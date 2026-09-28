@@ -1206,6 +1206,13 @@ export function startScheduler() {
       console.error('Scheduler: To-do chase failed:', err);
     }
     try {
+      // Untaken list items → the list's watchers (docs/TASKS-SPEC.md §7).
+      const r = await notifications.runListItemChase();
+      console.log(`Scheduler: List items — ${r.chased} nudged`);
+    } catch (err) {
+      console.error('Scheduler: List item chase failed:', err);
+    }
+    try {
       // The setter's side: "did they do it?" (docs/TASKS-SPEC.md §5.2).
       const r = await notifications.runTaskFollowUpChase();
       console.log(`Scheduler: To-do follow-ups — ${r.chased} sent`);

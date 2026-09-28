@@ -24,7 +24,7 @@ jest.mock('../staff-notifications', () => ({
 }));
 
 import { query } from '../../config/database';
-import { createTask, updateTask, cancelTask, handBackTask, listEveryone } from '../staff-tasks';
+import { createTask, updateTask, cancelTask, handBackTask, listEveryone, takeTask } from '../staff-tasks';
 import { notifyTaskAssigned, notifyTaskHandedBack, notifyTaskDone } from '../staff-notifications';
 
 const mockQuery = query as jest.MockedFunction<typeof query>;
@@ -372,6 +372,47 @@ describe('dates look forward (jon, Sep 2026)', () => {
     rows([{ person_id: THEIR_PERSON, created_by: ME, follow_up_on: '2099-01-01' }], [{ person_id: MY_PERSON }]);
     await expect(updateTask(TASK, { followUpOn: '2020-01-01' }, ME, 'staff'))
       .rejects.toThrow(/follow-up can’t be in the past/);
+  });
+});
+
+describe('shared lists (TASKS-SPEC §7)', () => {
+  const LIST = '77777777-6666-5555-4444-333333333333';
+
+  it('adds to a list with no owner, no bell, no follow-up, and no nudge without a date', async () => {
+    rows([{ person_id: MY_PERSON }], [{ id: LIST }], [{ id: TASK }], [{ id: TASK }]);
+    await createTask({ title: 'Milk', listId: LIST }, ME, 'staff');
+    const params = mockQuery.mock.calls[2]![1] as unknown[];
+    expect(params[0]).toBeNull();      // person_id
+    expect(params[4]).toBeNull();      // next_chase_date — undated list items never nag
+    expect(params[8]).toBeNull();      // follow_up_on
+    expect(params[10]).toBe(LIST);     // list_id
+    expect(notifyTaskAssigned).not.toHaveBeenCalled();
+  });
+
+  it('refuses an archived or unknown list', async () => {
+    rows([{ person_id: MY_PERSON }], []);
+    await expect(createTask({ title: 'Milk', listId: LIST }, ME, 'staff')).rejects.toThrow('List not found');
+  });
+
+  it('lets ANY staff member tick an item nobody has taken', async () => {
+    rows([{ person_id: null, list_id: LIST, created_by: 'user-9' }], [], [{ id: TASK }]);
+    await expect(updateTask(TASK, { status: 'done' }, ME, 'staff')).resolves.toBeDefined();
+  });
+
+  it('only takes an item nobody has taken yet', async () => {
+    rows([{ person_id: MY_PERSON }], []);
+    await expect(takeTask(TASK, ME)).rejects.toThrow(/already on it/);
+    const sql = mockQuery.mock.calls[1]![0] as string;
+    expect(sql).toMatch(/person_id IS NULL AND list_id IS NOT NULL/);
+  });
+
+  it('won’t hand back a list item — it goes back on the list instead', async () => {
+    rows(
+      [{ person_id: MY_PERSON, due_date: null, status: 'open', created_by: 'user-2', setter_person: THEIR_PERSON,
+         source_type: 'manual', list_id: LIST }],
+      [{ person_id: MY_PERSON }],
+    );
+    await expect(handBackTask(TASK, 'nah', ME)).rejects.toThrow(/put it back on the list/);
   });
 });
 

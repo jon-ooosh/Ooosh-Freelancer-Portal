@@ -41,7 +41,9 @@ interface SeriesRow {
   id: string;
   title: string;
   detail: string | null;
-  person_id: string;
+  /** NULL for a series that lives on a list (the bins) — spec §7. */
+  person_id: string | null;
+  list_id: string | null;
   mode: Mode;
   rule: RecurrenceRule;
   starts_on: string;
@@ -54,7 +56,7 @@ interface SeriesRow {
 }
 
 const SERIES_COLS = `
-  s.id, s.title, s.detail, s.person_id, s.mode, s.rule,
+  s.id, s.title, s.detail, s.person_id, s.list_id, s.mode, s.rule,
   s.starts_on::text AS starts_on, s.ends_on::text AS ends_on, s.ends_after,
   s.occurrences_made, s.status, s.decline_reason, s.ended_reason, s.is_private,
   s.created_by, s.created_at`;
@@ -78,6 +80,9 @@ async function nameForUser(userId: string): Promise<string | null> {
 /** Owner, setter or admin — the same three as a task; "Not found" otherwise. */
 async function whoFor(s: SeriesRow, userId: string, role: string | undefined) {
   if (isAdmin(role)) return 'admin' as const;
+  // A list's series (the bins) belongs to nobody, like its items: anyone may
+  // change it, move it, stop it (spec §7).
+  if (!s.person_id && s.list_id) return 'list' as const;
   if (s.created_by && s.created_by === userId) return 'setter' as const;
   const mine = await personIdForUser(userId);
   if (mine && s.person_id === mine) return 'owner' as const;
@@ -97,17 +102,17 @@ export function seriesText(s: Pick<SeriesRow, 'mode' | 'rule' | 'starts_on'>): s
 async function spawn(s: SeriesRow, due: string): Promise<string | null> {
   const r = await query(
     `INSERT INTO staff_tasks
-       (person_id, title, detail, due_date, next_chase_date, source_type, source_id, created_by, is_private)
+       (person_id, title, detail, due_date, next_chase_date, source_type, source_id, created_by, is_private, list_id)
      -- Every parameter typed: in INSERT … SELECT Postgres does NOT infer
      -- types from the target columns, so a bare $1 arrives as text and a uuid
      -- column refuses it. $5 is text in both places (CLAUDE.md, 42P08).
-     SELECT $1::uuid, $2::text, $3::text, $4::date, $4::date, $5::text, $6::uuid, $7::uuid, $8::boolean
+     SELECT $1::uuid, $2::text, $3::text, $4::date, $4::date, $5::text, $6::uuid, $7::uuid, $8::boolean, $9::uuid
       WHERE NOT EXISTS (
         SELECT 1 FROM staff_tasks
          WHERE source_type = $5::text AND source_id = $6::uuid AND status = 'open'
       )
      RETURNING id`,
-    [s.person_id, s.title, s.detail, due, SERIES_SOURCE, s.id, s.created_by, s.is_private]
+    [s.person_id, s.title, s.detail, due, SERIES_SOURCE, s.id, s.created_by, s.is_private, s.list_id]
   );
   if (!r.rows.length) return null;
   await query(
@@ -151,6 +156,8 @@ export interface SeriesInput {
   endsOn?: string | null;
   endsAfter?: number | null;
   isPrivate?: boolean;
+  /** On a shared list (the bins): no owner, nobody asked, anyone can change it. */
+  listId?: string;
 }
 
 function checkInput(input: Pick<SeriesInput, 'mode' | 'rule' | 'startsOn' | 'endsOn' | 'endsAfter'>) {
@@ -173,22 +180,27 @@ export async function createSeries(input: SeriesInput, userId: string) {
   const rule = checkInput(input);
 
   const mine = await personIdForUser(userId);
-  const personId = input.personId || mine;
-  if (!personId) throw new Error('Your login is not linked to a person record');
-  const forSomebodyElse = personId !== mine;
+  if (input.listId) {
+    const list = await query('SELECT id FROM staff_task_lists WHERE id = $1 AND archived_at IS NULL', [input.listId]);
+    if (!list.rows.length) throw new Error('List not found');
+  }
+  // On a list: owned by nobody, so nobody is asked — it starts at once.
+  const personId = input.listId ? null : (input.personId || mine);
+  if (!personId && !input.listId) throw new Error('Your login is not linked to a person record');
+  const forSomebodyElse = !!personId && personId !== mine;
 
   const r = await query(
     `INSERT INTO staff_task_series
-       (title, detail, person_id, mode, rule, starts_on, ends_on, ends_after, status, is_private, created_by)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::date, $7::date, $8, $9, $10, $11)
+       (title, detail, person_id, mode, rule, starts_on, ends_on, ends_after, status, is_private, created_by, list_id)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::date, $7::date, $8, $9, $10, $11, $12)
      RETURNING id`,
     [title, input.detail?.trim() || null, personId, input.mode, JSON.stringify(rule),
      input.startsOn, input.endsOn || null, input.endsAfter ?? null,
-     forSomebodyElse ? 'proposed' : 'active', !!input.isPrivate, userId]
+     forSomebodyElse ? 'proposed' : 'active', !!input.isPrivate, userId, input.listId ?? null]
   );
   const s = await loadSeries(r.rows[0].id);
 
-  if (forSomebodyElse) {
+  if (forSomebodyElse && personId) {
     // Nothing is made until they say yes (§6.4).
     try {
       const { notifySeriesProposed } = await import('./staff-notifications');
@@ -249,7 +261,7 @@ export async function endSeries(id: string, reason: string | null, userId: strin
     const byName = await nameForUser(userId);
     if (who === 'owner' && s.created_by && s.created_by !== userId) {
       await n.notifySeriesEnded(s.created_by, null, id, s.title, byName, reason?.trim() || null);
-    } else if (who !== 'owner') {
+    } else if (who !== 'owner' && s.person_id) {   // a list's series has nobody to tell
       const mine = await personIdForUser(userId);
       if (mine !== s.person_id) await n.notifySeriesEnded(null, s.person_id, id, s.title, byName, reason?.trim() || null);
     }
@@ -308,6 +320,9 @@ export async function updateSeries(id: string, patch: SeriesPatch, userId: strin
   if (patch.isPrivate !== undefined) add('is_private = ?', patch.isPrivate);
 
   let newOwner: string | null = null;
+  if (patch.personId && s.list_id && !s.person_id) {
+    throw new Error('A list’s repeating to-do stays on the list — take the one that’s due instead');
+  }
   if (patch.personId && patch.personId !== s.person_id) {
     newOwner = patch.personId;
     add('person_id = ?', newOwner);
@@ -423,11 +438,13 @@ const SERIES_SELECT = `
                      COALESCE(op.last_name, '')), '') AS owner_name,
          NULLIF(TRIM(COALESCE(cp.preferred_name, cp.first_name, '') || ' ' ||
                      COALESCE(cp.last_name, '')), '') AS set_by_name,
-         nx.id AS open_task_id, nx.due_date::text AS next_on,
+         nx.id AS open_task_id, nx.due_date::text AS next_on, l.name AS list_name,
          (SELECT MAX(d.completed_at) FROM staff_tasks d
            WHERE d.source_type = '${SERIES_SOURCE}' AND d.source_id = s.id AND d.status = 'done') AS last_done_at
     FROM staff_task_series s
-    JOIN people op ON op.id = s.person_id
+    -- LEFT: a list's series (the bins) has no owner (spec §7).
+    LEFT JOIN people op ON op.id = s.person_id
+    LEFT JOIN staff_task_lists l ON l.id = s.list_id
     LEFT JOIN users cu  ON cu.id = s.created_by
     LEFT JOIN people cp ON cp.id = cu.person_id
     LEFT JOIN LATERAL (
@@ -463,9 +480,19 @@ export async function listSeriesSetByMe(userId: string) {
     `${SERIES_SELECT}
       WHERE s.created_by = $1
         AND cu.person_id IS DISTINCT FROM s.person_id
+        AND s.list_id IS NULL   -- a list's series is on the list, not "given" to anyone
         AND (s.status IN ('proposed', 'active') OR s.updated_at > NOW() - INTERVAL '30 days')
       ORDER BY s.status = 'active' DESC, s.title`,
     [userId]
+  );
+  return withText(r.rows);
+}
+
+/** A list's repeating to-dos (the bins), for the Lists view. */
+export async function listSeriesOnList(listId: string) {
+  const r = await query(
+    `${SERIES_SELECT} WHERE s.list_id = $1 AND s.status = 'active' ORDER BY s.title`,
+    [listId]
   );
   return withText(r.rows);
 }
@@ -480,6 +507,7 @@ export async function listAllSeries(userId: string, role: string | undefined) {
   const r = await query(
     `${SERIES_SELECT}
       WHERE s.status IN ('proposed', 'active')
+        AND s.person_id IS NOT NULL   -- people's; a list's series shows on Lists
         AND (NOT s.is_private OR $3::boolean OR s.person_id = $2 OR s.created_by = $1)
       ORDER BY owner_name, s.title`,
     [userId, mine, isAdmin(role)]

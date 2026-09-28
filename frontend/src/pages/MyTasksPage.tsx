@@ -20,7 +20,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import ForwardDateInput, { ymdFromToday } from '../components/ForwardDateInput';
 import {
@@ -39,8 +39,11 @@ interface Task {
   source_id: string | null;
   created_at: string;
   completed_at: string | null;
-  person_id: string;
+  /** NULL for a list item nobody has taken yet (spec §7). */
+  person_id: string | null;
   owner_name: string | null;
+  list_id: string | null;
+  list_name: string | null;
   created_by: string | null;
   is_private: boolean;
   follow_up_on: string | null;
@@ -55,20 +58,27 @@ interface Task {
 /** Somebody a task can be given to — GET /staff-tasks/people. */
 interface Person { person_id: string; name: string | null }
 
-/** Set by somebody other than its owner — i.e. given to them. */
+/**
+ * Set by somebody other than its owner — i.e. given to them. Not a list item:
+ * whoever added "milk" to Shopping didn't give it to the person who took it.
+ */
 function setBySomeoneElse(t: Task): boolean {
-  return !!t.set_by_person_id && t.set_by_person_id !== t.person_id;
+  return !t.list_id && !!t.set_by_person_id && t.set_by_person_id !== t.person_id;
 }
+
+/** Label-height spacer: lines a control up with inputs that sit under a label. */
+const LABEL_SPACER = <span className="block text-xs mb-1 select-none" aria-hidden>&nbsp;</span>;
 
 const VIEWS = [
   { id: 'mine', label: 'Mine' },
   { id: 'assigned', label: 'Assigned by me' },
+  { id: 'lists', label: 'Lists' },
   { id: 'everyone', label: 'Everyone' },
 ] as const;
 type ViewId = (typeof VIEWS)[number]['id'];
 
 /**
- * The To Do tab: a header, the three views, and the people list they share.
+ * The To Do tab: a header, the four views, and the people list they share.
  * The views mount rather than route, like the Me page's own tabs.
  */
 export default function ToDoPage() {
@@ -76,13 +86,17 @@ export default function ToDoPage() {
   const raw = params.get('view');
   const view: ViewId = VIEWS.some(v => v.id === raw) ? (raw as ViewId) : 'mine';
   const [people, setPeople] = useState<Person[]>([]);
+  const [me, setMe] = useState<string | null>(null);
 
   useEffect(() => {
-    // Only the "For" picker needs it; failing leaves "Me" as the one choice.
-    api.get<{ data: Person[] }>('/staff-tasks/people')
-      .then(res => setPeople(res.data))
+    // Only the pickers need it; failing leaves "Me" as the one choice.
+    api.get<{ data: Person[]; me?: string | null }>('/staff-tasks/people')
+      .then(res => { setPeople(res.data); setMe(res.me ?? null); })
       .catch(() => undefined);
   }, []);
+  // The "For" picker leaves me out: "Me" is already its first option, and
+  // me again by name read like two different people (jon, Sep 2026).
+  const others = people.filter(p => p.person_id !== me);
 
   function select(v: ViewId) {
     const next = new URLSearchParams(params);
@@ -105,8 +119,9 @@ export default function ToDoPage() {
           ))}
         </div>
       </div>
-      {view === 'mine' && <MineView people={people} />}
+      {view === 'mine' && <MineView people={people} others={others} />}
       {view === 'assigned' && <AssignedView people={people} />}
+      {view === 'lists' && <ListsView people={people} me={me} />}
       {view === 'everyone' && <EveryoneView people={people} />}
     </div>
   );
@@ -142,9 +157,10 @@ function fmtDue(iso: string | null): { text: string; tone: string } {
   return { text, tone: 'text-gray-500' };
 }
 
+// A repeating to-do's occurrence carries its series' words instead of a
+// badge (SeriesInline), so it isn't listed here.
 const SOURCE_LABEL: Record<string, string> = {
   staff_review: 'From your review',
-  staff_task_series: 'Repeats',
 };
 
 const SERIES = 'staff_task_series';
@@ -170,12 +186,16 @@ function SeriesList({ series, people, showOwner, canChange, canStop, onChanged, 
   onError: (msg: string) => void;
 }) {
   const [editing, setEditing] = useState<Series | null>(null);
-  if (!series.length) return null;
+  // A series with one open shows ON that row (SeriesInline) — listing it here
+  // too is what made the views show everything twice. Here: only the ones
+  // with nothing open right now.
+  const idle = series.filter(s => !s.open_task_id);
+  if (!idle.length) return null;
   return (
     <div>
-      <h2 className="text-sm font-medium text-gray-700 mb-2">Repeating</h2>
+      <h2 className="text-sm font-medium text-gray-700 mb-2">Repeating — nothing open right now</h2>
       <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
-        {series.map(s => (
+        {idle.map(s => (
           <div key={s.id} className="px-4 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
             <div className="min-w-0 flex-1">
               <div className="text-sm text-gray-900">
@@ -220,7 +240,56 @@ function SeriesList({ series, people, showOwner, canChange, canStop, onChanged, 
   );
 }
 
-function MineView({ people }: { people: Person[] }) {
+/**
+ * A repeating to-do's words and controls, on the row of its open occurrence:
+ * "↻ Every week on Tue · change · stop repeating". One row per thing.
+ */
+function SeriesInline({ series, people, canChange, canStop, onChanged, onError }: {
+  series: Series;
+  people: Person[];
+  canChange: boolean;
+  canStop: boolean;
+  onChanged: () => Promise<void>;
+  onError: (msg: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2 text-[11px]">
+      <span className="px-1.5 py-0.5 rounded bg-ooosh-50 text-ooosh-700" title="Repeats">↻ {series.rule_text}</span>
+      {canChange && (
+        <button onClick={() => setEditing(true)} className="text-ooosh-600 hover:underline">change</button>
+      )}
+      {canStop && (
+        <button
+          onClick={() => { void stopSeries(series).then(onChanged)
+            .catch(e => onError(e instanceof Error ? e.message : 'Could not stop it')); }}
+          className="text-gray-400 hover:text-gray-600">stop repeating</button>
+      )}
+      {editing && (
+        <SeriesEditModal series={series} people={people}
+          onClose={() => setEditing(false)}
+          onSaved={async () => { setEditing(false); await onChanged(); }}
+          onError={onError} />
+      )}
+    </span>
+  );
+}
+
+/** My job reminders and my Problems (spec §2, phase 4) — read-through. */
+interface JobReminder {
+  id: string; custom_label: string | null; notes: string | null; due_date: string | null;
+  job_id: string; hh_job_number: number | null; job_name: string | null;
+}
+interface MyProblem {
+  id: string; summary: string; status: string; severity: string;
+  job_id: string | null; hh_job_number: number | null;
+}
+const PROBLEM_STATUS: Record<string, string> = {
+  open: 'Open', investigating: 'Investigating', awaiting_quote: 'Awaiting quote',
+  quoted: 'Quoted', actioned: 'Actioned',
+};
+
+function MineView({ people, others }: { people: Person[]; others: Person[] }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [linked, setLinked] = useState(true);
   // My person id, from /mine — to tell my rows from ones I handed back.
@@ -248,6 +317,8 @@ function MineView({ people }: { people: Person[] }) {
   const [repeat, setRepeat] = useState<RepeatValue | null>(null);
   const [repeatOpen, setRepeatOpen] = useState(false);
   const [series, setSeries] = useState<Series[]>([]);
+  const [reminders, setReminders] = useState<JobReminder[]>([]);
+  const [problems, setProblems] = useState<MyProblem[]>([]);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -260,6 +331,9 @@ function MineView({ people }: { people: Person[] }) {
       // Secondary: a failure here shouldn't blank the list above it.
       api.get<{ data: Series[] }>('/staff-tasks/series/mine')
         .then(r => setSeries(r.data))
+        .catch(() => undefined);
+      api.get<{ data: { reminders: JobReminder[]; problems: MyProblem[] } }>('/staff-tasks/pullins')
+        .then(r => { setReminders(r.data.reminders); setProblems(r.data.problems); })
         .catch(() => undefined);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Could not load your to-do list');
@@ -340,6 +414,32 @@ function MineView({ people }: { people: Person[] }) {
     }
   }
 
+  /** Tick a job reminder — through the job module's own endpoint (spec §2). */
+  async function tickReminder(r: JobReminder) {
+    setBusyId(r.id);
+    try {
+      await api.patch(`/requirements/${r.id}`, { status: 'done' });
+      await load();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Could not tick the reminder');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  /** A taken list item goes back on its list. */
+  async function putBack(task: Task) {
+    setBusyId(task.id);
+    try {
+      await api.post(`/staff-tasks/${task.id}/release`, {});
+      await load();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Could not put it back');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function handBack(task: Task) {
     const reason = window.prompt(
       `Hand “${task.title}” back to ${task.set_by_name || 'whoever set it'}? Say why:`);
@@ -402,7 +502,10 @@ function MineView({ people }: { people: Person[] }) {
       )}
 
       <form onSubmit={add} className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex flex-wrap items-end gap-3">
+        {/* items-start: every control sits under a same-height label, so the
+            boxes line up in a row and the date shortcuts hang BELOW them
+            (jon, Sep 2026). */}
+        <div className="flex flex-wrap items-start gap-3">
           <label className="flex-1 min-w-[16rem] text-sm">
             <span className="block text-xs text-gray-600 mb-1">Add something</span>
             <input
@@ -444,22 +547,28 @@ function MineView({ people }: { people: Person[] }) {
             <select value={forPerson} onChange={e => setForPerson(e.target.value)}
               className="px-3 py-2 border border-gray-300 rounded text-sm bg-white">
               <option value="">Me</option>
-              {people.map(p => <option key={p.person_id} value={p.person_id}>{p.name ?? 'Unnamed'}</option>)}
+              {others.map(p => <option key={p.person_id} value={p.person_id}>{p.name ?? 'Unnamed'}</option>)}
             </select>
           </label>
-          <label className="text-sm inline-flex items-center gap-1.5 text-gray-700 pb-2"
-            title="Only you, whoever it's for, and admins will see it">
-            <input type="checkbox" checked={isPrivate} onChange={e => setIsPrivate(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-300" />
-            Private
-          </label>
-          <button
-            type="submit"
-            disabled={!title.trim() || adding}
-            className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40"
-          >
-            {adding ? 'Adding…' : 'Add'}
-          </button>
+          <div className="text-sm">
+            {LABEL_SPACER}
+            <label className="inline-flex items-center gap-1.5 text-gray-700 py-2"
+              title="Only you, whoever it's for, and admins will see it">
+              <input type="checkbox" checked={isPrivate} onChange={e => setIsPrivate(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300" />
+              Private
+            </label>
+          </div>
+          <div className="text-sm">
+            {LABEL_SPACER}
+            <button
+              type="submit"
+              disabled={!title.trim() || adding}
+              className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40"
+            >
+              {adding ? 'Adding…' : 'Add'}
+            </button>
+          </div>
         </div>
         {repeat && forPerson && (
           <p className="text-xs text-amber-700 mt-2">
@@ -539,9 +648,25 @@ function MineView({ people }: { people: Person[] }) {
                         from {task.set_by_name || 'someone'}
                       </span>
                     )}
+                    {task.list_id && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">
+                        from {task.list_name || 'a list'}
+                      </span>
+                    )}
                     {task.is_private && (
                       <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">private</span>
                     )}
+                    {task.source_type === SERIES && (() => {
+                      const x = series.find(v => v.id === task.source_id);
+                      return x ? (
+                        <SeriesInline series={x} people={people}
+                          // Your own series you can change; one somebody set for you, only stop.
+                          // A list's repeating to-do is the list's — changed from Lists.
+                          canChange={!!me && x.set_by_person_id === me && !x.list_id}
+                          canStop={!x.list_id}
+                          onChanged={load} onError={m => setLoadError(m)} />
+                      ) : null;
+                    })()}
                   </div>
                   {task.handed_back_reason && (
                     <div className="text-xs text-amber-800 mt-1">
@@ -549,6 +674,16 @@ function MineView({ people }: { people: Person[] }) {
                     </div>
                   )}
                 </div>
+                {task.list_id && (
+                  <button
+                    onClick={() => void putBack(task)}
+                    disabled={busyId === task.id}
+                    className="text-xs text-gray-500 hover:text-gray-800 disabled:opacity-40 shrink-0"
+                    title={`Back on ${task.list_name || 'the list'} for someone else`}
+                  >
+                    Put back
+                  </button>
+                )}
                 {setBySomeoneElse(task) && task.source_type !== SERIES && (
                   <button
                     onClick={() => void handBack(task)}
@@ -577,6 +712,56 @@ function MineView({ people }: { people: Person[] }) {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {(reminders.length > 0 || problems.length > 0) && (
+        <div>
+          <h2 className="text-sm font-medium text-gray-700 mb-2">From jobs</h2>
+          <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+            {reminders.map(r => {
+              const due = fmtDue(r.due_date);
+              return (
+                <div key={r.id} className="flex items-start gap-3 px-4 py-3">
+                  <input type="checkbox" checked={false} disabled={busyId === r.id}
+                    onChange={() => void tickReminder(r)}
+                    className="mt-1 h-4 w-4 rounded border-gray-300 text-ooosh-600"
+                    aria-label={`Mark reminder "${r.custom_label || 'Reminder'}" done`} />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-gray-900">{r.custom_label || 'Reminder'}</div>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <span className={`text-xs ${due.tone}`}>{due.text}</span>
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800">job reminder</span>
+                      <Link to={`/jobs/${r.job_id}`} className="text-[11px] text-ooosh-600 hover:underline">
+                        Job {r.hh_job_number ?? ''}{r.job_name ? ` · ${r.job_name}` : ''}
+                      </Link>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {problems.map(p => (
+              <div key={p.id} className="flex items-start gap-3 px-4 py-3">
+                <span className="mt-0.5 w-4 shrink-0 text-center text-sm font-semibold text-red-500" aria-hidden>!</span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-gray-900">{p.summary}</div>
+                  <div className="flex flex-wrap items-center gap-2 mt-1">
+                    <span className={`text-[11px] px-1.5 py-0.5 rounded ${p.severity === 'urgent'
+                      ? 'bg-red-50 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+                      Problem · {PROBLEM_STATUS[p.status] ?? p.status}
+                    </span>
+                    {p.hh_job_number && <span className="text-[11px] text-gray-500">Job {p.hh_job_number}</span>}
+                  </div>
+                </div>
+                {/* A Problem has its own workflow (quote, action, resolve) —
+                    it is worked on its own page, not ticked off here. */}
+                <Link to={`/operations/problems/${p.id}`}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-800 shrink-0">
+                  Open
+                </Link>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -658,7 +843,7 @@ function TaskEditRow({ task, busy, onCancel, onSave }: {
       <textarea value={detail} onChange={e => setDetail(e.target.value)} rows={2} maxLength={4000}
         placeholder="Detail (optional)"
         className="w-full px-3 py-2 border border-gray-300 rounded text-sm bg-white" />
-      <div className="flex flex-wrap items-end gap-3">
+      <div className="flex flex-wrap items-start gap-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Due</span>
           <ForwardDateInput value={dueDate} onChange={setDueDate} ariaLabel="Due" />
@@ -667,10 +852,10 @@ function TaskEditRow({ task, busy, onCancel, onSave }: {
           <span className="block text-xs text-gray-600 mb-1">Remind me</span>
           <ForwardDateInput value={remindOn} onChange={setRemindOn} ariaLabel="Remind me" />
         </label>
-        <span className="text-[11px] text-gray-400 pb-2 max-w-[16rem]">
+        <span className="text-[11px] text-gray-400 mt-6 max-w-[16rem]">
           Blank = never nudge. Moving the due date moves the reminder with it unless you set one here.
         </span>
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex gap-2 mt-5">
           <button onClick={onCancel} disabled={busy}
             className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40">
             Cancel
@@ -748,7 +933,7 @@ function AssignedView({ people }: { people: Person[] }) {
         ) : open.map(task => {
           const due = fmtDue(task.due_date);
           return (
-            <div key={task.id} className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <div key={task.id} className="px-4 py-3 flex flex-wrap items-start gap-x-4 gap-y-2">
               <div className="min-w-0 flex-1">
                 <div className="text-sm text-gray-900">{task.title}</div>
                 <div className="flex flex-wrap items-center gap-2 mt-1">
@@ -756,17 +941,24 @@ function AssignedView({ people }: { people: Person[] }) {
                   {task.is_private && (
                     <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">private</span>
                   )}
+                  {task.source_type === SERIES && (() => {
+                    const x = series.find(v => v.id === task.source_id);
+                    return x ? (
+                      <SeriesInline series={x} people={people} canChange canStop
+                        onChanged={load} onError={setError} />
+                    ) : null;
+                  })()}
                 </div>
               </div>
               {task.source_type !== SERIES && <label className="text-xs text-gray-600">
                 <span className="block mb-0.5">With</span>
-                <select value={task.person_id} disabled={busyId === task.id}
+                <select value={task.person_id ?? ''} disabled={busyId === task.id}
                   onChange={e => void patch(task, { personId: e.target.value })}
                   className="px-2 py-1 border border-gray-300 rounded text-sm bg-white">
                   {/* Keep the current owner selectable even if they are not in
                       the picker (a login since deactivated) — a select with no
                       matching option renders blank and would save blank. */}
-                  {!people.some(p => p.person_id === task.person_id) && (
+                  {task.person_id && !people.some(p => p.person_id === task.person_id) && (
                     <option value={task.person_id}>{task.owner_name ?? 'Unknown'}</option>
                   )}
                   {people.map(p => <option key={p.person_id} value={p.person_id}>{p.name ?? 'Unnamed'}</option>)}
@@ -785,7 +977,7 @@ function AssignedView({ people }: { people: Person[] }) {
                 }
               }}
                 disabled={busyId === task.id}
-                className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-40">
+                className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-40 mt-5">
                 Drop
               </button>
             </div>
@@ -884,6 +1076,16 @@ function EveryoneView({ people }: { people: Person[] }) {
                   {setBySomeoneElse(t) && (
                     <span className="text-[11px] text-gray-400">from {t.set_by_name || 'someone'}</span>
                   )}
+                  {t.list_id && (
+                    <span className="text-[11px] text-gray-400">from {t.list_name || 'a list'}</span>
+                  )}
+                  {t.source_type === SERIES && (() => {
+                    const x = series.find(v => v.id === t.source_id);
+                    return x ? (
+                      <SeriesInline series={x} people={people} canChange={manages(x)} canStop={manages(x)}
+                        onChanged={loadSeries} onError={setError} />
+                    ) : null;
+                  })()}
                   <span className={`text-xs ${due.tone}`}>{due.text}</span>
                 </li>
               );
@@ -895,6 +1097,338 @@ function EveryoneView({ people }: { people: Person[] }) {
       <p className="text-xs text-gray-400">
         Private to-dos only appear here for the person they belong to, whoever set them, and admins.
       </p>
+    </div>
+  );
+}
+
+/** A shared list as GET /staff-tasks/lists returns it. */
+interface TaskList {
+  id: string;
+  name: string;
+  open_count: number;
+  taken_count: number;
+  watching: boolean;
+  watchers: (string | null)[];
+}
+
+/**
+ * Lists (spec §7, phase 3): Shopping, Building, and whatever else gets added.
+ * Items belong to nobody until somebody says "I'll take it" — then they move
+ * to that person's Mine, still marked "from Shopping", and can be put back.
+ * Anyone can add, tick or drop an untaken item. Watchers get the nudges for
+ * dated items nobody has taken.
+ */
+function ListsView({ people, me }: { people: Person[]; me: string | null }) {
+  const [params, setParams] = useSearchParams();
+  const [lists, setLists] = useState<TaskList[]>([]);
+  const [items, setItems] = useState<Task[]>([]);
+  const [series, setSeries] = useState<Series[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const [title, setTitle] = useState('');
+  const [dueDate, setDueDate] = useState('');
+  const [repeat, setRepeat] = useState<RepeatValue | null>(null);
+  const [repeatOpen, setRepeatOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+
+  // The list is in the URL so a watcher's bell can open it directly.
+  const listParam = params.get('list');
+  const current = lists.find(l => l.id === listParam) ?? lists[0] ?? null;
+
+  const loadLists = useCallback(async () => {
+    try {
+      const r = await api.get<{ data: TaskList[] }>('/staff-tasks/lists');
+      setLists(r.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the lists');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const currentId = current?.id ?? null;
+  const loadItems = useCallback(async () => {
+    if (!currentId) { setItems([]); setSeries([]); return; }
+    try {
+      const r = await api.get<{ data: { items: Task[]; series: Series[] } }>(
+        `/staff-tasks/lists/${currentId}/items`);
+      setItems(r.data.items);
+      setSeries(r.data.series);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the list');
+    }
+  }, [currentId]);
+
+  useEffect(() => { void loadLists(); }, [loadLists]);
+  useEffect(() => { void loadItems(); }, [loadItems]);
+
+  /** Counts on the chips and the items below both change on every action. */
+  const reload = useCallback(async () => {
+    await Promise.all([loadLists(), loadItems()]);
+  }, [loadLists, loadItems]);
+
+  function pick(id: string) {
+    const next = new URLSearchParams(params);
+    next.set('list', id);
+    setParams(next, { replace: true });
+  }
+
+  /** One wrapper for every button here: busy, error, reload. */
+  async function act(id: string, fn: () => Promise<unknown>, fallback: string) {
+    setBusyId(id);
+    setError(null);
+    try {
+      await fn();
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : fallback);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function newList() {
+    const name = window.prompt('Name the new list (e.g. Cleaning, Van kit):');
+    if (!name?.trim()) return;
+    setError(null);
+    try {
+      const r = await api.post<{ data: { id: string } }>('/staff-tasks/lists', { name: name.trim() });
+      await loadLists();
+      pick(r.data.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add the list');
+    }
+  }
+
+  async function rename(l: TaskList) {
+    const name = window.prompt('Rename the list:', l.name);
+    if (!name?.trim() || name.trim() === l.name) return;
+    await act(l.id, () => api.patch(`/staff-tasks/lists/${l.id}`, { name: name.trim() }), 'Could not rename it');
+  }
+
+  async function archive(l: TaskList) {
+    if (!window.confirm(`Archive “${l.name}”? It disappears from Lists. It must be empty first.`)) return;
+    await act(l.id, async () => {
+      await api.post(`/staff-tasks/lists/${l.id}/archive`, {});
+      const next = new URLSearchParams(params);
+      next.delete('list');
+      setParams(next, { replace: true });
+    }, 'Could not archive it');
+  }
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault();
+    if (!current || !title.trim()) return;
+    setAdding(true);
+    setError(null);
+    try {
+      if (repeat) {
+        // A list's repeating to-do (the bins): owned by nobody, needs nobody's
+        // acceptance — each one due lands on the list (spec §6.4).
+        await api.post('/staff-tasks/series', {
+          title: title.trim(),
+          mode: repeat.mode, rule: repeat.rule,
+          startsOn: dueDate || ymdFromToday(0),
+          ...(repeat.endsOn ? { endsOn: repeat.endsOn } : {}),
+          ...(repeat.endsAfter ? { endsAfter: repeat.endsAfter } : {}),
+          listId: current.id,
+        });
+      } else {
+        await api.post(`/staff-tasks/lists/${current.id}/items`, {
+          title: title.trim(),
+          ...(dueDate ? { dueDate } : {}),
+        });
+      }
+      setTitle(''); setDueDate(''); setRepeat(null);
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add it');
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  if (loading) return <p className="text-sm text-gray-500">Loading…</p>;
+
+  const open = items.filter(t => t.status === 'open');
+  const done = items.filter(t => t.status === 'done');
+  const watchers = current ? current.watchers.filter((w): w is string => !!w) : [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {lists.map(l => (
+          <button key={l.id} onClick={() => pick(l.id)}
+            className={`px-3 py-1.5 text-sm rounded-full border ${current?.id === l.id
+              ? 'border-ooosh-600 bg-ooosh-50 text-ooosh-800 font-medium'
+              : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>
+            {l.name}
+            {l.open_count > 0 && <span className="ml-1.5 text-xs text-gray-500">{l.open_count}</span>}
+          </button>
+        ))}
+        <button onClick={() => void newList()}
+          className="px-3 py-1.5 text-sm rounded-full border border-dashed border-gray-300 text-gray-600 hover:bg-gray-50">
+          + New list
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+      )}
+
+      {!current ? (
+        <p className="text-sm text-gray-400">No lists yet — add one above.</p>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <h2 className="text-base font-medium text-gray-900">{current.name}</h2>
+            <label className="text-sm inline-flex items-center gap-1.5 text-gray-700"
+              title="Watchers get the nudges for dated items nobody has taken">
+              <input type="checkbox" checked={current.watching} disabled={busyId === current.id}
+                onChange={e => void act(current.id,
+                  () => api.post(`/staff-tasks/lists/${current.id}/watch`, { on: e.target.checked }),
+                  'Could not change watching')}
+                className="h-4 w-4 rounded border-gray-300" />
+              Watch
+            </label>
+            <span className="text-xs text-gray-500">
+              {watchers.length ? `Watching: ${watchers.join(', ')}` : 'Nobody is watching — nudges go nowhere'}
+            </span>
+            <span className="ml-auto flex gap-3">
+              <button onClick={() => void rename(current)} disabled={busyId === current.id}
+                className="text-xs text-ooosh-600 hover:text-ooosh-800 disabled:opacity-40">Rename</button>
+              <button onClick={() => void archive(current)} disabled={busyId === current.id}
+                className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-40">Archive</button>
+            </span>
+          </div>
+
+          <form onSubmit={add} className="bg-white rounded-lg border border-gray-200 p-4">
+            <div className="flex flex-wrap items-start gap-3">
+              <label className="flex-1 min-w-[16rem] text-sm">
+                <span className="block text-xs text-gray-600 mb-1">Add to {current.name}</span>
+                <input value={title} onChange={e => setTitle(e.target.value)} maxLength={300}
+                  placeholder="e.g. Milk, bin bags, fix the loading bay light"
+                  className="w-full px-3 py-2 border border-gray-300 rounded text-sm" />
+              </label>
+              <label className="text-sm">
+                <span className="block text-xs text-gray-600 mb-1">{repeat ? 'Starts' : 'Due (optional)'}</span>
+                <ForwardDateInput value={dueDate} onChange={setDueDate} ariaLabel={repeat ? 'Starts' : 'Due'} />
+              </label>
+              <label className="text-sm">
+                <span className="block text-xs text-gray-600 mb-1">Repeats</span>
+                <select value={repeat ? 'custom' : 'none'}
+                  onChange={e => {
+                    if (e.target.value === 'none') setRepeat(null);
+                    else setRepeatOpen(true);
+                  }}
+                  className="px-3 py-2 border border-gray-300 rounded text-sm bg-white">
+                  <option value="none">Doesn’t repeat</option>
+                  <option value="custom">{repeat ? repeat.text || 'Custom…' : 'Custom…'}</option>
+                </select>
+                {repeat && (
+                  <button type="button" onClick={() => setRepeatOpen(true)}
+                    className="block text-[11px] text-ooosh-600 hover:underline mt-1">change</button>
+                )}
+              </label>
+              <div className="text-sm">
+                {LABEL_SPACER}
+                <button type="submit" disabled={!title.trim() || adding}
+                  className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
+                  {adding ? 'Adding…' : 'Add'}
+                </button>
+              </div>
+            </div>
+          </form>
+          {repeatOpen && (
+            <RecurrenceModal
+              startsOn={dueDate || ymdFromToday(0)}
+              initial={repeat ?? defaultRepeat(dueDate || ymdFromToday(0))}
+              onCancel={() => setRepeatOpen(false)}
+              onDone={v => { setRepeat(v); setRepeatOpen(false); }}
+            />
+          )}
+
+          <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+            {open.length === 0 ? (
+              <p className="px-4 py-6 text-sm text-gray-400">Nothing on {current.name}.</p>
+            ) : open.map(t => {
+              const due = fmtDue(t.due_date);
+              const taken = !!t.person_id;
+              const x = t.source_type === SERIES ? series.find(v => v.id === t.source_id) : undefined;
+              return (
+                <div key={t.id} className="flex items-start gap-3 px-4 py-3">
+                  <input type="checkbox" checked={false}
+                    // Once taken it's the taker's to tick (from Mine).
+                    disabled={taken || busyId === t.id}
+                    onChange={() => void act(t.id,
+                      () => api.patch(`/staff-tasks/${t.id}`, { status: 'done' }), 'Could not tick it')}
+                    className="mt-1 h-4 w-4 rounded border-gray-300 text-ooosh-600 disabled:opacity-30"
+                    aria-label={`Mark "${t.title}" done`} />
+                  <div className="min-w-0 flex-1">
+                    <div className={`text-sm ${taken ? 'text-gray-500' : 'text-gray-900'}`}>{t.title}</div>
+                    {t.detail && <div className="text-xs text-gray-500 mt-0.5">{t.detail}</div>}
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      {t.due_date && <span className={`text-xs ${due.tone}`}>{due.text}</span>}
+                      {taken && (
+                        <span className="text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">
+                          {t.person_id === me ? 'You’re on it — it’s in Mine' : `${t.owner_name || 'Someone'} is on it`}
+                        </span>
+                      )}
+                      {x && (
+                        <SeriesInline series={x} people={people} canChange canStop
+                          onChanged={reload} onError={setError} />
+                      )}
+                    </div>
+                  </div>
+                  {!taken && (
+                    <>
+                      <button onClick={() => void act(t.id,
+                        () => api.post(`/staff-tasks/${t.id}/take`, {}), 'Could not take it')}
+                        disabled={busyId === t.id}
+                        className="text-xs text-ooosh-600 hover:text-ooosh-800 disabled:opacity-40 shrink-0">
+                        I’ll take it
+                      </button>
+                      <button onClick={() => void act(t.id,
+                        () => api.patch(`/staff-tasks/${t.id}`, { status: 'cancelled' }), 'Could not drop it')}
+                        disabled={busyId === t.id}
+                        className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-40 shrink-0"
+                        title="Not needed after all">
+                        Drop
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <SeriesList series={series} people={people} showOwner={false}
+            canChange={() => true} canStop={() => true}
+            onChanged={reload} onError={setError} />
+
+          {done.length > 0 && (
+            <div>
+              <h2 className="text-sm font-medium text-gray-700 mb-2">Done in the last 14 days</h2>
+              <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+                {done.map(t => (
+                  <div key={t.id} className="flex items-center gap-3 px-4 py-2">
+                    <span className="text-sm text-gray-500 line-through min-w-0 flex-1">{t.title}</span>
+                    <span className="text-xs text-gray-400 whitespace-nowrap">
+                      {t.owner_name ? `${t.owner_name} · ` : ''}done {fmtShort(t.completed_at)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <p className="text-xs text-gray-400">
+            Anyone can add, tick or drop something here. “I’ll take it” moves it onto your own list;
+            “Put back” there returns it. Watchers are nudged about dated items nobody has taken.
+          </p>
+        </>
+      )}
     </div>
   );
 }

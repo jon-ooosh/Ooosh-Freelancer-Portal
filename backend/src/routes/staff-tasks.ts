@@ -17,12 +17,15 @@ import {
   listTasks, createTask, updateTask, cancelTask, openTaskCount,
   personIdForUser, listTasksForSource, TASK_STATUSES,
   handBackTask, listAssignedByMe, listEveryone, listAssignablePeople,
+  listListItems, takeTask, releaseTask,
 } from '../services/staff-tasks';
 import { STAFF_ADMIN_ROLES } from '../services/staff-employment';
 import {
   createSeries, respondToSeries, endSeries, updateSeries, previewSeries,
-  listMySeries, listSeriesSetByMe, listAllSeries,
+  listMySeries, listSeriesSetByMe, listAllSeries, listSeriesOnList,
 } from '../services/staff-task-series';
+import { listLists, createList, renameList, archiveList, setWatching } from '../services/staff-task-lists';
+import { listMyJobReminders, listMyProblems } from '../services/staff-task-pullins';
 
 const router = Router();
 router.use(authenticate);
@@ -78,6 +81,7 @@ const seriesCreateSchema = z.object({
   endsOn: dateStr.optional(),
   endsAfter: z.number().int().min(1).max(999).nullish(),
   isPrivate: z.boolean().optional(),
+  listId: z.string().regex(UUID_RE).optional(),
 });
 const seriesPatchSchema = z.object({
   title: z.string().min(1).max(300).optional(),
@@ -148,6 +152,7 @@ router.post('/series', validate(seriesCreateSchema), async (req: AuthRequest, re
     const data = await createSeries({
       title: b.title, detail: b.detail ?? null, personId: b.personId, mode: b.mode, rule: b.rule,
       startsOn: b.startsOn, endsOn: b.endsOn || null, endsAfter: b.endsAfter ?? null, isPrivate: b.isPrivate,
+      listId: b.listId,
     }, req.user!.id);
     res.status(201).json({ data });
   } catch (err) { seriesError(res, err, 'Failed to set up the repeating to-do'); }
@@ -185,6 +190,108 @@ router.post('/series/:id/end', validate(endSchema), async (req: AuthRequest, res
   } catch (err) { seriesError(res, err, 'Failed to stop it'); }
 });
 
+// ── Shared lists (docs/TASKS-SPEC.md §7) ────────────────────────────────────
+
+const listNameSchema = z.object({ name: z.string().min(1).max(60) });
+const watchSchema = z.object({ on: z.boolean() });
+const listItemSchema = z.object({
+  title: z.string().min(1).max(300),
+  detail: z.string().max(4000).nullish(),
+  dueDate: dateStr.optional(),
+});
+
+function listError(res: Response, err: unknown, fallback: string) {
+  const msg = err instanceof Error ? err.message : fallback;
+  res.status(msg === 'List not found' ? 404 : 400).json({ error: msg });
+}
+
+// GET /api/staff-tasks/lists — every live list, with counts and "watching"
+router.get('/lists', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listLists(await personIdForUser(req.user!.id)) });
+  } catch (err) {
+    console.error('[staff-tasks] lists error:', err);
+    res.status(500).json({ error: 'Failed to load the lists' });
+  }
+});
+
+// POST /api/staff-tasks/lists — a new list
+router.post('/lists', validate(listNameSchema), async (req: AuthRequest, res: Response) => {
+  try { res.status(201).json({ data: await createList(req.body.name, req.user!.id) }); }
+  catch (err) { listError(res, err, 'Failed to add the list'); }
+});
+
+// PATCH /api/staff-tasks/lists/:id — rename
+router.patch('/lists/:id', validate(listNameSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    res.json({ data: await renameList(id, req.body.name) });
+  } catch (err) { listError(res, err, 'Failed to rename the list'); }
+});
+
+// POST /api/staff-tasks/lists/:id/archive — only once it's empty
+router.post('/lists/:id/archive', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    res.json({ data: await archiveList(id) });
+  } catch (err) { listError(res, err, 'Failed to archive the list'); }
+});
+
+// POST /api/staff-tasks/lists/:id/watch — watch / stop watching (yourself)
+router.post('/lists/:id/watch', validate(watchSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    const me = await personIdForUser(req.user!.id);
+    if (!me) { res.status(400).json({ error: 'Your login is not linked to a person record' }); return; }
+    res.json({ data: await setWatching(id, me, req.body.on) });
+  } catch (err) { listError(res, err, 'Failed to change watching'); }
+});
+
+// GET /api/staff-tasks/lists/:id/items — its items and its repeating to-dos
+router.get('/lists/:id/items', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    const [items, series] = await Promise.all([listListItems(id), listSeriesOnList(id)]);
+    res.json({ data: { items, series } });
+  } catch (err) {
+    console.error('[staff-tasks] list items error:', err);
+    res.status(500).json({ error: 'Failed to load the list' });
+  }
+});
+
+// POST /api/staff-tasks/lists/:id/items — add to a list (nobody owns it yet)
+router.post('/lists/:id/items', validate(listItemSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    const b = req.body as z.infer<typeof listItemSchema>;
+    const task = await createTask(
+      { title: b.title, detail: b.detail ?? null, dueDate: b.dueDate || null, listId: id },
+      req.user!.id, req.user!.role
+    );
+    res.status(201).json({ data: task });
+  } catch (err) { listError(res, err, 'Failed to add it'); }
+});
+
+// ── Mine pull-ins (docs/TASKS-SPEC.md §2, phase 4) ────────────────────────
+// Read-through: ticking a reminder goes through PATCH /requirements/:id, a
+// Problem is worked on its own page. Nothing here writes to either.
+router.get('/pullins', async (req: AuthRequest, res: Response) => {
+  try {
+    const [reminders, problems] = await Promise.all([
+      listMyJobReminders(req.user!.id), listMyProblems(req.user!.id),
+    ]);
+    res.json({ data: { reminders, problems } });
+  } catch (err) {
+    console.error('[staff-tasks] pullins error:', err);
+    res.status(500).json({ error: 'Failed to load your job reminders and Problems' });
+  }
+});
+
 // GET /api/staff-tasks/assigned — what I gave to other people
 router.get('/assigned', async (req: AuthRequest, res: Response) => {
   try {
@@ -205,10 +312,12 @@ router.get('/everyone', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /api/staff-tasks/people — who a task can be given to
-router.get('/people', async (_req: AuthRequest, res: Response) => {
+// GET /api/staff-tasks/people — who a task can be given to. `me` lets the
+// "For" picker leave the caller out: "Me" is already the first option, and
+// listing them again by name reads like two different people.
+router.get('/people', async (req: AuthRequest, res: Response) => {
   try {
-    res.json({ data: await listAssignablePeople() });
+    res.json({ data: await listAssignablePeople(), me: await personIdForUser(req.user!.id) });
   } catch (err) {
     console.error('[staff-tasks] people error:', err);
     res.status(500).json({ error: 'Failed to load people' });
@@ -311,6 +420,27 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
     const msg = err instanceof Error ? err.message : 'Failed to update the task';
     // "Not found" covers both missing and not-yours on purpose: telling
     // somebody a task exists but isn't theirs is itself a small leak.
+    res.status(msg === 'Task not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
+// POST /api/staff-tasks/:id/take — "I'll take it": an untaken list item onto my list
+router.post('/:id/take', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    res.json({ data: await takeTask(id, req.user!.id) });
+  } catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to take it' }); }
+});
+
+// POST /api/staff-tasks/:id/release — put a taken list item back on its list
+router.post('/:id/release', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'id must be a UUID' }); return; }
+    res.json({ data: await releaseTask(id, req.user!.id, req.user!.role) });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to put it back';
     res.status(msg === 'Task not found' ? 404 : 400).json({ error: msg });
   }
 });
