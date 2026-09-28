@@ -232,6 +232,7 @@ existing definition:
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
 | Closing a finished shop week (invoice, allocate, complete) | `services/shop-close.ts` |
+| Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
 | Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |
 | Does the week's shop job match the till? What did the week take? | `services/shop-reconcile.ts` |
@@ -330,7 +331,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, to
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
-shop close reminder Mon 08:55 ·
+shop close reminder Mon 08:55 · shop contact check 06:40 ·
 Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
