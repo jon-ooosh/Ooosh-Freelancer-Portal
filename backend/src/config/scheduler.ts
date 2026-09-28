@@ -135,6 +135,23 @@ export function startScheduler() {
     }, { timezone: 'Europe/London' });
   }
 
+  // ── Shop contact check ────────────────────────────────────────────────
+  // Daily 06:40 (UK): has the "OP Shop Sales" HireHop contact — the client on
+  // every weekly shop invoice — had its name or address edited? Emails jon once
+  // per change (docs/SHOP-SALES-SPEC.md §6.0). Not a job, so the lost/cancelled
+  // + is_internal gates don't apply.
+  if (isHireHopConfigured()) {
+    cron.schedule('40 6 * * *', async () => {
+      try {
+        const { checkShopContact } = await import('../services/shop-contact-check');
+        const r = await checkShopContact();
+        if (r === 'changed') console.log('Scheduler: shop contact check — the OP Shop Sales contact changed; jon emailed');
+      } catch (err) {
+        console.error('Scheduler: shop contact check failed:', err instanceof Error ? err.message : err);
+      }
+    }, { timezone: 'Europe/London' });
+  }
+
   // ── Shop sale-stock catalogue mirror ──────────────────────────────────
   // Keeps `shop_stock_cache` fresh so the till never calls HireHop to search or
   // price an item (docs/SHOP-SALES-SPEC.md §10). A few HireHop calls per refresh
