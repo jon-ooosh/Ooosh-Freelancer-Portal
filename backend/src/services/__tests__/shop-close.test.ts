@@ -283,6 +283,16 @@ describe('runShopClose', () => {
     expect(period.hh_invoice_number).toBe('OT-INV-99001');
   });
 
+  it('treats a PAID invoice (status 3) as approved, never re-approving it', async () => {
+    hh.invoices = [{ id: 12900, status: 3, number: 'OT-INV-99001', net: 10, tax: 2, paid: 0, accId: '' }];
+    Object.assign(period, { hh_invoice_id: 12900, close_state: 'drafted' });
+
+    const r = await runShopClose('p1', 'user-jon');
+
+    expect(r.done).toBe(true);
+    expect(posts('/php_functions/billing_save_status.php')).toHaveLength(0);
+  });
+
   it('does NOT call the week closed when HireHop says it synced an allocation but Xero never got it', async () => {
     hh.xeroDropsApps = 99;                      // what 16762 did live, 25 Sep 2026
 

@@ -154,6 +154,7 @@ function findInvoice(rows: Row[], invoiceId: number): Row | null {
   return invoiceRows(rows).find((row) => idOf(row) === invoiceId) ?? null;
 }
 
+/** HireHop invoice STATUS: 0 draft · 2 approved · 3 paid (seen on 16762 once allocated). */
 function invoiceStatus(row: Row): number {
   return parseInt(row.status ?? row.data?.STATUS ?? '0');
 }
@@ -471,7 +472,7 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
     // ── 4. Approve, dated the week's Sunday ──
     // Skipped if it's already approved — a resume after the approve landed but
     // its read-back failed. Approving twice is not something to find out about.
-    const alreadyApproved = invoiceStatus(inv!) === 2;
+    const alreadyApproved = invoiceStatus(inv!) >= 2;
     const res = alreadyApproved
       ? { success: true, data: null as any, error: undefined }
       : await hhBroker.post<any>('/php_functions/billing_save_status.php', {
@@ -483,7 +484,7 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
       }, { priority: 'high' });
     const after = findInvoice(await readBillingRows(hhJobNumber), invoiceId);
     const number = after?.data?.NUMBER ? String(after.data.NUMBER) : '';
-    if (!after || invoiceStatus(after) !== 2 || !number) {
+    if (!after || invoiceStatus(after) < 2 || !number) {
       await stop(periodId, 'approve', `HireHop did not approve invoice ${invoiceId} (${res.error || 'still a draft on read-back'}). `
         + 'Nothing has gone to Xero — press Close to try again.');
     }
