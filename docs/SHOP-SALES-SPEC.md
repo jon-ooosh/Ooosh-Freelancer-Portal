@@ -1256,8 +1256,12 @@ never has), so the close now **applies each payment's credit in Xero itself**
 `accounting.payments`) and only completes the job once XERO says the invoice has
 £0 due. Idempotent: it applies only what each overpayment hasn't already applied
 to the invoice, so a resume, or a hand "Apply credit" in Xero, is never doubled.
-**First real test: week 21–27 Sep (16750)**, left at `approved` with the credit
-unapplied in Xero — press Close once deployed.
+**Proven live: week 21–27 Sep (16750) closed 28 Sep 2026** — OT-INV-12253 £47.50
+paid in HireHop AND Xero (credit applied by OP), job Completed. The full recipe is
+`HIREHOP-BILLING-API.md` §8. The invoice's `ref` now carries the week (→ Xero
+Reference). Per-line sale dates on the Xero lines: dropped (jon — HireHop builds those
+descriptions and has no setting for it). Sale items' nominal group:
+`scripts/shop-nominal-fix.ts` (§9 of the billing doc).
 
 The "No HireHop job for this week yet" banner on the till is gone (jon, 28 Sep
 2026): the first sale creates the week's job by itself, so asking staff to act

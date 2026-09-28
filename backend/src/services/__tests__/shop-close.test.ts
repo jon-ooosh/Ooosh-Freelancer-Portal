@@ -227,7 +227,7 @@ describe('runShopClose', () => {
 
     // Draft: ALWAYS all: 1, on the right job.
     const [draft] = posts('/php_functions/billing_save.php');
-    expect(draft).toMatchObject({ id: 0, all: 1, job: 16757 });
+    expect(draft).toMatchObject({ id: 0, all: 1, job: 16757, ref: 'Shop sales 06/01/2020 - 12/01/2020' });
 
     // Approved, dated the week's Sunday.
     const [approve] = posts('/php_functions/billing_save_status.php');

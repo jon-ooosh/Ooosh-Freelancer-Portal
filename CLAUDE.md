@@ -121,7 +121,7 @@ somewhere the rules don't cover.
 | `PLATFORM-CONVENTIONS.md` | security posture, crew & transport calculator, HireHop API field reference, dashboard extension points, files tab, DB tables |
 | `PLATFORM-HISTORY.md` | original repo-structure tree, full deployment playbook, Phase 1 history |
 | `BACKLOG.md` | captured but unscheduled ideas |
-| `HIREHOP-BILLING-API.md` | invoices, payments, allocations, refunds and their Xero sync — captured payloads. Read before ANY new billing write; the base for the bookkeeping module |
+| `HIREHOP-BILLING-API.md` | invoices, payments, allocations, refunds and their Xero sync — captured payloads. Read before ANY new billing write. **§8 is the proven end-to-end recipe (invoice → allocate → apply credit in Xero → complete) — the base for the bookkeeping module** |
 
 `docs/*-SPEC.md` are the hand-written per-feature specs; several rules point at them.
 
@@ -153,9 +153,10 @@ anything private under `files/`.
 (`/money/shop`). Ad-hoc shop sales, internal stock consumption and sale-stock
 lookup, with HireHop remaining the single stock database. **§19 is the current
 state, the live settings, and what to do next — read it before touching this.**
-**§20, the weekly close** (invoice → approve → allocate payments → complete) — BUILT
-(`services/shop-close.ts`, admin-only button on *This week*), **first live run on scratch
-job 16757 still to do** (§20.6). Every HireHop call is in `docs/reference/HIREHOP-BILLING-API.md`.
+**§20, the weekly close** (invoice → approve → allocate payments → complete) — LIVE
+(`services/shop-close.ts`, admin-only button on *This week*; first real week closed
+28 Sep 2026). **HireHop never pushes an allocation to Xero — OP applies the credit in
+Xero itself** (`HIREHOP-BILLING-API.md` §8).
 
 Three rules from it that bite elsewhere:
 - **A stock movement is EITHER a HireHop job line OR a `tally_save` adjustment,
