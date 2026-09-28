@@ -131,11 +131,6 @@ async function sendReceipt(saleId: string, to: string): Promise<string | null> {
   }
 }
 
-interface PeriodInfo {
-  periodStart: string;
-  period: { hh_job_number: number | null; period_end: string } | null;
-}
-
 interface ConsumptionRow {
   hh_stock_id: number;
   name: string;
@@ -214,8 +209,6 @@ export default function ShopTillPage() {
   const [refundReceiptTo, setRefundReceiptTo] = useState('');
   const [recent, setRecent] = useState<RecentSale[]>([]);
   const [usage, setUsage] = useState<ConsumptionRow[] | null>(null);
-  const [period, setPeriod] = useState<PeriodInfo | null>(null);
-  const [creatingPeriod, setCreatingPeriod] = useState(false);
   // The bottom tabs. null = folded away, which is how most visits leave it.
   // `?tab=review` (the lock-up report and the reminder email link here) wins
   // over the remembered tab, so a link always lands on what it's about.
@@ -381,27 +374,6 @@ export default function ShopTillPage() {
     loadRecentRef.current?.();
   }, []);
 
-  const loadPeriod = useCallback(() => {
-    api.get<{ data: PeriodInfo }>('/shop/period')
-      .then(r => setPeriod(r.data))
-      .catch(() => setPeriod(null));
-  }, []);
-
-  /** Bring this week's HireHop job into being without waiting for a sale. */
-  const createPeriod = useCallback(async () => {
-    setCreatingPeriod(true);
-    setError(null);
-    try {
-      await api.post('/shop/period/ensure', {});
-      loadPeriod();
-    } catch (e: any) {
-      // The backend's messages name what to go and fix in HireHop.
-      setError(e?.body?.error || e?.message || "Could not create this week's shop job.");
-    } finally {
-      setCreatingPeriod(false);
-    }
-  }, [loadPeriod]);
-
   // Recent and needs-attention move together: anything that changes one
   // (a sale, a refund, a retry) can change the other.
   const loadRecent = useCallback(() => {
@@ -459,8 +431,7 @@ export default function ShopTillPage() {
       .then(r => setTodayJobs(r.data))
       .catch(() => setTodayJobs([]));
     loadRecent();
-    loadPeriod();
-  }, [loadRecent, loadPeriod]);
+  }, [loadRecent]);
 
   // Debounced search. Postgres-backed, so this is cheap enough to fire per keystroke.
   useEffect(() => {
@@ -850,31 +821,10 @@ export default function ShopTillPage() {
         ))}
       </div>
 
-      {/* This week's HireHop job. Sales can be taken without it — they queue —
-          but nothing reaches HireHop until it exists. */}
-      {period && (
-        <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
-          {/* Only ever says something when something is WRONG. A permanent
-              "everything is fine" line is noise at a counter, and the job
-              number itself is deliberately not shown: the shop job is
-              machinery, and anyone who opens it in HireHop is one status
-              change away from releasing a week of sale stock (§2.1). */}
-          {period.period?.hh_job_number ? null : (
-            <>
-              <span className="text-amber-700">
-                No HireHop job for this week yet — sales will queue until there is one.
-              </span>
-              <button
-                onClick={createPeriod}
-                disabled={creatingPeriod}
-                className="rounded border border-ooosh-300 px-2 py-1 font-medium text-ooosh-700 hover:bg-ooosh-50 disabled:opacity-50"
-              >
-                {creatingPeriod ? 'Creating…' : "Create this week's job"}
-              </button>
-            </>
-          )}
-        </div>
-      )}
+      {/* No "this week's HireHop job" banner (jon, Sep 2026): the first sale
+          creates the job on its own, so a warning asking staff to act only
+          confused. If creation ever fails, the queued sales show under
+          Needs attention, which is where a problem belongs. */}
 
       {saved && (
         <div className="mb-4 rounded border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">

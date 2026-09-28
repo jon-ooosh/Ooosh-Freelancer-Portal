@@ -167,8 +167,15 @@ application twice (`d12598_dep` / `d12598_inv`, `data.OWNER: 12841`,
 (1008 → 1006.5), and top-level `hh_task: "post_payment", hh_id: 12598` (the
 APPLICATION id) → `accounting/tasks.php` → Xero applies the overpayment to the invoice.
 
-⚠️ **First live use (scratch job 16762, 25 Sep 2026): the allocation did NOT reach
-Xero.** Save and `tasks.php` both succeeded (`package_updated: true`), yet the
+🔴 **HireHop NEVER pushes an allocation to Xero** (jon, 28 Sep 2026: "it never has —
+we've always applied the credit in Xero by hand"; re-proven on the real week 16750).
+Deposits reach Xero as overpayments at creation and then stay orphaned. So OP applies
+the credit in Xero ITSELF: `xero-broker.ts allocateOverpayment()` →
+`PUT /Overpayments/{ACC_DATA.OverpaymentID}/Allocations` against the invoice's
+`ACC_ID`, and reads back Xero's `AmountDue` (`shop-close.ts applyCreditsInXero`).
+This is the piece the bookkeeping module will reuse for every job.
+
+The first live use, for the record (scratch job 16762, 25 Sep 2026): Save and `tasks.php` both succeeded (`package_updated: true`), yet the
 application rows kept `ACC_ID: ""`, `ACC_EXPORTED: ""`, `ACC_CHANGED: 1`, and Xero
 left the invoice at *Awaiting payment* with both overpayments unapplied. **HireHop's own
 UI did exactly the same** (re-saving the application from the UI: same payload shape —
