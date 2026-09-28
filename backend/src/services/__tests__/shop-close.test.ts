@@ -30,6 +30,11 @@ jest.mock('../shop-reconcile', () => ({
 jest.mock('../shop-stock', () => ({ hhLocalNow: () => '2026-09-28 09:00:00' }));
 jest.mock('../email-service', () => ({ emailService: { sendRaw: jest.fn().mockResolvedValue({}) } }));
 jest.mock('../../config/app-urls', () => ({ getFrontendUrl: () => 'https://op.test' }));
+jest.mock('../../config/xero', () => ({ isXeroConfigured: () => true }));
+jest.mock('../xero-broker', () => ({
+  __esModule: true,
+  default: { getInvoice: jest.fn(), getOverpayment: jest.fn(), allocateOverpayment: jest.fn() },
+}));
 
 import { query } from '../../config/database';
 import hhBroker from '../hirehop-broker';
@@ -37,6 +42,7 @@ import { readBillingRows } from '../hh-deposit-release';
 import { syncSavedRowToXero } from '../hh-xero-sync';
 import { checkShopPeriodLocked } from '../shop-reconcile';
 import { emailService } from '../email-service';
+import xeroBroker from '../xero-broker';
 import { runShopClose } from '../shop-close';
 
 const mockQuery = query as jest.Mock;
@@ -46,6 +52,9 @@ const mockRead = readBillingRows as jest.Mock;
 const mockSync = syncSavedRowToXero as jest.Mock;
 const mockCheck = checkShopPeriodLocked as jest.Mock;
 const mockEmail = (emailService as any).sendRaw as jest.Mock;
+const mockXeroInvoice = (xeroBroker as any).getInvoice as jest.Mock;
+const mockXeroOverpayment = (xeroBroker as any).getOverpayment as jest.Mock;
+const mockXeroAllocate = (xeroBroker as any).allocateOverpayment as jest.Mock;
 
 // ── A tiny HireHop ──────────────────────────────────────────────────────
 
@@ -56,9 +65,15 @@ interface App { id: number; invoiceId: number; depositId: number; amount: number
 let hh: {
   jobStatus: number; invoices: Inv[]; deposits: Dep[]; apps: App[]; nextApp: number;
   draftNet: number; draftTax: number;
-  /** How many allocation pushes HireHop "accepts" without reaching Xero — what 16762 did live. */
-  xeroDropsApps: number;
 };
+
+// ── A tiny Xero ─────────────────────────────────────────────────────────
+// HireHop's deposits arrive as overpayments; the invoice arrives when approved.
+// Allocations never arrive from HireHop (what 16762 and 16750 did live) — OP
+// applies them.
+
+interface Op { remaining: number; allocations: Array<{ Invoice: { InvoiceID: string }; Amount: number }> }
+let xero: { invoiceDue: Record<string, number>; overpayments: Record<string, Op>; ignoresAllocations: boolean };
 
 function rows() {
   const out: any[] = [];
@@ -72,7 +87,7 @@ function rows() {
   for (const d of hh.deposits) {
     out.push({
       kind: 6, credit: d.credit, owing: -(d.credit - d.allocated), paid: d.allocated,
-      data: { ID: d.id, ACC_ACCOUNT_ID: d.bank, DESCRIPTION: '16757 - shop sale' },
+      data: { ID: d.id, ACC_ACCOUNT_ID: d.bank, DESCRIPTION: '16757 - shop sale', ACC_DATA: { OverpaymentID: `op-${d.id}` } },
     });
   }
   for (const a of hh.apps) {
@@ -116,14 +131,33 @@ function installHireHop() {
   mockSync.mockImplementation(async (_label: string, saved: any) => {
     if (saved.hh_task === 'post_invoice_credit') {
       const inv = hh.invoices.find((i) => i.id === saved.hh_id);
-      if (inv) inv.accId = 'xero-guid';
-    }
-    if (saved.hh_task === 'post_payment') {
-      const app = hh.apps.find((a) => a.id === saved.hh_id);
-      if (app && hh.xeroDropsApps > 0) hh.xeroDropsApps--;       // "package_updated: true", nothing in Xero
-      else if (app) app.accId = `xero-alloc-${app.id}`;
+      if (inv) {
+        inv.accId = 'xero-guid';
+        xero.invoiceDue['xero-guid'] = Math.round((inv.net + inv.tax) * 100) / 100;
+      }
     }
     return { ok: true, error: null };
+  });
+}
+
+function installXero() {
+  xero = {
+    invoiceDue: {},
+    overpayments: Object.fromEntries(hh.deposits.map((d) => [`op-${d.id}`, { remaining: d.credit, allocations: [] }])),
+    ignoresAllocations: false,
+  };
+  mockXeroInvoice.mockImplementation(async (id: string) =>
+    (id in xero.invoiceDue ? { InvoiceID: id, AmountDue: xero.invoiceDue[id] } : null));
+  mockXeroOverpayment.mockImplementation(async (id: string) => {
+    const op = xero.overpayments[id];
+    return op ? { OverpaymentID: id, RemainingCredit: op.remaining, Allocations: op.allocations } : null;
+  });
+  mockXeroAllocate.mockImplementation(async (a: { overpaymentId: string; invoiceId: string; amount: number }) => {
+    if (xero.ignoresAllocations) return;
+    const op = xero.overpayments[a.overpaymentId];
+    op.remaining = Math.round((op.remaining - a.amount) * 100) / 100;
+    op.allocations.push({ Invoice: { InvoiceID: a.invoiceId }, Amount: a.amount });
+    xero.invoiceDue[a.invoiceId] = Math.round((xero.invoiceDue[a.invoiceId] - a.amount) * 100) / 100;
   });
 }
 
@@ -162,7 +196,7 @@ function installDb() {
 beforeEach(() => {
   jest.clearAllMocks();
   hh = {
-    jobStatus: 5, invoices: [], apps: [], nextApp: 500, xeroDropsApps: 0,
+    jobStatus: 5, invoices: [], apps: [], nextApp: 500,
     deposits: [
       { id: 9401, credit: 5.00, bank: 168, allocated: 0 },    // Till (cash)
       { id: 9402, credit: 7.00, bank: 169, allocated: 0 },    // Worldpay
@@ -178,6 +212,7 @@ beforeEach(() => {
   mockCheck.mockResolvedValue({ problems: [], status: 5 });
   installHireHop();
   installDb();
+  installXero();
 });
 
 const posts = (path: string) => mockPost.mock.calls.filter((c) => c[0] === path).map((c) => c[1]);
@@ -258,7 +293,9 @@ describe('runShopClose', () => {
     // Approved and in Xero; 9401 was allocated before a Xero wobble stopped it.
     hh.invoices = [{ id: 12900, status: 2, number: 'OT-INV-99001', net: 10, tax: 2, paid: 5, accId: 'xero-guid' }];
     hh.deposits[0].allocated = 5;
-    hh.apps = [{ id: 499, invoiceId: 12900, depositId: 9401, amount: 5, accId: 'xero-alloc-499' }];
+    hh.apps = [{ id: 499, invoiceId: 12900, depositId: 9401, amount: 5, accId: '' }];
+    xero.invoiceDue['xero-guid'] = 7;
+    xero.overpayments['op-9401'] = { remaining: 0, allocations: [{ Invoice: { InvoiceID: 'xero-guid' }, Amount: 5 }] };
     Object.assign(period, { hh_invoice_id: 12900, hh_invoice_number: 'OT-INV-99001', close_state: 'approved' });
 
     const r = await runShopClose('p1', 'user-jon');
@@ -293,29 +330,81 @@ describe('runShopClose', () => {
     expect(posts('/php_functions/billing_save_status.php')).toHaveLength(0);
   });
 
-  it('does NOT call the week closed when HireHop says it synced an allocation but Xero never got it', async () => {
-    hh.xeroDropsApps = 99;                      // what 16762 did live, 25 Sep 2026
+  it('applies every payment as credit in Xero itself, then reads Xero back', async () => {
+    const r = await runShopClose('p1', 'user-jon');
+
+    expect(r.done).toBe(true);
+    expect(mockXeroAllocate.mock.calls.map((c) => c[0])).toEqual([
+      expect.objectContaining({ overpaymentId: 'op-9401', invoiceId: 'xero-guid', amount: 5 }),
+      expect.objectContaining({ overpaymentId: 'op-9402', invoiceId: 'xero-guid', amount: 7 }),
+    ]);
+    expect(xero.invoiceDue['xero-guid']).toBe(0);
+    // HireHop's allocation push is never called — it does nothing.
+    expect(mockSync.mock.calls.every((c) => c[1].hh_task !== 'post_payment')).toBe(true);
+  });
+
+  it('does NOT complete the job while Xero still shows money due', async () => {
+    xero.ignoresAllocations = true;
 
     const r = await runShopClose('p1', 'user-jon');
 
     expect(r.done).toBe(false);
-    expect(r.message).toContain("haven't reached Xero");
-    expect(period.close_state).toBe('approved');   // not allocated, not completed
+    expect(r.message).toContain('still shows £12.00 due');
+    expect(period.close_state).toBe('approved');
     expect(hh.jobStatus).toBe(5);
 
-    // Once HireHop behaves, pressing Close again finishes — no re-allocation.
-    hh.xeroDropsApps = 0;
+    // Once Xero behaves, Close finishes — nothing is allocated twice in HireHop.
+    xero.ignoresAllocations = false;
     const again = await runShopClose('p1', 'user-jon');
     expect(again.done).toBe(true);
     expect(posts('/php_functions/billing_payments_save.php')).toHaveLength(2);
     expect(hh.jobStatus).toBe(11);
   });
 
-  it('retries an allocation push once before stopping', async () => {
-    hh.xeroDropsApps = 1;                       // the first push goes nowhere, the retry lands
+  it('finishes without applying anything if the credit was applied by hand in Xero', async () => {
+    // 16750's state: allocated in HireHop, approved — then jon pressed "Apply credit".
+    hh.invoices = [{ id: 12900, status: 3, number: 'OT-INV-99001', net: 10, tax: 2, paid: 12, accId: 'xero-guid' }];
+    hh.deposits.forEach((d) => { d.allocated = d.credit; });
+    hh.apps = [
+      { id: 600, invoiceId: 12900, depositId: 9401, amount: 5, accId: '' },
+      { id: 601, invoiceId: 12900, depositId: 9402, amount: 7, accId: '' },
+    ];
+    xero.invoiceDue['xero-guid'] = 0;
+    Object.assign(period, { hh_invoice_id: 12900, hh_invoice_number: 'OT-INV-99001', close_state: 'approved' });
+
     const r = await runShopClose('p1', 'user-jon');
+
     expect(r.done).toBe(true);
-    expect(hh.apps.every((a) => a.accId)).toBe(true);
+    expect(mockXeroAllocate).not.toHaveBeenCalled();
+    expect(hh.jobStatus).toBe(11);
+  });
+
+  it('resumes 16750 as it stands — allocated in HireHop, nothing applied in Xero', async () => {
+    hh.invoices = [{ id: 12900, status: 3, number: 'OT-INV-99001', net: 10, tax: 2, paid: 12, accId: 'xero-guid' }];
+    hh.deposits.forEach((d) => { d.allocated = d.credit; });
+    hh.apps = [
+      { id: 600, invoiceId: 12900, depositId: 9401, amount: 5, accId: '' },
+      { id: 601, invoiceId: 12900, depositId: 9402, amount: 7, accId: '' },
+    ];
+    xero.invoiceDue['xero-guid'] = 12;
+    Object.assign(period, { hh_invoice_id: 12900, hh_invoice_number: 'OT-INV-99001', close_state: 'approved' });
+
+    const r = await runShopClose('p1', 'user-jon');
+
+    expect(r.done).toBe(true);
+    expect(mockXeroAllocate).toHaveBeenCalledTimes(2);
+    expect(posts('/php_functions/billing_payments_save.php')).toHaveLength(0);
+    expect(hh.jobStatus).toBe(11);
+  });
+
+  it('says so plainly when Xero refuses for lack of permission', async () => {
+    mockXeroAllocate.mockRejectedValueOnce(new Error('Xero token rejected (re-minting)'));
+
+    const r = await runShopClose('p1', 'user-jon');
+
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('permission');
+    expect(hh.jobStatus).toBe(5);
   });
 
   it("does not allocate anything if Xero refuses the invoice", async () => {

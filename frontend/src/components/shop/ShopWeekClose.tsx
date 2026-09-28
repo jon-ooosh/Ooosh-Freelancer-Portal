@@ -36,11 +36,13 @@ const BANKS: Record<number, string> = {
   173: 'PayPal', 265: 'Wise (BACS)', 267: 'Stripe',
 };
 
+// What a stopped close has DONE and where it stopped — "stopped at approving"
+// read as though approval had failed when the invoice was already approved.
 const STATE_LABEL: Record<CloseState, string> = {
-  drafted: 'the draft invoice',
-  approved: 'approving the invoice',
-  allocated: 'allocating the payments',
-  completed: 'closing',
+  drafted: 'Draft invoice raised, not yet approved',
+  approved: 'Invoice approved — stopped at paying it off with the payments (HireHop / Xero)',
+  allocated: 'Invoice paid off — stopped before setting the job to Completed',
+  completed: 'Closed',
 };
 
 const money = (n: number) => `£${n.toFixed(2)}`;
@@ -123,7 +125,7 @@ export default function ShopWeekClose({ periodId, closeState, invoiceNumber, clo
 
       {state && state !== 'completed' && (
         <p className="mb-2 text-sm text-amber-800">
-          Started, but stopped at {STATE_LABEL[state]}. Close carries on from there.
+          {STATE_LABEL[state]}. Close carries on from there — nothing is done twice.
         </p>
       )}
       {!state && !preview && (

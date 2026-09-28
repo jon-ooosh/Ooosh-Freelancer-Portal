@@ -1250,8 +1250,18 @@ approve, invoice into Xero, allocations in HireHop, Completed. **VAT: HireHop ro
 per line, same as OP** (net £19.14 → £22.96, where rounding the total would give
 £22.97; one rate only). **Invoice date: `date = Sunday 23:59` gave TAX_POINT and the
 Xero date = that Sunday.** **NOT proven: the allocations never reached Xero** — see
-`HIREHOP-BILLING-API.md` §5. The close now reads that back and stops rather than
-reporting "paid". Resolve that before closing a real week.
+`HIREHOP-BILLING-API.md` §5. **HireHop never pushes allocations to Xero** (jon: it
+never has), so the close now **applies each payment's credit in Xero itself**
+(`applyCreditsInXero`, via OP's Xero connection — the bills token's
+`accounting.payments`) and only completes the job once XERO says the invoice has
+£0 due. Idempotent: it applies only what each overpayment hasn't already applied
+to the invoice, so a resume, or a hand "Apply credit" in Xero, is never doubled.
+**First real test: week 21–27 Sep (16750)**, left at `approved` with the credit
+unapplied in Xero — press Close once deployed.
+
+The "No HireHop job for this week yet" banner on the till is gone (jon, 28 Sep
+2026): the first sale creates the week's job by itself, so asking staff to act
+only confused.
 
 ~~Run the first live close on scratch job 16757 (§20.6).~~ The close is built
 (§20, `services/shop-close.ts`) but has only run against a fake HireHop in tests.

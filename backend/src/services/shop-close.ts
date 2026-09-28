@@ -36,6 +36,8 @@ import { query } from '../config/database';
 import hhBroker from './hirehop-broker';
 import { readBillingRows, readDepositAvailability } from './hh-deposit-release';
 import { syncSavedRowToXero, sendXeroSyncFailedAlert } from './hh-xero-sync';
+import xeroBroker from './xero-broker';
+import { isXeroConfigured } from '../config/xero';
 import { withShopDrainLock } from './shop-drain';
 import { checkShopPeriodLocked, SHOP_ALERT_RECIPIENT, ShopCheck } from './shop-reconcile';
 import { londonDate } from './shop-period';
@@ -535,21 +537,11 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
         await stop(periodId, 'allocate', `HireHop refused to allocate payment ${pay.depositId} (${gbp(pay.available)}): `
           + `${res.error || 'no reply'}. Press Close to carry on — payments already allocated are skipped.`);
       }
-      if (!res.data.hh_id) {
-        await stop(periodId, 'allocate', `Payment ${pay.depositId} was allocated in HireHop, but HireHop didn't say how to send it to Xero. `
-          + 'Open it in HireHop and Save to push it, then press Close to carry on.');
-      }
-      const sync = await syncSavedRowToXero(`shop close ${week} — payment ${pay.depositId}`, res.data);
-      if (!sync.ok) {
-        void sendXeroSyncFailedAlert({
-          jobId: null, hhJobNumber, what: `shop week payment allocation (${week})`,
-          amount: pay.available, hhRowId: res.data.hh_id, hhDepositId: pay.depositId,
-          error: sync.error || 'unknown',
-        });
-        await stop(periodId, 'allocate', `Payment ${pay.depositId} (${gbp(pay.available)}) is allocated in HireHop but Xero refused it: `
-          + `${sync.error}. Fix that one in Xero (you've been emailed), then press Close to carry on.`);
-      }
-      await log(periodId, 'allocate', true, `Payment ${pay.depositId} — ${gbp(pay.available)} allocated and sent to Xero.`);
+      // No HireHop → Xero push here: HireHop never sends an allocation to Xero
+      // (it answers "package_updated: true" and does nothing — proven on 16762
+      // and 16750, and jon confirms it never has). OP applies the credit in
+      // Xero itself, below.
+      await log(periodId, 'allocate', true, `Payment ${pay.depositId} — ${gbp(pay.available)} allocated in HireHop.`);
     }
 
     // Read back: nothing left owing, nothing left unallocated.
@@ -561,7 +553,7 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
       await stop(periodId, 'allocate', `After allocating, the invoice shows ${owing == null ? '?' : gbp(owing)} owing`
         + `${left.length ? ` and ${left.length} payment(s) still hold money` : ''} — expected £0.00. Check the job in HireHop.`);
     }
-    await checkAllocationsInXero(periodId, hhJobNumber, rows, invoiceId, p.hh_invoice_number || String(invoiceId));
+    await applyCreditsInXero(periodId, rows, invoiceId, p.hh_invoice_number || String(invoiceId));
     await setState(periodId, 'allocated');
     await log(periodId, 'allocate', true, 'Invoice shows £0.00 owing.');
     p = await loadPeriod(periodId);
@@ -606,40 +598,82 @@ function invoiceAllocations(rows: Row[], invoiceId: number): Row[] {
     && Number(row.data?.OWNER ?? 0) === invoiceId);
 }
 
-const hasXeroId = (row: Row) => {
-  const accId = String(row.data?.ACC_ID ?? '').trim();
-  return accId !== '' && accId !== '0';
-};
+const xeroMoney = (v: unknown) => round2(Number(v) || 0);
 
 /**
- * Read back Xero for every allocation on the invoice: HireHop stamps each with
- * its Xero id (`ACC_ID`) once Xero has applied it. The first live close
- * (scratch job 16762, 25 Sep 2026) proved `tasks.php` can answer
- * `package_updated: true` and leave the allocation OUT of Xero — HireHop's own
- * UI did exactly the same. So "HireHop says it synced" is not enough to call
- * the invoice paid. One more push per missing allocation, then stop and say so.
+ * Make Xero match HireHop: apply each payment's overpayment to the invoice —
+ * Xero's "Apply credit" — then ask XERO whether the invoice is paid.
+ *
+ * HireHop allocates on its side but never pushes the allocation to Xero (jon,
+ * Sep 2026: it never has; 16762 and 16750 proved it). The ids are already on
+ * HireHop's rows: the invoice's `ACC_ID` is the Xero invoice, each deposit's
+ * `ACC_DATA.OverpaymentID` is its Xero overpayment.
+ *
+ * Idempotent. It applies only what each overpayment has NOT already applied to
+ * this invoice, so a resume — or jon pressing "Apply credit" in Xero by hand —
+ * never applies anything twice. The only judge of "done" is Xero's AmountDue.
  */
-async function checkAllocationsInXero(
-  periodId: string, hhJobNumber: number, rows: Row[], invoiceId: number, number: string,
-): Promise<void> {
-  let missing = invoiceAllocations(rows, invoiceId).filter((row) => !hasXeroId(row));
-  if (!missing.length) {
-    await log(periodId, 'xero', true, `Every payment is applied to ${number} in Xero.`);
-    return;
+async function applyCreditsInXero(periodId: string, rows: Row[], invoiceId: number, number: string): Promise<void> {
+  if (!isXeroConfigured()) {
+    await stop(periodId, 'xero', 'OP has no Xero connection on this server, so it cannot apply the payments in Xero. '
+      + `Apply the credit to ${number} in Xero by hand, then press Close to finish.`);
   }
-  for (const row of missing) {
-    await syncSavedRowToXero(`shop close — ${number} allocation ${idOf(row)} (retry)`, {
-      hh_task: 'post_payment', hh_id: idOf(row), hh_acc_package_id: 3, hh_package_type: 1,
-    });
+  const inv = findInvoice(rows, invoiceId);
+  const xeroInvoiceId = String(inv?.data?.ACC_ID ?? '').trim();
+  if (!xeroInvoiceId) {
+    await stop(periodId, 'xero', `${number} has no Xero id in HireHop, so OP can't find it in Xero. Check it reached Xero, then press Close.`);
   }
-  missing = invoiceAllocations(await readBillingRows(hhJobNumber), invoiceId).filter((row) => !hasXeroId(row));
-  if (missing.length) {
-    const total = round2(missing.reduce((s, r) => s + Math.abs(parseFloat(r.credit ?? r.data?.AMOUNT ?? '0')), 0));
-    await stop(periodId, 'xero', `The payments are allocated in HireHop (£0.00 owing there), but ${missing.length} of them `
-      + `(${gbp(total)}) haven't reached Xero — HireHop accepted the push and didn't do it, so Xero still shows ${number} `
-      + 'as owing. The job has NOT been completed. Press Close to try the push again.');
+
+  const amountDue = async () => {
+    const x = await xeroBroker.getInvoice(xeroInvoiceId);
+    if (!x) throw new Error(`Xero can't find ${number} (${xeroInvoiceId}).`);
+    return xeroMoney(x.AmountDue);
+  };
+
+  try {
+    if ((await amountDue()) < PENNY) {
+      await log(periodId, 'xero', true, `${number} already shows paid in Xero.`);
+      return;
+    }
+    const today = londonDate(new Date());
+    for (const app of invoiceAllocations(rows, invoiceId)) {
+      const depositId = Number(app.data?.OWNER_DEPOSIT ?? 0);
+      const amount = xeroMoney(Math.abs(parseFloat(app.credit ?? app.data?.AMOUNT ?? '0')));
+      const dep = rows.find((r) => kindOf(r) === 6 && idOf(r) === depositId);
+      const overpaymentId = String(dep?.data?.ACC_DATA?.OverpaymentID ?? '').trim();
+      if (!overpaymentId) {
+        await stop(periodId, 'xero', `Payment ${depositId} (${gbp(amount)}) isn't in Xero as a payment, so there's no credit to apply. `
+          + 'Check it in HireHop (it should have the cloud icon), then press Close.');
+      }
+      const op = await xeroBroker.getOverpayment(overpaymentId);
+      if (!op) await stop(periodId, 'xero', `Xero can't find the overpayment for payment ${depositId}. Check it in Xero, then press Close.`);
+      const applied = xeroMoney(((op!.Allocations as any[]) || [])
+        .filter((a) => String(a?.Invoice?.InvoiceID ?? '') === xeroInvoiceId)
+        .reduce((sum, a) => sum + (Number(a?.Amount) || 0), 0));
+      const need = round2(amount - applied);
+      if (need < PENNY) continue;                 // already applied — by us earlier, or by hand
+      const remaining = xeroMoney(op!.RemainingCredit);
+      if (remaining + PENNY < need) {
+        await stop(periodId, 'xero', `Payment ${depositId} needs ${gbp(need)} applying to ${number}, but Xero says only `
+          + `${gbp(remaining)} of it is unused — it has been applied elsewhere. Check it in Xero; nothing more was applied.`);
+      }
+      await xeroBroker.allocateOverpayment({ overpaymentId, invoiceId: xeroInvoiceId, amount: need, date: today });
+      await log(periodId, 'xero', true, `Payment ${depositId} — ${gbp(need)} credit applied to ${number} in Xero.`);
+    }
+    const due = await amountDue();
+    if (due >= PENNY) {
+      await stop(periodId, 'xero', `After applying every payment, Xero still shows ${gbp(due)} due on ${number}. `
+        + 'The job has NOT been completed. Check the invoice in Xero, then press Close.');
+    }
+  } catch (err) {
+    if (err instanceof Stop) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    const scope = /\b40[13]\b|scope|token rejected/i.test(msg)
+      ? ' This looks like OP\'s Xero connection lacking permission to apply credit (accounting.payments).' : '';
+    await stop(periodId, 'xero', `Xero refused while applying the payments to ${number}: ${msg}.${scope} `
+      + 'Anything already applied stays applied; press Close to carry on.');
   }
-  await log(periodId, 'xero', true, `Every payment is applied to ${number} in Xero (after a retry).`);
+  await log(periodId, 'xero', true, `${number} shows paid in Xero.`);
 }
 
 /** Status 11, read back. Completed keeps sale stock consumed (§2.1). */
