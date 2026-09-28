@@ -1244,7 +1244,16 @@ once the mirror lands — it costs one query, and any item below 100 means today
 
 ### THE FIRST THING TO DO NEXT
 
-**Run the first live close on scratch job 16757 (§20.6).** The close is built
+**First live close ran on scratch job 16762 (25 Sep 2026).** Proven: pre-flight
+(it caught four real faults on the messy 16757 and refused), draft, penny check,
+approve, invoice into Xero, allocations in HireHop, Completed. **VAT: HireHop rounds
+per line, same as OP** (net £19.14 → £22.96, where rounding the total would give
+£22.97; one rate only). **Invoice date: `date = Sunday 23:59` gave TAX_POINT and the
+Xero date = that Sunday.** **NOT proven: the allocations never reached Xero** — see
+`HIREHOP-BILLING-API.md` §5. The close now reads that back and stops rather than
+reporting "paid". Resolve that before closing a real week.
+
+~~Run the first live close on scratch job 16757 (§20.6).~~ The close is built
 (§20, `services/shop-close.ts`) but has only run against a fake HireHop in tests.
 Two things to verify on that run and record here: whether HireHop's VAT across
 several odd-pence lines matches OP's per-line rounding (the penny check will stop

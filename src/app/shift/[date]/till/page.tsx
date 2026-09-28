@@ -428,7 +428,9 @@ export default function SitterTillPage() {
             {/* Checkout */}
             <section className="rounded-xl border border-gray-300 bg-white overflow-hidden shadow-sm">
               <div className="flex items-baseline justify-between bg-gray-900 px-4 py-3 text-white">
-                <span className="text-sm font-semibold">Total</span>
+                <span className="text-sm font-semibold">
+                  Total <span className="text-xs font-normal text-gray-300">(inc VAT)</span>
+                </span>
                 <span className="text-2xl font-bold tabular-nums">{money(total)}</span>
               </div>
               <div className="p-4 space-y-4">

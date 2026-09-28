@@ -167,6 +167,18 @@ application twice (`d12598_dep` / `d12598_inv`, `data.OWNER: 12841`,
 (1008 → 1006.5), and top-level `hh_task: "post_payment", hh_id: 12598` (the
 APPLICATION id) → `accounting/tasks.php` → Xero applies the overpayment to the invoice.
 
+⚠️ **First live use (scratch job 16762, 25 Sep 2026): the allocation did NOT reach
+Xero.** Save and `tasks.php` both succeeded (`package_updated: true`), yet the
+application rows kept `ACC_ID: ""`, `ACC_EXPORTED: ""`, `ACC_CHANGED: 1`, and Xero
+left the invoice at *Awaiting payment* with both overpayments unapplied. **HireHop's own
+UI did exactly the same** (re-saving the application from the UI: same payload shape —
+`id, date, desc, paid, memo, bank, correction: 0, CUSTOM_FIELDS, bill` — same result),
+so it is HireHop↔Xero, not OP. Suspect: that invoice was dated 11 Jan 2026 (a fake
+past week) and the overpayments 25 Sep — Xero refuses an allocation dated before the
+overpayment if HireHop dates it by the invoice. Unconfirmed. **The invoice-side
+application row's `ACC_ID` is the read-back** — `shop-close.ts` now checks it,
+retries the push once, and otherwise stops without completing the job.
+
 The same endpoint, variants:
 
 | `OWNER` | `id` | Meaning | Where in code |
