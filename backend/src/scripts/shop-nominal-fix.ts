@@ -25,6 +25,10 @@
  *   npx tsx src/scripts/shop-nominal-fix.ts --limit=10 --commit  # a few
  *   npx tsx src/scripts/shop-nominal-fix.ts --commit             # the rest
  *
+ * Add --default-only to move ONLY items on the default (blank) group — the set-up
+ * mistake — and leave items someone put on a group deliberately (Staging, Misc
+ * income, …) alone. The dry run lists those.
+ *
  * Re-running is safe: items already on 6 are skipped.
  */
 import dotenv from 'dotenv';
@@ -42,6 +46,7 @@ const idArg = process.argv.find((a) => a.startsWith('--id='));
 const onlyId = idArg ? Number(idArg.split('=')[1]) : null;
 const limitArg = process.argv.find((a) => a.startsWith('--limit='));
 const limit = limitArg ? Number(limitArg.split('=')[1]) : Infinity;
+const defaultOnly = process.argv.includes('--default-only');
 
 const str = (v: unknown) => (v == null ? '' : String(v));
 const price = (item: any, k: string) => Number(item?.PRICES?.[k]?.PRICE ?? 0);
@@ -126,7 +131,15 @@ async function main() {
   console.log(`${items.length} sales-stock items. By nominal group id:`);
   for (const [k, n] of [...byNominal].sort((a, b) => b[1] - a[1])) console.log(`  ${k.padEnd(10)} ${n}`);
 
-  let todo = items.filter((it) => str(it.ACC_NOMINAL) !== SHOP_SALES_NOMINAL);
+  // Items on a group chosen on purpose (not blank, not already Shop Sales).
+  const deliberate = items.filter((it) => str(it.ACC_NOMINAL) && str(it.ACC_NOMINAL) !== SHOP_SALES_NOMINAL);
+  if (deliberate.length) {
+    console.log(`\nOn a group other than default or Shop Sales (${defaultOnly ? 'LEFT ALONE — --default-only' : 'WILL be moved — add --default-only to skip'}):`);
+    for (const it of deliberate) console.log(`  ${it.ID}  ${it.TITLE}  (group ${str(it.ACC_NOMINAL)})`);
+  }
+
+  let todo = items.filter((it) => str(it.ACC_NOMINAL) !== SHOP_SALES_NOMINAL
+    && (!defaultOnly || !str(it.ACC_NOMINAL)));
   if (onlyId != null) todo = todo.filter((it) => Number(it.ID) === onlyId);
   todo = todo.slice(0, limit);
   console.log(`\n${todo.length} to move to group ${SHOP_SALES_NOMINAL} ("Shop Sales").`);
