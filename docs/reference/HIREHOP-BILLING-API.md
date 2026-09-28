@@ -67,7 +67,7 @@ Bank ids: 165 Amex · 168 Till (Cash) · 169 Worldpay · 170 Lloyds · 173 PayPa
 
 ---
 
-## 3. Creating an invoice (draft) — `billing_save.php` 🟢 (in code: `services/shop-close.ts`, not yet run live)
+## 3. Creating an invoice (draft) — `billing_save.php` ✅ (`services/shop-close.ts`, live since 28 Sep 2026)
 
 Captured on scratch job 16757, 25 Sep 2026 (New → Invoice):
 
@@ -101,14 +101,21 @@ the id every later call uses), `NUMBER: ""` (drafts have no number), `STATUS: 0`
 `PRICE`, `VAT_RATE`, `VAT`, `ACC_NOMINAL_ID`. **No `hh_task`** — a draft does not go
 to Xero, correctly.
 
-❓ **VAT rounding with several odd-pence lines is not yet verified.** The one capture
+✅ **VAT is rounded PER LINE, same as OP's till** (verified live, 16762 and 16750:
+net £19.14 → gross £22.96, where rounding the total would give £22.97). Only one VAT
+rate has been seen on a shop invoice so far. `ref` → the Xero invoice's Reference
+(the close sends `Shop sales dd/mm/yyyy - dd/mm/yyyy`; confirm on the next close).
+Line descriptions in Xero are HireHop's: item name + the LINE's hire dates in
+brackets — there is no setting to change it (jon looked, Sep 2026).
+
+The original note: the one capture
 had a single line (840 + 168). Per-line `VAT` on items suggests HireHop sums per-line
 VAT, which would match OP's till (VAT rounded per line) — but check on real data: the
 shop close compares the invoice total to OP's own total to the penny before approving.
 
 ---
 
-## 4. Approving an invoice — `billing_save_status.php` 🟢 (in code: `services/shop-close.ts`, not yet run live)
+## 4. Approving an invoice — `billing_save_status.php` ✅ (`services/shop-close.ts`, live since 28 Sep 2026)
 
 Captured 25 Sep 2026 (right-click → Approved):
 
@@ -141,7 +148,7 @@ uses `post_invoice_credit` for invoices AND credit notes** (`MONEY-AND-EXCESS.md
 
 ---
 
-## 5. Allocating a payment to an invoice — `billing_payments_save.php` 🟢 (create) / ✅ (edit)
+## 5. Allocating a payment to an invoice — `billing_payments_save.php` ✅ (create and edit)
 
 Captured 25 Sep 2026 (right-click the deposit → allocate to invoice → Save):
 
@@ -190,7 +197,7 @@ The same endpoint, variants:
 
 | `OWNER` | `id` | Meaning | Where in code |
 |---|---|---|---|
-| invoice id | 0 | **allocate** a deposit to an invoice | 🟢 `shop-close.ts` (built, not yet run live) |
+| invoice id | 0 | **allocate** a deposit to an invoice | ✅ `shop-close.ts` |
 | invoice id | existing app id | **change** an allocation's amount | ✅ `hh-deposit-release.ts setApplicationAmount()` |
 | **0** | 0 | **refund** out of a deposit to the client | ✅ `hh-deposit.ts refundDepositOnHH()` |
 
@@ -222,3 +229,87 @@ Interested (10) releases it** (`SHOP-SALES-SPEC.md` §2.1).
 - What `upto`, `aggregated`, `novat` do on invoice create.
 - Voiding / deleting an approved invoice (and what it does in Xero).
 - VAT rounding across several odd-pence lines (§3).
+
+---
+
+## 8. THE RECIPE — settling an invoice end to end (proven live 28 Sep 2026)
+
+**This is the base of the bookkeeping module.** It is what the shop's weekly close
+does (`services/shop-close.ts`), and it is the first time OP has taken a HireHop job
+all the way from "payments sitting on it" to "invoice paid in HireHop AND Xero, job
+Completed". First real run: week 21–27 Sep 2026, job 16750, OT-INV-12253, £47.50.
+
+### Who holds what
+
+| Thing | HireHop | Xero | How OP finds the Xero side |
+|---|---|---|---|
+| A payment received | deposit (billing `kind = 6`) | an **Overpayment**, created when HireHop saves the deposit | deposit row `data.ACC_DATA.OverpaymentID` |
+| An invoice | `kind = 1`, `STATUS` 0 draft · 2 approved · **3 paid** | an ACCREC invoice, created when HireHop approves it | invoice row `data.ACC_ID` |
+| A payment applied to an invoice | `kind = 3` application (published twice — deposit side and invoice side) | an **Allocation** of the overpayment to the invoice | — **HireHop never creates this. OP does.** |
+
+### The steps
+
+1. **Pre-flight** — nothing half-done in OP, the job's lines and money match OP's
+   own record, no invoice on the job yet (shop: `checkShopPeriod` + the close's
+   blockers). Refuse rather than improvise.
+2. **Draft** — `billing_save.php` (§3), `all: 1`. Read back: exactly one invoice on
+   the job, status 0. The broker retries POSTs, so count invoices, don't trust the reply.
+3. **Penny check** — the draft's gross = what OP expects = the money held. Stop at
+   the draft if not; a draft never reaches Xero.
+4. **Approve** — `billing_save_status.php` (§4), `date` = the invoice date. Read back
+   `STATUS >= 2` and a `NUMBER`. Never approve an invoice already at 2 or 3.
+5. **Invoice → Xero** — `syncSavedRowToXero` with `hh_task: post_invoice_credit`
+   (default it yourself if the reply lacks it — the helper's default is
+   `post_payment`, wrong for an invoice). Read back `ACC_ID` on the invoice row.
+6. **Allocate in HireHop** — `billing_payments_save.php` (§5), `id: 0`, `OWNER` =
+   invoice id, `deposit` = deposit id, `bank` = the DEPOSIT's bank, `paid` = what
+   the deposit still holds. Read back: invoice `owing` = 0, no deposit left holding
+   money. **Do not bother calling HireHop's Xero push for these — it answers
+   `package_updated: true` and does nothing** (proven on 16762 and 16750; jon: it
+   never has, the office has always pressed "Apply credit" in Xero by hand).
+7. **Allocate in Xero — OP does it** — for each invoice-side application: take its
+   deposit's `OverpaymentID`, `GET /Overpayments/{id}` (`xero-broker.getOverpayment`),
+   work out what it has NOT already applied to this invoice, and
+   `PUT /Overpayments/{id}/Allocations` (`xero-broker.allocateOverpayment`) with that
+   amount, dated today (never before the overpayment or the invoice). Idempotent by
+   construction: a resume, or someone pressing "Apply credit" by hand, is never
+   doubled. Scope: the bills token's `accounting.payments` — it worked first time.
+8. **Read back from XERO** — `GET /Invoices/{ACC_ID}` → `AmountDue` = 0. This, not
+   anything HireHop says, is what "paid" means.
+9. **Complete the job** — `status_save.php` (§6) status 11, read back.
+
+### What the bookkeeping module will need beyond this
+
+- Jobs with more than one invoice, part-payments, and deposits bigger than the
+  invoice (allocate `min(deposit available, invoice owing)`, oldest deposit first).
+- Refunds already in the chain: an `OWNER = 0` application is money back to the
+  client, not an allocation (§5); the refunded part of a deposit must never be
+  allocated. `hh-deposit-release.ts readDepositAvailability()` already gets this right.
+- Credit notes (§7 — not captured), and the Xero 2263 shape (`MONEY-AND-EXCESS.md`).
+- Deposits pushed before OP existed may have no `OverpaymentID` (never reached
+  Xero) — surface them, don't guess.
+
+---
+
+## 9. Sales-stock items and their nominal group — `/modules/consumables/*` 🟢
+
+Captured 28 Sep 2026 (Sales stock → edit an item → Save).
+
+- **Read:** `GET /modules/consumables/list.php?page=&rows=&del=0` — the till's
+  catalogue mirror already uses it (`shop-stock.ts`). Rows carry every field below.
+- **Save:** `POST /modules/consumables/save.php` (the UI sends multipart form data).
+  It saves the WHOLE item — `ID, TITLE, ALT_TITLE, IMAGE_ID, PART_NUMBER, BARCODE, MEMO,
+  CATEGORY_ID, EXCLUDE_FROM_WEBSHOP, VAT_RATE, MAX_DISCOUNT, ACC_NOMINAL,
+  ACC_NOMINAL_PO, COST_PRICE, BOUGHT_FROM, REORDER_LEVEL, REORDER_QTY, WEIGHT,
+  LOCATION, WIDTH, LENGTH, HEIGHT, VOLUME, COUNTRY_ORIGIN, HS_CODE, STATUS, FLAG,
+  PRICES` (JSON `{"_1":{"PRICE":11.25,"TYPE":0},"_2":…,"_3":…}`) `, DEPOT_LIMITS`
+  (`[]`). **Send every field back; changing one field means re-sending the rest.**
+  The reply is a list page holding the saved item — the read-back.
+- **`ACC_NOMINAL` is HireHop's own nominal-GROUP id**, not a Xero code. HireHop maps
+  groups to Xero accounts in Settings › Accounting. Groups seen: 6 Shop Sales (→ 270),
+  24 Backline hire (the default, → 200), 1 Sale, 2 Purchase, 22 Misc income … Blank =
+  the default group. Invoice lines instead carry `ACC_NOMINAL_ID` (175, 189…) — a
+  third numbering, the Xero-account mapping. Don't mix them up.
+- `backend/src/scripts/shop-nominal-fix.ts` moves every sale item to group 6 (dry
+  run by default; reads back each save and stops on any difference).
+

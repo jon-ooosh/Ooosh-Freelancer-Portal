@@ -51,6 +51,8 @@ type Row = Record<string, any>;
 
 const PENNY = 0.005;
 const round2 = (n: number) => Math.round(n * 100) / 100;
+/** '2026-09-21' → '21/09/2026'. */
+const ukDay = (iso: string) => iso.split('-').reverse().join('/');
 const gbp = (n: number) => `£${n.toFixed(2)}`;
 
 /** HireHop status codes the close sets or refuses. */
@@ -380,7 +382,9 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
     const res = await hhBroker.post<any>('/php_functions/billing_save.php', {
       id: 0,
       desc: '',
-      ref: '',
+      // The week, so the Xero invoice's Reference says what it covers
+      // (jon, Sep 2026). HireHop's line descriptions carry the job's dates.
+      ref: `Shop sales ${ukDay(p.period_start)} - ${ukDay(p.period_end)}`,
       memo: '',
       bank: 169,              // the invoice's default bank as captured; payments carry their own
       tax_total: '0.00',
