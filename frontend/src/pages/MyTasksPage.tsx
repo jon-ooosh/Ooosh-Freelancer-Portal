@@ -53,6 +53,20 @@ interface Task {
   handed_back_reason: string | null;
   handed_back_by_name: string | null;
   handed_back_at: string | null;
+  /**
+   * A repeating to-do can't be ticked before this date (YYYY-MM-DD), or a row
+   * of clicks would walk through the weeks ahead. NULL = can be ticked now.
+   * The server works it out and refuses an early tick; this only greys the box.
+   */
+  opens_on: string | null;
+}
+
+/** Not open yet → "opens Tue 6 Oct"; otherwise null. */
+function notOpenYet(task: Task): string | null {
+  const today = new Date().toLocaleDateString('en-CA');
+  if (!task.opens_on || task.opens_on <= today) return null;
+  return new Date(`${task.opens_on}T00:00:00Z`)
+    .toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
 }
 
 /** Somebody a task can be given to — GET /staff-tasks/people. */
@@ -602,6 +616,7 @@ function MineView({ people, others }: { people: Person[]; others: Person[] }) {
             </p>
           ) : open.map(task => {
             const due = fmtDue(task.due_date);
+            const opens = notOpenYet(task);
             if (editingId === task.id) {
               return (
                 <TaskEditRow key={task.id} task={task} busy={busyId === task.id}
@@ -614,16 +629,18 @@ function MineView({ people, others }: { people: Person[]; others: Person[] }) {
                 <input
                   type="checkbox"
                   checked={false}
-                  disabled={busyId === task.id}
+                  disabled={busyId === task.id || !!opens}
                   onChange={() => void setStatus(task, 'done')}
-                  className="mt-1 h-4 w-4 rounded border-gray-300 text-ooosh-600"
+                  className="mt-1 h-4 w-4 rounded border-gray-300 text-ooosh-600 disabled:opacity-30"
                   aria-label={`Mark "${task.title}" done`}
+                  title={opens ? `Can be ticked from ${opens}` : undefined}
                 />
                 <div className="min-w-0 flex-1">
                   <div className="text-sm text-gray-900">{task.title}</div>
                   {task.detail && <div className="text-xs text-gray-500 mt-0.5">{task.detail}</div>}
                   <div className="flex flex-wrap items-center gap-2 mt-1">
                     <span className={`text-xs ${due.tone}`}>{due.text}</span>
+                    {opens && <span className="text-[11px] text-gray-400">opens {opens}</span>}
                     {task.next_chase_date && (
                       <span className="text-[11px] text-gray-400">
                         nudge {new Date(task.next_chase_date).toLocaleDateString('en-GB',
@@ -1376,6 +1393,7 @@ function ListsView({ people, me }: { people: Person[]; me: string | null }) {
             ) : open.map(t => {
               const due = fmtDue(t.due_date);
               const taken = !!t.person_id;
+              const opens = notOpenYet(t);
               const x = t.source_type === SERIES ? series.find(v => v.id === t.source_id) : undefined;
               if (editingId === t.id) {
                 // Anyone may edit an untaken item — move the bins to Thursday
@@ -1398,16 +1416,18 @@ function ListsView({ people, me }: { people: Person[]; me: string | null }) {
                 <div key={t.id} className="flex items-start gap-3 px-4 py-3">
                   <input type="checkbox" checked={false}
                     // Once taken it's the taker's to tick (from Mine).
-                    disabled={taken || busyId === t.id}
+                    disabled={taken || busyId === t.id || !!opens}
                     onChange={() => void act(t.id,
                       () => api.patch(`/staff-tasks/${t.id}`, { status: 'done' }), 'Could not tick it')}
                     className="mt-1 h-4 w-4 rounded border-gray-300 text-ooosh-600 disabled:opacity-30"
-                    aria-label={`Mark "${t.title}" done`} />
+                    aria-label={`Mark "${t.title}" done`}
+                    title={opens ? `Can be ticked from ${opens}` : undefined} />
                   <div className="min-w-0 flex-1">
                     <div className={`text-sm ${taken ? 'text-gray-500' : 'text-gray-900'}`}>{t.title}</div>
                     {t.detail && <div className="text-xs text-gray-500 mt-0.5">{t.detail}</div>}
                     <div className="flex flex-wrap items-center gap-2 mt-1">
                       {t.due_date && <span className={`text-xs ${due.tone}`}>{due.text}</span>}
+                      {opens && <span className="text-[11px] text-gray-400">opens {opens}</span>}
                       {taken && (
                         <span className="text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">
                           {t.person_id === me ? 'You’re on it — it’s in Mine' : `${t.owner_name || 'Someone'} is on it`}

@@ -107,7 +107,21 @@ const SELECT_TASKS = `
          NULLIF(TRIM(COALESCE(cp.preferred_name, cp.first_name, '') || ' ' ||
                      COALESCE(cp.last_name, '')), '') AS set_by_name,
          NULLIF(TRIM(COALESCE(hb.preferred_name, hb.first_name, '') || ' ' ||
-                     COALESCE(hb.last_name, '')), '') AS handed_back_by_name
+                     COALESCE(hb.last_name, '')), '') AS handed_back_by_name,
+         -- An open occurrence of a repeating to-do ON A SCHEDULE can't be
+         -- ticked before the day after the previous one was due: ticking one
+         -- makes the next straight away, so without this a row of clicks
+         -- walked through the weeks ahead (jon, 29 Sep 2026). NULL = open now
+         -- (a first occurrence, anything else, or "after the last one", whose
+         -- next counts from today and so can't run ahead).
+         CASE WHEN t.source_type = 'staff_task_series' AND t.status = 'open'
+                   AND t.due_date IS NOT NULL THEN (
+           SELECT (MAX(p.due_date) + 1)::text
+             FROM staff_tasks p
+             JOIN staff_task_series s ON s.id = t.source_id AND s.mode = 'schedule'
+            WHERE p.source_type = 'staff_task_series' AND p.source_id = t.source_id
+              AND p.id <> t.id AND p.due_date < t.due_date
+         ) END AS opens_on
     FROM staff_tasks t
     -- LEFT: a list item has no owner until somebody takes it (spec §7).
     LEFT JOIN people op ON op.id = t.person_id
@@ -299,6 +313,17 @@ export async function updateTask(
   role: string | undefined
 ) {
   const who = await assertCanTouch(taskId, userId, role);
+
+  // A repeating one that isn't open yet can't be ticked (see opens_on above).
+  // Dropping it still can — that's "skip this one", and it's cancelTask.
+  if (patch.status === 'done' && who.sourceType === 'staff_task_series') {
+    const opensOn: string | null = (await taskFacts(taskId))?.opens_on ?? null;
+    if (opensOn && opensOn > todayLondon()) {
+      const when = new Date(`${opensOn}T00:00:00Z`)
+        .toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+      throw new Error(`This one isn’t open yet — it can be ticked from ${when}`);
+    }
+  }
 
   const sets: string[] = [];
   const params: unknown[] = [];

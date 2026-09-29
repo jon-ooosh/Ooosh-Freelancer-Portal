@@ -183,6 +183,14 @@ one is ticked or dropped:
 early for Wednesday": move the open occurrence to Wednesday; when it's ticked,
 the following one counts from Wednesday. That is jon's "things to be set".
 
+**Ticking can't run ahead** (29 Sep 2026 — clicking the box walked a weekly
+to-do five weeks forward). On a schedule, an occurrence can only be ticked
+from the day after the previous one was due; before that its box is greyed
+with "opens Wed 30 Sept", and the server refuses the tick. `opens_on` in
+`SELECT_TASKS` is the one place this is worked out. Dropping ("skip this one")
+is not limited, and "after the last one" repeats never needed it — their next
+counts from today.
+
 ### 6.4 Accepting a recurring to-do
 
 - Setting a series on **yourself** starts it immediately.
