@@ -343,6 +343,13 @@ describe('the Everyone view (TASKS-SPEC §4, §8)', () => {
     expect(sql).toMatch(/NOT t\.is_private OR \$3::boolean OR t\.person_id = \$2 OR t\.created_by = \$1/);
     expect(params).toEqual([ME, MY_PERSON, false]);
   });
+
+  it('shows untaken list items only when they have a date — the bins, not the milk', async () => {
+    rows([{ person_id: MY_PERSON }], []);
+    await listEveryone(ME, 'staff');
+    const sql = mockQuery.mock.calls[1]![0] as string;
+    expect(sql).toMatch(/t\.person_id IS NOT NULL OR \(t\.list_id IS NOT NULL AND t\.due_date IS NOT NULL\)/);
+  });
 });
 
 describe('dates look forward (jon, Sep 2026)', () => {

@@ -542,10 +542,12 @@ export async function listEveryone(userId: string, role: string | undefined) {
   const r = await query(
     `${SELECT_TASKS}
       WHERE t.status = 'open'
-        -- People's to-dos only: untaken list items live on the Lists view.
-        AND t.person_id IS NOT NULL
+        -- People's to-dos, plus untaken list items that have a DATE — the
+        -- bins, not the milk. Undated shopping would swamp a view grouped by
+        -- person; it lives on the Lists view (jon, 29 Sep 2026).
+        AND (t.person_id IS NOT NULL OR (t.list_id IS NOT NULL AND t.due_date IS NOT NULL))
         AND (NOT t.is_private OR $3::boolean OR t.person_id = $2 OR t.created_by = $1)
-      ORDER BY owner_name, t.due_date NULLS LAST, t.created_at`,
+      ORDER BY t.person_id IS NULL, owner_name, list_name, t.due_date NULLS LAST, t.created_at`,
     [userId, mine, isAdmin(role)]
   );
   return r.rows;
