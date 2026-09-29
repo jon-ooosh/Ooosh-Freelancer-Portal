@@ -3,10 +3,11 @@
  * Shows a simplified van outline with the camera position indicated,
  * helping users frame their photos consistently.
  *
- * 16 angles in clockwise walk-around order:
+ * 18 angles in clockwise walk-around order:
  * Front → Front Right → Passenger Door → Interior Front → Sliding Door →
- * Interior Rear → Rear Right → Rear Doors → Rear Left → Left Panel →
- * Driver Door → Front Left → Windscreen L → Windscreen M → Windscreen R → Dashboard
+ * Interior Rear → Right Panel → Rear Right → Rear Door (sliding-door side) →
+ * Rear Door (driver side) → Rear Left → Left Panel → Driver Door → Front Left →
+ * Windscreen L → Windscreen M → Windscreen R → Dashboard
  */
 
 import React from 'react'
@@ -178,6 +179,32 @@ function InteriorRearGuide({ className }: GuideProps) {
   )
 }
 
+function RightPanelGuide({ className }: GuideProps) {
+  return (
+    <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
+      <line x1="20" y1="260" x2="380" y2="260" stroke="white" strokeWidth="1" opacity="0.3" />
+      {/* Van side view - right (sliding-door) side */}
+      <path d="M40 240 L40 110 Q40 90 60 90 L340 90 Q360 90 360 110 L360 240 Z" stroke="white" strokeWidth="2" opacity="0.5" fill="none" />
+      {/* Sliding door - already photographed, shown faint for reference */}
+      <rect x="110" y="110" width="100" height="130" rx="2" stroke="white" strokeWidth="1" opacity="0.25" />
+      {/* Rear panel behind the sliding door highlighted */}
+      <rect x="215" y="110" width="130" height="130" rx="2" stroke="white" strokeWidth="2" opacity="0.6" fill="white" fillOpacity="0.08" />
+      {/* Wheels */}
+      <ellipse cx="100" cy="240" rx="25" ry="20" stroke="white" strokeWidth="1.5" opacity="0.4" />
+      <ellipse cx="300" cy="240" rx="25" ry="20" stroke="white" strokeWidth="1.5" opacity="0.4" />
+      {/* Camera position */}
+      <circle cx="280" cy="280" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
+      <path d="M280 272 L280 255" stroke="white" strokeWidth="1.5" opacity="0.5" />
+      <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
+        Stand level with the right panel
+      </text>
+      <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
+        Sliding door to rear corner, rear wheel arch in shot
+      </text>
+    </svg>
+  )
+}
+
 function RearRightGuide({ className }: GuideProps) {
   return (
     <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -201,37 +228,51 @@ function RearRightGuide({ className }: GuideProps) {
   )
 }
 
-function RearDoorsGuide({ className }: GuideProps) {
+/**
+ * One rear door. Seen from behind a UK van, the sliding-door (nearside) door
+ * is on your LEFT and the driver-side door on your right — the drawing shows
+ * it that way, and the words name the side, so nobody has to work out whose
+ * left is meant.
+ */
+function RearDoorGuide({ className, side }: GuideProps & { side: 'sliding' | 'driver' }) {
+  const onLeft = side === 'sliding'
+  const doorX = onLeft ? 90 : 210
+  const otherX = onLeft ? 210 : 90
+  const camX = onLeft ? 140 : 260
   return (
     <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
       <line x1="20" y1="260" x2="380" y2="260" stroke="white" strokeWidth="1" opacity="0.3" />
       {/* Van rear - head-on view */}
       <path d="M80 240 L80 100 Q80 80 100 80 L300 80 Q320 80 320 100 L320 240 Z" stroke="white" strokeWidth="2" opacity="0.5" fill="none" />
-      {/* Rear doors - double door split */}
-      <rect x="90" y="100" width="100" height="140" rx="3" stroke="white" strokeWidth="1.5" opacity="0.4" fill="white" fillOpacity="0.05" />
-      <rect x="210" y="100" width="100" height="140" rx="3" stroke="white" strokeWidth="1.5" opacity="0.4" fill="white" fillOpacity="0.05" />
-      {/* Door handles */}
-      <rect x="178" y="170" width="8" height="20" rx="2" stroke="white" strokeWidth="1" opacity="0.4" />
-      <rect x="214" y="170" width="8" height="20" rx="2" stroke="white" strokeWidth="1" opacity="0.4" />
-      {/* Rear windows */}
-      <rect x="100" y="110" width="80" height="50" rx="3" stroke="white" strokeWidth="1" opacity="0.3" fill="white" fillOpacity="0.03" />
-      <rect x="220" y="110" width="80" height="50" rx="3" stroke="white" strokeWidth="1" opacity="0.3" fill="white" fillOpacity="0.03" />
+      {/* The door to photograph, highlighted; the other faint */}
+      <rect x={doorX} y="100" width="100" height="140" rx="3" stroke="white" strokeWidth="2" opacity="0.6" fill="white" fillOpacity="0.08" />
+      <rect x={otherX} y="100" width="100" height="140" rx="3" stroke="white" strokeWidth="1" opacity="0.2" />
+      {/* Window on the highlighted door */}
+      <rect x={doorX + 10} y="110" width="80" height="50" rx="3" stroke="white" strokeWidth="1" opacity="0.3" fill="white" fillOpacity="0.03" />
       {/* Tail lights */}
       <rect x="82" y="180" width="15" height="30" rx="3" stroke="white" strokeWidth="1.5" opacity="0.5" fill="red" fillOpacity="0.2" />
       <rect x="303" y="180" width="15" height="30" rx="3" stroke="white" strokeWidth="1.5" opacity="0.5" fill="red" fillOpacity="0.2" />
       {/* Bumper */}
       <path d="M80 240 L320 240" stroke="white" strokeWidth="1.5" opacity="0.3" />
-      {/* Camera position */}
-      <circle cx="200" cy="280" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
-      <path d="M200 272 L200 255" stroke="white" strokeWidth="1.5" opacity="0.5" />
+      {/* Camera position - level with the door */}
+      <circle cx={camX} cy="280" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
+      <path d={`M${camX} 272 L${camX} 255`} stroke="white" strokeWidth="1.5" opacity="0.5" />
       <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
-        Stand directly behind
+        Stand behind the {onLeft ? 'sliding-door side' : 'driver side'} rear door
       </text>
       <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
-        Full rear visible, both doors centred
+        That whole door visible, edges and hinges included
       </text>
     </svg>
   )
+}
+
+function RearDoorSlidingGuide({ className }: GuideProps) {
+  return <RearDoorGuide className={className} side="sliding" />
+}
+
+function RearDoorDriverGuide({ className }: GuideProps) {
+  return <RearDoorGuide className={className} side="driver" />
 }
 
 function RearLeftGuide({ className }: GuideProps) {
@@ -452,8 +493,10 @@ export function getPhotoGuide(angle: PhotoAngle): ((props: GuideProps) => React.
     interior_front: InteriorFrontGuide,
     sliding_door: SlidingDoorGuide,
     interior_rear: InteriorRearGuide,
+    right_panel: RightPanelGuide,
     rear_right: RearRightGuide,
-    rear_doors: RearDoorsGuide,
+    rear_doors: RearDoorSlidingGuide,
+    rear_door_driver: RearDoorDriverGuide,
     rear_left: RearLeftGuide,
     left_panel: LeftPanelGuide,
     driver_door: DriverDoorGuide,
@@ -474,8 +517,10 @@ export const PHOTO_GUIDE_TIPS: Record<PhotoAngle, string> = {
   interior_front: 'Stand at the sliding door or rear of cab. Show dashboard, steering wheel, and both front seats.',
   sliding_door: 'Stand level with the sliding door on the passenger side. Full door panel visible.',
   interior_rear: 'Stand at the cab partition looking rearward. Show the full seating area and rear doors.',
+  right_panel: 'Stand level with the panel behind the sliding door. Full panel visible from the sliding door to the rear corner, rear wheel arch included.',
   rear_right: 'Stand 2-3 metres away at the rear-right corner. Include the full rear and right side panel.',
-  rear_doors: 'Stand directly behind the van, centred. Both rear doors fully visible.',
+  rear_doors: 'Stand behind the rear door on the sliding-door side. That whole door visible, edges and hinges included.',
+  rear_door_driver: 'Stand behind the rear door on the driver side. That whole door visible, edges and hinges included.',
   rear_left: 'Stand 2-3 metres away at the rear-left corner. Include the full rear and left side panel.',
   left_panel: 'Stand level with the left side panel. Full panel visible between wheel arches.',
   driver_door: 'Stand level with the driver door. Full door visible including wing mirror.',
