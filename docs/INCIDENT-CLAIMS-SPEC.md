@@ -626,3 +626,16 @@ Attention bucket.
 policyholder signature save, and the broker send. Everything else was exercised against a real
 Postgres: create/idempotency, check-in auto-link, stage rules and roles, freelancer lock-out,
 reminders, dashboard bucket, out-of-the-blue, and the PDF build (rendered and checked).
+
+### 18.1 Follow-up (migration 260, Sep 2026 — jon after first live use)
+- **How we heard** (`incident_claims.notified_via`): client / TTS360 (24-hour line) / third party /
+  found at check-in / other. Set automatically for check-in Problems and out-of-the-blue claims; staff
+  set the rest. New file type **TTS360 notice** for the notices TTS360 send when a client calls them.
+- **Share with insurers** (`incident_claim_files.share_with_insurer`): not everything on the case goes
+  to the broker. Photos, police reports and repair quotes start ticked; everything else private. Only
+  ticked photos go in the broker PDF (and only they work behind its "View full size" links); ticked
+  documents are attached to the broker email, up to 15MB in total (anything over is named in the email
+  as "available on request").
+- **@mentions in case updates** — the shared `MentionComposer`; mentioned staff get the same bell and
+  immediate email as a mention anywhere else (`notifyClaimMentions()`). Pasted attachments are refused
+  there: case files go through the Files card so they stay under the private `claims/` prefix.

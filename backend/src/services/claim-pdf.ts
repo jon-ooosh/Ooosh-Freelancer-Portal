@@ -130,7 +130,9 @@ export async function buildClaimPdf(
 
   const filesRes = await query(
     `SELECT id, filename, thumb_r2_key, r2_key, content_type, caption, taken_at
-     FROM incident_claim_files WHERE claim_id = $1 AND file_type = 'photo' ORDER BY taken_at NULLS LAST, uploaded_at`,
+     FROM incident_claim_files
+     WHERE claim_id = $1 AND file_type = 'photo' AND share_with_insurer = true
+     ORDER BY taken_at NULLS LAST, uploaded_at`,
     [claimId],
   );
 

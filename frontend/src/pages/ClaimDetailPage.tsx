@@ -17,6 +17,8 @@ import { useAuthedFileUrl } from '../hooks/useAuthedFileUrl';
 import { openAuthedFile, openR2Key } from '../lib/openAuthedFile';
 import { compressImageWithThumb } from '../modules/vehicles/lib/image-utils';
 import { SignatureCapture, SignatureCaptureHandle } from '../modules/vehicles/components/book-out/SignatureCapture';
+import { MentionComposer } from '../components/messaging/MentionComposer';
+import { useAttachments } from '../components/messaging/Attachments';
 import {
   CLAIM_SECTIONS, ClaimFieldDef, ClaimSectionDef, isFieldShown,
 } from '@claimform';
@@ -47,6 +49,7 @@ interface ClaimFile {
   taken_at: string | null;
   uploaded_at: string;
   uploaded_by_name: string | null;
+  share_with_insurer: boolean;
 }
 interface LinkedProblem { id: string; summary: string; category: string; status: string; created_at: string }
 interface CaseDriver { driver_id: string; full_name: string; assignment_id: string; vehicle_id: string; has_hire_form: boolean }
@@ -68,6 +71,7 @@ interface Claim {
   hh_job_number: number | null;
   incident_at: string | null;
   notified_on: string | null;
+  notified_via: string | null;
   form_data: FormData;
   broker_ref: string | null;
   insurer_ref: string | null;
@@ -98,8 +102,20 @@ const FILE_TYPE_LABEL: Record<string, string> = {
   police_report: 'Police report',
   broker_correspondence: 'Broker / insurer letter',
   repair_quote: 'Repair quote',
+  tts360_notice: 'TTS360 notice',
   other: 'Other',
 };
+
+// How the incident first reached us (migration 260).
+const NOTIFIED_VIA_LABEL: Record<string, string> = {
+  client: 'Client (called / emailed us)',
+  tts360: 'TTS360 (24-hour line)',
+  third_party: 'Third party / their insurer',
+  check_in: 'Found at check-in',
+  other: 'Other',
+};
+// File types an insurer would expect — pre-ticked "share" on upload (mirrors the backend).
+const SHARED_BY_DEFAULT = new Set(['photo', 'police_report', 'repair_quote']);
 
 const errMsg = (e: unknown, fallback: string) =>
   ((e as { body?: { error?: string } })?.body?.error) || fallback;
@@ -356,6 +372,17 @@ function DetailsCard({ claim, patch }: { claim: Claim; patch: (b: Row, m?: strin
             onChange={(e) => e.target.value && patch({ notified_on: e.target.value })}
             className="border border-slate-200 rounded px-2 py-1 text-sm"
           />
+        ))}
+        {f('How we heard', (
+          <select
+            value={claim.notified_via || ''}
+            onChange={(e) => patch({ notified_via: e.target.value || null }, 'Saved.')}
+            className="w-full border border-slate-200 rounded px-2 py-1 text-sm"
+          >
+            <option value="">— not set —</option>
+            {claim.notified_via && !NOTIFIED_VIA_LABEL[claim.notified_via] && <option value={claim.notified_via}>{claim.notified_via}</option>}
+            {Object.entries(NOTIFIED_VIA_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
         ))}
         {f('Boswell ref (broker)', <InlineText value={claim.broker_ref} onSave={(v) => patch({ broker_ref: v }, 'Boswell ref saved.')} placeholder="—" />)}
         {f('Markerstudy ref (insurer)', <InlineText value={claim.insurer_ref} onSave={(v) => patch({ insurer_ref: v }, 'Markerstudy ref saved.')} placeholder="—" />)}
@@ -653,7 +680,9 @@ function FilesCard({ claim, isManager, onChange }: { claim: Claim; isManager: bo
         } catch { /* upload the original */ }
       }
       fd.append('file', body, name);
-      fd.append('file_type', file.type.startsWith('image/') ? 'photo' : uploadType === 'photo' ? 'other' : uploadType);
+      const type = file.type.startsWith('image/') ? 'photo' : uploadType === 'photo' ? 'other' : uploadType;
+      fd.append('file_type', type);
+      fd.append('share_with_insurer', SHARED_BY_DEFAULT.has(type) ? 'true' : 'false');
       try {
         await api.upload(`/claims/${claim.id}/files`, fd);
         done++;
@@ -688,7 +717,11 @@ function FilesCard({ claim, isManager, onChange }: { claim: Claim; isManager: bo
         </div>
       }
     >
-      <p className="text-xs text-slate-500 mb-2">Photos, police reports, broker letters, repair quotes. Photos are compressed and appear as thumbnails in the broker PDF.</p>
+      <p className="text-xs text-slate-500 mb-2">
+        Photos, police reports, TTS360 notices, broker letters, repair quotes. Only files ticked <em>Share with insurers</em> go
+        to the broker: photos as thumbnails in the PDF, documents attached to the email. Photos, police reports and repair
+        quotes start ticked; everything else starts private.
+      </p>
       {error && <div className="text-xs text-red-600 mb-2">{error}</div>}
       {claim.files.length === 0 ? (
         <div className="text-xs text-slate-400 italic">No files yet.</div>
@@ -703,6 +736,10 @@ function FilesCard({ claim, isManager, onChange }: { claim: Claim; isManager: bo
                   <select value={f.file_type} onChange={(e) => edit(f, { file_type: e.target.value })} className="border rounded px-1.5 py-0.5 text-xs">
                     {Object.entries(FILE_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                   </select>
+                  <label className="flex items-center gap-1 text-xs text-slate-700" title="Shared files go to the broker: photos in the PDF, documents attached to the email">
+                    <input type="checkbox" checked={f.share_with_insurer} onChange={(e) => edit(f, { share_with_insurer: e.target.checked })} />
+                    Share with insurers
+                  </label>
                   <span className="text-[11px] text-slate-400">{fmtClaimDate(f.uploaded_at)}{f.uploaded_by_name ? ` · ${f.uploaded_by_name}` : ''}</span>
                 </div>
                 <InlineText value={f.caption} onSave={(v) => edit(f, { caption: v })} placeholder="Caption (shows in the broker PDF)" />
@@ -724,11 +761,16 @@ const EVENT_ICON: Record<string, string> = {
   created: '🆕', comment: '💬', stage_change: '➡️', milestone: '📍', next_check: '📅',
   problem_linked: '🔗', problem_unlinked: '✂️', file_added: '📎', file_removed: '🗑', ref_recorded: '🔖',
   complication: '⚠️', owner_change: '👤', driver_set: '🧑', form_saved: '📝', broker_sent: '📤',
-  broker_send_failed: '❌', policyholder_signed: '✍️',
+  broker_send_failed: '❌', policyholder_signed: '✍️', notified_via: '📞', file_sharing: '🔓',
 };
 
 function TimelineCard({ claim, onChange }: { claim: Claim; onChange: () => void }) {
   const [note, setNote] = useState('');
+  const [mentionedIds, setMentionedIds] = useState<string[]>([]);
+  // The shared composer needs an attachments hook; case files go through the
+  // Files card instead (kept under the private claims/ prefix), so anything
+  // pasted here is refused at submit rather than silently dropped.
+  const attach = useAttachments();
   const [next, setNext] = useState<string>(claim.next_check_on && claim.next_check_on > ukDatePlus(0) ? claim.next_check_on : ukDatePlus(14));
   const [mKind, setMKind] = useState('processed');
   const [mDate, setMDate] = useState(ukDatePlus(0));
@@ -739,11 +781,20 @@ function TimelineCard({ claim, onChange }: { claim: Claim; onChange: () => void 
 
   const logUpdate = async () => {
     if (!note.trim()) return;
+    if (attach.pending.length > 0) {
+      setError('Add files in the Files card above - they stay private to the case there. Remove the attachment here to post.');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
-      await api.post(`/claims/${claim.id}/updates`, { note: note.trim(), ...(needsDate ? { next_check_on: next || null } : {}) });
+      await api.post(`/claims/${claim.id}/updates`, {
+        note: note.trim(),
+        mentioned_user_ids: mentionedIds,
+        ...(needsDate ? { next_check_on: next || null } : {}),
+      });
       setNote('');
+      setMentionedIds([]);
       onChange();
     } catch (e) {
       setError(errMsg(e, 'Could not log the update'));
@@ -770,7 +821,15 @@ function TimelineCard({ claim, onChange }: { claim: Claim; onChange: () => void 
   return (
     <Card title="Updates & timeline">
       <div className="space-y-2 mb-4">
-        <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="Log an update — a call, an email from the broker, what's next…" className="w-full border rounded px-2 py-1.5 text-sm" />
+        <MentionComposer
+          value={note}
+          onChange={setNote}
+          mentionedIds={mentionedIds}
+          onMentionedIdsChange={setMentionedIds}
+          attach={attach}
+          rows={2}
+          placeholder="Log an update — a call, an email from the broker, what's next… (type @ to mention someone)"
+        />
         <div className="flex flex-wrap items-center gap-2">
           {needsDate && (
             <>

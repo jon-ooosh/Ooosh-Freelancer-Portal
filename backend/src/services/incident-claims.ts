@@ -26,6 +26,13 @@ type DbClient = {
 export const CLAIM_STAGES = ['open', 'form_out', 'submitted', 'reviewed', 'with_broker', 'closed'] as const;
 export type ClaimStage = (typeof CLAIM_STAGES)[number];
 
+/** How the incident first reached us (migration 260). */
+export const NOTIFIED_VIA = ['client', 'tts360', 'third_party', 'check_in', 'other'] as const;
+export type NotifiedVia = (typeof NOTIFIED_VIA)[number];
+
+/** File types an insurer would expect by default (share_with_insurer pre-ticked). */
+export const SHARED_BY_DEFAULT: ReadonlySet<string> = new Set(['photo', 'police_report', 'repair_quote']);
+
 export const CLAIM_OUTCOMES = ['not_claimed', 'settled', 'denied', 'defended', 'withdrawn'] as const;
 export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
@@ -138,14 +145,14 @@ export interface CreateClaimResult {
 export async function createClaimFromIssue(
   issueId: string,
   userId: string,
-  opts: { thirdPartyClaim?: boolean; notifiedOn?: string | null; incidentDate?: string | null } = {},
+  opts: { thirdPartyClaim?: boolean; notifiedOn?: string | null; incidentDate?: string | null; notifiedVia?: NotifiedVia | null } = {},
 ): Promise<CreateClaimResult> {
   const client = await getClient();
   try {
     await client.query('BEGIN');
     const issueRes = await client.query(
       `SELECT ji.id, ji.claim_id, ji.job_id, ji.vehicle_id, ji.driver_id, ji.summary, ji.description,
-              j.hh_job_number
+              ji.source_module, j.hh_job_number
        FROM job_issues ji
        LEFT JOIN jobs j ON j.id = ji.job_id
        WHERE ji.id = $1
@@ -190,19 +197,24 @@ export async function createClaimFromIssue(
       }
     }
 
+    // How we heard, where OP can tell: check-in found it, or the third party
+    // told us. Anything else (client call, TTS360) staff set on the case.
+    const notifiedVia: NotifiedVia | null = opts.notifiedVia
+      ?? (opts.thirdPartyClaim ? 'third_party' : issue.source_module === 'vehicle' ? 'check_in' : null);
+
     const insert = await client.query(
       `INSERT INTO incident_claims (
          origin_issue_id, job_id, vehicle_id, driver_id, hh_job_number, vehicle_reg,
          incident_at, notified_on, form_data, third_party_claim,
-         owner_user_id, next_check_on, watchers, created_by
+         owner_user_id, next_check_on, watchers, created_by, notified_via
        ) VALUES ($1, $2, $3, $4, $5, $6,
                  $7::date, COALESCE($8::date, CURRENT_DATE), $9::jsonb, $10,
-                 $11, $12::date, $13::uuid[], $11)
+                 $11, $12::date, $13::uuid[], $11, $14)
        RETURNING id`,
       [
         issue.id, issue.job_id, vehicleId, issue.driver_id, issue.hh_job_number, reg,
         opts.incidentDate || null, opts.notifiedOn || null, JSON.stringify(formData), !!opts.thirdPartyClaim,
-        userId, ukDatePlus(3), watchers,
+        userId, ukDatePlus(3), watchers, notifiedVia,
       ],
     );
     const claimId: string = insert.rows[0].id;
@@ -346,4 +358,72 @@ export async function getClaimAttentionBuckets(): Promise<{ check_overdue: Claim
 /** Whether a stage needs a next-check date (everything but self-chasing and closed). */
 export function stageNeedsCheckDate(stage: string): boolean {
   return stage !== 'closed' && !SELF_CHASING.has(stage);
+}
+
+/**
+ * @mentions in a case update — the same bell + immediate email the Problems
+ * and timeline composers give (routes/interactions.ts), honouring each user's
+ * 'mention' delivery preference. Stamps email_sent_at at insert when emailing
+ * so the escalator doesn't double-fire. Best-effort: never throws.
+ */
+export async function notifyClaimMentions(
+  claimId: string,
+  actorUserId: string,
+  mentionedUserIds: string[],
+  text: string,
+): Promise<void> {
+  const ids = Array.from(new Set(mentionedUserIds.filter((id) => id && id !== actorUserId)));
+  if (!ids.length) return;
+  try {
+    const actor = await query(
+      `SELECT NULLIF(TRIM(CONCAT(COALESCE(NULLIF(p.preferred_name, ''), p.first_name), ' ', p.last_name)), '') AS name, u.email
+       FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
+      [actorUserId],
+    );
+    const creatorName: string = actor.rows[0]?.name || actor.rows[0]?.email || 'Someone';
+    const c = await query(`SELECT vehicle_reg, hh_job_number FROM incident_claims WHERE id = $1`, [claimId]);
+    const label = claimLabel(c.rows[0] || {});
+    const recipients = await query(
+      `SELECT u.id, u.email, p.first_name, p.preferred_name,
+              COALESCE((SELECT delivery_method FROM user_notification_preferences
+                         WHERE user_id = u.id AND notification_type = 'mention'), 'both') AS pref
+       FROM users u LEFT JOIN people p ON p.id = u.person_id
+       WHERE u.id = ANY($1::uuid[]) AND u.is_active = true`,
+      [ids],
+    );
+    const preview = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+    const actionUrl = `/vehicles/claims/${claimId}`;
+    const { emailService } = await import('./email-service');
+    const { frontendLink } = await import('../config/app-urls');
+    const esc = (s: string) => s.replace(/[<>&]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[ch] as string));
+    for (const r of recipients.rows) {
+      const wantsEmail = (r.pref === 'email' || r.pref === 'both') && !!r.email;
+      await query(
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id,
+           source_user_id, action_url, priority, email_sent_at)
+         VALUES ($1, 'mention', $2, $3, 'incident_claims', $4, $5, $6, 'normal', ${wantsEmail ? 'NOW()' : 'NULL'})`,
+        [r.id, `${creatorName} mentioned you on claim ${label}`, preview, claimId, actorUserId, actionUrl],
+      );
+      if (wantsEmail) {
+        const hi = (r.preferred_name || '').trim() || r.first_name || 'there';
+        const result = await emailService.sendRaw({
+          to: r.email,
+          subject: `${creatorName} mentioned you on claim ${label}`,
+          html: `
+            <p>Hi ${esc(hi)},</p>
+            <p style="font-size: 15px; margin: 16px 0;"><strong>${esc(creatorName)} mentioned you on insurance claim ${esc(label)}</strong></p>
+            <p style="color: #333; white-space: pre-wrap;">${esc(preview)}</p>
+            <p><a href="${frontendLink(actionUrl)}" style="color: #7B5EA7; text-decoration: underline;">View in Ooosh</a></p>
+            <p style="color: #999; font-size: 12px; margin-top: 24px;">
+              You're receiving this because you were @mentioned on the Ooosh Operations Platform.
+              Adjust your notification preferences in your Inbox settings.
+            </p>`,
+          variant: 'internal',
+        });
+        if (!result.success) console.error(`[claims] mention email to ${r.email} failed:`, result.error);
+      }
+    }
+  } catch (err) {
+    console.error('Claim mention notify failed (non-fatal):', err);
+  }
 }

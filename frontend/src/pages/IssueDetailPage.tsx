@@ -172,7 +172,7 @@ function IssueDetailContent() {
   // (docs/INCIDENT-CLAIMS-SPEC.md D1). Idempotent server-side.
   async function openClaim() {
     if (!id) return;
-    if (!confirm('Open a possible insurance claim for this Problem? The broker is NOT contacted — that stays a manager\'s decision.')) return;
+    if (!confirm('Open a possible insurance claim for this Problem?')) return;
     setOpeningClaim(true);
     try {
       const res = await api.post<{ data: { id: string } }>(`/claims/from-problem/${id}`, {});
