@@ -2,17 +2,24 @@
  * Phase 3 — AI scoring. Ported from `ai_filter.py`.
  *
  * Scores each detected lead 1-10 against the Ooosh ideal-client profile and
- * assigns a tier. Upgrades over the original: forced tool-use for structured
- * output (no fragile ```json``` fence-stripping) + prompt caching on the static
- * system prompt (identical across every batch → served at ~10% input cost from
- * batch 2). Model: Claude Sonnet 5.
+ * assigns a tier. Upgrades over the original: structured outputs (json_schema,
+ * no fragile ```json``` fence-stripping) + prompt caching on the static system
+ * prompt (identical across every batch → served at ~10% input cost from batch
+ * 2). Model: Claude Sonnet (CLAUDE_SONNET_MODEL).
  */
-import { getAnthropicClient, isAnthropicConfigured } from '../../config/anthropic';
+import {
+  getAnthropicClient,
+  isAnthropicConfigured,
+  readStructuredJson,
+  CLAUDE_SONNET_MODEL,
+} from '../../config/anthropic';
 import { query } from '../../config/database';
 
-const MODEL_ID = 'claude-sonnet-5';
+const MODEL_ID = CLAUDE_SONNET_MODEL;
 const BATCH_SIZE = 30;
-const MAX_TOKENS = 4096;
+// 30 assessments plus headroom for thinking — thinking counts towards
+// max_tokens on Sonnet 5.5.
+const MAX_TOKENS = 12000;
 
 const SYSTEM_PROMPT = `You are a lead qualification assistant for OOOSH Tours, a UK-based company that provides:
 - Splitter van hire for touring bands
@@ -128,26 +135,13 @@ async function callClaude(batch: LeadRow[]): Promise<Assessment[]> {
     max_tokens: MAX_TOKENS,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: buildPrompt(batch) }],
-    tools: [
-      {
-        name: 'report_assessments',
-        description: 'Report the lead-qualification assessment for each artist.',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input_schema: SCHEMA as any,
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'report_assessments' },
+    // Structured outputs (json_schema) — replaced forced tool-use (400 on Sonnet 5.5).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA as any } } as any,
   });
 
-  const toolBlock = response.content.find((b) => b.type === 'tool_use');
-  if (toolBlock && toolBlock.type === 'tool_use') {
-    if (response.usage?.cache_read_input_tokens) {
-      console.log('[leads/score] cache read: %d tokens', response.usage.cache_read_input_tokens);
-    }
-    const input = toolBlock.input as { assessments?: Assessment[] };
-    return input.assessments ?? [];
-  }
-  return [];
+  const input = readStructuredJson<{ assessments?: Assessment[] }>(response, 'leads/score');
+  return input.assessments ?? [];
 }
 
 export interface ScoreSummary {

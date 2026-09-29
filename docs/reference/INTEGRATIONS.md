@@ -340,7 +340,7 @@ JWT auth for free, which is what locks out the old direct-URL access).
   UI renders proper cards with availability pills instead of a markdown blob. The
   well-tuned domain prompt (FT/RT/BD abbreviations, "different model number ≠
   variant" precision) is ported verbatim. **Prompt caching** on the system prompt.
-  Model: `claude-sonnet-4-6`. When a HH job is attached, per-item availability is
+  Model: `CLAUDE_SONNET_MODEL` (`config/anthropic.ts`). When a HH job is attached, per-item availability is
   checked via the broker (`items_picklist_avail.php`, chunked 50s, cached) and
   folded into the prompt so Claude prioritises what's free for the dates.
 - **Demand tracker** (migration 137, `backline_demand`): replaces Monday board
@@ -408,8 +408,8 @@ background `setImmediate` job writing progress/counts to `lead_runs`.
   whose earliest *visible* UK date is under `today + lead_lookahead_min_weeks` — no point
   surfacing a tour that's already on the road or too soon to sell into.
 - **Scoring** (`scorer.ts`): ported ai_filter prompt (Tier 1 international / Tier 2 within
-  70mi of Shoreham / Tier 3), Claude `claude-sonnet-5` with forced tool-use for structured
-  output + prompt caching, batched 30.
+  70mi of Shoreham / Tier 3), Claude `CLAUDE_SONNET_MODEL` with structured outputs (json_schema)
+  + prompt caching, batched 30.
 - **Matching** (`matcher.ts`): `pg_trgm` fuzzy match of the artist name against
   `organisations` (the `%` operator + `similarity()`; `CREATE EXTENSION pg_trgm` in migration
   175, though the existing trgm index already required it). Exact (normalised equality) →
@@ -487,7 +487,7 @@ The auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Work
 **GO-LIVE STATE (Jul 2026): Phase 1 + most of Phase 2 are LIVE and working on prod.** Emails are ingesting onto job timelines; chase drafts create real Gmail drafts in info@. The service account key is a FILE at `/var/www/ooosh-portal/backend/gmail-sa.json` owned by the service user (`chown --reference=.env` — a `chmod 600` root-owned file gave `EACCES`; match `.env`'s owner). Both `gmail.readonly` + `gmail.compose` scopes are authorised on the DWD client. Baseline established, 10-min ingestion cron running.
 
 **Phase 2 — AI drafts + real Gmail draft creation + search/backfill (Jul 2026):**
-- `services/chase-draft.ts` drafts a "just checking in" chase with Claude Sonnet 5 (`claude-sonnet-5`), forced tool-use, grounded in the quote line items (`jobs.line_items`), repeat-vs-first-contact history, prior ingested email thread, prior chase count, **days-until-hire (urgency/tone)**, and **the INSIDE hire dates**. The "checking-in NOT renegotiating" guardrails live in the code SYSTEM_PROMPT; the `chase_voice_instructions` system-setting is appended (tunable without a deploy). `POST /api/auto-chase/preview-draft/:jobId` returns the draft as JSON without touching Gmail.
+- `services/chase-draft.ts` drafts a "just checking in" chase with Claude Sonnet (`CLAUDE_SONNET_MODEL`), structured outputs, grounded in the quote line items (`jobs.line_items`), repeat-vs-first-contact history, prior ingested email thread, prior chase count, **days-until-hire (urgency/tone)**, and **the INSIDE hire dates**. The "checking-in NOT renegotiating" guardrails live in the code SYSTEM_PROMPT; the `chase_voice_instructions` system-setting is appended (tunable without a deploy). `POST /api/auto-chase/preview-draft/:jobId` returns the draft as JSON without touching Gmail.
 - **INSIDE hire dates (critical grounding rule).** Read from OP's `jobs` (synced from HH). Hire START = `job_date` (fallback `out_date`); last hire DAY = `job_end` date **minus 1 when `job_end`'s time-of-day is a morning marker (`getUTCHours() < 12`)** — Ooosh books `job_end` ~09:00 the morning *after* the last hire day (a hire to the 15th shows `job_end` 16th 09:00; the 16th is the RETURN, not a hire day). Matches OP's own "N days" figure. Fixes both 1-day-as-2-day AND multi-day overstatement. A HARD RULE forbids describing the hire as running to the return date. This is code-only — the voice setting can't reach a factual date calc.
 - `config/gmail.ts` — `gmail.compose` scope on a **separate** JWT client (`getGmailComposeClient`) so ingestion stays strictly read-only; `createGmailDraft()` (`POST /users/{mailbox}/drafts`, base64url RFC822 + optional `threadId`); `gmailSearchMessageIds()` (readonly `messages.list?q=`). **OP only creates drafts — never sends; staff send from Gmail.**
 - `services/gmail-draft.ts` `createChaseDraftForJob()` — AI draft → resolve recipient + thread latch → MIME → create draft. `POST /api/auto-chase/create-draft/:jobId`. Latch order: most recent ingested INBOUND client email on the job (reply into their thread) → else primary `job_contacts` email + a **Gmail search on the HH job number** to latch onto the original sent-quote thread even when the client never replied → else 422 no client email.

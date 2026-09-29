@@ -18,11 +18,11 @@
  * exactly where we want in OP beats Gmail's native card (which no API exposes).
  */
 import { query } from '../config/database';
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
+import { getAnthropicClient, isAnthropicConfigured, CLAUDE_HAIKU_MODEL } from '../config/anthropic';
 
 // Spec §4: Haiku for summaries — cheap, cacheable, well within ability. Bump an
 // individual call to sonnet if long rumbling threads ever lose nuance.
-const MODEL_ID = 'claude-haiku-4-5';
+const MODEL_ID = CLAUDE_HAIKU_MODEL;
 const MAX_TOKENS = 600;
 
 const SYSTEM_PROMPT = `You summarise the email conversation between Ooosh Tours (a music & event transport / backline / rehearsal hire company) and a client about a specific hire. The reader is Ooosh internal staff opening the job — they want the gist at a glance without reading every message.

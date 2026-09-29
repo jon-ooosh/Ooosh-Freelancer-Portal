@@ -222,6 +222,7 @@ existing definition:
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
+| Which Claude model? | `config/anthropic.ts` `CLAUDE_SONNET_MODEL` / `CLAUDE_HAIKU_MODEL` — never a model string in a service. Read a Claude structured-output reply with `readStructuredJson()`; Sonnet 5.5+ rejects forced `tool_choice` |
 | Opening a possible insurance claim | `services/incident-claims.ts` `createClaimFromIssue()` — always from a Problem |
 | The claim form's fields (staff form, PDF, client form) | `services/claim-form-fields.ts` (frontend: `@claimform`) |
 | A claim's client links, driver code, damage marks, sketch | `services/claim-links.ts` (public routes: `routes/claim-form.ts` — every save through `sanitiseSection()`) |
