@@ -108,6 +108,24 @@ collect everything fast and completely, and leave *when (or whether) to notify* 
    carry on through the linked Problems (quote → TTS360 → actioned) exactly as today.
 9. **Close** with an outcome.
 
+### 3.1 A claim out of the blue, after the hire has closed
+
+A third party (or their insurer) writes weeks or months later saying one of our vans hit them. The van
+may have checked in clean. Same one rule — **start with a Problem**:
+
+1. New Problem on the **vehicle**, category `dispute`, with the date the third party alleges. The form
+   offers the hire(s) that had that van at that moment — the PCN matcher's lookup (`vehicle_hire_
+   assignments` hire window, `jobs.job_date/job_end` fallback) — and anchors the Problem to the job
+   picked. No match → vehicle-only Problem (e.g. the van was in the yard: that *is* the defence).
+2. "Possible insurance claim" → case opens with `third_party_claim = true`.
+3. The evidence we'd defend with is already on the case: the check-in condition report (§13) and, in
+   Phase 4, the GPS trace (§14) for the alleged time.
+4. Sending the form to the driver works exactly as normal, however long ago the hire was.
+
+**Consequence for every scheduled job in this module:** claims outlive their jobs. Chasers and
+reminders here must **not** apply the usual "skip lost/cancelled/completed jobs" gate (CLAUDE.md,
+scheduled tasks) — the case's own `stage` decides, as with PCNs.
+
 ---
 
 ## 4. Lifecycle
@@ -124,7 +142,8 @@ collect everything fast and completely, and leave *when (or whether) to notify* 
 | `closed` | Done — see `outcome` | manager can re-open |
 
 `incident_claims.outcome` (set on close): `not_claimed` (dealt with internally / under excess),
-`settled`, `denied`, `withdrawn`.
+`settled`, `denied` (our claim refused), `defended` (a third-party claim against us that failed or
+was dropped), `withdrawn`.
 
 Staff may also fill the form themselves from a phone call (§7) and move `open` → `submitted` without
 ever sending a link.
@@ -211,6 +230,10 @@ incident_claims
   damage_marks_png_key    TEXT
   sketch_key              TEXT      -- freehand PNG or uploaded photo of a paper sketch
 
+  -- keeping long cases moving (§9.2)
+  owner_user_id           UUID REFERENCES users(id)   -- who's driving this case; defaults to creator
+  next_check_on           DATE                        -- when the owner next chases/looks
+
   watchers                UUID[] DEFAULT '{}'
   created_by              UUID REFERENCES users(id)
   is_deleted              BOOLEAN DEFAULT FALSE  -- soft only
@@ -260,6 +283,20 @@ repair_quote | other`. `taken_at` is the photo's original capture time, read bef
 `TEXT` — `vito | sprinter_mwb | sprinter_lwb`, NULL = generic van. Set once per van on the vehicle
 page. (`simple_type` is trim level, not body length, so it can't be derived.)
 
+### 6.6 Estimated vehicle value (a fleet-module side-step, Phase 1)
+
+Useful beyond claims. Kept deliberately rough — the broker asks for an *approximate* value.
+
+- New admin field `fleet_vehicles.acquired_date` (there's no acquisition date today; `finance_start`
+  is empty for vans bought outright). Pre-filled from `finance_start` where set.
+- `system_settings.vehicle_depreciation_rate` — one annual declining-balance rate (e.g. 0.18).
+- **Estimate = `cash_price` × (1 − rate) ^ years since `acquired_date`**, computed at read time,
+  never stored. Shown on the vehicle page and pre-filled (overwritable) on the claim.
+- `cash_price` is admin-only finance data, so the estimate is **rounded to the nearest £500** for
+  non-admins — enough for a claim form, not a back door to the purchase price.
+- Missing `cash_price` or `acquired_date` → no estimate, blank field, no guess.
+- Later, sold vans' `sale_price` gives real data to check the rate against.
+
 ---
 
 ## 7. The form
@@ -271,7 +308,8 @@ page. (`simple_type` is trim level, not body length, so it can't be derived.)
 | Insured block (name, address, policy no., VAT ×2, email, phone, business) | **Constants** — `system_settings` | Never shown to the client |
 | Depot, driver type (`On Hire`), use (`Carriage of own goods`), ownership (`Owned`) | **Staff defaults**, editable on review | |
 | Vehicle make / model / CC / reg | **From `fleet_vehicles`** | CC = `cylinder_capacity_cc` |
-| Approx. vehicle value, repair cost, repairer instructed + details, storage charges, vehicle in use / where | **Staff** on review | There's no value field in the fleet data (`cash_price` is purchase price) |
+| Approx. vehicle value | **Pre-filled** from the estimate (§6.6), staff can overwrite | |
+| Repair cost, repairer instructed + details, storage charges, vehicle in use / where | **Staff** on review | |
 | Driver name, DOB, address, phones, licence type + date obtained | **From `drivers`** once identified (§8.2) — joined in the PDF only | HGV = `licence_categories` contains C; full car = B; date = `date_passed_test` |
 | Title, occupation | **Verified driver** | Not held anywhere |
 | Declarations (a)(b)(c) | **Pre-filled** (§7.3), confirmed by verified driver | |
@@ -287,10 +325,9 @@ saves to the server when the person moves on (`POST .../section/:key`, never on 
    (ours + other), speed limit, lights, weather, visibility, road conditions, warning lights/horn,
    any concerns
 3. **Police** — informed? then ref, officer name/number, station, potential prosecution
-4. **People** — passengers (name, address/phone, injured?), witnesses (name, address/phone, type P/E/I),
-   was the driver injured?
-5. **Other vehicles or property** — repeatable third-party block (owner, make/model, reg, address,
-   phones, insurer + policy no., driver name, damage, number of passengers)
+4. **People involved** — one "Add a person" list (§7.2.1); plus "was the driver injured?"
+5. **Other vehicles or property** — repeatable block: make/model, reg, insurer + policy no., damage,
+   number of passengers; owner and driver **picked from the people list** (or "unknown")
 6. **Damage & photos** — outline marks (§10.1), damage description, airbags deployed?, photos (§10.3)
 7. **Your account** — description (with the broker's prompt: direction, speed before and at impact),
    sketch (§10.2), at fault? if not why, prepared to attend court?
@@ -298,6 +335,22 @@ saves to the server when the person moves on (`POST .../section/:key`, never on 
    confirmation, "anything changed since your hire form?" (address/phone), sign
 
 Sections appear only when relevant (e.g. section 5 only if "another vehicle or property was involved").
+
+#### 7.2.1 "Add a person" — the contact gatherer
+
+One list instead of the broker form's three separate tables, so nobody has to work out which box a
+person belongs in. Big "Add a person" button → **who are they?** (Passenger in our van · Witness ·
+Other driver · Owner of other vehicle/property · Someone injured · Other) → name, phone, email,
+address, notes. **Every field optional** — it's a memory aid, and a name and a phone number beat
+nothing. A person can have more than one role (a passenger who was injured). Passengers get "injured?"
+and witnesses get "passenger / employee / independent", matching the broker form.
+
+The broker PDF sorts the list back into its Passengers, Witnesses and Third Party tables.
+
+**Honest limit:** it's most useful *at the scene*, but a client only has the link once we've sent it —
+i.e. after they've told us. Getting the form into hands *before* anything happens is the "report an
+incident" link planned for the van info-pack rebuild (§17). The form is built phone-first so it works
+at the roadside the day that exists.
 
 Submit is available once sections 1–7 are done **and** section 8 is signed. If the person filling in
 isn't the driver, section 8 shows "This part must be completed by the driver" with a button to send it
@@ -320,8 +373,8 @@ opens a free-text box. **The broker question means *previous* accidents — this
 
 Shown at the top of section 1 and on the PDF footer:
 
-> **How we use this information.** Ooosh! Tours Ltd uses what you tell us on this form — including
-> details of passengers, witnesses, other drivers and anyone injured — only to deal with this incident:
+> **How we use this information.** Ooosh! Tours Ltd uses what you tell us on this form - including
+> details of passengers, witnesses, other drivers and anyone injured - only to deal with this incident:
 > to assess it, arrange repairs and, if needed, make or defend an insurance claim. We may share it with
 > our insurance broker (Alan Boswell Group), our insurers, repairers, legal advisers and the police
 > where required. If you include details of other people, please give only what's needed for the claim.
@@ -359,7 +412,7 @@ complete section 8 by phone.
 
 ---
 
-## 9. Chasing and reminders (Phase 3)
+## 9. Chasing and reminders (Phase 3, except §9.2 which is Phase 1)
 
 Built the house way: a marker column + a scheduled job, like `pcn-chase.ts`. **No generic rules engine.**
 
@@ -375,16 +428,31 @@ Built the house way: a marker column + a scheduled job, like `pcn-chase.ts`. **N
   optional) on the case page, both logged.
 - Submission stops chasing immediately.
 
-### 9.2 Staff reminders (bells to watchers)
+### 9.2 Keeping long cases moving — owner + next check date
 
-- `submitted` for > 1 working day → "waiting for review".
-- `with_broker` with no broker ref after 7 and 14 days → "no reference yet".
-- `with_broker` monthly → "still open with the broker".
-- A dismissed reminder records who and why, as an event.
+EU and third-party cases can run for months. Fixed reminder intervals don't fit that (some weeks
+nothing can happen; some days it's urgent), so every open case has an **owner** and a **next check
+date**, like a job's next-chase date:
+
+- Every case outside `form_out` (which chases itself) **must** have a `next_check_on`. Logging any
+  update on the case asks "When should we next check on this?" — default +14 days, one-tap +7 / +30.
+- On the date, the owner gets a bell: "Check in on claim — RF21 PWX (#16063): with broker, last update
+  12 days ago". It links to the case.
+- **Overdue or missing date → Needs Attention.** A case can't silently go quiet: it's either got a
+  date in the future or it's on the list.
+- `submitted` gets `next_check_on` = next working day automatically ("waiting for review").
+- Pushing the date on is itself an event ("next check moved to 3 Nov — waiting on Markerstudy's
+  engineer"), so the timeline shows the case was being watched.
+
+**Why not the To Do module:** `docs/TASKS-SPEC.md` §2 is explicit — things that belong to another module
+(Problems, job reminders) are shown in To Do *read-through*, never copied into `staff_tasks`; two write
+paths to one thing is exactly the drift CLAUDE.md warns about. When To Do's Phase 4 (pull-ins) lands,
+"claims I own that are due" becomes one more read-through source, badge and link back here. Until then
+the bell + Needs Attention do the job.
 
 ### 9.3 Needs Attention buckets
 
-Chasing exhausted · awaiting review · no broker ref after 14 days.
+Chasing exhausted · check date overdue or missing.
 
 ### 9.4 Watchers
 
@@ -436,10 +504,16 @@ of a paper sketch". Stored as a PNG.
 - Generated only by `MANAGER_ROLES`, after the policyholder signature (drawn with `SignatureCapture`,
   recorded against the logged-in user). The PDF sent is frozen to R2 (`broker_pdf_key`); regeneration
   after sending makes a new file, never overwrites.
-- **Send:** one click → `emailService.sendRaw` with the PDF + full-size photos as attachments up to a
-  size cap (thumbnails only above it, with a note), to the broker address in `system_settings`,
-  reply-to a monitored Ooosh address. Branch on `result.success`. Sets `broker_sent_at`, stage
-  `with_broker`, milestone event.
+- **Photos: thumbnails in the PDF, each with a "View full size" link** — the book-out condition
+  report's pattern. **But not its storage:** those links point at the *public* vehicle-photo bucket,
+  and claim photos (faces, other people's number plates, injuries) must never go there. Instead each
+  sent case gets a long-lived, unguessable **broker link token**; the PDF's links go to a public OP
+  route (`/claim-photo/:token/:n`) that streams the full-size photo from the private `claims/` prefix.
+  Revocable per case; closed when the case closes + 90 days. Rate-limited like every public route.
+- **Send:** one click → `emailService.sendRaw` with the PDF attached, to
+  `system_settings.claims_broker_email` (initially **SelfDriveHire@alanboswell.com**), reply-to a
+  monitored Ooosh address. Branch on `result.success`. Sets `broker_sent_at`, stage `with_broker`,
+  milestone event.
 - A **Download PDF** button lets a manager review it before sending.
 
 ---
@@ -448,9 +522,9 @@ of a paper sketch". Stored as a PNG.
 
 | Phase | Contents | Standalone value |
 |---|---|---|
-| **1. Case file** | Migrations (§6); gated `claims/` prefix; "Possible insurance claim" on Problems + tick-box on the new-Problem form; "Report incident" on the Job › Drivers card; check-in auto-link; list + case page (stage, refs, milestones, complications, notes, files, watchers, linked Problems); staff-entered form (§7); auto-linked documents (§13); broker PDF + policyholder sign + one-click send | Replaces the Word form for phoned-in claims; gives the vehicle manager his tracker |
+| **1. Case file** | Migrations (§6); gated `claims/` prefix; "Possible insurance claim" on Problems + tick-box on the new-Problem form; "Report incident" on the Job › Drivers card; check-in auto-link; hire lookup for out-of-the-blue claims (§3.1); list + case page (stage, refs, milestones, complications, notes, files, watchers, linked Problems, owner + next check date with its daily bell and Needs Attention (§9.2)); estimated vehicle value (§6.6); staff-entered form (§7); auto-linked documents (§13); broker PDF + policyholder sign + one-click send | Replaces the Word form for phoned-in claims; gives the vehicle manager his tracker |
 | **2. Client form** | Links + send dialog; public page with checklist and section-by-section save; who's-filling-in + handoff; driver code; outline marking (+ artwork, `outline_type`); sketch; photos (HEIC port, capture time); privacy notice | The client replacement |
-| **3. Chasing** | §9 in full; scheduler entry (add to CLAUDE.md's scheduled-tasks line) | Nobody has to remember to chase |
+| **3. Chasing** | Client chase (§9.1), Needs Attention for exhausted chases; scheduler entry (add to CLAUDE.md's scheduled-tasks line) | Nobody has to remember to chase |
 | **4. Extras** | GPS trace (§14); SMS chase via Twilio (check international sending is enabled — EU numbers); video (direct phone-to-R2 upload); retention flagging | |
 
 ---
@@ -493,12 +567,19 @@ and a map image as case files. Needs a backend `getRouteForReg(reg, from, to)` a
 
 ## 16. Open items
 
-1. **Broker:** preferred subject line / file naming; whether they want full-size photos attached or
-   thumbnails only; the address claims go to.
-2. **Privacy notice** wording (§7.4) — jon to approve.
-3. **Van outline artwork** — Claude draws them at the start of Phase 2; jon judges whether they're good
+1. **Broker:** preferred subject line / file naming (ask before Phase 1's send button goes live).
+2. **Van outline artwork** — Claude draws them at the start of Phase 2; jon judges whether they're good
    enough.
-4. **Sensitive fields:** should injury and declaration answers be visible to all `STAFF_ROLES` on the
-   case page, or `MANAGER_ROLES` only? (Default: all staff — simplest; revisit if the vehicle manager
-   isn't manager-tier.)
-5. **Retention enforcement** — part of the wider driver-data retention discussion, not this module.
+3. **Depreciation rate** (§6.6) — jon to pick the starting figure.
+4. **Retention enforcement** — part of the wider driver-data retention discussion, not this module.
+
+**Resolved:** privacy notice approved (hyphens, not dashes); injury and declaration answers visible to
+all `STAFF_ROLES`; broker address SelfDriveHire@alanboswell.com; photos as thumbnails + full-size links.
+
+---
+
+## 17. Later (not scheduled)
+
+- **Client-started reports** — a "report an incident" link in the rebuilt van info packs, creating the
+  Problem + case itself. The natural home for at-the-scene use of the people gatherer (§7.2.1).
+- To Do read-through of cases I own (§9.2), when To Do Phase 4 lands.
