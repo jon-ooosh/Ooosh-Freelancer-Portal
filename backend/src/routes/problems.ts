@@ -34,6 +34,7 @@ import {
   notifyIssueRecipients,
   sendVehicleIssueAlertEmail,
 } from '../services/job-issues';
+import { autoLinkIssueToOpenClaim } from '../services/incident-claims';
 
 const router = Router();
 router.use(authenticate);
@@ -185,6 +186,7 @@ const ISSUE_SELECT = `
   ji.reported_by, ji.assigned_to, ji.watchers,
   ji.due_date, ji.surface_on,
   ji.estimated_cost, ji.actual_cost, ji.excess_id,
+  ji.claim_id,
   ji.created_at, ji.updated_at, ji.resolved_at,
   j.hh_job_number, j.job_name, j.client_name, j.company_name,
   fv.reg AS vehicle_reg, fv.simple_type AS vehicle_type,
@@ -616,6 +618,10 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
         await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
       }
 
+      // Damage on a van + hire that already has an open insurance case joins
+      // it (docs/INCIDENT-CLAIMS-SPEC.md §3). No-op otherwise.
+      await autoLinkIssueToOpenClaim(issueId, body.vehicle_id, jobId ?? existing.rows[0].job_id ?? null, req.user!.id);
+
       // Reflag pings watchers + assignee + reporter — the original
       // reporter cares that "their" issue is still happening.
       await notifyIssueRecipients(
@@ -671,6 +677,9 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       category: body.category, severity: body.severity, source_module: body.source_module,
       component_key: body.component_key,
     });
+
+    // Joins an open insurance case on the same van + hire (spec §3). No-op otherwise.
+    await autoLinkIssueToOpenClaim(issueId, body.vehicle_id, jobId, req.user!.id);
 
     await notifyIssueRecipients(
       issueId, req.user!.id, body.severity,

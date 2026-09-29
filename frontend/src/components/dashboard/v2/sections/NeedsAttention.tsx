@@ -461,6 +461,22 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
   const pcnBuckets = [pcnNip, pcnTransfer, pcnDeadline, pcnAwaiting].filter((b) => b.count > 0);
 
+  // Possible insurance claims nobody is watching: check date passed or never
+  // set (docs/INCIDENT-CLAIMS-SPEC.md §9.2–9.3). Hidden when there are none.
+  const claimChecks: NABucket = {
+    key: 'claim_checks', title: 'Insurance claims to check on', accent: 'amber',
+    count: na.claim_check_overdue_total || 0,
+    items: (na.claim_check_overdue || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: c.next_check_on ? deadlineLabel(c.next_check_on) : 'no check date',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  const claimBuckets = claimChecks.count > 0 ? [claimChecks] : [];
+
   // Studio-sitter cover gaps (Rehearsals) — evenings in the next 14 days that
   // need a sitter but have none assigned. Amber — action-needed planning.
   const sitterGaps: NABucket = {
@@ -505,7 +521,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
   const selfHiding = [holdingUnlinked].filter((b) => b.count > 0);
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...claimBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

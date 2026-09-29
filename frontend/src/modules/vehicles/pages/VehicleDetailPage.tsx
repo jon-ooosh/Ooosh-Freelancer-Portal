@@ -12,6 +12,7 @@ import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
 import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
+import { ClaimListRow, ClaimStagePill, fmtClaimDate } from '../../../components/claims/format'
 import { updateVehicle, correctCurrentMileage, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile, markVehicleWashed } from '../lib/fleet-api'
 import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { getRossettsStatus, URGENCY_DOT, URGENCY_TEXT } from '../lib/service-status'
@@ -247,7 +248,7 @@ export function VehicleDetailPage() {
   // legacy `history` = Events alias) and resolve to History + the right sub-tab.
   const TOP_TABS = ['details', 'history', 'forecast', 'location'] as const
   type TopTab = typeof TOP_TABS[number]
-  const HISTORY_SUBS = ['service', 'events', 'preps', 'issues', 'pcns'] as const
+  const HISTORY_SUBS = ['service', 'events', 'preps', 'issues', 'pcns', 'claims'] as const
   type HistorySub = typeof HISTORY_SUBS[number]
 
   function parseTabParam(raw: string | null): { top: TopTab; sub?: HistorySub } {
@@ -518,7 +519,7 @@ export function VehicleDetailPage() {
                     : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                {sub === 'service' ? 'Service' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : 'PCNs'}
+                {sub === 'service' ? 'Service' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : sub === 'pcns' ? 'PCNs' : 'Claims'}
               </button>
             ))}
           </div>
@@ -548,6 +549,10 @@ export function VehicleDetailPage() {
           {/* OP pcns backed, penalty charge notices against this reg */}
           {historySub === 'pcns' && (
             <VehiclePcnsSectionOp vehicleId={vehicle.id} />
+          )}
+          {/* OP incident_claims backed — possible insurance claims on this van */}
+          {historySub === 'claims' && (
+            <VehicleClaimsSectionOp vehicleId={vehicle.id} />
           )}
         </div>
       )}
@@ -660,6 +665,7 @@ export function VehicleDetailPage() {
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">V5 / Registration</h3>
         <EditableRow label="VIN / Chassis #" value={vehicle.vin} type="text" onSave={v => saveField('vin', v)} />
         <EditableRow label="Date of First Reg" value={vehicle.dateFirstReg} type="date" onSave={v => saveField('date_first_reg', v)} />
+        <VehicleValueRow vehicleId={vehicle.id} />
         <EditableRow label="D.1: Make" value={vehicle.make} type="text" onSave={v => saveField('make', v)} />
         <EditableRow label="D.2: Type" value={vehicle.v5Type} type="text" onSave={v => saveField('v5_type', v)} />
         <EditableRow label="D.3: Model" value={vehicle.model} type="text" onSave={v => saveField('model', v)} />
@@ -1521,6 +1527,79 @@ function OpIssueRowCard({ issue }: { issue: OpIssueRow }) {
         </div>
       </div>
     </Link>
+  )
+}
+
+// ── Estimated value (docs/INCIDENT-CLAIMS-SPEC.md §6.6) ──────────────────
+// Rough replacement value from the purchase price + first registration on the
+// settings curve. Rounded server-side (£500 for non-admins) so it can't be
+// used to back out the admin-only purchase price.
+function VehicleValueRow({ vehicleId }: { vehicleId: string }) {
+  const { data } = useQuery({
+    queryKey: ['op-vehicle-value', vehicleId],
+    enabled: Boolean(vehicleId),
+    queryFn: async (): Promise<{ value_ex_vat: number; rounded_to: number } | null> => {
+      const resp = await apiFetch(`/api/claims/meta/vehicle-value/${vehicleId}`)
+      if (!resp.ok) return null
+      const body = await resp.json() as { data: { value_ex_vat: number; rounded_to: number } | null }
+      return body.data
+    },
+    staleTime: 5 * 60_000,
+  })
+  return (
+    <div className="flex items-center justify-between border-b border-gray-100 py-2 text-sm">
+      <span className="text-gray-500">Estimated value (ex-VAT)</span>
+      <span className="text-gray-800" title="From purchase price and first registration, on the curve in Settings › Claims">
+        {data ? `£${data.value_ex_vat.toLocaleString('en-GB')}` : <span className="text-gray-400">needs purchase price + first reg</span>}
+      </span>
+    </div>
+  )
+}
+
+// ── Claims (OP incident_claims-backed, mirrors the PCNs section below) ──
+function VehicleClaimsSectionOp({ vehicleId }: { vehicleId: string }) {
+  const { data: claims = [], isLoading } = useQuery({
+    queryKey: ['op-vehicle-claims', vehicleId],
+    enabled: Boolean(vehicleId),
+    queryFn: async (): Promise<ClaimListRow[]> => {
+      const resp = await apiFetch(`/api/claims/by-vehicle/${vehicleId}`)
+      if (!resp.ok) throw new Error(`Failed to fetch claims: ${resp.status}`)
+      const body = await resp.json() as { data: ClaimListRow[] }
+      return body.data || []
+    },
+    staleTime: 60_000,
+  })
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+          Insurance claims {claims.length > 0 && <span className="normal-case text-gray-400">({claims.length})</span>}
+        </h3>
+        <Link to="/vehicles/claims" className="text-xs font-medium text-blue-600">All claims →</Link>
+      </div>
+      {isLoading ? (
+        <p className="text-sm text-gray-400 text-center py-4">Loading…</p>
+      ) : claims.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-4">No insurance claims</p>
+      ) : (
+        <div className="space-y-2">
+          {claims.map(c => (
+            <Link
+              key={c.id}
+              to={`/vehicles/claims/${c.id}`}
+              className="flex items-center justify-between gap-2 rounded border border-gray-200 bg-white px-2.5 py-2 text-sm hover:border-ooosh-300 hover:bg-ooosh-50/40"
+            >
+              <span className="min-w-0 truncate">
+                {c.incident_at ? fmtClaimDate(c.incident_at) : 'Date unknown'}
+                {c.hh_job_number ? ` · J-${c.hh_job_number}` : ''}
+                {c.driver_name ? ` · ${c.driver_name}` : ''}
+              </span>
+              <ClaimStagePill stage={c.stage} outcome={c.outcome} />
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 

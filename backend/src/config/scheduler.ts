@@ -1370,6 +1370,24 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: PCN deadline / NIP nudges scheduled daily at 09:37 Europe/London');
 
+  // ── Possible-claim check dates ───────────────────────────────────────────
+  // Daily at 09:22 Europe/London. Bells the owner of every insurance case
+  // whose next check date has arrived (docs/INCIDENT-CLAIMS-SPEC.md §9.2).
+  // Stamp-first dedup per check date; moving the date re-arms it. Cases that
+  // stay overdue sit on the dashboard Needs Attention bucket instead of being
+  // re-belled daily. Claims outlive their jobs, so this deliberately does NOT
+  // apply the lost/cancelled job gate — the case's own stage decides.
+  cron.schedule('22 9 * * *', async () => {
+    try {
+      const { runClaimCheckReminders } = await import('../services/incident-claims');
+      const r = await runClaimCheckReminders();
+      if (r.belled) console.log(`Scheduler: claim check reminders — ${r.belled} bell(s)`);
+    } catch (err) {
+      console.error('Scheduler: claim check reminders failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: claim check-date reminders scheduled daily at 09:22 Europe/London');
+
   // ── Pre-auth expiry reconciliation (silent housekeeping) ─────────────────
   // Daily at 09:40 Europe/London. Closes out held pre-auths past their window.
   // NO emails / bell nudges — the dashboard "Pre-auth Holds Expiring" bucket is

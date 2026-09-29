@@ -8,7 +8,7 @@
  *        watchers, due date, surface_on, dangerous-zone (resolve, cancel).
  */
 import { useState, useEffect, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import ThreadView from '../components/messaging/ThreadView';
 import CostCaptureModal from '../components/CostCaptureModal';
@@ -57,6 +57,7 @@ interface IssueComment {
 
 interface Issue {
   id: string;
+  claim_id?: string | null;
   job_id: string | null;
   vehicle_id: string | null;
   vehicle_reg: string | null;
@@ -164,6 +165,23 @@ function IssueDetailContent() {
     text: string;
   } | null>(null);
   const attach = useAttachments();
+  const navigate = useNavigate();
+  const [openingClaim, setOpeningClaim] = useState(false);
+
+  // A Problem is where every possible insurance claim starts
+  // (docs/INCIDENT-CLAIMS-SPEC.md D1). Idempotent server-side.
+  async function openClaim() {
+    if (!id) return;
+    if (!confirm('Open a possible insurance claim for this Problem? The broker is NOT contacted — that stays a manager\'s decision.')) return;
+    setOpeningClaim(true);
+    try {
+      const res = await api.post<{ data: { id: string } }>(`/claims/from-problem/${id}`, {});
+      navigate(`/vehicles/claims/${res.data.id}`);
+    } catch (err) {
+      console.error('Open claim failed:', err);
+      setOpeningClaim(false);
+    }
+  }
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -277,10 +295,23 @@ function IssueDetailContent() {
             </>
           )}
         </div>
-        <button onClick={() => setShowAddCost(true)}
-          className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5 whitespace-nowrap">
-          + Add cost
-        </button>
+        <div className="flex items-center gap-2">
+          {issue.claim_id ? (
+            <Link to={`/vehicles/claims/${issue.claim_id}`}
+              className="text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 rounded-md px-3 py-1.5 whitespace-nowrap">
+              🛡️ Insurance claim →
+            </Link>
+          ) : (
+            <button onClick={openClaim} disabled={openingClaim}
+              className="text-sm font-medium text-indigo-700 border border-indigo-300 hover:bg-indigo-50 rounded-md px-3 py-1.5 whitespace-nowrap disabled:opacity-50">
+              {openingClaim ? 'Opening…' : '🛡️ Possible insurance claim'}
+            </button>
+          )}
+          <button onClick={() => setShowAddCost(true)}
+            className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5 whitespace-nowrap">
+            + Add cost
+          </button>
+        </div>
       </div>
 
       {showAddCost && (

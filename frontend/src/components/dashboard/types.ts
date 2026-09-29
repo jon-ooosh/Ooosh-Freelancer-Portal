@@ -279,6 +279,15 @@ export interface HoldingUnlinkedItem {
   action_due: string | null;
 }
 
+export interface ClaimAttentionItem {
+  id: string;
+  stage: string;
+  vehicle_reg: string | null;
+  hh_job_number: number | null;
+  next_check_on: string | null;
+  owner_name: string | null;
+}
+
 export interface PcnAttentionItem {
   id: string;
   reference: string | null;
@@ -357,6 +366,9 @@ export interface OperationsData {
     pcn_ready_to_transfer?: PcnAttentionItem[];
     pcn_deadline_approaching?: PcnAttentionItem[];
     pcn_awaiting_action?: PcnAttentionItem[];
+    /** Possible insurance claims whose check date has passed or is missing (docs/INCIDENT-CLAIMS-SPEC.md §9.3). */
+    claim_check_overdue?: ClaimAttentionItem[];
+    claim_check_overdue_total?: number;
   };
   transport_ops: {
     summary: Record<string, number>;

@@ -142,9 +142,11 @@ reminders, Problems and the vehicle module — read it before putting any "thing
 anywhere. §15 is the phase 3–4 log, §16 the close and what is deliberately not built.
 Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.md`.
 
-**AGREED, NOT BUILT, Sep 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
-(replacing the broker's Word claim form). Always opened from a Problem (`job_issues`); the broker is
-never contacted automatically. §1 lists the settled decisions — read it before building any part.
+**PHASE 1 BUILT, Sep 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
+(Vehicles › Claims, replacing the broker's Word claim form). Always opened from a Problem
+(`job_issues.claim_id`); the broker is never contacted automatically — only a manager's "Send to
+broker". §1 lists the settled decisions, §18 what Phase 1 shipped. Claim files live under the
+`claims/` R2 prefix, which `GET /api/files/download` gates to staff — never file them under `files/`.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
 Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day
@@ -220,6 +222,9 @@ existing definition:
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
+| Opening a possible insurance claim | `services/incident-claims.ts` `createClaimFromIssue()` — always from a Problem |
+| The claim form's fields (staff form, PDF, client form) | `services/claim-form-fields.ts` (frontend: `@claimform`) |
+| What is a van worth (approx.)? | `services/vehicle-value.ts` `estimateVehicleValue()` |
 | What is this person called? | `frontend/src/lib/displayName.ts` |
 | …the same, on the backend | `services/display-name.ts` |
 | Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |
@@ -336,7 +341,7 @@ bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
-09:20 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
+09:20 · claim check dates 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation

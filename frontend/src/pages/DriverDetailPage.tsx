@@ -8,6 +8,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import OohComplianceTab from '../components/OohComplianceTab';
 import PcnHistorySection from '../components/PcnHistorySection';
+import { ClaimsSection } from '../components/claims/format';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
@@ -1062,7 +1063,13 @@ function DriverDetailContent() {
             onVerificationAction={handleVerificationAction}
           />
         )}
-        {activeTab === 'hires' && <HireHistoryTab history={hireHistory} />}
+        {activeTab === 'hires' && (
+          <>
+            {/* Insurance claims where this driver was identified — only when any exist. */}
+            <ClaimsSection entityType="driver" entityId={driver.id} hideWhenEmpty />
+            <HireHistoryTab history={hireHistory} />
+          </>
+        )}
         {activeTab === 'ooh' && <OohComplianceTab driverId={driver.id} />}
         {activeTab === 'pcns' && (
           <PcnHistorySection

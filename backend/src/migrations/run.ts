@@ -298,6 +298,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '256_shop_week_close.sql',
         '257_staff_task_series.sql',
         '258_staff_task_lists.sql',
+        '259_incident_claims.sql',
       ];
 
       for (const migration of migrations) {

@@ -1016,6 +1016,16 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       console.warn('Dashboard PCN attention skipped:', (err as Error).message);
     }
 
+    // ── Possible-claim check dates (docs/INCIDENT-CLAIMS-SPEC.md §9.3) ─────
+    // Defensive, like the PCN block: a pre-migration env can't 500 the dashboard.
+    let claimAttention = { check_overdue: [] as unknown[], check_overdue_total: 0 };
+    try {
+      const { getClaimAttentionBuckets } = await import('../services/incident-claims');
+      claimAttention = await getClaimAttentionBuckets();
+    } catch (err) {
+      console.warn('Dashboard claim attention skipped:', (err as Error).message);
+    }
+
     res.json({
       stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
       on_today: onToday,
@@ -1102,6 +1112,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         pcn_ready_to_transfer: pcnAttention.ready_to_transfer,
         pcn_deadline_approaching: pcnAttention.deadline_approaching,
         pcn_awaiting_action: pcnAttention.awaiting_action,
+        // ── Possible claims whose check date has passed or is missing ──
+        claim_check_overdue: claimAttention.check_overdue,
+        claim_check_overdue_total: claimAttention.check_overdue_total,
       },
       transport_ops: {
         summary: transportOpsSummary,

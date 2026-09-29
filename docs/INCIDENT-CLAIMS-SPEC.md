@@ -1,6 +1,7 @@
 # INCIDENT & POSSIBLE-CLAIMS SPEC — replacing the broker's Word/PDF claim form
 
-**Status:** 📝 AGREED DESIGN, NOT BUILT (Sep 2026). Nothing in §6–§12 exists yet.
+**Status:** ✅ PHASE 1 BUILT (Sep 2026) — the case file (§12 row 1). Phases 2–4 not started.
+See §18 for what Phase 1 actually shipped and where it differs from the plan below.
 **Shaped:** Sep 2026 — jon + Claude, revising a spec drafted months earlier in a non-code session
 against the codebase as it actually is. Where this document and that draft disagree, this wins.
 
@@ -283,19 +284,21 @@ repair_quote | other`. `taken_at` is the photo's original capture time, read bef
 `TEXT` — `vito | sprinter_mwb | sprinter_lwb`, NULL = generic van. Set once per van on the vehicle
 page. (`simple_type` is trim level, not body length, so it can't be derived.)
 
-### 6.6 Estimated vehicle value (a fleet-module side-step, Phase 1)
+### 6.6 Estimated vehicle value (a fleet-module side-step, Phase 1) — BUILT
 
-Useful beyond claims. Kept deliberately rough — the broker asks for an *approximate* value.
+`services/vehicle-value.ts` is THE definition. Useful beyond claims; deliberately rough (the broker
+asks for an *approximate* value). Never stored — computed at read time.
 
-- New admin field `fleet_vehicles.acquired_date` (there's no acquisition date today; `finance_start`
-  is empty for vans bought outright). Pre-filled from `finance_start` where set.
-- `system_settings.vehicle_depreciation_rate` — one annual declining-balance rate (e.g. 0.18).
-- **Estimate = `cash_price` × (1 − rate) ^ years since `acquired_date`**, computed at read time,
-  never stored. Shown on the vehicle page and pre-filled (overwritable) on the claim.
-- `cash_price` is admin-only finance data, so the estimate is **rounded to the nearest £500** for
-  non-admins — enough for a claim form, not a back door to the purchase price.
-- Missing `cash_price` or `acquired_date` → no estimate, blank field, no guess.
-- Later, sold vans' `sale_price` gives real data to check the rate against.
+- **Base** = `cash_price` (the van's cash price, which already excludes finance charges); falls back to
+  `deposit_paid + amount_financed` when no cash price is recorded.
+- **Start** = `date_first_reg` (jon: ≈ when we got it). No acquisition-date field was added.
+- **Curve** (jon, Sep 2026): an immediate drop on the start date, then a yearly rate that starts high
+  and falls a step each year, never below a floor; part-years compound pro rata. Defaults
+  10% / 17% / −1 point / 5% floor, all in `system_settings` (Settings › Insurance claims).
+- **Ex-VAT**: `cash_price` is stored inc-VAT; we recover VAT, so insurers settle net of it.
+- `cash_price` is admin-only, so the estimate is rounded to the nearest **£500 for non-admins**
+  (£100 for admins). The claim form's pre-fill always uses the £500 figure (the form is all-staff).
+- Missing price or first-registration date → no estimate, no guess.
 
 ---
 
@@ -583,3 +586,43 @@ all `STAFF_ROLES`; broker address SelfDriveHire@alanboswell.com; photos as thumb
 - **Client-started reports** — a "report an incident" link in the rebuilt van info packs, creating the
   Problem + case itself. The natural home for at-the-scene use of the people gatherer (§7.2.1).
 - To Do read-through of cases I own (§9.2), when To Do Phase 4 lands.
+
+---
+
+## 18. Phase 1 as built (Sep 2026)
+
+**Backend**
+- Migration `259_incident_claims.sql` (258 was taken on main): `incident_claims`, `incident_claim_events`,
+  `incident_claim_files` (+ `thumb_r2_key`), `job_issues.claim_id`, `photo_link_token`, settings
+  (category `claims`). The Phase 2 per-recipient links table is NOT created yet.
+- `services/incident-claims.ts` — `createClaimFromIssue()` (transactional, idempotent),
+  `autoLinkIssueToOpenClaim()` (wired into both paths of `POST /problems/auto-create`),
+  `runClaimCheckReminders()` (daily 09:22, stamp-first on `next_check_sent_for`),
+  `getClaimAttentionBuckets()` (dashboard `claim_check_overdue`).
+- `services/claim-form-fields.ts` — THE field catalogue; the frontend imports it via the `@claimform`
+  alias (same arrangement as `@calc`). Pure — no imports.
+- `services/claim-pdf.ts` — broker PDF (pdf-lib, subset fonts, ~25KB before photos).
+- `routes/incident-claims.ts` at `/api/claims`. Public: `GET /claims/photo/:token/:fileId` only.
+  Out-of-the-blue claims reuse `GET /pcns/match` for the hire lookup (needs regs without spaces,
+  as the fleet stores them).
+- `GET /files/download` gates the `claims/` prefix to `STAFF_ROLES`.
+
+**Frontend** — `/vehicles/claims` (list + "Claim out of the blue"), `/vehicles/claims/:id` (case page),
+"🛡️ Possible insurance claim" on the Problem page, a tick-box on the job's Log Problem form,
+"🛡️ Report incident" on the Job › Drivers cards (opens that form pre-filled), claims cards on job /
+driver / vehicle pages, estimated value on the vehicle page, Settings › Insurance claims, and a Needs
+Attention bucket.
+
+**Differences from the plan above**
+- "Form out" can't be set yet — there's no client link until Phase 2, so nothing would chase. Staff
+  fill the form themselves and move `open → submitted`.
+- Other vehicles' owner and driver are typed into the block (§7.2 item 5); picking them from the people
+  list comes with the Phase 2 client form.
+- Photo capture time (EXIF) is not read yet — `taken_at` stays empty for staff uploads (Phase 2, §10.3).
+  HEIC that the browser can't decode is uploaded as-is, without a PDF thumbnail.
+- `fleet_vehicles.outline_type` is not added yet (Phase 2 with the outline artwork).
+
+**Not tested end to end before shipping** (no R2 / email in the build sandbox): file upload, the
+policyholder signature save, and the broker send. Everything else was exercised against a real
+Postgres: create/idempotency, check-in auto-link, stage rules and roles, freelancer lock-out,
+reminders, dashboard bucket, out-of-the-blue, and the PDF build (rendered and checked).
