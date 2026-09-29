@@ -25,8 +25,8 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from
 import { validate } from '../middleware/validate';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 import {
-  CLAIM_STAGES, CLAIM_OUTCOMES, STAGE_LABEL,
-  createClaimFromIssue, logClaimEvent, notifyClaimFollowers, claimLabel,
+  CLAIM_STAGES, CLAIM_OUTCOMES, STAGE_LABEL, NOTIFIED_VIA, SHARED_BY_DEFAULT,
+  createClaimFromIssue, logClaimEvent, notifyClaimFollowers, claimLabel, notifyClaimMentions,
   nextWorkingDay, ukDatePlus, stageNeedsCheckDate, getDefaultClaimWatchers,
 } from '../services/incident-claims';
 import {
@@ -70,6 +70,7 @@ router.get('/photo/:token/:fileId', photoLimiter, async (req: Request, res: Resp
        WHERE c.photo_link_token = $1 AND f.id = $2
          AND c.is_deleted = false
          AND f.file_type = 'photo'
+         AND f.share_with_insurer = true
          AND (c.stage <> 'closed' OR c.closed_at IS NULL OR c.closed_at > NOW() - INTERVAL '90 days')`,
       [token, fileId],
     );
@@ -104,7 +105,7 @@ const LIST_SELECT = `
   c.id, c.stage, c.outcome, c.closed_at,
   c.origin_issue_id, c.job_id, c.vehicle_id, c.driver_id, c.assignment_id,
   c.hh_job_number, COALESCE(fv.reg, c.vehicle_reg) AS vehicle_reg,
-  c.incident_at, c.incident_time_text, c.incident_location, c.notified_on,
+  c.incident_at, c.incident_time_text, c.incident_location, c.notified_on, c.notified_via,
   c.broker_ref, c.insurer_ref, c.broker_sent_at,
   c.third_party_claim, c.liability_dispute,
   c.owner_user_id, c.next_check_on,
@@ -349,7 +350,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       ),
       query(
         `SELECT f.id, f.r2_key, f.thumb_r2_key, f.filename, f.file_type, f.content_type, f.size_bytes,
-                f.caption, f.taken_at, f.uploaded_at,
+                f.caption, f.taken_at, f.uploaded_at, f.share_with_insurer,
                 NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), '') AS uploaded_by_name
          FROM incident_claim_files f
          LEFT JOIN users u ON u.id = f.uploaded_by
@@ -427,6 +428,13 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 // ─────────────────────────────────────────────────────────────────────────
 
 const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const NOTIFIED_VIA_LABEL: Record<string, string> = {
+  client: 'client (direct)',
+  tts360: 'TTS360 (24-hour line)',
+  third_party: 'third party / their insurer',
+  check_in: 'found at check-in',
+  other: 'other',
+};
 /** 2026-10-20 → 20/10/2026 for timeline text. */
 const ukd = (ymd: string) => ymd.split('-').reverse().join('/');
 
@@ -434,6 +442,7 @@ const patchSchema = z.object({
   vehicle_id: z.string().uuid().nullable().optional(),
   driver_id: z.string().uuid().nullable().optional(),
   notified_on: dateStr.optional(),
+  notified_via: z.enum(NOTIFIED_VIA).nullable().optional(),
   broker_ref: z.string().trim().max(100).nullable().optional(),
   insurer_ref: z.string().trim().max(100).nullable().optional(),
   broker_sent_on: dateStr.nullable().optional(),
@@ -490,6 +499,7 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
       set('assignment_id', assignmentId);
     }
     if (body.notified_on !== undefined) set('notified_on', body.notified_on, '::date');
+    if ('notified_via' in body) set('notified_via', body.notified_via ?? null);
     if ('broker_ref' in body) set('broker_ref', body.broker_ref || null);
     if ('insurer_ref' in body) set('insurer_ref', body.insurer_ref || null);
     if ('broker_sent_on' in body) set('broker_sent_at', body.broker_sent_on ? `${body.broker_sent_on}T12:00:00Z` : null, '::timestamptz');
@@ -514,6 +524,9 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
     await query(`UPDATE incident_claims SET ${sets.join(', ')} WHERE id = $1`, params);
 
     // Timeline — one event per meaningful change.
+    if ('notified_via' in body && (body.notified_via ?? null) !== before.notified_via) {
+      await logClaimEvent(id, userId, 'notified_via', `How we heard: ${NOTIFIED_VIA_LABEL[body.notified_via ?? ''] || 'not set'}`);
+    }
     if ('broker_ref' in body && (body.broker_ref || null) !== before.broker_ref) {
       await logClaimEvent(id, userId, 'ref_recorded', `Boswell ref: ${body.broker_ref || '(cleared)'}`);
     }
@@ -572,6 +585,7 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
 const updateSchema = z.object({
   note: z.string().trim().min(1).max(10000),
   next_check_on: dateStr.nullable().optional(),
+  mentioned_user_ids: z.array(z.string().uuid()).max(50).optional(),
 });
 
 router.post('/:id/updates', validate(updateSchema), async (req: AuthRequest, res: Response) => {
@@ -580,7 +594,9 @@ router.post('/:id/updates', validate(updateSchema), async (req: AuthRequest, res
     const body = req.body as z.infer<typeof updateSchema>;
     const c = await loadClaimRow(id);
     if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
-    await logClaimEvent(id, req.user!.id, 'comment', body.note);
+    const mentioned = body.mentioned_user_ids ?? [];
+    await logClaimEvent(id, req.user!.id, 'comment', body.note, mentioned.length ? { mentioned_user_ids: mentioned } : null);
+    if (mentioned.length) await notifyClaimMentions(id, req.user!.id, mentioned, body.note);
     if (body.next_check_on !== undefined) {
       await query(`UPDATE incident_claims SET next_check_on = $2::date, updated_at = NOW() WHERE id = $1`, [id, body.next_check_on]);
       await logClaimEvent(id, req.user!.id, 'next_check',
@@ -589,7 +605,13 @@ router.post('/:id/updates', validate(updateSchema), async (req: AuthRequest, res
     } else {
       await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
     }
-    await notifyClaimFollowers(id, req.user!.id, `Claim update — ${claimLabel(c)}`, 'A new update was logged on the case.', { priority: 'low' });
+    // Followers get the low-priority "update logged" bell — minus anyone just
+    // @mentioned, who already has the louder one.
+    const r = await query(`SELECT watchers, owner_user_id FROM incident_claims WHERE id = $1`, [id]);
+    const followers = new Set<string>([...((r.rows[0]?.watchers as string[]) || []), ...(r.rows[0]?.owner_user_id ? [r.rows[0].owner_user_id] : [])]);
+    for (const m of mentioned) followers.delete(m);
+    await notifyClaimFollowers(id, req.user!.id, `Claim update — ${claimLabel(c)}`, 'A new update was logged on the case.',
+      { priority: 'low', onlyUserIds: Array.from(followers) });
     res.status(201).json({ data: { ok: true } });
   } catch (err) {
     console.error('Claim update error:', err);
@@ -783,7 +805,7 @@ router.get('/:id/linkable-problems', async (req: AuthRequest, res: Response) => 
 // ─────────────────────────────────────────────────────────────────────────
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 2 } });
-const FILE_TYPES = ['photo', 'police_report', 'broker_correspondence', 'repair_quote', 'other'] as const;
+const FILE_TYPES = ['photo', 'police_report', 'broker_correspondence', 'repair_quote', 'tts360_notice', 'other'] as const;
 
 router.post('/:id/files', upload.fields([{ name: 'file', maxCount: 1 }, { name: 'thumb', maxCount: 1 }]), async (req: AuthRequest, res: Response) => {
   try {
@@ -812,12 +834,16 @@ router.post('/:id/files', upload.fields([{ name: 'file', maxCount: 1 }, { name: 
     const takenRaw = typeof req.body.taken_at === 'string' ? req.body.taken_at : '';
     const takenAt = takenRaw && !Number.isNaN(new Date(takenRaw).getTime()) ? new Date(takenRaw).toISOString() : null;
     const caption = typeof req.body.caption === 'string' && req.body.caption.trim() ? req.body.caption.trim().slice(0, 500) : null;
+    // Not everything on the case goes to the insurer (jon). Default by type;
+    // an explicit 'true' / 'false' from the uploader wins.
+    const shareRaw = String(req.body.share_with_insurer ?? '');
+    const share = shareRaw === 'true' ? true : shareRaw === 'false' ? false : SHARED_BY_DEFAULT.has(fileType);
 
     await query(
       `INSERT INTO incident_claim_files
-         (id, claim_id, r2_key, thumb_r2_key, filename, file_type, content_type, size_bytes, caption, taken_at, uploaded_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [fileId, id, key, thumbKey, file.originalname.slice(0, 255), fileType, file.mimetype, file.size, caption, takenAt, req.user!.id],
+         (id, claim_id, r2_key, thumb_r2_key, filename, file_type, content_type, size_bytes, caption, taken_at, uploaded_by, share_with_insurer)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [fileId, id, key, thumbKey, file.originalname.slice(0, 255), fileType, file.mimetype, file.size, caption, takenAt, req.user!.id, share],
     );
     await logClaimEvent(id, req.user!.id, 'file_added', file.originalname.slice(0, 255), { file_id: fileId, file_type: fileType });
     await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
@@ -831,16 +857,22 @@ router.post('/:id/files', upload.fields([{ name: 'file', maxCount: 1 }, { name: 
 router.patch('/:id/files/:fileId', validate(z.object({
   caption: z.string().trim().max(500).nullable().optional(),
   file_type: z.enum(FILE_TYPES).optional(),
+  share_with_insurer: z.boolean().optional(),
 })), async (req: AuthRequest, res: Response) => {
   try {
-    const body = req.body as { caption?: string | null; file_type?: string };
+    const body = req.body as { caption?: string | null; file_type?: string; share_with_insurer?: boolean };
     const sets: string[] = [];
     const params: unknown[] = [String(req.params.fileId), String(req.params.id)];
     if ('caption' in body) { params.push(body.caption || null); sets.push(`caption = $${params.length}`); }
     if (body.file_type) { params.push(body.file_type); sets.push(`file_type = $${params.length}`); }
+    if (body.share_with_insurer !== undefined) { params.push(body.share_with_insurer); sets.push(`share_with_insurer = $${params.length}`); }
     if (!sets.length) { res.status(400).json({ error: 'Nothing to update' }); return; }
-    const r = await query(`UPDATE incident_claim_files SET ${sets.join(', ')} WHERE id = $1 AND claim_id = $2 RETURNING id`, params);
+    const r = await query(`UPDATE incident_claim_files SET ${sets.join(', ')} WHERE id = $1 AND claim_id = $2 RETURNING id, filename`, params);
     if (!r.rowCount) { res.status(404).json({ error: 'File not found' }); return; }
+    if (body.share_with_insurer !== undefined) {
+      await logClaimEvent(String(req.params.id), req.user!.id, 'file_sharing',
+        `${r.rows[0].filename}: ${body.share_with_insurer ? 'shared with insurers' : 'not shared with insurers'}`);
+    }
     res.json({ data: { ok: true } });
   } catch (err) {
     console.error('Claim file edit error:', err);
@@ -993,6 +1025,38 @@ router.post('/:id/send-to-broker', authorize(...MANAGER_ROLES), validate(sendSch
     const pdfKey = `${CLAIMS_PREFIX}${id}/broker-${Date.now()}.pdf`;
     await uploadToR2(pdfKey, Buffer.from(bytes), 'application/pdf');
 
+    // Ticked documents (not photos — those are in the PDF) ride along as
+    // attachments, up to a total size that mail servers reliably accept.
+    const MAX_ATTACH_BYTES = 15 * 1024 * 1024;
+    const docs = await query(
+      `SELECT id, r2_key, filename, content_type, size_bytes FROM incident_claim_files
+       WHERE claim_id = $1 AND share_with_insurer = true AND file_type <> 'photo'
+       ORDER BY uploaded_at`,
+      [id],
+    );
+    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = [
+      { filename, content: Buffer.from(bytes), contentType: 'application/pdf' },
+    ];
+    let total = bytes.length;
+    const attached: string[] = [];
+    const tooBig: string[] = [];
+    for (const d of docs.rows) {
+      if (total + Number(d.size_bytes || 0) > MAX_ATTACH_BYTES) { tooBig.push(d.filename); continue; }
+      try {
+        const obj = await getFromR2(d.r2_key);
+        const chunks: Buffer[] = [];
+        for await (const chunk of obj.Body as NodeJS.ReadableStream) chunks.push(Buffer.from(chunk as Uint8Array));
+        const buf = Buffer.concat(chunks);
+        if (total + buf.length > MAX_ATTACH_BYTES) { tooBig.push(d.filename); continue; }
+        attachments.push({ filename: d.filename, content: buf, contentType: d.content_type || 'application/octet-stream' });
+        total += buf.length;
+        attached.push(d.filename);
+      } catch (e) {
+        console.error(`[claims] could not read ${d.r2_key} for the broker email:`, e);
+        tooBig.push(d.filename);
+      }
+    }
+
     const { emailService } = await import('../services/email-service');
     const reg = c.vehicle_reg || 'vehicle';
     const subject = `Motor claim — Ooosh! Tours — ${reg}${c.incident_at ? ` — ${new Date(c.incident_at).toLocaleDateString('en-GB')}` : ''}${c.hh_job_number ? ` (#${c.hh_job_number})` : ''}`;
@@ -1002,13 +1066,15 @@ router.post('/:id/send-to-broker', authorize(...MANAGER_ROLES), validate(sendSch
       <p>Please find attached our completed motor claim form for vehicle <strong>${esc(reg)}</strong>${c.hh_job_number ? ` (our job #${c.hh_job_number})` : ''}.</p>
       ${body.note ? `<p>${esc(body.note).replace(/\n/g, '<br>')}</p>` : ''}
       <p>Photographs are shown as thumbnails in the PDF; each has a "View full size" link.</p>
+      ${attached.length ? `<p>Also attached: ${attached.map(esc).join(', ')}.</p>` : ''}
+      ${tooBig.length ? `<p>Too large to attach (available on request): ${tooBig.map(esc).join(', ')}.</p>` : ''}
       <p>Kind regards,<br>Ooosh! Tours Ltd</p>`;
     const result = await emailService.sendRaw({
       to,
       subject,
       html,
       variant: 'client',
-      attachments: [{ filename, content: Buffer.from(bytes), contentType: 'application/pdf' }],
+      attachments,
     });
     if (!result.success) {
       await logClaimEvent(id, req.user!.id, 'broker_send_failed', result.error || 'Email failed', { pdf_key: pdfKey });
@@ -1022,7 +1088,9 @@ router.post('/:id/send-to-broker', authorize(...MANAGER_ROLES), validate(sendSch
        WHERE id = $1`,
       [id, pdfKey, ukDatePlus(14)],
     );
-    await logClaimEvent(id, req.user!.id, 'broker_sent', `Sent to ${to}`, { pdf_key: pdfKey, from_stage: c.stage });
+    await logClaimEvent(id, req.user!.id, 'broker_sent',
+      `Sent to ${to}${attached.length ? ` with ${attached.length} document${attached.length === 1 ? '' : 's'}` : ''}${tooBig.length ? ` (${tooBig.length} too large to attach)` : ''}`,
+      { pdf_key: pdfKey, from_stage: c.stage, attached, too_big: tooBig });
     await logClaimEvent(id, req.user!.id, 'milestone', 'Docs sent to broker', { kind: 'broker_sent' }, { eventDate: ukDatePlus(0) });
     await notifyClaimFollowers(id, req.user!.id, `Claim sent to broker — ${claimLabel(c)}`, `Sent to ${to}.`);
     res.json({ data: { ok: true, pdf_key: pdfKey } });

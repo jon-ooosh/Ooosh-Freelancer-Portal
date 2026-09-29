@@ -24,6 +24,7 @@ export interface ClaimListRow {
   incident_time_text: string | null;
   incident_location: string | null;
   notified_on: string | null;
+  notified_via: string | null;
   broker_ref: string | null;
   insurer_ref: string | null;
   broker_sent_at: string | null;

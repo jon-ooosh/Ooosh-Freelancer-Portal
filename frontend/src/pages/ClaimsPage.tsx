@@ -141,6 +141,7 @@ export default function ClaimsPage() {
                 <td className="px-3 py-2 whitespace-nowrap">
                   {c.incident_at ? fmtClaimDate(c.incident_at) : '—'}
                   {c.incident_time_text ? <span className="text-slate-500"> {c.incident_time_text}</span> : null}
+                  {c.notified_via === 'tts360' && <span className="ml-1 text-[11px] text-sky-700" title="Reported through TTS360's 24-hour line">via TTS360</span>}
                 </td>
                 <td className="px-3 py-2 max-w-[16rem] truncate" title={c.incident_location || ''}>{c.incident_location || '—'}</td>
                 <td className="px-3 py-2">{c.insurer_ref || '—'}</td>
