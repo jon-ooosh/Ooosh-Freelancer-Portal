@@ -1047,6 +1047,8 @@ const FLEET_FIELD_MAP: Record<string, string> = {
   is_active: 'is_active', isActive: 'is_active',
   monday_item_id: 'monday_item_id', mondayItemId: 'monday_item_id',
   notes: 'notes',
+  // Damage-marking drawing for insurance claims (migration 261)
+  outline_type: 'outline_type', outlineType: 'outline_type',
   // Setup checklist (migration 089)
   setup_checklist: 'setup_checklist', setupChecklist: 'setup_checklist',
   // Insurance
@@ -1085,6 +1087,8 @@ const FLEET_FIELD_MAP: Record<string, string> = {
 /** Coerce a request value for its target DB column (uppercase reg, stringify jsonb). */
 function coerceFleetValue(key: string, dbCol: string, value: unknown): unknown {
   if (key === 'reg') return String(value).toUpperCase();
+  // "Auto" in the picker sends '' — the CHECK constraint wants NULL (migration 261).
+  if (dbCol === 'outline_type') return value ? value : null;
   if ((dbCol === 'setup_checklist' || dbCol === 'removal_checklist' || dbCol === 'finance_fees') && typeof value !== 'string') {
     return JSON.stringify(value ?? []);
   }
@@ -7089,6 +7093,7 @@ function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?
     mpg: row.mpg ? Number(row.mpg) : null,
     fleetGroup: row.fleet_group as string,
     isActive: row.is_active as boolean,
+    outlineType: (row.outline_type as string | null) ?? null,
     mondayItemId: row.monday_item_id as string | null,
     // Insurance
     insuranceDue: formatDate(row.insurance_due),
