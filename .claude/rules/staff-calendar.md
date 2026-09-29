@@ -145,9 +145,17 @@ claim they are interchangeable.
 ignores it and offers all sixty minutes, so the field took 09:07 from the one
 route anybody uses.
 
-**Overtime is the exception and stays a time input on 5-minute steps.**
-`staff_overtime_entries` has a `minutes % 5 = 0` CHECK; the two are answering
-different questions.
+**Overtime owns its options too, on 5-minute steps** (Sep 2026 My Time
+redesign): an hour `<select>` and a minute `<select>` offering only 00, 05 … 55,
+in `LogOvertime` (`MyTimePage.tsx`). `staff_overtime_entries` has a
+`minutes % 5 = 0` CHECK, and the old `<input type="time" step={300}>` had the
+same hole as above. The ceil-to-5 snap is kept as a guard but is now a no-op.
+
+**Overtime cannot be logged into the future.** On today's date the end time may
+be at most 15 minutes past now (log "until 18:00" at 17:55 on the way out).
+It is a browser-side check on the person's own clock — the server's timezone is
+not theirs. Unlike the leave warnings this one blocks: overtime that has not
+happened yet is a mistake, not a judgement call.
 
 ## The freelancer offer link is a bearer credential, and the GET never writes
 

@@ -1013,7 +1013,8 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
     // them explicitly so My Time can say which it is.
     const { query: dbQuery } = await import('../config/database');
     const emp = await dbQuery(
-      `SELECT 1 FROM staff_employment WHERE person_id = $1 AND employment_status = 'employed'`,
+      `SELECT bank_holiday_policy FROM staff_employment
+        WHERE person_id = $1 AND employment_status = 'employed'`,
       [personId]);
     if (emp.rows.length === 0) { res.json({ data: null, hasStaffRecord: false }); return; }
 
@@ -1034,11 +1035,19 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
     // holding the previous JS bundle read balanceMinutes, got undefined, and
     // rendered "NaNh NaNm". A cached bundle is the normal state of affairs
     // right after a deploy, so response shapes here only ever gain fields.
+    // The person's OWN bank holiday rule: their staff record's override if it
+    // has one, else the company-wide setting. /bank-holidays only knows the
+    // company one, so My Time read that and ignored the per-person override
+    // (spec §17 item 3 — "it varies per person").
+    const bankHolidayPolicy =
+      (emp.rows[0].bank_holiday_policy as 'use_allowance' | 'granted' | null)
+      ?? await getBankHolidayPolicy();
     res.json({
       data: {
         personId, year,
         holiday: { ...holiday, balanceMinutes: holiday.availableMinutes },
         overtime: { ...overtime, balanceMinutes: overtime.availableMinutes },
+        bankHolidayPolicy,
       },
       hasStaffRecord: true,
     });
