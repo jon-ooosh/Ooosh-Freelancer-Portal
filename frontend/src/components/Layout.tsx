@@ -64,6 +64,7 @@ const navItems: NavItem[] = [
       { path: '/vehicles/issues', label: 'Issues' },
       { path: '/vehicles/ve103b', label: 'VE103B Certs' },
       { path: '/vehicles/pcns', label: 'PCNs' },
+      { path: '/vehicles/claims', label: 'Claims' },
       { path: '/vehicles/fleet-map', label: 'Fleet Map' },
       { path: '/vehicles/settings', label: 'Settings' },
     ],

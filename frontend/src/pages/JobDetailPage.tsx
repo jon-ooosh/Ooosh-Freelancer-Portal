@@ -8,6 +8,7 @@ import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
 import PcnHistorySection from '../components/PcnHistorySection';
+import { ClaimsSection } from '../components/claims/format';
 import SendMerchFormButton from '../components/SendMerchFormButton';
 import AddHeldItemButton from '../components/AddHeldItemButton';
 import TransportCalculator from '../components/TransportCalculator';
@@ -4584,6 +4585,9 @@ function JobDetailContent() {
             <PcnHistorySection entityType="job" entityId={id} hideWhenEmpty heading="🅿️ Penalty Charge Notices" />
           )}
 
+          {/* Insurance claims on this job — renders only when a case exists. */}
+          {id && <ClaimsSection entityType="job" entityId={id} hideWhenEmpty />}
+
           {/* Holding for this client (incoming deliveries) now lives inside the
               prep checklist's "Held for Clients" block — rolled in with the merch
               requirement so there's one surface. Temp storage + lost property
@@ -5420,6 +5424,24 @@ function JobDetailContent() {
                           excludeHhJobId={job.hh_job_number ?? null}
                           onChanged={loadVehicleAssignments}
                         />
+                      )}
+
+                      {/* Report incident — opens the Problem form on the
+                          Overview pre-filled with this van + driver and the
+                          possible-claim box ticked. Problem-first, always
+                          (docs/INCIDENT-CLAIMS-SPEC.md §3). */}
+                      {a.driver_id && (a.effective_vehicle_id || a.vehicle_id) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveTab('overview');
+                            navigate(`?tab=overview&report_incident=${a.effective_vehicle_id || a.vehicle_id}&incident_driver=${a.driver_id}`);
+                          }}
+                          className="text-xs font-medium text-indigo-700 hover:text-indigo-900"
+                          title="Log an incident (accident, damage) as a Problem and open a possible insurance claim"
+                        >
+                          🛡️ Report incident
+                        </button>
                       )}
 
                       {/* Hire Form PDF actions */}

@@ -48,6 +48,8 @@ import FreelancerApplyPage from './pages/FreelancerApplyPage';
 import HoldingPage from './pages/HoldingPage';
 import PcnsPage from './pages/PcnsPage';
 import PcnDetailPage from './pages/PcnDetailPage';
+import ClaimsPage from './pages/ClaimsPage';
+import ClaimDetailPage from './pages/ClaimDetailPage';
 import HoldingReceiptPage from './pages/HoldingReceiptPage';
 import QuickActionsPage from './pages/QuickActionsPage';
 import MerchFormPage from './pages/MerchFormPage';
@@ -254,6 +256,8 @@ export default function App() {
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
                 <Route path="/vehicles/pcns" element={<PcnsPage />} />
                 <Route path="/vehicles/pcns/:id" element={<PcnDetailPage />} />
+                <Route path="/vehicles/claims" element={<ClaimsPage />} />
+                <Route path="/vehicles/claims/:id" element={<ClaimDetailPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/staff/calendar" element={<StaffCalendarPage />} />

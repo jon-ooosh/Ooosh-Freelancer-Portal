@@ -84,6 +84,9 @@ function SettingsContent() {
       {/* Vehicle Issues settings — admin & manager */}
       <VehicleIssueSettingsSection />
 
+      {/* Insurance claims: broker address, insured block, vehicle-value curve — admin & manager */}
+      <ClaimsSettingsSection />
+
       {/* Staff time thresholds & bank holidays — admin & manager */}
       <StaffTimeSettingsSection />
 
@@ -2011,6 +2014,89 @@ function ShopSettingsSection() {
             <input id={row.key} value={vals[row.key] ?? ''}
               onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
               className={`px-2 py-1.5 rounded border border-gray-300 text-sm ${row.value_type === 'json' ? 'font-mono' : ''}`} />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Settings › Claims (docs/INCIDENT-CLAIMS-SPEC.md). The broker address, the
+ * insured block printed on every broker PDF, and the four numbers behind the
+ * estimated vehicle value (§6.6). Plain text boxes — each is one value.
+ */
+function ClaimsSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=claims');
+      // The default-watchers list is edited as JSON by hand for now; keep it out of this box list.
+      const rows = res.data.filter(r => r.key !== 'claims_default_watchers');
+      setSettings(rows);
+      const v: Record<string, string> = {};
+      for (const row of rows) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load claims settings (has migration 259 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const orig = row.value ?? '';
+        if (orig !== (vals[row.key] ?? '')) changed[row.key] = vals[row.key];
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} setting${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Insurance claims</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Where claim PDFs are emailed, the insured details printed on them, and the curve behind each van&apos;s
+        estimated value: a drop on first registration, then a yearly rate that falls each year down to a floor.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {settings.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''}
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
           </div>
         ))}
       </div>
