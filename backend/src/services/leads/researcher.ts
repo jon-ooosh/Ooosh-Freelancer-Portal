@@ -10,11 +10,11 @@
  * results, so we keep the original tool's approach: ask for JSON in the reply,
  * parse with a fence/brace fallback.
  */
-import { getAnthropicClient, isAnthropicConfigured } from '../../config/anthropic';
+import { getAnthropicClient, isAnthropicConfigured, CLAUDE_SONNET_MODEL } from '../../config/anthropic';
 import { query } from '../../config/database';
 import { getSystemSetting } from '../../routes/system-settings';
 
-const MODEL_ID = 'claude-sonnet-5';
+const MODEL_ID = CLAUDE_SONNET_MODEL;
 
 const SYSTEM_PROMPT = `You are a music industry contact researcher for OOOSH Tours, a UK-based company that provides splitter van hire and backline equipment to touring bands.
 
@@ -83,7 +83,10 @@ async function researchOne(lead: LeadRow): Promise<{ contacts: Contact[]; notes:
   const response = await client.messages.create(
     {
       model: MODEL_ID,
-      max_tokens: 2048,
+      // Headroom for thinking as well as the JSON — thinking counts towards
+      // max_tokens on Sonnet 5.5.
+      max_tokens: 8000,
+      output_config: { effort: 'low' },
       system: SYSTEM_PROMPT,
       tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 } as never],
       messages: [{
