@@ -122,7 +122,7 @@ const templates: Record<string, EmailTemplate> = {
         <li>Disability/medical conditions: <strong>{{hasDisability}}</strong></li>
         <li>Motoring convictions: <strong>{{hasConvictions}}</strong></li>
         <li>Pending prosecutions: <strong>{{hasProsecution}}</strong></li>
-        <li>Accidents (last 5 years): <strong>{{hasAccidents}}</strong></li>
+        <li>Accidents (last 3 years): <strong>{{hasAccidents}}</strong></li>
         <li>Insurance issues: <strong>{{hasInsuranceIssues}}</strong></li>
         <li>Driving bans: <strong>{{hasDrivingBan}}</strong></li>
       </ul>

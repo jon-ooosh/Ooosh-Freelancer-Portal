@@ -142,6 +142,10 @@ reminders, Problems and the vehicle module — read it before putting any "thing
 anywhere. §15 is the phase 3–4 log, §16 the close and what is deliberately not built.
 Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.md`.
 
+**AGREED, NOT BUILT, Sep 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
+(replacing the broker's Word claim form). Always opened from a Problem (`job_issues`); the broker is
+never contacted automatically. §1 lists the settled decisions — read it before building any part.
+
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
 Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day
 insurability, `services/driver-validity.ts`); the staff one is an annual sanity check
