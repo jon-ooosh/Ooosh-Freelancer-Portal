@@ -19,9 +19,9 @@ import { compressImageWithThumb } from '../modules/vehicles/lib/image-utils';
 import { SignatureCapture, SignatureCaptureHandle } from '../modules/vehicles/components/book-out/SignatureCapture';
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import { useAttachments } from '../components/messaging/Attachments';
-import {
-  CLAIM_SECTIONS, ClaimFieldDef, ClaimSectionDef, isFieldShown,
-} from '@claimform';
+import { CLAIM_SECTIONS, ClaimSectionDef, isFieldShown, type DamageMark, type OutlineType } from '@claimform';
+import { DamageOutlineEditor } from '../components/claims/VanOutline';
+import { FieldsGrid, ListEditor } from '../components/claims/FormFields';
 import {
   ClaimStage, ClaimStagePill, NextCheckCell, OUTCOME_LABEL, fmtClaimDate, ukDatePlus,
 } from '../components/claims/format';
@@ -94,8 +94,27 @@ interface Claim {
   events: ClaimEvent[];
   files: ClaimFile[];
   drivers: CaseDriver[];
+  links: ClaimLink[];
+  outline: OutlineType;
+  damage_marks: DamageMark[];
+  sketch_key: string | null;
+  driver_signed_at: string | null;
+  driver_signed_name: string | null;
 }
 interface StaffUser { id: string; name: string | null; email: string }
+interface ClaimLink {
+  id: string;
+  recipient_name: string | null;
+  recipient_email: string | null;
+  role: string;
+  status: string;
+  filled_as: string | null;
+  filled_by_name: string | null;
+  sent_at: string | null;
+  first_opened_at: string | null;
+  last_opened_at: string | null;
+  created_at: string;
+}
 
 const FILE_TYPE_LABEL: Record<string, string> = {
   photo: 'Photo',
@@ -213,7 +232,9 @@ function ClaimDetailContent() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
         <div className="lg:col-span-2 space-y-4">
           <DetailsCard claim={claim} patch={patch} />
+          <ClientLinksCard claim={claim} onChange={(m) => { if (m) setFlash(m); load(); }} />
           <FormCard claim={claim} onSaved={(m) => { setFlash(m); load(); }} />
+          <DamageCard claim={claim} onChange={load} />
           <FilesCard claim={claim} isManager={isManager} onChange={load} />
           <TimelineCard claim={claim} onChange={load} />
         </div>
@@ -266,8 +287,8 @@ function StageBar({ claim, isManager, onDone }: { claim: Claim; isManager: boole
 
   const btn = 'px-3 py-1.5 text-xs rounded border disabled:opacity-50';
   const help: Record<ClaimStage, string> = {
-    open: 'Fill in the form below (from a phone call or email), then mark it complete. Sending the form to the client arrives with Phase 2.',
-    form_out: 'The client has the form.',
+    open: 'Send the form to the driver(s) and contacts below — or fill it in yourself from a phone call — then mark it complete.',
+    form_out: 'The client has the form. You get a bell when they submit it; the next-check date still applies until automatic chasing arrives.',
     submitted: 'Waiting for a manager to review the answers.',
     reviewed: 'Reviewed. The broker has NOT been told — send it when (and if) you decide to, or close it.',
     with_broker: 'With the broker. Record their reference and keep the next-check date moving.',
@@ -278,8 +299,9 @@ function StageBar({ claim, isManager, onDone }: { claim: Claim; isManager: boole
     <div className="bg-white rounded-lg border p-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm text-slate-600 mr-auto">{help[claim.stage]}</span>
-        {claim.stage === 'open' && (
-          <button type="button" disabled={busy} className={`${btn} bg-ooosh-600 text-white border-ooosh-600`} onClick={() => move('submitted')}>
+        {(claim.stage === 'open' || claim.stage === 'form_out') && (
+          <button type="button" disabled={busy} className={`${btn} bg-ooosh-600 text-white border-ooosh-600`} onClick={() => move('submitted')}
+            title={claim.stage === 'form_out' ? 'Mark it complete yourself (e.g. the rest came by phone)' : undefined}>
             Form complete — ready for review
           </button>
         )}
@@ -365,6 +387,9 @@ function DetailsCard({ claim, patch }: { claim: Claim; patch: (b: Row, m?: strin
             {claim.drivers.map((d) => <option key={d.driver_id} value={d.driver_id}>{d.full_name}</option>)}
           </select>
         ))}
+        {f('Driver declaration', claim.driver_signed_at
+          ? <span className="text-green-700">✍️ Signed by {claim.driver_signed_name} on {fmtClaimDate(claim.driver_signed_at)}</span>
+          : <span className="text-slate-400">not signed yet</span>)}
         {f('We were notified on', (
           <input
             type="date"
@@ -403,85 +428,6 @@ function DetailsCard({ claim, patch }: { claim: Claim; patch: (b: Row, m?: strin
 }
 
 // ── The form (staff-entered in Phase 1) ─────────────────────────────────────
-
-function FieldInput({ def, value, onChange }: { def: ClaimFieldDef; value: unknown; onChange: (v: unknown) => void }) {
-  const base = 'w-full border border-slate-200 rounded px-2 py-1 text-sm focus:border-ooosh-400';
-  switch (def.kind) {
-    case 'textarea':
-      return <textarea rows={3} value={(value as string) || ''} placeholder={def.placeholder} onChange={(e) => onChange(e.target.value)} className={base} />;
-    case 'date':
-      return <input type="date" value={(value as string) || ''} onChange={(e) => onChange(e.target.value)} className={base} />;
-    case 'money':
-      return <input type="number" min={0} step="1" value={value == null ? '' : String(value)} onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))} className={base} />;
-    case 'yesno':
-      return (
-        <div className="flex gap-1">
-          {([['Yes', true], ['No', false]] as const).map(([label, v]) => (
-            <button
-              key={label}
-              type="button"
-              onClick={() => onChange(value === v ? null : v)}
-              className={`px-3 py-1 text-xs rounded border ${value === v ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-slate-600 border-slate-300'}`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      );
-    case 'choice': {
-      const opts = def.options || [];
-      const current = (value as string) || '';
-      return (
-        <select value={current} onChange={(e) => onChange(e.target.value || null)} className={base}>
-          <option value="">—</option>
-          {current && !opts.includes(current) && <option value={current}>{current}</option>}
-          {opts.map((o) => <option key={o} value={o}>{o}</option>)}
-        </select>
-      );
-    }
-    case 'multi': {
-      const arr = Array.isArray(value) ? (value as string[]) : [];
-      return (
-        <div className="flex flex-wrap gap-1">
-          {(def.options || []).map((o) => {
-            const on = arr.includes(o);
-            return (
-              <button
-                key={o}
-                type="button"
-                onClick={() => onChange(on ? arr.filter((x) => x !== o) : [...arr, o])}
-                className={`px-2 py-0.5 text-xs rounded-full border ${on ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-slate-600 border-slate-300'}`}
-              >
-                {o}
-              </button>
-            );
-          })}
-        </div>
-      );
-    }
-    default:
-      return <input value={(value as string) || ''} placeholder={def.placeholder} onChange={(e) => onChange(e.target.value)} className={base} />;
-  }
-}
-
-function FieldsGrid({ fields, row, onChange, hints }: {
-  fields: readonly ClaimFieldDef[];
-  row: Row;
-  onChange: (key: string, v: unknown) => void;
-  hints?: Record<string, string>;
-}) {
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-      {fields.filter((f) => isFieldShown(f, row)).map((f) => (
-        <label key={f.key} className={`block ${f.kind === 'textarea' || f.kind === 'multi' ? 'sm:col-span-2' : ''}`}>
-          <span className="text-xs text-slate-600">{f.label}</span>
-          {hints?.[f.key] && <span className="ml-2 text-[11px] text-indigo-600">{hints[f.key]}</span>}
-          <div className="mt-1"><FieldInput def={f} value={row[f.key]} onChange={(v) => onChange(f.key, v)} /></div>
-        </label>
-      ))}
-    </div>
-  );
-}
 
 function FormCard({ claim, onSaved }: { claim: Claim; onSaved: (msg: string) => void }) {
   const [form, setForm] = useState<FormData>(() => JSON.parse(JSON.stringify(claim.form_data || {})));
@@ -548,7 +494,7 @@ function FormCard({ claim, onSaved }: { claim: Claim; onSaved: (msg: string) => 
       }
     >
       <p className="text-xs text-slate-500 mb-3">
-        The broker's questions. In Phase 1 staff fill this in from what the client tells us; the client link comes in Phase 2.
+        The broker's questions — filled in by the client through their link, or by staff from a phone call; either can edit.
         Insured details come from Settings › Claims, and the driver's name, date of birth, address and licence from their hire form — only the broker PDF puts them together.
       </p>
       {error && <div className="text-xs text-red-600 mb-2">{error}</div>}
@@ -597,41 +543,190 @@ function FormCard({ claim, onSaved }: { claim: Claim; onSaved: (msg: string) => 
   );
 }
 
-function ListEditor({ section, rows, gate, onGate, onChange }: {
-  section: ClaimSectionDef;
-  rows: Row[];
-  gate: unknown;
-  onGate: (v: unknown) => void;
-  onChange: (rows: Row[]) => void;
-}) {
-  const showRows = !section.gate || gate === true || rows.length > 0;
+// ── Client links (Phase 2) ───────────────────────────────────────────────
+
+const LINK_STATUS: Record<string, string> = {
+  sent: 'Sent', opened: 'Opened', handed_off: 'Passed on', submitted: 'Submitted', revoked: 'Switched off',
+};
+
+interface Recipients {
+  drivers: Array<{ driver_id: string; name: string; email: string | null }>;
+  contacts: Array<{ person_id: string; name: string; email: string; role: string | null; org: string | null; is_primary: boolean }>;
+}
+
+function ClientLinksCard({ claim, onChange }: { claim: Claim; onChange: (msg?: string) => void }) {
+  const [picking, setPicking] = useState(false);
+  const [rec, setRec] = useState<Recipients | null>(null);
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
+  const [extraName, setExtraName] = useState('');
+  const [extraEmail, setExtraEmail] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const canSend = claim.stage === 'open' || claim.stage === 'form_out';
+
+  const openPicker = async () => {
+    setPicking(true); setError('');
+    try {
+      const r = await api.get<{ data: Recipients }>(`/claims/${claim.id}/recipients`);
+      setRec(r.data);
+      // Pre-tick every driver on the van with an email, and the lead contact (spec §3 step 4).
+      const t = new Set<string>();
+      r.data.drivers.filter((d) => d.email).forEach((d) => t.add(`d:${d.driver_id}`));
+      const lead = r.data.contacts.find((c) => c.is_primary) || r.data.contacts[0];
+      if (lead) t.add(`p:${lead.person_id}`);
+      setTicked(t);
+    } catch { setError('Could not load who to send it to'); }
+  };
+  const toggle = (k: string) => setTicked((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; });
+  const send = async () => {
+    const recipients: Row[] = [];
+    ticked.forEach((k) => {
+      if (k.startsWith('d:')) recipients.push({ driver_id: k.slice(2) });
+      if (k.startsWith('p:')) recipients.push({ person_id: k.slice(2) });
+    });
+    if (extraEmail.trim()) recipients.push({ name: extraName.trim() || undefined, email: extraEmail.trim() });
+    if (!recipients.length) { setError('Tick at least one person'); return; }
+    setBusy(true); setError('');
+    try {
+      const r = await api.post<{ data: { results: Array<{ name: string; sent: boolean; error?: string }> } }>(`/claims/${claim.id}/links`, { recipients });
+      const failed = r.data.results.filter((x) => !x.sent);
+      setPicking(false); setExtraName(''); setExtraEmail('');
+      onChange(failed.length
+        ? `Sent to ${r.data.results.length - failed.length}; not sent: ${failed.map((f) => `${f.name} (${f.error || 'failed'})`).join(', ')}`
+        : `Form sent to ${r.data.results.map((x) => x.name).join(', ')}.`);
+    } catch (e) { setError(errMsg(e, 'Send failed')); } finally { setBusy(false); }
+  };
+  const act = async (l: ClaimLink, what: 'resend' | 'revoke') => {
+    if (what === 'revoke' && !confirm(`Switch off ${l.recipient_name || l.recipient_email}'s link? They won't be able to open the form.`)) return;
+    try { await api.post(`/claims/${claim.id}/links/${l.id}/${what}`, {}); onChange(what === 'resend' ? 'Link re-sent.' : 'Link switched off.'); } catch (e) { setError(errMsg(e, 'Failed')); }
+  };
+
   return (
-    <div className="space-y-3">
-      {section.gate && (
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-slate-600">{section.gate.label}</span>
-          <FieldInput def={{ key: 'gate', label: '', kind: 'yesno' }} value={gate} onChange={onGate} />
+    <Card
+      title="Client form"
+      right={canSend ? <button type="button" onClick={openPicker} className="px-3 py-1.5 text-xs rounded bg-ooosh-600 text-white">{claim.links.length ? '+ Send to someone else' : 'Send form'}</button> : undefined}
+    >
+      {claim.links.length === 0 && !picking && (
+        <p className="text-xs text-slate-500">
+          Nobody has the form yet. Send it to the driver(s) and the lead contact — each gets their own link, can pass it on, and it saves as they go.
+          Only driver names are shown on it; the driver confirms who they are with a code emailed to their hire-form address.
+        </p>
+      )}
+      {claim.links.length > 0 && (
+        <ul className="divide-y text-sm mb-2">
+          {claim.links.map((l) => (
+            <li key={l.id} className="py-2 flex flex-wrap items-center gap-2">
+              <span className="font-medium text-slate-800">{l.recipient_name || l.recipient_email}</span>
+              <span className="text-xs text-slate-400">{l.role === 'driver' ? 'driver' : l.role === 'forwarded' ? 'passed on to them' : 'contact'}</span>
+              <span className={`text-xs px-2 py-0.5 rounded-full ${l.status === 'submitted' ? 'bg-green-100 text-green-700' : l.status === 'revoked' ? 'bg-slate-100 text-slate-500' : l.status === 'opened' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-700'}`}>
+                {LINK_STATUS[l.status] || l.status}
+              </span>
+              {l.filled_by_name && <span className="text-xs text-slate-500">filled in by {l.filled_by_name}{l.filled_as === 'driver' ? ' (driver)' : ''}</span>}
+              <span className="text-[11px] text-slate-400">
+                {l.sent_at ? `sent ${fmtClaimDate(l.sent_at)}` : 'not sent'}{l.last_opened_at ? ` · last opened ${new Date(l.last_opened_at).toLocaleString('en-GB')}` : ''}
+              </span>
+              {canSend && l.status !== 'revoked' && (
+                <span className="ml-auto flex gap-2">
+                  <button type="button" onClick={() => act(l, 'resend')} className="text-xs text-ooosh-700 hover:underline">Resend</button>
+                  <button type="button" onClick={() => act(l, 'revoke')} className="text-xs text-slate-400 hover:text-red-600">Switch off</button>
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {picking && (
+        <div className="border rounded p-3 space-y-3 bg-slate-50/60">
+          {!rec ? <div className="text-xs text-slate-400">Loading…</div> : (
+            <>
+              <div>
+                <div className="text-xs font-semibold text-slate-600 mb-1">Drivers on this van</div>
+                {rec.drivers.length === 0 && <div className="text-xs text-slate-400">No drivers found on this van and hire.</div>}
+                {rec.drivers.map((d) => (
+                  <label key={d.driver_id} className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" disabled={!d.email} checked={ticked.has(`d:${d.driver_id}`)} onChange={() => toggle(`d:${d.driver_id}`)} />
+                    {d.name} <span className="text-xs text-slate-400">{d.email || 'no email on file'}</span>
+                  </label>
+                ))}
+              </div>
+              <div>
+                <div className="text-xs font-semibold text-slate-600 mb-1">Job contacts</div>
+                {rec.contacts.length === 0 && <div className="text-xs text-slate-400">No contacts with an email on this job.</div>}
+                {rec.contacts.map((c) => (
+                  <label key={c.person_id} className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={ticked.has(`p:${c.person_id}`)} onChange={() => toggle(`p:${c.person_id}`)} />
+                    {c.name} <span className="text-xs text-slate-400">{[c.role, c.org, c.email].filter(Boolean).join(' · ')}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <input value={extraName} onChange={(e) => setExtraName(e.target.value)} placeholder="Someone else — name" className="border rounded px-2 py-1 text-sm" />
+                <input value={extraEmail} onChange={(e) => setExtraEmail(e.target.value)} placeholder="email" className="border rounded px-2 py-1 text-sm flex-1 min-w-[12rem]" />
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button type="button" onClick={() => setPicking(false)} className="px-3 py-1.5 text-xs rounded border">Cancel</button>
+                <button type="button" onClick={send} disabled={busy} className="px-3 py-1.5 text-xs rounded bg-ooosh-600 text-white disabled:opacity-50">{busy ? 'Sending…' : 'Send'}</button>
+              </div>
+            </>
+          )}
         </div>
       )}
-      {showRows && rows.map((r, i) => (
-        <div key={i} className="border rounded p-3 bg-slate-50/50">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-semibold text-slate-600">{section.list!.itemLabel} {i + 1}</span>
-            <button type="button" onClick={() => onChange(rows.filter((_, j) => j !== i))} className="text-xs text-red-600 hover:underline">Remove</button>
-          </div>
-          <FieldsGrid
-            fields={section.fields}
-            row={r}
-            onChange={(k, v) => onChange(rows.map((x, j) => (j === i ? { ...x, [k]: v } : x)))}
-          />
+      {error && <div className="text-xs text-red-600 mt-2">{error}</div>}
+    </Card>
+  );
+}
+
+// ── Damage outline + sketch ────────────────────────────────────────────────
+
+function SketchImage({ keyName }: { keyName: string }) {
+  const { ref, url, failed } = useAuthedFileUrl(keyName);
+  return url
+    ? <img ref={ref} src={url} alt="Sketch" className="w-full border rounded cursor-pointer" onClick={() => openR2Key(keyName, 'sketch.png').catch(() => undefined)} />
+    : <div ref={ref} className="h-40 border rounded bg-slate-50 flex items-center justify-center text-xs text-slate-400">{failed ? "Couldn't load the sketch" : 'Loading sketch…'}</div>;
+}
+
+function DamageCard({ claim, onChange }: { claim: Claim; onChange: () => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const uploadSketch = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setBusy(true); setError('');
+    try {
+      const fd = new FormData();
+      try {
+        const { blob } = await compressImageWithThumb(file, 2000, 0.85, 0);
+        fd.append('file', blob, 'sketch.jpg');
+      } catch { fd.append('file', file, file.name); }
+      await api.upload(`/claims/${claim.id}/sketch`, fd);
+      onChange();
+    } catch (err) { setError(errMsg(err, 'Upload failed')); } finally { setBusy(false); }
+  };
+  return (
+    <Card title="Damage marks & sketch">
+      <p className="text-xs text-slate-500 mb-2">
+        Crosses for damage, arrows for the point of impact — what the client marked, or mark it yourself. Printed in the broker PDF.
+        The drawing is the {claim.outline.replace('_', ' ')} outline; change the van&apos;s outline on its vehicle page if it&apos;s wrong.
+      </p>
+      <DamageOutlineEditor
+        type={claim.outline}
+        initial={claim.damage_marks || []}
+        onSave={async (marks, png) => { await api.put(`/claims/${claim.id}/damage`, { marks, png_base64: png }); onChange(); }}
+      />
+      <div className="mt-4">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs font-semibold text-slate-600">Sketch of the scene</span>
+          <button type="button" onClick={() => inputRef.current?.click()} disabled={busy} className="text-xs text-ooosh-700 hover:underline">
+            {busy ? 'Uploading…' : claim.sketch_key ? 'Replace with a photo / image' : 'Add a photo of a sketch'}
+          </button>
+          <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={uploadSketch} />
         </div>
-      ))}
-      {showRows && (
-        <button type="button" onClick={() => onChange([...rows, {}])} className="px-3 py-1.5 text-xs rounded border border-dashed border-slate-400 text-slate-600 hover:bg-slate-50">
-          + {section.list!.addLabel}
-        </button>
-      )}
-    </div>
+        {claim.sketch_key ? <SketchImage keyName={claim.sketch_key} /> : <div className="text-xs text-slate-400 italic">No sketch yet — the client draws one on the form.</div>}
+      </div>
+      {error && <div className="text-xs text-red-600 mt-2">{error}</div>}
+    </Card>
   );
 }
 
@@ -762,6 +857,8 @@ const EVENT_ICON: Record<string, string> = {
   problem_linked: '🔗', problem_unlinked: '✂️', file_added: '📎', file_removed: '🗑', ref_recorded: '🔖',
   complication: '⚠️', owner_change: '👤', driver_set: '🧑', form_saved: '📝', broker_sent: '📤',
   broker_send_failed: '❌', policyholder_signed: '✍️', notified_via: '📞', file_sharing: '🔓',
+  form_sent: '📧', link_opened: '👀', link_revoked: '🚫', who_filling: '🙋', handed_off: '↪️', sent_to_driver: '📧',
+  section_saved: '✅', driver_verified: '🔐', driver_signed: '✍️', damage_marked: '❌', sketch_saved: '✏️',
 };
 
 function TimelineCard({ claim, onChange }: { claim: Claim; onChange: () => void }) {

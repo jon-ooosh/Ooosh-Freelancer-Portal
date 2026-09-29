@@ -1,7 +1,8 @@
 # INCIDENT & POSSIBLE-CLAIMS SPEC — replacing the broker's Word/PDF claim form
 
-**Status:** ✅ PHASE 1 BUILT (Sep 2026) — the case file (§12 row 1). Phases 2–4 not started.
-See §18 for what Phase 1 actually shipped and where it differs from the plan below.
+**Status:** ✅ PHASES 1–2 BUILT (Sep 2026) — the case file and the client form (§12 rows 1–2).
+Phases 3 (client chasing) and 4 not started. See §18 (Phase 1) and §19 (Phase 2) for what actually
+shipped and where it differs from the plan below.
 **Shaped:** Sep 2026 — jon + Claude, revising a spec drafted months earlier in a non-code session
 against the codebase as it actually is. Where this document and that draft disagree, this wins.
 
@@ -639,3 +640,65 @@ reminders, dashboard bucket, out-of-the-blue, and the PDF build (rendered and ch
 - **@mentions in case updates** — the shared `MentionComposer`; mentioned staff get the same bell and
   immediate email as a mention anywhere else (`notifyClaimMentions()`). Pasted attachments are refused
   there: case files go through the Files card so they stay under the private `claims/` prefix.
+
+## 19. Phase 2 as built (Sep 2026) — the client form
+
+**Backend**
+- Migration `261_claim_client_form.sql`: `incident_claim_links` (one per recipient — token, name,
+  email, `driver_id` / `person_id`, role `driver | contact | forwarded`, status
+  `sent → opened → handed_off | submitted | revoked`, who filled it in, `handed_off_from`, opened
+  times), `incident_claim_codes` (driver email codes, sha256-hashed), `fleet_vehicles.outline_type`,
+  `incident_claim_files.uploaded_via_link_id`, `incident_claims.submitted_at` / `submitted_via_link_id`.
+- `services/claim-links.ts` — link resolve, create + send (an existing live link for the same email is
+  re-sent rather than duplicated), drivers on the van, the driver code (6 digits, 10 minutes, 5 tries,
+  30s resend throttle; success = a 2-hour `claim_driver` JWT sent back in `x-claim-driver-session`),
+  damage marks, sketch, and the hire-form declarations pre-fill (§7.3).
+- `routes/claim-form.ts` — PUBLIC, `/api/claim-form/:token`, rate-limited per IP. Nothing changes on a
+  GET ("opened" is its own POST). Writes are refused (409) once the case has left `open` / `form_out`,
+  so a client can't edit a form a manager is reviewing. The page only ever receives the client
+  sections, driver NAMES (never contact details or hire-form data), and files uploaded through a link
+  — never staff files. The driver section and declarations only after the code, and only the details
+  that driver gave on their own hire form.
+- Every save runs through `sanitiseSection()` in the field catalogue: unknown keys dropped, types
+  coerced, choices checked, list blocks capped at 30 rows. Damage marks through
+  `sanitiseDamageMarks()` (≤ 60, positions 0–100).
+- Submit needs "who", every client section and the driver's signature; otherwise it returns the
+  missing list. On success: stage `submitted`, next check the next working day, followers notified.
+- Staff: `GET /claims/:id/recipients`, `POST /claims/:id/links` (moves `open → form_out`),
+  resend / "switch off" a link, `PUT /claims/:id/damage`, `POST /claims/:id/sketch`.
+
+**Frontend**
+- `/claim/:token` (`pages/ClaimFormPage.tsx`) — public, no Layout, phone-first. Home checklist
+  ("N of 8 done") → one section at a time, saved as you go, so it can be finished over several sittings
+  from the same link. Who's filling this in: the driver (pick your name → email code), someone else
+  (name), or "send it to someone else" (forward). A non-driver can send the driver section to the
+  driver by name without ever seeing their email address.
+- `components/claims/VanOutline.tsx` — the outline sheet (top, both sides, front, rear) drawn in
+  code from a few proportions per type (Vito/V-Class, Sprinter MWB, Sprinter LWB, generic), not from
+  the watermarked stock images. Tap for a cross, or an arrow you can turn; each mark can take a note.
+  Saved as marks (JSON) plus a PNG for the PDF. Staff get the same editor on the case page.
+- `components/claims/SketchPad.tsx` — freehand scene sketch (3 colours, two pen sizes, undo), or a
+  photo of a paper sketch through the photo uploader.
+- `lib/imageNormalise.ts` — the hire-form photo port: reads the EXIF capture time first, converts
+  HEIC (detected by its bytes, not the file name) with `heic2any` loaded only when needed, then
+  compresses to 2048px with a 400px thumbnail.
+- `components/claims/FormFields.tsx` — the field inputs, now shared between the case page and the
+  public form.
+- Case page: "Client form" card (pick recipients — drivers on the van and the lead contact start
+  ticked — plus an extra name/email; each link's status, resend, switch off), "Damage marks & sketch"
+  card, and the signed driver declaration. The vehicle page gets a "Claims damage drawing" choice
+  (`outline_type`); left blank, it is guessed from the make/model/type text.
+
+**Differences from the plan above**
+- Until Phase 3, `form_out` cases are chased by the ordinary owner/next-check-date reminder (§9.2),
+  not by client emails — sending the form sets the check date 3 days out.
+- Other vehicles' owners and drivers are typed in by the client; they are not picked from the people
+  list (a public page can't see it).
+- No video, GPS or SMS (Phase 4).
+
+**Not tested end to end before shipping** (no R2 / email in the build sandbox — an in-memory storage
+shim and a local mail sink stood in): the real link and code emails, and photo/sketch storage on R2.
+Exercised against a real Postgres and a phone-sized browser with touch input: send, open, who's
+filling it in, forward, send-to-driver, the code (wrong code, reuse), every section save and its
+sanitising, photo upload (and refusal of non-images), marks, sketch, signature, submit (missing list,
+then success, then writes refused), and the broker PDF with all of it in.
