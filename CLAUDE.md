@@ -131,7 +131,7 @@ staff-facing review, document review cycles, retention. §20 is the current stat
 the short list of what is deliberately NOT built. Read it before changing anything here.
 Wider to-do work (assigning to others, recurring) is the general tasks module, not this one.
 
-**PHASES 1–4 BUILT, Sep 2026:** `docs/TASKS-SPEC.md` — the To Do module (Me › To Do), built on
+**CLOSED, Sep 2026:** `docs/TASKS-SPEC.md` — the To Do module (Me › To Do), built on
 `staff_tasks`. Anyone can give anyone a task; owner, setter and admins can touch it; private
 ones stay off the Everyone view. Repeating to-dos are a `staff_task_series` whose occurrences
 are ordinary tasks (`source_type = 'staff_task_series'`), one open at a time. Shared lists
@@ -139,7 +139,8 @@ are ordinary tasks (`source_type = 'staff_task_series'`), one open at a time. Sh
 one** — a task or series is owned by a person OR a list (DB CHECK), so `person_id` can be NULL.
 Mine also shows my job reminders and Problems, READ-THROUGH only. §2 is the boundary with job
 reminders, Problems and the vehicle module — read it before putting any "thing to do"
-anywhere. §15 is the phase 3–4 log. Phase 5 (person/org links) only if wanted.
+anywhere. §15 is the phase 3–4 log, §16 the close and what is deliberately not built.
+Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.md`.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
 Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day

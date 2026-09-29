@@ -1,8 +1,9 @@
 # To Do — the things that fall between the cracks
 
-**Status: AGREED 24 Sep 2026. Phases 1–4 BUILT — assigning §13, repeating §14,
-lists and pull-ins §15. Phase 5 (person / organisation links) only if still
-wanted.** Written straight after the staff records module closed
+**Status: CLOSED 29 Sep 2026. Phases 1–4 BUILT — assigning §13, repeating
+§14, lists and pull-ins §15, the closing gaps §16. Phase 5 (person /
+organisation links) deliberately skipped — kept as a possibility in
+`docs/reference/BACKLOG.md`.** Written straight after the staff records module closed
 (`docs/STAFF-RECORDS-SPEC.md` §23), from the discussion recorded in §0; jon's
 answers to §12 are recorded there.
 
@@ -446,3 +447,36 @@ doesn't repeat; pull-ins hide dead-job, suspended and resolved rows. And in a
 real browser: the picker without "me", the form boxes on one line, a reminder
 ticked from Mine, take → "from Shopping" → put back, a new list, each
 repeating to-do shown once on Everyone — no console errors.
+
+---
+
+## 16. Closing — the §7 gaps, and what is deliberately not built (29 Sep 2026)
+
+Re-reading §7 against what shipped found three gaps; all closed:
+
+- **List items can be edited** — title, note, due date, and the watchers'
+  nudge date — by anyone while untaken (the same `'list'` answer from
+  `assertCanTouch`). This is how "anyone can move" one bin day: edit that
+  occurrence's date; the repeat itself is changed with "change" beside it.
+- **List items carry a note** ("the 13A fuses, not the 5A") — on the add
+  form and the edit row.
+- **Dated list items show on Everyone**, grouped after the people as "On
+  Shopping — nobody on it yet". *Dated* only — the bins, not the milk:
+  undated shopping would swamp a view grouped by person. This supersedes §15's
+  "untaken items stay off Everyone". The list's repeating to-dos still stay
+  out of Everyone's Repeating section; their open occurrence is the row.
+
+**Deliberately not built:**
+
+- **Phase 5, person / organisation links** (§9, §11) — nobody has missed it
+  yet and the title carries the context. The shape is recorded in
+  `docs/reference/BACKLOG.md` for when somebody does.
+- **Ticking a Problem from Mine** — Problems link to their own page; their
+  lifecycle is being reworked (§15).
+- **Links to jobs** — never (§9): job remind-mes already are that.
+
+Verified in a real browser as a user who neither added nor took the items:
+an item added with a note, an item renamed and noted, one bin occurrence moved
+a week on, Everyone showing the dated items under "On Shopping" and not the
+undated ones — no console errors. The watcher bell was verified on a test
+database in §15; jon is confirming it on production.
