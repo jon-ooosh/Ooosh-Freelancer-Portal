@@ -268,7 +268,7 @@ export interface Series {
   id: string;
   title: string;
   detail: string | null;
-  person_id: string;
+  person_id: string | null;
   owner_name: string | null;
   mode: RepeatMode;
   rule: RepeatRule;
@@ -285,6 +285,11 @@ export interface Series {
   next_on: string | null;
   last_done_at: string | null;
   rule_text: string;
+  /** The occurrence open now, if any — its row carries the series' words. */
+  open_task_id: string | null;
+  /** Set when the series lives on a shared list (the bins). */
+  list_id: string | null;
+  list_name: string | null;
 }
 
 /**
@@ -299,7 +304,7 @@ export function SeriesEditModal({ series, people, onClose, onSaved, onError }: {
   onError: (msg: string) => void;
 }) {
   const [title, setTitle] = useState(series.title);
-  const [owner, setOwner] = useState(series.person_id);
+  const [owner, setOwner] = useState(series.person_id ?? '');
   const [value, setValue] = useState<RepeatValue>({
     mode: series.mode, rule: series.rule, endsOn: series.ends_on, endsAfter: series.ends_after, text: series.rule_text,
   });
@@ -312,7 +317,7 @@ export function SeriesEditModal({ series, people, onClose, onSaved, onError }: {
         title: title.trim(),
         mode: value.mode, rule: value.rule,
         endsOn: value.endsOn ?? '', endsAfter: value.endsAfter,
-        ...(owner !== series.person_id ? { personId: owner } : {}),
+        ...(owner && owner !== series.person_id ? { personId: owner } : {}),
       });
       await onSaved();
     } catch (err) {
@@ -329,11 +334,12 @@ export function SeriesEditModal({ series, people, onClose, onSaved, onError }: {
         <div className="space-y-3 mb-4">
           <input value={title} onChange={e => setTitle(e.target.value)} maxLength={300} aria-label="Title"
             className="w-full px-3 py-2 border border-gray-300 rounded text-sm" />
-          <label className="block text-sm">
+          {/* A list's series (the bins) stays on its list — no owner to pick. */}
+          {!series.list_id && <label className="block text-sm">
             <span className="block text-xs text-gray-600 mb-1">For</span>
             <select value={owner} onChange={e => setOwner(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded text-sm bg-white">
-              {!people.some(p => p.person_id === series.person_id) && (
+              {series.person_id && !people.some(p => p.person_id === series.person_id) && (
                 <option value={series.person_id}>{series.owner_name ?? 'Unknown'}</option>
               )}
               {people.map(p => <option key={p.person_id} value={p.person_id}>{p.name ?? 'Unnamed'}</option>)}
@@ -343,7 +349,7 @@ export function SeriesEditModal({ series, people, onClose, onSaved, onError }: {
                 They’ll be asked to accept it; the one currently open is dropped.
               </span>
             )}
-          </label>
+          </label>}
         </div>
         <RecurrenceFields value={value} onChange={setValue} startsOn={series.starts_on} />
         <p className="text-xs text-gray-400 mt-3">Changes apply from the next one — the one already open keeps its date.</p>

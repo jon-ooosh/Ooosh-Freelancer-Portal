@@ -1,7 +1,9 @@
 # To Do — the things that fall between the cracks
 
-**Status: AGREED 24 Sep 2026. Phases 1 (assigning) and 2 (repeating) BUILT —
-§13, §14. Phases 3–4 (lists, pull-ins) to come.** Written straight after the staff records module closed
+**Status: CLOSED 29 Sep 2026. Phases 1–4 BUILT — assigning §13, repeating
+§14, lists and pull-ins §15, the closing gaps §16. Phase 5 (person /
+organisation links) deliberately skipped — kept as a possibility in
+`docs/reference/BACKLOG.md`.** Written straight after the staff records module closed
 (`docs/STAFF-RECORDS-SPEC.md` §23), from the discussion recorded in §0; jon's
 answers to §12 are recorded there.
 
@@ -379,3 +381,102 @@ decline-with-reason, one-open-only under a double tick, drop → next, ends
 after N, reassign, privacy, leaver prompt, permission refusals, the repair),
 and in a real browser (Playwright) through the whole create → propose →
 accept → first occurrence flow, with no console errors.
+
+---
+
+## 15. Phases 3–4 build log — lists and pull-ins (28 Sep 2026)
+
+Also in this pass, from jon's phase 2 testing:
+
+- **Date boxes line up.** The form rows align to the top, so every input sits
+  in one line under its label and the Today / +7 / +14 shortcuts hang beneath.
+- **"Me" means me.** The "For" picker listed "Me" and then your own name —
+  two options, one person. `GET /staff-tasks/people` now also returns `me` and
+  the picker leaves you out. (The "Me" itself was already right: blank
+  resolves server-side to the caller, the same rule the job remind-me uses.)
+- **Everything twice.** An occurrence showed as a task AND under "Repeating".
+  The repeat's words and its change / stop now sit on the occurrence's own row
+  (↻ Every week on Tue); the Repeating section lists only series with nothing
+  open right now (waiting to be accepted, or between after-done occurrences).
+
+**Lists (phase 3)** — migration `258_staff_task_lists.sql`:
+`staff_task_lists`, `staff_task_list_watchers`, and `list_id` on both
+`staff_tasks` and `staff_task_series`, whose `person_id` becomes nullable under
+a CHECK that one of the two is set. Shopping and Building are seeded; "+ New
+list" adds more (names unique, case-insensitive, among live lists).
+
+- An item has **no owner** until "I'll take it" (`takeTask`, only if still
+  untaken — two people can't both take the milk). It moves to the taker's
+  Mine marked "from Shopping", and **Put back** returns it (`releaseTask`, the
+  taker or an admin). It can't be handed back — nobody set it FOR you.
+- **Anyone can tick or drop an untaken item** (`assertCanTouch` answers
+  `'list'`). Once taken it follows the normal owner / setter / admin rule. No
+  done bell for list items — "Sam bought the milk" isn't news.
+- **Repeating to-dos on a list** (the bins): owned by nobody, active at once
+  with no accept step, and anyone may change or stop them. Their occurrences
+  are list items.
+- **Watchers** (§12.1): `runListItemChase` at 09:45 bells every watcher about
+  dated items nobody has taken, then re-arms like a normal task chase. The bell
+  opens the list (`/me?tab=todo&view=lists&list=…`). Undated items (most
+  shopping) never nudge.
+- **Archive** refuses while anything untaken or a repeating to-do is still on
+  the list — an archived list would hide them from everybody.
+- Untaken items stay off Everyone and Assigned by me; taken ones show on
+  Everyone under the taker.
+
+**Pull-ins (phase 4)** — `services/staff-task-pullins.ts`, read-through only,
+shown in Mine under **From jobs**:
+
+- **Job reminders** that are mine — assigned to me, or created by me with
+  nobody assigned (the remind-me form's "Me") — gated like every requirements
+  reader: not on a lost / cancelled job unless kept, no `[Suspended:` markers.
+  **Ticked from Mine** (§12.4) through the job module's own
+  `PATCH /requirements/:id`, so its own side effects still run.
+- **Problems** assigned to me that aren't closed, with their status and an
+  **Open** link. Not tickable: a Problem has an eight-state workflow (quote,
+  action, resolve, write off) that belongs on its own page — and that
+  lifecycle is due a rework (jon, 28 Sep 2026), so To Do links rather than
+  wiring itself to states that will change.
+
+Verified on a fresh Postgres (all migrations) over HTTP as three users: take /
+double-take refused / put back (taker only) / no hand-back; anyone ticks an
+untaken item; duplicate list name refused; archive refused with items, allowed
+empty; a list series starts active with no owner and stays off Everyone; the
+watcher chase bells the watcher only, deep-links to the list, re-arms, and
+doesn't repeat; pull-ins hide dead-job, suspended and resolved rows. And in a
+real browser: the picker without "me", the form boxes on one line, a reminder
+ticked from Mine, take → "from Shopping" → put back, a new list, each
+repeating to-do shown once on Everyone — no console errors.
+
+---
+
+## 16. Closing — the §7 gaps, and what is deliberately not built (29 Sep 2026)
+
+Re-reading §7 against what shipped found three gaps; all closed:
+
+- **List items can be edited** — title, note, due date, and the watchers'
+  nudge date — by anyone while untaken (the same `'list'` answer from
+  `assertCanTouch`). This is how "anyone can move" one bin day: edit that
+  occurrence's date; the repeat itself is changed with "change" beside it.
+- **List items carry a note** ("the 13A fuses, not the 5A") — on the add
+  form and the edit row.
+- **Dated list items show on Everyone**, grouped after the people as "On
+  Shopping — nobody on it yet". *Dated* only — the bins, not the milk:
+  undated shopping would swamp a view grouped by person. This supersedes §15's
+  "untaken items stay off Everyone". The list's repeating to-dos still stay
+  out of Everyone's Repeating section; their open occurrence is the row.
+
+**Deliberately not built:**
+
+- **Phase 5, person / organisation links** (§9, §11) — nobody has missed it
+  yet and the title carries the context. The shape is recorded in
+  `docs/reference/BACKLOG.md` for when somebody does.
+- **Ticking a Problem from Mine** — Problems link to their own page; their
+  lifecycle is being reworked (§15).
+- **Links to jobs** — never (§9): job remind-mes already are that.
+
+Verified in a real browser as a user who neither added nor took the items:
+an item added with a note, an item renamed and noted, one bin occurrence moved
+a week on, Everyone showing the dated items under "On Shopping" and not the
+undated ones — no console errors. The watcher bell was verified on a test
+database in §15; jon is confirming it on production.

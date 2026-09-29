@@ -40,6 +40,8 @@ export interface TaskInput {
   isPrivate?: boolean;
   /** The setter's follow-up. Omitted → derived when assigning to someone else. */
   followUpOn?: string | null;
+  /** A shared list (TASKS-SPEC §7): the task then has NO owner until taken. */
+  listId?: string;
 }
 
 /**
@@ -99,6 +101,7 @@ const SELECT_TASKS = `
          t.follow_up_on::text AS follow_up_on,
          t.handed_back_by, t.handed_back_reason, t.handed_back_at,
          cu.person_id AS set_by_person_id,
+         t.list_id, l.name AS list_name,
          NULLIF(TRIM(COALESCE(op.preferred_name, op.first_name, '') || ' ' ||
                      COALESCE(op.last_name, '')), '') AS owner_name,
          NULLIF(TRIM(COALESCE(cp.preferred_name, cp.first_name, '') || ' ' ||
@@ -106,7 +109,9 @@ const SELECT_TASKS = `
          NULLIF(TRIM(COALESCE(hb.preferred_name, hb.first_name, '') || ' ' ||
                      COALESCE(hb.last_name, '')), '') AS handed_back_by_name
     FROM staff_tasks t
-    JOIN people op ON op.id = t.person_id
+    -- LEFT: a list item has no owner until somebody takes it (spec §7).
+    LEFT JOIN people op ON op.id = t.person_id
+    LEFT JOIN staff_task_lists l ON l.id = t.list_id
     LEFT JOIN users cu  ON cu.id = t.created_by
     LEFT JOIN people cp ON cp.id = cu.person_id
     LEFT JOIN people hb ON hb.id = t.handed_back_by`;
@@ -138,7 +143,9 @@ function isAdmin(role: string | undefined): boolean {
 }
 
 interface TouchInfo {
-  personId: string;
+  /** NULL for a list item nobody has taken yet. */
+  personId: string | null;
+  listId: string | null;
   createdBy: string | null;
   /** Stored dates, so an untouched past date isn't refused (assertForward). */
   dueDate: string | null;
@@ -146,7 +153,7 @@ interface TouchInfo {
   followUpOn: string | null;
   sourceType: string | null;
   /** Why this caller may touch it — decides what they may change. */
-  as: 'admin' | 'setter' | 'owner';
+  as: 'admin' | 'setter' | 'owner' | 'list';
 }
 
 /**
@@ -161,14 +168,15 @@ async function assertCanTouch(taskId: string, userId: string, role: string | und
   const r = await query(
     `SELECT person_id, created_by, due_date::text AS due_date,
             next_chase_date::text AS next_chase_date, follow_up_on::text AS follow_up_on,
-            source_type
+            source_type, list_id
        FROM staff_tasks WHERE id = $1`,
     [taskId]
   );
   if (!r.rows.length) throw new Error('Task not found');
   const row = r.rows[0];
   const base = {
-    personId: row.person_id as string,
+    personId: (row.person_id as string | null) ?? null,
+    listId: (row.list_id as string | null) ?? null,
     createdBy: (row.created_by as string | null) ?? null,
     dueDate: row.due_date ?? null,
     nextChaseDate: row.next_chase_date ?? null,
@@ -176,6 +184,9 @@ async function assertCanTouch(taskId: string, userId: string, role: string | und
     sourceType: row.source_type ?? null,
   };
   if (isAdmin(role)) return { ...base, as: 'admin' };
+  // An untaken list item is everybody's (spec §7): anyone can tick it, drop
+  // it, reword it. Once taken it follows the normal owner/setter rule.
+  if (!base.personId && base.listId) return { ...base, as: 'list' };
   const mine = await personIdForUser(userId);
   if (mine && base.personId === mine) return { ...base, as: 'owner' };
   if (base.createdBy && base.createdBy === userId) return { ...base, as: 'setter' };
@@ -212,9 +223,15 @@ export async function createTask(input: TaskInput, userId: string, role: string 
   // anyone's list (docs/TASKS-SPEC.md §5.1) — it lands with a bell, and the
   // owner can hand it back.
   const mine = await personIdForUser(userId);
-  const personId = input.personId || mine;
-  if (!personId) throw new Error('Your login is not linked to a person record');
-  const forSomebodyElse = personId !== mine;
+  // On a list: nobody owns it yet, nobody is being asked — no bell, no
+  // follow-up. Somebody takes it later (takeTask).
+  if (input.listId) {
+    const list = await query('SELECT id FROM staff_task_lists WHERE id = $1 AND archived_at IS NULL', [input.listId]);
+    if (!list.rows.length) throw new Error('List not found');
+  }
+  const personId = input.listId ? null : (input.personId || mine);
+  if (!personId && !input.listId) throw new Error('Your login is not linked to a person record');
+  const forSomebodyElse = !!personId && personId !== mine;
 
   // A review action is linked to its review, which is what puts it in the
   // follow-up email, the "From your review" badge and the check-in list.
@@ -228,7 +245,11 @@ export async function createTask(input: TaskInput, userId: string, role: string 
 
   const dueDate = input.dueDate || null;
   assertForward(dueDate, 'The due date');
-  const nextChase = await resolveChaseDate(input.nextChaseDate, dueDate);
+  // A list item is only chased when it has a date (spec §7): "milk" with no
+  // date shouldn't nag the watchers every fortnight like a personal to-do.
+  const nextChase = input.listId
+    ? (input.nextChaseDate !== undefined ? (input.nextChaseDate || null) : dueDate)
+    : await resolveChaseDate(input.nextChaseDate, dueDate);
   if (nextChase && !DATE_RE.test(nextChase)) throw new Error('nextChaseDate must be YYYY-MM-DD');
   if (input.nextChaseDate !== undefined) assertForward(input.nextChaseDate, 'The reminder');
 
@@ -247,15 +268,15 @@ export async function createTask(input: TaskInput, userId: string, role: string 
 
   const r = await query(
     `INSERT INTO staff_tasks (person_id, title, detail, due_date, next_chase_date, source_type, source_id, created_by,
-                              follow_up_on, is_private)
-     VALUES ($1, $2, $3, $4::date, $5::date, COALESCE($6,'manual'), $7, $8, $9::date, $10)
+                              follow_up_on, is_private, list_id)
+     VALUES ($1, $2, $3, $4::date, $5::date, COALESCE($6,'manual'), $7, $8, $9::date, $10, $11)
      RETURNING id`,
     [personId, title, input.detail?.trim() || null, dueDate, nextChase,
-     input.sourceType ?? null, input.sourceId ?? null, userId, followUp, isPrivate]
+     input.sourceType ?? null, input.sourceId ?? null, userId, followUp, isPrivate, input.listId ?? null]
   );
   const row = await taskFacts(r.rows[0].id);
 
-  if (forSomebodyElse) {
+  if (forSomebodyElse && personId) {
     const { notifyTaskAssigned } = await import('./staff-notifications');
     await notifyTaskAssigned(personId, row.id, title, await nameForUser(userId), dueDate)
       .catch(e => console.error('[staff-tasks] assigned bell failed:', e));
@@ -379,7 +400,9 @@ export async function updateTask(
     // each occurrence of a repeating one: a bell every Thursday that the
     // meters were read is noise; Assigned by me shows "last done" instead.
     if (patch.status === 'done' && row.created_by && row.created_by !== userId
-        && row.set_by_person_id !== row.person_id && row.source_type !== 'staff_task_series') {
+        && row.set_by_person_id !== row.person_id && row.source_type !== 'staff_task_series'
+        // Nor for a list item: "Sam bought the milk" is not news.
+        && !row.list_id) {
       await n.notifyTaskDone(row.created_by, taskId, row.title, row.owner_name);
     }
   } catch (e) {
@@ -404,7 +427,7 @@ export async function handBackTask(taskId: string, reason: string, userId: strin
   if (!why) throw new Error('Say why you’re handing it back');
   const r = await query(
     `SELECT t.person_id, t.due_date::text AS due_date, t.status, t.created_by, t.source_type,
-            cu.person_id AS setter_person
+            t.list_id, cu.person_id AS setter_person
        FROM staff_tasks t LEFT JOIN users cu ON cu.id = t.created_by
       WHERE t.id = $1`,
     [taskId]
@@ -418,6 +441,7 @@ export async function handBackTask(taskId: string, reason: string, userId: strin
   if (t.source_type === 'staff_task_series') {
     throw new Error('This repeats — stop the repeating to-do instead, with a reason');
   }
+  if (t.list_id) throw new Error('This came off a list — put it back on the list instead');
   if (!t.setter_person || t.setter_person === mine) throw new Error('Nobody to hand this back to');
 
   // On the setter's list now, so it chases THEM like any other task of theirs.
@@ -441,6 +465,54 @@ export async function handBackTask(taskId: string, reason: string, userId: strin
 }
 
 /**
+ * One list's items (spec §7): everything open on it — untaken first, then the
+ * ones somebody is on — and what was ticked off in the last fortnight, so
+ * "did anyone get the milk?" has an answer.
+ */
+export async function listListItems(listId: string) {
+  const r = await query(
+    `${SELECT_TASKS}
+      WHERE t.list_id = $1
+        AND (t.status = 'open' OR (t.status = 'done' AND t.completed_at > NOW() - INTERVAL '14 days'))
+      ORDER BY t.status = 'open' DESC, t.person_id IS NOT NULL, t.due_date NULLS LAST, t.created_at`,
+    [listId]
+  );
+  return r.rows;
+}
+
+/**
+ * "I'll take it" (spec §7): an untaken list item moves onto my list. It keeps
+ * the list it came from, so it can go back (releaseTask) and shows "from
+ * Shopping". Only an UNTAKEN item — taking one off a colleague is reassigning,
+ * which is the setter's call.
+ */
+export async function takeTask(taskId: string, userId: string) {
+  const mine = await personIdForUser(userId);
+  if (!mine) throw new Error('Your login is not linked to a person record');
+  const r = await query(
+    `UPDATE staff_tasks SET person_id = $2, updated_at = NOW()
+      WHERE id = $1 AND person_id IS NULL AND list_id IS NOT NULL AND status = 'open'
+      RETURNING id`,
+    [taskId, mine]
+  );
+  if (!r.rows.length) throw new Error('Somebody’s already on it — or it’s gone');
+  return taskFacts(taskId);
+}
+
+/** Put a list item back on its list — whoever took it, or an admin. */
+export async function releaseTask(taskId: string, userId: string, role: string | undefined) {
+  const who = await assertCanTouch(taskId, userId, role);
+  if (!who.listId) throw new Error('This wasn’t from a list');
+  if (who.as !== 'owner' && who.as !== 'admin') throw new Error('Only whoever took it can put it back');
+  await query(
+    `UPDATE staff_tasks SET person_id = NULL, follow_up_on = NULL, updated_at = NOW()
+      WHERE id = $1 AND status = 'open'`,
+    [taskId]
+  );
+  return taskFacts(taskId);
+}
+
+/**
  * "Assigned by me" (spec §5.2): what I put on OTHER people's lists, open or
  * finished in the last 30 days. Things handed back to me are on my own list,
  * not here.
@@ -450,6 +522,9 @@ export async function listAssignedByMe(userId: string) {
     `${SELECT_TASKS}
       WHERE t.created_by = $1
         AND cu.person_id IS DISTINCT FROM t.person_id
+        -- Not list items: adding milk to Shopping isn't giving it to anybody,
+        -- and whoever takes it chose to.
+        AND t.list_id IS NULL
         AND (t.status = 'open' OR (t.status = 'done' AND t.completed_at > NOW() - INTERVAL '30 days'))
       ORDER BY t.status = 'open' DESC, t.follow_up_on NULLS LAST, t.due_date NULLS LAST, t.created_at DESC`,
     [userId]
@@ -467,8 +542,12 @@ export async function listEveryone(userId: string, role: string | undefined) {
   const r = await query(
     `${SELECT_TASKS}
       WHERE t.status = 'open'
+        -- People's to-dos, plus untaken list items that have a DATE — the
+        -- bins, not the milk. Undated shopping would swamp a view grouped by
+        -- person; it lives on the Lists view (jon, 29 Sep 2026).
+        AND (t.person_id IS NOT NULL OR (t.list_id IS NOT NULL AND t.due_date IS NOT NULL))
         AND (NOT t.is_private OR $3::boolean OR t.person_id = $2 OR t.created_by = $1)
-      ORDER BY owner_name, t.due_date NULLS LAST, t.created_at`,
+      ORDER BY t.person_id IS NULL, owner_name, list_name, t.due_date NULLS LAST, t.created_at`,
     [userId, mine, isAdmin(role)]
   );
   return r.rows;

@@ -816,6 +816,55 @@ export async function runTaskChase(): Promise<{ chased: number }> {
   return { chased };
 }
 
+/**
+ * List items nobody has taken yet (spec §7): the nudge goes to the list's
+ * WATCHERS. Same fire-then-re-arm shape as runTaskChase. Only items with a
+ * chase date — an undated list item never nags (createTask leaves it null).
+ * A list with no watchers nudges nobody; the item still shows on the list.
+ */
+export async function runListItemChase(): Promise<{ chased: number }> {
+  const { getTaskChaseDays } = await import('./staff-settings');
+  const intervalDays = await getTaskChaseDays();
+  const due = await query(
+    `SELECT t.id, t.title, t.due_date::text AS due_date, t.list_id, l.name AS list_name
+       FROM staff_tasks t
+       JOIN staff_task_lists l ON l.id = t.list_id AND l.archived_at IS NULL
+      WHERE t.status = 'open'
+        AND t.person_id IS NULL
+        AND t.next_chase_date IS NOT NULL
+        AND t.next_chase_date <= CURRENT_DATE`
+  );
+  let chased = 0;
+  for (const row of due.rows) {
+    await query(
+      `UPDATE staff_tasks
+          SET chased_at = NOW(),
+              next_chase_date = (CURRENT_DATE + ($2 || ' days')::interval)::date
+        WHERE id = $1`,
+      [row.id, String(intervalDays)]
+    );
+    const watchers = await query(
+      `SELECT u.id FROM staff_task_list_watchers w
+         JOIN users u ON u.person_id = w.person_id AND u.is_active = true
+        WHERE w.list_id = $1`,
+      [row.list_id]
+    );
+    const when = row.due_date
+      ? (row.due_date < new Date().toISOString().slice(0, 10) ? `was due ${fmtDate(row.due_date)}` : `is due ${fmtDate(row.due_date)}`)
+      : 'is still on the list';
+    for (const w of watchers.rows) {
+      await notify(
+        w.id, 'staff_list_item_due', `On ${esc(row.list_name)}: something needs doing`,
+        `“${esc(row.title)}” ${when} — nobody has taken it yet.`,
+        'staff_tasks', row.id, `/me?tab=todo&view=lists&list=${row.list_id}`, 'normal'
+      );
+    }
+    chased++;
+  }
+  if (chased) console.log(`[staff-notifications] list items: nudged watchers about ${chased}`);
+  return { chased };
+}
+
 // ── To Do: assigning (docs/TASKS-SPEC.md §5) ────────────────────────────────
 //
 // Bells only. The escalation scheduler turns them into email per each
