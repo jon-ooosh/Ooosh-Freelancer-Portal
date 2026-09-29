@@ -666,6 +666,15 @@ export function VehicleDetailPage() {
         <EditableRow label="VIN / Chassis #" value={vehicle.vin} type="text" onSave={v => saveField('vin', v)} />
         <EditableRow label="Date of First Reg" value={vehicle.dateFirstReg} type="date" onSave={v => saveField('date_first_reg', v)} />
         <VehicleValueRow vehicleId={vehicle.id} />
+        {/* Which drawing insurance-claim damage is marked on. Blank (—) = guessed from the model. */}
+        <EditableRow
+          label="Claims damage drawing"
+          value={vehicle.outlineType ?? null}
+          type="select"
+          options={['vito', 'sprinter_mwb', 'sprinter_lwb', 'generic']}
+          displayMap={{ vito: 'Vito', sprinter_mwb: 'Sprinter MWB', sprinter_lwb: 'Sprinter LWB', generic: 'Generic van' }}
+          onSave={v => saveField('outline_type', v)}
+        />
         <EditableRow label="D.1: Make" value={vehicle.make} type="text" onSave={v => saveField('make', v)} />
         <EditableRow label="D.2: Type" value={vehicle.v5Type} type="text" onSave={v => saveField('v5_type', v)} />
         <EditableRow label="D.3: Model" value={vehicle.model} type="text" onSave={v => saveField('model', v)} />

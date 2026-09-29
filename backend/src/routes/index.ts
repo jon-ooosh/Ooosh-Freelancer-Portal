@@ -44,6 +44,7 @@ import storageRouter from './storage';
 import holdingRouter from './holding';
 import pcnsRouter from './pcns';
 import incidentClaimsRouter from './incident-claims';
+import claimFormRouter from './claim-form';
 import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
 import carnetsRouter from './carnets';
@@ -95,6 +96,7 @@ router.use('/problems', problemsRouter);  // Job-level problems register (damage
 router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing receipt/cost workflow
 router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)
+router.use('/claim-form', claimFormRouter);  // PUBLIC token-authenticated client claim form (Phase 2)
 router.use('/claims', incidentClaimsRouter);  // Possible insurance claims (Vehicles › Claims) — docs/INCIDENT-CLAIMS-SPEC.md
 router.use('/pcns', pcnsRouter);  // PCN module — Penalty Charge Notice management (Vehicles), replaces Monday PCN boards
 router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token

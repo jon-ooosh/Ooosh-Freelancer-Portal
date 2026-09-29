@@ -36,8 +36,12 @@ export const SHARED_BY_DEFAULT: ReadonlySet<string> = new Set(['photo', 'police_
 export const CLAIM_OUTCOMES = ['not_claimed', 'settled', 'denied', 'defended', 'withdrawn'] as const;
 export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
-/** Stages that chase themselves (the client chase) and so need no check date. */
-const SELF_CHASING: ReadonlySet<string> = new Set(['form_out']);
+/**
+ * Stages that chase themselves and so need no check date. Empty until the
+ * Phase 3 client chase exists — until then a case with the form out stays on
+ * the owner's check date like any other, so it can't go quiet.
+ */
+const SELF_CHASING: ReadonlySet<string> = new Set<string>();
 
 export async function logClaimEvent(
   claimId: string,
@@ -286,7 +290,7 @@ export async function runClaimCheckReminders(): Promise<{ belled: number }> {
     `UPDATE incident_claims
         SET next_check_sent_for = next_check_on
       WHERE is_deleted = false
-        AND stage NOT IN ('closed', 'form_out')
+        AND stage <> 'closed'
         AND next_check_on IS NOT NULL
         AND next_check_on <= CURRENT_DATE
         AND next_check_sent_for IS DISTINCT FROM next_check_on
@@ -343,7 +347,7 @@ export async function getClaimAttentionBuckets(): Promise<{ check_overdue: Claim
      LEFT JOIN users u ON u.id = c.owner_user_id
      LEFT JOIN people p ON p.id = u.person_id
      WHERE c.is_deleted = false
-       AND c.stage NOT IN ('closed', 'form_out')
+       AND c.stage <> 'closed'
        AND (c.next_check_on IS NULL OR c.next_check_on < CURRENT_DATE)
      ORDER BY c.next_check_on NULLS FIRST
      LIMIT 10`,

@@ -50,6 +50,7 @@ import PcnsPage from './pages/PcnsPage';
 import PcnDetailPage from './pages/PcnDetailPage';
 import ClaimsPage from './pages/ClaimsPage';
 import ClaimDetailPage from './pages/ClaimDetailPage';
+import ClaimFormPage from './pages/ClaimFormPage';
 import HoldingReceiptPage from './pages/HoldingReceiptPage';
 import QuickActionsPage from './pages/QuickActionsPage';
 import MerchFormPage from './pages/MerchFormPage';
@@ -189,6 +190,8 @@ export default function App() {
       <Route path="/freelancer-apply/:token" element={<FreelancerApplyPage />} />
       {/* Public PCN pay-direct proof-of-payment upload — token-authenticated, no Layout */}
       <Route path="/pcn-receipt/:token" element={<PcnReceiptUploadPage />} />
+      {/* Public insurance-claim incident form — token-authenticated, no Layout */}
+      <Route path="/claim/:token" element={<ClaimFormPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
       <Route path="/merch-form" element={<MerchFormPage />} />
       {/* Public view-only Rack Plan (tokenised, no login) */}

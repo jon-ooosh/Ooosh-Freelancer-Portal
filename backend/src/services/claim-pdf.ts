@@ -328,8 +328,9 @@ export async function buildClaimPdf(
     if (!rows.length) return;
     heading(title);
     rows.forEach((p, i) => {
+      // A name alone is still worth a row — print a dash rather than drop it.
       field(`${i + 1}. ${hasValue(p.name) ? String(p.name) : '(name not given)'}`,
-        [contact(p), extra(p), hasValue(p.notes) ? String(p.notes) : ''].filter(hasValue).join('\n'));
+        [contact(p), extra(p), hasValue(p.notes) ? String(p.notes) : ''].filter(hasValue).join('\n') || 'No contact details given');
     });
   };
   personTable('Passengers', passengers, (p) => (p.injured === true ? 'Injured: Yes' : p.injured === false ? 'Injured: No' : ''));

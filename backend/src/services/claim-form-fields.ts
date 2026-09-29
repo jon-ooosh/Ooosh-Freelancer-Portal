@@ -286,3 +286,117 @@ export function defaultFormData(): Record<string, Row> {
   }
   return out;
 }
+
+/** Sections a client link may write (never the Ooosh-only ones, never the driver's). */
+export const CLIENT_SECTION_KEYS: readonly string[] = CLAIM_SECTIONS.filter((s) => s.who === 'client').map((s) => s.key);
+
+/** The client form's checklist, in order: who's filling in, the client sections, the driver's part. */
+export const CLIENT_CHECKLIST: ReadonlyArray<{ key: string; title: string }> = [
+  { key: 'who', title: "Who's filling this in" },
+  ...CLAIM_SECTIONS.filter((s) => s.who === 'client').map((s) => ({ key: s.key, title: s.title })),
+  { key: 'driver', title: 'Driver declaration' },
+];
+
+const MAX_TEXT = 10000;
+const MAX_ROWS = 30;
+
+/** Coerce one answer to its field's kind; undefined = drop it. */
+function sanitiseValue(field: ClaimFieldDef, v: unknown): unknown {
+  if (v === null) return null;
+  switch (field.kind) {
+    case 'yesno':
+      return typeof v === 'boolean' ? v : undefined;
+    case 'money': {
+      if (v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 && n < 1e9 ? n : undefined;
+    }
+    case 'multi':
+      return Array.isArray(v)
+        ? v.filter((x): x is string => typeof x === 'string' && (!field.options || field.options.includes(x))).slice(0, 20)
+        : undefined;
+    case 'choice':
+      return typeof v === 'string' && (v === '' || !field.options || field.options.includes(v)) ? v : undefined;
+    case 'date':
+      return typeof v === 'string' && (v === '' || /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : undefined;
+    default:
+      return typeof v === 'string' ? v.slice(0, MAX_TEXT) : undefined;
+  }
+}
+
+function sanitiseRow(def: ClaimSectionDef, raw: unknown): Row {
+  const out: Row = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const f of def.fields) {
+    if (!(f.key in (raw as Row))) continue;
+    const v = sanitiseValue(f, (raw as Row)[f.key]);
+    if (v !== undefined) out[f.key] = v;
+  }
+  return out;
+}
+
+/**
+ * Validate what a client (or anyone untrusted) sent for one section against
+ * the catalogue: unknown keys dropped, values coerced to their field's kind.
+ * A list section returns an array of rows; a plain section one row.
+ */
+export function sanitiseSection(def: ClaimSectionDef, raw: unknown): Row | Row[] {
+  if (def.list) {
+    return Array.isArray(raw) ? raw.slice(0, MAX_ROWS).map((r) => sanitiseRow(def, r)) : [];
+  }
+  return sanitiseRow(def, raw);
+}
+
+export type OutlineType = 'vito' | 'sprinter_mwb' | 'sprinter_lwb' | 'generic';
+
+/**
+ * Which van drawing to mark damage on. The vehicle's own outline_type wins;
+ * otherwise a guess from its model / hire category text; generic if nothing
+ * matches (spec §10.1).
+ */
+export function resolveOutlineType(v: {
+  outline_type?: string | null;
+  model?: string | null;
+  make?: string | null;
+  vehicle_type?: string | null;
+  simple_type?: string | null;
+}): OutlineType {
+  const set = v.outline_type;
+  if (set === 'vito' || set === 'sprinter_mwb' || set === 'sprinter_lwb' || set === 'generic') return set;
+  const text = [v.make, v.model, v.vehicle_type, v.simple_type].filter(Boolean).join(' ').toLowerCase();
+  if (/\bvito\b|v-?class|\bv\s?class\b/.test(text)) return 'vito';
+  if (/\blwb\b|\bl3\b|\bxlwb\b/.test(text)) return 'sprinter_lwb';
+  if (/\bmwb\b|\bl2\b/.test(text)) return 'sprinter_mwb';
+  if (/sprinter/.test(text)) return 'sprinter_mwb';
+  return 'generic';
+}
+
+export interface DamageMark {
+  x: number;       // 0–100, percent of the drawing's width
+  y: number;       // 0–100, percent of its height
+  kind: 'cross' | 'arrow';
+  angle?: number;  // arrows only, degrees
+  note?: string;
+}
+
+/** Validate damage marks from an untrusted source. */
+export function sanitiseDamageMarks(raw: unknown): DamageMark[] {
+  if (!Array.isArray(raw)) return [];
+  const out: DamageMark[] = [];
+  for (const m of raw.slice(0, 60)) {
+    if (!m || typeof m !== 'object') continue;
+    const r = m as Row;
+    const x = Number(r.x);
+    const y = Number(r.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 100 || y < 0 || y > 100) continue;
+    const kind = r.kind === 'arrow' ? 'arrow' : 'cross';
+    const mark: DamageMark = { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100, kind };
+    if (kind === 'arrow') {
+      const a = Number(r.angle);
+      mark.angle = Number.isFinite(a) ? ((Math.round(a) % 360) + 360) % 360 : 0;
+    }
+    if (typeof r.note === 'string' && r.note.trim()) mark.note = r.note.trim().slice(0, 200);
+    out.push(mark);
+  }
+  return out;
+}

@@ -101,7 +101,6 @@ export function ukDatePlus(days: number): string {
 /** Check-date cell: red when overdue or missing on a case that needs one. */
 export function NextCheckCell({ row }: { row: Pick<ClaimListRow, 'stage' | 'next_check_on'> }) {
   if (row.stage === 'closed') return <span className="text-slate-400">—</span>;
-  if (row.stage === 'form_out') return <span className="text-slate-500">chasing</span>;
   if (!row.next_check_on) return <span className="text-red-600 font-medium">not set</span>;
   const overdue = row.next_check_on < ukToday();
   const today = row.next_check_on === ukToday();

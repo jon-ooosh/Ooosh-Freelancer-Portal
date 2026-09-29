@@ -300,6 +300,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '258_staff_task_lists.sql',
         '259_incident_claims.sql',
         '260_claims_notified_via_and_sharing.sql',
+        '261_claim_client_form.sql',
       ];
 
       for (const migration of migrations) {

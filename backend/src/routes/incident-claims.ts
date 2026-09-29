@@ -33,6 +33,9 @@ import {
   logIssueEvent, getDefaultVehicleIssueWatchers, notifyIssueRecipients,
 } from '../services/job-issues';
 import { estimateVehicleValue } from '../services/vehicle-value';
+import { resolveOutlineType } from '../services/claim-form-fields';
+import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
+import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 
 const router = Router();
 
@@ -308,6 +311,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       `SELECT c.*, COALESCE(fv.reg, c.vehicle_reg) AS vehicle_reg,
               fv.make AS vehicle_make, fv.model AS vehicle_model, fv.cylinder_capacity_cc AS vehicle_cc,
               fv.cash_price, fv.deposit_paid, fv.amount_financed, fv.date_first_reg,
+              fv.outline_type, fv.vehicle_type AS fleet_vehicle_type, fv.simple_type AS fleet_simple_type,
               j.job_name, j.client_name, j.job_date, j.job_end,
               d.full_name AS driver_name,
               NULLIF(TRIM(CONCAT(op.first_name, ' ', op.last_name)), '') AS owner_name,
@@ -328,8 +332,18 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 
     // Value estimate — admins get £100 rounding, everyone else £500 (§6.6).
     const estimate = await estimateVehicleValue(claim, { isAdmin: req.user!.role === 'admin' });
+    const outline = resolveOutlineType({
+      outline_type: claim.outline_type, make: claim.vehicle_make, model: claim.vehicle_model,
+      vehicle_type: claim.fleet_vehicle_type, simple_type: claim.fleet_simple_type,
+    });
     delete claim.cash_price; delete claim.deposit_paid; delete claim.amount_financed;
     delete claim.photo_link_token;
+    const links = await query(
+      `SELECT id, recipient_name, recipient_email, role, status, filled_as, filled_by_name,
+              sent_at, first_opened_at, last_opened_at, created_at, handed_off_from
+       FROM incident_claim_links WHERE claim_id = $1 ORDER BY created_at`,
+      [id],
+    );
 
     const [problems, events, files, drivers] = await Promise.all([
       query(
@@ -409,6 +423,8 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         ...normaliseDates(claim),
         date_first_reg: claim.date_first_reg instanceof Date ? claim.date_first_reg.toISOString().slice(0, 10) : claim.date_first_reg,
         value_estimate: estimate,
+        outline,
+        links: links.rows,
         hire_form_declarations: hireFormDeclarations,
         problems: problems.rows,
         events: events.rows,
@@ -690,7 +706,7 @@ router.post('/:id/stage', validate(stageSchema), async (req: AuthRequest, res: R
     }
     if (body.stage === 'form_out') {
       // Phase 2 builds the client form + links; until then nothing would chase.
-      res.status(400).json({ error: 'Sending the form to the client arrives with the client form (Phase 2).' });
+      res.status(400).json({ error: 'Use "Send form" to send the form to someone — the case moves to Form out when it goes.' });
       return;
     }
     if (body.stage === 'closed' && !body.outcome) {
@@ -1097,6 +1113,160 @@ router.post('/:id/send-to-broker', authorize(...MANAGER_ROLES), validate(sendSch
   } catch (err) {
     console.error('Send claim to broker error:', err);
     res.status(500).json({ error: 'Failed to send to the broker' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Client links (Phase 2) — who can we send the form to, send, resend, revoke
+// ─────────────────────────────────────────────────────────────────────────
+
+// Candidates: every driver on the van on this hire, plus the job's contacts
+// (services/job-contact-candidates.ts — THE "who could we contact" list).
+router.get('/:id/recipients', async (req: AuthRequest, res: Response) => {
+  try {
+    const c = await loadClaimRow(String(req.params.id));
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const drivers = await driversOnVan(c);
+    const contacts = c.job_id ? await resolveJobContactCandidates(c.job_id) : [];
+    res.json({
+      data: {
+        drivers: drivers.map((d) => ({ driver_id: d.id, name: d.name, email: d.email })),
+        contacts: contacts.filter((p) => p.email).map((p) => ({
+          person_id: p.person_id, name: p.name, email: p.email, role: p.role, org: p.source_org_name, is_primary: p.is_org_primary,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error('Claim recipients error:', err);
+    res.status(500).json({ error: 'Failed to load recipients' });
+  }
+});
+
+const sendLinksSchema = z.object({
+  recipients: z.array(z.object({
+    driver_id: z.string().uuid().optional(),
+    person_id: z.string().uuid().optional(),
+    name: z.string().trim().max(120).optional(),
+    email: z.string().trim().email().max(200).optional(),
+  })).min(1).max(20),
+});
+
+router.post('/:id/links', validate(sendLinksSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const c = await loadClaimRow(id);
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    if (!['open', 'form_out'].includes(c.stage)) {
+      res.status(400).json({ error: 'The form can only go out while the case is open' });
+      return;
+    }
+    const body = req.body as z.infer<typeof sendLinksSchema>;
+    const drivers = await driversOnVan(c);
+    const results: Array<{ name: string; email: string; sent: boolean; reused: boolean; error?: string }> = [];
+    for (const r of body.recipients) {
+      let name = r.name || null;
+      let email = r.email || null;
+      let role: 'driver' | 'contact' = 'contact';
+      if (r.driver_id) {
+        const d = drivers.find((x) => x.id === r.driver_id);
+        if (!d?.email) { results.push({ name: d?.name || 'Driver', email: '', sent: false, reused: false, error: 'No email on file' }); continue; }
+        name = d.name; email = d.email; role = 'driver';
+      } else if (r.person_id) {
+        const p = await query(`SELECT first_name, last_name, email FROM people WHERE id = $1`, [r.person_id]);
+        if (!p.rows[0]?.email) { results.push({ name: name || 'Contact', email: '', sent: false, reused: false, error: 'No email on file' }); continue; }
+        name = `${p.rows[0].first_name || ''} ${p.rows[0].last_name || ''}`.trim(); email = p.rows[0].email;
+      }
+      if (!email) continue;
+      const out = await createAndSendLink({
+        claimId: id, name, email, driverId: r.driver_id ?? null, personId: r.person_id ?? null, role, createdBy: req.user!.id,
+      });
+      results.push({ name: name || email, email, sent: out.sent, reused: out.reused, error: out.error });
+    }
+    const sent = results.filter((r) => r.sent);
+    if (sent.length) {
+      await query(
+        `UPDATE incident_claims
+            SET stage = CASE WHEN stage = 'open' THEN 'form_out' ELSE stage END,
+                next_check_on = COALESCE(next_check_on, $2::date),
+                updated_at = NOW()
+          WHERE id = $1`,
+        [id, ukDatePlus(3)],
+      );
+      await logClaimEvent(id, req.user!.id, 'form_sent', `Form sent to ${sent.map((r) => r.name).join(', ')}`,
+        { recipients: sent.map((r) => r.email) });
+      if (c.stage === 'open') {
+        await logClaimEvent(id, req.user!.id, 'stage_change', STAGE_LABEL.form_out, { from: 'open', to: 'form_out' });
+      }
+    }
+    res.json({ data: { results } });
+  } catch (err) {
+    console.error('Send claim links error:', err);
+    res.status(500).json({ error: 'Failed to send the form' });
+  }
+});
+
+router.post('/:id/links/:linkId/resend', async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT l.token, l.recipient_email, l.recipient_name, c.stage
+       FROM incident_claim_links l JOIN incident_claims c ON c.id = l.claim_id
+       WHERE l.id = $2 AND l.claim_id = $1 AND l.status <> 'revoked'`,
+      [String(req.params.id), String(req.params.linkId)],
+    );
+    const l = r.rows[0];
+    if (!l || !l.recipient_email) { res.status(404).json({ error: 'Link not found' }); return; }
+    if (!['open', 'form_out'].includes(l.stage)) { res.status(400).json({ error: 'The case is past the form stage' }); return; }
+    const out = await sendLinkEmail(String(req.params.id), l.token, l.recipient_email, l.recipient_name, null);
+    if (!out.success) { res.status(502).json({ error: out.error || 'Email failed' }); return; }
+    await query(`UPDATE incident_claim_links SET sent_at = NOW() WHERE id = $1`, [String(req.params.linkId)]);
+    await logClaimEvent(String(req.params.id), req.user!.id, 'form_sent', `Form re-sent to ${l.recipient_name || l.recipient_email}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Resend claim link error:', err);
+    res.status(500).json({ error: 'Failed to resend' });
+  }
+});
+
+router.post('/:id/links/:linkId/revoke', async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `UPDATE incident_claim_links SET status = 'revoked' WHERE id = $2 AND claim_id = $1 AND status <> 'revoked'
+       RETURNING recipient_name, recipient_email`,
+      [String(req.params.id), String(req.params.linkId)],
+    );
+    if (!r.rowCount) { res.status(404).json({ error: 'Link not found' }); return; }
+    await logClaimEvent(String(req.params.id), req.user!.id, 'link_revoked', `Link for ${r.rows[0].recipient_name || r.rows[0].recipient_email} switched off`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Revoke claim link error:', err);
+    res.status(500).json({ error: 'Failed to revoke' });
+  }
+});
+
+// Staff marking damage / adding a sketch on the case page — same storage as the client form.
+router.put('/:id/damage', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const marks = await saveDamageMarks(id, req.body?.marks, req.body?.png_base64, { userId: req.user!.id, label: 'staff' });
+    res.json({ data: { marks } });
+  } catch (err) {
+    console.error('Claim damage marks error:', err);
+    res.status(500).json({ error: 'Failed to save damage marks' });
+  }
+});
+
+router.post('/:id/sketch', upload.single('file'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const file = req.file;
+    if (!file || !(file.mimetype || '').startsWith('image/')) { res.status(400).json({ error: 'An image is needed' }); return; }
+    const key = await saveSketch(id, file, { userId: req.user!.id, label: 'staff' });
+    res.json({ data: { sketch_key: key } });
+  } catch (err) {
+    console.error('Claim sketch error:', err);
+    res.status(500).json({ error: 'Failed to save the sketch' });
   }
 });
 
