@@ -17,6 +17,8 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFirstName, displayInitials } from '../lib/displayName';
 import MyTimePage from './MyTimePage';
 import MyTasksPage from './MyTasksPage';
 import MyReviewPage from './MyReviewPage';
@@ -68,19 +70,40 @@ export default function MePage() {
     setParams(next, { replace: true });
   }
 
+  const user = useAuthStore(s => s.user);
+  const now = new Date();
+  const hour = now.getHours();
+  const greeting = hour < 12 ? 'Morning' : hour < 18 ? 'Afternoon' : 'Evening';
+  const today = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+
   return (
     <div>
-      <div className="border-b border-gray-200 mb-4">
-        <nav className="flex gap-1 -mb-px" aria-label="Me">
+      <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="hidden sm:flex w-12 h-12 shrink-0 rounded-full bg-ooosh-600 text-white items-center justify-center text-[17px] font-semibold">
+            {displayInitials(user)}
+          </div>
+          <div className="min-w-0">
+            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 tracking-[-0.01em]">
+              {greeting}, {displayFirstName(user)}
+            </h1>
+            <p className="mt-0.5 text-sm text-gray-500">{today} · your time, documents and profile</p>
+          </div>
+        </div>
+
+        {/* A segmented control on a desktop; on a phone the same buttons become
+            a strip of pills that scrolls sideways rather than wrapping. */}
+        <nav aria-label="Me"
+          className="w-full sm:w-auto flex gap-1.5 sm:gap-1 overflow-x-auto scrollbar-hide sm:bg-white sm:border sm:border-gray-200 sm:rounded-[10px] sm:p-1">
           {tabs.map(t => (
             <button
               key={t.id}
               onClick={() => select(t.id)}
               aria-current={active === t.id ? 'page' : undefined}
-              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              className={`shrink-0 whitespace-nowrap px-3 py-[7px] sm:px-3.5 sm:py-2 rounded-full sm:rounded-[7px] text-[13px] sm:text-sm transition-colors ${
                 active === t.id
-                  ? 'border-ooosh-600 text-ooosh-700'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  ? 'bg-ooosh-600 text-white font-semibold'
+                  : 'bg-white sm:bg-transparent border border-gray-200 sm:border-0 text-gray-600 font-medium hover:text-gray-900 sm:hover:bg-gray-50'
               }`}
             >
               {t.label}
