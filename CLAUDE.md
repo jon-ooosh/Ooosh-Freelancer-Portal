@@ -138,6 +138,10 @@ are ordinary tasks (`source_type = 'staff_task_series'`), one open at a time. §
 boundary with job reminders, Problems and the vehicle module — read it before putting any
 "thing to do" anywhere. Phases 3–4 (lists, pull-ins) to come.
 
+**AGREED, NOT BUILT, Sep 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
+(replacing the broker's Word claim form). Always opened from a Problem (`job_issues`); the broker is
+never contacted automatically. §1 lists the settled decisions — read it before building any part.
+
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
 Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day
 insurability, `services/driver-validity.ts`); the staff one is an annual sanity check
