@@ -457,15 +457,7 @@ function MineView({ people, others }: { people: Person[]; others: Person[] }) {
   }
 
   async function saveEdit(task: Task, patch: Record<string, string | null>) {
-    // Only what changed — so a title fix doesn't reset the chase stamp, which
-    // re-dating deliberately does.
-    const changed: Record<string, string | null> = {};
-    if (patch.title !== task.title) changed.title = patch.title;
-    if ((patch.detail ?? null) !== (task.detail ?? null)) changed.detail = patch.detail;
-    if ((patch.dueDate || null) !== (task.due_date || null)) changed.dueDate = patch.dueDate || null;
-    if ((patch.nextChaseDate || null) !== (task.next_chase_date || null)) {
-      changed.nextChaseDate = patch.nextChaseDate || null;
-    }
+    const changed = changedFields(task, patch);
     if (Object.keys(changed).length === 0) { setEditingId(null); return; }
     setBusyId(task.id);
     try {
@@ -824,11 +816,28 @@ function MineView({ people, others }: { people: Person[]; others: Person[] }) {
 }
 
 /** Edit an open to-do in place: wording, detail, due date, when to be nudged. */
-function TaskEditRow({ task, busy, onCancel, onSave }: {
+/**
+ * What an edit actually changed — only that is sent, so a title fix doesn't
+ * reset the chase stamp, which re-dating deliberately does.
+ */
+function changedFields(task: Task, patch: Record<string, string | null>): Record<string, string | null> {
+  const changed: Record<string, string | null> = {};
+  if (patch.title !== task.title) changed.title = patch.title;
+  if ((patch.detail ?? null) !== (task.detail ?? null)) changed.detail = patch.detail;
+  if ((patch.dueDate || null) !== (task.due_date || null)) changed.dueDate = patch.dueDate || null;
+  if ((patch.nextChaseDate || null) !== (task.next_chase_date || null)) {
+    changed.nextChaseDate = patch.nextChaseDate || null;
+  }
+  return changed;
+}
+
+function TaskEditRow({ task, busy, onCancel, onSave, remindLabel = 'Remind me' }: {
   task: Task;
   busy: boolean;
   onCancel: () => void;
   onSave: (patch: Record<string, string | null>) => void;
+  /** On a list item the nudge goes to the list's watchers, not "me". */
+  remindLabel?: string;
 }) {
   const [title, setTitle] = useState(task.title);
   const [detail, setDetail] = useState(task.detail ?? '');
@@ -849,8 +858,8 @@ function TaskEditRow({ task, busy, onCancel, onSave }: {
           <ForwardDateInput value={dueDate} onChange={setDueDate} ariaLabel="Due" />
         </label>
         <label className="text-sm">
-          <span className="block text-xs text-gray-600 mb-1">Remind me</span>
-          <ForwardDateInput value={remindOn} onChange={setRemindOn} ariaLabel="Remind me" />
+          <span className="block text-xs text-gray-600 mb-1">{remindLabel}</span>
+          <ForwardDateInput value={remindOn} onChange={setRemindOn} ariaLabel={remindLabel} />
         </label>
         <span className="text-[11px] text-gray-400 mt-6 max-w-[16rem]">
           Blank = never nudge. Moving the due date moves the reminder with it unless you set one here.
@@ -1052,7 +1061,9 @@ function EveryoneView({ people }: { people: Person[] }) {
 
   const groups = new Map<string, Task[]>();
   for (const t of tasks) {
-    const key = t.owner_name || 'Unnamed';
+    // Untaken list items come back only when dated (the bins) and group
+    // under their list, after the people — the server orders them last.
+    const key = t.person_id ? (t.owner_name || 'Unnamed') : `On ${t.list_name || 'a list'} — nobody on it yet`;
     groups.set(key, [...(groups.get(key) ?? []), t]);
   }
 
@@ -1076,7 +1087,7 @@ function EveryoneView({ people }: { people: Person[] }) {
                   {setBySomeoneElse(t) && (
                     <span className="text-[11px] text-gray-400">from {t.set_by_name || 'someone'}</span>
                   )}
-                  {t.list_id && (
+                  {t.list_id && t.person_id && (
                     <span className="text-[11px] text-gray-400">from {t.list_name || 'a list'}</span>
                   )}
                   {t.source_type === SERIES && (() => {
@@ -1128,10 +1139,13 @@ function ListsView({ people, me }: { people: Person[]; me: string | null }) {
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const [title, setTitle] = useState('');
+  // "The 13A fuses, not the 5A" — items can carry a note (spec §7).
+  const [detail, setDetail] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [repeat, setRepeat] = useState<RepeatValue | null>(null);
   const [repeatOpen, setRepeatOpen] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   // The list is in the URL so a watcher's bell can open it directly.
   const listParam = params.get('list');
@@ -1229,6 +1243,7 @@ function ListsView({ people, me }: { people: Person[]; me: string | null }) {
         // acceptance — each one due lands on the list (spec §6.4).
         await api.post('/staff-tasks/series', {
           title: title.trim(),
+          ...(detail.trim() ? { detail: detail.trim() } : {}),
           mode: repeat.mode, rule: repeat.rule,
           startsOn: dueDate || ymdFromToday(0),
           ...(repeat.endsOn ? { endsOn: repeat.endsOn } : {}),
@@ -1238,10 +1253,11 @@ function ListsView({ people, me }: { people: Person[]; me: string | null }) {
       } else {
         await api.post(`/staff-tasks/lists/${current.id}/items`, {
           title: title.trim(),
+          ...(detail.trim() ? { detail: detail.trim() } : {}),
           ...(dueDate ? { dueDate } : {}),
         });
       }
-      setTitle(''); setDueDate(''); setRepeat(null);
+      setTitle(''); setDetail(''); setDueDate(''); setRepeat(null);
       await reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not add it');
@@ -1340,6 +1356,10 @@ function ListsView({ people, me }: { people: Person[]; me: string | null }) {
                 </button>
               </div>
             </div>
+            <input value={detail} onChange={e => setDetail(e.target.value)} maxLength={4000}
+              placeholder="Note (optional) — e.g. the 13A fuses, not the 5A"
+              aria-label="Note"
+              className="mt-3 w-full px-3 py-2 border border-gray-300 rounded text-sm" />
           </form>
           {repeatOpen && (
             <RecurrenceModal
@@ -1357,6 +1377,23 @@ function ListsView({ people, me }: { people: Person[]; me: string | null }) {
               const due = fmtDue(t.due_date);
               const taken = !!t.person_id;
               const x = t.source_type === SERIES ? series.find(v => v.id === t.source_id) : undefined;
+              if (editingId === t.id) {
+                // Anyone may edit an untaken item — move the bins to Thursday
+                // this week, fix "mlik" — without dropping and re-adding it.
+                return (
+                  <TaskEditRow key={t.id} task={t} busy={busyId === t.id}
+                    remindLabel="Nudge watchers"
+                    onCancel={() => setEditingId(null)}
+                    onSave={patch => {
+                      const changed = changedFields(t, patch);
+                      if (Object.keys(changed).length === 0) { setEditingId(null); return; }
+                      void act(t.id, async () => {
+                        await api.patch(`/staff-tasks/${t.id}`, changed);
+                        setEditingId(null);
+                      }, 'Could not save it');
+                    }} />
+                );
+              }
               return (
                 <div key={t.id} className="flex items-start gap-3 px-4 py-3">
                   <input type="checkbox" checked={false}
@@ -1389,6 +1426,11 @@ function ListsView({ people, me }: { people: Person[]; me: string | null }) {
                         disabled={busyId === t.id}
                         className="text-xs text-ooosh-600 hover:text-ooosh-800 disabled:opacity-40 shrink-0">
                         I’ll take it
+                      </button>
+                      <button onClick={() => setEditingId(t.id)}
+                        disabled={busyId === t.id}
+                        className="text-xs text-ooosh-600 hover:text-ooosh-800 disabled:opacity-40 shrink-0">
+                        Edit
                       </button>
                       <button onClick={() => void act(t.id,
                         () => api.patch(`/staff-tasks/${t.id}`, { status: 'cancelled' }), 'Could not drop it')}
