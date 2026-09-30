@@ -367,6 +367,40 @@ router.get('/review/:reviewId', authorize(...STAFF_ADMIN_ROLES), async (req: Aut
   }
 });
 
+// GET /api/staff-tasks/review/:reviewId/mine — the REVIEWEE's view of every
+// action their review produced, whoever owns it, for "Things to do from it" on
+// My Review. The admin route above is admin-only, so without this the
+// reviewee saw only their own actions — and the company's, the ones most
+// likely to lapse (spec §6.2), were exactly the ones hidden from them.
+// Only for a review that is theirs; a private action owned by somebody else
+// stays out, same rule as the Everyone view; only the fields the page needs.
+router.get('/review/:reviewId/mine', async (req: AuthRequest, res: Response) => {
+  try {
+    const reviewId = req.params.reviewId as string;
+    if (!UUID_RE.test(reviewId)) { res.status(400).json({ error: 'reviewId must be a UUID' }); return; }
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: [] }); return; }
+    const { query } = await import('../config/database');
+    const own = await query(
+      `SELECT 1 FROM staff_reviews WHERE id = $1 AND person_id = $2`, [reviewId, personId]);
+    // Not yours and not there look the same on purpose.
+    if (own.rows.length === 0) { res.status(404).json({ error: 'Review not found' }); return; }
+    const rows = (await listTasksForSource('staff_review', reviewId)) as Array<Record<string, unknown>>;
+    res.json({
+      data: rows
+        .filter(t => t.status !== 'cancelled' && (!t.is_private || t.person_id === personId))
+        .map(t => ({
+          id: t.id, title: t.title, due_date: t.due_date, status: t.status,
+          completed_at: t.completed_at, owner_name: t.owner_name,
+          is_mine: t.person_id === personId,
+        })),
+    });
+  } catch (err) {
+    console.error('[staff-tasks] my review actions error:', err);
+    res.status(500).json({ error: 'Failed to load the review actions' });
+  }
+});
+
 // POST /api/staff-tasks
 router.post('/', validate(createSchema), async (req: AuthRequest, res: Response) => {
   try {

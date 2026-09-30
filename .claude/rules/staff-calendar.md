@@ -161,8 +161,10 @@ happened yet is a mistake, not a judgement call.
 'working'`) an entry overlapping that day's start–end is refused — the unpaid
 break included: working through lunch is not overtime here (jon, Sep 2026).
 Days off, leave days and `partial` days are not checked — we know a part-day
-person was in for SOME of it but not which part. Same browser-side check, read
-from `/staff-calendar/me`; if that read fails nothing is blocked.
+person was in for SOME of it but not which part. Checked in the browser (read
+from `/staff-calendar/me`; if that read fails the form blocks nothing) AND in
+`POST /staff-calendar/overtime`, so a stale bundle cannot get round it. The
+"not in the future" check is browser-only on purpose — see above.
 
 ## The freelancer offer link is a bearer credential, and the GET never writes
 
