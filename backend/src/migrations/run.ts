@@ -302,6 +302,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '260_claims_notified_via_and_sharing.sql',
         '261_claim_client_form.sql',
         '262_review_self_assessment_draft.sql',
+        '263_vehicle_mot_history.sql',
       ];
 
       for (const migration of migrations) {
