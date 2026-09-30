@@ -369,6 +369,8 @@ export interface OperationsData {
     /** Possible insurance claims whose check date has passed or is missing (docs/INCIDENT-CLAIMS-SPEC.md §9.3). */
     claim_check_overdue?: ClaimAttentionItem[];
     claim_check_overdue_total?: number;
+    /** Client forms submitted and waiting for a manager's review (next_check_on carries the submitted date). */
+    claim_to_review?: ClaimAttentionItem[];
   };
   transport_ops: {
     summary: Record<string, number>;

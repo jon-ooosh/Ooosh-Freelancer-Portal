@@ -702,3 +702,39 @@ Exercised against a real Postgres and a phone-sized browser with touch input: se
 filling it in, forward, send-to-driver, the code (wrong code, reuse), every section save and its
 sanitising, photo upload (and refusal of non-images), marks, sketch, signature, submit (missing list,
 then success, then writes refused), and the broker PDF with all of it in.
+
+### 19.1 Follow-up after first live test (Sep 2026 — jon)
+- **Send first.** On an open case the top bar's main button is "Send form to driver / client", which
+  opens the recipient picker right there (drivers on the van, job contacts, and a clear "Someone else"
+  name + email row). "Taken by phone — ready for review" is the secondary route. Once the form is out
+  the bar shows **progress** — "N of 8 done", each part done / started / not yet, and the client's
+  latest activity.
+- **Staff and client edit the same answers.** Anything staff type into a client section pre-fills the
+  client's link; a section only ticks when the client saves it complete (their confirmation). The staff
+  form now saves **only the sections staff edited** (`form_data || patch`), so a client saving through
+  their link at the same time keeps their answers; while the form is out the staff form says so. No lock.
+- **Required answers** (catalogue: `required`, `requiredWhenAnyYes`, `minLength`, section `oneOf`,
+  list gates): a section always saves, but only counts as done — and the form can only be sent — once
+  its core answers are in (`sectionMissing()`). When and where: date + place. Police: informed; if so a
+  reference or station. People involved: new "Was anyone else there?" gate; if yes, a name per person.
+  Other vehicles: the gate; if yes, make/model or reg per row. Damage: a description ("none" is fine).
+  Your version of events: a description (≥ 20 characters) + at fault. Driver declaration: title,
+  occupation, (a)–(c), details if any is yes, and the signature. Staff "mark complete" is not gated.
+- **Validation** (`fieldFormatError()`): emails need `x@y.z`; phones are loose (any country) — digits,
+  spaces, `+ ( ) - .`, 7–15 digits. Refused on the client form (page and server); shown as a warning
+  on the staff form.
+- **People consolidated.** "Witness type" and the "Someone injured" chip are gone: a witness gets
+  "Do they know you or the driver?", and the PDF derives the broker's witness type (Passenger /
+  Connected / Independent; an old `witness_type` still prints). Injured stays a yes/no.
+- **Renamed:** "What happened" → **When and where**; "Your account" → **Your version of events**.
+- **Submitted = action.** Bell (high) to owner + watchers, an **email to the owner** (or the default
+  claim watchers when there's no owner), and a Needs Attention bucket **"Claim forms to review"**
+  (stage `submitted`) — those cases are left out of the overdue-check bucket.
+- **Second case on the same job — a flag, not a gate.** Ticking "Possible insurance claim" (Log Problem
+  form or the Problem page) when the job (or, for a jobless Problem, the van) already has an open case
+  offers "Add this Problem to that case" or "open a separate case".
+- **Driver not on a hire** (one of us or a freelancer — garage runs, non-HireHop jobs): a staff-only
+  section `non_hire_driver` (name, DOB, address, mobile, licence) that the broker PDF prints in the
+  driver block when the case has no hire driver. Staff fill the declaration from the staff form.
+- Not done, deliberately: changing the van on a case (jon — it comes from the Problem; a jobless
+  Problem on the van already covers non-job claims).

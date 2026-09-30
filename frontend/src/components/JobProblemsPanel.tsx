@@ -11,6 +11,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { useOpenClaimsFor, ExistingClaimChoice } from './claims/format';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -266,6 +267,12 @@ function LogProblemForm({ jobId, prefill, onCancel, onCreated }: {
   // Tick to open a possible insurance claim from this Problem in the same
   // save (docs/INCIDENT-CLAIMS-SPEC.md §3 step 3). The broker is not told.
   const [possibleClaim, setPossibleClaim] = useState(!!prefill);
+  // An open case already on this job → offer to add the Problem to it (a flag, not a gate).
+  const openClaims = useOpenClaimsFor(jobId, null, possibleClaim);
+  const [claimTarget, setClaimTarget] = useState('');
+  useEffect(() => {
+    if (openClaims && !claimTarget) setClaimTarget(openClaims[0]?.id || 'new');
+  }, [openClaims, claimTarget]);
   const [personId, setPersonId] = useState('');
   const [lineItemId, setLineItemId] = useState('');     // HH list_id stringified
   const [lineItemName, setLineItemName] = useState(''); // denormalised
@@ -326,6 +333,11 @@ function LogProblemForm({ jobId, prefill, onCancel, onCreated }: {
       const created = await api.post<{ data: { id: string } }>('/problems', payload);
       if (possibleClaim) {
         try {
+          if (claimTarget && claimTarget !== 'new') {
+            await api.post(`/claims/${claimTarget}/problems`, { issue_id: created.data.id });
+            navigate(`/vehicles/claims/${claimTarget}`);
+            return;
+          }
           const claim = await api.post<{ data: { id: string } }>(`/claims/from-problem/${created.data.id}`, {});
           navigate(`/vehicles/claims/${claim.data.id}`);
         } catch {
@@ -568,6 +580,9 @@ function LogProblemForm({ jobId, prefill, onCancel, onCreated }: {
           <span className="block text-[10px] text-gray-500">Opens a claim case for this Problem. Nothing is sent to the broker.</span>
         </span>
       </label>
+      {possibleClaim && openClaims && openClaims.length > 0 && (
+        <ExistingClaimChoice claims={openClaims} value={claimTarget} onChange={setClaimTarget} />
+      )}
 
       {error && <div className="text-xs text-red-600">{error}</div>}
 

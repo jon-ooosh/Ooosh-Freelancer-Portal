@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   CLAIM_SECTIONS, CLIENT_CHECKLIST, CLAIM_PRIVACY_NOTICE, BROKER_DECLARATION,
+  sectionMissing, sectionFormatErrors,
   type ClaimSectionDef, type DamageMark, type OutlineType,
 } from '@claimform';
 import { FieldsGrid, ListEditor } from '../components/claims/FormFields';
@@ -53,7 +54,24 @@ async function call<T>(url: string, init?: RequestInit): Promise<T> {
 }
 const post = <T,>(url: string, data: unknown, headers: Record<string, string> = {}) =>
   call<T>(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(data) });
-const errText = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong');
+const errText = (e: unknown) => {
+  const body = (e as { body?: { problems?: string[]; missing?: string[] } }).body;
+  const list = body?.problems || body?.missing;
+  const msg = e instanceof Error ? e.message : 'Something went wrong';
+  return list?.length ? `${msg}: ${list.join('; ')}` : msg;
+};
+
+/** A checklist item's state: done (client saved it complete), started, or not yet. */
+function itemState(key: string, data: FormState): { done: boolean; started: boolean; missing: string[] } {
+  if (key === 'driver') return { done: data.driver_signed, started: data.driver_signed, missing: [] };
+  if (key === 'who') return { done: !!data.sections_done?.who, started: !!data.filled_as, missing: [] };
+  const def = CLAIM_SECTIONS.find((s) => s.key === key);
+  const missing = def ? sectionMissing(def, data.form) : [];
+  const v = data.form[key];
+  const started = (Array.isArray(v) ? v.length > 0 : !!v && Object.keys(v as object).length > 0)
+    || typeof data.form[`${key}_involved`] === 'boolean';
+  return { done: !!data.sections_done?.[key] && missing.length === 0, started, missing };
+}
 
 export default function ClaimFormPage() {
   const { token = '' } = useParams<{ token: string }>();
@@ -108,8 +126,9 @@ export default function ClaimFormPage() {
     );
   }
 
-  const done = data.sections_done || {};
-  const allDone = CLIENT_CHECKLIST.every((s) => (s.key === 'driver' ? data.driver_signed : !!done[s.key]));
+  const states = Object.fromEntries(CLIENT_CHECKLIST.map((s) => [s.key, itemState(s.key, data)]));
+  const doneCount = CLIENT_CHECKLIST.filter((s) => states[s.key].done).length;
+  const allDone = doneCount === CLIENT_CHECKLIST.length;
 
   if (view === 'home') {
     return (
@@ -119,19 +138,27 @@ export default function ClaimFormPage() {
           each part saves when you press <strong>Save</strong>, and this same link brings you back.
         </p>
         <p className="text-sm text-slate-500 mb-4">
-          {Object.keys(done).filter((k) => k !== 'driver').length + (data.driver_signed ? 1 : 0)} of {CLIENT_CHECKLIST.length} done
+          {doneCount} of {CLIENT_CHECKLIST.length} done · parts marked <span className="text-red-600">*</span> are needed
         </p>
         <ul className="divide-y border rounded-xl bg-white">
           {CLIENT_CHECKLIST.map((s) => {
-            const isDone = s.key === 'driver' ? data.driver_signed : !!done[s.key];
+            const st = states[s.key];
             return (
               <li key={s.key}>
                 <button type="button" onClick={() => go(s.key)} className="w-full flex items-center justify-between px-4 py-4 text-left">
                   <span className="flex items-center gap-3">
-                    <span className={`w-7 h-7 rounded-full flex items-center justify-center text-sm ${isDone ? 'bg-green-600 text-white' : 'border-2 border-slate-300 text-slate-400'}`}>
-                      {isDone ? '✓' : ''}
+                    <span className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-sm ${
+                      st.done ? 'bg-green-600 text-white' : st.started ? 'border-2 border-amber-500 text-amber-600' : 'border-2 border-slate-300 text-slate-400'}`}>
+                      {st.done ? '✓' : st.started ? '…' : ''}
                     </span>
-                    <span className="text-base text-slate-800">{s.title}</span>
+                    <span>
+                      <span className="block text-base text-slate-800">{s.title}</span>
+                      {!st.done && st.started && (
+                        <span className="block text-xs text-amber-700">
+                          {st.missing.length ? `Still needed: ${st.missing.slice(0, 3).join(', ')}${st.missing.length > 3 ? '…' : ''}` : 'Started — open it and press Save'}
+                        </span>
+                      )}
+                    </span>
                   </span>
                   <span className="text-slate-400">›</span>
                 </button>
@@ -358,9 +385,13 @@ function ClientSection({ token, def, data, onSaved, onReload }: {
   const [error, setError] = useState('');
   const sketchRef = useRef<SketchPadHandle>(null);
   const [sketchDirty, setSketchDirty] = useState(false);
+  const [stillNeeded, setStillNeeded] = useState<string[]>([]);
 
   const save = async () => {
-    setBusy(true); setError('');
+    const value = def.list ? rows : row;
+    const bad = sectionFormatErrors(def, value);
+    if (bad.length) { setError(`Please check: ${bad.join('; ')}`); return; }
+    setBusy(true); setError(''); setStillNeeded([]);
     try {
       if (def.key === 'account' && sketchDirty && sketchRef.current && !sketchRef.current.isEmpty()) {
         const blob = await sketchRef.current.toBlob();
@@ -370,8 +401,15 @@ function ClientSection({ token, def, data, onSaved, onReload }: {
           await call(`${API}/${token}/sketch`, { method: 'POST', body: fd });
         }
       }
-      await post(`${API}/${token}/section/${def.key}`, def.list ? { data: rows, gate } : { data: row });
-      onSaved();
+      const r = await post<{ data: { missing?: string[] } }>(`${API}/${token}/section/${def.key}`, def.list ? { data: rows, gate } : { data: row });
+      setSketchDirty(false);
+      // Saved either way — but only back to the checklist once it's complete.
+      if (r.data.missing?.length) {
+        setStillNeeded(r.data.missing);
+        await onReload();
+      } else {
+        onSaved();
+      }
     } catch (e) { setError(errText(e)); } finally { setBusy(false); }
   };
 
@@ -423,7 +461,15 @@ function ClientSection({ token, def, data, onSaved, onReload }: {
       )}
 
       {error && <p className="text-sm text-red-600">{error}</p>}
+      {stillNeeded.length > 0 && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          <p className="font-medium">Saved — but to finish this part we still need:</p>
+          <ul className="list-disc ml-5 mt-1">{stillNeeded.map((m) => <li key={m}>{m}</li>)}</ul>
+          <p className="mt-1">Fill those in and press Save again, or come back to it later.</p>
+        </div>
+      )}
       <button type="button" disabled={busy} onClick={save} className={primary}>{busy ? 'Saving…' : 'Save'}</button>
+      {stillNeeded.length > 0 && <button type="button" onClick={onSaved} className={secondary}>Back to the checklist</button>}
     </div>
   );
 }
@@ -588,6 +634,8 @@ function DriverSection({ token, data, session, onSession, onDone }: {
   }
 
   const save = async () => {
+    const missing = sectionMissing(def, { driver: row });
+    if (missing.length) { setError(`Please answer: ${missing.join('; ')}`); return; }
     const blob = await sigRef.current?.getBlob();
     if (!blob) { setError('Please sign in the box.'); return; }
     if (printName.trim().length < 2) { setError('Please print your name.'); return; }

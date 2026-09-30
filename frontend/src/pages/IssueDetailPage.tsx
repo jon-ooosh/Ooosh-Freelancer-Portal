@@ -15,6 +15,7 @@ import CostCaptureModal from '../components/CostCaptureModal';
 import { useAttachments, type InteractionAttachment } from '../components/messaging/Attachments';
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import ImageLightbox from '../components/ImageLightbox';
+import { useOpenClaimsFor, ExistingClaimChoice } from '../components/claims/format';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -167,14 +168,28 @@ function IssueDetailContent() {
   const attach = useAttachments();
   const navigate = useNavigate();
   const [openingClaim, setOpeningClaim] = useState(false);
+  const [choosingClaim, setChoosingClaim] = useState(false);
+  const [claimTarget, setClaimTarget] = useState('');
+  const openClaims = useOpenClaimsFor(issue?.job_id, issue?.vehicle_id, !!issue && !issue.claim_id);
 
   // A Problem is where every possible insurance claim starts
-  // (docs/INCIDENT-CLAIMS-SPEC.md D1). Idempotent server-side.
+  // (docs/INCIDENT-CLAIMS-SPEC.md D1). Idempotent server-side. An open case
+  // already on the job (or van) is offered first — a flag, not a gate.
   async function openClaim() {
     if (!id) return;
-    if (!confirm('Open a possible insurance claim for this Problem?')) return;
+    if (openClaims && openClaims.length > 0 && !choosingClaim) {
+      setClaimTarget(openClaims[0].id);
+      setChoosingClaim(true);
+      return;
+    }
+    if (!choosingClaim && !confirm('Open a possible insurance claim for this Problem?')) return;
     setOpeningClaim(true);
     try {
+      if (choosingClaim && claimTarget !== 'new') {
+        await api.post(`/claims/${claimTarget}/problems`, { issue_id: id });
+        navigate(`/vehicles/claims/${claimTarget}`);
+        return;
+      }
       const res = await api.post<{ data: { id: string } }>(`/claims/from-problem/${id}`, {});
       navigate(`/vehicles/claims/${res.data.id}`);
     } catch (err) {
@@ -313,6 +328,19 @@ function IssueDetailContent() {
           </button>
         </div>
       </div>
+
+      {choosingClaim && openClaims && openClaims.length > 0 && !issue.claim_id && (
+        <div className="mb-4 space-y-2">
+          <ExistingClaimChoice claims={openClaims} value={claimTarget} onChange={setClaimTarget} />
+          <div className="flex gap-2 justify-end">
+            <button type="button" onClick={() => setChoosingClaim(false)} className="px-3 py-1.5 text-xs border rounded">Cancel</button>
+            <button type="button" onClick={openClaim} disabled={openingClaim}
+              className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white disabled:opacity-50">
+              {openingClaim ? 'Saving…' : claimTarget === 'new' ? 'Open a separate case' : 'Add to that case'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {showAddCost && (
         <CostCaptureModal

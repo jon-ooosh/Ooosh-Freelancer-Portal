@@ -337,7 +337,24 @@ export interface ClaimAttentionRow {
  * missing. (The client-chase bucket arrives with Phase 3.) Full total plus a
  * capped item list — never bucket a LIMIT-ed set client-side.
  */
-export async function getClaimAttentionBuckets(): Promise<{ check_overdue: ClaimAttentionRow[]; check_overdue_total: number }> {
+export async function getClaimAttentionBuckets(): Promise<{
+  check_overdue: ClaimAttentionRow[];
+  check_overdue_total: number;
+  to_review: ClaimAttentionRow[];
+}> {
+  // A submitted form is its own bucket (it needs a manager's review, whatever
+  // the check date says), so it's left out of the overdue-check one.
+  const review = await query(
+    `SELECT c.id, c.stage, c.vehicle_reg, c.hh_job_number,
+            to_char(c.submitted_at, 'YYYY-MM-DD') AS next_check_on,
+            NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), '') AS owner_name
+     FROM incident_claims c
+     LEFT JOIN users u ON u.id = c.owner_user_id
+     LEFT JOIN people p ON p.id = u.person_id
+     WHERE c.is_deleted = false AND c.stage = 'submitted'
+     ORDER BY c.submitted_at NULLS LAST, c.updated_at
+     LIMIT 20`,
+  );
   const r = await query(
     `SELECT c.id, c.stage, c.vehicle_reg, c.hh_job_number,
             to_char(c.next_check_on, 'YYYY-MM-DD') AS next_check_on,
@@ -347,7 +364,7 @@ export async function getClaimAttentionBuckets(): Promise<{ check_overdue: Claim
      LEFT JOIN users u ON u.id = c.owner_user_id
      LEFT JOIN people p ON p.id = u.person_id
      WHERE c.is_deleted = false
-       AND c.stage <> 'closed'
+       AND c.stage NOT IN ('closed', 'submitted')
        AND (c.next_check_on IS NULL OR c.next_check_on < CURRENT_DATE)
      ORDER BY c.next_check_on NULLS FIRST
      LIMIT 10`,
@@ -356,12 +373,67 @@ export async function getClaimAttentionBuckets(): Promise<{ check_overdue: Claim
   return {
     check_overdue: r.rows.map(({ total: _t, ...row }) => row as ClaimAttentionRow),
     check_overdue_total: total,
+    to_review: review.rows as ClaimAttentionRow[],
   };
 }
 
 /** Whether a stage needs a next-check date (everything but self-chasing and closed). */
 export function stageNeedsCheckDate(stage: string): boolean {
   return stage !== 'closed' && !SELF_CHASING.has(stage);
+}
+
+/**
+ * The client submitted the form: a bell for the owner and watchers, and an
+ * email to the owner (or, with no owner, the default claim watchers) — it
+ * needs a manager to review it, and a bell alone is easy to miss. The case
+ * also sits in Needs Attention until it's moved on. Best-effort: never throws.
+ */
+export async function notifyClaimSubmitted(claimId: string, byName: string): Promise<void> {
+  try {
+    const c = await query(`SELECT vehicle_reg, hh_job_number, owner_user_id FROM incident_claims WHERE id = $1`, [claimId]);
+    if (!c.rows[0]) return;
+    const label = claimLabel(c.rows[0]);
+    const title = `Claim form submitted — ${label}`;
+    const content = `${byName} has submitted the incident form. It needs a manager to review it.`;
+    await notifyClaimFollowers(claimId, null, title, content, { priority: 'high' });
+    const to = c.rows[0].owner_user_id ? [c.rows[0].owner_user_id as string] : await getDefaultClaimWatchers();
+    if (!to.length) return;
+    const users = await query(
+      `SELECT u.id, u.email, COALESCE(NULLIF(p.preferred_name, ''), p.first_name) AS first_name
+       FROM users u LEFT JOIN people p ON p.id = u.person_id
+       WHERE u.id = ANY($1::uuid[]) AND u.is_active = true AND u.email IS NOT NULL`,
+      [to],
+    );
+    const { emailService } = await import('./email-service');
+    const { frontendLink } = await import('../config/app-urls');
+    const esc = (s: string) => s.replace(/[<>&]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[ch] as string));
+    const emailed: string[] = [];
+    for (const u of users.rows) {
+      const result = await emailService.sendRaw({
+        to: u.email,
+        subject: title,
+        html: `
+          <p>Hi ${esc(u.first_name || 'there')},</p>
+          <p style="font-size: 15px; margin: 16px 0;"><strong>${esc(content)}</strong></p>
+          <p><a href="${frontendLink(`/vehicles/claims/${claimId}`)}" style="color: #7B5EA7; text-decoration: underline;">Open the case in Ooosh</a></p>
+          <p style="color: #999; font-size: 12px; margin-top: 24px;">The broker has not been told — that only happens when a manager sends it.</p>`,
+        variant: 'internal',
+      });
+      if (result.success) emailed.push(u.id);
+      else console.error(`[claims] submitted email to ${u.email} failed:`, result.error);
+    }
+    // Those people's bells are the same news — don't let the escalator email it again.
+    if (emailed.length) {
+      await query(
+        `UPDATE notifications SET email_sent_at = NOW()
+         WHERE entity_type = 'incident_claims' AND entity_id = $1 AND title = $2
+           AND user_id = ANY($3::uuid[]) AND email_sent_at IS NULL`,
+        [claimId, title, emailed],
+      );
+    }
+  } catch (err) {
+    console.error('Claim submitted notify failed (non-fatal):', err);
+  }
 }
 
 /**

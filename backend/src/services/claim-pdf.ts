@@ -287,6 +287,20 @@ export async function buildClaimPdf(
     field('HGV', hgv ? `Yes${passed ? ` (licence obtained ${passed})` : ''}` : 'No');
     field('Car — full', String(driver.licence_type || '').toLowerCase().includes('provisional') ? 'No' : `Yes${passed ? ` (obtained ${passed})` : ''}`);
     if (String(driver.licence_type || '').toLowerCase().includes('provisional')) field('Car — provisional', 'Yes');
+  } else if (hasValue(sec('non_hire_driver').name)) {
+    // Not a hire client (one of us, a freelancer) — staff typed the details in.
+    const nh = sec('non_hire_driver');
+    field('Name', [drv.title, nh.name].filter(hasValue).join(' '));
+    field('Date of birth', ukDate(nh.date_of_birth));
+    field('Occupation', String(drv.occupation || ''));
+    field('Address', String(nh.address || ''));
+    field('Telephone (mobile)', String(nh.phone || ''));
+    field('(a) Motor accident or claim in the past 3 years?', yesNo(drv.decl_accidents));
+    field('(b) Driving conviction in the last 5 years, or prosecution pending?', yesNo(drv.decl_convictions));
+    field('(c) Defect in vision or hearing, or any physical or mental disability?', yesNo(drv.decl_disability));
+    field('Full details', String(drv.decl_details || ''));
+    heading('Driving licence');
+    field('Licence', String(nh.licence || ''));
   } else {
     para('Driver not yet identified on this case.', 9, regular, GREY);
   }
@@ -334,7 +348,15 @@ export async function buildClaimPdf(
     });
   };
   personTable('Passengers', passengers, (p) => (p.injured === true ? 'Injured: Yes' : p.injured === false ? 'Injured: No' : ''));
-  personTable('Witnesses', witnesses, (p) => (hasValue(p.witness_type) ? `Witness type: ${p.witness_type}` : ''));
+  // The broker's witness type, from the roles + "do they know you?" (witness_type is the pre-Oct-2026 field).
+  const witnessType = (p: Row) => (hasRole(p, 'Passenger in our van') ? 'Passenger'
+    : p.knows_us === true ? 'Connected (knows the driver)'
+      : p.knows_us === false ? 'Independent'
+        : hasValue(p.witness_type) ? String(p.witness_type) : '');
+  personTable('Witnesses', witnesses, (p) => [
+    witnessType(p) ? `Witness type: ${witnessType(p)}` : '',
+    p.injured === true ? 'Injured: Yes' : '',
+  ].filter(hasValue).join(' · '));
   personTable('Other people involved', others, (p) => [
     Array.isArray(p.roles) ? (p.roles as string[]).join(', ') : '',
     p.injured === true ? 'Injured: Yes' : '',
