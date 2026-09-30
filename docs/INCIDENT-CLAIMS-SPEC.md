@@ -738,3 +738,13 @@ then success, then writes refused), and the broker PDF with all of it in.
   driver block when the case has no hire driver. Staff fill the declaration from the staff form.
 - Not done, deliberately: changing the van on a case (jon — it comes from the Problem; a jobless
   Problem on the van already covers non-job claims).
+
+### 19.2 Outline artwork (Oct 2026)
+The Vito, Sprinter MWB and Sprinter LWB now use jon's original shaded outline sheets
+(`frontend/src/components/claims/outlines/*.svg`, from the "Ooosh Vehicle Outlines" design handoff —
+drawn to scale in mm, roof / offside + front / nearside + rear). Use them as they are; the handoff's
+generator (not committed) is where edits belong. The C2PA provenance metadata was stripped from the
+copies. They're inlined into the marking sheet, so marks (still % of the sheet) sit on the artwork and
+the saved PNG for the broker PDF includes it. 'generic' vans keep the simple generated drawing.
+Marks saved before the swap were placed on the old layout and will sit in the wrong place on these
+sheets — only test cases had any.
