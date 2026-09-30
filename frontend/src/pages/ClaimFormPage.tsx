@@ -422,7 +422,7 @@ function ClientSection({ token, def, data, onSaved, onReload }: {
         <div className="space-y-5">
           <div>
             <h3 className="text-base font-semibold text-slate-700 mb-1">Mark the damage on the van</h3>
-            <p className="text-sm text-slate-500 mb-2">A cross for damage, an arrow for where it was hit. Roughly is fine — the photos show the detail.</p>
+            <p className="text-sm text-slate-500 mb-2">A cross for damage, an arrow for where it was hit. Roughly is fine — the photos show the detail. Turning your phone sideways makes the drawing bigger.</p>
             <DamageOutlineEditor
               type={data.vehicle.outline}
               initial={data.damage_marks}

@@ -33,6 +33,8 @@ export interface ClaimListRow {
   owner_user_id: string | null;
   owner_name: string | null;
   next_check_on: string | null;
+  chase_level?: number;
+  chase_paused_at?: string | null;
   job_name: string | null;
   client_name: string | null;
   driver_name: string | null;
@@ -98,9 +100,17 @@ export function ukDatePlus(days: number): string {
   return dt.toISOString().slice(0, 10);
 }
 
-/** Check-date cell: red when overdue or missing on a case that needs one. */
-export function NextCheckCell({ row }: { row: Pick<ClaimListRow, 'stage' | 'next_check_on'> }) {
+/**
+ * Check-date cell: red when overdue or missing on a case that needs one. A case
+ * with the form out chases the client itself (spec §9.1) unless it's paused.
+ */
+export function NextCheckCell({ row }: { row: Pick<ClaimListRow, 'stage' | 'next_check_on' | 'chase_level' | 'chase_paused_at'> }) {
   if (row.stage === 'closed') return <span className="text-slate-400">—</span>;
+  if (row.stage === 'form_out' && !row.chase_paused_at) {
+    return (row.chase_level || 0) > 4
+      ? <span className="text-red-600 font-medium">reminders ran out</span>
+      : <span className="text-slate-500">client reminders ({Math.min(row.chase_level || 0, 4)}/4)</span>;
+  }
   if (!row.next_check_on) return <span className="text-red-600 font-medium">not set</span>;
   const overdue = row.next_check_on < ukToday();
   const today = row.next_check_on === ukToday();

@@ -1018,7 +1018,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
 
     // ── Possible-claim check dates (docs/INCIDENT-CLAIMS-SPEC.md §9.3) ─────
     // Defensive, like the PCN block: a pre-migration env can't 500 the dashboard.
-    let claimAttention = { check_overdue: [] as unknown[], check_overdue_total: 0, to_review: [] as unknown[] };
+    let claimAttention = { check_overdue: [] as unknown[], check_overdue_total: 0, to_review: [] as unknown[], chase_exhausted: [] as unknown[] };
     try {
       const { getClaimAttentionBuckets } = await import('../services/incident-claims');
       claimAttention = await getClaimAttentionBuckets();
@@ -1116,6 +1116,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         claim_check_overdue: claimAttention.check_overdue,
         claim_check_overdue_total: claimAttention.check_overdue_total,
         claim_to_review: claimAttention.to_review,
+        claim_chase_exhausted: claimAttention.chase_exhausted,
       },
       transport_ops: {
         summary: transportOpsSummary,

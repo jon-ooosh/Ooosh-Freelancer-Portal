@@ -1403,6 +1403,23 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: claim check-date reminders scheduled daily at 09:22 Europe/London');
 
+  // ── Possible-claim client chase ──────────────────────────────────────────
+  // Daily at 09:21 Europe/London, weekends included (tours run through them).
+  // Reminds everyone holding a live link on a case with the form out, up to 4
+  // times, then flags it to staff (docs/INCIDENT-CLAIMS-SPEC.md §9.1). Stamp-
+  // first per UK day. Like the check dates, the case's own stage decides — no
+  // lost/cancelled job gate (claims outlive their jobs).
+  cron.schedule('21 9 * * *', async () => {
+    try {
+      const { runClaimClientChase } = await import('../services/claim-chase');
+      const r = await runClaimClientChase();
+      if (r.chased || r.escalated) console.log(`Scheduler: claim client chase — ${r.chased} chased, ${r.escalated} flagged, ${r.skipped} skipped`);
+    } catch (err) {
+      console.error('Scheduler: claim client chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: claim client chase scheduled daily at 09:21 Europe/London');
+
   // ── Pre-auth expiry reconciliation (silent housekeeping) ─────────────────
   // Daily at 09:40 Europe/London. Closes out held pre-auths past their window.
   // NO emails / bell nudges — the dashboard "Pre-auth Holds Expiring" bucket is
