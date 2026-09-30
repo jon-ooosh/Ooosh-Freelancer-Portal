@@ -167,3 +167,36 @@ export function MotHistoryTab({ vehicleId }: Props) {
     </div>
   )
 }
+
+/**
+ * One line under Details › Key Dates › MOT Due, so the date and DVSA's record
+ * never sit side by side disagreeing. MOT Due stays the ONE date (it's what
+ * the compliance check reads); a DVSA refresh moves it forward itself, so the
+ * only case that needs a person is DVSA being EARLIER. Shares the MOT tab's
+ * query, so it costs nothing extra once either has loaded.
+ */
+export function MotDvsaNote({ vehicleId }: Props) {
+  const { data } = useQuery({
+    queryKey: ['mot-history', vehicleId],
+    queryFn: () => fetchMotHistory(vehicleId),
+    staleTime: 5 * 60 * 1000,
+  })
+  const dvsaDue = data?.summary?.dvsaMotDue ?? null
+  if (!data || !dvsaDue) return null
+
+  if (data.comparison === 'earlier') {
+    return (
+      <div className="border-b border-gray-100 py-1 text-[11px] text-amber-700">
+        ⚠ DVSA says the MOT expires {fmtDate(dvsaDue)} — earlier than the date above. Check which is right.
+      </div>
+    )
+  }
+  if (data.comparison === 'same') {
+    return (
+      <div className="border-b border-gray-100 py-1 text-[11px] text-gray-400">
+        ✓ Matches DVSA (checked {fmtDateTime(data.fetchedAt)})
+      </div>
+    )
+  }
+  return null
+}

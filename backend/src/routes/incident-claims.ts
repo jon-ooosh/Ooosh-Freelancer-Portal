@@ -33,6 +33,7 @@ import {
   logIssueEvent, getDefaultVehicleIssueWatchers, notifyIssueRecipients,
 } from '../services/job-issues';
 import { estimateVehicleValue } from '../services/vehicle-value';
+import { notifyVehicleSaleOfIssue } from '../services/vehicle-sales';
 import { resolveOutlineType, CLAIM_SECTIONS } from '../services/claim-form-fields';
 import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
@@ -209,6 +210,7 @@ router.post('/out-of-the-blue', validate(outOfTheBlueSchema), async (req: AuthRe
       category: 'dispute', severity: 'normal', source_module: 'manual', alleged_date: body.alleged_date,
     });
     await notifyIssueRecipients(issueId, userId, 'normal', `New issue: ${body.summary.slice(0, 80)}`, 'dispute — third-party claim');
+    await notifyVehicleSaleOfIssue(issueId, userId);
     if (body.job_id) {
       await query(
         `INSERT INTO interactions (type, content, job_id, created_by, source)

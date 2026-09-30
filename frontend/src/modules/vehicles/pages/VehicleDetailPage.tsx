@@ -10,7 +10,9 @@ import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
-import { MotHistoryTab } from '../components/mot/MotHistoryTab'
+import { MotHistoryTab, MotDvsaNote } from '../components/mot/MotHistoryTab'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
 import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
 import { ClaimListRow, ClaimStagePill, fmtClaimDate } from '../../../components/claims/format'
@@ -286,6 +288,9 @@ export function VehicleDetailPage() {
   const canEditMileage = isAdmin || opAuth?.userRole === 'weekend_manager'
   // Finance is stricter than the page's admin/manager gate — admin only.
   const isStrictAdmin = opAuth?.userRole === 'admin'
+  // Open sale (if any) — the header pill links to the sale page.
+  const openSales = useOpenSalesByVehicle()
+  const openSale = vehicle ? openSales.get(vehicle.id) : undefined
 
   const saveField = async (field: string, value: string | number | boolean | null) => {
     if (!vehicle) return
@@ -361,6 +366,15 @@ export function VehicleDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-2xl font-bold text-ooosh-navy">{vehicle.reg}</h2>
+            {openSale ? (
+              <Link to={vmPath(`/vehicles/${vehicle.id}/sale`)} className="inline-block hover:opacity-80">
+                <ForSalePill sale={openSale} />
+              </Link>
+            ) : isStrictAdmin && !vehicle.isOldSold ? (
+              <Link to={vmPath(`/vehicles/${vehicle.id}/sale`)} className="text-[11px] text-ooosh-blue hover:underline">
+                Start sales process
+              </Link>
+            ) : null}
             <p className="mt-0.5 text-sm text-gray-500">{vehicle.model || vehicle.vehicleType}</p>
             <p className="text-sm text-gray-400">{vehicle.make} · {vehicle.colour}</p>
           </div>
@@ -591,6 +605,7 @@ export function VehicleDetailPage() {
           onSaveDate={v => saveField('mot_due', v)}
           onSaveBooked={v => saveField('mot_booked_in_date', v)}
         />
+        <MotDvsaNote vehicleId={vehicle.id} />
         <ComplianceDateRow
           label="Tax Due" date={vehicle.taxDue} warningDays={cs.tax_warning_days}
           bookedIn={vehicle.taxBookedInDate}

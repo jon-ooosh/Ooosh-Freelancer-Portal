@@ -54,10 +54,40 @@ export function isDvsaConfigured(): boolean {
 export type DvsaErrorKind = 'not_configured' | 'auth' | 'not_found' | 'rate_limited' | 'failed';
 
 export class DvsaError extends Error {
-  constructor(public kind: DvsaErrorKind, message: string) {
+  /** A short, secret-free reason from DVSA / Entra (e.g. "AADSTS7000222 — the client
+   *  secret has expired"), shown to staff after the plain sentence. */
+  constructor(public kind: DvsaErrorKind, message: string, public detail: string | null = null) {
     super(message);
     this.name = 'DvsaError';
   }
+}
+
+/** The Entra codes worth naming in plain words — the rest show as the raw code. */
+const ENTRA_CODES: Record<string, string> = {
+  AADSTS7000222: 'the client secret has expired',
+  AADSTS7000215: 'the client secret is wrong',
+  AADSTS700016: 'the client ID is not recognised',
+  AADSTS90002: 'the tenant in DVSA_TOKEN_URL is not recognised',
+  AADSTS70011: 'DVSA_SCOPE is not valid',
+  AADSTS1002012: 'DVSA_SCOPE is not valid',
+};
+
+/** Pull the Entra error code out of a token-endpoint error body. Pure. */
+export function entraErrorDetail(body: string): string | null {
+  const code = body.match(/AADSTS\d+/)?.[0];
+  if (code) return ENTRA_CODES[code] ? `${code} — ${ENTRA_CODES[code]}` : code;
+  try {
+    const err = (JSON.parse(body) as { error?: unknown }).error;
+    return typeof err === 'string' ? err : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The plain sentence, plus DVSA's own reason when we have one. */
+export function explainDvsaError(err: unknown): string {
+  if (!(err instanceof DvsaError)) return describeDvsaError('failed');
+  return err.detail ? `${describeDvsaError(err.kind)} (DVSA said: ${err.detail})` : describeDvsaError(err.kind);
 }
 
 /** The sentence staff see in the MOT history section. */
@@ -66,7 +96,7 @@ export function describeDvsaError(kind: DvsaErrorKind): string {
     case 'not_configured':
       return 'DVSA is not set up on this server (DVSA_* settings missing from .env).';
     case 'auth':
-      return 'DVSA rejected our credentials — the client secret may have expired. Renew it with DVSA and update .env.';
+      return 'DVSA rejected our credentials — the client secret may have expired, or one of the DVSA_* values in .env is wrong.';
     case 'not_found':
       return 'DVSA has no record of this registration.';
     case 'rate_limited':
@@ -105,7 +135,7 @@ async function getAccessToken(cfg: DvsaConfig): Promise<string> {
     const body = await resp.text().catch(() => '');
     // Entra answers a bad/expired secret with 400/401 (invalid_client).
     const kind: DvsaErrorKind = resp.status === 400 || resp.status === 401 ? 'auth' : 'failed';
-    throw new DvsaError(kind, `DVSA token request returned ${resp.status}: ${body.slice(0, 300)}`);
+    throw new DvsaError(kind, `DVSA token request returned ${resp.status}: ${body.slice(0, 300)}`, entraErrorDetail(body));
   }
 
   const json = (await resp.json()) as { access_token?: string; expires_in?: number | string };
@@ -160,7 +190,13 @@ export async function fetchMotHistoryByReg(reg: string): Promise<unknown> {
         : resp.status === 429 ? 'rate_limited'
         : resp.status === 401 || resp.status === 403 ? 'auth'
         : 'failed';
-    throw new DvsaError(kind, `DVSA returned ${resp.status}: ${body.slice(0, 300)}`);
+    const apiCode = (() => {
+      try { return (JSON.parse(body) as { errorCode?: unknown }).errorCode; } catch { return null; }
+    })();
+    const detail = kind === 'auth'
+      ? `the MOT API refused the request (HTTP ${resp.status}) — check DVSA_API_KEY`
+      : typeof apiCode === 'string' ? apiCode : null;
+    throw new DvsaError(kind, `DVSA returned ${resp.status}: ${body.slice(0, 300)}`, detail);
   }
   // Unreachable — the loop either returns or throws.
   throw new DvsaError('failed', 'DVSA request failed');
@@ -328,14 +364,13 @@ export async function refreshVehicleMot(vehicleId: string, actor: string): Promi
   try {
     payload = await fetchMotHistoryByReg(reg);
   } catch (err) {
-    const kind: DvsaErrorKind = err instanceof DvsaError ? err.kind : 'failed';
     console.warn(`[dvsa-mot] ${reg}: ${(err as Error).message}`);
     await query(
       `INSERT INTO vehicle_mot_history (vehicle_id, last_attempt_at, last_error)
        VALUES ($1, NOW(), $2)
        ON CONFLICT (vehicle_id) DO UPDATE
          SET last_attempt_at = NOW(), last_error = EXCLUDED.last_error`,
-      [vehicleId, describeDvsaError(kind)],
+      [vehicleId, explainDvsaError(err)],
     );
     throw err instanceof DvsaError ? err : new DvsaError('failed', (err as Error).message);
   }

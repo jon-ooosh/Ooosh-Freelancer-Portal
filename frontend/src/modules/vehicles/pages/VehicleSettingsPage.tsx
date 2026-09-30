@@ -6,7 +6,7 @@
 
 import { useState, useEffect } from 'react'
 import { hasManagerRole } from '../../../lib/roles'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
@@ -15,6 +15,7 @@ import type { ComplianceSettings } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import { VAN_TYPES } from '../lib/van-matching'
 import { buildDefaultRemovalChecklist } from '../lib/removal-checklist'
+import { fetchSaleForVehicle, saleStageLabel } from '../lib/vehicle-sales'
 
 function EditableField({
   label,
@@ -231,7 +232,15 @@ export function VehicleSettingsPage() {
   // are operational so any admin/manager who can reach this page may set them.
   const isStrictAdmin = opAuth?.userRole === 'admin'
   const [actionLoading, setActionLoading] = useState(false)
-  const [showRemovalModal, setShowRemovalModal] = useState(false)
+  // `?sell=1` — the sale page's "Mark sold…" lands here with the modal open.
+  const [searchParams] = useSearchParams()
+  const [showRemovalModal, setShowRemovalModal] = useState(searchParams.get('sell') === '1')
+  // An open sale changes the danger zone: "Mark sold" instead of "Remove without sale".
+  const { data: openSale } = useQuery({
+    queryKey: ['vehicle-sale', id],
+    queryFn: () => fetchSaleForVehicle(id ?? ''),
+    enabled: !!id,
+  })
 
   const { data: complianceSettings } = useQuery({
     queryKey: ['compliance-settings'],
@@ -314,6 +323,9 @@ export function VehicleSettingsPage() {
       }
       await updateVehicle(vehicle.id, payload)
       queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+      // Removal closes any open sale on the van server-side (services/vehicle-sales.ts).
+      queryClient.invalidateQueries({ queryKey: ['vehicle-sale', vehicle.id] })
+      queryClient.invalidateQueries({ queryKey: ['vehicle-sales', 'open'] })
       navigate(vmPath('/vehicles'))
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to mark as sold')
@@ -417,33 +429,78 @@ export function VehicleSettingsPage() {
         <ComplianceValueRow label="Rossetts — alert this far ahead" settingsKey="rossetts_warning_days" suffix="d" settings={compliance} onSave={saveThreshold} />
       </div>
 
-      {/* Danger zone — sell / removal */}
+      {/* Danger zone — selling starts on the sale page (docs/VEHICLE-SALES-SPEC.md §5.1);
+          the sold / remove modal is where it ends, or how a van leaves without a sale. */}
       <div className="rounded-lg border border-red-200 bg-white p-4">
         <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-red-500">Danger Zone</h3>
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-medium text-gray-900">
-              {vehicle.isOldSold ? 'Reactivate Vehicle' : 'Sell / Remove from Fleet'}
-            </p>
-            <p className="text-xs text-gray-500">
-              {vehicle.isOldSold
-                ? 'Return this vehicle to the active fleet'
-                : 'Records the sale and starts the removal checklist. Can be reactivated later.'}
-            </p>
+        {vehicle.isOldSold ? (
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-900">Reactivate Vehicle</p>
+              <p className="text-xs text-gray-500">Return this vehicle to the active fleet</p>
+            </div>
+            <button
+              type="button"
+              onClick={handleReactivate}
+              disabled={actionLoading}
+              className="rounded-lg border border-green-200 px-4 py-2 text-sm font-medium text-green-700 transition-colors hover:bg-green-50 disabled:opacity-50"
+            >
+              {actionLoading ? 'Processing...' : 'Reactivate'}
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={vehicle.isOldSold ? handleReactivate : () => setShowRemovalModal(true)}
-            disabled={actionLoading}
-            className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
-              vehicle.isOldSold
-                ? 'border border-green-200 text-green-700 hover:bg-green-50'
-                : 'border border-red-200 text-red-700 hover:bg-red-50'
-            }`}
-          >
-            {actionLoading ? 'Processing...' : vehicle.isOldSold ? 'Reactivate' : 'Sell / Remove'}
-          </button>
-        </div>
+        ) : openSale ? (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium text-gray-900">For sale · {saleStageLabel(openSale.status)}</p>
+              <p className="text-xs text-gray-500">Mark it sold when it goes — that records the sale and starts the removal checklist.</p>
+            </div>
+            <div className="flex gap-2">
+              <Link
+                to={vmPath(`/vehicles/${vehicle.id}/sale`)}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Open sales page
+              </Link>
+              <button
+                type="button"
+                onClick={() => setShowRemovalModal(true)}
+                disabled={actionLoading}
+                className="rounded-lg border border-red-200 px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 disabled:opacity-50"
+              >
+                {actionLoading ? 'Processing...' : 'Mark sold'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium text-gray-900">Sell this vehicle</p>
+                <p className="text-xs text-gray-500">
+                  Gathers photos and details for buyers. The van stays active and hireable until it's sold.
+                </p>
+              </div>
+              {isStrictAdmin ? (
+                <Link
+                  to={vmPath(`/vehicles/${vehicle.id}/sale`)}
+                  className="rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+                >
+                  Start sales process
+                </Link>
+              ) : (
+                <span className="text-xs text-gray-400">An admin starts the sales process</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowRemovalModal(true)}
+              disabled={actionLoading}
+              className="text-xs text-red-600 underline hover:text-red-700 disabled:opacity-50"
+            >
+              Remove without sale (written off, returned to finance, scrapped)…
+            </button>
+          </div>
+        )}
       </div>
 
       {showRemovalModal && (
