@@ -602,6 +602,10 @@ export async function recordReviewOutcome(
             outcome        = COALESCE($5, outcome),
             salary_history_id = COALESCE($6, salary_history_id),
             next_review_due = (CURRENT_DATE + ($7 || ' months')::interval)::date,
+            -- An unsent prep draft (mig 262) dies with the meeting: it was
+            -- never shared, and it is private writing we have no reason to keep.
+            self_assessment_draft = NULL,
+            self_assessment_draft_saved_at = NULL,
             updated_at = NOW()
       WHERE id = $1 AND person_id = $2
       RETURNING *`,

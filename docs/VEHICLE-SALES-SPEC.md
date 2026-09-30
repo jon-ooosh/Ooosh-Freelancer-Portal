@@ -84,7 +84,7 @@ MOT **history** is not in OP at all — DVSA was applied for in March 2026 and n
 
 ### 3.2 Storage
 
-`vehicle_mot_history` — one row per van, overwritten on each fetch:
+`vehicle_mot_history` (mig 263) — one row per van, overwritten on each fetch:
 `vehicle_id` (PK, FK), `fetched_at`, `payload JSONB` (DVSA response as-is), `error TEXT`.
 The UI parses the payload; storing it raw means a DVSA field we don't show yet isn't lost.
 
@@ -116,7 +116,7 @@ the MOT history section instead, where they belong.
 
 ## 4. Data model (Phases 1–3)
 
-Migration numbers are taken at build time (next free is currently 262). Every new file goes in
+Migration numbers are taken at build time (Phase 0 took 263; next free is 264 at time of writing). Every new file goes in
 `backend/src/migrations/run.ts`.
 
 **`vehicle_sales`**

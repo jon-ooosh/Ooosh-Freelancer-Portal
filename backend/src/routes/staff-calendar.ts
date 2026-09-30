@@ -1259,11 +1259,51 @@ router.get('/me/review', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// The reviewee's prep answers — one shape for the draft and the submit.
+const reviewAnswersSchema = z.object({
+  answers: z.array(z.object({ q: z.string().max(500), a: z.string().max(10000) })).max(40),
+});
+
+// The reviewee's private autosave (mig 262) is never for the reviewer's eyes.
+// The admin review writes return `RETURNING *` rows, which would carry it, so
+// strip it on the way out. The admin list selects column by column already.
+function withoutReviewDraft<T extends Record<string, unknown> | null>(row: T): T {
+  if (!row) return row;
+  const { self_assessment_draft: _d, self_assessment_draft_saved_at: _s, ...rest } = row;
+  return rest as T;
+}
+
+// PUT /api/staff-calendar/me/review/:reviewId/draft
+// Save-as-you-go. Writes ONLY the caller's private draft; the reviewer sees
+// nothing until the POST /answers below. Same ownership check and same open
+// window (proposed/confirmed) as the submit.
+router.put('/me/review/:reviewId/draft', async (req: AuthRequest, res: Response) => {
+  const parsed = reviewAnswersSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  const reviewId = req.params.reviewId as string;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reviewId)) {
+    res.status(404).json({ error: 'Review not found' }); return;
+  }
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.status(400).json({ error: 'Your login is not linked to a person record' }); return; }
+    const { saveSelfAssessmentDraft } = await import('../services/staff-review-prep');
+    const data = await saveSelfAssessmentDraft(reviewId, personId, parsed.data.answers);
+    res.json({ data });
+  } catch (err) {
+    const { ReviewClosedError } = await import('../services/staff-review-prep');
+    if (err instanceof ReviewClosedError) { res.status(400).json({ error: err.message }); return; }
+    if (err instanceof Error && err.message === 'Review not found') { res.status(404).json({ error: err.message }); return; }
+    console.error('[staff-calendar] review draft error:', err);
+    res.status(500).json({ error: 'Failed to save your draft' });
+  }
+});
+
 // POST /api/staff-calendar/me/review/:reviewId/answers
+// Submit to reviewer: copies the answers into self_assessment, stamps it sent
+// and clears the draft.
 router.post('/me/review/:reviewId/answers', async (req: AuthRequest, res: Response) => {
-  const schema = z.object({
-    answers: z.array(z.object({ q: z.string().max(500), a: z.string().max(10000) })).max(40),
-  });
+  const schema = reviewAnswersSchema;
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
   try {
@@ -1607,7 +1647,7 @@ router.post('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, 
   try {
     const { id, ...input } = parsed.data;
     const row = await upsertReview(id ?? null, req.params.personId as string, input, req.user!.id);
-    res.json({ data: row });
+    res.json({ data: withoutReviewDraft(row) });
   } catch (err) {
     console.error('[staff-calendar] review error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save the review' });
@@ -1637,7 +1677,7 @@ router.post('/employees/:personId/reviews/:reviewId/complete', adminOnly, async 
       parsed.data,
       req.user!.id
     );
-    res.json({ data: row });
+    res.json({ data: withoutReviewDraft(row) });
   } catch (err) {
     console.error('[staff-calendar] review complete error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to complete the review' });
