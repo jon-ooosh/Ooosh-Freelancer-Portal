@@ -1,7 +1,7 @@
 # VEHICLE SALES SPEC — selling a van, and DVSA MOT history
 
-**Status:** 📝 SHAPED, NOT BUILT (30 Sep 2026) — jon + Claude. §9 lists the open questions that
-must be answered before the phase they block.
+**Status:** 🔨 PHASE 0 BUILT (30 Sep 2026) — jon + Claude. Phases 1–4 not started. §9 records
+jon's answers to the open questions (all recommendations taken).
 
 **Replaces:** the "Sell / Remove from Fleet" button in the Vehicle Settings danger zone as the
 *starting point* of a sale (the existing sold modal + removal checklist stay as the *end* of it).
@@ -88,12 +88,15 @@ MOT **history** is not in OP at all — DVSA was applied for in March 2026 and n
 `vehicle_id` (PK, FK), `fetched_at`, `payload JSONB` (DVSA response as-is), `error TEXT`.
 The UI parses the payload; storing it raw means a DVSA field we don't show yet isn't lost.
 
-MOT odometer readings are also written to `vehicle_mileage_log` with `source = 'mot'` and
-`source_ref = <MOT test number>` (dedup on that), so mileage history has independent data points.
+MOT odometer readings are **NOT** written to `vehicle_mileage_log` (changed at build time). Many
+tests pre-date our ownership of the van, and the log's first/last readings drive the average daily
+mileage and the Forecast tab's mileage pace — old readings would skew both. The readings are shown in
+the MOT history section instead, where they belong.
 
 ### 3.3 When it fetches
 
-- **Weekly** for every `is_active` van (new scheduler entry; low volume, well inside limits).
+- **Weekly**, Monday 07:30 Europe/London, for every active van — before the 08:00 compliance
+  check, so a corrected `mot_due` is what that check sees. Paced one van every 1.5 s.
 - **On demand**: "Refresh from DVSA" on the van's MOT history section.
 - **On Start sales process.**
 
@@ -101,9 +104,13 @@ MOT odometer readings are also written to `vehicle_mileage_log` with `source = '
 
 - **Vehicle Detail → "MOT history"** section: each test — date, result, expiry, mileage, advisories /
   failures (dangerous flagged red). All staff.
-- **`mot_due` vs DVSA expiry**: see open question Q3.
-- An admin-only line in Vehicle Settings: "DVSA client secret expires on …" (a `system_settings`
-  date jon types in when renewing) — plus it joins the compliance run's alerts 30 days out.
+- **`mot_due` vs DVSA expiry** (Q3): when the latest *passed* test's expiry is **later** than
+  `mot_due` (or `mot_due` is empty), OP updates `mot_due` and writes an `audit_log` row
+  (`action = 'mot_due_from_dvsa'`). When DVSA's date is **earlier**, OP only shows a warning in the
+  section — never moves a date backwards on its own.
+- **Secret expiry:** no OP reminder (dropped at build time) — DVSA already emails 30 and 14 days
+  before. If the credentials are rejected, the section says so in plain words ("DVSA rejected our
+  credentials — the client secret may have expired") rather than a generic failure.
 
 ---
 
@@ -149,7 +156,8 @@ Event photos are **referenced by key** (the public bucket keeps them); new uploa
   (admin). It opens a small form: asking price, optional hold-from date → creates the sale in
   `preparing`, triggers a DVSA fetch, and opens the sale page.
 - Also offered from the admin's Vehicle Detail header.
-- A van not being sold (write-off, finance hand-back, scrapped): see **Q1**.
+- A van not being sold (write-off, finance hand-back, scrapped): the danger zone keeps a smaller
+  **"Remove without sale"** link that opens today's sold/remove modal (Q1).
 
 ### 5.2 The sale page (`/vehicles/fleet/:id/sale`)
 - Header: reg, stage pill, asking price, days on sale, admin-only value estimate hint.
@@ -239,17 +247,17 @@ as today. The sale closes as `sold`; open follow-up tasks from it are cancelled;
 
 ---
 
-## 9. Open questions
+## 9. Answered questions (jon, 30 Sep 2026 — all recommendations taken)
 
-| # | Question | Blocks | Claude's recommendation |
-|---|---|---|---|
-| Q1 | The Sell button becomes "Start sales process" — how is a van removed **without** a sale (write-off, finance hand-back, scrapped)? | Phase 1 | Keep a small secondary "Remove without sale" link in the danger zone that opens today's modal, with a reason. Cheap: the modal already exists. |
-| Q2 | DVSA: what exactly is "expiring soon"? Do we have all five credentials (client ID, secret, scope, token URL, API key)? | Phase 0 | Check the email. If it's an unused-account warning, build Phase 0 first. |
-| Q3 | If DVSA shows a **later** MOT expiry than `mot_due`, update it automatically? | Phase 0 | Auto-update when DVSA is later (the van passed, we forgot to type it); only *warn* when DVSA is earlier. |
-| Q4 | Who gets the "Problem on a van for sale" bell? | Phase 1 | Whoever started the sale + default vehicle-issue watchers. |
-| Q5 | Asking price: shown inc. or ex. VAT? (Dealer vs private buyer.) | Phase 1 | Store one figure + a VAT flag shown on the link ("+VAT" / "inc. VAT"). |
-| Q6 | What does a link show after the sale closes? | Phase 2 | "This vehicle is no longer available" — nothing else. |
-| Q7 | Contact details on the public page? | Phase 2 | A fixed sales contact from `system_settings`. |
+| # | Question | Answer |
+|---|---|---|
+| Q1 | Removing a van **without** a sale? | Keep a "Remove without sale" link in the danger zone opening today's modal. |
+| Q2 | DVSA credentials? | All five in hand. Phase 0 built first. |
+| Q3 | DVSA later MOT expiry than `mot_due`? | Auto-update when DVSA is later; only warn when it's earlier. |
+| Q4 | Who gets the "Problem on a van for sale" bell? | Whoever started the sale + the default vehicle-issue watchers. |
+| Q5 | Asking price inc. or ex. VAT? | One figure + a VAT flag, shown on the link as "+VAT" / "inc. VAT". |
+| Q6 | What a link shows after the sale closes? | "This vehicle is no longer available" — nothing else. |
+| Q7 | Contact details on the public page? | A fixed sales contact from `system_settings`. |
 
 ---
 
