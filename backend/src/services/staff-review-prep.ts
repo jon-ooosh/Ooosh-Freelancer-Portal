@@ -14,6 +14,12 @@
  * 2. The reviewee NEVER sees `private_notes` or `manager_prep`. Everything
  *    staff-facing goes through `getMyReview()`, which selects column by column
  *    rather than `SELECT *`, so a column added later cannot leak by default.
+ *
+ * 3. The reviewee's DRAFT (mig 262) is theirs alone. `self_assessment_draft`
+ *    is what autosave writes while they mull it over; the reviewer reads only
+ *    `self_assessment`, which changes on an explicit "Submit to reviewer".
+ *    getMyReview() is the only reader of the draft columns — never add them
+ *    to listReviews() or any reviewer-side SELECT.
  */
 
 import { query } from '../config/database';
@@ -66,7 +72,8 @@ export async function getMyReview(personId: string) {
     `SELECT id, review_type, scheduled_for::text AS scheduled_for, status,
             completed_at, shared_summary, outcome,
             next_review_due::text AS next_review_due,
-            self_assessment, self_assessment_submitted_at
+            self_assessment, self_assessment_submitted_at,
+            self_assessment_draft, self_assessment_draft_saved_at
        FROM staff_reviews
       WHERE person_id = $1
         AND (status IN ('proposed','confirmed')
@@ -88,14 +95,17 @@ export async function getMyReview(personId: string) {
  * something the evening before should be able to add it.
  */
 export async function submitSelfAssessment(reviewId: string, personId: string, answers: Answer[]) {
-  const clean = answers
-    .filter(a => a && typeof a.q === 'string')
-    .map(a => ({ q: String(a.q).slice(0, 500), a: String(a.a ?? '').slice(0, 10_000) }));
+  const clean = cleanAnswers(answers);
 
+  // Sending supersedes the draft, so both draft columns clear in the same
+  // write — "you have changes your reviewer hasn't seen" is then simply
+  // "a draft exists".
   const r = await query(
     `UPDATE staff_reviews
         SET self_assessment = $3::jsonb,
             self_assessment_submitted_at = NOW(),
+            self_assessment_draft = NULL,
+            self_assessment_draft_saved_at = NULL,
             updated_at = NOW()
       WHERE id = $1 AND person_id = $2
         AND status IN ('proposed','confirmed')
@@ -108,11 +118,53 @@ export async function submitSelfAssessment(reviewId: string, personId: string, a
   return getMyReview(personId);
 }
 
-/** The reviewer's own answers to the same questions. Admin-only. */
-export async function saveManagerPrep(reviewId: string, personId: string, answers: Answer[]) {
-  const clean = answers
+function cleanAnswers(answers: Answer[]): Answer[] {
+  return answers
     .filter(a => a && typeof a.q === 'string')
     .map(a => ({ q: String(a.q).slice(0, 500), a: String(a.a ?? '').slice(0, 10_000) }));
+}
+
+/** Thrown when the draft's review exists and is theirs but is already over. */
+export class ReviewClosedError extends Error {}
+
+/**
+ * Autosave the reviewee's answers into their PRIVATE draft (mig 262).
+ *
+ * Same ownership rule as submitSelfAssessment — checked here against
+ * person_id, never trusted from the route — and the same window: open while
+ * the review is proposed or confirmed. Does NOT touch self_assessment or its
+ * submitted stamp; the reviewer sees nothing until they submit.
+ *
+ * Deliberately no updated_at bump: a keystroke is not an edit to the review
+ * the admin side should see as "changed".
+ */
+export async function saveSelfAssessmentDraft(
+  reviewId: string, personId: string, answers: Answer[]
+): Promise<{ self_assessment_draft_saved_at: string }> {
+  const r = await query(
+    `UPDATE staff_reviews
+        SET self_assessment_draft = $3::jsonb,
+            self_assessment_draft_saved_at = NOW()
+      WHERE id = $1 AND person_id = $2
+        AND status IN ('proposed','confirmed')
+      RETURNING self_assessment_draft_saved_at`,
+    [reviewId, personId, JSON.stringify(cleanAnswers(answers))]
+  );
+  if (r.rows.length) return { self_assessment_draft_saved_at: r.rows[0].self_assessment_draft_saved_at };
+
+  // Tell "not yours / not there" apart from "finished", so the page can say
+  // which. Still scoped to person_id: somebody else's review stays not-found.
+  const own = await query(
+    'SELECT status FROM staff_reviews WHERE id = $1 AND person_id = $2',
+    [reviewId, personId]
+  );
+  if (!own.rows.length) throw new Error('Review not found');
+  throw new ReviewClosedError('This review is finished, so the answers can no longer be changed');
+}
+
+/** The reviewer's own answers to the same questions. Admin-only. */
+export async function saveManagerPrep(reviewId: string, personId: string, answers: Answer[]) {
+  const clean = cleanAnswers(answers);
   const r = await query(
     `UPDATE staff_reviews SET manager_prep = $3::jsonb, updated_at = NOW()
       WHERE id = $1 AND person_id = $2 RETURNING id`,
