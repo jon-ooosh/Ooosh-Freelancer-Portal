@@ -157,6 +157,13 @@ It is a browser-side check on the person's own clock — the server's timezone i
 not theirs. Unlike the leave warnings this one blocks: overtime that has not
 happened yet is a mistake, not a judgement call.
 
+**Nor inside contracted hours.** On a plain working day (`StaffDay.status =
+'working'`) an entry overlapping that day's start–end is refused — the unpaid
+break included: working through lunch is not overtime here (jon, Sep 2026).
+Days off, leave days and `partial` days are not checked — we know a part-day
+person was in for SOME of it but not which part. Same browser-side check, read
+from `/staff-calendar/me`; if that read fails nothing is blocked.
+
 ## The freelancer offer link is a bearer credential, and the GET never writes
 
 `services/freelancer-day-offer.ts` owns the token; `routes/freelancer-days.ts`

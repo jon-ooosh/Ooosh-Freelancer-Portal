@@ -598,9 +598,12 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
           <select value={leaveType} onChange={e => setLeaveType(e.target.value as LeaveType)}
             className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm">
             {/* The balance is in the label so the choice between holiday and
-                overtime is made with both figures visible, not from memory. */}
+                overtime is made with both figures visible, not from memory.
+                Holiday in days, as on the stat card — "61h 13m" means nothing
+                to anybody deciding whether they can take a week off. */}
             <option value="holiday">
-              Holiday{balances ? ` — ${fmtH(balances.holiday.availableMinutes)} left` : ''}
+              Holiday{balances ? ` — ${asDays(balances.holiday.availableMinutes, balances.holiday.nominalDayMinutes)
+                ?? fmtH(balances.holiday.availableMinutes)}${balances.holiday.nominalDayMinutes ? ' days' : ''} left` : ''}
             </option>
             <option value="toil">
               Overtime as time off{balances ? ` — ${fmtH(balances.overtime.availableMinutes)} banked` : ''}
@@ -1114,6 +1117,9 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
   const [touched, setTouched] = useState(false);
   const [finishes, setFinishes] = useState<Record<string, number>>({});
   const [starts, setStarts] = useState<Record<string, number>>({});
+  // Contracted hours on the days you were actually down to work — a day off,
+  // a day on leave or a part day is not in here, so nothing is blocked on it.
+  const [workingHours, setWorkingHours] = useState<Record<string, { start: number; end: number }>>({});
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
   const [lastLogged, setLastLogged] = useState<{ id: string; text: string } | null>(null);
@@ -1125,18 +1131,26 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
   // silent: the form simply starts at 17:00.
   useEffect(() => {
     let cancelled = false;
-    api.get<{ data: { days: { date: string; startTime: string | null; endTime: string | null }[] } | null }>(
+    api.get<{ data: { days: { date: string; status: string; startTime: string | null; endTime: string | null }[] } | null }>(
       `/staff-calendar/me?from=${earliest}&to=${today}`)
       .then(res => {
         if (cancelled || !res.data) return;
         const ends: Record<string, number> = {};
         const begins: Record<string, number> = {};
+        const hours: Record<string, { start: number; end: number }> = {};
         for (const d of res.data.days) {
           if (d.endTime) ends[d.date] = toMin(d.endTime);
           if (d.startTime) begins[d.date] = toMin(d.startTime);
+          // Only a plain working day. 'partial' (a half day or a few hours
+          // off) is left alone: we know they were in for SOME of it, not
+          // which part, and blocking real overtime there is the worse error.
+          if (d.status === 'working' && d.startTime && d.endTime) {
+            hours[d.date] = { start: toMin(d.startTime), end: toMin(d.endTime) };
+          }
         }
         setFinishes(ends);
         setStarts(begins);
+        setWorkingHours(hours);
       })
       .catch(() => { /* no staff record or no pattern — keep the default */ });
     return () => { cancelled = true; };
@@ -1179,12 +1193,19 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
   const now = new Date();
   const nowMin = now.getHours() * 60 + now.getMinutes();
   const isToday = workDate === localIso(now);
+  // Overtime is time OUTSIDE your contracted hours. Anything overlapping them
+  // is refused — including the unpaid break: working through lunch is not
+  // overtime here (jon, Sep 2026). If the calendar could not be read there is
+  // nothing to check against, and nothing is blocked.
+  const contracted = workingHours[workDate];
+  const inHours = !!contracted && startMin < contracted.end && endMin > contracted.start;
   const timeError =
     duration <= 0 ? 'end before start'
     : snapped > 960 ? 'more than 16 hours'
     // Overtime that has not happened yet is a mistake, not a judgement call —
     // so unlike the leave warnings, this one blocks.
     : isToday && endMin > nowMin + FUTURE_GRACE_MIN ? 'that’s still to come'
+    : inHours ? 'that’s in your working hours'
     : null;
   const valid = timeError === null && reason.trim() !== '';
 
@@ -1245,7 +1266,6 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
       </div>
 
       <div>
-        <span className="block text-xs text-gray-600 mb-1">Day</span>
         <div className="flex items-stretch gap-1.5">
           {/* ‹ goes back toward Today; › further into the past. */}
           <button type="button" aria-label="Towards today" className={arrow}
@@ -1320,6 +1340,13 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
             : `Log ${fmtH(snapped)} for ${dayWord}`}
         </button>
       </div>
+
+      {inHours && contracted && timeError === 'that’s in your working hours' && (
+        <p className="-mt-1.5 text-xs text-red-600">
+          You&apos;re down to work {hhmm(contracted.start)}–{hhmm(contracted.end)} that day —
+          overtime is time before or after that.
+        </p>
+      )}
 
       {timeError === 'that’s still to come' && (
         <p className="-mt-1.5 text-xs text-red-600">
