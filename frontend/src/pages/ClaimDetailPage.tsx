@@ -19,7 +19,9 @@ import { compressImageWithThumb } from '../modules/vehicles/lib/image-utils';
 import { SignatureCapture, SignatureCaptureHandle } from '../modules/vehicles/components/book-out/SignatureCapture';
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import { useAttachments } from '../components/messaging/Attachments';
-import { CLAIM_SECTIONS, ClaimSectionDef, isFieldShown, type DamageMark, type OutlineType } from '@claimform';
+import {
+  CLAIM_SECTIONS, CLIENT_CHECKLIST, ClaimSectionDef, isFieldShown, sectionMissing, type DamageMark, type OutlineType,
+} from '@claimform';
 import { DamageOutlineEditor } from '../components/claims/VanOutline';
 import { FieldsGrid, ListEditor } from '../components/claims/FormFields';
 import {
@@ -100,6 +102,8 @@ interface Claim {
   sketch_key: string | null;
   driver_signed_at: string | null;
   driver_signed_name: string | null;
+  sections_done: Record<string, string> | null;
+  submitted_at: string | null;
 }
 interface StaffUser { id: string; name: string | null; email: string }
 interface ClaimLink {
@@ -153,6 +157,7 @@ function ClaimDetailContent() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [flash, setFlash] = useState('');
+  const [sending, setSending] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -227,12 +232,23 @@ function ClaimDetailContent() {
         </div>
       )}
 
-      <StageBar claim={claim} isManager={isManager} onDone={(m) => { setFlash(m); load(); }} />
+      <StageBar claim={claim} isManager={isManager} onDone={(m) => { setFlash(m); load(); }} onSend={() => setSending(true)} />
+      {sending && (
+        <SendFormPanel
+          claim={claim}
+          onClose={() => setSending(false)}
+          onSent={(m) => { setSending(false); setFlash(m); load(); }}
+        />
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
         <div className="lg:col-span-2 space-y-4">
           <DetailsCard claim={claim} patch={patch} />
-          <ClientLinksCard claim={claim} onChange={(m) => { if (m) setFlash(m); load(); }} />
+          <ClientLinksCard
+            claim={claim}
+            onChange={(m) => { if (m) setFlash(m); load(); }}
+            onSend={() => { setSending(true); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+          />
           <FormCard claim={claim} onSaved={(m) => { setFlash(m); load(); }} />
           <DamageCard claim={claim} onChange={load} />
           <FilesCard claim={claim} isManager={isManager} onChange={load} />
@@ -264,7 +280,9 @@ function Card({ title, children, right }: { title: string; children: React.React
   );
 }
 
-function StageBar({ claim, isManager, onDone }: { claim: Claim; isManager: boolean; onDone: (msg: string) => void }) {
+function StageBar({ claim, isManager, onDone, onSend }: {
+  claim: Claim; isManager: boolean; onDone: (msg: string) => void; onSend: () => void;
+}) {
   const [closing, setClosing] = useState(false);
   const [outcome, setOutcome] = useState('');
   const [note, setNote] = useState('');
@@ -287,8 +305,8 @@ function StageBar({ claim, isManager, onDone }: { claim: Claim; isManager: boole
 
   const btn = 'px-3 py-1.5 text-xs rounded border disabled:opacity-50';
   const help: Record<ClaimStage, string> = {
-    open: 'Send the form to the driver(s) and contacts below — or fill it in yourself from a phone call — then mark it complete.',
-    form_out: 'The client has the form. You get a bell when they submit it; the next-check date still applies until automatic chasing arrives.',
+    open: 'Start here: send the incident form to the driver and/or the client. Taken it all by phone instead? Fill in the form below and mark it complete.',
+    form_out: 'The client has the form. You get a bell and an email when they submit it; the next-check date still applies until automatic chasing arrives.',
     submitted: 'Waiting for a manager to review the answers.',
     reviewed: 'Reviewed. The broker has NOT been told — send it when (and if) you decide to, or close it.',
     with_broker: 'With the broker. Record their reference and keep the next-check date moving.',
@@ -299,11 +317,24 @@ function StageBar({ claim, isManager, onDone }: { claim: Claim; isManager: boole
     <div className="bg-white rounded-lg border p-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm text-slate-600 mr-auto">{help[claim.stage]}</span>
-        {(claim.stage === 'open' || claim.stage === 'form_out') && (
-          <button type="button" disabled={busy} className={`${btn} bg-ooosh-600 text-white border-ooosh-600`} onClick={() => move('submitted')}
-            title={claim.stage === 'form_out' ? 'Mark it complete yourself (e.g. the rest came by phone)' : undefined}>
-            Form complete — ready for review
-          </button>
+        {claim.stage === 'open' && (
+          <>
+            <button type="button" disabled={busy} className={`${btn} bg-ooosh-600 text-white border-ooosh-600 !text-sm !px-4 !py-2`} onClick={onSend}>
+              📧 Send form to driver / client
+            </button>
+            <button type="button" disabled={busy} className={btn} onClick={() => move('submitted')} title="Everything was taken by phone and entered below">
+              Taken by phone — ready for review
+            </button>
+          </>
+        )}
+        {claim.stage === 'form_out' && (
+          <>
+            <button type="button" disabled={busy} className={btn} onClick={onSend}>+ Send to someone else</button>
+            <button type="button" disabled={busy} className={btn} onClick={() => move('submitted')}
+              title="Mark it complete yourself (e.g. the rest came by phone)">
+              Mark complete — ready for review
+            </button>
+          </>
         )}
         {claim.stage === 'submitted' && isManager && (
           <>
@@ -342,6 +373,44 @@ function StageBar({ claim, isManager, onDone }: { claim: Claim; isManager: boole
         </div>
       )}
       {error && <div className="text-xs text-red-600 mt-2">{error}</div>}
+      {(claim.stage === 'form_out' || (claim.stage === 'open' && claim.links.length > 0)) && <FormProgress claim={claim} />}
+    </div>
+  );
+}
+
+/** Which EVENT types are the client working through their link. */
+const CLIENT_ACTIVITY = new Set([
+  'link_opened', 'who_filling', 'section_saved', 'damage_marked', 'sketch_saved', 'driver_verified', 'driver_signed', 'handed_off', 'sent_to_driver',
+]);
+
+/** "5 of 8 done" + where each part stands + the client's latest activity. */
+function FormProgress({ claim }: { claim: Claim }) {
+  const done = claim.sections_done || {};
+  const form = claim.form_data || {};
+  const items = CLIENT_CHECKLIST.map((it) => {
+    if (it.key === 'driver') return { ...it, state: claim.driver_signed_at ? 'done' : 'todo' };
+    if (it.key === 'who') return { ...it, state: done.who ? 'done' : 'todo' };
+    const def = CLAIM_SECTIONS.find((x) => x.key === it.key)!;
+    const complete = !!done[it.key] && sectionMissing(def, form).length === 0;
+    const v = form[it.key];
+    const started = (Array.isArray(v) ? v.length > 0 : !!v && Object.keys(v as object).length > 0) || typeof form[`${it.key}_involved`] === 'boolean';
+    return { ...it, state: complete ? 'done' : started ? 'started' : 'todo' };
+  });
+  const n = items.filter((i) => i.state === 'done').length;
+  const last = claim.events.find((e) => !e.created_by_name && CLIENT_ACTIVITY.has(e.event_type));
+  return (
+    <div className="mt-3 pt-3 border-t flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+      <span className="font-medium text-slate-700">Client form: {n} of {items.length} done</span>
+      {items.map((i) => (
+        <span key={i.key} className={i.state === 'done' ? 'text-green-700' : i.state === 'started' ? 'text-amber-700' : 'text-slate-400'}
+          title={i.state === 'started' ? 'Started, not finished' : undefined}>
+          {i.state === 'done' ? '✓' : i.state === 'started' ? '…' : '○'} {i.title}
+        </span>
+      ))}
+      <span className="basis-full text-slate-500">
+        {last ? `Last activity ${new Date(last.created_at).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}: ${last.body}` : 'Not opened yet.'}
+        {' '}Parts the client saves show in the form below as they go — ticked once they are complete.
+      </span>
     </div>
   );
 }
@@ -431,10 +500,24 @@ function DetailsCard({ claim, patch }: { claim: Claim; patch: (b: Row, m?: strin
 
 function FormCard({ claim, onSaved }: { claim: Claim; onSaved: (msg: string) => void }) {
   const [form, setForm] = useState<FormData>(() => JSON.parse(JSON.stringify(claim.form_data || {})));
-  const [dirty, setDirty] = useState(false);
+  // Top-level keys staff have edited since the last save. Only these are sent,
+  // so a client saving other parts through their link at the same time keeps them.
+  const [changed, setChanged] = useState<Set<string>>(new Set());
+  const dirty = changed.size > 0;
   const [open, setOpen] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const touch = (key: string) => setChanged((c) => (c.has(key) ? c : new Set(c).add(key)));
+
+  // The page reloads the case after any save (ours or a card's) — take the
+  // server's copy of every part staff aren't in the middle of editing.
+  useEffect(() => {
+    setForm((prev) => {
+      const next: FormData = JSON.parse(JSON.stringify(claim.form_data || {}));
+      changed.forEach((k) => { if (k in prev) next[k] = prev[k]; });
+      return next;
+    });
+  }, [claim.form_data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sectionRow = (key: string): Row => {
     const v = form[key];
@@ -443,17 +526,19 @@ function FormCard({ claim, onSaved }: { claim: Claim; onSaved: (msg: string) => 
   const listRows = (key: string): Row[] => (Array.isArray(form[key]) ? (form[key] as Row[]) : []);
   const setSectionField = (section: string, key: string, v: unknown) => {
     setForm((f) => ({ ...f, [section]: { ...(f[section] && typeof f[section] === 'object' ? (f[section] as Row) : {}), [key]: v } }));
-    setDirty(true);
+    touch(section);
   };
-  const setList = (section: string, rows: Row[]) => { setForm((f) => ({ ...f, [section]: rows })); setDirty(true); };
-  const setTop = (key: string, v: unknown) => { setForm((f) => ({ ...f, [key]: v })); setDirty(true); };
+  const setList = (section: string, rows: Row[]) => { setForm((f) => ({ ...f, [section]: rows })); touch(section); };
+  const setTop = (key: string, v: unknown) => { setForm((f) => ({ ...f, [key]: v })); touch(key); };
 
   const save = async () => {
     setSaving(true);
     setError('');
     try {
-      await api.patch(`/claims/${claim.id}`, { form_data: form });
-      setDirty(false);
+      const patch: FormData = {};
+      changed.forEach((k) => { patch[k] = form[k] ?? null; });
+      await api.patch(`/claims/${claim.id}`, { form_data: patch });
+      setChanged(new Set());
       onSaved('Form saved.');
     } catch (e) {
       setError(errMsg(e, 'Save failed'));
@@ -472,13 +557,18 @@ function FormCard({ claim, onSaved }: { claim: Claim; onSaved: (msg: string) => 
   }
 
   const summary = (s: ClaimSectionDef): string => {
+    let text: string;
     if (s.list) {
       const n = listRows(s.key).length;
-      return n ? `${n} ${s.list.itemLabel.toLowerCase()}${n === 1 ? '' : 's'}` : s.gate && form[`${s.key}_involved`] === false ? 'none' : '—';
+      text = n ? `${n} ${s.list.itemLabel.toLowerCase()}${n === 1 ? '' : 's'}` : s.gate && form[`${s.key}_involved`] === false ? 'none' : '—';
+    } else {
+      const row = sectionRow(s.key);
+      const filled = s.fields.filter((f) => isFieldShown(f, row) && row[f.key] != null && row[f.key] !== '').length;
+      text = filled ? `${filled} answered` : '—';
     }
-    const row = sectionRow(s.key);
-    const filled = s.fields.filter((f) => isFieldShown(f, row) && row[f.key] != null && row[f.key] !== '').length;
-    return filled ? `${filled} answered` : '—';
+    // What the client form would still ask for (staff sections have no required fields).
+    const needed = s.who === 'staff' ? 0 : sectionMissing(s, form).length;
+    return needed && text !== '—' ? `${text} · ${needed} still needed` : text;
   };
 
   return (
@@ -497,6 +587,11 @@ function FormCard({ claim, onSaved }: { claim: Claim; onSaved: (msg: string) => 
         The broker's questions — filled in by the client through their link, or by staff from a phone call; either can edit.
         Insured details come from Settings › Claims, and the driver's name, date of birth, address and licence from their hire form — only the broker PDF puts them together.
       </p>
+      {claim.stage === 'form_out' && (
+        <div className="text-xs mb-3 px-3 py-2 rounded bg-blue-50 text-blue-800 border border-blue-200">
+          The client has this form and can see and change the parts they fill in. Saving here only changes the parts you edited.
+        </div>
+      )}
       {error && <div className="text-xs text-red-600 mb-2">{error}</div>}
       <div className="divide-y border rounded">
         {CLAIM_SECTIONS.map((s) => (
@@ -554,48 +649,113 @@ interface Recipients {
   contacts: Array<{ person_id: string; name: string; email: string; role: string | null; org: string | null; is_primary: boolean }>;
 }
 
-function ClientLinksCard({ claim, onChange }: { claim: Claim; onChange: (msg?: string) => void }) {
-  const [picking, setPicking] = useState(false);
+/** Pick who gets the form — opened from the top bar or the Client form card. */
+function SendFormPanel({ claim, onClose, onSent }: { claim: Claim; onClose: () => void; onSent: (msg: string) => void }) {
   const [rec, setRec] = useState<Recipients | null>(null);
   const [ticked, setTicked] = useState<Set<string>>(new Set());
   const [extraName, setExtraName] = useState('');
   const [extraEmail, setExtraEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const canSend = claim.stage === 'open' || claim.stage === 'form_out';
 
-  const openPicker = async () => {
-    setPicking(true); setError('');
-    try {
-      const r = await api.get<{ data: Recipients }>(`/claims/${claim.id}/recipients`);
-      setRec(r.data);
-      // Pre-tick every driver on the van with an email, and the lead contact (spec §3 step 4).
-      const t = new Set<string>();
-      r.data.drivers.filter((d) => d.email).forEach((d) => t.add(`d:${d.driver_id}`));
-      const lead = r.data.contacts.find((c) => c.is_primary) || r.data.contacts[0];
-      if (lead) t.add(`p:${lead.person_id}`);
-      setTicked(t);
-    } catch { setError('Could not load who to send it to'); }
-  };
+  useEffect(() => {
+    let alive = true;
+    api.get<{ data: Recipients }>(`/claims/${claim.id}/recipients`)
+      .then((r) => {
+        if (!alive) return;
+        setRec(r.data);
+        // Pre-tick every driver on the van with an email, and the lead contact (spec §3 step 4) —
+        // but not people who already have a link.
+        const already = new Set(claim.links.filter((l) => l.status !== 'revoked').map((l) => (l.recipient_email || '').toLowerCase()));
+        const t = new Set<string>();
+        r.data.drivers.filter((d) => d.email && !already.has(d.email.toLowerCase())).forEach((d) => t.add(`d:${d.driver_id}`));
+        const lead = r.data.contacts.find((c) => c.is_primary) || r.data.contacts[0];
+        if (lead && !already.has(lead.email.toLowerCase())) t.add(`p:${lead.person_id}`);
+        setTicked(t);
+      })
+      .catch(() => { if (alive) setError('Could not load who to send it to'); });
+    return () => { alive = false; };
+  }, [claim.id, claim.links]);
+
   const toggle = (k: string) => setTicked((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; });
+  const extraOk = !extraEmail.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(extraEmail.trim());
   const send = async () => {
     const recipients: Row[] = [];
     ticked.forEach((k) => {
       if (k.startsWith('d:')) recipients.push({ driver_id: k.slice(2) });
       if (k.startsWith('p:')) recipients.push({ person_id: k.slice(2) });
     });
-    if (extraEmail.trim()) recipients.push({ name: extraName.trim() || undefined, email: extraEmail.trim() });
-    if (!recipients.length) { setError('Tick at least one person'); return; }
+    if (extraEmail.trim()) {
+      if (!extraOk) { setError("That email address doesn't look right"); return; }
+      recipients.push({ name: extraName.trim() || undefined, email: extraEmail.trim() });
+    }
+    if (!recipients.length) { setError('Tick someone, or type a name and email under "Someone else"'); return; }
     setBusy(true); setError('');
     try {
       const r = await api.post<{ data: { results: Array<{ name: string; sent: boolean; error?: string }> } }>(`/claims/${claim.id}/links`, { recipients });
       const failed = r.data.results.filter((x) => !x.sent);
-      setPicking(false); setExtraName(''); setExtraEmail('');
-      onChange(failed.length
+      onSent(failed.length
         ? `Sent to ${r.data.results.length - failed.length}; not sent: ${failed.map((f) => `${f.name} (${f.error || 'failed'})`).join(', ')}`
         : `Form sent to ${r.data.results.map((x) => x.name).join(', ')}.`);
     } catch (e) { setError(errMsg(e, 'Send failed')); } finally { setBusy(false); }
   };
+
+  return (
+    <div className="bg-white rounded-lg border-2 border-ooosh-300 p-4 mt-3 space-y-4">
+      <div>
+        <h2 className="text-sm font-semibold text-slate-800">Send the incident form</h2>
+        <p className="text-xs text-slate-500 mt-0.5">
+          Each person gets their own link, can pass it on, and it saves as they go. Only driver NAMES are shown on it —
+          the driver confirms who they are with a code emailed to the address on their hire form.
+        </p>
+      </div>
+      {!rec ? <div className="text-xs text-slate-400">{error || 'Loading…'}</div> : (
+        <>
+          <div>
+            <div className="text-xs font-semibold text-slate-600 mb-1">Drivers on this van</div>
+            {rec.drivers.length === 0 && <div className="text-xs text-slate-400">No drivers found on this van and hire — use "Someone else" below.</div>}
+            {rec.drivers.map((d) => (
+              <label key={d.driver_id} className="flex items-center gap-2 text-sm py-0.5">
+                <input type="checkbox" disabled={!d.email} checked={ticked.has(`d:${d.driver_id}`)} onChange={() => toggle(`d:${d.driver_id}`)} />
+                {d.name} <span className="text-xs text-slate-400">{d.email || 'no email on file'}</span>
+              </label>
+            ))}
+          </div>
+          <div>
+            <div className="text-xs font-semibold text-slate-600 mb-1">Job contacts</div>
+            {rec.contacts.length === 0 && <div className="text-xs text-slate-400">No contacts with an email on this job.</div>}
+            {rec.contacts.map((c) => (
+              <label key={c.person_id} className="flex items-center gap-2 text-sm py-0.5">
+                <input type="checkbox" checked={ticked.has(`p:${c.person_id}`)} onChange={() => toggle(`p:${c.person_id}`)} />
+                {c.name} <span className="text-xs text-slate-400">{[c.role, c.org, c.email].filter(Boolean).join(' · ')}</span>
+              </label>
+            ))}
+          </div>
+          <div>
+            <div className="text-xs font-semibold text-slate-600 mb-1">Someone else</div>
+            <div className="flex flex-wrap gap-2">
+              <input value={extraName} onChange={(e) => setExtraName(e.target.value)} placeholder="Name" className="border rounded px-2 py-1.5 text-sm w-48" />
+              <input type="email" value={extraEmail} onChange={(e) => setExtraEmail(e.target.value)} placeholder="Email address"
+                className={`border rounded px-2 py-1.5 text-sm flex-1 min-w-[14rem] ${extraOk ? '' : 'border-red-400'}`} />
+            </div>
+          </div>
+        </>
+      )}
+      {error && rec && <div className="text-xs text-red-600">{error}</div>}
+      <div className="flex gap-2 justify-end">
+        <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs rounded border">Cancel</button>
+        <button type="button" onClick={send} disabled={busy || !rec} className="px-4 py-1.5 text-sm rounded bg-ooosh-600 text-white disabled:opacity-50">
+          {busy ? 'Sending…' : 'Send'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ClientLinksCard({ claim, onChange, onSend }: { claim: Claim; onChange: (msg?: string) => void; onSend: () => void }) {
+  const [error, setError] = useState('');
+  const canSend = claim.stage === 'open' || claim.stage === 'form_out';
+
   const act = async (l: ClaimLink, what: 'resend' | 'revoke') => {
     if (what === 'revoke' && !confirm(`Switch off ${l.recipient_name || l.recipient_email}'s link? They won't be able to open the form.`)) return;
     try { await api.post(`/claims/${claim.id}/links/${l.id}/${what}`, {}); onChange(what === 'resend' ? 'Link re-sent.' : 'Link switched off.'); } catch (e) { setError(errMsg(e, 'Failed')); }
@@ -604,12 +764,11 @@ function ClientLinksCard({ claim, onChange }: { claim: Claim; onChange: (msg?: s
   return (
     <Card
       title="Client form"
-      right={canSend ? <button type="button" onClick={openPicker} className="px-3 py-1.5 text-xs rounded bg-ooosh-600 text-white">{claim.links.length ? '+ Send to someone else' : 'Send form'}</button> : undefined}
+      right={canSend ? <button type="button" onClick={onSend} className="px-3 py-1.5 text-xs rounded bg-ooosh-600 text-white">{claim.links.length ? '+ Send to someone else' : 'Send form'}</button> : undefined}
     >
-      {claim.links.length === 0 && !picking && (
+      {claim.links.length === 0 && (
         <p className="text-xs text-slate-500">
-          Nobody has the form yet. Send it to the driver(s) and the lead contact — each gets their own link, can pass it on, and it saves as they go.
-          Only driver names are shown on it; the driver confirms who they are with a code emailed to their hire-form address.
+          Nobody has the form yet — use <strong>Send form</strong> (also at the top of the page) to email it to the driver, the client, or anyone else.
         </p>
       )}
       {claim.links.length > 0 && (
@@ -634,42 +793,6 @@ function ClientLinksCard({ claim, onChange }: { claim: Claim; onChange: (msg?: s
             </li>
           ))}
         </ul>
-      )}
-      {picking && (
-        <div className="border rounded p-3 space-y-3 bg-slate-50/60">
-          {!rec ? <div className="text-xs text-slate-400">Loading…</div> : (
-            <>
-              <div>
-                <div className="text-xs font-semibold text-slate-600 mb-1">Drivers on this van</div>
-                {rec.drivers.length === 0 && <div className="text-xs text-slate-400">No drivers found on this van and hire.</div>}
-                {rec.drivers.map((d) => (
-                  <label key={d.driver_id} className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" disabled={!d.email} checked={ticked.has(`d:${d.driver_id}`)} onChange={() => toggle(`d:${d.driver_id}`)} />
-                    {d.name} <span className="text-xs text-slate-400">{d.email || 'no email on file'}</span>
-                  </label>
-                ))}
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-slate-600 mb-1">Job contacts</div>
-                {rec.contacts.length === 0 && <div className="text-xs text-slate-400">No contacts with an email on this job.</div>}
-                {rec.contacts.map((c) => (
-                  <label key={c.person_id} className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" checked={ticked.has(`p:${c.person_id}`)} onChange={() => toggle(`p:${c.person_id}`)} />
-                    {c.name} <span className="text-xs text-slate-400">{[c.role, c.org, c.email].filter(Boolean).join(' · ')}</span>
-                  </label>
-                ))}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <input value={extraName} onChange={(e) => setExtraName(e.target.value)} placeholder="Someone else — name" className="border rounded px-2 py-1 text-sm" />
-                <input value={extraEmail} onChange={(e) => setExtraEmail(e.target.value)} placeholder="email" className="border rounded px-2 py-1 text-sm flex-1 min-w-[12rem]" />
-              </div>
-              <div className="flex gap-2 justify-end">
-                <button type="button" onClick={() => setPicking(false)} className="px-3 py-1.5 text-xs rounded border">Cancel</button>
-                <button type="button" onClick={send} disabled={busy} className="px-3 py-1.5 text-xs rounded bg-ooosh-600 text-white disabled:opacity-50">{busy ? 'Sending…' : 'Send'}</button>
-              </div>
-            </>
-          )}
-        </div>
       )}
       {error && <div className="text-xs text-red-600 mt-2">{error}</div>}
     </Card>

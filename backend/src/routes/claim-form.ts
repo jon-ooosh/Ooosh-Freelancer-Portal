@@ -22,10 +22,10 @@ import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { uploadToR2, getFromR2, deleteFromR2, isR2Configured } from '../config/r2';
 import {
-  CLAIM_SECTIONS, CLIENT_SECTION_KEYS, sanitiseSection, resolveOutlineType,
+  CLAIM_SECTIONS, CLIENT_SECTION_KEYS, sanitiseSection, resolveOutlineType, sectionMissing, sectionFormatErrors,
 } from '../services/claim-form-fields';
 import {
-  logClaimEvent, notifyClaimFollowers, claimLabel, nextWorkingDay, SHARED_BY_DEFAULT,
+  logClaimEvent, notifyClaimSubmitted, nextWorkingDay, SHARED_BY_DEFAULT,
 } from '../services/incident-claims';
 import {
   LinkRow, OPEN_STAGES, resolveLink, driversOnVan, createAndSendLink, maskEmail,
@@ -195,11 +195,17 @@ async function markDone(claimId: string, key: string) {
   );
 }
 
+async function unmarkDone(claimId: string, key: string) {
+  await query(`UPDATE incident_claims SET sections_done = sections_done - $2::text WHERE id = $1`, [claimId, key]);
+}
+
 router.post('/:token/section/:key', writeLimiter, withLink(true, async (req, res, link) => {
   const key = String(req.params.key);
   const def = CLAIM_SECTIONS.find((s) => s.key === key && s.who === 'client');
   if (!def) { res.status(404).json({ error: 'Unknown section' }); return; }
   const clean = sanitiseSection(def, req.body?.data);
+  const bad = sectionFormatErrors(def, clean);
+  if (bad.length) { res.status(400).json({ error: 'Please check these and save again', problems: bad }); return; }
   // Merge into form_data without touching any other section (Ooosh-only ones included).
   const patch: Record<string, unknown> = { [key]: clean };
   if (def.gate) {
@@ -222,12 +228,16 @@ router.post('/:token/section/:key', writeLimiter, withLink(true, async (req, res
       inc && typeof inc.place === 'string' && inc.place.trim() ? inc.place.trim() : null,
     ],
   );
-  const first = await query(`SELECT (sections_done ? $2::text) AS done FROM incident_claims WHERE id = $1`, [link.claim_id, key]);
-  if (!first.rows[0]?.done) {
+  // Saved either way (it's done over several sittings); only DONE once the core answers are in.
+  const after = await query(`SELECT form_data, (sections_done ? $2::text) AS done FROM incident_claims WHERE id = $1`, [link.claim_id, key]);
+  const missing = sectionMissing(def, after.rows[0]?.form_data || {});
+  if (missing.length) {
+    if (after.rows[0]?.done) await unmarkDone(link.claim_id, key);
+  } else if (!after.rows[0]?.done) {
     await markDone(link.claim_id, key);
     await logClaimEvent(link.claim_id, null, 'section_saved', `${def.title} completed (${actorLabel(link)})`);
   }
-  res.json({ data: { ok: true } });
+  res.json({ data: { ok: true, missing } });
 }));
 
 // ── Driver's part (code → session → declarations + signature) ───────────
@@ -280,6 +290,8 @@ router.post('/:token/driver/save', writeLimiter, withLink(true, async (req, res,
   if (!driverId) return;
   const def = CLAIM_SECTIONS.find((s) => s.key === 'driver')!;
   const clean = sanitiseSection(def, req.body?.data);
+  const missing = sectionMissing(def, { driver: clean });
+  if (missing.length) { res.status(400).json({ error: 'Please answer these before signing', missing }); return; }
   const sig = typeof req.body?.signature_png_base64 === 'string' ? req.body.signature_png_base64 : '';
   const printName = typeof req.body?.print_name === 'string' ? req.body.print_name.trim().slice(0, 120) : '';
   if (!sig || printName.length < 2) { res.status(400).json({ error: 'Please sign and print your name.' }); return; }
@@ -431,9 +443,13 @@ router.get('/:token/sketch', readLimiter, withLink(false, async (_req, res, link
 // ── Submit ───────────────────────────────────────────────────────────────
 
 router.post('/:token/submit', writeLimiter, withLink(true, async (_req, res, link) => {
-  const c = await query(`SELECT sections_done, driver_signed_at, stage FROM incident_claims WHERE id = $1`, [link.claim_id]);
+  const c = await query(`SELECT sections_done, driver_signed_at, stage, form_data FROM incident_claims WHERE id = $1`, [link.claim_id]);
   const done = (c.rows[0]?.sections_done || {}) as Record<string, unknown>;
-  const missing = ['who', ...CLIENT_SECTION_KEYS].filter((k) => !done[k])
+  const form = (c.rows[0]?.form_data || {}) as Record<string, unknown>;
+  // A section counts once the client has saved it complete AND it's still complete
+  // (staff can edit the same answers).
+  const missing = ['who', ...CLIENT_SECTION_KEYS]
+    .filter((k) => !done[k] || (k !== 'who' && sectionMissing(CLAIM_SECTIONS.find((s) => s.key === k)!, form).length > 0))
     .map((k) => (k === 'who' ? "Who's filling this in" : CLAIM_SECTIONS.find((s) => s.key === k)?.title || k));
   if (!c.rows[0]?.driver_signed_at) missing.push("The driver's declaration and signature");
   if (missing.length) { res.status(400).json({ error: 'Not quite finished', missing }); return; }
@@ -448,7 +464,7 @@ router.post('/:token/submit', writeLimiter, withLink(true, async (_req, res, lin
   await query(`UPDATE incident_claim_links SET status = 'submitted' WHERE claim_id = $1 AND status <> 'revoked'`, [link.claim_id]);
   await logClaimEvent(link.claim_id, null, 'stage_change', `Form submitted by ${link.filled_by_name || link.recipient_name || 'the client'}`,
     { from: c.rows[0].stage, to: 'submitted', via_link: link.id });
-  await notifyClaimFollowers(link.claim_id, null, `Claim form submitted — ${claimLabel(link)}`, 'The client has submitted the incident form. It needs a manager to review.');
+  await notifyClaimSubmitted(link.claim_id, link.filled_by_name || link.recipient_name || 'The client');
   res.json({ data: { ok: true } });
 }));
 

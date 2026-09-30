@@ -33,7 +33,7 @@ import {
   logIssueEvent, getDefaultVehicleIssueWatchers, notifyIssueRecipients,
 } from '../services/job-issues';
 import { estimateVehicleValue } from '../services/vehicle-value';
-import { resolveOutlineType } from '../services/claim-form-fields';
+import { resolveOutlineType, CLAIM_SECTIONS } from '../services/claim-form-fields';
 import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 
@@ -526,14 +526,19 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
     if ('owner_user_id' in body) set('owner_user_id', body.owner_user_id ?? null);
     if ('next_check_on' in body) set('next_check_on', body.next_check_on ?? null, '::date');
     if (body.form_data) {
-      // Whole-object replace; derive the few list/filter columns from it.
+      // Only the sections sent are replaced — the page sends just the ones staff
+      // edited, so a client filling in the same form through their link at the
+      // same time keeps everything else. Derive the list/filter columns from it.
       const fd = body.form_data as Record<string, Record<string, unknown> | unknown>;
-      const inc = (fd.incident && typeof fd.incident === 'object' ? fd.incident : {}) as Record<string, unknown>;
-      set('form_data', JSON.stringify(fd), '::jsonb');
-      const date = typeof inc.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(inc.date) ? inc.date : null;
-      set('incident_at', date ? `${date}T12:00:00Z` : null, '::timestamptz');
-      set('incident_time_text', typeof inc.time === 'string' && inc.time.trim() ? inc.time.trim() : null);
-      set('incident_location', typeof inc.place === 'string' && inc.place.trim() ? inc.place.trim() : null);
+      params.push(JSON.stringify(fd));
+      sets.push(`form_data = form_data || $${params.length}::jsonb`);
+      if (fd.incident && typeof fd.incident === 'object') {
+        const inc = fd.incident as Record<string, unknown>;
+        const date = typeof inc.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(inc.date) ? inc.date : null;
+        set('incident_at', date ? `${date}T12:00:00Z` : null, '::timestamptz');
+        set('incident_time_text', typeof inc.time === 'string' && inc.time.trim() ? inc.time.trim() : null);
+        set('incident_location', typeof inc.place === 'string' && inc.place.trim() ? inc.place.trim() : null);
+      }
     }
     if (sets.length === 0) { res.status(400).json({ error: 'Nothing to update' }); return; }
     sets.push('updated_at = NOW()');
@@ -587,7 +592,12 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
         await logClaimEvent(id, userId, 'milestone', 'Date we were notified corrected', { kind: 'notified' }, { eventDate: body.notified_on });
       }
     }
-    if (body.form_data) await logClaimEvent(id, userId, 'form_saved', 'Form answers updated');
+    if (body.form_data) {
+      const titles = Object.keys(body.form_data)
+        .map((k) => CLAIM_SECTIONS.find((s) => s.key === k.replace(/_involved$/, ''))?.title)
+        .filter((t, i, a): t is string => !!t && a.indexOf(t) === i);
+      await logClaimEvent(id, userId, 'form_saved', `Form answers updated${titles.length ? ` — ${titles.join(', ')}` : ''}`);
+    }
 
     res.json({ data: { ok: true } });
   } catch (err) {
