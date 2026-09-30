@@ -488,7 +488,20 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     })),
     viewAllHref: '/vehicles/claims',
   };
-  const claimBuckets = [claimReview, claimChecks].filter((b) => b.count > 0);
+  // Four client reminders and still no form — the chase has stopped; phone them.
+  const claimChase: NABucket = {
+    key: 'claim_chase', title: 'Claim forms not coming back', accent: 'red',
+    count: na.claim_chase_exhausted?.length || 0,
+    items: (na.claim_chase_exhausted || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: '4 reminders sent',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  const claimBuckets = [claimChase, claimReview, claimChecks].filter((b) => b.count > 0);
 
   // Studio-sitter cover gaps (Rehearsals) — evenings in the next 14 days that
   // need a sitter but have none assigned. Amber — action-needed planning.

@@ -3,7 +3,7 @@
  * deciding whether mot_due moves. The second is the one that matters — it
  * rewrites a compliance date on its own, so it must only ever move FORWARD.
  */
-import { parseMotPayload, compareMotDue, normaliseReg, describeDvsaError } from '../dvsa-mot';
+import { parseMotPayload, compareMotDue, normaliseReg, describeDvsaError, entraErrorDetail } from '../dvsa-mot';
 
 // Shaped like a real DVSA VehicleWithMotResponse (openapi spec, Sep 2026).
 const vanWithTests = {
@@ -218,5 +218,26 @@ describe('fetchMotHistoryByReg', () => {
     delete process.env.DVSA_API_KEY;
     const { fetchMotHistoryByReg } = await import('../dvsa-mot');
     await expect(fetchMotHistoryByReg('RX21ABC')).rejects.toMatchObject({ kind: 'not_configured' });
+  });
+});
+
+describe('entraErrorDetail', () => {
+  it('names an expired secret from the Entra error body', () => {
+    const body = JSON.stringify({
+      error: 'invalid_client',
+      error_description: 'AADSTS7000222: The provided client secret keys for app are expired.',
+    });
+    expect(entraErrorDetail(body)).toBe('AADSTS7000222 — the client secret has expired');
+  });
+
+  it('tells a wrong scope apart from an expired secret', () => {
+    expect(entraErrorDetail('{"error":"invalid_scope","error_description":"AADSTS70011: bad scope"}'))
+      .toBe('AADSTS70011 — DVSA_SCOPE is not valid');
+  });
+
+  it('falls back to the raw code, then the OAuth error name', () => {
+    expect(entraErrorDetail('AADSTS12345: something new')).toBe('AADSTS12345');
+    expect(entraErrorDetail('{"error":"unauthorized_client"}')).toBe('unauthorized_client');
+    expect(entraErrorDetail('<html>gateway</html>')).toBeNull();
   });
 });

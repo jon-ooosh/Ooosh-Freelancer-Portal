@@ -37,11 +37,12 @@ export const CLAIM_OUTCOMES = ['not_claimed', 'settled', 'denied', 'defended', '
 export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
 /**
- * Stages that chase themselves and so need no check date. Empty until the
- * Phase 3 client chase exists — until then a case with the form out stays on
- * the owner's check date like any other, so it can't go quiet.
+ * Stages that chase themselves and so need no check date: the client chase
+ * (services/claim-chase.ts) runs a case with the form out. A PAUSED chase is
+ * back on the owner's check date, and a chase that has run out is flagged in
+ * Needs Attention instead.
  */
-const SELF_CHASING: ReadonlySet<string> = new Set<string>();
+const SELF_CHASING: ReadonlySet<string> = new Set<string>(['form_out']);
 
 export async function logClaimEvent(
   claimId: string,
@@ -291,6 +292,7 @@ export async function runClaimCheckReminders(): Promise<{ belled: number }> {
         SET next_check_sent_for = next_check_on
       WHERE is_deleted = false
         AND stage <> 'closed'
+        AND NOT (stage = 'form_out' AND chase_paused_at IS NULL)   -- the client chase has it
         AND next_check_on IS NOT NULL
         AND next_check_on <= CURRENT_DATE
         AND next_check_sent_for IS DISTINCT FROM next_check_on
@@ -341,7 +343,22 @@ export async function getClaimAttentionBuckets(): Promise<{
   check_overdue: ClaimAttentionRow[];
   check_overdue_total: number;
   to_review: ClaimAttentionRow[];
+  chase_exhausted: ClaimAttentionRow[];
 }> {
+  // Four reminders and no form (services/claim-chase.ts) — needs a phone call.
+  // next_check_on carries the date the last reminder went.
+  const exhausted = await query(
+    `SELECT c.id, c.stage, c.vehicle_reg, c.hh_job_number,
+            c.chase_sent_for AS next_check_on,
+            NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), '') AS owner_name
+     FROM incident_claims c
+     LEFT JOIN users u ON u.id = c.owner_user_id
+     LEFT JOIN people p ON p.id = u.person_id
+     WHERE c.is_deleted = false AND c.stage = 'form_out'
+       AND c.chase_paused_at IS NULL AND c.chase_level >= 5
+     ORDER BY c.updated_at
+     LIMIT 20`,
+  );
   // A submitted form is its own bucket (it needs a manager's review, whatever
   // the check date says), so it's left out of the overdue-check one.
   const review = await query(
@@ -365,6 +382,7 @@ export async function getClaimAttentionBuckets(): Promise<{
      LEFT JOIN people p ON p.id = u.person_id
      WHERE c.is_deleted = false
        AND c.stage NOT IN ('closed', 'submitted')
+       AND NOT (c.stage = 'form_out' AND c.chase_paused_at IS NULL)   -- chased, or in chase_exhausted
        AND (c.next_check_on IS NULL OR c.next_check_on < CURRENT_DATE)
      ORDER BY c.next_check_on NULLS FIRST
      LIMIT 10`,
@@ -374,6 +392,7 @@ export async function getClaimAttentionBuckets(): Promise<{
     check_overdue: r.rows.map(({ total: _t, ...row }) => row as ClaimAttentionRow),
     check_overdue_total: total,
     to_review: review.rows as ClaimAttentionRow[],
+    chase_exhausted: exhausted.rows as ClaimAttentionRow[],
   };
 }
 

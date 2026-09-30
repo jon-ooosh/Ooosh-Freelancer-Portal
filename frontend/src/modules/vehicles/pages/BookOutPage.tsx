@@ -39,6 +39,8 @@ import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
 import type { ChecklistItem } from '../lib/settings-api'
 import type { HireHopJob } from '../types/hirehop'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 
 /** Per-operation result shown on the success/complete screen */
 interface OpResult {
@@ -1516,6 +1518,8 @@ function StepSelectVehicle({
   hireHopJob: HireHopJob | null
   onSelect: (v: Vehicle) => void
 }) {
+  // "For sale" pill — staff only; the hook stays idle in a freelancer session.
+  const openSales = useOpenSalesByVehicle()
   // Extract van requirements if a HireHop job is linked
   const requirements = useMemo(
     () => hireHopJob ? extractVanRequirements(hireHopJob) : [],
@@ -1610,6 +1614,7 @@ function StepSelectVehicle({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   <span className="font-mono text-sm font-bold text-ooosh-navy">{v.reg}</span>
+                  <ForSalePill sale={openSales.get(v.id)} />
                   <span className="text-xs text-gray-400">{v.simpleType}</span>
                   {gearbox !== 'unknown' && (
                     <span className="text-[10px] text-gray-400">({gearbox === 'auto' ? 'A' : 'M'})</span>

@@ -33,6 +33,7 @@ import {
   logIssueEvent, getDefaultVehicleIssueWatchers, notifyIssueRecipients,
 } from '../services/job-issues';
 import { estimateVehicleValue } from '../services/vehicle-value';
+import { notifyVehicleSaleOfIssue } from '../services/vehicle-sales';
 import { resolveOutlineType, CLAIM_SECTIONS } from '../services/claim-form-fields';
 import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
@@ -111,7 +112,7 @@ const LIST_SELECT = `
   c.incident_at, c.incident_time_text, c.incident_location, c.notified_on, c.notified_via,
   c.broker_ref, c.insurer_ref, c.broker_sent_at,
   c.third_party_claim, c.liability_dispute,
-  c.owner_user_id, c.next_check_on,
+  c.owner_user_id, c.next_check_on, c.chase_level, c.chase_paused_at,
   c.created_at, c.updated_at,
   j.job_name, j.client_name,
   d.full_name AS driver_name,
@@ -209,6 +210,7 @@ router.post('/out-of-the-blue', validate(outOfTheBlueSchema), async (req: AuthRe
       category: 'dispute', severity: 'normal', source_module: 'manual', alleged_date: body.alleged_date,
     });
     await notifyIssueRecipients(issueId, userId, 'normal', `New issue: ${body.summary.slice(0, 80)}`, 'dispute — third-party claim');
+    await notifyVehicleSaleOfIssue(issueId, userId);
     if (body.job_id) {
       await query(
         `INSERT INTO interactions (type, content, job_id, created_by, source)
@@ -1194,13 +1196,16 @@ router.post('/:id/links', validate(sendLinksSchema), async (req: AuthRequest, re
     }
     const sent = results.filter((r) => r.sent);
     if (sent.length) {
+      // A new recipient gets the full run of reminders (§9.1) — restart the chase.
+      const fresh = sent.some((r) => !r.reused);
       await query(
         `UPDATE incident_claims
             SET stage = CASE WHEN stage = 'open' THEN 'form_out' ELSE stage END,
                 next_check_on = COALESCE(next_check_on, $2::date),
+                chase_level = CASE WHEN $3::boolean THEN 0 ELSE chase_level END,
                 updated_at = NOW()
           WHERE id = $1`,
-        [id, ukDatePlus(3)],
+        [id, ukDatePlus(3), fresh],
       );
       await logClaimEvent(id, req.user!.id, 'form_sent', `Form sent to ${sent.map((r) => r.name).join(', ')}`,
         { recipients: sent.map((r) => r.email) });
@@ -1212,6 +1217,50 @@ router.post('/:id/links', validate(sendLinksSchema), async (req: AuthRequest, re
   } catch (err) {
     console.error('Send claim links error:', err);
     res.status(500).json({ error: 'Failed to send the form' });
+  }
+});
+
+// ── Client chase controls (§9.1) — pause needs a reason; restart goes back to reminder 1 ──
+
+router.post('/:id/chase/pause', validate(z.object({ reason: z.string().trim().min(2).max(1000) })), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const reason = (req.body as { reason: string }).reason;
+    // Paused = back on the owner's check date, so make sure there is one.
+    const r = await query(
+      `UPDATE incident_claims
+          SET chase_paused_at = NOW(), chase_paused_reason = $2,
+              next_check_on = COALESCE(next_check_on, $3::date), updated_at = NOW()
+        WHERE id = $1 AND is_deleted = false AND stage = 'form_out' AND chase_paused_at IS NULL
+        RETURNING id`,
+      [id, reason, ukDatePlus(7)],
+    );
+    if (!r.rowCount) { res.status(409).json({ error: 'Chasing is not running on this case' }); return; }
+    await logClaimEvent(id, req.user!.id, 'chase_paused', `Reminders paused — ${reason}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Pause claim chase error:', err);
+    res.status(500).json({ error: 'Failed to pause reminders' });
+  }
+});
+
+router.post('/:id/chase/restart', validate(z.object({ reason: z.string().trim().max(1000).optional() })), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const reason = (req.body as { reason?: string }).reason;
+    const r = await query(
+      `UPDATE incident_claims
+          SET chase_level = 0, chase_paused_at = NULL, chase_paused_reason = NULL, updated_at = NOW()
+        WHERE id = $1 AND is_deleted = false AND stage = 'form_out'
+        RETURNING id`,
+      [id],
+    );
+    if (!r.rowCount) { res.status(409).json({ error: 'The form is not out on this case' }); return; }
+    await logClaimEvent(id, req.user!.id, 'chase_restarted', `Reminders restarted from 1${reason ? ` — ${reason}` : ''}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Restart claim chase error:', err);
+    res.status(500).json({ error: 'Failed to restart reminders' });
   }
 });
 

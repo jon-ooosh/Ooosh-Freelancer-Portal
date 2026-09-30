@@ -104,6 +104,10 @@ interface Claim {
   driver_signed_name: string | null;
   sections_done: Record<string, string> | null;
   submitted_at: string | null;
+  chase_level: number;
+  chase_sent_for: string | null;
+  chase_paused_at: string | null;
+  chase_paused_reason: string | null;
 }
 interface StaffUser { id: string; name: string | null; email: string }
 interface ClaimLink {
@@ -306,7 +310,7 @@ function StageBar({ claim, isManager, onDone, onSend }: {
   const btn = 'px-3 py-1.5 text-xs rounded border disabled:opacity-50';
   const help: Record<ClaimStage, string> = {
     open: 'Start here: send the incident form to the driver and/or the client. Taken it all by phone instead? Fill in the form below and mark it complete.',
-    form_out: 'The client has the form. You get a bell and an email when they submit it; the next-check date still applies until automatic chasing arrives.',
+    form_out: 'The client has the form. They get a reminder each morning (up to 4) until they send it; you get a bell and an email when they do.',
     submitted: 'Waiting for a manager to review the answers.',
     reviewed: 'Reviewed. The broker has NOT been told — send it when (and if) you decide to, or close it.',
     with_broker: 'With the broker. Record their reference and keep the next-check date moving.',
@@ -374,6 +378,59 @@ function StageBar({ claim, isManager, onDone, onSend }: {
       )}
       {error && <div className="text-xs text-red-600 mt-2">{error}</div>}
       {(claim.stage === 'form_out' || (claim.stage === 'open' && claim.links.length > 0)) && <FormProgress claim={claim} />}
+      {claim.stage === 'form_out' && <ChaseControls claim={claim} onDone={onDone} />}
+    </div>
+  );
+}
+
+const CHASE_MAX = 4;
+
+/** Reminder status + pause / restart (spec §9.1). Pause needs a reason. */
+function ChaseControls({ claim, onDone }: { claim: Claim; onDone: (msg: string) => void }) {
+  const [pausing, setPausing] = useState(false);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const call = async (path: string, body: Row, msg: string) => {
+    setBusy(true); setError('');
+    try { await api.post(`/claims/${claim.id}/chase/${path}`, body); setPausing(false); setReason(''); onDone(msg); }
+    catch (e) { setError(errMsg(e, 'Failed')); }
+    finally { setBusy(false); }
+  };
+  const sent = Math.min(claim.chase_level, CHASE_MAX);
+  const last = claim.chase_sent_for ? ` · last run ${fmtClaimDate(claim.chase_sent_for)}` : '';
+  let status: React.ReactNode;
+  if (claim.chase_paused_at) {
+    status = <span className="text-amber-700">Reminders paused — {claim.chase_paused_reason}. The next-check date applies meanwhile.</span>;
+  } else if (claim.chase_level > CHASE_MAX) {
+    status = <span className="text-red-700 font-medium">{CHASE_MAX} reminders sent and still no form — reminders have stopped. Worth a phone call.</span>;
+  } else {
+    status = <span className="text-slate-600">Reminders: {sent} of {CHASE_MAX} sent{last}. One goes each morning at 09:21 (not within 20 hours of the client doing something).</span>;
+  }
+  const btn = 'px-2 py-1 text-xs rounded border bg-white disabled:opacity-50';
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+      {status}
+      {!claim.chase_paused_at && claim.chase_level <= CHASE_MAX && (
+        <button type="button" className={btn} disabled={busy} onClick={() => setPausing((v) => !v)}>Pause reminders…</button>
+      )}
+      {(claim.chase_paused_at || claim.chase_level > 0) && (
+        <button type="button" className={btn} disabled={busy}
+          onClick={() => call('restart', {}, 'Reminders restarted — the next one is reminder 1.')}>
+          Restart from reminder 1
+        </button>
+      )}
+      {pausing && (
+        <span className="basis-full flex flex-wrap gap-2">
+          <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why? (e.g. driver in hospital, speaking by phone)"
+            className="flex-1 min-w-[16rem] border rounded px-2 py-1 text-sm" />
+          <button type="button" className="px-2 py-1 text-xs rounded border bg-slate-800 text-white disabled:opacity-50" disabled={busy || reason.trim().length < 2}
+            onClick={() => call('pause', { reason: reason.trim() }, 'Reminders paused.')}>
+            Pause
+          </button>
+        </span>
+      )}
+      {error && <span className="basis-full text-red-600">{error}</span>}
     </div>
   );
 }
@@ -408,7 +465,7 @@ function FormProgress({ claim }: { claim: Claim }) {
         </span>
       ))}
       <span className="basis-full text-slate-500">
-        {last ? `Last activity ${new Date(last.created_at).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}: ${last.body}` : 'Not opened yet.'}
+        {last ? `Last activity ${new Date(last.created_at).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}: ${(last.body || '').replace(/\.?$/, '.')}` : 'Not opened yet.'}
         {' '}Parts the client saves show in the form below as they go — ticked once they are complete.
       </span>
     </div>
@@ -982,6 +1039,7 @@ const EVENT_ICON: Record<string, string> = {
   broker_send_failed: '❌', policyholder_signed: '✍️', notified_via: '📞', file_sharing: '🔓',
   form_sent: '📧', link_opened: '👀', link_revoked: '🚫', who_filling: '🙋', handed_off: '↪️', sent_to_driver: '📧',
   section_saved: '✅', driver_verified: '🔐', driver_signed: '✍️', damage_marked: '❌', sketch_saved: '✏️',
+  chase_sent: '⏰', chase_escalated: '🚩', chase_paused: '⏸', chase_restarted: '🔁',
 };
 
 function TimelineCard({ claim, onChange }: { claim: Claim; onChange: () => void }) {

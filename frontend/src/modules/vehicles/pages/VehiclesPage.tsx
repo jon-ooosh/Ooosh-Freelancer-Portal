@@ -17,6 +17,8 @@ import { isSetupPending, checklistProgress } from '../lib/setup-checklist'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import type { Vehicle } from '../types/vehicle'
 import type { ComplianceSettings } from '../lib/fleet-api'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 
 /** Colour classes for simple vehicle types */
 const typeColours: Record<string, string> = {
@@ -50,6 +52,7 @@ function DateBadge({ label, date, warningDays = 30 }: { label: string; date: str
 }
 
 function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: boolean }) {
+  const openSales = useOpenSalesByVehicle()
   const gearbox = vehicleGearbox(vehicle)
   const gearboxLabel = gearbox === 'auto' ? 'Auto' : gearbox === 'manual' ? 'Manual' : null
 
@@ -62,7 +65,9 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
         {/* Top row: reg + type badges */}
         <div className="flex items-start justify-between">
           <div>
-            <h3 className="text-lg font-bold text-ooosh-navy">{vehicle.reg}</h3>
+            <h3 className="text-lg font-bold text-ooosh-navy">
+              {vehicle.reg} <ForSalePill sale={openSales.get(vehicle.id)} />
+            </h3>
             <p className="text-sm text-gray-500">
               {vehicle.make} {vehicle.colour ? `· ${vehicle.colour}` : ''}
             </p>
@@ -282,6 +287,7 @@ function FleetTable({
 }) {
   const [sort, setSort] = useState<SortState | null>(null)
   const onSort = (col: string) => setSort(s => nextSort(s, col))
+  const openSales = useOpenSalesByVehicle()
 
   const accessor = (v: Vehicle, col: string): string | number | null => {
     switch (col) {
@@ -332,6 +338,7 @@ function FleetTable({
                   <Link to={vmPath(`/vehicles/${vehicle.id}`)} className="text-sm font-bold text-ooosh-navy hover:underline">
                     {vehicle.reg}
                   </Link>
+                  <ForSalePill sale={openSales.get(vehicle.id)} className="ml-1.5" />
                   {isSetupPending(vehicle.setupChecklist) && (
                     <span
                       className="ml-1.5 inline-block rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 align-middle"
