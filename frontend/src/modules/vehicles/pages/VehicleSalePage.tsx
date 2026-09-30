@@ -34,6 +34,17 @@ import {
   removeSalePhoto,
   uploadSalePhoto,
   salePhotoUrl,
+  fetchSaleLinks,
+  createSaleLink,
+  updateSaleLink,
+  revokeSaleLink,
+  saleLinkUrl,
+  fetchSalesContact,
+  saveSalesContact,
+  DEFAULT_LINK_SWITCHES,
+  LINK_SWITCH_LABELS,
+  type LinkSwitches,
+  type SaleLink,
   type SaleView,
   type VatBasis,
 } from '../lib/vehicle-sales'
@@ -149,6 +160,7 @@ function SaleContent({ vehicleId }: { vehicleId: string }) {
           <SaleHeaderCard sale={sale} isAdmin={isAdmin} isManager={isManager} onSaved={applySale} vehicleId={vehicle.id} />
           <RecheckBanner sale={sale} onSaved={applySale} />
           <DescriptionCard sale={sale} onSaved={applySale} />
+          <ShareLinksCard sale={sale} isManager={isManager} />
           <KeyFactsCard vehicle={vehicle} />
           <ChosenPhotos sale={sale} onSaved={applySale} />
           <AddPhotos sale={sale} vehicle={vehicle} onSaved={applySale} />
@@ -719,3 +731,216 @@ function EventPhotoPicker({ event, reg, saleId, chosenKeys, defaultOpen, onSaved
     </div>
   )
 }
+
+// ── Share links (Phase 2, §6) ──────────────────────────────────────────────
+
+function ShareLinksCard({ sale, isManager }: { sale: SaleView; isManager: boolean }) {
+  const queryClient = useQueryClient()
+  const linksKey = ['sale-links', sale.id]
+  const { data: links, isLoading } = useQuery({ queryKey: linksKey, queryFn: () => fetchSaleLinks(sale.id) })
+  const [name, setName] = useState('')
+  const [switches, setSwitches] = useState<LinkSwitches>(DEFAULT_LINK_SWITCHES)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
+  const [showRevoked, setShowRevoked] = useState(false)
+
+  async function run(fn: () => Promise<SaleLink[]>) {
+    setBusy(true)
+    setError(null)
+    try {
+      queryClient.setQueryData(linksKey, await fn())
+      return true
+    } catch (err) {
+      setError((err as Error).message)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function create() {
+    if (!name.trim()) { setError('Who is this link for?'); return }
+    if (await run(() => createSaleLink(sale.id, name.trim(), switches))) {
+      setName('')
+      setSwitches(DEFAULT_LINK_SWITCHES)
+    }
+  }
+
+  async function copy(link: SaleLink) {
+    const url = saleLinkUrl(link.token)
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopied(link.id)
+      setTimeout(() => setCopied(c => (c === link.id ? null : c)), 2000)
+    } catch {
+      window.prompt('Copy this link:', url)
+    }
+  }
+
+  const live = (links ?? []).filter(l => !l.revokedAt)
+  const revoked = (links ?? []).filter(l => l.revokedAt)
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Share links</h3>
+        <p className="text-xs text-gray-500">
+          One link per buyer. Each shows the photos, description and vehicle details, plus whichever
+          extras you tick. Details stay live; the link stops working if you revoke it or the sale ends.
+        </p>
+      </div>
+
+      {isLoading && <p className="text-sm text-gray-400">Loading links…</p>}
+      {live.length === 0 && !isLoading && <p className="text-sm text-gray-500">No links yet.</p>}
+
+      {live.map(link => (
+        <div key={link.id} className="rounded border border-gray-200 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium text-gray-900">{link.recipientName}</p>
+              <p className="text-[11px] text-gray-500">
+                Made {fmtDate(link.createdAt)}{link.createdByName ? ` by ${link.createdByName}` : ''} ·{' '}
+                {link.viewCount > 0
+                  ? `opened ${link.viewCount}× · last ${fmtDate(link.lastViewedAt)}`
+                  : 'not opened yet'}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <button type="button" onClick={() => copy(link)}
+                className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                {copied === link.id ? 'Copied ✓' : 'Copy link'}
+              </button>
+              <a href={`${saleLinkUrl(link.token)}?preview=1`} target="_blank" rel="noreferrer"
+                className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                Preview
+              </a>
+              <button type="button" disabled={busy}
+                onClick={() => {
+                  if (window.confirm(`Revoke the link for ${link.recipientName}? It will stop working straight away.`)) {
+                    void run(() => revokeSaleLink(sale.id, link.id))
+                  }
+                }}
+                className="rounded border border-red-200 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50">
+                Revoke
+              </button>
+            </div>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {LINK_SWITCH_LABELS.map(({ key, label }) => (
+              <button key={key} type="button" disabled={busy}
+                onClick={() => void run(() => updateSaleLink(sale.id, link.id, { [key]: !link[key] }))}
+                title={link[key] ? `Showing — click to hide from ${link.recipientName}` : `Hidden — click to show ${link.recipientName}`}
+                className={`rounded-full px-2 py-0.5 text-[11px] font-medium disabled:opacity-50 ${
+                  link[key] ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-400 line-through'
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      <div className="rounded border border-dashed border-gray-300 p-3">
+        <p className="mb-2 text-xs font-medium text-gray-600">New link</p>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="Who is it for? e.g. Van Monster, Dave (client)"
+          className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+          {LINK_SWITCH_LABELS.map(({ key, label }) => (
+            <label key={key} className="flex items-center gap-1.5 text-xs text-gray-700">
+              <input type="checkbox" checked={switches[key]}
+                onChange={e => setSwitches(sw => ({ ...sw, [key]: e.target.checked }))} />
+              {label}
+            </label>
+          ))}
+        </div>
+        {!switches.showDamageHistory && (
+          <p className="mt-1 text-[11px] text-amber-700">
+            Damage history hidden — fine for a dealer, but a private buyer should normally see it.
+          </p>
+        )}
+        <button type="button" onClick={create} disabled={busy}
+          className="mt-2 rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+          {busy ? 'Saving…' : 'Create link'}
+        </button>
+      </div>
+
+      {error && <p className="text-sm text-red-600">{error}</p>}
+
+      <p className="text-[11px] text-gray-400">
+        Damage history shows each Problem's summary exactly as it was written — check the preview before sending.
+      </p>
+
+      {revoked.length > 0 && (
+        <div>
+          <button type="button" onClick={() => setShowRevoked(v => !v)} className="text-xs text-gray-500 hover:underline">
+            {showRevoked ? 'Hide' : 'Show'} revoked links ({revoked.length})
+          </button>
+          {showRevoked && (
+            <ul className="mt-1 space-y-0.5">
+              {revoked.map(l => (
+                <li key={l.id} className="text-xs text-gray-400">
+                  {l.recipientName} — revoked {fmtDate(l.revokedAt)} · opened {l.viewCount}×
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <SalesContactLine canEdit={isManager} />
+    </div>
+  )
+}
+
+/** Q7 — the contact shown at the foot of every sale page, for every van. */
+function SalesContactLine({ canEdit }: { canEdit: boolean }) {
+  const queryClient = useQueryClient()
+  const { data: contact } = useQuery({ queryKey: ['vehicle-sales-contact'], queryFn: fetchSalesContact })
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function save() {
+    setBusy(true)
+    try {
+      await saveSalesContact(text)
+      queryClient.setQueryData(['vehicle-sales-contact'], text.trim())
+      setEditing(false)
+    } catch (err) {
+      alert((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="border-t border-gray-100 pt-2 text-xs">
+      <span className="text-gray-500">Contact shown to buyers (all vans): </span>
+      {!editing ? (
+        <>
+          <span className={contact ? 'whitespace-pre-line text-gray-800' : 'text-amber-700'}>
+            {contact || 'none set — buyers won\'t see who to call'}
+          </span>
+          {canEdit && (
+            <button type="button" onClick={() => { setText(contact ?? ''); setEditing(true) }}
+              className="ml-2 text-ooosh-blue hover:underline">Edit</button>
+          )}
+        </>
+      ) : (
+        <div className="mt-1 space-y-1">
+          <textarea value={text} onChange={e => setText(e.target.value)} rows={2}
+            placeholder="e.g. name · phone · email"
+            className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-blue-400 focus:outline-none" />
+          <div className="flex gap-2">
+            <button type="button" onClick={save} disabled={busy}
+              className="rounded bg-ooosh-navy px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50">Save</button>
+            <button type="button" onClick={() => setEditing(false)}
+              className="rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-600">Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+

@@ -36,11 +36,14 @@ interface DvsaConfig {
 }
 
 function readConfig(): DvsaConfig | null {
-  const clientId = process.env.DVSA_CLIENT_ID;
-  const clientSecret = process.env.DVSA_CLIENT_SECRET;
-  const scope = process.env.DVSA_SCOPE;
-  const tokenUrl = process.env.DVSA_TOKEN_URL;
-  const apiKey = process.env.DVSA_API_KEY;
+  // Trimmed: a stray space or line-end pasted into .env makes DVSA refuse
+  // the value with nothing to show for it.
+  const env = (k: string) => process.env[k]?.trim() || undefined;
+  const clientId = env('DVSA_CLIENT_ID');
+  const clientSecret = env('DVSA_CLIENT_SECRET');
+  const scope = env('DVSA_SCOPE');
+  const tokenUrl = env('DVSA_TOKEN_URL');
+  const apiKey = env('DVSA_API_KEY');
   if (!clientId || !clientSecret || !scope || !tokenUrl || !apiKey) return null;
   return { clientId, clientSecret, scope, tokenUrl, apiKey };
 }
@@ -190,12 +193,15 @@ export async function fetchMotHistoryByReg(reg: string): Promise<unknown> {
         : resp.status === 429 ? 'rate_limited'
         : resp.status === 401 || resp.status === 403 ? 'auth'
         : 'failed';
-    const apiCode = (() => {
-      try { return (JSON.parse(body) as { errorCode?: unknown }).errorCode; } catch { return null; }
+    const apiErr = (() => {
+      try { return JSON.parse(body) as { errorCode?: unknown; errorMessage?: unknown }; } catch { return {}; }
     })();
+    // DVSA's own words, e.g. "MOTH-FB-03: Your API key is invalid".
+    const apiDetail = [apiErr.errorCode, apiErr.errorMessage]
+      .filter((x): x is string => typeof x === 'string' && x.trim() !== '').join(': ') || null;
     const detail = kind === 'auth'
-      ? `the MOT API refused the request (HTTP ${resp.status}) — check DVSA_API_KEY`
-      : typeof apiCode === 'string' ? apiCode : null;
+      ? `${apiDetail ?? `HTTP ${resp.status}`} — the login worked, so check DVSA_API_KEY`
+      : apiDetail;
     throw new DvsaError(kind, `DVSA returned ${resp.status}: ${body.slice(0, 300)}`, detail);
   }
   // Unreachable — the loop either returns or throws.

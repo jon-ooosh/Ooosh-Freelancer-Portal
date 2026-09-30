@@ -1,13 +1,14 @@
 /**
- * Vehicle sales — /api/vehicle-sales (docs/VEHICLE-SALES-SPEC.md, Phase 1).
+ * Vehicle sales — /api/vehicle-sales (docs/VEHICLE-SALES-SPEC.md, Phases 1–2).
  *
  * All rules live in services/vehicle-sales.ts (THE definition); this file only
  * maps HTTP to it. Staff-only throughout; the admin-only actions (start,
  * withdraw, price / VAT / hold date) are enforced by the service's
  * planSalePatch() and the start route below.
  */
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import multer from 'multer';
+import rateLimit from 'express-rate-limit';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { isR2Configured } from '../config/r2';
 import {
@@ -25,8 +26,38 @@ import {
   removeSalePhoto,
 } from '../services/vehicle-sales';
 import { refreshVehicleMot } from '../services/dvsa-mot';
+import {
+  listLinks,
+  createLink,
+  updateLinkSwitches,
+  revokeLink,
+  resolvePublicLink,
+} from '../services/vehicle-sale-links';
 
 const router = Router();
+
+// ── Public: a buyer's link (no login — the token is the credential) ─────────
+// Mounted BEFORE authenticate. Unknown, revoked and closed all answer the same
+// "no longer available" (Q6). `?preview=1` is staff looking at it — not counted.
+const publicLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  message: { error: 'Too many requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.get('/public/:token', publicLimiter, async (req: Request, res: Response) => {
+  try {
+    const result = await resolvePublicLink(String(req.params.token), req.query.preview !== '1');
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ data: result });
+  } catch (err) {
+    console.error('[vehicle-sales] public link:', err);
+    res.status(500).json({ error: 'Could not load this page' });
+  }
+});
+
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
 
@@ -220,6 +251,58 @@ router.delete('/:id/photos/:photoId', async (req: AuthRequest, res: Response) =>
     await sendSale(res, id);
   } catch (err) {
     fail(res, err, 'remove photo');
+  }
+});
+
+// ── Share links (Phase 2) ─────────────────────────────────────────────────
+
+router.get('/:id/links', async (req: AuthRequest, res: Response) => {
+  const id = idOr404(res, req.params.id);
+  if (!id) return;
+  try {
+    res.json({ data: await listLinks(id) });
+  } catch (err) {
+    fail(res, err, 'load links');
+  }
+});
+
+/** POST /:id/links — { recipientName, switches? } */
+router.post('/:id/links', async (req: AuthRequest, res: Response) => {
+  const id = idOr404(res, req.params.id);
+  if (!id) return;
+  try {
+    await createLink(id, req.user!.id, { recipientName: req.body?.recipientName, switches: req.body?.switches });
+    res.status(201).json({ data: await listLinks(id) });
+  } catch (err) {
+    fail(res, err, 'create link');
+  }
+});
+
+/** PATCH /:id/links/:linkId — { switches } */
+router.patch('/:id/links/:linkId', async (req: AuthRequest, res: Response) => {
+  const id = idOr404(res, req.params.id);
+  if (!id) return;
+  const linkId = idOr404(res, req.params.linkId, 'Link');
+  if (!linkId) return;
+  try {
+    await updateLinkSwitches(id, linkId, req.body?.switches);
+    res.json({ data: await listLinks(id) });
+  } catch (err) {
+    fail(res, err, 'update link');
+  }
+});
+
+/** DELETE /:id/links/:linkId — revoke (kept for the record, never deleted). */
+router.delete('/:id/links/:linkId', async (req: AuthRequest, res: Response) => {
+  const id = idOr404(res, req.params.id);
+  if (!id) return;
+  const linkId = idOr404(res, req.params.linkId, 'Link');
+  if (!linkId) return;
+  try {
+    await revokeLink(id, linkId);
+    res.json({ data: await listLinks(id) });
+  } catch (err) {
+    fail(res, err, 'revoke link');
   }
 });
 

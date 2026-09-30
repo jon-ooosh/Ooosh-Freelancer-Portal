@@ -241,3 +241,30 @@ describe('entraErrorDetail', () => {
     expect(entraErrorDetail('<html>gateway</html>')).toBeNull();
   });
 });
+
+describe('fetchMotHistoryByReg — API key refused', () => {
+  const ENV = { ...process.env };
+  const realFetch = global.fetch;
+  afterEach(() => { process.env = { ...ENV }; global.fetch = realFetch; });
+
+  it("names DVSA's own reason and points at the API key, not the secret", async () => {
+    jest.resetModules();
+    Object.assign(process.env, {
+      DVSA_CLIENT_ID: 'id', DVSA_CLIENT_SECRET: 'secret', DVSA_SCOPE: 'scope',
+      DVSA_TOKEN_URL: 'https://login.example/token', DVSA_API_KEY: '  key-with-spaces \n',
+    });
+    const seenKeys: string[] = [];
+    global.fetch = jest.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes('login.example')) {
+        return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200 });
+      }
+      seenKeys.push((init?.headers as Record<string, string>)['X-API-Key']);
+      return new Response(JSON.stringify({ errorCode: 'MOTH-FB-03', errorMessage: 'Your API key is invalid' }), { status: 403 });
+    }) as unknown as typeof fetch;
+    const { fetchMotHistoryByReg, explainDvsaError } = await import('../dvsa-mot');
+    const err = (await fetchMotHistoryByReg('RX21ABC').catch((e: unknown) => e)) as { kind: string };
+    expect(seenKeys[0]).toBe('key-with-spaces');   // trimmed before sending
+    expect(err.kind).toBe('auth');
+    expect(explainDvsaError(err)).toContain('MOTH-FB-03: Your API key is invalid — the login worked, so check DVSA_API_KEY');
+  });
+});

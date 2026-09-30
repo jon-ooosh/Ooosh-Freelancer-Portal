@@ -149,3 +149,75 @@ export function useOpenSalesByVehicle(): Map<string, OpenSaleSummary> {
   for (const s of data ?? []) map.set(s.vehicleId, s)
   return map
 }
+
+// ── Share links (Phase 2) ──────────────────────────────────────────────────
+
+export interface LinkSwitches {
+  showPrice: boolean
+  showServiceHistory: boolean
+  showMotHistory: boolean
+  showMileageHistory: boolean
+  showDamageHistory: boolean
+}
+
+/** Same defaults as the backend (§6.2) — damage ON, mileage OFF. */
+export const DEFAULT_LINK_SWITCHES: LinkSwitches = {
+  showPrice: true,
+  showServiceHistory: true,
+  showMotHistory: true,
+  showMileageHistory: false,
+  showDamageHistory: true,
+}
+
+export const LINK_SWITCH_LABELS: Array<{ key: keyof LinkSwitches; label: string }> = [
+  { key: 'showPrice', label: 'Price' },
+  { key: 'showServiceHistory', label: 'Service history' },
+  { key: 'showMotHistory', label: 'MOT history' },
+  { key: 'showMileageHistory', label: 'Mileage history' },
+  { key: 'showDamageHistory', label: 'Damage history' },
+]
+
+export interface SaleLink extends LinkSwitches {
+  id: string
+  token: string
+  recipientName: string
+  createdAt: string
+  createdByName: string | null
+  revokedAt: string | null
+  viewCount: number
+  lastViewedAt: string | null
+}
+
+export const fetchSaleLinks = (saleId: string) =>
+  apiFetch(`${BASE}/${saleId}/links`).then(r => readJson<SaleLink[]>(r))
+export const createSaleLink = (saleId: string, recipientName: string, switches: LinkSwitches) =>
+  send<SaleLink[]>(`/${saleId}/links`, 'POST', { recipientName, switches })
+export const updateSaleLink = (saleId: string, linkId: string, switches: Partial<LinkSwitches>) =>
+  send<SaleLink[]>(`/${saleId}/links/${linkId}`, 'PATCH', { switches })
+export const revokeSaleLink = (saleId: string, linkId: string) =>
+  send<SaleLink[]>(`/${saleId}/links/${linkId}`, 'DELETE')
+
+/** The buyer's URL — the public page lives in the main app, outside /vehicles. */
+export function saleLinkUrl(token: string): string {
+  return `${window.location.origin}/van/${token}`
+}
+
+/** Q7 — the contact line on every sale page (system_settings, admin/manager to edit). */
+export async function fetchSalesContact(): Promise<string> {
+  const resp = await apiFetch('/api/system-settings?category=vehicle_sales')
+  if (!resp.ok) return ''
+  const body = await resp.json() as { data?: Array<{ key: string; value: string | null }> }
+  return body.data?.find(s => s.key === 'vehicle_sales_contact')?.value ?? ''
+}
+
+export async function saveSalesContact(value: string): Promise<void> {
+  const resp = await apiFetch('/api/system-settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { vehicle_sales_contact: value.trim() || null } }),
+  })
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}))
+    throw new Error((body as { error?: string }).error || `HTTP ${resp.status}`)
+  }
+}

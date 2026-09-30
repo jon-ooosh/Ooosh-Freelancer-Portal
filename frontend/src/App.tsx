@@ -55,6 +55,7 @@ import HoldingReceiptPage from './pages/HoldingReceiptPage';
 import QuickActionsPage from './pages/QuickActionsPage';
 import MerchFormPage from './pages/MerchFormPage';
 import RackPlanPublicPage from './pages/RackPlanPublicPage';
+import VehicleForSalePage from './pages/VehicleForSalePage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
@@ -196,6 +197,8 @@ export default function App() {
       <Route path="/merch-form" element={<MerchFormPage />} />
       {/* Public view-only Rack Plan (tokenised, no login) */}
       <Route path="/rack/:token" element={<RackPlanPublicPage />} />
+      {/* Public van-for-sale page (tokenised, no login) — docs/VEHICLE-SALES-SPEC.md §6 */}
+      <Route path="/van/:token" element={<VehicleForSalePage />} />
       {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
       <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
