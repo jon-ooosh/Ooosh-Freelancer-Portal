@@ -371,6 +371,8 @@ export interface OperationsData {
     claim_check_overdue_total?: number;
     /** Client forms submitted and waiting for a manager's review (next_check_on carries the submitted date). */
     claim_to_review?: ClaimAttentionItem[];
+    /** Four reminders and no form — chasing stopped (next_check_on carries the last reminder's date). */
+    claim_chase_exhausted?: ClaimAttentionItem[];
   };
   transport_ops: {
     summary: Record<string, number>;

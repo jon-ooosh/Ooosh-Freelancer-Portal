@@ -1,8 +1,8 @@
 # INCIDENT & POSSIBLE-CLAIMS SPEC — replacing the broker's Word/PDF claim form
 
-**Status:** ✅ PHASES 1–2 BUILT (Sep 2026) — the case file and the client form (§12 rows 1–2).
-Phases 3 (client chasing) and 4 not started. See §18 (Phase 1) and §19 (Phase 2) for what actually
-shipped and where it differs from the plan below.
+**Status:** ✅ PHASES 1–3 BUILT (Sep–Oct 2026) — the case file, the client form and client chasing
+(§12 rows 1–3). Phase 4 not started. See §18 (Phase 1), §19 (Phase 2) and §20 (Phase 3) for what
+actually shipped and where it differs from the plan below.
 **Shaped:** Sep 2026 — jon + Claude, revising a spec drafted months earlier in a non-code session
 against the codebase as it actually is. Where this document and that draft disagree, this wins.
 
@@ -748,3 +748,26 @@ copies. They're inlined into the marking sheet, so marks (still % of the sheet) 
 the saved PNG for the broker PDF includes it. 'generic' vans keep the simple generated drawing.
 Marks saved before the swap were placed on the old layout and will sit in the wrong place on these
 sheets — only test cases had any.
+
+## 20. Phase 3 as built (Oct 2026) — client chasing
+
+- `services/claim-chase.ts` `runClaimClientChase()`, daily **09:21** Europe/London, weekends included.
+  No migration — the `chase_*` columns came with 259.
+- Every case in `form_out` with chasing not paused: stamp-first on `chase_sent_for` (UK date), then
+  email every live link (`sent` / `opened`) a reminder — same link, "N of 8 parts done"
+  (`formProgress()`, the count the form and case page show), van + job number only, no personal or
+  injury details. The 4th says it's the last and to call us. `chase_level` counts them (1–4).
+- The day after the 4th with no form: `chase_escalated` event, a high bell to owner + watchers, and
+  the Needs Attention bucket **"Claim forms not coming back"**; `chase_level` = 5 marks it flagged.
+- **Quiet days** (added in the build, not in §9.1): a day is skipped, not counted, when the form went
+  out or the client did anything on it in the last 20 hours — someone half-way through doesn't get a
+  "please finish". A day where no email could be sent is also not counted.
+- **Pause** (reason required) and **Restart** (back to reminder 1, clears a pause) on the case page's
+  top bar, both on the timeline. A paused case goes back on the owner's check date (one is set, 7 days
+  out, if missing) and into the overdue-check bucket; an actively chased case is left out of the
+  check-date bells and that bucket (`SELF_CHASING` = `form_out`).
+- Staff sending the form to someone **new** restarts the count, so the new person gets the full run.
+- The claims list's check-date column shows "client reminders (n/4)" or "reminders ran out" for a
+  case being chased.
+- Not done: a separate chase for the driver's part (the driver's link is chased like any other).
+
