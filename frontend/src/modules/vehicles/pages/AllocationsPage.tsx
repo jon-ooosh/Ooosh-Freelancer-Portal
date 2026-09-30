@@ -24,6 +24,8 @@ import { findMatchingVehicles, formatVanType, getVehicleGearboxLabel, vehicleNee
 import { useAvailability } from '../hooks/useAvailability'
 import type { HireHopJob, VanAllocation, VanRequirement } from '../types/hirehop'
 import type { Vehicle } from '../types/vehicle'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 
 type DateFilter = 'today' | 'tomorrow' | 'this-week' | 'all'
 type ViewMode = 'going-out' | 'due-back'
@@ -944,6 +946,7 @@ function VanPicker({
   onCancel: () => void
 }) {
   const [search, setSearch] = useState('')
+  const openSales = useOpenSalesByVehicle()
 
   const filtered = vehicles.filter(v => {
     if (!search) return true
@@ -1005,6 +1008,7 @@ function VanPicker({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
                     <span className="font-mono text-sm font-bold text-ooosh-navy">{v.reg}</span>
+                    <ForSalePill sale={openSales.get(v.id)} />
                     {needsWarning && (
                       <svg className={`h-4 w-4 shrink-0 ${
                         isOnHire ? 'text-blue-500' : isNotReady ? 'text-red-500' : 'text-amber-500'
