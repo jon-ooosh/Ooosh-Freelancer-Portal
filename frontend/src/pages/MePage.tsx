@@ -103,7 +103,9 @@ export default function MePage() {
     if (!nav || !btn || nav.scrollWidth <= nav.clientWidth) return;
     // The nav is `relative`, so offsetLeft is already measured from its edge.
     nav.scrollLeft = Math.max(0, btn.offsetLeft - 8);
-  }, [active, navWidth]);
+    // hasReview and the badges too: the review tab and the counts arrive a
+    // moment after mount and widen the strip, pushing the active tab out of view.
+  }, [active, navWidth, hasReview, badges.todo, badges.documents]);
 
   // Always show it when it is the tab being asked for, so the notification's
   // deep link cannot land on a tab that has been hidden.
