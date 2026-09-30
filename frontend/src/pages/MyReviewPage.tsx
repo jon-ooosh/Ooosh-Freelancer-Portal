@@ -46,15 +46,15 @@ interface MyReview {
 
 interface Payload { data: MyReview | null; questions: string[]; linked: boolean }
 
-/** The slice of a To Do row this page reads (GET /staff-tasks/mine). */
+/** One action from the review — GET /staff-tasks/review/:id/mine. */
 interface ActionTask {
   id: string;
   title: string;
   due_date: string | null;
   status: string;
-  source_type: string | null;
-  source_id: string | null;
-  person_id: string | null;
+  owner_name: string | null;
+  /** Mine, rather than the manager's or the company's. */
+  is_mine: boolean;
 }
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -432,10 +432,11 @@ export default function MyReviewPage() {
 /**
  * After the meeting: the write-up, and what came out of it.
  *
- * The actions are the caller's OWN To Do rows linked to this review
- * (source_type 'staff_review'), read through GET /staff-tasks/mine — the
- * endpoint that lists every action a review produced is admin-only, so the
- * company's side of the list is not visible here.
+ * Every action the review produced, whoever owns it — the company's side
+ * included, because those are the ones most likely to lapse (spec §6.2) and
+ * the reviewee is the person who notices. Read through the reviewee-scoped
+ * GET /staff-tasks/review/:id/mine, which checks the review is theirs and
+ * keeps somebody else's private action out.
  */
 function AfterMeeting({ review }: { review: MyReview }) {
   const [actions, setActions] = useState<ActionTask[] | null>(null);
@@ -443,12 +444,8 @@ function AfterMeeting({ review }: { review: MyReview }) {
 
   useEffect(() => {
     let live = true;
-    api.get<{ data: ActionTask[] }>('/staff-tasks/mine?includeDone=true')
-      .then(res => {
-        if (!live) return;
-        setActions((res.data ?? []).filter(t =>
-          t.source_type === 'staff_review' && t.source_id === review.id && t.status !== 'cancelled'));
-      })
+    api.get<{ data: ActionTask[] }>(`/staff-tasks/review/${review.id}/mine`)
+      .then(res => { if (live) setActions(res.data ?? []); })
       .catch(() => { if (live) setActionsError(true); });
     return () => { live = false; };
   }, [review.id]);
@@ -515,7 +512,8 @@ function AfterMeeting({ review }: { review: MyReview }) {
             <div key={a.id} className="px-4 sm:px-5 py-3 border-b border-gray-100 last:border-b-0 flex justify-between gap-3">
               <span className={`text-sm ${done ? 'text-gray-400 line-through' : 'text-gray-900'}`}>{a.title}</span>
               <span className="text-[13px] text-gray-500 whitespace-nowrap">
-                {done ? 'Done' : `You${by ? ` · by ${by}` : ''}`}
+                {done ? 'Done'
+                  : `${a.is_mine ? 'You' : (a.owner_name?.split(' ')[0] || 'Ooosh')}${by ? ` · by ${by}` : ''}`}
               </span>
             </div>
           );
