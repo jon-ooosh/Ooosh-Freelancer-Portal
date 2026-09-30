@@ -326,6 +326,11 @@ export async function createJobIssue(opts: {
     `New issue: ${opts.summary.slice(0, 80)}`,
     `${opts.category} — ${severity}`,
   );
+  // Van for sale with chosen photos → "check its sale photos" (VEHICLE-SALES-SPEC D6).
+  if (opts.vehicleId) {
+    const { notifyVehicleSaleOfIssue } = await import('./vehicle-sales');
+    await notifyVehicleSaleOfIssue(issueId, opts.reportedByUserId);
+  }
 
   // Direct email for vehicle damage/breakdown — gated internally on
   // vehicle anchor + category. No-op inside a caller's transaction window

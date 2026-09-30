@@ -34,6 +34,7 @@ import {
   notifyIssueRecipients,
   sendVehicleIssueAlertEmail,
 } from '../services/job-issues';
+import { notifyVehicleSaleOfIssue } from '../services/vehicle-sales';
 import { autoLinkIssueToOpenClaim } from '../services/incident-claims';
 
 const router = Router();
@@ -368,6 +369,8 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       `New issue: ${body.summary.slice(0, 80)}`,
       `${body.category} — ${body.severity}`,
     );
+    // Van for sale with chosen photos → "check its sale photos" (VEHICLE-SALES-SPEC D6).
+    await notifyVehicleSaleOfIssue(issueId, req.user!.id);
 
     // Direct email for vehicle damage/breakdown (gated internally on
     // vehicle anchor + category) — see sendVehicleIssueAlertEmail.
@@ -630,6 +633,7 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
         eventBody,
         { includeReporter: true }
       );
+      await notifyVehicleSaleOfIssue(issueId, req.user!.id);
 
       // Persist any photos the caller already uploaded to R2 (e.g. the
       // check-in flow's damage-photo keys). Dedup'd by r2_key.
@@ -686,6 +690,7 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       `New issue: ${body.summary.slice(0, 80)}`,
       `${body.category} — flagged from ${body.source_module}`,
     );
+    await notifyVehicleSaleOfIssue(issueId, req.user!.id);
 
     if (body.r2_photo_keys?.length) {
       await attachExternalIssuePhotos(issueId, req.user!.id, body.r2_photo_keys);

@@ -303,6 +303,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '261_claim_client_form.sql',
         '262_review_self_assessment_draft.sql',
         '263_vehicle_mot_history.sql',
+        '264_vehicle_sales.sql',
       ];
 
       for (const migration of migrations) {

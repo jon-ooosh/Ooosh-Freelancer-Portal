@@ -1,7 +1,8 @@
 # VEHICLE SALES SPEC — selling a van, and DVSA MOT history
 
-**Status:** 🔨 PHASE 0 BUILT (30 Sep 2026) — jon + Claude. Phases 1–4 not started. §9 records
-jon's answers to the open questions (all recommendations taken).
+**Status:** 🔨 PHASES 0–1 BUILT (30 Sep 2026) — jon + Claude. Phases 2–4 not started. §9 records
+jon's answers to the open questions (all recommendations taken); §11 is what Phase 1 actually shipped
+and where it differs from §5.
 
 **Replaces:** the "Sell / Remove from Fleet" button in the Vehicle Settings danger zone as the
 *starting point* of a sale (the existing sold modal + removal checklist stay as the *end* of it).
@@ -268,3 +269,55 @@ as today. The sale closes as `sold`; open follow-up tasks from it are cancelled;
 3. **Phase 2** share links + public page.
 4. **Phase 3** activity log, To Do follow-ups, Mark sold.
 5. **Phase 4** only if asked.
+
+---
+
+## 11. Phase 1 — as built (30 Sep 2026)
+
+**Where things are**
+- Backend: `services/vehicle-sales.ts` (THE definition — every rule), `routes/vehicle-sales.ts`
+  (`/api/vehicle-sales`, staff-only), migration **264** (`vehicle_sales`, `vehicle_sale_photos`).
+- Frontend: `modules/vehicles/pages/VehicleSalePage.tsx` (`/vehicles/fleet/:id/sale`),
+  `lib/vehicle-sales.ts`, `components/sales/ForSalePill.tsx`.
+
+**Differences from §5**
+- **Start lives on the sale page.** The danger zone and the Vehicle Detail header link there; the
+  page shows the start form to an admin when there's no open sale.
+- **Danger zone has three states:** van gone → *Reactivate*; open sale → *Open sales page* +
+  *Mark sold*; otherwise → *Start sales process* (admin) + a small *Remove without sale…* link.
+  Both *Mark sold* and *Remove without sale* open the existing sold/remove modal.
+- **"Mark sold" arrived early (part of §7.3).** The sale page's *Mark sold…* opens Vehicle Settings
+  with `?sell=1`, which opens the modal. **Any removal (`fleet_group → 'old_sold'` through
+  `PUT /api/vehicles/fleet/:id`) closes an open sale as `sold`** (`closeOpenSaleOnRemoval`).
+  Not yet done from §7.3: pre-filling the modal from an accepted offer (needs Phase 3's offers).
+- **Admin means `admin` only** for start, withdraw, price, VAT and hold date — managers are refused
+  (D7 said admin). Stage, description and photos are any `STAFF_ROLES`.
+- **Photo re-check** is computed on every read (`loadRecheck`): Problems created, or re-flagged
+  (`job_issue_events.event_type = 'reflagged'`), after `photos_confirmed_at`. A sale with no photos
+  never shows it. Any photo change stamps `photos_confirmed_at`, as does *Photos still OK*.
+- **The bell** (`notifyVehicleSaleOfIssue`) is called at all five places a Problem is created or
+  re-flagged: `problems.ts` (manual create, check-in auto-create, its re-flag branch),
+  `job-issues.ts` `createJobIssue()`, `incident-claims.ts`. It only fires when the sale has photos.
+  A `createJobIssue()` call inside a caller's transaction may miss the bell (row not committed yet)
+  — the computed banner still catches it.
+- **The photo picker** lists Book Out / Check In events newest first, 3 at a time; only the first is
+  expanded, so thumbnails load only for events someone opens. Photos display from the public bucket
+  (`VITE_R2_PUBLIC_URL`), falling back to `/api/vehicles/photo/*`, which now also serves
+  `vehicle-sales/` keys from the public bucket.
+- **The "For sale" pill** shows on Vehicle Detail (links to the sale), the fleet board (cards + table),
+  the Allocations van picker and the Book-out van list. It turns amber when a live hire
+  (`soft`/`confirmed`/`booked_out`/`active`) ends after the hold date. **It never loads in a
+  freelancer session** — the route is staff-only and a refused call would trigger a token refresh.
+- **Key facts** on the sale page are a plain live summary; the buyer-facing sections are Phase 2.
+- **Dates** are refused outside 2000–2099 (`cleanDate`) — a mistyped `0006-08-25` otherwise stores
+  year 6.
+- DVSA: the MOT tab and a one-line note under *Details › Key Dates › MOT Due* ("✓ Matches DVSA" or the
+  earlier-date warning) share one query. DVSA errors now carry DVSA's own reason (Entra `AADSTS…`
+  code named in plain words, or the MOT API's `errorCode`).
+
+**Verified** against a real Postgres 16 with all 264 migrations applied from scratch: start / second
+start refused / hold-date warning (cancelled hires ignored) / photos (other van refused, duplicates
+ignored) / re-check on new and re-flagged Problems / *Photos still OK* / bell recipients / staff vs
+admin patches / reorder, label, remove / removal closes the sale / closed sale locked; DVSA refresh
+moving `mot_due` forward with one audit row and never backwards.
+

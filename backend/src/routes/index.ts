@@ -44,6 +44,7 @@ import storageRouter from './storage';
 import holdingRouter from './holding';
 import pcnsRouter from './pcns';
 import incidentClaimsRouter from './incident-claims';
+import vehicleSalesRouter from './vehicle-sales';
 import claimFormRouter from './claim-form';
 import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
@@ -98,6 +99,7 @@ router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/ac
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)
 router.use('/claim-form', claimFormRouter);  // PUBLIC token-authenticated client claim form (Phase 2)
 router.use('/claims', incidentClaimsRouter);  // Possible insurance claims (Vehicles › Claims) — docs/INCIDENT-CLAIMS-SPEC.md
+router.use('/vehicle-sales', vehicleSalesRouter);  // Selling a van — docs/VEHICLE-SALES-SPEC.md
 router.use('/pcns', pcnsRouter);  // PCN module — Penalty Charge Notice management (Vehicles), replaces Monday PCN boards
 router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token
 router.use('/staging', stagingRouter);  // Staging Calculator — stock/availability/push + 3D plan short-links (embedded vanilla-JS tool)

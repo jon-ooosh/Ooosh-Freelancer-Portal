@@ -40,7 +40,8 @@ import {
   type ConditionReportEmailParams,
 } from '../services/condition-report-email';
 import { getSystemSetting } from './system-settings';
-import { getVehicleMot, refreshVehicleMot, DvsaError, describeDvsaError } from '../services/dvsa-mot';
+import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError } from '../services/dvsa-mot';
+import { closeOpenSaleOnRemoval } from '../services/vehicle-sales';
 
 const router = Router();
 
@@ -1198,6 +1199,11 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
     if (result.rows.length === 0) {
       res.status(404).json({ error: 'Vehicle not found' });
       return;
+    }
+
+    // Leaving the fleet ends any open sale on the van (services/vehicle-sales.ts).
+    if (result.rows[0].fleet_group === 'old_sold') {
+      await closeOpenSaleOnRemoval(String(id));
     }
 
     res.json(mapDbRowToVehicle(result.rows[0], { includeFinance: financeAllowed }));
@@ -3767,7 +3773,7 @@ router.post('/fleet/:id/mot-history/refresh', authorize(...STAFF_ROLES), async (
     res.json({ data: view });
   } catch (error) {
     if (error instanceof DvsaError) {
-      res.status(error.kind === 'not_configured' ? 503 : 502).json({ error: describeDvsaError(error.kind) });
+      res.status(error.kind === 'not_configured' ? 503 : 502).json({ error: explainDvsaError(error) });
       return;
     }
     console.error('[vehicles/mot-history] refresh error:', error);
@@ -5982,7 +5988,7 @@ router.get('/list-photos', async (req: AuthRequest, res: Response) => {
 /**
  * GET /api/vehicles/photo/:key
  * Serve a photo from R2 (streaming proxy). Reads from the public bucket
- * for `events/` keys, private bucket otherwise.
+ * for `events/` and `vehicle-sales/` keys, private bucket otherwise.
  */
 router.get('/photo/*', async (req: AuthRequest, res: Response) => {
   try {
@@ -5992,7 +5998,9 @@ router.get('/photo/*', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const isEventPhoto = /^events\//.test(key);
+    // events/ = condition photos; vehicle-sales/ = photos taken for a sale
+    // (services/vehicle-sales.ts). Both live in the public bucket.
+    const isEventPhoto = /^(events|vehicle-sales)\//.test(key);
     const obj = isEventPhoto ? await getFromPublicR2(key) : await getFromR2(key);
     if (!obj.Body) {
       res.status(404).json({ error: 'Photo not found' });
