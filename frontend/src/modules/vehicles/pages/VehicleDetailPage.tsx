@@ -10,6 +10,7 @@ import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
+import { MotHistoryTab } from '../components/mot/MotHistoryTab'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
 import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
 import { ClaimListRow, ClaimStagePill, fmtClaimDate } from '../../../components/claims/format'
@@ -242,13 +243,13 @@ export function VehicleDetailPage() {
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [searchParams] = useSearchParams()
-  // Top-level tabs. Service / Events / Preps / Issues / PCNs are grouped under
+  // Top-level tabs. Service / MOT / Events / Preps / Issues / PCNs are grouped under
   // a single "History" parent with its own sub-tab bar; Details + Location
   // stay top-level. `?tab=` deep-links still accept the child names (and the
   // legacy `history` = Events alias) and resolve to History + the right sub-tab.
   const TOP_TABS = ['details', 'history', 'forecast', 'location'] as const
   type TopTab = typeof TOP_TABS[number]
-  const HISTORY_SUBS = ['service', 'events', 'preps', 'issues', 'pcns', 'claims'] as const
+  const HISTORY_SUBS = ['service', 'mot', 'events', 'preps', 'issues', 'pcns', 'claims'] as const
   type HistorySub = typeof HISTORY_SUBS[number]
 
   function parseTabParam(raw: string | null): { top: TopTab; sub?: HistorySub } {
@@ -504,7 +505,7 @@ export function VehicleDetailPage() {
         <VehicleLocationTab reg={vehicle.reg} />
       )}
 
-      {/* History tab — sub-tab bar (Service / Events / Preps / Issues / PCNs) */}
+      {/* History tab — sub-tab bar (Service / MOT / Events / Preps / Issues / PCNs) */}
       {activeTab === 'history' && (
         <div className="space-y-4">
           <div className="flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 scrollbar-hide">
@@ -519,13 +520,17 @@ export function VehicleDetailPage() {
                     : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                {sub === 'service' ? 'Service' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : sub === 'pcns' ? 'PCNs' : 'Claims'}
+                {sub === 'service' ? 'Service' : sub === 'mot' ? 'MOT' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : sub === 'pcns' ? 'PCNs' : 'Claims'}
               </button>
             ))}
           </div>
 
           {historySub === 'service' && (
             <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
+          )}
+          {/* DVSA MOT history — every test, advisories, refresh from DVSA */}
+          {historySub === 'mot' && (
+            <MotHistoryTab vehicleId={vehicle.id} />
           )}
           {/* Events — book-outs, check-ins, preps. Rows link through to the
               full "life of a hire" comparison page. */}

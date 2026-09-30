@@ -177,6 +177,10 @@ Three rules from it that bite elsewhere:
   be linked to from the UI. Sale stock is only consumed while that job is
   DISPATCHED, so any status change releases a week of stock, silently.
 
+**PHASE 0 BUILT, Sep 2026:** `docs/VEHICLE-SALES-SPEC.md` — selling a van (sales pack, per-buyer
+share links, activity + To Do follow-ups, hand-off to the existing sold modal). Phase 0 (DVSA MOT
+history, Vehicle › History › MOT) is built; phases 1–4 are not. §1 is the settled decisions.
+
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
@@ -228,6 +232,7 @@ existing definition:
 | A claim's client links, driver code, damage marks, sketch | `services/claim-links.ts` (public routes: `routes/claim-form.ts` — every save through `sanitiseSection()`) |
 | Preparing a photo for upload (EXIF time, HEIC, compress + thumb) | `frontend/src/lib/imageNormalise.ts` `prepareImage()` |
 | What is a van worth (approx.)? | `services/vehicle-value.ts` `estimateVehicleValue()` |
+| What does DVSA say about this van's MOT? | `services/dvsa-mot.ts` — moves `mot_due` forward only, never back |
 | What is this person called? | `frontend/src/lib/displayName.ts` |
 | …the same, on the backend | `services/display-name.ts` |
 | Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |
@@ -349,7 +354,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
-shop close reminder Mon 08:55 · shop contact check 06:40 ·
+shop close reminder Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·
 Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the

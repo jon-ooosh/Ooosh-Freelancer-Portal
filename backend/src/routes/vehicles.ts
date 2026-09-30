@@ -14,7 +14,7 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import {
   verifyFreelancerBookoutToken,
   mintFreelancerBookoutSession,
@@ -40,6 +40,7 @@ import {
   type ConditionReportEmailParams,
 } from '../services/condition-report-email';
 import { getSystemSetting } from './system-settings';
+import { getVehicleMot, refreshVehicleMot, DvsaError, describeDvsaError } from '../services/dvsa-mot';
 
 const router = Router();
 
@@ -3727,6 +3728,50 @@ router.post('/fleet/:id/forecast/assess', async (req: AuthRequest, res: Response
   } catch (error) {
     console.error('[vehicles/forecast] assess error:', error);
     res.status(500).json({ error: 'Failed to generate assessment' });
+  }
+});
+
+/**
+ * GET /api/vehicles/fleet/:id/mot-history
+ * The van's DVSA MOT history as last fetched, plus how DVSA's MOT expiry
+ * compares with ours. Drives the Vehicle Detail "MOT history" section.
+ * See services/dvsa-mot.ts (THE definition) and docs/VEHICLE-SALES-SPEC.md §3.
+ */
+router.get('/fleet/:id/mot-history', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const view = await getVehicleMot(String(req.params.id));
+    if (!view) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    res.json({ data: view });
+  } catch (error) {
+    console.error('[vehicles/mot-history] error:', error);
+    res.status(500).json({ error: 'Failed to load MOT history' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:id/mot-history/refresh
+ * Fetch from DVSA now ("Refresh from DVSA" button). Moves mot_due forward
+ * when DVSA knows a later expiry; never backwards. Weekly refresh runs
+ * Mon 07:30 — see config/scheduler.ts.
+ */
+router.post('/fleet/:id/mot-history/refresh', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const view = await refreshVehicleMot(String(req.params.id), req.user!.id);
+    if (!view) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    res.json({ data: view });
+  } catch (error) {
+    if (error instanceof DvsaError) {
+      res.status(error.kind === 'not_configured' ? 503 : 502).json({ error: describeDvsaError(error.kind) });
+      return;
+    }
+    console.error('[vehicles/mot-history] refresh error:', error);
+    res.status(500).json({ error: 'Failed to refresh MOT history' });
   }
 });
 
