@@ -506,6 +506,9 @@ export function VehicleSettingsPage() {
       {showRemovalModal && (
         <RemovalModal
           reg={vehicle.reg}
+          // Pre-filled by the sale page's "Mark sold…" from the accepted offer.
+          initialPrice={searchParams.get('price') ?? ''}
+          initialNotes={searchParams.get('buyer') ? `Sold to ${searchParams.get('buyer')}` : ''}
           showSaleFigures={isStrictAdmin}
           loading={actionLoading}
           onClose={() => setShowRemovalModal(false)}
@@ -518,9 +521,11 @@ export function VehicleSettingsPage() {
 
 /** Modal for selling / removing a vehicle — captures sale data + confirms. */
 function RemovalModal({
-  reg, showSaleFigures, loading, onClose, onConfirm,
+  reg, initialPrice = '', initialNotes = '', showSaleFigures, loading, onClose, onConfirm,
 }: {
   reg: string
+  initialPrice?: string
+  initialNotes?: string
   showSaleFigures: boolean
   loading: boolean
   onClose: () => void
@@ -528,8 +533,8 @@ function RemovalModal({
 }) {
   const today = new Date().toISOString().slice(0, 10)
   const [soldDate, setSoldDate] = useState(today)
-  const [salePrice, setSalePrice] = useState('')
-  const [saleNotes, setSaleNotes] = useState('')
+  const [salePrice, setSalePrice] = useState(initialPrice)
+  const [saleNotes, setSaleNotes] = useState(initialNotes)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }

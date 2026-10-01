@@ -177,11 +177,12 @@ Three rules from it that bite elsewhere:
   be linked to from the UI. Sale stock is only consumed while that job is
   DISPATCHED, so any status change releases a week of stock, silently.
 
-**PHASES 0–2 BUILT, Sep 2026:** `docs/VEHICLE-SALES-SPEC.md` — selling a van (sales pack, per-buyer
+**PHASES 0–3 BUILT, Oct 2026:** `docs/VEHICLE-SALES-SPEC.md` — selling a van (sales pack, per-buyer
 share links, activity + To Do follow-ups, hand-off to the existing sold modal). Built: DVSA MOT history
 (Vehicle › History › MOT), the sale page (`/vehicles/fleet/:id/sale` — stage, price, chosen photos,
-photo re-check, "For sale" pills) and per-buyer share links (public page `/van/:token`). Phases 3–4
-are not. §1 is the settled decisions, §11–12 what shipped. **What a buyer sees is built ONLY by
+photo re-check, "For sale" pills), per-buyer share links (public page `/van/:token`) and the activity
+log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 4 (PDF) is not built.
+§1 is the settled decisions, §11–14 what shipped. **What a buyer sees is built ONLY by
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 

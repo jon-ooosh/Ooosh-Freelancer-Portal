@@ -385,7 +385,49 @@ async function assertOpen(saleId: string): Promise<{ vehicle_id: string; reg: st
   return s;
 }
 
-export async function updateSale(saleId: string, role: string, patch: SalePatch): Promise<void> {
+const STAGE_LABEL: Record<SaleStatus, string> = {
+  preparing: 'Preparing', listed: 'Listed', under_offer: 'Under offer', sold: 'Sold', withdrawn: 'Withdrawn',
+};
+
+/**
+ * One line in the sale's activity log (Phase 3). OP's own entries — stage
+ * changes, links — come through here; staff entries through
+ * services/vehicle-sale-activity.ts. Best-effort: a log line never fails
+ * the action it records.
+ */
+export async function logSaleEvent(
+  saleId: string,
+  type: 'status_change' | 'link_created' | 'link_revoked',
+  text: string,
+  userId: string | null,
+): Promise<void> {
+  await query(
+    `INSERT INTO vehicle_sale_events (sale_id, type, text, created_by) VALUES ($1, $2, $3, $4)`,
+    [saleId, type, text.slice(0, 1000), userId],
+  ).catch((err) => console.warn('[vehicle-sales] activity log failed:', err));
+}
+
+/**
+ * The sale is over — its open follow-ups (To Do items) go with it. Cancelled
+ * through the To Do module, never deleted (D13, CLAUDE.md soft-cancel).
+ * Lazy import: staff-tasks pulls in the staff modules.
+ */
+export async function cancelSaleFollowUps(saleId: string, actorUserId: string | null): Promise<void> {
+  try {
+    const open = await query(
+      `SELECT id FROM staff_tasks WHERE source_type = 'vehicle_sale' AND source_id = $1 AND status = 'open'`,
+      [saleId],
+    );
+    if (open.rows.length === 0) return;
+    const { cancelTask } = await import('./staff-tasks');
+    // As admin: the sale closing is the authority, whoever owns the task.
+    for (const r of open.rows) await cancelTask(r.id as string, actorUserId ?? 'system', 'admin');
+  } catch (err) {
+    console.error('[vehicle-sales] could not cancel follow-ups:', err);
+  }
+}
+
+export async function updateSale(saleId: string, role: string, patch: SalePatch, userId: string | null = null): Promise<void> {
   const current = await loadSaleForWrite(saleId);
   const updates = planSalePatch(patch, role, current.status);
   const cols = Object.keys(updates);
@@ -398,6 +440,13 @@ export async function updateSale(saleId: string, role: string, patch: SalePatch)
     `UPDATE vehicle_sales SET ${sets.join(', ')} WHERE id = $1`,
     [saleId, ...cols.map((c) => updates[c])],
   );
+
+  const next = updates.status as SaleStatus | undefined;
+  if (next && next !== current.status) {
+    const reason = next === 'withdrawn' && updates.closed_reason ? ` — ${updates.closed_reason}` : '';
+    await logSaleEvent(saleId, 'status_change', `${STAGE_LABEL[current.status]} → ${STAGE_LABEL[next]}${reason}`, userId);
+    if (next === 'withdrawn') await cancelSaleFollowUps(saleId, userId);
+  }
 }
 
 /** Any change to the photo set counts as "someone has looked at the photos". */
@@ -559,15 +608,20 @@ export async function notifyVehicleSaleOfIssue(issueId: string, actorUserId: str
  * danger zone offers "Mark sold", not "Remove without sale", so a removal
  * during a sale is the sale completing. Idempotent; best-effort.
  */
-export async function closeOpenSaleOnRemoval(vehicleId: string): Promise<void> {
+export async function closeOpenSaleOnRemoval(vehicleId: string, userId: string | null = null): Promise<void> {
   try {
-    await query(
+    const closed = await query(
       `UPDATE vehicle_sales
           SET status = 'sold', closed_at = NOW(), updated_at = NOW(),
               closed_reason = COALESCE(closed_reason, 'Van removed from the fleet')
-        WHERE vehicle_id = $1 AND status IN ('preparing', 'listed', 'under_offer')`,
+        WHERE vehicle_id = $1 AND status IN ('preparing', 'listed', 'under_offer')
+        RETURNING id`,
       [vehicleId],
     );
+    for (const r of closed.rows) {
+      await logSaleEvent(r.id as string, 'status_change', 'Sold — van removed from the fleet', userId);
+      await cancelSaleFollowUps(r.id as string, userId);
+    }
   } catch (err) {
     console.error('[vehicle-sales] could not close the sale on removal:', err);
   }

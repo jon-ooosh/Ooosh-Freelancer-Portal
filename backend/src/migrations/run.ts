@@ -306,6 +306,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '264_vehicle_sales.sql',
         '265_vehicle_sale_links.sql',
         '266_vehicle_sales_defaults.sql',
+        '267_vehicle_sale_events.sql',
       ];
 
       for (const migration of migrations) {

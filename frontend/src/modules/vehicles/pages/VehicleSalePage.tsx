@@ -35,6 +35,7 @@ import {
   uploadSalePhoto,
   salePhotoUrl,
   fetchSaleLinks,
+  fetchSaleActivity,
   createSaleLink,
   updateSaleLink,
   revokeSaleLink,
@@ -52,6 +53,7 @@ import {
   type VatBasis,
 } from '../lib/vehicle-sales'
 import type { Vehicle } from '../types/vehicle'
+import { SaleActivityCard, activityQueryKey, latestAcceptedOffer } from '../components/sales/SaleActivityCard'
 
 // ── Formatting (range-checked: a bad value renders '—', never throws) ──────
 
@@ -164,6 +166,8 @@ function SaleContent({ vehicleId }: { vehicleId: string }) {
           <RecheckBanner sale={sale} onSaved={applySale} />
           <DescriptionCard sale={sale} onSaved={applySale} canEditSnippets={isManager} />
           <ShareLinksCard sale={sale} isManager={isManager} />
+          <SaleActivityCard sale={sale}
+            onSaleChanged={() => queryClient.invalidateQueries({ queryKey: ['vehicle-sale', vehicleId] })} />
           <KeyFactsCard vehicle={vehicle} />
           <ChosenPhotos sale={sale} onSaved={applySale} />
           <AddPhotos sale={sale} vehicle={vehicle} onSaved={applySale} />
@@ -279,6 +283,12 @@ function SaleHeaderCard({ sale, isAdmin, isManager, onSaved, vehicleId }: {
   }
 
   const days = daysSince(sale.startedAt)
+  // "Mark sold" pre-fills the sold modal from the accepted offer, if there is one.
+  const { data: activity } = useQuery({ queryKey: activityQueryKey(sale.id), queryFn: () => fetchSaleActivity(sale.id) })
+  const accepted = latestAcceptedOffer(activity)
+  const sellParams = new URLSearchParams({ sell: '1' })
+  if (accepted?.amount != null) sellParams.set('price', String(accepted.amount))
+  if (accepted?.who) sellParams.set('buyer', accepted.who)
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
@@ -372,7 +382,8 @@ function SaleHeaderCard({ sale, isAdmin, isManager, onSaved, vehicleId }: {
         )}
         <div className="flex-1" />
         {isManager && (
-          <Link to={vmPath(`/vehicles/${vehicleId}/settings?sell=1`)}
+          <Link to={vmPath(`/vehicles/${vehicleId}/settings?${sellParams.toString()}`)}
+            title={accepted ? `Pre-filled from ${accepted.who ?? 'the'} accepted offer` : undefined}
             className="rounded-lg border border-green-300 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-50">
             Mark sold…
           </Link>

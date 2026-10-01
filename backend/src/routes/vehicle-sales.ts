@@ -33,6 +33,7 @@ import {
   revokeLink,
   resolvePublicLink,
 } from '../services/vehicle-sale-links';
+import { listActivity, addActivity, setOfferStatus } from '../services/vehicle-sale-activity';
 
 const router = Router();
 
@@ -147,7 +148,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
   const id = idOr404(res, req.params.id);
   if (!id) return;
   try {
-    await updateSale(id, req.user!.role, req.body ?? {});
+    await updateSale(id, req.user!.role, req.body ?? {}, req.user!.id);
     await sendSale(res, id);
   } catch (err) {
     fail(res, err, 'update sale');
@@ -299,10 +300,48 @@ router.delete('/:id/links/:linkId', async (req: AuthRequest, res: Response) => {
   const linkId = idOr404(res, req.params.linkId, 'Link');
   if (!linkId) return;
   try {
-    await revokeLink(id, linkId);
+    await revokeLink(id, linkId, req.user!.id);
     res.json({ data: await listLinks(id) });
   } catch (err) {
     fail(res, err, 'revoke link');
+  }
+});
+
+// ── Activity (Phase 3) ────────────────────────────────────────────────────
+
+router.get('/:id/activity', async (req: AuthRequest, res: Response) => {
+  const id = idOr404(res, req.params.id);
+  if (!id) return;
+  try {
+    res.json({ data: await listActivity(id) });
+  } catch (err) {
+    fail(res, err, 'load activity');
+  }
+});
+
+/** POST /:id/activity — a viewing / listing / contact / offer / note, optionally with a follow-up. */
+router.post('/:id/activity', async (req: AuthRequest, res: Response) => {
+  const id = idOr404(res, req.params.id);
+  if (!id) return;
+  try {
+    await addActivity(id, req.user!.id, req.user!.role, req.body ?? {});
+    res.status(201).json({ data: await listActivity(id) });
+  } catch (err) {
+    fail(res, err, 'log activity');
+  }
+});
+
+/** PATCH /:id/activity/:eventId/offer — { status: 'accepted' | 'declined' | 'open' } */
+router.patch('/:id/activity/:eventId/offer', async (req: AuthRequest, res: Response) => {
+  const id = idOr404(res, req.params.id);
+  if (!id) return;
+  const eventId = idOr404(res, req.params.eventId, 'Offer');
+  if (!eventId) return;
+  try {
+    await setOfferStatus(id, eventId, req.body?.status, req.user!.id, req.user!.role);
+    res.json({ data: await listActivity(id) });
+  } catch (err) {
+    fail(res, err, 'update offer');
   }
 });
 
