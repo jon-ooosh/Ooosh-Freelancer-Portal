@@ -79,7 +79,11 @@ function ineligible(c: Candidate): string | null {
   if (c.payment_status === 'paid' || c.xero_payment_id) {
     return 'is already marked paid';
   }
-  if (!c.xero_object_id || c.xero_object_type === 'banktransaction') {
+  if (c.xero_object_id && c.xero_object_type === 'banktransaction') {
+    // Was paid-now when it reached Xero, so Xero holds a Spend Money, not a bill.
+    return 'is in Xero as a paid Spend Money, not a bill — delete that in Xero and have an admin point this cost at the bill';
+  }
+  if (!c.xero_object_id) {
     return 'has no bill in Xero yet — approve it and let it sync first';
   }
   if (!['approved', 'paid'].includes(String(c.approval_state))) {

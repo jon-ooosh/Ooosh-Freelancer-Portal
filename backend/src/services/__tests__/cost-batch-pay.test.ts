@@ -82,6 +82,11 @@ describe('payCostsAsBatch — refusals', () => {
     expect(r.error).toMatch(/paid-now cost/);
   });
 
+  it('refuses a pay-later cost whose Xero object is a Spend Money — names why', async () => {
+    const r = await run([bill({ xero_object_type: 'banktransaction' })]);
+    expect(r.error).toMatch(/Spend Money/);
+  });
+
   it('refuses an unapproved bill', async () => {
     const r = await run([bill({ approval_state: 'verified' })]);
     expect(r.error).toMatch(/still verified/);
