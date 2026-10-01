@@ -164,13 +164,30 @@ function SaleContent({ vehicleId }: { vehicleId: string }) {
         <>
           <SaleHeaderCard sale={sale} isAdmin={isAdmin} isManager={isManager} onSaved={applySale} vehicleId={vehicle.id} />
           <RecheckBanner sale={sale} onSaved={applySale} />
-          <DescriptionCard sale={sale} onSaved={applySale} canEditSnippets={isManager} />
-          <ShareLinksCard sale={sale} isManager={isManager} />
-          <SaleActivityCard sale={sale}
-            onSaleChanged={() => queryClient.invalidateQueries({ queryKey: ['vehicle-sale', vehicleId] })} />
-          <KeyFactsCard vehicle={vehicle} />
-          <ChosenPhotos sale={sale} onSaved={applySale} />
-          <AddPhotos sale={sale} vehicle={vehicle} onSaved={applySale} />
+          {/* The page follows the stage (jon, 1 Oct 2026): while Preparing, the pack
+              comes first; once Listed / Under offer, the people side does.
+              Nothing is hidden at any stage. */}
+          {sale.status === 'preparing' ? (
+            <>
+              <DescriptionCard sale={sale} onSaved={applySale} canEditSnippets={isManager} />
+              <ChosenPhotos sale={sale} onSaved={applySale} />
+              <AddPhotos sale={sale} vehicle={vehicle} onSaved={applySale} />
+              <KeyFactsCard vehicle={vehicle} />
+              <ShareLinksCard sale={sale} isManager={isManager} />
+              <SaleActivityCard sale={sale}
+                onSaleChanged={() => queryClient.invalidateQueries({ queryKey: ['vehicle-sale', vehicleId] })} />
+            </>
+          ) : (
+            <>
+              <SaleActivityCard sale={sale}
+                onSaleChanged={() => queryClient.invalidateQueries({ queryKey: ['vehicle-sale', vehicleId] })} />
+              <ShareLinksCard sale={sale} isManager={isManager} />
+              <DescriptionCard sale={sale} onSaved={applySale} canEditSnippets={isManager} />
+              <ChosenPhotos sale={sale} onSaved={applySale} />
+              <AddPhotos sale={sale} vehicle={vehicle} onSaved={applySale} />
+              <KeyFactsCard vehicle={vehicle} />
+            </>
+          )}
         </>
       )}
     </div>
@@ -292,21 +309,63 @@ function SaleHeaderCard({ sale, isAdmin, isManager, onSaved, vehicleId }: {
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
-      <div className="flex flex-wrap gap-1 rounded-lg bg-gray-100 p-1">
-        {SALE_STAGES.map(s => (
-          <button key={s.value} type="button" disabled={busy || sale.status === s.value}
-            onClick={() => run(() => updateSale(sale.id, { status: s.value }))}
-            className={`flex-1 rounded-md px-2 py-1.5 text-sm font-medium transition-colors ${
-              sale.status === s.value ? 'bg-white text-ooosh-navy shadow-sm' : 'text-gray-500 hover:text-gray-700'
-            }`}>
-            {s.label}
-          </button>
-        ))}
+      {/* A progress line, deliberately NOT tab-shaped — the grey pill bar is how
+          other pages switch sections, and this doesn't (jon, 1 Oct 2026). */}
+      <div>
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">Sale stage</div>
+        <ol className="flex items-center">
+          {SALE_STAGES.map((s, i) => {
+            const at = SALE_STAGES.findIndex(x => x.value === sale.status)
+            const done = i < at
+            const current = i === at
+            return (
+              <li key={s.value} className={`flex items-center ${i < SALE_STAGES.length - 1 ? 'flex-1' : ''}`}>
+                <span className="flex items-center gap-1.5 whitespace-nowrap">
+                  <span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${
+                    current ? 'bg-ooosh-navy text-white ring-4 ring-ooosh-navy/15'
+                      : done ? 'bg-green-600 text-white' : 'border-2 border-gray-300 bg-white text-gray-400'
+                  }`}>
+                    {done ? '✓' : i + 1}
+                  </span>
+                  {/* On a phone only the current stage is named — three labels don't fit. */}
+                  <span className={`text-sm ${current ? 'font-semibold text-ooosh-navy' : `hidden sm:inline ${done ? 'text-gray-700' : 'text-gray-400'}`}`}>
+                    {s.label}
+                  </span>
+                </span>
+                {i < SALE_STAGES.length - 1 && (
+                  <span className={`mx-2 h-0.5 flex-1 ${done ? 'bg-green-600' : 'bg-gray-200'}`} />
+                )}
+              </li>
+            )
+          })}
+        </ol>
+        {(() => {
+          const at = SALE_STAGES.findIndex(x => x.value === sale.status)
+          const next = SALE_STAGES[at + 1]
+          const prev = SALE_STAGES[at - 1]
+          return (
+            <div className="mt-2 flex flex-wrap items-center gap-3">
+              {next && (
+                <button type="button" disabled={busy}
+                  onClick={() => run(() => updateSale(sale.id, { status: next.value }))}
+                  className="rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50">
+                  Move to {next.label} →
+                </button>
+              )}
+              {prev && (
+                <button type="button" disabled={busy}
+                  onClick={() => run(() => updateSale(sale.id, { status: prev.value }))}
+                  className="text-xs text-gray-500 hover:underline disabled:opacity-50">
+                  ← Back to {prev.label}
+                </button>
+              )}
+              <span className="text-[11px] text-gray-400">
+                For the team only — buyers never see the stage.
+              </span>
+            </div>
+          )
+        })()}
       </div>
-      <p className="-mt-1 text-[11px] text-gray-400">
-        The stage is a marker for the team — it shows on the "For sale" pill. Buyers never see it, and
-        it doesn't change what a link shows.
-      </p>
 
       {!editing ? (
         <div className="grid gap-2 text-sm sm:grid-cols-3">
