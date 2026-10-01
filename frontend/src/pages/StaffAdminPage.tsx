@@ -283,6 +283,10 @@ export default function StaffAdminPage() {
           {isAdmin && (
             <Link to="/staff/absence" className="text-sm text-ooosh-600 hover:underline">Absence →</Link>
           )}
+          {/* The 2026 BrightHR backfill — a one-off for the October go-live. */}
+          {isAdmin && (
+            <Link to="/staff/import" className="text-sm text-ooosh-600 hover:underline">Import from BrightHR →</Link>
+          )}
           <Link to="/staff/calendar" className="text-sm text-ooosh-600 hover:underline">View calendar →</Link>
         </div>
       </div>

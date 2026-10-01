@@ -33,6 +33,7 @@ import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import StaffCalendarPage from './pages/StaffCalendarPage';
 import StaffAdminPage from './pages/StaffAdminPage';
+import StaffHistoryImportPage from './pages/StaffHistoryImportPage';
 import StaffAbsencePage from './pages/StaffAbsencePage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
 import StaffReceiptsPage from './pages/StaffReceiptsPage';
@@ -270,6 +271,7 @@ export default function App() {
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/staff/calendar" element={<StaffCalendarPage />} />
                 <Route path="/staff/admin" element={<StaffAdminPage />} />
+                <Route path="/staff/import" element={<StaffHistoryImportPage />} />
                 {/* One destination for the personal pages. The three old paths
                     below still work and redirect in: notifications.action_url
                     holds them for rows already in the database, and emails
