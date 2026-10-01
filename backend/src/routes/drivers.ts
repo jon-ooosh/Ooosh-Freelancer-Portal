@@ -18,6 +18,7 @@ import { persistableWindows, touchesValidity, backfillFromDates, isUkLicence } f
 import { sendIdentityReviewAlert } from '../services/identity-review';
 import { computeVerificationState } from '../services/driver-verification-state';
 import { unsignedJobNumberSql, findUnsignedDriversForJob } from '../services/driver-hire-progress';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
 
 const router = Router();
 router.use(authenticate);
@@ -484,9 +485,12 @@ router.get('/:id/audit-log', async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT al.id, al.user_id, al.action, al.previous_values, al.new_values, al.created_at,
         u.email AS user_email,
-        COALESCE(u.first_name || ' ' || u.last_name, u.email) AS user_name
+        COALESCE(NULLIF(${DISPLAY_NAME_SQL}, ' '), u.email) AS user_name
       FROM audit_log al
       LEFT JOIN users u ON u.id::text = al.user_id
+      -- users carries no name — it points at people (this read u.first_name and
+      -- failed on every call, so Edit history was always empty).
+      LEFT JOIN people p ON p.id = u.person_id
       WHERE al.entity_type = 'driver' AND al.entity_id = $1
       ORDER BY al.created_at DESC
       LIMIT 100`,
