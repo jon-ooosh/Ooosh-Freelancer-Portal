@@ -221,3 +221,36 @@ export async function saveSalesContact(value: string): Promise<void> {
     throw new Error((body as { error?: string }).error || `HTTP ${resp.status}`)
   }
 }
+
+/** Boilerplate for sale descriptions — shared by every van (system_settings JSON). */
+export interface SaleSnippet { title: string; text: string }
+
+export async function fetchSalesSnippets(): Promise<SaleSnippet[]> {
+  const resp = await apiFetch('/api/system-settings?category=vehicle_sales')
+  if (!resp.ok) return []
+  const body = await resp.json() as { data?: Array<{ key: string; value: string | null }> }
+  const raw = body.data?.find(s => s.key === 'vehicle_sales_snippets')?.value
+  try {
+    const list = JSON.parse(raw || '[]') as unknown
+    return Array.isArray(list)
+      ? list.filter((x): x is SaleSnippet => !!x && typeof x.title === 'string' && typeof x.text === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+export async function saveSalesSnippets(list: SaleSnippet[]): Promise<void> {
+  const clean = list
+    .map(s => ({ title: s.title.trim().slice(0, 80), text: s.text.trim().slice(0, 3000) }))
+    .filter(s => s.title && s.text)
+  const resp = await apiFetch('/api/system-settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { vehicle_sales_snippets: JSON.stringify(clean) } }),
+  })
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}))
+    throw new Error((body as { error?: string }).error || `HTTP ${resp.status}`)
+  }
+}

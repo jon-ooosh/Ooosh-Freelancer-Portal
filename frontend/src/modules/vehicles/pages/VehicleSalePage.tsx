@@ -41,6 +41,9 @@ import {
   saleLinkUrl,
   fetchSalesContact,
   saveSalesContact,
+  fetchSalesSnippets,
+  saveSalesSnippets,
+  type SaleSnippet,
   DEFAULT_LINK_SWITCHES,
   LINK_SWITCH_LABELS,
   type LinkSwitches,
@@ -159,7 +162,7 @@ function SaleContent({ vehicleId }: { vehicleId: string }) {
         <>
           <SaleHeaderCard sale={sale} isAdmin={isAdmin} isManager={isManager} onSaved={applySale} vehicleId={vehicle.id} />
           <RecheckBanner sale={sale} onSaved={applySale} />
-          <DescriptionCard sale={sale} onSaved={applySale} />
+          <DescriptionCard sale={sale} onSaved={applySale} canEditSnippets={isManager} />
           <ShareLinksCard sale={sale} isManager={isManager} />
           <KeyFactsCard vehicle={vehicle} />
           <ChosenPhotos sale={sale} onSaved={applySale} />
@@ -290,6 +293,10 @@ function SaleHeaderCard({ sale, isAdmin, isManager, onSaved, vehicleId }: {
           </button>
         ))}
       </div>
+      <p className="-mt-1 text-[11px] text-gray-400">
+        The stage is a marker for the team — it shows on the "For sale" pill. Buyers never see it, and
+        it doesn't change what a link shows.
+      </p>
 
       {!editing ? (
         <div className="grid gap-2 text-sm sm:grid-cols-3">
@@ -423,7 +430,9 @@ function RecheckBanner({ sale, onSaved }: { sale: SaleView; onSaved: (s: SaleVie
 
 // ── Description ────────────────────────────────────────────────────────────
 
-function DescriptionCard({ sale, onSaved }: { sale: SaleView; onSaved: (s: SaleView) => void }) {
+function DescriptionCard({ sale, onSaved, canEditSnippets }: {
+  sale: SaleView; onSaved: (s: SaleView) => void; canEditSnippets: boolean
+}) {
   const [text, setText] = useState(sale.description ?? '')
   const [busy, setBusy] = useState(false)
   const dirty = text !== (sale.description ?? '')
@@ -439,17 +448,131 @@ function DescriptionCard({ sale, onSaved }: { sale: SaleView; onSaved: (s: SaleV
     }
   }
 
+  /** Add a snippet to the end, on its own paragraph. Saved with the description. */
+  function insert(snippet: string) {
+    setText(t => (t.trim() ? `${t.replace(/\s+$/, '')}\n\n${snippet}` : snippet))
+  }
+
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Description</h3>
-      <textarea value={text} onChange={e => setText(e.target.value)} rows={4}
-        placeholder="What a buyer should know — spec, condition, extras…"
-        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
-      {dirty && (
-        <button type="button" onClick={save} disabled={busy}
-          className="mt-2 rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
-          {busy ? 'Saving…' : 'Save description'}
-        </button>
+      <div className="grid gap-4 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div>
+          <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Description</h3>
+          <textarea value={text} onChange={e => setText(e.target.value)} rows={8}
+            placeholder="What a buyer should know — spec, condition, extras…"
+            className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
+          {dirty && (
+            <button type="button" onClick={save} disabled={busy}
+              className="mt-2 rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+              {busy ? 'Saving…' : 'Save description'}
+            </button>
+          )}
+        </div>
+        <SnippetsPanel onInsert={insert} canEdit={canEditSnippets} />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Boilerplate shared by every van (jon, 1 Oct 2026) — the same paragraphs get
+ * written again and again. "Insert" adds one to the description; admin /
+ * manager edit the list (system_settings.vehicle_sales_snippets).
+ */
+function SnippetsPanel({ onInsert, canEdit }: { onInsert: (text: string) => void; canEdit: boolean }) {
+  const queryClient = useQueryClient()
+  const { data: snippets = [] } = useQuery({ queryKey: ['vehicle-sales-snippets'], queryFn: fetchSalesSnippets })
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<SaleSnippet[]>([])
+  const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState<number | null>(null)
+
+  async function copy(i: number, text: string) {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(i)
+      setTimeout(() => setCopied(c => (c === i ? null : c)), 1500)
+    } catch {
+      window.prompt('Copy this text:', text)
+    }
+  }
+
+  async function save() {
+    setBusy(true)
+    try {
+      await saveSalesSnippets(draft)
+      await queryClient.invalidateQueries({ queryKey: ['vehicle-sales-snippets'] })
+      setEditing(false)
+    } catch (err) {
+      alert((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="space-y-2">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Boilerplate (all vans)</h3>
+        {draft.map((sn, i) => (
+          <div key={i} className="space-y-1 rounded border border-gray-200 p-2">
+            <div className="flex gap-1">
+              <input value={sn.title} placeholder="Title, e.g. Ex-hire history"
+                onChange={e => setDraft(d => d.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)))}
+                className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none" />
+              <button type="button" onClick={() => setDraft(d => d.filter((_, j) => j !== i))}
+                className="rounded border border-red-200 px-1.5 text-xs text-red-600">✕</button>
+            </div>
+            <textarea value={sn.text} rows={3} placeholder="The paragraph to insert"
+              onChange={e => setDraft(d => d.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)))}
+              className="w-full rounded border border-gray-300 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none" />
+          </div>
+        ))}
+        <button type="button" onClick={() => setDraft(d => [...d, { title: '', text: '' }])}
+          className="text-xs font-medium text-ooosh-blue hover:underline">+ Add a snippet</button>
+        <div className="flex gap-2">
+          <button type="button" onClick={save} disabled={busy}
+            className="rounded bg-ooosh-navy px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50">
+            {busy ? 'Saving…' : 'Save boilerplate'}
+          </button>
+          <button type="button" onClick={() => setEditing(false)}
+            className="rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-600">Cancel</button>
+        </div>
+        <p className="text-[11px] text-gray-400">Snippets without both a title and text are dropped.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Boilerplate</h3>
+        {canEdit && (
+          <button type="button" onClick={() => { setDraft(snippets.length ? snippets : [{ title: '', text: '' }]); setEditing(true) }}
+            className="text-xs text-ooosh-blue hover:underline">Edit</button>
+        )}
+      </div>
+      {snippets.length === 0 ? (
+        <p className="text-xs text-gray-500">
+          No boilerplate yet.{canEdit ? ' Add the paragraphs you write for every van — ex-hire history, servicing, what\'s included.' : ' An admin or manager can add some.'}
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {snippets.map((sn, i) => (
+            <li key={i} className="rounded border border-gray-200 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-gray-800">{sn.title}</span>
+                <span className="flex shrink-0 gap-1">
+                  <button type="button" onClick={() => onInsert(sn.text)}
+                    className="rounded bg-ooosh-navy px-1.5 py-0.5 text-[11px] font-medium text-white">Insert</button>
+                  <button type="button" onClick={() => copy(i, sn.text)}
+                    className="rounded border border-gray-300 px-1.5 py-0.5 text-[11px] text-gray-700">{copied === i ? 'Copied ✓' : 'Copy'}</button>
+                </span>
+              </div>
+              <p className="mt-1 line-clamp-3 whitespace-pre-line text-[11px] text-gray-500">{sn.text}</p>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   )
@@ -508,6 +631,13 @@ function ChosenPhotos({ sale, onSaved }: { sale: SaleView; onSaved: (s: SaleView
     }
   }
 
+  /** The main photo is simply the first one — the buyer page shows it large at the top. */
+  function makeMain(index: number) {
+    const ids = sale.photos.map(p => p.id)
+    const [picked] = ids.splice(index, 1)
+    void run(() => reorderSalePhotos(sale.id, [picked, ...ids]))
+  }
+
   function move(index: number, delta: number) {
     const ids = sale.photos.map(p => p.id)
     const target = index + delta
@@ -525,13 +655,23 @@ function ChosenPhotos({ sale, onSaved }: { sale: SaleView; onSaved: (s: SaleView
         )}
       </div>
       {sale.photos.length === 0 ? (
-        <p className="text-sm text-gray-500">No photos yet — pick some from recent book-outs below, or take new ones.</p>
+        <p className="text-sm text-gray-500">No photos yet — pick some from recent book-outs below, or take new ones. The first one is the main photo buyers see at the top.</p>
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {sale.photos.map((p, i) => (
-            <div key={p.id} className="rounded border border-gray-200 p-1.5">
+            <div key={p.id} className={`relative rounded border p-1.5 ${i === 0 ? 'border-ooosh-navy ring-1 ring-ooosh-navy' : 'border-gray-200'}`}>
               <img src={salePhotoUrl(p.r2Key)} alt={p.label ?? 'Sale photo'} loading="lazy"
                 className="aspect-[4/3] w-full rounded object-cover" />
+              {i === 0 ? (
+                <span className="absolute left-2.5 top-2.5 rounded bg-ooosh-navy px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                  ★ Main photo
+                </span>
+              ) : (
+                <button type="button" disabled={busy} onClick={() => makeMain(i)}
+                  className="absolute left-2.5 top-2.5 rounded bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-gray-700 shadow hover:bg-white disabled:opacity-50">
+                  ☆ Make main photo
+                </button>
+              )}
               <input
                 defaultValue={p.label ?? ''}
                 placeholder="Label"
@@ -562,9 +702,11 @@ function ChosenPhotos({ sale, onSaved }: { sale: SaleView; onSaved: (s: SaleView
   )
 }
 
-// ── Adding photos: recent book-outs / check-ins, or new ones ───────────────
+// ── Adding photos: recent book-outs, or new ones ───────────────────────────
 
-const PICKER_EVENT_TYPES = new Set(['Book Out', 'Check In'])
+// Book-outs only (jon, 1 Oct 2026): a check-in mostly shows new damage, and
+// the next book-out photographs the van again anyway.
+const PICKER_EVENT_TYPES = new Set(['Book Out'])
 
 function AddPhotos({ sale, vehicle, onSaved }: { sale: SaleView; vehicle: Vehicle; onSaved: (s: SaleView) => void }) {
   const [shown, setShown] = useState(3)
@@ -612,7 +754,7 @@ function AddPhotos({ sale, vehicle, onSaved }: { sale: SaleView; vehicle: Vehicl
 
       {eventsQuery.isLoading && <p className="text-sm text-gray-400">Loading recent book-outs…</p>}
       {!eventsQuery.isLoading && events.length === 0 && (
-        <p className="text-sm text-gray-500">No book-out or check-in photos on record for this van.</p>
+        <p className="text-sm text-gray-500">No book-out photos on record for this van.</p>
       )}
 
       {events.slice(0, shown).map((ev, i) => (
@@ -843,7 +985,7 @@ function ShareLinksCard({ sale, isManager }: { sale: SaleView; isManager: boolea
 
       <div className="rounded border border-dashed border-gray-300 p-3">
         <p className="mb-2 text-xs font-medium text-gray-600">New link</p>
-        <input value={name} onChange={e => setName(e.target.value)} placeholder="Who is it for? e.g. Van Monster, Dave (client)"
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="Who is it for? e.g. the dealer's name, or Dave (client)"
           className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
           {LINK_SWITCH_LABELS.map(({ key, label }) => (
@@ -859,9 +1001,10 @@ function ShareLinksCard({ sale, isManager }: { sale: SaleView; isManager: boolea
             Damage history hidden — fine for a dealer, but a private buyer should normally see it.
           </p>
         )}
-        <button type="button" onClick={create} disabled={busy}
-          className="mt-2 rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
-          {busy ? 'Saving…' : 'Create link'}
+        <button type="button" onClick={create} disabled={busy || !name.trim()}
+          title={name.trim() ? undefined : 'Type who the link is for first'}
+          className="mt-2 rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
+          {busy ? 'Saving…' : name.trim() ? `Create link for ${name.trim()}` : 'Create link'}
         </button>
       </div>
 
