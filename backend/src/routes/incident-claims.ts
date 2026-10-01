@@ -35,6 +35,8 @@ import {
 import { estimateVehicleValue } from '../services/vehicle-value';
 import { notifyVehicleSaleOfIssue } from '../services/vehicle-sales';
 import { resolveOutlineType, CLAIM_SECTIONS } from '../services/claim-form-fields';
+import { getRouteForReg } from '../services/traccar-server';
+import { incidentWindow, saveGpsTrace, csvToPoints, MAX_WINDOW_HOURS } from '../services/claim-gps';
 import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 
@@ -1217,6 +1219,93 @@ router.post('/:id/links', validate(sendLinksSchema), async (req: AuthRequest, re
   } catch (err) {
     console.error('Send claim links error:', err);
     res.status(500).json({ error: 'Failed to send the form' });
+  }
+});
+
+// ── GPS trace (§14, §21) ──────────────────────────────────────────────────
+
+const gpsWindowSchema = z.object({ from: z.string().datetime({ offset: true }), to: z.string().datetime({ offset: true }) });
+
+/** The van's reg + the default window for a case (±30 min of the time, else the whole day). */
+async function gpsContext(id: string) {
+  const r = await query(
+    `SELECT COALESCE(fv.reg, c.vehicle_reg) AS reg, c.incident_time_text,
+            to_char(c.incident_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS incident_date
+     FROM incident_claims c LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+     WHERE c.id = $1 AND c.is_deleted = false`,
+    [id],
+  );
+  return r.rows[0] || null;
+}
+
+function checkWindow(from: Date, to: Date): string | null {
+  if (!(to > from)) return 'The end must be after the start';
+  if (to.getTime() - from.getTime() > MAX_WINDOW_HOURS * 3600_000) return `At most ${MAX_WINDOW_HOURS} hours at a time`;
+  return null;
+}
+
+router.get('/:id/gps', async (req: AuthRequest, res: Response) => {
+  try {
+    const ctx = await gpsContext(String(req.params.id));
+    if (!ctx) { res.status(404).json({ error: 'Claim not found' }); return; }
+    if (!ctx.reg) { res.status(409).json({ error: 'Set the van on the case first' }); return; }
+    const q = req.query as Record<string, string | undefined>;
+    let from: Date; let to: Date;
+    if (q.from && q.to) {
+      from = new Date(q.from); to = new Date(q.to);
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) { res.status(400).json({ error: 'Bad dates' }); return; }
+    } else if (ctx.incident_date) {
+      ({ from, to } = incidentWindow(ctx.incident_date, ctx.incident_time_text, 30));
+    } else {
+      res.json({ data: { reg: ctx.reg, from: null, to: null, points: [], gps: true, needs_date: true } });
+      return;
+    }
+    const bad = checkWindow(from, to);
+    if (bad) { res.status(400).json({ error: bad }); return; }
+    const points = await getRouteForReg(ctx.reg, from, to);
+    res.json({ data: { reg: ctx.reg, from: from.toISOString(), to: to.toISOString(), points: points || [], gps: points !== null } });
+  } catch (err) {
+    console.error('Claim GPS error:', err);
+    res.status(502).json({ error: 'Could not reach the tracking server' });
+  }
+});
+
+router.post('/:id/gps/attach', validate(gpsWindowSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const ctx = await gpsContext(id);
+    if (!ctx?.reg) { res.status(ctx ? 409 : 404).json({ error: ctx ? 'Set the van on the case first' : 'Claim not found' }); return; }
+    const from = new Date(req.body.from); const to = new Date(req.body.to);
+    const bad = checkWindow(from, to);
+    if (bad) { res.status(400).json({ error: bad }); return; }
+    const r = await saveGpsTrace(id, ctx.reg, from, to, { userId: req.user!.id, auto: false });
+    if (r === null) { res.status(409).json({ error: 'No GPS tracker found for this van' }); return; }
+    if (!r.fileId) { res.status(409).json({ error: 'No GPS positions in that window — nothing saved' }); return; }
+    await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
+    res.status(201).json({ data: r });
+  } catch (err) {
+    console.error('Claim GPS attach error:', err);
+    res.status(502).json({ error: 'Could not save the trace' });
+  }
+});
+
+/** A saved trace's points, read back from its CSV (the page redraws the route from it). */
+router.get('/:id/gps/files/:fileId', async (req: AuthRequest, res: Response) => {
+  try {
+    const f = await query(
+      `SELECT r2_key FROM incident_claim_files WHERE id = $1 AND claim_id = $2 AND file_type = 'gps_trace'`,
+      [String(req.params.fileId), String(req.params.id)],
+    );
+    if (!f.rows[0]) { res.status(404).json({ error: 'Trace not found' }); return; }
+    const obj = await getFromR2(f.rows[0].r2_key);
+    // Read the stream generically (works whatever stream type the S3 client hands back).
+    const chunks: Buffer[] = [];
+    if (obj.Body) for await (const chunk of obj.Body as AsyncIterable<Uint8Array>) chunks.push(Buffer.from(chunk));
+    const text = Buffer.concat(chunks).toString('utf8');
+    res.json({ data: { points: csvToPoints(text) } });
+  } catch (err) {
+    console.error('Claim GPS file error:', err);
+    res.status(500).json({ error: 'Could not read the trace' });
   }
 });
 

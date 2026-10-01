@@ -6,7 +6,8 @@
  * out and chasing not paused:
  *
  *   chase_level 0–3  → email every live link (sent / opened) a reminder with
- *                      the same link and "N of 8 parts done"; level + 1
+ *                      the same link and "N of 8 parts done"; level + 1.
+ *                      The 3rd is also texted to anyone we have a mobile for.
  *   chase_level 4    → four reminders and still no form: stop, flag it —
  *                      `chase_escalated` event, bell the owner + watchers,
  *                      Needs Attention ("Client forms not coming back");
@@ -26,11 +27,14 @@ import { query } from '../config/database';
 import { frontendLink } from '../config/app-urls';
 import { CLAIM_SECTIONS, CLIENT_CHECKLIST, sectionMissing } from './claim-form-fields';
 import { logClaimEvent, notifyClaimFollowers, claimLabel, ukDatePlus } from './incident-claims';
+import { sendLinkSms } from './claim-links';
 
 export const CHASE_MAX = 4;
 /** chase_level once the chase has run out and been flagged to staff. */
 export const CHASE_ESCALATED = CHASE_MAX + 1;
 const QUIET_HOURS = 20;
+/** Which reminder is also texted (jon, Oct 2026: the first send and the 3rd reminder). */
+const SMS_AT_LEVEL = 3;
 
 /** Events that mean the client is working on the form through their link. */
 const CLIENT_EVENTS = [
@@ -132,7 +136,7 @@ export async function runClaimClientChase(): Promise<{ chased: number; skipped: 
       if (recent.rows[0]?.busy) { out.skipped++; continue; }
 
       const links = await query(
-        `SELECT token, recipient_name, recipient_email FROM incident_claim_links
+        `SELECT token, recipient_name, recipient_email, driver_id, person_id FROM incident_claim_links
          WHERE claim_id = $1 AND status IN ('sent', 'opened') AND recipient_email IS NOT NULL
          ORDER BY created_at`,
         [c.id],
@@ -148,6 +152,11 @@ export async function runClaimClientChase(): Promise<{ chased: number; skipped: 
           reg: c.vehicle_reg || 'our van', hh: c.hh_job_number, progress, level,
         });
         if (ok) sentTo.push(l.recipient_name || l.recipient_email);
+        // The 3rd reminder also goes by text, when we have their mobile (§21 — not every day).
+        if (ok && level === SMS_AT_LEVEL) {
+          await sendLinkSms(c.id, l.token, { driverId: l.driver_id, personId: l.person_id, name: l.recipient_name }, 'claim_form_reminder',
+            { done: String(progress.done), total: String(progress.total) });
+        }
       }
       if (!sentTo.length) { out.skipped++; continue; }   // nothing went — try again tomorrow at the same level
       await query(`UPDATE incident_claims SET chase_level = $2, updated_at = NOW() WHERE id = $1`, [c.id, level]);

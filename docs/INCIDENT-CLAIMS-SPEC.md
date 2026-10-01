@@ -1,8 +1,8 @@
 # INCIDENT & POSSIBLE-CLAIMS SPEC — replacing the broker's Word/PDF claim form
 
-**Status:** ✅ PHASES 1–3 BUILT (Sep–Oct 2026) — the case file, the client form and client chasing
-(§12 rows 1–3). Phase 4 not started. See §18 (Phase 1), §19 (Phase 2) and §20 (Phase 3) for what
-actually shipped and where it differs from the plan below.
+**Status:** ✅ PHASES 1–4 BUILT (Sep–Oct 2026) — the case file, the client form, client chasing and
+the extras that were kept (GPS trace, SMS). Video and retention flagging were dropped (§21). See §18–21
+for what actually shipped and where it differs from the plan below.
 **Shaped:** Sep 2026 — jon + Claude, revising a spec drafted months earlier in a non-code session
 against the codebase as it actually is. Where this document and that draft disagree, this wins.
 
@@ -770,4 +770,38 @@ sheets — only test cases had any.
 - The claims list's check-date column shows "client reminders (n/4)" or "reminders ran out" for a
   case being chased.
 - Not done: a separate chase for the driver's part (the driver's link is chased like any other).
+
+## 21. Phase 4 as built (Oct 2026) — GPS trace and SMS
+
+Decided with jon before the build: GPS and SMS yes; **video and retention flagging not built**.
+
+**GPS trace** (migration `268_claim_gps.sql`: file type `gps_trace`, `incident_claims.gps_auto_captured_at`)
+- `traccar-server.ts` `getRouteForReg(reg, from, to)` — Traccar `/positions` for the device named after
+  the reg (null = no tracker; [] = nothing then). `services/claim-gps.ts` does the rest.
+- Case page "GPS trace" card, loaded only when asked: the route ±30 min of the incident time (parsed
+  from the free-text time — "about 3pm", "15:30", "midday"; else the whole UK day), Wider / Narrower /
+  any window up to 48 h, and **Attach to case**, which saves the points as a CSV case file (UK and UTC
+  times, speed, address) — not shared with insurers unless ticked. Saved traces redraw from their own
+  file ("Show on map"), so the record doesn't depend on Traccar keeping the history.
+- **No map image** (a change from §14): capturing map tiles in a browser is fragile and the points
+  are the evidence.
+- **Automatic capture** (added — Traccar's history period wasn't known): in the 09:22 job, every case
+  with a van and an incident date that's over gets one trace saved on its own — ±1 h when the time is
+  known, else the whole day. Tried once (stamp first); a Traccar error un-stamps it so tomorrow retries.
+- GPS times are shown in the browser's time zone (UK for staff); file captions are UK time.
+
+**SMS** (jon: the first send and the 3rd reminder only — texts are more intrusive than email)
+- Templates `claim_form_link` and `claim_form_reminder` in `sms-templates.ts` — one 160-character
+  segment with the link. They go live like the existing texts: `SMS_LIVE_TEMPLATES=claim_form_link,claim_form_reminder`
+  (or `SMS_MODE=live`); until then they go to the test number.
+- Only to people we have a mobile for: a driver's from their hire form, a job contact's from the
+  address book (mobile, else international, else phone). Someone a client forwarded the form to has
+  only an email, so gets emails only. A resend is email-only.
+- Each text goes on the case timeline ("Form link texted to …").
+- Twilio must allow sending to the country (Geo Permissions) — EU numbers need enabling there.
+
+**Video links:** no upload. Paste the link (WeTransfer, Dropbox…) into a case update — links in the
+timeline are now clickable (`components/LinkifiedText.tsx`, shared with the studio shift notes).
+
+**Retention:** deferred to the wider driver-data retention discussion (§16 item 4).
 
