@@ -516,10 +516,14 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
         </div>
       </div>
 
-      <div className="flex gap-1 border-b border-gray-200 mb-4 overflow-x-auto">
+      {/* The grey rule is an inset shadow, not a border: with a border the
+          tabs' -mb-px overlap spilled one pixel below the scroll box, and an
+          overflow-x-auto box then grows a vertical scrollbar for it — the
+          little up/down arrows beside the tabs. */}
+      <div className="flex gap-1 mb-4 overflow-x-auto scrollbar-hide shadow-[inset_0_-1px_0_#e5e7eb]">
         {tabs.map(x => (
           <button key={x.id} onClick={() => onTab(x.id)}
-            className={`px-4 py-2 text-sm whitespace-nowrap -mb-px border-b-2 ${
+            className={`px-4 py-2 text-sm whitespace-nowrap border-b-2 ${
               active === x.id
                 ? 'font-semibold text-ooosh-700 border-ooosh-600'
                 : 'text-gray-600 border-transparent hover:text-gray-900'}`}>
