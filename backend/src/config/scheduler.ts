@@ -1400,8 +1400,16 @@ export function startScheduler() {
     } catch (err) {
       console.error('Scheduler: claim check reminders failed:', err);
     }
+    // Same slot: save each new case's GPS trace while Traccar still has it (§21).
+    try {
+      const { runClaimGpsAutoCapture } = await import('../services/claim-gps');
+      const g = await runClaimGpsAutoCapture();
+      if (g.saved || g.empty || g.failed) console.log(`Scheduler: claim GPS capture — ${g.saved} saved, ${g.empty} empty, ${g.noGps} no tracker, ${g.failed} failed`);
+    } catch (err) {
+      console.error('Scheduler: claim GPS capture failed:', err);
+    }
   }, { timezone: 'Europe/London' });
-  console.log('Scheduler: claim check-date reminders scheduled daily at 09:22 Europe/London');
+  console.log('Scheduler: claim check-date reminders + GPS capture scheduled daily at 09:22 Europe/London');
 
   // ── Possible-claim client chase ──────────────────────────────────────────
   // Daily at 09:21 Europe/London, weekends included (tours run through them).

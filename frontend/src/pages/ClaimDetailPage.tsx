@@ -23,6 +23,8 @@ import {
   CLAIM_SECTIONS, CLIENT_CHECKLIST, ClaimSectionDef, isFieldShown, sectionMissing, type DamageMark, type OutlineType,
 } from '@claimform';
 import { DamageOutlineEditor } from '../components/claims/VanOutline';
+import { GpsTraceCard } from '../components/claims/GpsTraceCard';
+import { LinkifiedText } from '../components/LinkifiedText';
 import { FieldsGrid, ListEditor } from '../components/claims/FormFields';
 import {
   ClaimStage, ClaimStagePill, NextCheckCell, OUTCOME_LABEL, fmtClaimDate, ukDatePlus,
@@ -255,6 +257,12 @@ function ClaimDetailContent() {
           />
           <FormCard claim={claim} onSaved={(m) => { setFlash(m); load(); }} />
           <DamageCard claim={claim} onChange={load} />
+          <GpsTraceCard
+            claimId={claim.id}
+            hasVan={!!claim.vehicle_reg}
+            saved={claim.files.filter((f) => f.file_type === 'gps_trace').map((f) => ({ id: f.id, caption: f.caption, filename: f.filename }))}
+            onChange={(m) => { setFlash(m); load(); }}
+          />
           <FilesCard claim={claim} isManager={isManager} onChange={load} />
           <TimelineCard claim={claim} onChange={load} />
         </div>
@@ -1008,9 +1016,14 @@ function FilesCard({ claim, isManager, onChange }: { claim: Claim; isManager: bo
               <div className="flex-1 min-w-0 space-y-1">
                 <div className="text-sm text-slate-800 truncate">{f.filename}</div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <select value={f.file_type} onChange={(e) => edit(f, { file_type: e.target.value })} className="border rounded px-1.5 py-0.5 text-xs">
-                    {Object.entries(FILE_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-                  </select>
+                  {f.file_type === 'gps_trace' ? (
+                    // Saved by the GPS card — not a type staff pick, so no select.
+                    <span className="border rounded px-1.5 py-0.5 text-xs bg-slate-50 text-slate-600">GPS trace</span>
+                  ) : (
+                    <select value={f.file_type} onChange={(e) => edit(f, { file_type: e.target.value })} className="border rounded px-1.5 py-0.5 text-xs">
+                      {Object.entries(FILE_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                    </select>
+                  )}
                   <label className="flex items-center gap-1 text-xs text-slate-700" title="Shared files go to the broker: photos in the PDF, documents attached to the email">
                     <input type="checkbox" checked={f.share_with_insurer} onChange={(e) => edit(f, { share_with_insurer: e.target.checked })} />
                     Share with insurers
@@ -1039,7 +1052,7 @@ const EVENT_ICON: Record<string, string> = {
   broker_send_failed: '❌', policyholder_signed: '✍️', notified_via: '📞', file_sharing: '🔓',
   form_sent: '📧', link_opened: '👀', link_revoked: '🚫', who_filling: '🙋', handed_off: '↪️', sent_to_driver: '📧',
   section_saved: '✅', driver_verified: '🔐', driver_signed: '✍️', damage_marked: '❌', sketch_saved: '✏️',
-  chase_sent: '⏰', chase_escalated: '🚩', chase_paused: '⏸', chase_restarted: '🔁',
+  chase_sent: '⏰', chase_escalated: '🚩', chase_paused: '⏸', chase_restarted: '🔁', gps_saved: '📍', sms_sent: '📱',
 };
 
 function TimelineCard({ claim, onChange }: { claim: Claim; onChange: () => void }) {
@@ -1150,7 +1163,7 @@ function TimelineCard({ claim, onChange }: { claim: Claim; onChange: () => void 
             <span className="w-5 shrink-0">{EVENT_ICON[e.event_type] || '•'}</span>
             <div className="min-w-0">
               <div className="text-slate-800 whitespace-pre-wrap break-words">
-                {e.body || e.event_type.replace(/_/g, ' ')}
+                {e.body ? <LinkifiedText text={e.body} /> : e.event_type.replace(/_/g, ' ')}
                 {e.event_date && e.event_type === 'milestone' ? <span className="text-slate-500"> ({fmtClaimDate(e.event_date)})</span> : null}
               </div>
               <div className="text-[11px] text-slate-400">

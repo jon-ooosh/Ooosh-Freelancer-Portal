@@ -16,6 +16,7 @@ import { query } from '../config/database';
 import { uploadToR2 } from '../config/r2';
 import { frontendLink } from '../config/app-urls';
 import { logClaimEvent } from './incident-claims';
+import { smsService, normaliseMsisdn } from './sms-service';
 import { sanitiseDamageMarks, DamageMark } from './claim-form-fields';
 
 export const OPEN_STAGES: ReadonlySet<string> = new Set(['open', 'form_out']);
@@ -131,8 +132,69 @@ export async function createAndSendLink(opts: {
   const sent = await sendLinkEmail(opts.claimId, token, email, opts.name, opts.forwardedByName ?? null);
   if (sent.success) {
     await query(`UPDATE incident_claim_links SET sent_at = NOW() WHERE id = $1`, [linkId]);
+    // First send only (a resend is email-only): a text too, when we have their mobile (§21).
+    if (!reused) {
+      await sendLinkSms(opts.claimId, token, { driverId: opts.driverId ?? null, personId: opts.personId ?? null, name: opts.name }, 'claim_form_link');
+    }
   }
   return { linkId, reused, sent: sent.success, error: sent.error };
+}
+
+/**
+ * A link holder's mobile, as E.164: a driver's from their hire form, a contact's
+ * from the address book (mobile, else international, else phone). Someone a
+ * client forwarded the form to has only an email — null.
+ */
+export async function linkPhone(who: { driverId: string | null; personId: string | null }): Promise<string | null> {
+  if (who.driverId) {
+    const d = await query(`SELECT phone, phone_country FROM drivers WHERE id = $1`, [who.driverId]);
+    return normaliseMsisdn(d.rows[0]?.phone, d.rows[0]?.phone_country)?.e164 || null;
+  }
+  if (who.personId) {
+    const p = await query(`SELECT mobile, international_phone, phone FROM people WHERE id = $1`, [who.personId]);
+    const r = p.rows[0];
+    for (const n of [r?.mobile, r?.international_phone, r?.phone]) {
+      const ok = normaliseMsisdn(n, null);
+      if (ok) return ok.e164;
+    }
+  }
+  return null;
+}
+
+/**
+ * Text a link holder (best-effort: no number, SMS not set up, or a failed send
+ * just means no text — the email has gone). Logged on the case timeline.
+ */
+export async function sendLinkSms(
+  claimId: string,
+  token: string,
+  who: { driverId: string | null; personId: string | null; name: string | null },
+  template: 'claim_form_link' | 'claim_form_reminder',
+  extra: Record<string, string> = {},
+): Promise<boolean> {
+  try {
+    if (!smsService.isConfigured()) return false;
+    const to = await linkPhone(who);
+    if (!to) return false;
+    const c = await query(`SELECT vehicle_reg, hh_job_number FROM incident_claims WHERE id = $1`, [claimId]);
+    const r = await smsService.send(template, {
+      to,
+      variables: {
+        vehicleReg: c.rows[0]?.vehicle_reg || '',
+        jobRef: c.rows[0]?.hh_job_number ? ` (#${c.rows[0].hh_job_number})` : '',
+        formUrl: frontendLink(`/claim/${token}`),
+        ...extra,
+      },
+    });
+    if (r.success) {
+      await logClaimEvent(claimId, null, 'sms_sent',
+        `${template === 'claim_form_link' ? 'Form link' : 'Reminder'} texted to ${who.name || 'the recipient'}`);
+    }
+    return r.success;
+  } catch (err) {
+    console.error('[claim-links] SMS failed (non-fatal):', err);
+    return false;
+  }
 }
 
 export async function sendLinkEmail(
