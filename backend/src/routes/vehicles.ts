@@ -1203,7 +1203,7 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
 
     // Leaving the fleet ends any open sale on the van (services/vehicle-sales.ts).
     if (result.rows[0].fleet_group === 'old_sold') {
-      await closeOpenSaleOnRemoval(String(id));
+      await closeOpenSaleOnRemoval(String(id), req.user?.id ?? null);
     }
 
     res.json(mapDbRowToVehicle(result.rows[0], { includeFinance: financeAllowed }));

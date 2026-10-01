@@ -43,6 +43,8 @@ interface Task {
   status: 'open' | 'done' | 'cancelled';
   source_type: string;
   source_id: string | null;
+  /** Where the source badge links back to (a van sale's follow-up → its sale page). */
+  source_link?: string | null;
   created_at: string;
   completed_at: string | null;
   /** NULL for a list item nobody has taken yet (spec §7). */
@@ -684,6 +686,7 @@ const DUE_GROUPS: { id: string; label: string; tone: string; test: (days: number
 // badge (SeriesInline), so it isn't listed here.
 const SOURCE_LABEL: Record<string, string> = {
   staff_review: 'From your review',
+  vehicle_sale: 'Van sale',
 };
 
 const SERIES = 'staff_task_series';
@@ -1015,7 +1018,9 @@ function MineView({ people, series, reloadSeries, refreshKey, flash, onSummary }
             )}
             {isFresh(task) && <Badge tone={BADGE.fresh}>New</Badge>}
             {SOURCE_LABEL[task.source_type] && (
-              <Badge tone={BADGE.review}>{SOURCE_LABEL[task.source_type]}</Badge>
+              task.source_link
+                ? <Link to={task.source_link} className="hover:opacity-80"><Badge tone={BADGE.review}>{SOURCE_LABEL[task.source_type]}</Badge></Link>
+                : <Badge tone={BADGE.review}>{SOURCE_LABEL[task.source_type]}</Badge>
             )}
             {setBySomeoneElse(task) && task.source_type !== 'staff_review' && (
               <Badge tone={BADGE.from} title={task.set_by_name ?? undefined}>From {firstName(task.set_by_name)}</Badge>

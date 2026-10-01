@@ -366,15 +366,13 @@ export function VehicleDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-2xl font-bold text-ooosh-navy">{vehicle.reg}</h2>
-            {openSale ? (
+            {/* Only once a sale exists (jon, 1 Oct 2026) — starting one lives in
+                Vehicle Settings, away from an accidental click. */}
+            {openSale && (
               <Link to={vmPath(`/vehicles/${vehicle.id}/sale`)} className="inline-block hover:opacity-80">
                 <ForSalePill sale={openSale} />
               </Link>
-            ) : isStrictAdmin && !vehicle.isOldSold ? (
-              <Link to={vmPath(`/vehicles/${vehicle.id}/sale`)} className="text-[11px] text-ooosh-blue hover:underline">
-                Start sales process
-              </Link>
-            ) : null}
+            )}
             <p className="mt-0.5 text-sm text-gray-500">{vehicle.model || vehicle.vehicleType}</p>
             <p className="text-sm text-gray-400">{vehicle.make} · {vehicle.colour}</p>
           </div>
