@@ -435,6 +435,8 @@ router.post('/overtime', async (req: AuthRequest, res: Response) => {
   let minutes = parsed.data.minutes ?? 0;
   if (!minutes && parsed.data.startTime && parsed.data.endTime) {
     minutes = minutesBetween(parsed.data.startTime, parsed.data.endTime);
+    // 22:00–02:00 runs past midnight, logged on the day it started.
+    if (minutes <= 0) minutes += 1440;
   }
   if (!minutes || minutes <= 0) {
     res.status(400).json({ error: 'Give either a start and end time, or a number of minutes' }); return;
@@ -458,7 +460,10 @@ router.post('/overtime', async (req: AuthRequest, res: Response) => {
       const day = row?.days?.[0];
       if (day && day.status === 'working' && day.startTime && day.endTime) {
         const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-        const s = toMin(parsed.data.startTime), e = toMin(parsed.data.endTime);
+        const s = toMin(parsed.data.startTime);
+        // End at or before start = past midnight; only the part on this day
+        // is checked against this day's hours.
+        const e = toMin(parsed.data.endTime) <= s ? 1440 : toMin(parsed.data.endTime);
         if (s < toMin(day.endTime) && e > toMin(day.startTime)) {
           res.status(400).json({
             error: `That overlaps contracted hours (${day.startTime.slice(0, 5)}–${day.endTime.slice(0, 5)}) — overtime is time before or after them.`,
@@ -1514,6 +1519,41 @@ router.put('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   } catch (err) {
     console.error('[staff-calendar] upsert employment error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save employment record' });
+  }
+});
+
+// ── 2026 backfill from BrightHR ─────────────────────────────────────────────
+
+// POST /api/staff-calendar/history-import — admin only. { rows, commit }.
+// commit:false is a preview that writes nothing; commit:true writes through
+// the module's own services (no notifications). See staff-history-import.ts.
+router.post('/history-import', adminOnly, async (req: AuthRequest, res: Response) => {
+  const hhmmOrHalf = z.string().regex(/^(\d{2}:\d{2}|AM|PM|am|pm|CHECK)$/).nullable();
+  const schema = z.object({
+    commit: z.boolean(),
+    rows: z.array(z.object({
+      person: z.string().min(1).max(200),
+      kind: z.enum(['holiday', 'toil_taken', 'unpaid', 'overtime_earned', 'toil_paid']),
+      status: z.enum(['approved', 'pending']),
+      date: dateStr,
+      endDate: dateStr.nullable(),
+      startTime: hhmmOrHalf,
+      endTime: hhmmOrHalf,
+      minutes: z.number().int().positive().nullable(),
+      note: z.string().max(500).nullable(),
+    })).min(1).max(1000),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    const i = parsed.error.issues[0];
+    res.status(400).json({ error: `${i?.path.join('.') ?? 'input'}: ${i?.message ?? 'Invalid input'}` }); return;
+  }
+  try {
+    const { runHistoryImport } = await import('../services/staff-history-import');
+    res.json({ data: await runHistoryImport(parsed.data.rows, req.user!.id, !parsed.data.commit) });
+  } catch (err) {
+    console.error('[staff-calendar] history import error:', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Import failed' });
   }
 });
 

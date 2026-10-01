@@ -157,6 +157,11 @@ It is a browser-side check on the person's own clock — the server's timezone i
 not theirs. Unlike the leave warnings this one blocks: overtime that has not
 happened yet is a mistake, not a judgement call.
 
+**Past midnight is ONE entry** (Oct 2026): To at or before From means the
+shift ran into the next day — 22:00–02:00 is 4h, dated the day it started.
+The selects stop at 23:55, so splitting at midnight was not possible. The
+16h cap still applies.
+
 **Nor inside contracted hours.** On a plain working day (`StaffDay.status =
 'working'`) an entry overlapping that day's start–end is refused — the unpaid
 break included: working through lunch is not overtime here (jon, Sep 2026).

@@ -1185,7 +1185,11 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
     setEndMin(Math.min(LAST_SLOT, start + 60));
   }, [workDate, finishes, starts, usualFinish, touched]);
 
-  const duration = endMin - startMin;
+  // To at or before From means the shift ran past midnight (22:00–02:00 is
+  // 4h, logged on the day it STARTED). One entry, not two halves: the selects
+  // stop at 23:55, so "until midnight" could not be entered at all.
+  const overnight = endMin <= startMin;
+  const duration = overnight ? endMin + 1440 - startMin : endMin - startMin;
   // Both ends are on the grid now, so this is a no-op — kept as a guard.
   const snapped = duration > 0 ? Math.ceil(duration / 5) * 5 : 0;
 
@@ -1198,13 +1202,20 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
   // overtime here (jon, Sep 2026). If the calendar could not be read there is
   // nothing to check against, and nothing is blocked.
   const contracted = workingHours[workDate];
-  const inHours = !!contracted && startMin < contracted.end && endMin > contracted.start;
+  // Only the part on the day itself is checked against that day's hours.
+  const inHours = !!contracted && startMin < contracted.end
+    && (overnight ? 1440 : endMin) > contracted.start;
+  // An overnight entry finishes the NEXT day — still to come if it started
+  // today; if it started yesterday, it finished today at endMin.
+  const endsInFuture = overnight
+    ? (isToday || (workDate === addDaysIso(localIso(now), -1) && endMin > nowMin + FUTURE_GRACE_MIN))
+    : isToday && endMin > nowMin + FUTURE_GRACE_MIN;
   const timeError =
     duration <= 0 ? 'end before start'
     : snapped > 960 ? 'more than 16 hours'
     // Overtime that has not happened yet is a mistake, not a judgement call —
     // so unlike the leave warnings, this one blocks.
-    : isToday && endMin > nowMin + FUTURE_GRACE_MIN ? 'that’s still to come'
+    : endsInFuture ? 'that’s still to come'
     : inHours ? 'that’s in your working hours'
     : null;
   const valid = timeError === null && reason.trim() !== '';
@@ -1321,7 +1332,7 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
             </button>
           ))}
           <span className={`ml-auto sm:ml-2 whitespace-nowrap text-[15px] font-semibold ${timeError ? 'text-red-600' : 'text-gray-900'}`}>
-            {timeError ?? `= ${fmtH(snapped)}`}
+            {timeError ?? `= ${fmtH(snapped)}${overnight ? ' (past midnight)' : ''}`}
           </span>
         </div>
       </div>
