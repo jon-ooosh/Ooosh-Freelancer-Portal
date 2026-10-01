@@ -2322,7 +2322,7 @@ const templates: Record<string, EmailTemplate> = {
         </tr>
       </table>{{/if}}
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">{{linkLabel}} →</a>
       </p>
     `,
   },
@@ -2380,7 +2380,7 @@ const templates: Record<string, EmailTemplate> = {
         end-of-night lock-up report. They've been sent a reminder. Worth a check the studio was closed up OK.
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">{{linkLabel}} →</a>
       </p>
     `,
   },
