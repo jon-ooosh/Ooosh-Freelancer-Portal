@@ -7,6 +7,7 @@ import { logAudit } from '../middleware/audit';
 import emailService from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { shiftLinkPath } from '../services/studio-sitter';
 
 const router = Router();
 router.use(authenticate);
@@ -510,7 +511,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     // default to the entity's timeline tab.
     const actionUrl = issue_id ? `/operations/problems/${issue_id}`
       : heldItemUrl ? heldItemUrl
-      : shift_id ? `/studio-sitters`
+      : shift_id ? (await shiftLinkPath(shift_id)).path
       : job_id ? `/jobs/${job_id}?tab=timeline`
       : person_id ? `/people/${person_id}`
       : organisation_id ? `/organisations/${organisation_id}`
