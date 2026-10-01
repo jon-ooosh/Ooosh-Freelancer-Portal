@@ -177,11 +177,12 @@ Three rules from it that bite elsewhere:
   be linked to from the UI. Sale stock is only consumed while that job is
   DISPATCHED, so any status change releases a week of stock, silently.
 
-**PHASES 0–1 BUILT, Sep 2026:** `docs/VEHICLE-SALES-SPEC.md` — selling a van (sales pack, per-buyer
+**PHASES 0–2 BUILT, Sep 2026:** `docs/VEHICLE-SALES-SPEC.md` — selling a van (sales pack, per-buyer
 share links, activity + To Do follow-ups, hand-off to the existing sold modal). Built: DVSA MOT history
-(Vehicle › History › MOT) and the sale page (`/vehicles/fleet/:id/sale` — stage, price, chosen photos,
-photo re-check, "For sale" pills). Phases 2–4 are not. §1 is the settled decisions, §11 what Phase 1
-shipped. **A sale never changes the van** — it stays active and hireable; removing the van from the
+(Vehicle › History › MOT), the sale page (`/vehicles/fleet/:id/sale` — stage, price, chosen photos,
+photo re-check, "For sale" pills) and per-buyer share links (public page `/van/:token`). Phases 3–4
+are not. §1 is the settled decisions, §11–12 what shipped. **What a buyer sees is built ONLY by
+`shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
@@ -238,6 +239,7 @@ existing definition:
 | What is a van worth (approx.)? | `services/vehicle-value.ts` `estimateVehicleValue()` |
 | What does DVSA say about this van's MOT? | `services/dvsa-mot.ts` — moves `mot_due` forward only, never back |
 | Is this van for sale? Who may change the sale? Do its photos need a re-check? | `services/vehicle-sales.ts` (frontend pill: `useOpenSalesByVehicle()` in `modules/vehicles/lib/vehicle-sales.ts`) |
+| What may a buyer see on a sale link? | `services/vehicle-sale-links.ts` `shapeForBuyer()` (sections: `frontend/src/components/vehicle-sale/BuyerSections.tsx`) |
 | What is this person called? | `frontend/src/lib/displayName.ts` |
 | …the same, on the backend | `services/display-name.ts` |
 | Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |

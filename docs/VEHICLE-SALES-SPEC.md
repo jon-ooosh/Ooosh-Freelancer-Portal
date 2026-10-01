@@ -1,8 +1,8 @@
 # VEHICLE SALES SPEC — selling a van, and DVSA MOT history
 
-**Status:** 🔨 PHASES 0–1 BUILT (30 Sep 2026) — jon + Claude. Phases 2–4 not started. §9 records
-jon's answers to the open questions (all recommendations taken); §11 is what Phase 1 actually shipped
-and where it differs from §5.
+**Status:** 🔨 PHASES 0–2 BUILT (30 Sep 2026) — jon + Claude. Phases 3–4 not started. §9 records
+jon's answers to the open questions (all recommendations taken); §11 and §12 are what Phases 1 and 2
+actually shipped and where they differ from §5–6.
 
 **Replaces:** the "Sell / Remove from Fleet" button in the Vehicle Settings danger zone as the
 *starting point* of a sale (the existing sold modal + removal checklist stay as the *end* of it).
@@ -320,4 +320,49 @@ start refused / hold-date warning (cancelled hires ignored) / photos (other van 
 ignored) / re-check on new and re-flagged Problems / *Photos still OK* / bell recipients / staff vs
 admin patches / reorder, label, remove / removal closes the sale / closed sale locked; DVSA refresh
 moving `mot_due` forward with one audit row and never backwards.
+
+---
+
+## 12. Phase 2 — as built (30 Sep 2026)
+
+**Where things are**
+- Backend: `services/vehicle-sale-links.ts` (THE definition of what a buyer sees), routes on
+  `routes/vehicle-sales.ts` (`GET /public/:token` mounted before the login check, rate-limited
+  60/min; staff `GET|POST /:id/links`, `PATCH|DELETE /:id/links/:linkId`), migration **265**
+  (`vehicle_sale_links` + the `vehicle_sales_contact` setting).
+- Frontend: the *Share links* card on the sale page; the public page `pages/VehicleForSalePage.tsx`
+  at **`/van/:token`**; the sections in `components/vehicle-sale/BuyerSections.tsx` — standalone,
+  for the vehicle info pack to reuse.
+
+**How it behaves**
+- **`shapeForBuyer()` is the only builder of what leaves OP.** It builds field by field from an
+  allow-list — nothing is spread from a DB row — and adds an optional section only when its switch is
+  on. Tests prove a switched-off section's key is absent and that extra fields on the input never
+  reach the output.
+- **Switches can be changed on a live link** (e.g. show the dealer the price later). Revoke keeps the
+  row (listed under "revoked") — never deleted.
+- **Unknown token, revoked link and closed sale all return `{ state: 'unavailable' }`** — the page says
+  only "This vehicle is no longer available" (Q6).
+- **Views:** each public load counts; `?preview=1` (the sale page's *Preview* button) doesn't.
+- **Service history** = `service` / `repair` / `mot` / `tyre` records up to today: date, mileage,
+  type, the record's name, garage. Never cost, notes, HireHop job or files. Insurance and tax
+  records are left out.
+- **MOT history** = the stored DVSA payload (null until DVSA has been fetched successfully).
+- **Mileage history** (off by default) = each month's last reading, excluding `correction` rows,
+  anything above the van's canonical `current_mileage`, and any month higher than a later one —
+  so a fat-fingered reading that was later corrected (RX73TBZ) never shows.
+- **Damage history** = Problems in `damaged` / `broken` / `breakdown` (not "wifi dongle missing"),
+  not cancelled: date, **the summary as written**, and Repaired / Closed / Outstanding. The card
+  warns staff to check the preview, since a summary is free text.
+- **Photos** are served from the public bucket via `R2_PUBLIC_URL` (backend env). Without it the
+  public page shows no photos.
+- **Contact (Q7)** is `system_settings.vehicle_sales_contact`, one line for every van, edited on the
+  sale page by admin / manager (the existing `PUT /api/system-settings`).
+- **Not built from §4:** linking a link to a person / organisation — Phase 3's activity log is where
+  people and organisations come in.
+
+**Verified** against a real Postgres 16 with all 265 migrations applied, through the real Express
+router: switches applied, price hidden then shown after a live switch change, no finance / cost /
+notes in the payload, service and damage filtering, mileage clean-up, view counting (preview not
+counted), unknown / revoked / closed → unavailable, staff routes refuse without login.
 
