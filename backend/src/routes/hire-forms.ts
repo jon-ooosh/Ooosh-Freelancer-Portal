@@ -753,6 +753,7 @@ router.get('/by-job/:hirehopJobId', authenticateVehicleFlexible, async (req: Fle
         d.email AS driver_email,
         d.licence_points AS driver_points,
         d.requires_referral,
+        d.referral_status,
         je.excess_amount_required,
         je.excess_amount_taken,
         je.excess_status
