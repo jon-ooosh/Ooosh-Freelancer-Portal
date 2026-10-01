@@ -96,6 +96,12 @@ const SELECT_TASKS = `
          t.due_date::text AS due_date, t.status,
          t.next_chase_date::text AS next_chase_date,
          t.source_type, t.source_id,
+         -- Where the badge links back to, for sources that live elsewhere
+         -- (a van sale's follow-up → its sale page; VEHICLE-SALES-SPEC §7.2).
+         CASE WHEN t.source_type = 'vehicle_sale' THEN (
+           SELECT '/vehicles/fleet/' || vs.vehicle_id || '/sale'
+             FROM vehicle_sales vs WHERE vs.id = t.source_id
+         ) END AS source_link,
          t.created_at, t.completed_at,
          t.created_by, t.is_private,
          t.follow_up_on::text AS follow_up_on,

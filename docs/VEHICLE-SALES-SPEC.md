@@ -1,8 +1,8 @@
 # VEHICLE SALES SPEC — selling a van, and DVSA MOT history
 
-**Status:** 🔨 PHASES 0–2 BUILT (30 Sep 2026) — jon + Claude. Phases 3–4 not started. §9 records
-jon's answers to the open questions (all recommendations taken); §11 and §12 are what Phases 1 and 2
-actually shipped and where they differ from §5–6.
+**Status:** 🔨 PHASES 0–3 BUILT (1 Oct 2026) — jon + Claude. Phase 4 (PDF / copy-out) not started and may
+never be needed. §9 records jon's answers to the open questions; §11–14 are what actually shipped and
+where it differs from §5–7.
 
 **Replaces:** the "Sell / Remove from Fleet" button in the Vehicle Settings danger zone as the
 *starting point* of a sale (the existing sold modal + removal checklist stay as the *end* of it).
@@ -365,4 +365,55 @@ moving `mot_due` forward with one audit row and never backwards.
 router: switches applied, price hidden then shown after a live switch change, no finance / cost /
 notes in the payload, service and damage filtering, mileage clean-up, view counting (preview not
 counted), unknown / revoked / closed → unavailable, staff routes refuse without login.
+
+---
+
+## 13. Tweaks after first use (jon, 1 Oct 2026)
+
+- **Photo picker lists book-outs only.** Check-ins mostly show new damage, and the next book-out
+  photographs the van again anyway.
+- **Main photo = the first photo.** "Make main photo" moves a photo to the front; the buyer page
+  shows it large at the top. No new column — order already existed.
+- **Boilerplate beside the description.** `system_settings.vehicle_sales_snippets` (JSON list of
+  `{ title, text }`, migration 266), shared by every van. *Insert* adds a snippet as a new paragraph,
+  *Copy* puts it on the clipboard; admin / manager edit the list. Starts empty — OP doesn't invent
+  sales copy.
+- **Default contact** `Ooosh Tours - 01273 911382 - info@oooshtours.co.uk` (migration 266) — only
+  when none was set; one line for every van.
+- **"Create link" is greyed out until a name is typed**, and says who it's for.
+- **The stage (Preparing / Listed / Under offer) is a team marker only** — it shows on the "For sale"
+  pill and buyers never see it. Said so under the stage buttons.
+
+## 14. Phase 3 — as built (1 Oct 2026)
+
+**Where things are**
+- Backend: `services/vehicle-sale-activity.ts` (staff entries, offers, follow-ups), `logSaleEvent()` /
+  `cancelSaleFollowUps()` in `services/vehicle-sales.ts`, routes `GET|POST /:id/activity` and
+  `PATCH /:id/activity/:eventId/offer`, migration **267** (`vehicle_sale_events`).
+- Frontend: `components/sales/SaleActivityCard.tsx` on the sale page; the *Van sale* badge on
+  Me › To Do links back to the sale.
+
+**How it behaves**
+- **Staff entries:** viewing, listed (site required, link must be http/https), contact, offer
+  (amount and who required), note. Dated today by default; may be back-dated, never future-dated.
+- **OP's own entries:** stage changes ("Preparing → Under offer", "… → Withdrawn — reason",
+  "Sold — van removed from the fleet") and links made / revoked.
+- **Follow-ups are To Do items** made by `staff-tasks.ts` `createTask()` with
+  `source_type = 'vehicle_sale'`, `source_id` = the sale — default owner is whoever logs it, or anyone
+  on the To Do people list (they get the usual "task given to you" bell). Title reads on its own:
+  "Follow up Dave re RX21ABC sale". `SELECT_TASKS` now returns `source_link`, so the badge links to
+  `/vehicles/fleet/:vehicleId/sale`.
+- **When a sale closes** (withdrawn, or the van removed from the fleet) its open follow-ups are
+  **cancelled** through `cancelTask()` — never deleted.
+- **Offers:** Accept / Decline / Undo. Accepting moves the sale to *Under offer* (logged). Accepting
+  never closes the sale or touches money.
+- **"Mark sold…" pre-fills the sold modal** from the most recent accepted offer: sale price, and
+  notes "Sold to <who>" (price and notes still only show to an admin, as before).
+- **"Who" is free text** — linking to a person / organisation record is deliberately not built.
+  The share links' recipient names are free text too; both could move to real records later.
+
+**Verified** against a real Postgres 16 with all 267 migrations applied: entries and follow-ups (owned
+by the logger, or given to someone else), To Do rows with titles and `source_link`, past follow-up
+refused, offer accept → *Under offer* + logged, links logged once each (revoke is idempotent),
+withdraw and removal both log and cancel open follow-ups, a closed sale refuses new activity.
 

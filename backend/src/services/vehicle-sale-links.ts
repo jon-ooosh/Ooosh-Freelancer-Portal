@@ -20,7 +20,7 @@ import { query } from '../config/database';
 import { getSystemSetting } from '../routes/system-settings';
 import { parseMotPayload, type MotTest } from './dvsa-mot';
 import { DISPLAY_NAME_SQL } from './display-name';
-import { SaleError, OPEN_SALE_STATUSES } from './vehicle-sales';
+import { SaleError, OPEN_SALE_STATUSES, logSaleEvent } from './vehicle-sales';
 
 // ── Switches ───────────────────────────────────────────────────────────────
 
@@ -380,6 +380,7 @@ export async function createLink(saleId: string, userId: string, input: { recipi
     [saleId, token, name, sw.showPrice, sw.showServiceHistory, sw.showMotHistory,
       sw.showMileageHistory, sw.showDamageHistory, userId],
   );
+  await logSaleEvent(saleId, 'link_created', `Link made for ${name}`, userId);
 }
 
 /** Change a live link's switches (e.g. "now show them the price"). */
@@ -397,13 +398,20 @@ export async function updateLinkSwitches(saleId: string, linkId: string, switche
   if ((res.rowCount ?? 0) === 0) throw new SaleError(404, 'Link not found');
 }
 
-export async function revokeLink(saleId: string, linkId: string): Promise<void> {
+export async function revokeLink(saleId: string, linkId: string, userId: string | null = null): Promise<void> {
   const res = await query(
-    `UPDATE vehicle_sale_links SET revoked_at = COALESCE(revoked_at, NOW())
-      WHERE id = $2 AND sale_id = $1`,
+    `UPDATE vehicle_sale_links SET revoked_at = NOW()
+      WHERE id = $2 AND sale_id = $1 AND revoked_at IS NULL
+      RETURNING recipient_name`,
     [saleId, linkId],
   );
-  if ((res.rowCount ?? 0) === 0) throw new SaleError(404, 'Link not found');
+  if ((res.rowCount ?? 0) === 0) {
+    // Already revoked is fine (idempotent); a link that isn't on this sale is not.
+    const exists = await query(`SELECT 1 FROM vehicle_sale_links WHERE id = $2 AND sale_id = $1`, [saleId, linkId]);
+    if (exists.rows.length === 0) throw new SaleError(404, 'Link not found');
+    return;
+  }
+  await logSaleEvent(saleId, 'link_revoked', `Link for ${res.rows[0].recipient_name} revoked`, userId);
 }
 
 // ── Public ─────────────────────────────────────────────────────────────────

@@ -221,3 +221,89 @@ export async function saveSalesContact(value: string): Promise<void> {
     throw new Error((body as { error?: string }).error || `HTTP ${resp.status}`)
   }
 }
+
+/** Boilerplate for sale descriptions — shared by every van (system_settings JSON). */
+export interface SaleSnippet { title: string; text: string }
+
+export async function fetchSalesSnippets(): Promise<SaleSnippet[]> {
+  const resp = await apiFetch('/api/system-settings?category=vehicle_sales')
+  if (!resp.ok) return []
+  const body = await resp.json() as { data?: Array<{ key: string; value: string | null }> }
+  const raw = body.data?.find(s => s.key === 'vehicle_sales_snippets')?.value
+  try {
+    const list = JSON.parse(raw || '[]') as unknown
+    return Array.isArray(list)
+      ? list.filter((x): x is SaleSnippet => !!x && typeof x.title === 'string' && typeof x.text === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+export async function saveSalesSnippets(list: SaleSnippet[]): Promise<void> {
+  const clean = list
+    .map(s => ({ title: s.title.trim().slice(0, 80), text: s.text.trim().slice(0, 3000) }))
+    .filter(s => s.title && s.text)
+  const resp = await apiFetch('/api/system-settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { vehicle_sales_snippets: JSON.stringify(clean) } }),
+  })
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}))
+    throw new Error((body as { error?: string }).error || `HTTP ${resp.status}`)
+  }
+}
+
+// ── Activity (Phase 3) ─────────────────────────────────────────────────────
+
+export type StaffActivityType = 'viewing' | 'listed' | 'contact' | 'offer' | 'note'
+
+export const ACTIVITY_TYPES: Array<{ value: StaffActivityType; label: string }> = [
+  { value: 'viewing', label: 'Viewing' },
+  { value: 'listed', label: 'Listed' },
+  { value: 'contact', label: 'Contact' },
+  { value: 'offer', label: 'Offer' },
+  { value: 'note', label: 'Note' },
+]
+
+export interface ActivityEntry {
+  id: string
+  type: StaffActivityType | 'status_change' | 'link_created' | 'link_revoked'
+  occurredOn: string
+  who: string | null
+  text: string | null
+  amount: number | null
+  offerStatus: 'open' | 'accepted' | 'declined' | null
+  listingSite: string | null
+  listingUrl: string | null
+  createdAt: string
+  createdByName: string | null
+  followUp: { taskId: string; dueDate: string | null; status: string; ownerName: string | null } | null
+}
+
+export interface ActivityInput {
+  type: StaffActivityType
+  occurredOn?: string
+  who?: string
+  text?: string
+  amount?: number | null
+  listingSite?: string
+  listingUrl?: string
+  followUp?: { dueDate: string; personId?: string | null } | null
+}
+
+export const fetchSaleActivity = (saleId: string) =>
+  apiFetch(`${BASE}/${saleId}/activity`).then(r => readJson<ActivityEntry[]>(r))
+export const addSaleActivity = (saleId: string, input: ActivityInput) =>
+  send<ActivityEntry[]>(`/${saleId}/activity`, 'POST', input)
+export const setOfferStatus = (saleId: string, eventId: string, status: 'open' | 'accepted' | 'declined') =>
+  send<ActivityEntry[]>(`/${saleId}/activity/${eventId}/offer`, 'PATCH', { status })
+
+/** People a follow-up can be given to — the To Do module's own list — and which one is me. */
+export async function fetchAssignablePeople(): Promise<{ people: Array<{ person_id: string; name: string | null }>; me: string | null }> {
+  const resp = await apiFetch('/api/staff-tasks/people')
+  if (!resp.ok) return { people: [], me: null }
+  const body = await resp.json() as { data?: Array<{ person_id: string; name: string | null }>; me?: string | null }
+  return { people: body.data ?? [], me: body.me ?? null }
+}
