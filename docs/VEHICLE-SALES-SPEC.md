@@ -417,3 +417,15 @@ by the logger, or given to someone else), To Do rows with titles and `source_lin
 refused, offer accept → *Under offer* + logged, links logged once each (revoke is idempotent),
 withdraw and removal both log and cancel open follow-ups, a closed sale refuses new activity.
 
+## 15. Second round of tweaks (jon, 1 Oct 2026)
+
+- **No "Start sales process" link on the Vehicle Detail header** — too easy to click by accident.
+  The header shows the "For sale" pill only once a sale exists; starting one is in Vehicle Settings'
+  danger zone.
+- **The stage control is a progress line, not tabs.** The grey pill bar is how other pages switch
+  sections, so it read as navigation. Now: numbered steps (✓ done, filled = current) with a
+  "Move to <next> →" button and a "← Back to <previous>" link.
+- **The page follows the stage.** Preparing: description, photos, key facts first, then links and
+  activity. Listed / Under offer: activity and links first. Nothing is hidden at any stage — you may
+  well talk to a buyer before the van is formally listed.
+
