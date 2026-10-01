@@ -1164,6 +1164,8 @@ export interface Cost {
   supporting_documents?: CostDocument[];
   xero_sync_state: CostXeroSyncState;
   xero_object_id: string | null;
+  /** What xero_object_id is in Xero: a Bill ('invoice') or a Spend Money ('banktransaction'). NULL on legacy rows. */
+  xero_object_type?: 'invoice' | 'banktransaction' | null;
   xero_payment_id: string | null;
   xero_synced_at: string | null;
   xero_error: string | null;
