@@ -16,6 +16,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { STEP_PHASE, FUTURE_STEP } from './CarnetSection';
 import { describePreauth } from '../lib/preauth';
+import { referralBadge } from '../lib/driverStatus';
 import BacklineLocationModal, {
   BacklineLocation,
   backlineLocationIcon,
@@ -112,6 +113,7 @@ interface HireFormDriver {
   status: string;
   created_at: string;
   requires_referral: boolean;
+  referral_status: string | null;
   excess_status: string | null;
   excess_amount_required: number | null;
   excess_amount_taken: number | null;
@@ -673,7 +675,11 @@ export default function RequirementCard({
                     d.driver_id &&
                     (d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active')
                   ).length;
-                  const referralCount = hireFormDrivers.filter(d => d.requires_referral).length;
+                  // Only an UNRESOLVED referral counts — an approval is standing,
+                  // so an approved driver re-declaring the same issue is not news.
+                  const referralCount = hireFormDrivers.filter(
+                    d => d.driver_id && referralBadge(d.requires_referral, d.referral_status)?.unresolved
+                  ).length;
                   // Parse all "sent" entries from the notes — each line was
                   // appended by /api/hire-forms/send-email as:
                   //   "Hire form email sent to a@x.com, b@y.com on DD/MM/YYYY"
@@ -736,9 +742,12 @@ export default function RequirementCard({
                             d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
                           }`} />
                           <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
-                          {d.requires_referral && (
-                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
-                          )}
+                          {(() => {
+                            const rb = referralBadge(d.requires_referral, d.referral_status);
+                            return rb ? (
+                              <span className={`text-[10px] px-1 py-0.5 rounded border ${rb.className}`}>{rb.label}</span>
+                            ) : null;
+                          })()}
                         </div>
                       ))}
                     </div>
@@ -821,9 +830,6 @@ export default function RequirementCard({
                                 £{taken.toLocaleString('en-GB', { minimumFractionDigits: 2 })} / £{required.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
                               </span>
                             </>
-                          )}
-                          {d.requires_referral && (
-                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
                           )}
                         </div>
                       );

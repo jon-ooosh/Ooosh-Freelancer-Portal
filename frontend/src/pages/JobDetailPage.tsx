@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { vehiclePrepPill } from '../lib/vehiclePrep';
+import { referralBadge } from '../lib/driverStatus';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
@@ -5033,6 +5034,21 @@ function JobDetailContent() {
                                 Referral Pending
                               </span>
                             )}
+                            {/* A RESOLVED referral used to vanish from this row
+                                entirely, so the only hint was an unexplained
+                                "Authorise" button. Unresolved ones are already
+                                shouted by the pill above and the held-back pill. */}
+                            {(() => {
+                              const rb = referralBadge(a.requires_referral, a.referral_status);
+                              return rb && !rb.unresolved ? (
+                                <span
+                                  className={`px-2 py-1 rounded-full border font-medium ${rb.className}`}
+                                  title="Insurer referral resolved — a standing approval for this driver. Details on the driver's page."
+                                >
+                                  {rb.label}
+                                </span>
+                              ) : null;
+                            })()}
                             {a.driver_points != null && a.driver_points > 0 && (
                               <span className={`px-2 py-1 rounded-full font-medium ${
                                 a.driver_points >= 10 ? 'bg-red-100 text-red-700' :
@@ -5228,11 +5244,22 @@ function JobDetailContent() {
                         // action that could only fail. With no vehicle_id the
                         // Allocate Van / Book Out CTA below is the correct next
                         // step and appears in its place.
+                        //
+                        // Only once the van is OUT (booked_out / active). That is
+                        // the only time an agreement can have been withheld: the
+                        // book-out flips every driver on the van to booked_out,
+                        // held ones included, and the mid-tour add lands them
+                        // there too. Before book-out, the normal book-out hooks
+                        // send it — so a soft/confirmed row offered a button on
+                        // every driver with a standing approval, which would
+                        // have emailed the agreement before the van inspection
+                        // and pinged the team "referral resolved" (Tyler
+                        // Meadham, Oct 2026).
                         const needsAuthorise = wasReferred
                           && !a.hire_form_emailed_at
                           && !a.hire_form_pdf_key
                           && !!a.vehicle_id
-                          && ['soft', 'confirmed', 'booked_out', 'active'].includes(a.status);
+                          && ['booked_out', 'active'].includes(a.status);
                         if (needsAuthorise) {
                           return (
                             <button
