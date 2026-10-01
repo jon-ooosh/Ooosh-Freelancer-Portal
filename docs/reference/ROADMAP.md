@@ -37,7 +37,7 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | — | External tools (PCN, staging calculator, backline matcher, leads, auto-chase) | All integrated into OP | `INTEGRATIONS.md` |
 | — | Freelancer onboarding | Phases A–C shipped; D next | `INTEGRATIONS.md` |
 | — | Staff documents & training | Live | `INTEGRATIONS.md` |
-| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **Phases A, B1, B2, C live** (Sep 2026) — patterns, ledger, leave, overtime bank, payroll export. D (absence/sickness), E (freelancer days), F (coverage, iCal) remain. **Deadline 1 Jan 2027** | `docs/STAFF-CALENDAR-SPEC.md` §18 |
+| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **Phases A–E live** (Sep 2026) — patterns, ledger, leave, overtime bank, payroll export, absence, freelancer days, company days; Me area redesigned. **Staff using it from Oct 2026** (earlier than the 1 Jan plan — 2026 history is being backfilled from BrightHR, see spec §14). F (coverage, iCal) and working location remain, post-go-live | `docs/STAFF-CALENDAR-SPEC.md` §18 |
 
 **Monday.com is fully retired** (Jul 2026). Some fallback code and unused env vars
 remain in the portal repos and can be swept.

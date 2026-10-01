@@ -235,6 +235,8 @@ export default function App() {
                 <Route path="/operations/rehearsals" element={<RehearsalsPage />} />
                 {/* Studio Sitters re-homed under the Rehearsals hub — keep old links working */}
                 <Route path="/operations/studio-sitters" element={<Navigate to="/operations/rehearsals?tab=sitters" replace />} />
+                {/* Old lock-up emails/bells linked here — keep them landing somewhere */}
+                <Route path="/studio-sitters" element={<Navigate to="/operations/rehearsals" replace />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
                 {/* The platform bug tracker was retired Sep 2026 (jon: no longer
                     used). Old emailed links land on the dashboard rather than a

@@ -445,6 +445,29 @@ router.post('/overtime', async (req: AuthRequest, res: Response) => {
   const snapped = Math.ceil(minutes / MIN_INCREMENT) * MIN_INCREMENT;
 
   try {
+    // Overtime is time OUTSIDE contracted hours — the same rule My Time's form
+    // enforces, held here too so a stale bundle or a direct call cannot bank
+    // the middle of somebody's working day. Only a plain working day is
+    // checked (not a day off, leave, or a part day — see staff-calendar.md),
+    // and the unpaid break counts as hours: working through lunch is not
+    // overtime here (jon, Sep 2026). The "not in the future" check stays in
+    // the browser: only the person's own clock knows what "now" is for them.
+    if (parsed.data.startTime && parsed.data.endTime) {
+      const [row] = await getStaffCalendar(parsed.data.workDate, parsed.data.workDate,
+        { isAdmin: true, personId: target.personId });
+      const day = row?.days?.[0];
+      if (day && day.status === 'working' && day.startTime && day.endTime) {
+        const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+        const s = toMin(parsed.data.startTime), e = toMin(parsed.data.endTime);
+        if (s < toMin(day.endTime) && e > toMin(day.startTime)) {
+          res.status(400).json({
+            error: `That overlaps contracted hours (${day.startTime.slice(0, 5)}–${day.endTime.slice(0, 5)}) — overtime is time before or after them.`,
+          });
+          return;
+        }
+      }
+    }
+
     const id = await createOvertime({
       personId: target.personId,
       workDate: parsed.data.workDate,

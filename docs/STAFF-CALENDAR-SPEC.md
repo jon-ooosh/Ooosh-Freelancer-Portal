@@ -1228,10 +1228,12 @@ more than the tick.
    Original question — The compressed-hours contract — confirm entitlement is expressed in hours, not
    days. If the contract says "28 days", it is ambiguous for an unequal-length week and
    should be restated in hours at the next review.
-5. **Will Parish's 15-minute weekly shortfall** (§0.1). His stated hours total 34h 45m
-   against a 35h week. Either the contract says something different from the hours he
-   works, or one day needs 15 minutes adding. Resolve before entering the pattern — it is
-   a data question, not a design one, but it will be visible in every report once live.
+5. ✅ **RESOLVED (jon, 30 Sep 2026): he works the full 35h.** The missing 15 minutes
+   are worked from home on the Thursday, so his PATTERN should carry them — add 15
+   minutes to Thursday rather than leaving a 34h 45m week, or his entitlement and every
+   report read 15 minutes short.
+   Original question — Will Parish's 15-minute weekly shortfall (§0.1). His stated hours
+   total 34h 45m against a 35h week.
 6. ✅ **ALREADY AN INPUT, not a derivation.** `break_minutes` is stored PER
    PATTERN DAY and the paid total is `end − start − break`, so the lunch break
    is set explicitly per person per day and everything else falls out of it.
@@ -1677,10 +1679,11 @@ calendar needs a location filter. Phase F; must NOT land before the parallel
 run, because moving what "In" means mid-run muddies the comparison.
 
 **Carried over:**
-- Absence retention. §17.9 asks how long sickness records are kept; nothing
-  expires them yet, and it feeds the open GDPR retention item in `ROADMAP.md`.
-- Port My Time into Quick Actions (in `BACKLOG.md`, deferred until E–F land so
-  the surface is not moved twice).
+- ~~Absence retention~~ — **SHIPPED**: `runAbsenceDetailPurge()`
+  (`services/staff-retention.ts`, 09:45 staff-records run) nulls the medical
+  detail a year after a spell ends; `absence_type` and the day rows stay.
+- ~~Port My Time into Quick Actions~~ — **SHIPPED**: "Log overtime" is the first
+  `/quick` tile, mounting the same `LogOvertime`.
 - A single home for freelancer RATES (`BACKLOG.md`) — today a rate lives in
   three unconnected places. Wanted, but it spans quoting and driver assignment
   as well, so it is its own piece.
@@ -1692,6 +1695,17 @@ run, because moving what "In" means mid-run muddies the comparison.
 - `staff.overtime_min_increment_minutes` drives the UI and the service check,
   but `staff_overtime_entries` has a `minutes % 5 = 0` CHECK. Lowering the
   setting without a migration leaves the database refusing what the form offers.
+
+**Going live EARLY (jon, 30 Sep 2026).** Staff start using OP in October rather
+than on 1 Jan 2027, so §14's plan changes: the 2026 history is NOT a read-only
+import alongside zeroed balances — it has to be real, because the 2026 balances
+are live. Holiday and overtime-as-time-off already taken in 2026, and overtime
+earned, are backfilled as ordinary approved records (so "where did it go?" is
+answerable on My Time), without notifications, and then each person's figure is
+reconciled against what BrightHR says is left. Sickness is not imported —
+BrightHR never tracked it. Prerequisite: each person's start date and working
+pattern must cover 1 Jan 2026, or the 2026 allowance is pro-rated from whenever
+the record was typed in and the backfilled days are refused as not contracted.
 
 **Not code — jon's to do before go-live:** the ten items in §17, which want a
 sanity check from the accountants or an HR advisor, and the §14 cutover plan

@@ -21,7 +21,7 @@ import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
-import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo } from '../services/studio-sitter';
+import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo, shiftLinkPath } from '../services/studio-sitter';
 import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
 import { greetingName, fullDisplayName } from '../services/display-name';
 
@@ -1136,15 +1136,17 @@ router.post('/studio-sitter/shifts/:date/thread', sitterNoteUploadMw, async (req
          WHERE shift_id = $1 AND created_by IS NOT NULL`,
         [shiftId]
       );
+      const link = priorStaff.rows.length > 0 ? await shiftLinkPath(shiftId) : null;
       for (const row of priorStaff.rows) {
         await query(
           `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, '/studio-sitters', 'low')`,
+           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, $5, 'low')`,
           [
             row.created_by,
             `${req.portalUser!.name} added a handover note`,
             storedContent.length > 200 ? storedContent.slice(0, 200) + '...' : storedContent,
             shiftId,
+            link!.path,
           ]
         );
       }
