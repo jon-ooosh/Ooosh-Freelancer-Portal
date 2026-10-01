@@ -320,6 +320,9 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     const requiresReferral = f.requires_referral || false;
     const referralReason = f.referral_reason || '';
 
+    // A standing approval (approved/waived) survives a later form that
+    // declares the same issue — see referralCleared below.
+    let referralCleared = false;
     if (requiresReferral) {
       // Leave referral_status NULL on initial submission so the driver
       // lands in the red "Refer to Insurers" todo state — explicit signal
@@ -329,10 +332,13 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // auto-fire of the referral_alert email to admins still happens
       // via the requires_referral flag elsewhere — the alert path is
       // unchanged.
-      await client.query(
-        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2`,
+      const flagged = await client.query(
+        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2
+         RETURNING referral_status`,
         [referralReason, driverId]
       );
+      const status = flagged.rows[0]?.referral_status;
+      referralCleared = status === 'approved' || status === 'waived';
     }
 
     // 3. Excess amount — passed from hire form app, NOT recalculated here
@@ -673,7 +679,10 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     // happens in setImmediate so it doesn't slow the hire form response.
     const advanceJobId: string | undefined = assignment.job_id;
     if (advanceJobId) {
-      const targetStatus = requiresReferral ? 'in_progress' : 'done';
+      // An insurer approval is STANDING for the driver (jon, Oct 2026), so a
+      // returning approved driver re-declaring the same issue is not a new
+      // referral and must not step the card back to amber (Tyler Meadham).
+      const targetStatus = requiresReferral && !referralCleared ? 'in_progress' : 'done';
       setImmediate(async () => {
         try {
           await query(
