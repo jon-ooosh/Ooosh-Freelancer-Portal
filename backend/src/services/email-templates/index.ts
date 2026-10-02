@@ -1128,6 +1128,45 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Northern Ireland (DVA) licence check waiting on staff ──────────────
+
+  dva_check_pending: {
+    variant: 'internal',
+    preheader: 'A Northern Ireland driver is waiting on a licence check only we can run',
+    subject: 'NI licence check needed — {{driverName}}{{#if jobNumber}} (job #{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Northern Ireland Licence Check Needed</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        This driver&rsquo;s licence was issued by the DVA in Northern Ireland, not the DVLA{{#if jobNumber}}, on job <strong>#{{jobNumber}}</strong>{{/if}}.
+        NI licences are not held by the GOV.UK share-code service, so they <strong>cannot run their own check</strong> &mdash;
+        they generate a code and somebody here has to do the lookup. Their hire form is parked
+        until that happens, and they cannot get past it on their own.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#fff7ed;border-radius:8px;border:1px solid #fed7aa;">
+            <p style="margin:0 0 8px;font-size:13px;color:#9a3412;font-weight:600;">Driver</p>
+            <p style="margin:0 0 4px;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
+            <p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{driverEmail}}</p>
+            <p style="margin:0 0 4px;font-size:13px;color:#9a3412;font-weight:600;">What you need for the lookup</p>
+            <p style="margin:0 0 2px;font-size:14px;color:#1e293b;">Check code: <strong style="font-family:monospace;">{{checkCode}}</strong></p>
+            <p style="margin:0;font-size:14px;color:#1e293b;">Licence number: <strong style="font-family:monospace;">{{licenceNumber}}</strong></p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Run the check at
+        <a href="https://www.nidirect.gov.uk/services/check-someones-ni-driving-licence-information" style="color:#7B5EA7;">nidirect</a>,
+        then record the result on the driver&rsquo;s record. The code is
+        <strong>single use and expires 21 days after the driver created it</strong> &mdash; if it fails,
+        ask them for a fresh one rather than retrying.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{driverUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Record the check in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
   // ── Mid-tour driver notification ───────────────────────────────────────
 
   mid_tour_driver: {

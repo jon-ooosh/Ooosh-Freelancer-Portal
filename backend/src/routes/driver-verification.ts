@@ -10,6 +10,7 @@
  *   GET  /api/driver-verification/status         — Get driver status + document validity
  *   POST /api/driver-verification/next-step      — Routing engine (determine next step)
  *   POST /api/driver-verification/update         — Update driver fields (partial)
+ *   POST /api/driver-verification/dva-check-code — NI driver supplies a nidirect check code
  *   GET  /api/driver-verification/check-hire-form — Check if hire form exists for job
  */
 import { Router, Request, Response, NextFunction } from 'express';
@@ -23,6 +24,7 @@ import { query } from '../config/database';
 import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
 import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates, hasAllRequiredDocuments } from '../services/driver-validity';
 import { idenfyNeedsReview, sendIdentityReviewAlert } from '../services/identity-review';
+import { sendDvaCheckAlert } from '../services/dva-check-alert';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
 
@@ -548,6 +550,99 @@ router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res
     }
     console.error('[driver-verification] Next-step error:', error);
     res.status(500).json({ error: 'Failed to determine next step' });
+  }
+});
+
+// ============================================================================
+// POST /api/driver-verification/dva-check-code
+// The Northern Ireland branch of the licence record check.
+// ============================================================================
+//
+// A DVA licence is a UK licence — `isUkLicence()` is true and the driver
+// correctly needs a licence record check rather than a passport. What they
+// cannot do is produce one: viewdrivingrecord.service.gov.uk holds GB licences
+// only. Before this existed, every route out of the hire form led back to
+// `dvla-check` and a gov.uk link that would never work for them, forever
+// (Declan Haughian / 16286).
+//
+// So the driver hands us the one thing they CAN get — a check code from
+// nidirect — and a member of staff runs the lookup.
+//
+// WHY THIS IS ITS OWN ENDPOINT RATHER THAN `/update`
+// --------------------------------------------------
+// `/update` whitelists BOTH `dvla_check_code` and `dvla_check_date`. A code
+// submission must never set the date: the date is what opens the 30-day window,
+// satisfies the router and releases the driver to signature. Writing it here
+// would mean a driver could walk themselves through to a signed hire agreement
+// on a check nobody had run, with 0 points and a floor excess assumed.
+//
+// Keeping it separate makes that structurally impossible rather than a rule
+// somebody has to remember — the same reason the app cannot write
+// `identity_check_status` or `referral_status`. The date arrives from exactly
+// one place: POST /api/drivers/:id/licence-record-check, by a member of staff,
+// with the points.
+const dvaCheckCodeSchema = z.object({
+  email: z.string().email(),
+  // Mixed case is REAL — Declan's was "BML1s646". Stored exactly as given;
+  // upper-casing it would make the recorded code useless for the lookup.
+  checkCode: z.string().trim().min(4).max(50),
+  jobNumber: z.coerce.number().int().positive().nullable().optional(),
+});
+
+router.post('/dva-check-code', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
+  try {
+    const parsed = dvaCheckCodeSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+
+    const existing = await query(
+      `SELECT id, dvla_check_code, licence_issued_by, current_job_number
+         FROM drivers WHERE email = $1 AND is_active = true
+        ORDER BY updated_at DESC LIMIT 1`,
+      [email],
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Driver not found' });
+      return;
+    }
+    const driver = existing.rows[0];
+
+    // `current_job_number` is best-effort and only ever moves forward to a job
+    // we've been told about — it is what makes OP's "started but not signed
+    // for #N" derivation work for a driver with no assignment row yet
+    // (services/driver-hire-progress.ts).
+    const jobNumber = parsed.jobNumber ?? null;
+
+    await query(
+      `UPDATE drivers
+          SET dvla_check_code = $1,
+              current_job_number = COALESCE($2, current_job_number),
+              updated_at = NOW()
+        WHERE id = $3`,
+      [parsed.checkCode, jobNumber, driver.id],
+    );
+
+    // Alert only on a CHANGED code. A driver refreshing the parked screen, or
+    // the page re-submitting, must not re-mail the team; a genuinely new code
+    // must, because the previous one is spent (single use, 21-day expiry).
+    const isNewCode = (driver.dvla_check_code || '') !== parsed.checkCode;
+    if (isNewCode) {
+      sendDvaCheckAlert(driver.id as string)
+        .catch(err => console.error('[driver-verification] DVA alert failed:', err));
+    }
+
+    console.log(
+      `[driver-verification] DVA check code ${isNewCode ? 'recorded' : 're-submitted'} for ${email}`
+      + `${jobNumber ? ` (job #${jobNumber})` : ''}`,
+    );
+
+    res.json({ success: true, alerted: isNewCode });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('[driver-verification] DVA check code error:', error);
+    res.status(500).json({ error: 'Failed to record check code' });
   }
 });
 
@@ -1582,6 +1677,10 @@ export function buildDriverStatusResponse(driver: Record<string, unknown>) {
     dvlaPoints: (driver.licence_points as number) || 0,
     dvlaEndorsements: endorsementsDisplay,
     dvlaCalculatedExcess: excessDisplay,
+    // The NI parked screen reads this to know we already hold a code, so a
+    // driver who reloads sees "we're checking this" rather than being asked
+    // for the code again. Their own code, inside their own session.
+    dvlaCheckCode: (driver.dvla_check_code as string) || null,
   };
 }
 
@@ -1620,6 +1719,7 @@ function buildNewDriverStatus(email: string) {
     dvlaPoints: 0,
     dvlaEndorsements: null,
     dvlaCalculatedExcess: null,
+    dvlaCheckCode: null,
   };
 }
 
