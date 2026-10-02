@@ -142,10 +142,10 @@ reminders, Problems and the vehicle module — read it before putting any "thing
 anywhere. §15 is the phase 3–4 log, §16 the close and what is deliberately not built.
 Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.md`.
 
-**PHASES 1–4 BUILT, Oct 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
+**CLOSED, Oct 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
 (Vehicles › Claims, replacing the broker's Word claim form). Always opened from a Problem
 (`job_issues.claim_id`); the broker is never contacted automatically — only a manager's "Send to
-broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built). Claim files live under the
+broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built), §22 troubleshooting. Claim files live under the
 `claims/` R2 prefix, which `GET /api/files/download` gates to staff — never file them under `files/`.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
