@@ -57,6 +57,11 @@ function esc(s: string): string {
  * unseen and silently, which is exactly the problem this exists to solve. The
  * fallback logs why so the cause is visible rather than mysterious.
  */
+/** One person's Time off tab on the Staff page (CLAUDE.md: deep-link the tab). */
+function timeOffUrl(personId: string): string {
+  return `${STAFF_URL}?person=${encodeURIComponent(personId)}&tab=time`;
+}
+
 async function approverUserIds(): Promise<{ id: string; email: string }[]> {
   const employed = await query(
     `SELECT u.id, u.email
@@ -102,13 +107,16 @@ async function notify(
 export async function notifyLeaveRequested(requestId: string) {
   try {
     const r = await query(
-      `SELECT r.id, r.leave_type, r.total_minutes, r.request_note,
+      `SELECT r.id, r.person_id, r.leave_type, r.total_minutes, r.request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
         WHERE r.id = $1`, [requestId]);
     const q = r.rows[0];
     if (!q) return;
+    // Straight to that person's Time off tab, where Approve / Decline sit
+    // beside their balance and the rest of their year.
+    const link = timeOffUrl(q.person_id);
     const range = q.start_date === q.end_date
       ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
     const what = q.leave_type === 'holiday' ? 'holiday' : q.leave_type === 'toil' ? 'TOIL' : 'unpaid leave';
@@ -116,7 +124,7 @@ export async function notifyLeaveRequested(requestId: string) {
       await notify(u.id, 'follow_up',
         `${q.name} has requested ${what}`,
         `${range} · ${fmtH(Number(q.total_minutes))}`,
-        'staff_leave_request', q.id, STAFF_URL);
+        'staff_leave_request', q.id, link);
     }
     await emailApprovers(
       `${q.name} has requested ${what}`,
@@ -125,24 +133,25 @@ export async function notifyLeaveRequested(requestId: string) {
         `<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))}`,
         ...(q.request_note ? [`<span style="color:#64748b;">“${esc(q.request_note)}”</span>`] : []),
       ],
-      STAFF_URL);
+      link);
   } catch (e) { console.error('[staff-notifications] leave requested:', e); }
 }
 
 export async function notifyOvertimeLogged(entryId: string) {
   try {
     const r = await query(
-      `SELECT e.id, e.minutes, e.reason, e.work_date::text AS work_date,
+      `SELECT e.id, e.person_id, e.minutes, e.reason, e.work_date::text AS work_date,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_overtime_entries e JOIN people p ON p.id = e.person_id
         WHERE e.id = $1`, [entryId]);
     const q = r.rows[0];
     if (!q) return;
+    const link = timeOffUrl(q.person_id);
     for (const u of await approverUserIds()) {
       await notify(u.id, 'follow_up',
         `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
         `${fmtDate(q.work_date)} — ${q.reason}`,
-        'staff_overtime_entry', q.id, STAFF_URL);
+        'staff_overtime_entry', q.id, link);
     }
     await emailApprovers(
       `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
@@ -151,7 +160,7 @@ export async function notifyOvertimeLogged(entryId: string) {
         `<strong>${esc(fmtDate(q.work_date))}</strong> — ${fmtH(Number(q.minutes))}`,
         `<span style="color:#64748b;">${esc(q.reason)}</span>`,
       ],
-      STAFF_URL);
+      link);
   } catch (e) { console.error('[staff-notifications] overtime logged:', e); }
 }
 
@@ -210,16 +219,42 @@ export async function notifyDecision(opts: {
 }) {
   try {
     const u = await query(
-      `SELECT id FROM users WHERE person_id = $1 AND is_active = true LIMIT 1`, [opts.personId]);
+      `SELECT id, email FROM users WHERE person_id = $1 AND is_active = true LIMIT 1`, [opts.personId]);
     const userId = u.rows[0]?.id;
     if (!userId) return;   // no login — nothing to notify to
     const what = opts.kind === 'leave' ? 'Time off' : 'Overtime';
+    // The routes pass ISO dates and raw minutes; say them the way people do.
+    const summary = opts.summary
+      .replace(/\d{4}-\d{2}-\d{2}/g, d => fmtDate(d))
+      .replace(/(\d+) min\b/g, (_m, n: string) => fmtH(Number(n)));
+    const MY_TIME = '/me?tab=time';
     await notify(userId, 'system',
-      `${what} ${opts.outcome}: ${opts.summary}`,
+      `${what} ${opts.outcome}: ${summary}`,
       opts.note ?? '',
       opts.kind === 'leave' ? 'staff_leave_request' : 'staff_overtime_entry',
-      opts.entityId, '/staff/me',
+      opts.entityId, MY_TIME,
       opts.outcome === 'declined' ? 'high' : 'normal');
+
+    // And by email. The approvers have been emailed about every request since
+    // Phase B; the person who ASKED only ever got a bell, so a decision made
+    // while they were out of the app reached nobody (jon, Oct 2026). Same
+    // rule as everywhere else in this module: a bell alone is not an alert.
+    const to = u.rows[0]?.email as string | undefined;
+    if (to) {
+      const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
+      const word = opts.outcome === 'approved' ? 'approved' : opts.outcome === 'declined' ? 'declined' : 'cancelled';
+      const heading = `Your ${opts.kind === 'leave' ? 'time off' : 'overtime'} has been ${word}`;
+      const body =
+        `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">${esc(heading)}</h2>` +
+        `<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;"><strong>${esc(summary)}</strong></p>` +
+        (opts.note ? `<p style="margin:0 0 8px;font-size:15px;color:#64748b;line-height:1.6;">“${esc(opts.note)}”</p>` : '') +
+        `<p style="margin:24px 0 0;"><a href="${base}${MY_TIME}" ` +
+        `style="display:inline-block;padding:10px 18px;background:#0074c6;color:#fff;` +
+        `border-radius:6px;text-decoration:none;font-size:15px;">Open My Time</a></p>`;
+      await emailService.send('staff_time_decision', {
+        to, subjectOverride: heading, bodyHtmlOverride: body,
+      }).catch(e => console.error('[staff-notifications] decision email failed:', e));
+    }
   } catch (e) { console.error('[staff-notifications] decision:', e); }
 }
 
@@ -738,7 +773,7 @@ export async function runCompanyDaysReview(today = new Date()): Promise<CompanyD
     [
       'A yearly check, so nobody turns up to a building that is shut.',
       recurring.length > 0
-        ? `These recur and need <strong>no action</strong>: ${recurring.map(r => `${esc(r.label)} (${esc(fmt(r.dayDate).replace(/ \\d{4}$/, ''))})`).join(', ')}.`
+        ? `These recur and need <strong>no action</strong>: ${recurring.map(r => `${esc(r.label)} (${esc(fmt(r.dayDate).replace(/ \d{4}$/, ''))})`).join(', ')}.`
         : 'No recurring company days are set up.',
       oneOffs > 0
         ? `${oneOffs} one-off day${oneOffs === 1 ? ' is' : 's are'} already set for ${nextYear}.`

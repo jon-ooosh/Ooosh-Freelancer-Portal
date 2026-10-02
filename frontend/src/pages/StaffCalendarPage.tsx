@@ -86,12 +86,6 @@ function weekdayIndex(date: string): number {
 function mondayOf(date: string): string {
   return addDays(date, -weekdayIndex(date));
 }
-function fmtMinutes(min: number): string {
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  if (h === 0) return `${m}m`;
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
-}
 function shortDay(date: string): string {
   return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][weekdayIndex(date)];
 }
@@ -104,9 +98,25 @@ function fmtLongDate(date: string): string {
   return Number.isNaN(dt.getTime()) ? date
     : dt.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
-function monthLabel(date: string): string {
+/**
+ * What the visible range is called. The view rolls week to week, so a window
+ * that starts on 31 August is mostly September — naming it after its first
+ * day said "August" over a fortnight of September. Name the span instead.
+ */
+function rangeLabel(from: string, to: string): string {
+  const fmt = (d: string, opts: Intl.DateTimeFormatOptions) => {
+    const [y, m, dd] = d.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, dd)).toLocaleDateString('en-GB', { ...opts, timeZone: 'UTC' });
+  };
+  if (from.slice(0, 7) === to.slice(0, 7)) return fmt(from, { month: 'long', year: 'numeric' });
+  const sameYear = from.slice(0, 4) === to.slice(0, 4);
+  return `${fmt(from, { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) })} – ${
+    fmt(to, { day: 'numeric', month: 'short', year: 'numeric' })}`;
+}
+/** Three-letter month for the header, shown where a month starts. */
+function monthShort(date: string): string {
   const [y, m] = date.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
 }
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -308,7 +318,7 @@ export default function StaffCalendarPage() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Staff calendar</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Who&apos;s in, who&apos;s not. {monthLabel(from)}
+            Who&apos;s in, who&apos;s not. {rangeLabel(from, to)}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -392,7 +402,14 @@ export default function StaffCalendarPage() {
       ) : (
         /* Wide grids scroll inside their own container — the page body must not. */
         <div className="overflow-x-auto border border-gray-200 rounded-lg bg-white">
-          <table className="min-w-full border-collapse text-sm">
+          {/* Fixed layout: every day column the same width whatever is in
+              it — auto layout let a "Requested" cell widen its whole column. */}
+          <table className="w-full border-collapse text-sm table-fixed"
+            style={{ minWidth: 160 + dates.length * 58 }}>
+            <colgroup>
+              <col style={{ width: 160 }} />
+              {dates.map(d => <col key={d} />)}
+            </colgroup>
             <thead>
               <tr className="bg-gray-50">
                 <th className="sticky left-0 z-10 bg-gray-50 text-left font-medium text-gray-600 px-3 py-2 border-b border-gray-200 min-w-[10rem]">
@@ -410,10 +427,16 @@ export default function StaffCalendarPage() {
                       }
                       return undefined;
                     })()}
-                    className={`px-1 py-2 border-b border-gray-200 font-medium text-center min-w-[3rem] ${
+                    className={`px-1 py-2 border-b border-gray-200 font-medium text-center ${
+                      d !== from && dayNum(d) === '1' ? 'border-l-2 border-l-ooosh-300' : ''} ${
                       d === TODAY ? 'bg-ooosh-50 text-ooosh-700' : 'text-gray-600'
                     } ${weekdayIndex(d) >= 5 ? 'bg-gray-100' : ''} ${
                       marker(d)?.kind === 'company' ? 'bg-emerald-50 text-emerald-800' : ''}`}>
+                    {/* The month is named where it starts — and on the first
+                        column, so the grid never opens on an unnamed month. */}
+                    <div className="h-3 text-[9px] font-semibold uppercase tracking-wide text-ooosh-700 leading-3">
+                      {(d === from || dayNum(d) === '1') ? monthShort(d) : ''}
+                    </div>
                     <div className="text-[10px] uppercase tracking-wide">{shortDay(d)}</div>
                     <div className="text-xs">{dayNum(d)}</div>
                     {/* A dot, not a colour fill: under `use_allowance` a bank
@@ -450,7 +473,7 @@ export default function StaffCalendarPage() {
                       const title = day.pending
                         ? `Requested${wins.length ? ` ${wins.map(w => `${w.start}–${w.end}`).join(', ')}` : ''}, not yet approved${why ? ` — ${why}` : ''}`
                         : day.status === 'working' && day.startTime
-                          ? `In ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)} · ${fmtMinutes(day.scheduledMinutes)}`
+                          ? `In ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}`
                           : wins.length > 0
                             ? `Off ${wins.map(w => `${w.start}–${w.end}`).join(', ')}${why ? ` — ${why}` : ''}`
                             : day.status === 'leave' || day.status === 'absent'
@@ -463,6 +486,7 @@ export default function StaffCalendarPage() {
                       return (
                         <td key={day.date}
                           className={`px-1 py-1 border-b border-gray-100 text-center align-middle ${
+                            day.date !== from && dayNum(day.date) === '1' ? 'border-l-2 border-l-ooosh-300' : ''} ${
                             day.date === TODAY ? 'bg-ooosh-50/40' : weekdayIndex(day.date) >= 5 ? 'bg-gray-50/60' : ''
                           }`}>
                           <div title={title}
@@ -486,7 +510,7 @@ export default function StaffCalendarPage() {
               {freelancerLanes.length > 0 && (
                 <tr>
                   <td colSpan={dates.length + 1}
-                    className="sticky left-0 bg-amber-50/70 px-3 py-1 text-[10px] uppercase tracking-wide text-amber-800 border-t border-amber-200">
+                    className="sticky left-0 bg-amber-200 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-950 border-t-2 border-amber-400">
                     Freelance — offered and confirmed
                   </td>
                 </tr>
