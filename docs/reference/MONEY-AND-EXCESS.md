@@ -727,6 +727,41 @@ Job 15187 showed **£3,300 collected / £1,800 reimbursed** against a £2,100 ex
 
 **Known gap left in place:** OP treats any positive kind=6 HireHop deposit as live excess, and a refund pushed as a kind=3 **payment application** doesn't change that (only NEGATIVE kind=6 rows feed `hhExcessRefunds`). So a reversed deposit still reads as money held: unlink such a record and the Money-tab passive reconciler re-links and re-adds it on the very next page load (job 15956, Sep 2026 — an excess re-taken on a different card). Harmless while the record stays linked; the workaround for a genuine card swap is to re-point with Link HH Deposit at the *new* deposit and leave the total unchanged.
 
+##### Rollover picker flipped the wrong hop — double-held deposit (Oct 2026, Lime Garden, HH deposit 7767)
+
+**Symptom.** Job 16529's Money tab said "Client has £2,400 on account" while the
+client's other jobs said £1,200; Total Held read £2,400 for one physical £1,200;
+and Manage on 16529 offered no "Apply Rolled Over Excess" — only "Record Excess
+Payment", which would have taken the money a second time.
+
+**Cause.** Two records on one `hh_deposit_id` were both `taken`: #16415 (12 Sep)
+and #16697 (29 Sep). When #16697's rollover was applied, `POST /excess/:id/payment`
+chose the record to flip to `rolled_over` as "the client's most recently updated
+record with a deposit link", from a set that *included* already-rolled-over hops.
+The flip is the last write of a rollover, so the previous hop (#16471) carried
+the newest `updated_at`, got re-flipped (a no-op), and the live #16415 was never
+touched. The earlier hops only worked because something else had bumped the live
+record's `updated_at` in between. `v_excess_held` then counted both (£2,400),
+and `available-rollover` — which refuses a source sharing its deposit with
+another live record — found no candidate, hiding the apply button.
+
+**Fix (PR, Oct 2026).**
+- The modal sends `source_excess_id` (the record `available-rollover` showed) with
+  the rollover payment; the backend flips exactly that hop, and 409s
+  (`rollover_source_unavailable`) before writing if it is no longer holding the
+  money. Without a source (legacy callers) it prefers a live record over a
+  rolled-over one, then newest.
+- "Apply Rolled Over Excess" is badged green ("Recommended · excess on account"),
+  same treatment as the short-hire pre-auth. `recommended` on the modal's action
+  list is now the badge text.
+- `runDoubleHeldExcessScan` (sanity scanner, every 15 min) emails jon@ once per
+  record when a deposit has more than one live `taken`/`partially_paid` record,
+  with the hand-fix in the body.
+
+**Hand-fix for the live case:** flip the stale (older) record —
+`UPDATE job_excess SET excess_status = 'rolled_over', held_on_account = FALSE …`.
+HireHop needs nothing; the deposit link already flows through the chain.
+
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.
 

@@ -43,6 +43,14 @@
  *     stuck van, deduped via `fleet_vehicles.stuck_onhire_alerted_at` (marker
  *     cleared in syncFleetHireStatus when the van leaves On Hire).
  *
+ *   • runDoubleHeldExcessScan — data-integrity tripwire for the excess
+ *     rollover chain: more than one LIVE (taken/partially_paid) `job_excess`
+ *     record on the same `hh_deposit_id`. The chain's invariant is one live
+ *     record per physical deposit; a second one double-counts the money in
+ *     Total Held and the Money-tab "on account" banner and hides the "Apply
+ *     Rolled Over Excess" option on the next hire (Lime Garden, deposit 7767,
+ *     Oct 2026). Alerts jon@ once per record, deduped via a notes marker.
+ *
  * The pipeline_status markers are cleared on transitions out of their
  * respective pipeline_status so a re-entered state can warn afresh — handled in
  * routes/pipeline.ts and routes/webhooks.ts wherever pipeline_status
@@ -593,4 +601,104 @@ export async function runStuckOnHireScan(): Promise<{ checked: number; warned: n
   }
 
   return { checked: candidates.rows.length, warned };
+}
+
+// Marker appended to job_excess.notes once a double-held deposit has been
+// alerted, so each record is reported once (not every 15 minutes).
+const DOUBLE_HELD_MARKER = '[sanity: double-held deposit alerted]';
+
+/**
+ * Double-held excess scanner (Oct 2026, Lime Garden / HH deposit 7767).
+ *
+ * When excess is applied forward to a new hire the previous hop flips to
+ * 'rolled_over', so each physical deposit is counted ONCE by v_excess_held.
+ * Before the Oct 2026 picker fix (routes/excess.ts, POST /:id/payment) the flip
+ * could land on an already-rolled-over hop, leaving two records 'taken' on one
+ * hh_deposit_id: Total Held and the "Client has £X on account" banner read
+ * double, and GET /:id/available-rollover — which refuses a source that shares
+ * its deposit with another live record — hid the apply button on the next hire.
+ *
+ * Finds every deposit with more than one live record and emails jon@ once per
+ * record (stamp-first, like the sibling scanners), naming the records and the
+ * hand-fix: the OLDER hop (its money moved on to the newer one) should be
+ * rolled_over.
+ */
+export async function runDoubleHeldExcessScan(): Promise<{ checked: number; warned: number }> {
+  const deposits = await query(
+    `SELECT hh_deposit_id
+       FROM job_excess
+      WHERE hh_deposit_id IS NOT NULL
+        AND excess_status IN ('taken', 'partially_paid')
+      GROUP BY hh_deposit_id
+     HAVING COUNT(*) > 1
+      ORDER BY hh_deposit_id
+      LIMIT 50`
+  );
+
+  if (deposits.rows.length === 0) return { checked: 0, warned: 0 };
+
+  let warned = 0;
+  const frontendUrl = getFrontendUrl();
+
+  for (const dep of deposits.rows) {
+    const depositId: number = dep.hh_deposit_id;
+    try {
+      const recs = await query(
+        `SELECT je.id, je.job_id, je.excess_status, je.excess_amount_taken, je.payment_date,
+                je.held_on_account, je.notes, j.hh_job_number, j.job_name
+           FROM job_excess je
+           LEFT JOIN jobs j ON j.id = je.job_id
+          WHERE je.hh_deposit_id = $1
+            AND je.excess_status IN ('taken', 'partially_paid')
+          ORDER BY je.payment_date ASC NULLS LAST, je.created_at ASC`,
+        [depositId]
+      );
+      const unalerted = recs.rows.filter((r: any) => !(r.notes || '').includes(DOUBLE_HELD_MARKER));
+      if (unalerted.length === 0) continue; // every record in this group already reported
+
+      // Stamp the marker on the unreported records FIRST — a transient send
+      // failure must not re-fire on the next scan.
+      await query(
+        `UPDATE job_excess
+            SET notes = CASE WHEN notes IS NULL OR notes = '' THEN $2
+                             ELSE notes || E'\\n' || $2 END
+          WHERE id = ANY($1::uuid[])`,
+        [unalerted.map((r: any) => r.id), DOUBLE_HELD_MARKER]
+      );
+
+      const rowsHtml = recs.rows.map((r: any) => {
+        const ref = r.hh_job_number ? `HH #${r.hh_job_number}` : '(no HH job)';
+        const paid = r.payment_date ? new Date(r.payment_date).toLocaleDateString('en-GB') : '—';
+        const link = r.job_id ? `<a href="${frontendUrl}/jobs/${r.job_id}?tab=money">${ref}</a>` : ref;
+        return `<li>${link} — ${r.job_name || ''} · <code>${r.excess_status}</code>${r.held_on_account ? ' (held on account)' : ''}
+          · £${Number(r.excess_amount_taken || 0).toFixed(2)} · paid ${paid} · <code>${r.id}</code></li>`;
+      }).join('');
+
+      const html = `
+        <p><strong>Data-integrity tripwire: one HireHop deposit, ${recs.rows.length} live excess records.</strong></p>
+        <p>HireHop deposit <strong>#${depositId}</strong> is held by more than one <code>taken</code> /
+        <code>partially_paid</code> record. The rollover chain should leave ONE live record per deposit —
+        every extra one double-counts the money in Total Held and the Money-tab "on account" banner,
+        and hides "Apply Rolled Over Excess" on the client's next hire.</p>
+        <ul>${rowsHtml}</ul>
+        <p>Usually the OLDER record is the stale one (its money moved on to the newer hire but it was
+        never flipped). Hand-fix, once you've confirmed which:</p>
+        <pre>UPDATE job_excess SET excess_status = 'rolled_over', held_on_account = FALSE, updated_at = NOW()
+ WHERE id = '&lt;stale record id&gt;' AND excess_status = 'taken';</pre>
+        <p style="color:#888;font-size:12px">Sanity scanner — double-held excess deposit check.</p>
+      `;
+
+      const result = await emailService.sendRaw({
+        to: 'jon@oooshtours.co.uk',
+        subject: `⚠ Excess double-held — HH deposit #${depositId} (${recs.rows.length} live records)`,
+        html,
+      });
+      if (result.success) warned++;
+      else console.warn(`[sanity-scanner] double-held excess alert send failed for deposit ${depositId}:`, result);
+    } catch (err) {
+      console.error(`[sanity-scanner] double-held excess scan error for deposit ${depositId}:`, err);
+    }
+  }
+
+  return { checked: deposits.rows.length, warned };
 }
