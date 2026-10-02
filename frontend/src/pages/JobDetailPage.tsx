@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { vehiclePrepPill } from '../lib/vehiclePrep';
+import { referralBadge } from '../lib/driverStatus';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
@@ -8,6 +9,7 @@ import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
 import PcnHistorySection from '../components/PcnHistorySection';
+import { ClaimsSection } from '../components/claims/format';
 import SendMerchFormButton from '../components/SendMerchFormButton';
 import AddHeldItemButton from '../components/AddHeldItemButton';
 import TransportCalculator from '../components/TransportCalculator';
@@ -4584,6 +4586,9 @@ function JobDetailContent() {
             <PcnHistorySection entityType="job" entityId={id} hideWhenEmpty heading="🅿️ Penalty Charge Notices" />
           )}
 
+          {/* Insurance claims on this job — renders only when a case exists. */}
+          {id && <ClaimsSection entityType="job" entityId={id} hideWhenEmpty />}
+
           {/* Holding for this client (incoming deliveries) now lives inside the
               prep checklist's "Held for Clients" block — rolled in with the merch
               requirement so there's one surface. Temp storage + lost property
@@ -5029,6 +5034,21 @@ function JobDetailContent() {
                                 Referral Pending
                               </span>
                             )}
+                            {/* A RESOLVED referral used to vanish from this row
+                                entirely, so the only hint was an unexplained
+                                "Authorise" button. Unresolved ones are already
+                                shouted by the pill above and the held-back pill. */}
+                            {(() => {
+                              const rb = referralBadge(a.requires_referral, a.referral_status);
+                              return rb && !rb.unresolved ? (
+                                <span
+                                  className={`px-2 py-1 rounded-full border font-medium ${rb.className}`}
+                                  title="Insurer referral resolved — a standing approval for this driver. Details on the driver's page."
+                                >
+                                  {rb.label}
+                                </span>
+                              ) : null;
+                            })()}
                             {a.driver_points != null && a.driver_points > 0 && (
                               <span className={`px-2 py-1 rounded-full font-medium ${
                                 a.driver_points >= 10 ? 'bg-red-100 text-red-700' :
@@ -5224,11 +5244,22 @@ function JobDetailContent() {
                         // action that could only fail. With no vehicle_id the
                         // Allocate Van / Book Out CTA below is the correct next
                         // step and appears in its place.
+                        //
+                        // Only once the van is OUT (booked_out / active). That is
+                        // the only time an agreement can have been withheld: the
+                        // book-out flips every driver on the van to booked_out,
+                        // held ones included, and the mid-tour add lands them
+                        // there too. Before book-out, the normal book-out hooks
+                        // send it — so a soft/confirmed row offered a button on
+                        // every driver with a standing approval, which would
+                        // have emailed the agreement before the van inspection
+                        // and pinged the team "referral resolved" (Tyler
+                        // Meadham, Oct 2026).
                         const needsAuthorise = wasReferred
                           && !a.hire_form_emailed_at
                           && !a.hire_form_pdf_key
                           && !!a.vehicle_id
-                          && ['soft', 'confirmed', 'booked_out', 'active'].includes(a.status);
+                          && ['booked_out', 'active'].includes(a.status);
                         if (needsAuthorise) {
                           return (
                             <button
@@ -5420,6 +5451,24 @@ function JobDetailContent() {
                           excludeHhJobId={job.hh_job_number ?? null}
                           onChanged={loadVehicleAssignments}
                         />
+                      )}
+
+                      {/* Report incident — opens the Problem form on the
+                          Overview pre-filled with this van + driver and the
+                          possible-claim box ticked. Problem-first, always
+                          (docs/INCIDENT-CLAIMS-SPEC.md §3). */}
+                      {a.driver_id && (a.effective_vehicle_id || a.vehicle_id) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveTab('overview');
+                            navigate(`?tab=overview&report_incident=${a.effective_vehicle_id || a.vehicle_id}&incident_driver=${a.driver_id}`);
+                          }}
+                          className="text-xs font-medium text-indigo-700 hover:text-indigo-900"
+                          title="Log an incident (accident, damage) as a Problem and open a possible insurance claim"
+                        >
+                          🛡️ Report incident
+                        </button>
                       )}
 
                       {/* Hire Form PDF actions */}

@@ -145,9 +145,31 @@ claim they are interchangeable.
 ignores it and offers all sixty minutes, so the field took 09:07 from the one
 route anybody uses.
 
-**Overtime is the exception and stays a time input on 5-minute steps.**
-`staff_overtime_entries` has a `minutes % 5 = 0` CHECK; the two are answering
-different questions.
+**Overtime owns its options too, on 5-minute steps** (Sep 2026 My Time
+redesign): an hour `<select>` and a minute `<select>` offering only 00, 05 … 55,
+in `LogOvertime` (`MyTimePage.tsx`). `staff_overtime_entries` has a
+`minutes % 5 = 0` CHECK, and the old `<input type="time" step={300}>` had the
+same hole as above. The ceil-to-5 snap is kept as a guard but is now a no-op.
+
+**Overtime cannot be logged into the future.** On today's date the end time may
+be at most 15 minutes past now (log "until 18:00" at 17:55 on the way out).
+It is a browser-side check on the person's own clock — the server's timezone is
+not theirs. Unlike the leave warnings this one blocks: overtime that has not
+happened yet is a mistake, not a judgement call.
+
+**Past midnight is ONE entry** (Oct 2026): To at or before From means the
+shift ran into the next day — 22:00–02:00 is 4h, dated the day it started.
+The selects stop at 23:55, so splitting at midnight was not possible. The
+16h cap still applies.
+
+**Nor inside contracted hours.** On a plain working day (`StaffDay.status =
+'working'`) an entry overlapping that day's start–end is refused — the unpaid
+break included: working through lunch is not overtime here (jon, Sep 2026).
+Days off, leave days and `partial` days are not checked — we know a part-day
+person was in for SOME of it but not which part. Checked in the browser (read
+from `/staff-calendar/me`; if that read fails the form blocks nothing) AND in
+`POST /staff-calendar/overtime`, so a stale bundle cannot get round it. The
+"not in the future" check is browser-only on purpose — see above.
 
 ## The freelancer offer link is a bearer credential, and the GET never writes
 
@@ -411,3 +433,121 @@ shows this as **No login** on the employee, with a *Link a login* action that
 moves `users.person_id`. The reverse is impossible — the ledger cannot be
 UPDATEd. The person-merge in `routes/duplicates.ts` does **not** remap any
 staff table; do not use it to fix this.
+
+## `rtw_` means TWO different things — check which table
+
+A genuine trap, live in the schema since Sep 2026:
+
+| Column | Table | Means |
+|---|---|---|
+| `rtw_checked_on` · `rtw_document_type` · `rtw_expires_on` · `rtw_checked_by` | `people` (mig 206) | **RIGHT TO WORK** — the legal check |
+| `rtw_required` · `rtw_date` · `rtw_chased_at` | `staff_absences` (mig 214) | **RETURN TO WORK** — the post-sickness conversation, and the 08:50 chase |
+
+Nothing is renamed (both are live and referenced), so never assume from the
+prefix. `runRtwChase()` in `staff-notifications.ts` is return-to-work; anything
+reading `people.rtw_*` is right-to-work and is admin-only.
+
+## The private columns on `people` never go out through a people response
+
+`people` is read by the whole team — `routes/people.ts` is gated on
+`STAFF_ROLES` and both its GETs `SELECT p.*`. Migration 206 added right-to-work
+and NI columns to that table, so until Sep 2026 every staff member, general
+assistant and weekend manager got a colleague's immigration-status fields and NI
+ciphertext with any person record they opened.
+
+**`services/people-private-fields.ts` is THE list**, and both people GETs run
+their rows through it. Add a private column to `people` and you must add it
+there too — the admin-gated staff surfaces read those columns by name, so
+redacting the general response costs them nothing.
+
+Write them through `updateKeyData()` in `staff-employment.ts` only. The NI
+number itself leaves the server through exactly one route
+(`GET /staff-calendar/employees/:personId/ni-number`), which writes an
+`audit_log` row with action `read` on every call. Every other read returns
+`has_ni_number` as a boolean.
+
+## Never restore a CHECK constraint on `audit_log.action`
+
+Migration `032_fix_audit_log_action_constraint` **deliberately dropped** the
+original `create | update | delete` CHECK and widened the column to VARCHAR(50),
+because the platform writes `resolve_referral`, `merge`, `mark_washed`,
+`override_document_gate`, `correct_mileage` and more — several from call sites
+that INSERT into `audit_log` directly rather than through `logAudit()`.
+
+Migration 232 tried to re-impose a four-value CHECK as a side effect of an
+unrelated feature. Postgres refused it (`is violated by some row`), which was
+the correct outcome — had those rows not existed it would have succeeded and
+begun rejecting live writes. The whole migration rolled back and took an
+unrelated column with it, breaking a shipped feature. See
+`docs/STAFF-RECORDS-SPEC.md` §13.6.
+
+Two rules from it:
+- **`action` is open free text.** Add a value by using it; `logAudit`'s union
+  type is a hint, not the set.
+- **One migration, one concern.** A feature's schema change must never share a
+  transaction with an unrelated change to a core table, or one blocks the other.
+
+## A failed load must never render as an empty one
+
+`StaffRecordFiles` showed "No files yet." when its fetch 500'd, and
+`StaffKeyData` rendered nothing at all — indistinguishable from "this person
+isn't an employee". Three failing requests looked calm on screen for a whole
+testing round because of it.
+
+Any component that fetches needs three states, not two: loading, failed, and
+genuinely empty. Track the error separately from the data and say which it is.
+
+## The staff document check is NOT the driver system
+
+Two things share the words "DVLA check" and must never be merged:
+
+| | `services/driver-validity.ts` | `services/staff-doc-cycles.ts` |
+|---|---|---|
+| About | self-drive-hire **clients** | **employees** |
+| Asks | "insurable for this hire, today?" | "have we looked at it this year?" |
+| Window | **30 days** from the check | the record's own `action_on` — pre-filled as **12 months** per `doc_type` |
+| If it fails | hard gate on dispatch | a nudge |
+
+jon's decision, Sep 2026, and it settled a design question the spec had been
+circling: the cheapest answer to "how do we share this?" was "we don't".
+Nothing in the staff module reads `drivers`. See `docs/STAFF-RECORDS-SPEC.md`
+§19.1.
+
+## One date per staff record — `action_on` is the only clock
+
+Since migration 243 a staff record file fires on ONE date, `action_on`, with
+`action_kind` remind | delete, `action_delivery` bell / email / both and
+`action_user_id` (NULL = every admin). It replaced two clocks — printed expiry
+and re-check cycle — that could nag twice about one passport.
+
+- **The per-type intervals are a PRE-FILL, not a clock.** `getReviewIntervals()`
+  and the expiry lead feed `suggestActionDate()` in `StaffRecordFiles.tsx`; the
+  stored date is all `runRecordActionChase()` reads. Don't re-add a derived scan.
+- **`expiry_chased_at` / `review_chased_at` are legacy** — nothing reads them.
+- **"Delete" never deletes.** It flags the record; a human presses Delete.
+- **Re-arm only on a real change.** The PATCH compares old against new
+  (`IS DISTINCT FROM`) before clearing `action_chased_at`, because the edit form
+  sends every field and an untouched save must not re-fire a sent reminder.
+
+## Review actions must carry `reviewId`
+
+`POST /api/staff-tasks` with `reviewId` stores `source_type = 'staff_review'`.
+Without it the action is a plain manual to-do, and silently misses the
+follow-up email, the "From your review" badge and the check-in list — which is
+exactly how every review action was saved before Sep 2026 (spec §22.1).
+
+## Absence detail expires; the absence does not
+
+`runAbsenceDetailPurge()` nulls `reason_category`, `notes` and the
+return-to-work narrative 12 months after a spell ends, then stamps
+`detail_purged_at`.
+
+**`absence_type` is NOT purged, and must not be.** `getSicknessMinutes()`
+filters on `absence_type = 'sickness'` and the payroll report reads it —
+purging the type would silently zero everybody's sickness figures instead of
+anonymising them. Day rows, minutes and ledger effects stay for the same
+reason.
+
+Right-to-work evidence past its retention (employment + 2 years) is **surfaced
+on the attention list, never swept**: destroying it is irreversible, and the
+clock runs off a hand-typed leaving date.

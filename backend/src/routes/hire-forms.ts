@@ -320,6 +320,9 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     const requiresReferral = f.requires_referral || false;
     const referralReason = f.referral_reason || '';
 
+    // A standing approval (approved/waived) survives a later form that
+    // declares the same issue — see referralCleared below.
+    let referralCleared = false;
     if (requiresReferral) {
       // Leave referral_status NULL on initial submission so the driver
       // lands in the red "Refer to Insurers" todo state — explicit signal
@@ -329,10 +332,13 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // auto-fire of the referral_alert email to admins still happens
       // via the requires_referral flag elsewhere — the alert path is
       // unchanged.
-      await client.query(
-        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2`,
+      const flagged = await client.query(
+        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2
+         RETURNING referral_status`,
         [referralReason, driverId]
       );
+      const status = flagged.rows[0]?.referral_status;
+      referralCleared = status === 'approved' || status === 'waived';
     }
 
     // 3. Excess amount — passed from hire form app, NOT recalculated here
@@ -673,7 +679,10 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     // happens in setImmediate so it doesn't slow the hire form response.
     const advanceJobId: string | undefined = assignment.job_id;
     if (advanceJobId) {
-      const targetStatus = requiresReferral ? 'in_progress' : 'done';
+      // An insurer approval is STANDING for the driver (jon, Oct 2026), so a
+      // returning approved driver re-declaring the same issue is not a new
+      // referral and must not step the card back to amber (Tyler Meadham).
+      const targetStatus = requiresReferral && !referralCleared ? 'in_progress' : 'done';
       setImmediate(async () => {
         try {
           await query(
@@ -753,6 +762,7 @@ router.get('/by-job/:hirehopJobId', authenticateVehicleFlexible, async (req: Fle
         d.email AS driver_email,
         d.licence_points AS driver_points,
         d.requires_referral,
+        d.referral_status,
         je.excess_amount_required,
         je.excess_amount_taken,
         je.excess_status
@@ -3291,133 +3301,150 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
       }
     }
 
-    // 3. Mid-tour detection — is the job already dispatched?
-    if (hhJobId) {
+    // 3. Mid-tour detection — is the job already out on the road?
+    //
+    // OP's own book-out records are the primary signal: if any van on this job
+    // is booked_out/active in OP, the hire has left and this driver missed it.
+    // HireHop's status is only a secondary signal. Keying on HH alone (5/6)
+    // missed job 16491 (Sep 2026): one line (a VE103B cert) was never scanned
+    // out, so HH sat at 4 "Part Dispatched" while the van was on the road —
+    // the driver was neither auto-added nor flagged to staff.
+    if (hhJobId || assignment.job_id) {
       try {
-        const { isHireHopConfigured } = await import('../config/hirehop');
-        if (isHireHopConfigured()) {
-          const { default: hhBroker } = await import('../services/hirehop-broker');
-          const jobData = await hhBroker.get<{ STATUS: string }>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 });
-          const hhStatus = parseFloat(String(jobData.data?.STATUS || '0'));
-          const isDispatched = [5, 6].includes(hhStatus);
+        const vansOutOnJob = await resolveBookedOutVans(String(id), assignment.job_id, hhJobId);
 
-          if (isDispatched) {
-            console.log(`[post-signature] MID-TOUR DETECTED — HH job ${hhJobId} status ${hhStatus}`);
-
-            // Is this a CLEAN driver we can auto-add? "Clean" = no insurer
-            // referral pending AND identity check cleared (isDriverAuthorisedFor
-            // Agreement covers both). The AI verification has already validated
-            // the driver's documents — they couldn't have reached signature
-            // otherwise — so a clean driver needs no human decision.
-            const clean = await isDriverAuthorisedForAgreement(String(id));
-            // Only a fresh self-drive hire-form row is auto-addable (a mid-tour
-            // driver's assignment lands soft/confirmed with vehicle_id NULL).
-            const addableState =
-              assignment.assignment_type === 'self_drive' &&
-              ['soft', 'confirmed'].includes(assignment.status);
-
-            // Resolve the vans currently out on the job. jon's call: add the
-            // clean driver to EVERY van out ("everyone drives everything").
-            const vansOut = clean && addableState
-              ? await resolveBookedOutVans(String(id), assignment.job_id, hhJobId)
-              : [];
-
-            if (clean && addableState && vansOut.length > 0) {
-              // AUTO-ADD: link the driver to every van out + send their hire
-              // agreement automatically. No "to do" email — nothing for staff
-              // to action. executeAddToHire stamps hire_start itself.
-              const affected = await executeAddToHire({
-                source: assignment,
-                siblings: vansOut,
-                actorUserId: req.user?.id || '00000000-0000-0000-0000-000000000000',
-                actorLabel: 'system (mid-tour auto-add)',
-              });
-
-              // Low-priority informational bell so staff still have visibility
-              // (not a to-do). email_sent_at = NOW() so it never escalates to email.
-              try {
-                const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
-                const targets = await getVehicleNotificationTargets();
-                const regList = affected.map(a => a.vehicle_reg).join(', ');
-                for (const userId of targets.bellUserIds) {
-                  await query(
-                    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
-                     VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'low', $5, NOW())`,
-                    [
-                      userId,
-                      `Mid-tour driver auto-added — ${assignment.driver_name || 'Unknown'}`,
-                      `${assignment.driver_name || 'A driver'} submitted a clean hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}), already dispatched — auto-added to ${regList} and their hire agreement has been sent. No action needed.`,
-                      id,
-                      assignment.job_id ? `/jobs/${assignment.job_id}` : null,
-                    ]
-                  );
-                }
-              } catch (notifyErr) {
-                console.warn('[post-signature] Mid-tour auto-add notification failed:', (notifyErr as Error).message);
-              }
-
-              console.log(`[post-signature] MID-TOUR AUTO-ADD — assignment ${id} linked to ${affected.length} van(s): ${affected.map(a => a.vehicle_reg).join(', ')}`);
-              results.midTour = { detected: true, hhStatus, autoAdded: true, vans: affected.map(a => a.vehicle_reg) };
-            } else {
-              // Fall back to the manual "to do" flow. Reasons: driver held for
-              // review (referral/identity — the referral alert email fires
-              // separately via sendReferralAlert), no van resolvable, or not a
-              // fresh self-drive row. Staff add + authorise the driver manually.
-              await query(
-                `UPDATE vehicle_hire_assignments SET hire_start = NOW() WHERE id = $1 AND hire_start IS NULL`,
-                [id]
-              );
-
-              const frontendUrl = getFrontendUrl();
-              try {
-                const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
-                const targets = await getVehicleNotificationTargets();
-
-                // Bell notification to vehicle manager only (no fan-out to all admins).
-                // email_sent_at = NOW() so the escalation scheduler doesn't fire a
-                // duplicate email — the direct mid_tour_driver send below covers it.
-                for (const userId of targets.bellUserIds) {
-                  await query(
-                    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
-                     VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
-                    [
-                      userId,
-                      `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
-                      `${assignment.driver_name || 'A driver'} submitted a hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}) which is already dispatched. Hire form assigned to ${assignment.vehicle_reg || 'unassigned vehicle'}.`,
-                      id,
-                      assignment.job_id ? `/jobs/${assignment.job_id}` : null,
-                    ]
-                  );
-                }
-
-                // Email notification — info@ + will@ CC
-                await emailService.send('mid_tour_driver', {
-                  to: targets.to,
-                  cc: targets.cc,
-                  variables: {
-                    driverName: assignment.driver_name || 'Unknown Driver',
-                    driverEmail: assignment.driver_email || 'N/A',
-                    vehicleReg: assignment.vehicle_reg || 'Not assigned',
-                    jobNumber: String(hhJobId),
-                    jobName: assignment.hirehop_job_name || '',
-                    jobUrl: `${frontendUrl}/jobs/${assignment.job_id || ''}`,
-                  },
-                });
-              } catch (notifyErr) {
-                console.warn('[post-signature] Mid-tour notification failed:', (notifyErr as Error).message);
-              }
-
-              results.midTour = {
-                detected: true,
-                hhStatus,
-                notified: true,
-                autoAdded: false,
-                reason: !clean ? 'held_for_review' : (!addableState ? 'not_addable' : 'no_van_out'),
-              };
+        // HH lookup is best-effort — a failure must not hide a van OP knows is out.
+        let hhStatus: number | null = null;
+        if (hhJobId) {
+          try {
+            const { isHireHopConfigured } = await import('../config/hirehop');
+            if (isHireHopConfigured()) {
+              const { default: hhBroker } = await import('../services/hirehop-broker');
+              const jobData = await hhBroker.get<{ STATUS: string }>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 });
+              hhStatus = parseFloat(String(jobData.data?.STATUS || '0'));
             }
-          } else {
-            results.midTour = { detected: false, hhStatus };
+          } catch (hhErr) {
+            console.warn('[post-signature] HH status lookup failed — relying on OP book-out records:', (hhErr as Error).message);
           }
+        }
+
+        const isDispatched = vansOutOnJob.length > 0 || (hhStatus !== null && [5, 6].includes(hhStatus));
+
+        if (isDispatched) {
+          console.log(`[post-signature] MID-TOUR DETECTED — HH job ${hhJobId} status ${hhStatus}, ${vansOutOnJob.length} van(s) booked out in OP`);
+
+          // Is this a CLEAN driver we can auto-add? "Clean" = no insurer
+          // referral pending AND identity check cleared (isDriverAuthorisedFor
+          // Agreement covers both). The AI verification has already validated
+          // the driver's documents — they couldn't have reached signature
+          // otherwise — so a clean driver needs no human decision.
+          const clean = await isDriverAuthorisedForAgreement(String(id));
+          // Only a fresh self-drive hire-form row is auto-addable (a mid-tour
+          // driver's assignment lands soft/confirmed with vehicle_id NULL).
+          const addableState =
+            assignment.assignment_type === 'self_drive' &&
+            ['soft', 'confirmed'].includes(assignment.status);
+
+          // Resolve the vans currently out on the job. jon's call: add the
+          // clean driver to EVERY van out ("everyone drives everything").
+          const vansOut = clean && addableState ? vansOutOnJob : [];
+
+          if (clean && addableState && vansOut.length > 0) {
+            // AUTO-ADD: link the driver to every van out + send their hire
+            // agreement automatically. No "to do" email — nothing for staff
+            // to action. executeAddToHire stamps hire_start itself.
+            const affected = await executeAddToHire({
+              source: assignment,
+              siblings: vansOut,
+              actorUserId: req.user?.id || '00000000-0000-0000-0000-000000000000',
+              actorLabel: 'system (mid-tour auto-add)',
+            });
+
+            // Low-priority informational bell so staff still have visibility
+            // (not a to-do). email_sent_at = NOW() so it never escalates to email.
+            try {
+              const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+              const targets = await getVehicleNotificationTargets();
+              const regList = affected.map(a => a.vehicle_reg).join(', ');
+              for (const userId of targets.bellUserIds) {
+                await query(
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'low', $5, NOW())`,
+                  [
+                    userId,
+                    `Mid-tour driver auto-added — ${assignment.driver_name || 'Unknown'}`,
+                    `${assignment.driver_name || 'A driver'} submitted a clean hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}), already dispatched — auto-added to ${regList} and their hire agreement has been sent. No action needed.`,
+                    id,
+                    assignment.job_id ? `/jobs/${assignment.job_id}` : null,
+                  ]
+                );
+              }
+            } catch (notifyErr) {
+              console.warn('[post-signature] Mid-tour auto-add notification failed:', (notifyErr as Error).message);
+            }
+
+            console.log(`[post-signature] MID-TOUR AUTO-ADD — assignment ${id} linked to ${affected.length} van(s): ${affected.map(a => a.vehicle_reg).join(', ')}`);
+            results.midTour = { detected: true, hhStatus, autoAdded: true, vans: affected.map(a => a.vehicle_reg) };
+          } else {
+            // Fall back to the manual "to do" flow. Reasons: driver held for
+            // review (referral/identity — the referral alert email fires
+            // separately via sendReferralAlert), no van resolvable, or not a
+            // fresh self-drive row. Staff add + authorise the driver manually.
+            await query(
+              `UPDATE vehicle_hire_assignments SET hire_start = NOW() WHERE id = $1 AND hire_start IS NULL`,
+              [id]
+            );
+
+            const frontendUrl = getFrontendUrl();
+            try {
+              const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+              const targets = await getVehicleNotificationTargets();
+
+              // Bell notification to vehicle manager only (no fan-out to all admins).
+              // email_sent_at = NOW() so the escalation scheduler doesn't fire a
+              // duplicate email — the direct mid_tour_driver send below covers it.
+              for (const userId of targets.bellUserIds) {
+                await query(
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
+                  [
+                    userId,
+                    `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
+                    `${assignment.driver_name || 'A driver'} submitted a hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}) which is already dispatched. Hire form assigned to ${assignment.vehicle_reg || 'unassigned vehicle'}.`,
+                    id,
+                    assignment.job_id ? `/jobs/${assignment.job_id}` : null,
+                  ]
+                );
+              }
+
+              // Email notification — info@ + will@ CC
+              await emailService.send('mid_tour_driver', {
+                to: targets.to,
+                cc: targets.cc,
+                variables: {
+                  driverName: assignment.driver_name || 'Unknown Driver',
+                  driverEmail: assignment.driver_email || 'N/A',
+                  vehicleReg: assignment.vehicle_reg || 'Not assigned',
+                  jobNumber: String(hhJobId),
+                  jobName: assignment.hirehop_job_name || '',
+                  jobUrl: `${frontendUrl}/jobs/${assignment.job_id || ''}`,
+                },
+              });
+            } catch (notifyErr) {
+              console.warn('[post-signature] Mid-tour notification failed:', (notifyErr as Error).message);
+            }
+
+            results.midTour = {
+              detected: true,
+              hhStatus,
+              notified: true,
+              autoAdded: false,
+              reason: !clean ? 'held_for_review' : (!addableState ? 'not_addable' : 'no_van_out'),
+            };
+          }
+        } else {
+          console.log(`[post-signature] Not mid-tour — HH job ${hhJobId} status ${hhStatus}, no van booked out in OP`);
+          results.midTour = { detected: false, hhStatus };
         }
       } catch (err) {
         console.warn('[post-signature] Mid-tour check failed (non-blocking):', (err as Error).message);

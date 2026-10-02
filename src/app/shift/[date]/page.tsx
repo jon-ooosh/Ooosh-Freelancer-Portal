@@ -318,6 +318,20 @@ export default function ShiftDetailPage() {
               </p>
             </section>
 
+            {/* Shop till — price lookup any time, selling on the night */}
+            <Link
+              href={`/shift/${date}/till`}
+              className="flex items-center justify-between gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm hover:bg-gray-50 transition-colors"
+            >
+              <span>
+                <span className="block font-medium text-gray-900">🛒 Shop till</span>
+                <span className="block text-xs text-gray-500">Look up a price, or sell strings, leads, gaffa…</span>
+              </span>
+              <svg className="w-5 h-5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </Link>
+
             {/* Who's in tonight */}
             <section>
               <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">

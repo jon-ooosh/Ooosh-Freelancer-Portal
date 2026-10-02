@@ -238,6 +238,29 @@ export interface JobCoverageEvening {
   report_submitted_at: string | null; // lock-up report submitted (null if not)
 }
 
+/** Where a staff link about one shift (lock-up email, handover bell) should land.
+ *  A shift is one evening shared by every band in that night, so: the job itself
+ *  when exactly one job needed a sitter that evening (its Overview shows the
+ *  lock-up report + handover notes), otherwise the Rehearsals roster. Returns a
+ *  path — prefix with the staff domain for emails. Never throws. */
+export async function shiftLinkPath(shiftId: string): Promise<{ path: string; isJob: boolean }> {
+  const roster = { path: '/operations/rehearsals', isJob: false };
+  try {
+    const res = await query(`SELECT shift_date::text AS shift_date FROM studio_sitter_shifts WHERE id = $1`, [shiftId]);
+    if (!res.rows[0]) return roster;
+    const date = String(res.rows[0].shift_date).slice(0, 10);
+    // Include provisional jobs — the night has happened; a firm job wins if both.
+    const jobs = (await loadRehearsalJobs(date, date, true))
+      .filter((j) => j.detail.evenings.some((e) => e.date === date && e.sitter_needed));
+    const firm = jobs.filter((j) => !SPECULATIVE_STATUSES.has(j.pipeline_status || ''));
+    const pick = firm.length > 0 ? firm : jobs;
+    return pick.length === 1 ? { path: `/jobs/${pick[0].id}`, isJob: true } : roster;
+  } catch (err) {
+    console.error('[studio-sitter] shiftLinkPath failed:', err);
+    return roster;
+  }
+}
+
 /** Per-job coverage for the job's sitter-needed evenings (drives the card chips). */
 export async function getJobCoverage(jobId: string): Promise<JobCoverageEvening[]> {
   const jobRes = await query(

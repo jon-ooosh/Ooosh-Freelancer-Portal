@@ -23,16 +23,17 @@ import BacklineMatcherPage from './pages/BacklineMatcherPage';
 import CarnetsPage from './pages/CarnetsPage';
 import CarnetDetailPage from './pages/CarnetDetailPage';
 import RehearsalsPage from './pages/RehearsalsPage';
-import IssuesPage from './pages/IssuesPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import MoneyOverviewPage from './pages/MoneyOverviewPage';
 import CostsPage from './pages/CostsPage';
+import ShopTillPage from './pages/ShopTillPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import StaffCalendarPage from './pages/StaffCalendarPage';
 import StaffAdminPage from './pages/StaffAdminPage';
+import StaffHistoryImportPage from './pages/StaffHistoryImportPage';
 import StaffAbsencePage from './pages/StaffAbsencePage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
 import StaffReceiptsPage from './pages/StaffReceiptsPage';
@@ -48,10 +49,14 @@ import FreelancerApplyPage from './pages/FreelancerApplyPage';
 import HoldingPage from './pages/HoldingPage';
 import PcnsPage from './pages/PcnsPage';
 import PcnDetailPage from './pages/PcnDetailPage';
+import ClaimsPage from './pages/ClaimsPage';
+import ClaimDetailPage from './pages/ClaimDetailPage';
+import ClaimFormPage from './pages/ClaimFormPage';
 import HoldingReceiptPage from './pages/HoldingReceiptPage';
 import QuickActionsPage from './pages/QuickActionsPage';
 import MerchFormPage from './pages/MerchFormPage';
 import RackPlanPublicPage from './pages/RackPlanPublicPage';
+import VehicleForSalePage from './pages/VehicleForSalePage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
@@ -187,10 +192,14 @@ export default function App() {
       <Route path="/freelancer-apply/:token" element={<FreelancerApplyPage />} />
       {/* Public PCN pay-direct proof-of-payment upload — token-authenticated, no Layout */}
       <Route path="/pcn-receipt/:token" element={<PcnReceiptUploadPage />} />
+      {/* Public insurance-claim incident form — token-authenticated, no Layout */}
+      <Route path="/claim/:token" element={<ClaimFormPage />} />
       {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
       <Route path="/merch-form" element={<MerchFormPage />} />
       {/* Public view-only Rack Plan (tokenised, no login) */}
       <Route path="/rack/:token" element={<RackPlanPublicPage />} />
+      {/* Public van-for-sale page (tokenised, no login) — docs/VEHICLE-SALES-SPEC.md §6 */}
+      <Route path="/van/:token" element={<VehicleForSalePage />} />
       {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
       <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
@@ -227,9 +236,15 @@ export default function App() {
                 <Route path="/operations/rehearsals" element={<RehearsalsPage />} />
                 {/* Studio Sitters re-homed under the Rehearsals hub — keep old links working */}
                 <Route path="/operations/studio-sitters" element={<Navigate to="/operations/rehearsals?tab=sitters" replace />} />
+                {/* Old lock-up emails/bells linked here — keep them landing somewhere */}
+                <Route path="/studio-sitters" element={<Navigate to="/operations/rehearsals" replace />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
-                <Route path="/operations/issues" element={<IssuesPage />} />
-                <Route path="/operations/issues/:id" element={<IssuesPage />} />
+                {/* The platform bug tracker was retired Sep 2026 (jon: no longer
+                    used). Old emailed links land on the dashboard rather than a
+                    blank page. Its tables — platform_issues / _comments — are
+                    kept, untouched; see migration 057. */}
+                <Route path="/operations/issues" element={<Navigate to="/" replace />} />
+                <Route path="/operations/issues/:id" element={<Navigate to="/" replace />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
                 <Route path="/storage" element={<StoragePage />} />
                 <Route path="/holding" element={<HoldingPage />} />
@@ -246,13 +261,17 @@ export default function App() {
                 <Route path="/money/overview" element={<MoneyOverviewPage />} />
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/money/costs" element={<CostsPage />} />
+                <Route path="/money/shop" element={<ShopTillPage />} />
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
                 <Route path="/vehicles/pcns" element={<PcnsPage />} />
                 <Route path="/vehicles/pcns/:id" element={<PcnDetailPage />} />
+                <Route path="/vehicles/claims" element={<ClaimsPage />} />
+                <Route path="/vehicles/claims/:id" element={<ClaimDetailPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/staff/calendar" element={<StaffCalendarPage />} />
                 <Route path="/staff/admin" element={<StaffAdminPage />} />
+                <Route path="/staff/import" element={<StaffHistoryImportPage />} />
                 {/* One destination for the personal pages. The three old paths
                     below still work and redirect in: notifications.action_url
                     holds them for rows already in the database, and emails

@@ -121,14 +121,77 @@ somewhere the rules don't cover.
 | `PLATFORM-CONVENTIONS.md` | security posture, crew & transport calculator, HireHop API field reference, dashboard extension points, files tab, DB tables |
 | `PLATFORM-HISTORY.md` | original repo-structure tree, full deployment playbook, Phase 1 history |
 | `BACKLOG.md` | captured but unscheduled ideas |
+| `HIREHOP-BILLING-API.md` | invoices, payments, allocations, refunds and their Xero sync — captured payloads. Read before ANY new billing write. **§8 is the proven end-to-end recipe (invoice → allocate → apply credit in Xero → complete) — the base for the bookkeeping module** |
 
 `docs/*-SPEC.md` are the hand-written per-feature specs; several rules point at them.
 
-**Not yet built:** `docs/STAFF-RECORDS-SPEC.md` — private staff files and key data
-(admin-only, some encrypted), document review cycles, periodic staff reviews, and the
-`staff_tasks` / "My To Do" surface their actions land on. Its §1 lists what already
-exists and must not be rebuilt — including the DVLA check, where the obvious reuse is
-a trap — and §8 is the agreed build order. Read both before designing.
+**CLOSED, Sep 2026:** `docs/STAFF-RECORDS-SPEC.md` — the private staff area. **All
+seven phases shipped**: files, key data, `staff_tasks` + "My To Do", reviews, the
+staff-facing review, document review cycles, retention. §20 is the current state and
+the short list of what is deliberately NOT built. Read it before changing anything here.
+Wider to-do work (assigning to others, recurring) is the general tasks module, not this one.
+
+**CLOSED, Sep 2026:** `docs/TASKS-SPEC.md` — the To Do module (Me › To Do), built on
+`staff_tasks`. Anyone can give anyone a task; owner, setter and admins can touch it; private
+ones stay off the Everyone view. Repeating to-dos are a `staff_task_series` whose occurrences
+are ordinary tasks (`source_type = 'staff_task_series'`), one open at a time. Shared lists
+(`staff_task_lists`) hold items with `list_id` set and **no `person_id` until somebody takes
+one** — a task or series is owned by a person OR a list (DB CHECK), so `person_id` can be NULL.
+Mine also shows my job reminders and Problems, READ-THROUGH only. §2 is the boundary with job
+reminders, Problems and the vehicle module — read it before putting any "thing to do"
+anywhere. §15 is the phase 3–4 log, §16 the close and what is deliberately not built.
+Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.md`.
+
+**PHASES 1–4 BUILT, Oct 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
+(Vehicles › Claims, replacing the broker's Word claim form). Always opened from a Problem
+(`job_issues.claim_id`); the broker is never contacted automatically — only a manager's "Send to
+broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built). Claim files live under the
+`claims/` R2 prefix, which `GET /api/files/download` gates to staff — never file them under `files/`.
+
+**The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
+Sep 2026: the `drivers` machinery verifies self-drive-hire CLIENTS (30-day
+insurability, `services/driver-validity.ts`); the staff one is an annual sanity check
+on an employee (`services/staff-doc-cycles.ts`). Same words, different people, different
+consequence. Never merge them.
+
+**`staff_record_files` objects live under the `staff-records/` R2 prefix, and that
+prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefix it
+serves is readable by any authenticated caller, freelancers included. Never file
+anything private under `files/`.
+
+**BUILT (steps 1–10 + the sitter till), Sep 2026:** `docs/SHOP-SALES-SPEC.md` — the **Shop Till**
+(`/money/shop`). Ad-hoc shop sales, internal stock consumption and sale-stock
+lookup, with HireHop remaining the single stock database. **§19 is the current
+state, the live settings, and what to do next — read it before touching this.**
+**§20, the weekly close** (invoice → approve → allocate payments → complete) — LIVE
+(`services/shop-close.ts`, admin-only button on *This week*; first real week closed
+28 Sep 2026). **HireHop never pushes an allocation to Xero — OP applies the credit in
+Xero itself** (`HIREHOP-BILLING-API.md` §8).
+
+Three rules from it that bite elsewhere:
+- **A stock movement is EITHER a HireHop job line OR a `tally_save` adjustment,
+  never both** — doing both halves the shelf count silently.
+- **`success: true` from HireHop does NOT mean HireHop did it.** Verify writes by
+  reading back; it has returned success for a no-op twice.
+- **The weekly shop job is never synced into OP's `jobs` table** and must never
+  be linked to from the UI. Sale stock is only consumed while that job is
+  DISPATCHED, so any status change releases a week of stock, silently.
+
+**PHASES 0–3 BUILT, Oct 2026:** `docs/VEHICLE-SALES-SPEC.md` — selling a van (sales pack, per-buyer
+share links, activity + To Do follow-ups, hand-off to the existing sold modal). Built: DVSA MOT history
+(Vehicle › History › MOT), the sale page (`/vehicles/fleet/:id/sale` — stage, price, chosen photos,
+photo re-check, "For sale" pills), per-buyer share links (public page `/van/:token`) and the activity
+log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 4 (PDF) is not built.
+§1 is the settled decisions, §11–14 what shipped. **What a buyer sees is built ONLY by
+`shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
+fleet closes its open sale as sold.
+
+**The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
+in place as `?person=<id>&tab=overview|employment|records|reviews|access`. The person is
+in the URL rather than in component state so a notification can deep-link to the tab
+that answers it — new bells should link that way, not at the bare page. The page is
+manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
+added to those tabs must degrade for a manager rather than 403.
 
 ---
 
@@ -169,6 +232,18 @@ existing definition:
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
+| Which Claude model? | `config/anthropic.ts` `CLAUDE_SONNET_MODEL` / `CLAUDE_HAIKU_MODEL` — never a model string in a service. Read a Claude structured-output reply with `readStructuredJson()`; Sonnet 5.5+ rejects forced `tool_choice` |
+| Opening a possible insurance claim | `services/incident-claims.ts` `createClaimFromIssue()` — always from a Problem |
+| The claim form's fields (staff form, PDF, client form) | `services/claim-form-fields.ts` (frontend: `@claimform`) |
+| A claim's client links, driver code, damage marks, sketch | `services/claim-links.ts` (public routes: `routes/claim-form.ts` — every save through `sanitiseSection()`) |
+| Chasing a client for their claim form / how far it's got | `services/claim-chase.ts` (`runClaimClientChase()`, `formProgress()`) |
+| A van's GPS route between two times | `services/traccar-server.ts` `getRouteForReg()` (a claim's trace: `services/claim-gps.ts`) |
+| Texting someone about anything | `services/sms-service.ts` — each template goes live on its own via `SMS_LIVE_TEMPLATES` |
+| Preparing a photo for upload (EXIF time, HEIC, compress + thumb) | `frontend/src/lib/imageNormalise.ts` `prepareImage()` |
+| What is a van worth (approx.)? | `services/vehicle-value.ts` `estimateVehicleValue()` |
+| What does DVSA say about this van's MOT? | `services/dvsa-mot.ts` — moves `mot_due` forward only, never back |
+| Is this van for sale? Who may change the sale? Do its photos need a re-check? | `services/vehicle-sales.ts` (frontend pill: `useOpenSalesByVehicle()` in `modules/vehicles/lib/vehicle-sales.ts`) |
+| What may a buyer see on a sale link? | `services/vehicle-sale-links.ts` `shapeForBuyer()` (sections: `frontend/src/components/vehicle-sale/BuyerSections.tsx`) |
 | What is this person called? | `frontend/src/lib/displayName.ts` |
 | …the same, on the backend | `services/display-name.ts` |
 | Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |
@@ -176,6 +251,28 @@ existing definition:
 | Opening a private-bucket file in a new tab | `frontend/src/lib/openAuthedFile.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
+| What must never leave a general `people` response? | `services/people-private-fields.ts` |
+| May this person change this task? | `services/staff-tasks.ts` `assertCanTouch()` — owner, setter or admin |
+| When does a repeating to-do fall next? | `services/task-recurrence.ts` (pure; the form asks it via `/staff-tasks/series/preview`) |
+| Shared To Do lists, watchers, archiving | `services/staff-task-lists.ts` (take / put back: `staff-tasks.ts` `takeTask()` / `releaseTask()`) |
+| My job reminders and Problems, for To Do › Mine | `services/staff-task-pullins.ts` — read-only; writes go through their own modules |
+| Who is due a staff review? | `services/staff-employment.ts` `listReviewsDue()` |
+| What needs an admin's attention on Staff? | `services/staff-attention.ts` |
+| What does a reviewee get to see? | `services/staff-review-prep.ts` `getMyReview()` |
+| Does this module need a new person field? | Check `people` first — it already has phone, mobile, home address, DOB and both emergency contacts (mig 001) |
+| When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` — the record's own `action_on` fires; the per-type intervals only pre-fill it (never `driver-validity.ts` — different people) |
+| What staff data has expired? | `services/staff-retention.ts` |
+| What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
+| What is a shop transaction worth? | `services/shop-sales.ts` |
+| Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
+| Closing a finished shop week (invoice, allocate, complete) | `services/shop-close.ts` |
+| Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |
+| What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
+| Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |
+| Does the week's shop job match the till? What did the week take? | `services/shop-reconcile.ts` |
+| The till's payment methods (backend / sitter till) | `services/shop-tenders.ts` — mirrors `frontend/src/lib/shopTenders.ts` |
+| A shop sale's receipt / refund receipt | `services/shop-receipts.ts` |
+| Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
@@ -263,11 +360,13 @@ bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
-09:20 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
-pre-auth expiry 09:40 · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
+09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
+pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
-every 15 min · Gmail ingestion every 10 min.
+every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
+shop close reminder Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·
+Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `is_internal` rule (see `jobs-pipeline-dashboard.md`).
@@ -278,7 +377,8 @@ Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `users` · `jobs` · `job_contacts` · `job_organisations` · `job_requirements` ·
 `quotes` · `quote_assignments` · `quote_contacts` · `drivers` · `vehicle_hire_assignments` · `job_excess` ·
 `fleet_vehicles` · `costs` · `job_issues` · `held_items` · `storage_tenancies` ·
-`notifications` · `audit_log` · `system_settings` · `external_id_map`
+`notifications` · `audit_log` · `system_settings` · `external_id_map` ·
+`shop_sales` · `shop_sale_lines` · `shop_sale_periods` · `shop_stock_cache`
 
 `system_settings` is the generic key/value store for staff-editable operational config
 (gate codes, thresholds, templates, feature toggles). **Use it rather than adding an env

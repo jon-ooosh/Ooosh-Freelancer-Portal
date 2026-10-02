@@ -59,8 +59,17 @@ const changePasswordSchema = z.object({
 const updateProfileSchema = z.object({
   first_name: z.string().min(1).optional(),
   last_name: z.string().min(1).optional(),
+  // "I prefer to be known as". Nullable and allowed to be empty so somebody can
+  // clear it and go back to their first name; `displayName.ts` already falls
+  // back. Editable here because it is a fact about the person, not employment
+  // configuration — it was previously only settable by an admin, and only for
+  // somebody who had an employment record at all.
+  preferred_name: z.string().max(60).optional().nullable(),
   // Staff's company-card last 4. Optional + nullable so the user can clear it.
   // Stored on users (not people) — it's a staff-only operational field.
+  // NOTE: no longer written by any UI — the card is assigned by an admin on the
+  // Staff page, which also holds the label and the card agreement. Kept on the
+  // endpoint so an older cached bundle can't 400 mid-deploy.
   cot_card_last4: z.string().regex(/^\d{4}$/).optional().nullable(),
 });
 
@@ -278,11 +287,12 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// PUT /api/auth/profile — update own profile (name + COT card last 4)
+// PUT /api/auth/profile — update own profile (name, preferred name)
 router.put('/profile', authenticate, validate(updateProfileSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { first_name, last_name, cot_card_last4 } = req.body as {
-      first_name?: string; last_name?: string; cot_card_last4?: string | null
+    const { first_name, last_name, preferred_name, cot_card_last4 } = req.body as {
+      first_name?: string; last_name?: string;
+      preferred_name?: string | null; cot_card_last4?: string | null
     };
     const userId = req.user!.id;
 
@@ -292,6 +302,12 @@ router.put('/profile', authenticate, validate(updateProfileSchema), async (req: 
     let idx = 1;
     if (first_name) { peopleUpdates.push(`first_name = $${idx++}`); peopleParams.push(first_name); }
     if (last_name)  { peopleUpdates.push(`last_name = $${idx++}`);  peopleParams.push(last_name); }
+    // `!== undefined`, not a truthy test: '' is how the form says "clear it",
+    // and a truthy test would silently ignore that and keep the old value.
+    if (preferred_name !== undefined) {
+      peopleUpdates.push(`preferred_name = $${idx++}`);
+      peopleParams.push(preferred_name?.trim() || null);
+    }
 
     // users fields (COT card last 4)
     const usersUpdates: string[] = [];

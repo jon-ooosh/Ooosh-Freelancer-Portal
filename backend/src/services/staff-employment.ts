@@ -46,6 +46,8 @@ export interface EmploymentInput {
   entitlementWeeks?: number | null;
   probationEndDate?: string | null;
   noticePeriodDays?: number | null;
+  /** Review cadence for this person; NULL inherits the company setting (§5.6). */
+  reviewIntervalMonths?: number | null;
   notes?: string | null;
   /** Personal fields that live on `people`, written in the same call. */
   preferredName?: string | null;
@@ -63,9 +65,9 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
     `INSERT INTO staff_employment
        (person_id, employment_status, start_date, end_date, job_title, department,
         bank_holiday_policy, entitlement_weeks, notes, created_by,
-        probation_end_date, notice_period_days)
+        probation_end_date, notice_period_days, review_interval_months)
      VALUES ($1, COALESCE($2,'employed'), $3::date, $4::date, $5, $6, $7, $8, $9, $10,
-             $11::date, $12)
+             $11::date, $12, $13)
      ON CONFLICT (person_id) DO UPDATE SET
        employment_status   = COALESCE(EXCLUDED.employment_status, staff_employment.employment_status),
        start_date          = EXCLUDED.start_date,
@@ -77,6 +79,7 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
        notes               = EXCLUDED.notes,
        probation_end_date  = EXCLUDED.probation_end_date,
        notice_period_days  = EXCLUDED.notice_period_days,
+       review_interval_months = EXCLUDED.review_interval_months,
        updated_at          = NOW()
      RETURNING *`,
     [
@@ -84,6 +87,7 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
       input.jobTitle ?? null, input.department ?? null, input.bankHolidayPolicy ?? null,
       input.entitlementWeeks ?? null, input.notes ?? null, userId,
       input.probationEndDate ?? null, input.noticePeriodDays ?? null,
+      input.reviewIntervalMonths ?? null,
     ]
   );
 
@@ -120,15 +124,33 @@ export async function getEmployeeRecord(personId: string) {
             se.start_date::text AS start_date,
             se.end_date::text   AS end_date,
             p.first_name, p.last_name, p.preferred_name, p.email, p.phone, p.mobile,
+            p.international_phone,
             p.date_of_birth::text AS date_of_birth,
+            p.marital_status,
             p.home_address,
             p.emergency_contact_name, p.emergency_contact_phone, p.emergency_contact_relationship,
             p.emergency_contact_2_name, p.emergency_contact_2_phone, p.emergency_contact_2_relationship,
             p.rtw_checked_on::text AS rtw_checked_on, p.rtw_document_type,
             p.rtw_expires_on::text AS rtw_expires_on,
+            (SELECT MIN(sr.scheduled_for)::text FROM staff_reviews sr
+              WHERE sr.person_id = se.person_id AND sr.status IN ('proposed','confirmed')
+            ) AS next_review_scheduled,
             p.licence_number, p.licence_expiry::text AS licence_expiry,
             p.passport_expiry::text AS passport_expiry,
-            (p.ni_number_encrypted IS NOT NULL) AS has_ni_number
+            (p.ni_number_encrypted IS NOT NULL) AS has_ni_number,
+            (SELECT row_to_json(x) FROM (
+               SELECT ph.is_member, ph.scheme_name, ph.employee_percent,
+                      ph.employer_percent, ph.effective_from::text AS effective_from
+                 FROM staff_pension_history ph
+                WHERE ph.person_id = se.person_id
+                ORDER BY ph.effective_from DESC, ph.created_at DESC LIMIT 1
+             ) x) AS pension,
+            (SELECT row_to_json(y) FROM (
+               SELECT sh.annual_amount, sh.effective_from::text AS effective_from
+                 FROM staff_salary_history sh
+                WHERE sh.person_id = se.person_id
+                ORDER BY sh.effective_from DESC, sh.created_at DESC LIMIT 1
+             ) y) AS salary
        FROM staff_employment se
        JOIN people p ON p.id = se.person_id
       WHERE se.person_id = $1`,
@@ -151,8 +173,12 @@ export async function listEmployees() {
             (SELECT sh.effective_from::text FROM staff_salary_history sh
               WHERE sh.person_id = se.person_id
               ORDER BY sh.effective_from DESC, sh.created_at DESC LIMIT 1) AS salary_since,
+            -- Keyed on status, NOT on a null completed_at: a CANCELLED review
+            -- also has no completion date, so the old test showed a review
+            -- somebody called off as permanently upcoming (status: mig 234).
             (SELECT MIN(sr.scheduled_for)::text FROM staff_reviews sr
-              WHERE sr.person_id = se.person_id AND sr.completed_at IS NULL) AS next_review_due
+              WHERE sr.person_id = se.person_id
+                AND sr.status IN ('proposed','confirmed')) AS next_review_due
        FROM staff_employment se
        JOIN people p ON p.id = se.person_id
       WHERE p.is_deleted = false
@@ -440,43 +466,189 @@ export async function listSalaryHistory(personId: string) {
   return r.rows;
 }
 
+/**
+ * Create or amend a review. docs/STAFF-RECORDS-SPEC.md §5.
+ *
+ * TWO NOTES FIELDS, never one (spec §5.4):
+ *   shared_summary — the reviewee sees this; it is what the follow-up email
+ *                    contains anyway
+ *   private_notes  — admin only: observations, concerns not yet raised, pay
+ *                    reasoning
+ * A single field that is SOMETIMES shared is a leak waiting to happen, and
+ * knowing it might be read, the reviewer self-censors into uselessness.
+ *
+ * PAY IS NOT HELD HERE (spec §5.1). A review points at the
+ * staff_salary_history row it produced — see recordReviewOutcome. Deciding pay
+ * in the room is what stops the honest half of the conversation happening.
+ */
 export async function upsertReview(
   id: string | null,
   personId: string,
-  input: { reviewType?: string; scheduledFor: string; completedAt?: string | null; notes?: string | null; outcome?: string | null; nextReviewDue?: string | null },
+  input: {
+    reviewType?: string; scheduledFor: string; status?: string;
+    completedAt?: string | null; sharedSummary?: string | null;
+    privateNotes?: string | null; outcome?: string | null; nextReviewDue?: string | null;
+  },
   userId: string
 ) {
   if (!DATE_RE.test(input.scheduledFor)) throw new Error('scheduledFor must be YYYY-MM-DD');
-  if (id) {
-    const r = await query(
-      `UPDATE staff_reviews
-          SET review_type = COALESCE($3, review_type),
-              scheduled_for = $4::date,
-              completed_at = $5,
-              notes = $6, outcome = $7,
-              next_review_due = $8::date,
-              updated_at = NOW()
-        WHERE id = $1 AND person_id = $2
-        RETURNING *`,
-      [id, personId, input.reviewType ?? null, input.scheduledFor, input.completedAt ?? null,
-       input.notes ?? null, input.outcome ?? null, input.nextReviewDue ?? null]
-    );
-    return r.rows[0] ?? null;
+  if (input.nextReviewDue && !DATE_RE.test(input.nextReviewDue)) {
+    throw new Error('nextReviewDue must be YYYY-MM-DD');
   }
-  const r = await query(
-    `INSERT INTO staff_reviews (person_id, review_type, scheduled_for, completed_at, notes, outcome, next_review_due, created_by)
-     VALUES ($1, COALESCE($2,'annual'), $3::date, $4, $5, $6, $7::date, $8)
-     RETURNING *`,
-    [personId, input.reviewType ?? null, input.scheduledFor, input.completedAt ?? null,
-     input.notes ?? null, input.outcome ?? null, input.nextReviewDue ?? null, userId]
+
+  const row = id
+    ? (await query(
+        `UPDATE staff_reviews
+            SET review_type = COALESCE($3, review_type),
+                scheduled_for = $4::date,
+                status = COALESCE($5, status),
+                completed_at = $6,
+                shared_summary = $7, private_notes = $8, outcome = $9,
+                next_review_due = $10::date,
+                updated_at = NOW()
+          WHERE id = $1 AND person_id = $2
+          RETURNING *`,
+        [id, personId, input.reviewType ?? null, input.scheduledFor, input.status ?? null,
+         input.completedAt ?? null, input.sharedSummary ?? null, input.privateNotes ?? null,
+         input.outcome ?? null, input.nextReviewDue ?? null]
+      )).rows[0] ?? null
+    : (await query(
+        `INSERT INTO staff_reviews
+           (person_id, review_type, scheduled_for, status, completed_at,
+            shared_summary, private_notes, outcome, next_review_due, created_by)
+         VALUES ($1, COALESCE($2,'annual'), $3::date, COALESCE($4,'proposed'), $5,
+                 $6, $7, $8, $9::date, $10)
+         RETURNING *`,
+        [personId, input.reviewType ?? null, input.scheduledFor, input.status ?? null,
+         input.completedAt ?? null, input.sharedSummary ?? null, input.privateNotes ?? null,
+         input.outcome ?? null, input.nextReviewDue ?? null, userId]
+      )).rows[0];
+
+  if (!row) return null;
+
+  // Booking or finishing a review answers the "this is due" reminder, so the
+  // stamp clears and the NEXT cycle can chase again. Without this the nudge
+  // fires once per person ever.
+  await query(
+    'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
+    [personId]
   );
+
+  // Tell the person, with the prep questions (spec §5.2). Once per review —
+  // sendReviewInvite owns the invited_at stamp, so editing a note later does
+  // not re-announce it. Best-effort: a failed bell must not fail the booking.
+  try {
+    const { sendReviewInvite } = await import('./staff-review-followup');
+    await sendReviewInvite(row.id);
+  } catch (err) {
+    console.error('[staff-employment] review invite failed:', err);
+  }
+
+  return row;
+}
+
+/**
+ * Complete a review: stamp it, set when the next one falls due, and — if a pay
+ * rise came out of it — write the salary row and link the two.
+ *
+ * `next_review_due` is DERIVED from the person's own cadence
+ * (staff_employment.review_interval_months, falling back to the company
+ * setting) rather than typed, so "annual for most, six-monthly for a new
+ * starter" needs no thought at the point of completing.
+ *
+ * The salary row is append-only and already THE record of what somebody is on
+ * (mig 206). This adds the link back, so "what did this review actually lead
+ * to" is answerable — and so the follow-up email has the figure to quote.
+ */
+export async function recordReviewOutcome(
+  reviewId: string,
+  personId: string,
+  input: {
+    sharedSummary?: string | null; privateNotes?: string | null; outcome?: string | null;
+    newSalary?: number | null; salaryEffectiveFrom?: string | null; salaryReason?: string | null;
+  },
+  userId: string
+) {
+  const emp = await query(
+    'SELECT review_interval_months FROM staff_employment WHERE person_id = $1',
+    [personId]
+  );
+  let months = emp.rows[0]?.review_interval_months as number | null | undefined;
+  if (months == null) {
+    const { getReviewIntervalMonths } = await import('./staff-settings');
+    months = await getReviewIntervalMonths();
+  }
+
+  let salaryId: string | null = null;
+  if (input.newSalary != null) {
+    if (!(input.newSalary >= 0)) throw new Error('A salary cannot be negative');
+    const effective = input.salaryEffectiveFrom || new Date().toISOString().slice(0, 10);
+    if (!DATE_RE.test(effective)) throw new Error('salaryEffectiveFrom must be YYYY-MM-DD');
+    const sal = await query(
+      `INSERT INTO staff_salary_history (person_id, annual_amount, effective_from, reason, created_by)
+       VALUES ($1, $2, $3::date, $4, $5) RETURNING id`,
+      [personId, input.newSalary, effective,
+       input.salaryReason?.trim() || 'Agreed at review', userId]
+    );
+    salaryId = sal.rows[0].id;
+  }
+
+  const r = await query(
+    `UPDATE staff_reviews
+        SET status = 'completed',
+            completed_at = COALESCE(completed_at, NOW()),
+            shared_summary = COALESCE($3, shared_summary),
+            private_notes  = COALESCE($4, private_notes),
+            outcome        = COALESCE($5, outcome),
+            salary_history_id = COALESCE($6, salary_history_id),
+            next_review_due = (CURRENT_DATE + ($7 || ' months')::interval)::date,
+            -- An unsent prep draft (mig 262) dies with the meeting: it was
+            -- never shared, and it is private writing we have no reason to keep.
+            self_assessment_draft = NULL,
+            self_assessment_draft_saved_at = NULL,
+            updated_at = NOW()
+      WHERE id = $1 AND person_id = $2
+      RETURNING *`,
+    [reviewId, personId, input.sharedSummary ?? null, input.privateNotes ?? null,
+     input.outcome ?? null, salaryId, String(months)]
+  );
+  if (!r.rows.length) throw new Error('Review not found');
+
+  await query(
+    'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
+    [personId]
+  );
+
+  // The write-up, carrying the agreed summary, the actions and — the point of
+  // deciding pay afterwards rather than in the room (§5.1) — the new figure.
+  // Once per review; amending a completed one does not re-send.
+  try {
+    const { sendReviewFollowUp } = await import('./staff-review-followup');
+    await sendReviewFollowUp(reviewId);
+  } catch (err) {
+    console.error('[staff-employment] review follow-up failed:', err);
+  }
+
   return r.rows[0];
 }
 
-export async function listReviews(personId: string) {
+/**
+ * Reviews for one person.
+ *
+ * `includePrivate` is the §5.4 split made real: the admin surface passes true,
+ * and anything staff-facing passes false so private_notes never leaves the
+ * server. Defaulting to FALSE is deliberate — a new caller that forgets to
+ * think about it gets the safe answer.
+ */
+export async function listReviews(personId: string, includePrivate = false) {
   const r = await query(
-    `SELECT id, review_type, scheduled_for::text AS scheduled_for, completed_at,
-            notes, outcome, next_review_due::text AS next_review_due, created_at
+    `SELECT id, review_type, scheduled_for::text AS scheduled_for, status,
+            completed_at, shared_summary,
+            ${includePrivate ? 'private_notes, manager_prep,' : 'NULL::text AS private_notes, NULL::jsonb AS manager_prep,'}
+            self_assessment, self_assessment_submitted_at,
+            invited_at, follow_up_sent_at,
+            outcome, next_review_due::text AS next_review_due,
+            salary_history_id, checkin_done_at, created_at
        FROM staff_reviews
       WHERE person_id = $1
       ORDER BY scheduled_for DESC`,
@@ -701,4 +873,377 @@ export async function linkLoginToPerson(personId: string, userId: string) {
   );
   if (r.rows.length === 0) throw new Error('Login not found');
   return r.rows[0];
+}
+
+// ── Key data: NI number + right to work (spec §3.2) ─────────────────────────
+//
+// These columns live on `people`, added by migration 206, and this is the only
+// place that writes them. NOT copied onto staff_employment: right to work is a
+// fact about a person, not about one employment record, and a second copy is
+// the mistake spec §1.1 documents on licence data.
+//
+// They are stripped from every general people response by
+// services/people-private-fields.ts — the admin staff surfaces read them by
+// name instead. If you add another private column to `people`, add it there.
+
+export interface KeyDataInput {
+  /** Plain NI number. Encrypted here; never stored or logged in the clear.
+   *  '' clears it. Absent leaves whatever is stored alone. */
+  niNumber?: string | null;
+  rtwDocumentType?: string | null;
+  rtwCheckedOn?: string | null;
+  rtwExpiresOn?: string | null;
+}
+
+/** Normalised for storage: "ab 12 34 56 c" -> "AB123456C". */
+function normaliseNi(raw: string): string {
+  return raw.replace(/\s+/g, '').toUpperCase();
+}
+
+// Format per HMRC: two letters, six digits, then A–D or a space. Deliberately a
+// WARNING not a gate elsewhere in this codebase's spirit — but here it IS
+// enforced, because an NI number is retyped from a document exactly once and a
+// typo is silently wrong forever. Better to reject at the point of entry.
+const NI_RE = /^[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\d{6}[A-D]$/;
+
+export async function updateKeyData(personId: string, input: KeyDataInput, userId: string) {
+  const sets: string[] = [];
+  const params: unknown[] = [personId];
+
+  if (input.niNumber !== undefined) {
+    if (input.niNumber === null || input.niNumber.trim() === '') {
+      sets.push('ni_number_encrypted = NULL');
+    } else {
+      const ni = normaliseNi(input.niNumber);
+      if (!NI_RE.test(ni)) {
+        throw new Error('That does not look like a National Insurance number (e.g. QQ123456C).');
+      }
+      // Imported lazily so a server without ENCRYPTION_KEY still boots and
+      // serves everything else — the route checks isEncryptionConfigured()
+      // first and refuses cleanly rather than throwing a 500 here.
+      const { encrypt } = await import('./encryption');
+      params.push(encrypt(ni));
+      sets.push(`ni_number_encrypted = $${params.length}`);
+    }
+  }
+
+  // Absent key = leave alone; empty = clear. Same rule as preferredName above,
+  // and for the same reason: COALESCE would make clearing a value silently
+  // do nothing.
+  const dateFields: [keyof KeyDataInput, string][] = [
+    ['rtwCheckedOn', 'rtw_checked_on'],
+    ['rtwExpiresOn', 'rtw_expires_on'],
+  ];
+  for (const [key, column] of dateFields) {
+    const value = input[key];
+    if (value === undefined) continue;
+    if (value === null || value === '') {
+      sets.push(`${column} = NULL`);
+    } else {
+      if (!DATE_RE.test(String(value))) throw new Error(`${column} must be YYYY-MM-DD`);
+      params.push(value);
+      sets.push(`${column} = $${params.length}::date`);
+    }
+  }
+
+  if (input.rtwDocumentType !== undefined) {
+    const v = input.rtwDocumentType?.trim();
+    params.push(v || null);
+    sets.push(`rtw_document_type = $${params.length}`);
+  }
+
+  // Stamp WHO did the check whenever any right-to-work field is touched. The
+  // check is the legal record, not the document — "seen by, on" is the bit an
+  // inspection asks for.
+  const touchedRtw = input.rtwDocumentType !== undefined
+    || input.rtwCheckedOn !== undefined
+    || input.rtwExpiresOn !== undefined;
+  if (touchedRtw) {
+    params.push(userId);
+    sets.push(`rtw_checked_by = $${params.length}`);
+  }
+
+  if (!sets.length) throw new Error('No fields to update');
+
+  const r = await query(
+    `UPDATE people SET ${sets.join(', ')}, updated_at = NOW()
+      WHERE id = $1
+      RETURNING id`,
+    params
+  );
+  if (!r.rows.length) throw new Error('Person not found');
+
+  // Audited WITHOUT the value — that somebody's NI was set is worth recording;
+  // putting the number in audit_log would undo the encryption it was just
+  // given.
+  const { logAudit } = await import('../middleware/audit');
+  await logAudit(userId, 'people', personId, 'update', null, {
+    key_data_changed: sets.map(s => s.split(' ')[0]),
+  });
+
+  return getEmployeeRecord(personId);
+}
+
+/**
+ * Reveal the stored NI number, once, deliberately, and on the record.
+ *
+ * Every other read returns `has_ni_number` as a boolean (see
+ * getEmployeeRecord) — the number itself only ever leaves the server through
+ * here, and every call writes an audit_log row. Migration 232 widened the
+ * audit action CHECK to allow 'read' for exactly this.
+ */
+export async function revealNiNumber(personId: string, userId: string): Promise<string | null> {
+  const r = await query(
+    'SELECT ni_number_encrypted FROM people WHERE id = $1',
+    [personId]
+  );
+  if (!r.rows.length) throw new Error('Person not found');
+  const stored = r.rows[0].ni_number_encrypted as string | null;
+  if (!stored) return null;
+
+  const { tryDecrypt } = await import('./encryption');
+  const value = tryDecrypt(stored);
+
+  const { logAudit } = await import('../middleware/audit');
+  await logAudit(userId, 'people', personId, 'read', null, { field: 'ni_number' });
+
+  return value;
+}
+
+/**
+ * When somebody's next review falls due, as SQL — shared by listReviewsDue()
+ * and listCheckInsDue() so the two cannot disagree about the date. Expects the
+ * `last_done` CTE aliased `ld`, `staff_employment` aliased `se`, and the
+ * company default interval (months) as $1.
+ */
+const LAST_DONE_CTE = `
+  last_done AS (
+    SELECT DISTINCT ON (person_id) id, person_id, completed_at, next_review_due, checkin_done_at
+      FROM staff_reviews
+     WHERE status = 'completed'
+     ORDER BY person_id, completed_at DESC
+  )`;
+const REVIEW_DUE_ON_SQL = `
+  COALESCE(
+    ld.next_review_due,
+    (ld.completed_at::date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date,
+    (se.start_date + (COALESCE(se.review_interval_months, $1) || ' months')::interval)::date
+  )`;
+
+/**
+ * Who is due a review — THE definition, per CLAUDE.md's helper rule.
+ *
+ * Two callers with the same question and no reason to disagree: the 09:45
+ * scan that bells an admin (`runReviewDueScan`) and the Staff page's
+ * "needs attention" list. They differ ONLY in whether an already-nudged
+ * person is filtered out, hence `onlyUnchased`.
+ *
+ * Due FROM: the last completed review's `next_review_due`, else that review's
+ * completion plus the person's cadence, else — for somebody never reviewed —
+ * their employment start plus the cadence. That last fallback is the important
+ * one: a person nobody has ever reviewed is exactly who this is for, and
+ * keying only off previous reviews would miss them forever.
+ *
+ * Excludes anyone with a review already booked; being told to arrange
+ * something already in the diary is noise.
+ */
+export async function listReviewsDue(opts: { onlyUnchased: boolean; withinDays: number }) {
+  let defaultMonths: number;
+  {
+    const { getReviewIntervalMonths } = await import('./staff-settings');
+    defaultMonths = await getReviewIntervalMonths();
+  }
+
+  const r = await query(
+    `WITH ${LAST_DONE_CTE}
+     SELECT se.person_id,
+            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
+                        COALESCE(p.last_name, '')), '') AS person_name,
+            ${REVIEW_DUE_ON_SQL}::text AS due_on,
+            ld.completed_at::date::text AS last_reviewed_on
+       FROM staff_employment se
+       JOIN people p ON p.id = se.person_id
+       LEFT JOIN last_done ld ON ld.person_id = se.person_id
+      WHERE se.employment_status = 'employed'
+        AND ($2::boolean IS FALSE OR se.review_due_chased_at IS NULL)
+        AND NOT EXISTS (
+          SELECT 1 FROM staff_reviews r
+           WHERE r.person_id = se.person_id
+             AND r.status IN ('proposed', 'confirmed')
+        )`,
+    [String(defaultMonths), opts.onlyUnchased]
+  );
+
+  // The horizon is applied here rather than in SQL because due_on is a
+  // COALESCE over three sources and comparing it inside the WHERE would mean
+  // repeating that whole expression.
+  const horizon = new Date();
+  horizon.setUTCDate(horizon.getUTCDate() + opts.withinDays);
+  const horizonYmd = horizon.toISOString().slice(0, 10);
+
+  return r.rows.filter((row: { due_on: string | null }) =>
+    !!row.due_on && row.due_on <= horizonYmd
+  ) as { person_id: string; person_name: string | null; due_on: string; last_reviewed_on: string | null }[];
+}
+
+/**
+ * Who is due a CHECK-IN — half-way between their last completed review and
+ * the next one due (spec §5.6, §22). "Here are last time's actions, where are
+ * they?" — the thing that stops the annual review being a ritual.
+ *
+ * Only for people who HAVE a completed review (there is nothing to check in
+ * on otherwise), whose cycle is at least four months (half of a monthly cycle
+ * is two weeks, which is just another review), with no review already booked,
+ * and not yet ticked off on that review (`checkin_done_at`, mig 244). A new
+ * completed review starts a new cycle with no stamp, so nothing needs clearing.
+ *
+ * Shares the due-date SQL with listReviewsDue() so the two cannot disagree.
+ */
+export async function listCheckInsDue(): Promise<
+  { person_id: string; person_name: string | null; review_id: string; checkin_on: string; last_reviewed_on: string }[]
+> {
+  const { getReviewIntervalMonths } = await import('./staff-settings');
+  const defaultMonths = await getReviewIntervalMonths();
+
+  const r = await query(
+    `WITH ${LAST_DONE_CTE},
+     cycle AS (
+       SELECT se.person_id, ld.id AS review_id, ld.checkin_done_at,
+              ld.completed_at::date AS last_on,
+              ${REVIEW_DUE_ON_SQL} AS due_on
+         FROM staff_employment se
+         JOIN last_done ld ON ld.person_id = se.person_id
+        WHERE se.employment_status = 'employed'
+          AND NOT EXISTS (
+            SELECT 1 FROM staff_reviews b
+             WHERE b.person_id = se.person_id
+               AND b.status IN ('proposed', 'confirmed')
+          )
+     )
+     SELECT c.person_id, c.review_id,
+            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
+                        COALESCE(p.last_name, '')), '') AS person_name,
+            (c.last_on + (c.due_on - c.last_on) / 2)::text AS checkin_on,
+            c.last_on::text AS last_reviewed_on
+       FROM cycle c
+       JOIN people p ON p.id = c.person_id
+      WHERE c.checkin_done_at IS NULL
+        AND c.due_on IS NOT NULL
+        AND c.due_on - c.last_on >= 120
+        AND c.last_on + (c.due_on - c.last_on) / 2 <= CURRENT_DATE
+      ORDER BY checkin_on`,
+    [String(defaultMonths)]
+  );
+  return r.rows;
+}
+
+/**
+ * Tick off the check-in on a completed review. The review must belong to the
+ * person — the id comes from the URL, and a mistyped one must not stamp
+ * somebody else's.
+ */
+export async function markCheckInDone(personId: string, reviewId: string): Promise<boolean> {
+  const r = await query(
+    `UPDATE staff_reviews SET checkin_done_at = NOW()
+      WHERE id = $1 AND person_id = $2 AND status = 'completed'
+      RETURNING id`,
+    [reviewId, personId]
+  );
+  return r.rows.length > 0;
+}
+
+// ── Pension (spec §18.2) ────────────────────────────────────────────────────
+//
+// Append-only, mirroring staff_salary_history: a contribution change is a NEW
+// ROW, never an edit, because "what were they on, and from when" is the
+// question auto-enrolment makes legally interesting.
+
+export async function listPensionHistory(personId: string) {
+  const r = await query(
+    `SELECT id, is_member, scheme_name, employee_percent, employer_percent,
+            effective_from::text AS effective_from, reason, created_at
+       FROM staff_pension_history
+      WHERE person_id = $1
+      ORDER BY effective_from DESC, created_at DESC`,
+    [personId]
+  );
+  return r.rows;
+}
+
+export async function addPensionRecord(
+  personId: string,
+  input: {
+    isMember: boolean; schemeName?: string | null;
+    employeePercent?: number | null; employerPercent?: number | null;
+    effectiveFrom: string; reason?: string | null;
+  },
+  userId: string
+) {
+  if (!DATE_RE.test(input.effectiveFrom)) throw new Error('effectiveFrom must be YYYY-MM-DD');
+  const r = await query(
+    `INSERT INTO staff_pension_history
+       (person_id, is_member, scheme_name, employee_percent, employer_percent,
+        effective_from, reason, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8)
+     RETURNING id`,
+    [personId, input.isMember, input.schemeName?.trim() || null,
+     input.employeePercent ?? null, input.employerPercent ?? null,
+     input.effectiveFrom, input.reason?.trim() || null, userId]
+  );
+  return r.rows[0];
+}
+
+// ── Personal details (spec §18.1) ───────────────────────────────────────────
+//
+// Every one of these columns ALREADY EXISTED on `people` — most since
+// migration 001 — and was simply never editable from the staff area. This is
+// a write path for what was already there, not new storage.
+//
+// Absent key = leave alone; empty string = clear. Same rule as preferredName
+// and the key data, and for the same reason: COALESCE would make clearing a
+// value silently do nothing.
+
+const PERSONAL_FIELDS: Record<string, string> = {
+  phone: 'phone',
+  mobile: 'mobile',
+  internationalPhone: 'international_phone',
+  homeAddress: 'home_address',
+  maritalStatus: 'marital_status',
+  emergencyContactName: 'emergency_contact_name',
+  emergencyContactPhone: 'emergency_contact_phone',
+  emergencyContactRelationship: 'emergency_contact_relationship',
+  emergencyContact2Name: 'emergency_contact_2_name',
+  emergencyContact2Phone: 'emergency_contact_2_phone',
+  emergencyContact2Relationship: 'emergency_contact_2_relationship',
+};
+
+export async function updatePersonalDetails(
+  personId: string,
+  input: Record<string, unknown> & { dateOfBirth?: string | null },
+) {
+  const sets: string[] = [];
+  const params: unknown[] = [personId];
+
+  for (const [key, column] of Object.entries(PERSONAL_FIELDS)) {
+    if (!(key in input)) continue;
+    const value = input[key];
+    params.push(typeof value === 'string' && value.trim() ? value.trim() : null);
+    sets.push(`${column} = $${params.length}`);
+  }
+
+  if ('dateOfBirth' in input) {
+    const dob = input.dateOfBirth;
+    if (dob && !DATE_RE.test(String(dob))) throw new Error('dateOfBirth must be YYYY-MM-DD');
+    params.push(dob || null);
+    sets.push(`date_of_birth = $${params.length}::date`);
+  }
+
+  if (!sets.length) throw new Error('No fields to update');
+
+  const r = await query(
+    `UPDATE people SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $1 RETURNING id`,
+    params
+  );
+  if (!r.rows.length) throw new Error('Person not found');
+  return getEmployeeRecord(personId);
 }

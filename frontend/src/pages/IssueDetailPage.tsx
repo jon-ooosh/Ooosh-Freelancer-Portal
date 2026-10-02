@@ -8,13 +8,14 @@
  *        watchers, due date, surface_on, dangerous-zone (resolve, cancel).
  */
 import { useState, useEffect, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import ThreadView from '../components/messaging/ThreadView';
 import CostCaptureModal from '../components/CostCaptureModal';
 import { useAttachments, type InteractionAttachment } from '../components/messaging/Attachments';
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import ImageLightbox from '../components/ImageLightbox';
+import { useOpenClaimsFor, ExistingClaimChoice } from '../components/claims/format';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -57,6 +58,7 @@ interface IssueComment {
 
 interface Issue {
   id: string;
+  claim_id?: string | null;
   job_id: string | null;
   vehicle_id: string | null;
   vehicle_reg: string | null;
@@ -164,6 +166,37 @@ function IssueDetailContent() {
     text: string;
   } | null>(null);
   const attach = useAttachments();
+  const navigate = useNavigate();
+  const [openingClaim, setOpeningClaim] = useState(false);
+  const [choosingClaim, setChoosingClaim] = useState(false);
+  const [claimTarget, setClaimTarget] = useState('');
+  const openClaims = useOpenClaimsFor(issue?.job_id, issue?.vehicle_id, !!issue && !issue.claim_id);
+
+  // A Problem is where every possible insurance claim starts
+  // (docs/INCIDENT-CLAIMS-SPEC.md D1). Idempotent server-side. An open case
+  // already on the job (or van) is offered first — a flag, not a gate.
+  async function openClaim() {
+    if (!id) return;
+    if (openClaims && openClaims.length > 0 && !choosingClaim) {
+      setClaimTarget(openClaims[0].id);
+      setChoosingClaim(true);
+      return;
+    }
+    if (!choosingClaim && !confirm('Open a possible insurance claim for this Problem?')) return;
+    setOpeningClaim(true);
+    try {
+      if (choosingClaim && claimTarget !== 'new') {
+        await api.post(`/claims/${claimTarget}/problems`, { issue_id: id });
+        navigate(`/vehicles/claims/${claimTarget}`);
+        return;
+      }
+      const res = await api.post<{ data: { id: string } }>(`/claims/from-problem/${id}`, {});
+      navigate(`/vehicles/claims/${res.data.id}`);
+    } catch (err) {
+      console.error('Open claim failed:', err);
+      setOpeningClaim(false);
+    }
+  }
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -277,11 +310,37 @@ function IssueDetailContent() {
             </>
           )}
         </div>
-        <button onClick={() => setShowAddCost(true)}
-          className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5 whitespace-nowrap">
-          + Add cost
-        </button>
+        <div className="flex items-center gap-2">
+          {issue.claim_id ? (
+            <Link to={`/vehicles/claims/${issue.claim_id}`}
+              className="text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 rounded-md px-3 py-1.5 whitespace-nowrap">
+              🛡️ Insurance claim →
+            </Link>
+          ) : (
+            <button onClick={openClaim} disabled={openingClaim}
+              className="text-sm font-medium text-indigo-700 border border-indigo-300 hover:bg-indigo-50 rounded-md px-3 py-1.5 whitespace-nowrap disabled:opacity-50">
+              {openingClaim ? 'Opening…' : '🛡️ Possible insurance claim'}
+            </button>
+          )}
+          <button onClick={() => setShowAddCost(true)}
+            className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5 whitespace-nowrap">
+            + Add cost
+          </button>
+        </div>
       </div>
+
+      {choosingClaim && openClaims && openClaims.length > 0 && !issue.claim_id && (
+        <div className="mb-4 space-y-2">
+          <ExistingClaimChoice claims={openClaims} value={claimTarget} onChange={setClaimTarget} />
+          <div className="flex gap-2 justify-end">
+            <button type="button" onClick={() => setChoosingClaim(false)} className="px-3 py-1.5 text-xs border rounded">Cancel</button>
+            <button type="button" onClick={openClaim} disabled={openingClaim}
+              className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white disabled:opacity-50">
+              {openingClaim ? 'Saving…' : claimTarget === 'new' ? 'Open a separate case' : 'Add to that case'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {showAddCost && (
         <CostCaptureModal

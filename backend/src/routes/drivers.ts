@@ -20,6 +20,7 @@ import { sendReferralAlert } from '../services/referral-alert';
 import { sendIdentityReviewAlert } from '../services/identity-review';
 import { computeVerificationState } from '../services/driver-verification-state';
 import { unsignedJobNumberSql, findUnsignedDriversForJob } from '../services/driver-hire-progress';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
 
 const router = Router();
 router.use(authenticate);
@@ -486,9 +487,12 @@ router.get('/:id/audit-log', async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT al.id, al.user_id, al.action, al.previous_values, al.new_values, al.created_at,
         u.email AS user_email,
-        COALESCE(u.first_name || ' ' || u.last_name, u.email) AS user_name
+        COALESCE(NULLIF(${DISPLAY_NAME_SQL}, ' '), u.email) AS user_name
       FROM audit_log al
       LEFT JOIN users u ON u.id::text = al.user_id
+      -- users carries no name — it points at people (this read u.first_name and
+      -- failed on every call, so Edit history was always empty).
+      LEFT JOIN people p ON p.id = u.person_id
       WHERE al.entity_type = 'driver' AND al.entity_id = $1
       ORDER BY al.created_at DESC
       LIMIT 100`,
@@ -1102,6 +1106,10 @@ const resolveReferralSchema = z.object({
   //              approved but recorded distinctly for audit clarity.
   outcome: z.enum(['approved', 'declined', 'waived']),
   notes: z.string().optional().default(''),
+  // Date the driver was referred to the insurer (YYYY-MM-DD). Required for
+  // approved/declined unless "Mark as Referred" already stamped one — see the
+  // check in the handler. Not used for waived (no referral happened).
+  referral_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   // Optional adjusted excess amount (insurer may approve with higher excess)
   adjusted_excess: z.number().min(0).nullable().optional(),
   // Optional: extend specific validity dates on approval / waive
@@ -1117,7 +1125,7 @@ const resolveReferralSchema = z.object({
 router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(resolveReferralSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { outcome, notes, adjusted_excess, extend_dates } = req.body;
+    const { outcome, notes, referral_date, adjusted_excess, extend_dates } = req.body;
 
     // Fetch current driver
     const current = await query('SELECT * FROM drivers WHERE id = $1', [id]);
@@ -1129,6 +1137,18 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
 
     if (!driver.requires_referral) {
       res.status(400).json({ error: 'Driver does not have a pending referral' });
+      return;
+    }
+
+    // An insurer outcome needs the date we referred. Staff who went straight
+    // to "Resolve" (skipping "Mark as Referred") left referral_date NULL with
+    // no way to add it afterwards, so an approval carried no record of when
+    // the insurer was asked (Tyler Meadham, Oct 2026). Record-keeping only —
+    // nothing gates on this date — but an approval is STANDING for the driver,
+    // so it is the evidence behind every later hire.
+    const referredViaInsurer = outcome === 'approved' || outcome === 'declined';
+    if (referredViaInsurer && !referral_date && !driver.referral_date) {
+      res.status(400).json({ error: 'Enter the date the driver was referred to the insurer.' });
       return;
     }
 
@@ -1148,6 +1168,9 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
       referral_notes: [driver.referral_notes, notes].filter(Boolean).join(' | '),
       insurance_status: cleared ? 'Approved' : 'Failed',
     };
+    if (referredViaInsurer && referral_date) {
+      updates.referral_date = referral_date;
+    }
     if (cleared) {
       updates.requires_referral = false;
     }

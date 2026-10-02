@@ -122,7 +122,7 @@ const templates: Record<string, EmailTemplate> = {
         <li>Disability/medical conditions: <strong>{{hasDisability}}</strong></li>
         <li>Motoring convictions: <strong>{{hasConvictions}}</strong></li>
         <li>Pending prosecutions: <strong>{{hasProsecution}}</strong></li>
-        <li>Accidents (last 5 years): <strong>{{hasAccidents}}</strong></li>
+        <li>Accidents (last 3 years): <strong>{{hasAccidents}}</strong></li>
         <li>Insurance issues: <strong>{{hasInsuranceIssues}}</strong></li>
         <li>Driving bans: <strong>{{hasDrivingBan}}</strong></li>
       </ul>
@@ -2348,11 +2348,20 @@ const templates: Record<string, EmailTemplate> = {
             <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{statusLine}}</p>
             {{#if exceptionsText}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Needs attention</p><p style="margin:0 0 8px;font-size:14px;color:#b45309;white-space:pre-line;">{{exceptionsText}}</p>{{/if}}
             {{#if notes}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Sitter's notes</p><p style="margin:0 0 8px;font-size:14px;color:#1e293b;white-space:pre-line;">{{notes}}</p>{{/if}}
+            {{#if shopLine}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Shop till tonight</p><p style="margin:0;font-size:14px;color:#1e293b;">🛒 {{shopLine}}</p>{{/if}}
           </td>
         </tr>
       </table>
+      {{#if shopReviewText}}<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fcd34d;">
+            <p style="margin:0 0 6px;font-size:14px;color:#92400e;font-weight:600;">To do: {{shopReviewText}}</p>
+            <p style="margin:0;font-size:14px;"><a href="{{shopReviewUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Review and tick them off →</a></p>
+          </td>
+        </tr>
+      </table>{{/if}}
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">{{linkLabel}} →</a>
       </p>
     `,
   },
@@ -2410,7 +2419,7 @@ const templates: Record<string, EmailTemplate> = {
         end-of-night lock-up report. They've been sent a reminder. Worth a check the studio was closed up OK.
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">{{linkLabel}} →</a>
       </p>
     `,
   },
@@ -2703,6 +2712,15 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{handlingSentence}} A copy of the notice is attached.</p>
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
     `,
+  },
+
+  // Sent when a review is marked complete (spec §5.5). Always with
+  // bodyHtmlOverride — the summary, actions and any pay change are assembled
+  // per person in services/staff-review-followup.ts.
+  staff_review_followup: {
+    variant: 'internal',
+    subject: 'Your review — {{reviewDate}}',
+    body: `<p>This template should be sent with bodyHtmlOverride. If you're seeing this, the caller forgot.</p>`,
   },
 
 };

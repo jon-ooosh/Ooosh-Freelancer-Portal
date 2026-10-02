@@ -8,6 +8,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import OohComplianceTab from '../components/OohComplianceTab';
 import PcnHistorySection from '../components/PcnHistorySection';
+import { ClaimsSection } from '../components/claims/format';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
@@ -1062,7 +1063,13 @@ function DriverDetailContent() {
             onVerificationAction={handleVerificationAction}
           />
         )}
-        {activeTab === 'hires' && <HireHistoryTab history={hireHistory} />}
+        {activeTab === 'hires' && (
+          <>
+            {/* Insurance claims where this driver was identified — only when any exist. */}
+            <ClaimsSection entityType="driver" entityId={driver.id} hideWhenEmpty />
+            <HireHistoryTab history={hireHistory} />
+          </>
+        )}
         {activeTab === 'ooh' && <OohComplianceTab driverId={driver.id} />}
         {activeTab === 'pcns' && (
           <PcnHistorySection
@@ -1178,6 +1185,17 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
   const [adjustedExcess, setAdjustedExcess] = useState('');
   const [showResolve, setShowResolve] = useState(false);
   const [error, setError] = useState('');
+  // Date the driver was referred to the insurer. Required to resolve as
+  // approved/declined (backend enforces it too); pre-filled when "Mark as
+  // Referred" already stamped one. Also used to backfill a resolved
+  // referral that predates the requirement.
+  const [referralDate, setReferralDate] = useState(toInputDate(driver.referral_date));
+  const [savingDate, setSavingDate] = useState(false);
+  // Follow the record — "Mark as Referred" stamps a date after mount.
+  useEffect(() => {
+    setReferralDate(toInputDate(driver.referral_date));
+  }, [driver.referral_date]);
+  const today = new Date().toISOString().split('T')[0];
   // Mirror the driver's existing dates exactly — empty stays empty.
   // Falling back to today on null fields would let staff inadvertently
   // FABRICATE a check date that never happened (e.g. DVLA date for a
@@ -1218,7 +1236,13 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
     || driver.referral_status === 'declined'
     || driver.referral_status === 'waived';
 
+  const needsReferralDate = outcome === 'approved' || outcome === 'declined';
+
   async function handleResolve() {
+    if (needsReferralDate && !referralDate) {
+      setError('Enter the date the driver was referred to the insurer.');
+      return;
+    }
     setResolving(true);
     setError('');
     try {
@@ -1226,6 +1250,9 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
         outcome,
         notes,
       };
+      if (needsReferralDate) {
+        payload.referral_date = referralDate;
+      }
       if (adjustedExcess) {
         payload.adjusted_excess = parseFloat(adjustedExcess);
       }
@@ -1239,6 +1266,24 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
       setError(err.message || 'Failed to resolve referral');
     } finally {
       setResolving(false);
+    }
+  }
+
+  // Backfill the referral date on an already-resolved referral (resolved
+  // before the date was required, so the panel read "—" with no way to fix it).
+  async function saveReferralDate() {
+    if (!referralDate) return;
+    setSavingDate(true);
+    setError('');
+    try {
+      const result = await api.put<{ data: DriverDetail }>(`/drivers/${driver.id}`, {
+        referral_date: referralDate,
+      });
+      onDriverUpdate(result.data);
+    } catch (err: any) {
+      setError(err.message || 'Failed to save referral date');
+    } finally {
+      setSavingDate(false);
     }
   }
 
@@ -1274,7 +1319,34 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
         <div>
           <dt className="text-xs text-gray-500">Referral Date</dt>
-          <dd className="text-sm text-gray-900">{formatDate(driver.referral_date) || formatDate(driver.created_at)}</dd>
+          {driver.referral_date ? (
+            <dd className="text-sm text-gray-900">{formatDate(driver.referral_date)}</dd>
+          ) : driver.referral_status === 'approved' || driver.referral_status === 'declined' ? (
+            <dd className="text-sm">
+              <span className="text-amber-700">Not recorded</span>
+              <div className="flex items-center gap-1.5 mt-1">
+                <input
+                  type="date"
+                  value={referralDate}
+                  max={today}
+                  onChange={(e) => setReferralDate(e.target.value)}
+                  className="rounded border border-gray-300 px-2 py-1 text-xs"
+                />
+                <button
+                  onClick={saveReferralDate}
+                  disabled={!referralDate || savingDate}
+                  className="px-2 py-1 rounded text-xs font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 disabled:opacity-50"
+                >
+                  {savingDate ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+              {error && !showResolve && <p className="text-xs text-red-600 mt-1">{error}</p>}
+            </dd>
+          ) : (
+            <dd className="text-sm text-gray-500">
+              {driver.referral_status === 'waived' ? 'Not referred (waived)' : 'Not yet referred'}
+            </dd>
+          )}
         </div>
         {driver.referral_notes && (
           <div className="md:col-span-2">
@@ -1294,7 +1366,6 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
               onClick={async () => {
                 setError('');
                 try {
-                  const today = new Date().toISOString().split('T')[0];
                   const result = await api.put<{ data: DriverDetail }>(`/drivers/${driver.id}`, {
                     referral_status: 'pending',
                     referral_date: today,
@@ -1350,6 +1421,19 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
               <p className="text-xs text-gray-400 mt-0.5">Leave blank if standard excess applies</p>
             </div>
           </div>
+
+          {needsReferralDate && (
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Date referred to insurer <span className="text-red-500">*</span></label>
+              <input
+                type="date"
+                value={referralDate}
+                max={today}
+                onChange={(e) => setReferralDate(e.target.value)}
+                className="rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+            </div>
+          )}
 
           <div>
             <label className="block text-xs text-gray-500 mb-1">Resolution Notes</label>

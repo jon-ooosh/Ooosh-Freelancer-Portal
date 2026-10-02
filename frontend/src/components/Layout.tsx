@@ -50,7 +50,6 @@ const navItems: NavItem[] = [
       { path: '/operations/carnets', label: 'Carnets' },
       { path: '/operations/rehearsals', label: 'Rehearsals' },
       { path: '/operations/problems', label: 'Problems' },
-      { path: '/operations/issues', label: 'Issues' },
     ],
   },
   {
@@ -65,6 +64,7 @@ const navItems: NavItem[] = [
       { path: '/vehicles/issues', label: 'Issues' },
       { path: '/vehicles/ve103b', label: 'VE103B Certs' },
       { path: '/vehicles/pcns', label: 'PCNs' },
+      { path: '/vehicles/claims', label: 'Claims' },
       { path: '/vehicles/fleet-map', label: 'Fleet Map' },
       { path: '/vehicles/settings', label: 'Settings' },
     ],
@@ -76,6 +76,7 @@ const navItems: NavItem[] = [
       { path: '/money/overview', label: 'Overview', roles: ['admin', 'manager'] },
       { path: '/money/excess', label: 'Excess', roles: ['admin', 'manager'] },
       { path: '/money/costs', label: 'Costs', roles: ['admin', 'manager', 'staff'] },
+      { path: '/money/shop', label: 'Shop Till' },
     ],
   },
 ];

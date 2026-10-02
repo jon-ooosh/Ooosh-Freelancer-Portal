@@ -96,6 +96,7 @@ export interface Vehicle {
   files: VehicleFile[]
   // Fleet group classification
   isOldSold: boolean              // true = from Monday "Old and sold" group
+  outlineType?: string | null      // damage-marking drawing for insurance claims (null = guess from model)
   // Raw data for anything we haven't mapped yet
   _raw?: Record<string, unknown>
 }

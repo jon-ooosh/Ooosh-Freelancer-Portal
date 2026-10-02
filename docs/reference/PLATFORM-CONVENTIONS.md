@@ -424,7 +424,7 @@ Key fields returned per item on a job:
 
 | Field | Example | Use |
 |---|---|---|
-| `kind` | 0=header, 2=item, 3=**selected prompt**, 4=service/crew | Item classification. `kind:3` = the selected option from a prompt set |
+| `kind` | 0=header, **1=sale/consumable item**, 2=hire item, 3=**selected prompt**, 4=service/crew | Item classification. `kind:3` = the selected option from a prompt set. **`kind:1` verified Sep 2026** (scratch job 16735) — a filter written as `kind === 2` silently misses every sale line; see `docs/SHOP-SALES-SPEC.md` §2.1 |
 | `title` | "Premium LWB Splitter Van - manual gearbox" | Item name. `▶` prefix = has child prompts |
 | `LIST_ID` | "1645" | HH stock item ID (stable across jobs) |
 | `AUTOPULL` | "2823" | Prompt option ID (stable identifier for specific prompt selections) |

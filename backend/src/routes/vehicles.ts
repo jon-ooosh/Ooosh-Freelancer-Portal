@@ -14,7 +14,7 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import {
   verifyFreelancerBookoutToken,
   mintFreelancerBookoutSession,
@@ -40,6 +40,8 @@ import {
   type ConditionReportEmailParams,
 } from '../services/condition-report-email';
 import { getSystemSetting } from './system-settings';
+import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError } from '../services/dvsa-mot';
+import { closeOpenSaleOnRemoval } from '../services/vehicle-sales';
 
 const router = Router();
 
@@ -1047,6 +1049,8 @@ const FLEET_FIELD_MAP: Record<string, string> = {
   is_active: 'is_active', isActive: 'is_active',
   monday_item_id: 'monday_item_id', mondayItemId: 'monday_item_id',
   notes: 'notes',
+  // Damage-marking drawing for insurance claims (migration 261)
+  outline_type: 'outline_type', outlineType: 'outline_type',
   // Setup checklist (migration 089)
   setup_checklist: 'setup_checklist', setupChecklist: 'setup_checklist',
   // Insurance
@@ -1085,6 +1089,8 @@ const FLEET_FIELD_MAP: Record<string, string> = {
 /** Coerce a request value for its target DB column (uppercase reg, stringify jsonb). */
 function coerceFleetValue(key: string, dbCol: string, value: unknown): unknown {
   if (key === 'reg') return String(value).toUpperCase();
+  // "Auto" in the picker sends '' — the CHECK constraint wants NULL (migration 261).
+  if (dbCol === 'outline_type') return value ? value : null;
   if ((dbCol === 'setup_checklist' || dbCol === 'removal_checklist' || dbCol === 'finance_fees') && typeof value !== 'string') {
     return JSON.stringify(value ?? []);
   }
@@ -1193,6 +1199,11 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
     if (result.rows.length === 0) {
       res.status(404).json({ error: 'Vehicle not found' });
       return;
+    }
+
+    // Leaving the fleet ends any open sale on the van (services/vehicle-sales.ts).
+    if (result.rows[0].fleet_group === 'old_sold') {
+      await closeOpenSaleOnRemoval(String(id), req.user?.id ?? null);
     }
 
     res.json(mapDbRowToVehicle(result.rows[0], { includeFinance: financeAllowed }));
@@ -3727,6 +3738,50 @@ router.post('/fleet/:id/forecast/assess', async (req: AuthRequest, res: Response
 });
 
 /**
+ * GET /api/vehicles/fleet/:id/mot-history
+ * The van's DVSA MOT history as last fetched, plus how DVSA's MOT expiry
+ * compares with ours. Drives the Vehicle Detail "MOT history" section.
+ * See services/dvsa-mot.ts (THE definition) and docs/VEHICLE-SALES-SPEC.md §3.
+ */
+router.get('/fleet/:id/mot-history', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const view = await getVehicleMot(String(req.params.id));
+    if (!view) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    res.json({ data: view });
+  } catch (error) {
+    console.error('[vehicles/mot-history] error:', error);
+    res.status(500).json({ error: 'Failed to load MOT history' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:id/mot-history/refresh
+ * Fetch from DVSA now ("Refresh from DVSA" button). Moves mot_due forward
+ * when DVSA knows a later expiry; never backwards. Weekly refresh runs
+ * Mon 07:30 — see config/scheduler.ts.
+ */
+router.post('/fleet/:id/mot-history/refresh', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const view = await refreshVehicleMot(String(req.params.id), req.user!.id);
+    if (!view) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    res.json({ data: view });
+  } catch (error) {
+    if (error instanceof DvsaError) {
+      res.status(error.kind === 'not_configured' ? 503 : 502).json({ error: explainDvsaError(error) });
+      return;
+    }
+    console.error('[vehicles/mot-history] refresh error:', error);
+    res.status(500).json({ error: 'Failed to refresh MOT history' });
+  }
+});
+
+/**
  * GET /api/vehicles/get-recent-events?limit=10
  * Fetch recent events across all vehicles.
  * Scans per-vehicle indexes and returns the most recent N events.
@@ -5933,7 +5988,7 @@ router.get('/list-photos', async (req: AuthRequest, res: Response) => {
 /**
  * GET /api/vehicles/photo/:key
  * Serve a photo from R2 (streaming proxy). Reads from the public bucket
- * for `events/` keys, private bucket otherwise.
+ * for `events/` and `vehicle-sales/` keys, private bucket otherwise.
  */
 router.get('/photo/*', async (req: AuthRequest, res: Response) => {
   try {
@@ -5943,7 +5998,9 @@ router.get('/photo/*', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const isEventPhoto = /^events\//.test(key);
+    // events/ = condition photos; vehicle-sales/ = photos taken for a sale
+    // (services/vehicle-sales.ts). Both live in the public bucket.
+    const isEventPhoto = /^(events|vehicle-sales)\//.test(key);
     const obj = isEventPhoto ? await getFromPublicR2(key) : await getFromR2(key);
     if (!obj.Body) {
       res.status(404).json({ error: 'Photo not found' });
@@ -7089,6 +7146,7 @@ function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?
     mpg: row.mpg ? Number(row.mpg) : null,
     fleetGroup: row.fleet_group as string,
     isActive: row.is_active as boolean,
+    outlineType: (row.outline_type as string | null) ?? null,
     mondayItemId: row.monday_item_id as string | null,
     // Insurance
     insuranceDue: formatDate(row.insurance_due),

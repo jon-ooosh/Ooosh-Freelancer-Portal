@@ -31,6 +31,7 @@ interface Ctx {
   lead_email: string | null;
   lead_role: string | null;
   default_start_date: string | null;
+  mode: 'we_supply' | 'client_arranges';
   authority_terms: string;
 }
 
@@ -120,7 +121,9 @@ export default function CarnetFormPage() {
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(leadEmail.trim())) return setError('Please enter a valid lead email.');
     if (!leadRole.trim()) return setError('Please enter the lead role.');
     if (eu.length + nonEu.length === 0) return setError('Please select at least one country.');
-    if (gmrNeeded === '') return setError('Please answer the GMR question.');
+    // Client-arranged carnets skip the GMR question (we're only the named holder).
+    const askGmr = ctx?.mode !== 'client_arranges';
+    if (askGmr && gmrNeeded === '') return setError('Please answer the GMR question.');
     if (gmrNeeded === 'yes' && !crossings.some((c) => c.crossing_date && c.crossing_location)) return setError('Please add at least one crossing (date + location).');
     if (!accepted) return setError('Please read and accept the terms.');
     if (!hasInk.current) return setError('Please sign in the box.');
@@ -137,7 +140,7 @@ export default function CarnetFormPage() {
           additional_names: extra.filter((n) => n.trim()).map((n) => {
             const parts = n.trim().split(/\s+/); return { first: parts[0], last: parts.slice(1).join(' ') };
           }),
-          gmr_needed: gmrNeeded === 'yes',
+          gmr_needed: askGmr && gmrNeeded === 'yes',
           crossings: gmrNeeded === 'yes' ? crossings.filter((c) => c.crossing_date || c.crossing_location) : [],
           accepted, signature,
         }),
@@ -207,6 +210,7 @@ export default function CarnetFormPage() {
         <button onClick={() => setExtra([...extra, ''])} className="text-sm text-purple-600 hover:text-purple-800">+ Add name</button>
       </Section>
 
+      {ctx?.mode !== 'client_arranges' && (
       <Section title="Do you need us to arrange GMR(s) too? (UK border)" required>
         <div className="flex gap-4 mb-2">
           <label className={cell}><input type="radio" name="gmr" checked={gmrNeeded === 'yes'} onChange={() => setGmrNeeded('yes')} /> Yes</label>
@@ -232,10 +236,16 @@ export default function CarnetFormPage() {
           </div>
         )}
       </Section>
+      )}
 
       {ctx && (
         <Section title="Terms & authority">
-          <div onScroll={onTermsScroll} className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded p-3 max-h-40 overflow-y-auto whitespace-pre-line mb-1">{ctx.authority_terms}</div>
+          <div
+            onScroll={onTermsScroll}
+            // Terms short enough to fit without scrolling count as read (the
+            // client-arranged wording is shorter) — else the checkbox never unlocks.
+            ref={(el) => { if (el && !termsScrolled && el.scrollHeight <= el.clientHeight + 8) setTermsScrolled(true); }}
+            className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded p-3 max-h-40 overflow-y-auto whitespace-pre-line mb-1">{ctx.authority_terms}</div>
           {!termsScrolled && <p className="text-xs text-amber-600 mb-2">Please scroll to the end of the terms to continue.</p>}
           <label className={`${cell} ${!termsScrolled ? 'opacity-50' : ''}`}>
             <input type="checkbox" disabled={!termsScrolled} checked={accepted} onChange={(e) => setAccepted(e.target.checked)} />

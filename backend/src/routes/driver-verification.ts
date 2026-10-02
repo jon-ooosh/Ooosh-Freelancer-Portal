@@ -924,14 +924,21 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
     // Check if requires_referral is being set to true (for notification trigger)
     const referralBeingSet = updates.requiresReferral === true || updates.requires_referral === true;
 
-    // If referral is being set, check if it's a *change* (was previously false/null)
+    // If referral is being set, check if it's a *change* (was previously false/null).
+    // An approved/waived referral counts as already referred: an approval is
+    // STANDING for the driver (jon, Oct 2026), but resolving it clears
+    // requires_referral, so every later form re-declaring the same issue
+    // raised a fresh high-priority "Referral needed" bell (Tyler Meadham).
     let wasAlreadyReferred = false;
     if (referralBeingSet && existing.rows.length > 0) {
       const currentDriver = await query(
-        `SELECT requires_referral FROM drivers WHERE id = $1`,
+        `SELECT requires_referral, referral_status FROM drivers WHERE id = $1`,
         [existing.rows[0].id]
       );
-      wasAlreadyReferred = currentDriver.rows[0]?.requires_referral === true;
+      const cur = currentDriver.rows[0];
+      wasAlreadyReferred = cur?.requires_referral === true
+        || cur?.referral_status === 'approved'
+        || cur?.referral_status === 'waived';
     }
 
     if (existing.rows.length > 0) {
