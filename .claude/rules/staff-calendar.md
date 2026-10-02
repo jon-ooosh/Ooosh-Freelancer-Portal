@@ -369,6 +369,25 @@ which is what the catch-up then fills.
 `getLeaveOverlay()` and not in `staff-absence.ts`, because `staff-absence.ts`
 reads the calendar to price days — a static import both ways is a cycle.
 
+## The calendar shows "Off" — one colour for leave AND absence
+
+Leave and absence are the same violet and the same word on the team calendar
+(jon, Oct 2026). A separate colour for sickness would tell everybody WHY
+somebody is not in, which is what `maskForViewer` exists to prevent; admins
+get the reason on hover from `detail`. Do not split them back apart.
+
+A **requested** (not yet approved) day is `status: 'partial'` with
+`pending: true` — still counted in, because nothing is agreed — and shows as a
+dashed "Requested", never "Part". "Part" is only a genuinely part day.
+
+## An admin's list calls must say whose
+
+`GET /leave` and `GET /overtime` with no `personId` return EVERYBODY's records
+to an admin — the approvals list depends on it. A page showing one person's
+time must pass `personId=` or `mine=1`; My Time once listed the whole team's
+leave as an admin's own. The Staff page's Time off tab is `MyTimePage
+personId={…}` — one page, two viewers, so the figures cannot drift.
+
 ## Special-category data is masked in the service, not the browser
 
 Sickness and parental data is masked inside `staff-day-status.ts`

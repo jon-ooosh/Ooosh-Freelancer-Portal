@@ -188,8 +188,18 @@ function asDays(mins: number, nominal: number | null): string | null {
   return nominal && nominal > 0 ? (mins / nominal).toFixed(1) : null;
 }
 
-export default function MyTimePage() {
+/**
+ * `personId` set = an ADMIN looking at somebody else's time (the Staff page's
+ * Time off tab). Same page, same figures — the two views cannot drift — minus
+ * the things only the person does themselves (logging, booking, withdrawing),
+ * plus Approve / Decline on whatever is still waiting.
+ */
+export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const role = useAuthStore(s => s.user?.role);
+  const adminView = !!personId;
+  // Whose records: that person's, or explicitly MINE — an admin calling the
+  // list endpoints with neither gets the whole team's.
+  const who = personId ? `personId=${encodeURIComponent(personId)}` : 'mine=1';
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [balances, setBalances] = useState<MyBalances | null>(null);
@@ -217,10 +227,10 @@ export default function MyTimePage() {
       const from = `${year}-01-01`;
       const to = `${year}-12-31`;
       const [leave, ot, bal, bh, cd] = await Promise.all([
-        api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}`),
-        api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}`),
+        api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}&${who}`),
+        api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}&${who}`),
         api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>(
-          `/staff-calendar/me/balances?year=${year}`),
+          `/staff-calendar/me/balances?year=${year}${personId ? `&${who}` : ''}`),
         api.get<{ data: string[]; policy?: BhPolicy }>(
           `/staff-calendar/bank-holidays?year=${year}`),
         api.get<{ occurrences: { date: string; label: string }[] }>(
@@ -236,9 +246,27 @@ export default function MyTimePage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load your time');
     } finally { setLoading(false); }
-  }, [year]);
+  }, [year, who, personId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Admin only — the same approve / decline calls the approvals list makes.
+  // A decline needs a reason; the person is told it.
+  async function decide(kind: 'leave' | 'overtime', id: string, action: 'approve' | 'decline') {
+    let note: string | null = null;
+    if (action === 'decline') {
+      note = window.prompt('Why is this declined? They will see this.');
+      if (!note?.trim()) return;
+    }
+    try {
+      await api.post(`/staff-calendar/${kind}/${id}/${action}`, action === 'decline' ? { note } : {});
+      setNotice(action === 'approve' ? 'Approved.' : 'Declined.');
+      setError(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${action}`);
+    }
+  }
 
   function changeView(v: 'list' | 'calendar') {
     setView(v);
@@ -316,7 +344,7 @@ export default function MyTimePage() {
       {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
       {notice && <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{notice}</div>}
 
-      {!hasStaffRecord && (
+      {!hasStaffRecord && !adminView && (
         <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-900">
           <strong className="block">Your login isn&apos;t linked to a staff record.</strong>
           Your hours, holiday and overtime all hang off a staff record, and this login
@@ -336,6 +364,10 @@ export default function MyTimePage() {
       <StatCards balances={balances} year={year} onYear={changeYear}
         pendingOvertime={pendingOvertime} />
 
+      {adminView ? (
+        <MobileTiles balances={balances} year={year} onYear={changeYear}
+          pendingOvertime={pendingOvertime} />
+      ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
         <div className="lg:col-span-2">
           <LogOvertime
@@ -404,6 +436,7 @@ export default function MyTimePage() {
           </div>
         </div>
       </div>
+      )}
 
       {booking && (
         <BookTimeOff key={`${booking.type}:${booking.seed}`}
@@ -416,7 +449,7 @@ export default function MyTimePage() {
       <section className="bg-white border border-gray-200 rounded-2xl sm:rounded-xl overflow-hidden">
         <div className="px-4 sm:px-5 py-3.5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-baseline gap-x-2.5">
-            <h2 className="text-[17px] font-semibold text-gray-900">Your time</h2>
+            <h2 className="text-[17px] font-semibold text-gray-900">{adminView ? 'Time off and overtime' : 'Your time'}</h2>
             <span className="hidden sm:inline text-[13px] text-gray-500">Holiday, overtime and company days together</span>
           </div>
           <div className="flex bg-gray-100 rounded-lg p-[3px]">
@@ -436,7 +469,8 @@ export default function MyTimePage() {
           <TimeList year={year} requests={requests} overtime={overtime} companyDays={companyDays}
             bankHolidaysToBook={bh.toBook} freshIds={freshIds}
             onWithdraw={withdraw} onCancelOvertime={cancelOvertime}
-            onBook={isPastYear ? undefined : (d) => openBooking('holiday', d)} />
+            onDecide={adminView ? decide : undefined}
+            onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         ) : (
           <TimeCalendar month={calMonth}
             onMonth={(next) => {
@@ -448,7 +482,7 @@ export default function MyTimePage() {
             onThisMonth={() => changeYear(CURRENT_YEAR)}
             requests={requests} overtime={overtime} companyDays={companyDays}
             bankHolidays={bankHolidays} bankHolidaysToBook={bh.toBook}
-            onBook={isPastYear ? undefined : (d) => openBooking('holiday', d)} />
+            onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         )}
       </section>
     </div>
@@ -1394,7 +1428,7 @@ interface TimeRow {
   statusClass: string;
   dot: string;
   fresh?: boolean;
-  action?: { label: string; onClick: () => void; className: string };
+  actions?: { label: string; onClick: () => void; className: string }[];
 }
 
 const statusWord = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -1406,10 +1440,23 @@ const DEAD = new Set(['declined', 'cancelled', 'withdrawn']);
  * IS time off — they just did not have to ask for it and it cost nothing — so
  * it sits in the same list as their own bookings.
  */
-function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook }: {
+type Decide = (kind: 'leave' | 'overtime', id: string, action: 'approve' | 'decline') => void;
+
+/** What a pending row offers: the person withdraws it; an admin decides it. */
+function pendingActions(kind: 'leave' | 'overtime', id: string, onWithdraw: () => void, onDecide?: Decide) {
+  return onDecide
+    ? [
+        { label: 'Approve', onClick: () => onDecide(kind, id, 'approve'), className: 'text-emerald-700 font-semibold' },
+        { label: 'Decline', onClick: () => onDecide(kind, id, 'decline'), className: 'text-red-600' },
+      ]
+    : [{ label: 'Withdraw', onClick: onWithdraw, className: 'text-red-600' }];
+}
+
+function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
+  onDecide?: Decide;
 }): TimeRow[] {
   const rows: TimeRow[] = [];
 
@@ -1430,7 +1477,7 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
       amount: '', amountClass: '',
       pill: 'Not booked', pillClass: 'bg-amber-100 text-amber-800', statusClass: 'text-amber-800',
       dot: 'bg-amber-500',
-      action: onBook ? { label: 'Book it', onClick: () => onBook(d), className: 'text-ooosh-600 font-semibold' } : undefined,
+      actions: onBook ? [{ label: 'Book it', onClick: () => onBook(d), className: 'text-ooosh-600 font-semibold' }] : undefined,
     });
   }
 
@@ -1448,8 +1495,8 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
       statusClass: e.status === 'pending' ? 'text-amber-800' : e.status === 'approved' ? 'text-emerald-700' : 'text-gray-500',
       dot: dead ? 'bg-gray-300' : e.status === 'pending' ? 'bg-amber-500' : 'bg-ooosh-600',
       fresh: freshIds.includes(e.id),
-      action: e.status === 'pending'
-        ? { label: 'Withdraw', onClick: () => onCancelOvertime(e.id), className: 'text-red-600' } : undefined,
+      actions: e.status === 'pending'
+        ? pendingActions('overtime', e.id, () => onCancelOvertime(e.id), onDecide) : undefined,
     });
   }
 
@@ -1475,8 +1522,8 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
       statusClass: r.status === 'pending' ? 'text-amber-800' : r.status === 'approved' ? 'text-emerald-700'
         : r.status === 'declined' ? 'text-red-700' : 'text-gray-500',
       dot: dead ? 'bg-gray-300' : isToil ? 'bg-slate-400' : 'bg-ooosh-600',
-      action: r.status === 'pending'
-        ? { label: 'Withdraw', onClick: () => onWithdraw(r.id), className: 'text-red-600' } : undefined,
+      actions: r.status === 'pending'
+        ? pendingActions('leave', r.id, () => onWithdraw(r.id), onDecide) : undefined,
     });
   }
   return rows;
@@ -1486,6 +1533,7 @@ function TimeList(props: {
   year: number; requests: LeaveRequest[]; overtime: OvertimeEntry[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
+  onDecide?: Decide;
 }) {
   const rows = buildRows(props);
   const upcoming = rows.filter(r => r.until >= TODAY).sort((a, b) => a.date.localeCompare(b.date));
@@ -1520,11 +1568,11 @@ function TimeList(props: {
             <span className={`hidden sm:inline-flex text-xs px-[9px] py-[3px] rounded-full whitespace-nowrap ${r.pillClass}`}>
               {r.pill}
             </span>
-            {r.action && (
-              <button onClick={r.action.onClick} className={`text-xs sm:text-sm hover:underline ${r.action.className}`}>
-                {r.action.label}
+            {r.actions?.map(a => (
+              <button key={a.label} onClick={a.onClick} className={`text-xs sm:text-sm hover:underline ${a.className}`}>
+                {a.label}
               </button>
-            )}
+            ))}
           </div>
         </div>
       ))}
