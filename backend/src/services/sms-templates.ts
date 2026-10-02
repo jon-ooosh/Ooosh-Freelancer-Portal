@@ -17,6 +17,21 @@ const templates: Record<string, SmsTemplate> = {
       `Please park considerately and do NOT block the neighbours' gates. ` +
       `Full instructions for how to return are: {{parkingFormUrl}}`,
   },
+
+  // Possible insurance claim (docs/INCIDENT-CLAIMS-SPEC.md §21): sent with the
+  // first email of a client's form link, when we have their mobile. GSM
+  // characters only (no dashes / curly quotes) so it stays one 160-char segment.
+  claim_form_link: {
+    body:
+      `Ooosh! Tours: please fill in our incident form for van {{vehicleReg}}{{jobRef}}: {{formUrl}}`,
+  },
+
+  // Sent alongside the 3rd email reminder (services/claim-chase.ts).
+  claim_form_reminder: {
+    body:
+      `Ooosh! Tours: reminder to finish our incident form for van {{vehicleReg}}{{jobRef}} ` +
+      `({{done}}/{{total}} done): {{formUrl}}`,
+  },
 };
 
 export default templates;

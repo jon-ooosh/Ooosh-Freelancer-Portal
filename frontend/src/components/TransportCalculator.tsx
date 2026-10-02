@@ -273,11 +273,18 @@ export default function TransportCalculator({
   const [success, setSuccess] = useState<string | null>(null);
   const [settings, setSettings] = useState<CalculatorSettings | null>(null);
   const [formData, setFormData] = useState<FormData>(INITIAL_FORM);
-  const [venues, setVenues] = useState<VenueOption[]>([]);
+  // Venue SEARCH RESULTS — not "all venues". See searchVenues() for why that
+  // distinction is the whole bug this replaced.
+  const [venueResults, setVenueResults] = useState<VenueOption[]>([]);
+  const [venueSearching, setVenueSearching] = useState(false);
+  const [venuesSearched, setVenuesSearched] = useState(false);
   const [venueSearch, setVenueSearch] = useState('');
   const [venueDropdownOpen, setVenueDropdownOpen] = useState(false);
   const [step, setStep] = useState(1);
   const venueDropdownRef = useRef<HTMLDivElement>(null);
+  const venueSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped per search so a slow earlier reply can't overwrite a newer one.
+  const venueReqSeq = useRef(0);
   // Track original HireHop dates for change warnings
   const [hhOriginalDate, setHhOriginalDate] = useState('');
   const [hhOriginalEndDate, setHhOriginalEndDate] = useState('');
@@ -321,17 +328,38 @@ export default function TransportCalculator({
       collectionDate: parsedEndDate || parsedDate, // Pre-fill collection date from HireHop end date (or start)
     });
     setVenueSearch(venueName || '');
+    setVenueResults([]);
+    setVenuesSearched(false);
+    setVenueSearching(false);
 
-    Promise.all([loadSettings(), loadVenues()]).then(() => setLoading(false));
+    loadSettings().then(() => setLoading(false));
   }, [isOpen]);
 
-  // Pre-fill venue if provided
+  // Drop any pending debounce when the modal closes or unmounts.
+  useEffect(() => () => {
+    if (venueSearchTimer.current) clearTimeout(venueSearchTimer.current);
+  }, []);
+
+  // Pre-fill venue if provided.
+  //
+  // Fetched BY ID rather than looked up in a loaded list. The old version
+  // searched the bulk-loaded 500, so for any venue past that cut-off the
+  // pre-fill silently did nothing: the job's saved miles/drive-time never
+  // landed and whoever was quoting re-typed them from scratch, believing the
+  // venue had none.
   useEffect(() => {
-    if (venueId && venues.length > 0) {
-      const v = venues.find(v => v.id === venueId);
-      if (v) handleVenueSelect(v);
-    }
-  }, [venueId, venues]);
+    if (!isOpen || !venueId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const v = await api.get<VenueOption>(`/venues/${venueId}`);
+        if (!cancelled && v?.id) handleVenueSelect(v);
+      } catch {
+        // Venue deleted or unreadable — leave the free-text venueName in place.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [venueId, isOpen]);
 
   // Close venue dropdown on outside click
   useEffect(() => {
@@ -379,12 +407,45 @@ export default function TransportCalculator({
     }
   }
 
-  async function loadVenues() {
+  /**
+   * Venue lookup runs SERVER-SIDE, debounced.
+   *
+   * This used to bulk-load `/venues?limit=500` when the modal opened and filter
+   * that array in the browser. With 573 live venues (Sep 2026) every venue
+   * alphabetically past #500 was invisible here — "The Union Chapel" sat at
+   * #506 and simply could not be found. Worse, the only thing the dropdown
+   * could then offer was "create as new venue", so the cut-off quietly minted
+   * duplicates of the very venues it was hiding (three Union Chapel records by
+   * Sep 2026) and every duplicate landed past the cut-off too.
+   *
+   * Raising the limit only moves the cliff, so the fetch is a search now —
+   * the same call VenuePicker already made correctly. The backend matches
+   * name, address, city and postcode.
+   */
+  async function searchVenues(term: string) {
+    const trimmed = term.trim();
+    if (trimmed.length < 2) {
+      venueReqSeq.current++; // invalidate anything still in flight
+      setVenueResults([]);
+      setVenueSearching(false);
+      setVenuesSearched(false);
+      return;
+    }
+    const seq = ++venueReqSeq.current;
+    setVenueSearching(true);
     try {
-      const data = await api.get<{ data: VenueOption[] }>('/venues?limit=500');
-      setVenues(data.data);
+      const data = await api.get<{ data: VenueOption[] }>(
+        `/venues?search=${encodeURIComponent(trimmed)}&limit=10`
+      );
+      if (seq !== venueReqSeq.current) return; // a newer search already answered
+      setVenueResults(data.data);
+      setVenuesSearched(true);
     } catch {
-      console.error('Failed to load venues');
+      if (seq !== venueReqSeq.current) return;
+      setVenueResults([]);
+      setVenuesSearched(false);
+    } finally {
+      if (seq === venueReqSeq.current) setVenueSearching(false);
     }
   }
 
@@ -418,15 +479,27 @@ export default function TransportCalculator({
     }));
   }
 
+  // Queue a debounced search. `venueSearching` is flipped HERE rather than
+  // inside searchVenues so the dropdown reads "Searching…" during the debounce
+  // window too — otherwise every keystroke flashes an empty bordered box.
+  function queueVenueSearch(text: string) {
+    if (venueSearchTimer.current) clearTimeout(venueSearchTimer.current);
+    if (text.trim().length >= 2) setVenueSearching(true);
+    venueSearchTimer.current = setTimeout(() => searchVenues(text), 250);
+  }
+
   function handleVenueInput(text: string) {
     setVenueSearch(text);
     setVenueDropdownOpen(true);
+    setVenuesSearched(false);
     setFormData(prev => ({
       ...prev,
       destination: text,
+      // Typing overrides any existing link; selecting a result sets both back.
       selectedVenueId: null,
-      isNewVenue: text.length > 0 && !venues.some(v => v.name.toLowerCase() === text.toLowerCase()),
+      isNewVenue: text.trim().length > 0,
     }));
+    queueVenueSearch(text);
   }
 
   const updateExpense = useCallback((updated: QuoteExpenseItem) => {
@@ -489,7 +562,7 @@ export default function TransportCalculator({
         default_miles_from_base: miles !== null && !isNaN(miles) ? miles : null,
         default_drive_time_mins: driveTime !== null && !isNaN(driveTime) ? driveTime : null,
       };
-      setVenues(prev => [...prev, created]);
+      setVenueResults([created]);
       setVenueSearch(created.name);
       setShowVenueForm(false);
       handleVenueSelect(created);
@@ -636,8 +709,6 @@ export default function TransportCalculator({
   const isStep1Valid = formData.jobType !== '' && formData.jobDate !== '' && (isCrewedJob || formData.whatIsIt !== '');
   const isStep2Valid = isCrewedJob ? true : (formData.destination !== '' && formData.distanceMiles >= 0);
   const isStep3Valid = !isCrewedJob || (formData.workType !== '' && (formData.workType !== 'other' || formData.workTypeOther.trim() !== ''));
-
-  const filteredVenues = venues.filter(v => v.name.toLowerCase().includes(venueSearch.toLowerCase())).slice(0, 10);
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50">
@@ -888,13 +959,20 @@ export default function TransportCalculator({
                           type="text"
                           value={venueSearch}
                           onChange={(e) => handleVenueInput(e.target.value)}
-                          onFocus={() => setVenueDropdownOpen(true)}
+                          onFocus={() => {
+                            setVenueDropdownOpen(true);
+                            // The field arrives pre-filled from the job, so no
+                            // search has run yet — open on matches, not on air.
+                            if (!venuesSearched && venueSearch.trim().length >= 2) {
+                              queueVenueSearch(venueSearch);
+                            }
+                          }}
                           placeholder="Search venues..."
                           className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-ooosh-500"
                         />
                         {venueDropdownOpen && venueSearch.length > 0 && (
                           <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
-                            {filteredVenues.map(v => (
+                            {venueResults.map(v => (
                               <button key={v.id} type="button" onClick={() => handleVenueSelect(v)}
                                 className="w-full px-4 py-2 text-left hover:bg-gray-100 border-b border-gray-50">
                                 <div className="flex justify-between items-center">
@@ -907,10 +985,28 @@ export default function TransportCalculator({
                                 </div>
                               </button>
                             ))}
-                            {filteredVenues.length === 0 && (
+                            {venueSearch.trim().length < 2 && (
+                              <div className="px-4 py-2 text-gray-500 text-sm">Keep typing to search venues…</div>
+                            )}
+                            {venueSearch.trim().length >= 2 && venueSearching && (
+                              <div className="px-4 py-2 text-gray-500 text-sm">Searching…</div>
+                            )}
+                            {venuesSearched && !venueSearching && venueResults.length === 0 && (
                               <div className="px-4 py-2 text-gray-500 text-sm">No matching venues</div>
                             )}
-                            {venueSearch.trim().length > 0 && !venues.some(v => v.name.toLowerCase() === venueSearch.trim().toLowerCase()) && (
+                            {venueSearch.trim().length >= 2 && !venueSearching && !venuesSearched && (
+                              <div className="px-4 py-2 text-amber-600 text-sm">
+                                Couldn't search venues — the typed name will still be used.
+                              </div>
+                            )}
+                            {/*
+                              Offer "create" only once a search has actually come
+                              back with no exact match. Offering it mid-flight is
+                              how you get a duplicate of the venue that was about
+                              to appear — the failure that produced three Union
+                              Chapel records.
+                            */}
+                            {venuesSearched && !venueSearching && !venueResults.some(v => v.name.trim().toLowerCase() === venueSearch.trim().toLowerCase()) && (
                               <button
                                 type="button"
                                 onClick={openVenueForm}
@@ -933,6 +1029,18 @@ export default function TransportCalculator({
                             <p className="text-xs text-amber-600 mt-0.5">📍 Changed from saved values — will update venue on save</p>
                           )}
                         </div>
+                      )}
+                      {/* Unlinked free text. This path already offers "Create
+                          … as new venue" above, so the warning is about the
+                          consequence of declining it rather than a missing
+                          affordance: the freelancer portal reads the address
+                          off `venues v ON v.id = q.venue_id`, so no link means
+                          the driver gets a name and no address. Matches the
+                          hint in VenuePicker. */}
+                      {!formData.selectedVenueId && !showVenueForm && formData.destination.trim().length > 0 && (
+                        <p className="text-xs text-amber-600 mt-1">
+                          ⚠ Not linked to a venue record — the freelancer won't see an address
+                        </p>
                       )}
 
                       {showVenueForm && (

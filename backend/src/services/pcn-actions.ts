@@ -6,19 +6,25 @@
  * £35+VAT handling charge. Replaces the legacy Netlify send-email.js +
  * hirehop-charge.js action handlers.
  *
- * Recipient rule:
- *   - driver-facing actions (transfer_liability / pay_direct) → the matched
- *     driver's email, else the job's client contacts, else info@.
- *   - client-facing actions (request_driver_id / pay_recharge) → the job's
- *     client contacts, else info@.
- *   - an explicit email_override always wins.
+ * Recipient resolution lives in services/pcn-recipient.ts — do NOT re-derive it
+ * here. That helper is shared with the chase ladder and the pre-send preview so
+ * the address staff are shown on the confirm panel is provably the one that
+ * gets used. It reads BOTH driver identities (drivers + people); the bare
+ * `drivers` join this file used to carry is what silently emailed a client
+ * about a freelancer's PCN (job 16373, Sep 2026).
  */
 import { query } from '../config/database';
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { collectNoticeAttachments } from './pcn-documents';
 import { addPcnFineLine } from './pcn-recharge';
-import { resolveClientEmailTarget } from '../services/money-emails';
+import {
+  loadPcnWithDrivers,
+  resolvePcnRecipient,
+  type PcnRow,
+  type PcnAudience,
+  type PcnRecipientKind,
+} from './pcn-recipient';
 import { getSystemSettings } from '../routes/system-settings';
 import { getFrontendUrl } from '../config/app-urls';
 import crypto from 'crypto';
@@ -35,18 +41,35 @@ export type PcnAction =
   | 'internal_freelancer'
   | 'query';
 
-// action → (status, action_path, driver-facing?, charges-by-default?)
-const ACTION_MAP: Record<PcnAction, {
-  status: string; action_path: string | null; driverFacing: boolean; chargesByDefault: boolean;
+// action → (status, action_path, who it's addressed to, charges-by-default?)
+//
+// `audience` drives resolvePcnRecipient. 'freelancer_only' NEVER falls through
+// to a client contact or info@ — an internal-freelancer notice is our business,
+// not the client's, so "no freelancer on file" must mean "no email sent".
+export const ACTION_MAP: Record<PcnAction, {
+  status: string; action_path: string | null; audience: PcnAudience; chargesByDefault: boolean;
 }> = {
-  transfer_liability:  { status: 'liability_transferred', action_path: 'transfer_liability',  driverFacing: true,  chargesByDefault: true },
-  pay_direct:          { status: 'driver_notified_pay',   action_path: 'pay_direct',          driverFacing: true,  chargesByDefault: false },
-  pay_recharge:        { status: 'paid_recharged',        action_path: 'pay_recharge',        driverFacing: false, chargesByDefault: true },
-  request_driver_id:   { status: 'awaiting_driver_id',    action_path: null,                  driverFacing: false, chargesByDefault: false },
-  internal_ooosh:      { status: 'internal_ooosh',        action_path: 'internal_ooosh',      driverFacing: false, chargesByDefault: false },
-  internal_freelancer: { status: 'internal_freelancer',   action_path: 'internal_freelancer', driverFacing: false, chargesByDefault: false },
-  query:               { status: 'under_query',           action_path: 'query',               driverFacing: false, chargesByDefault: false },
+  transfer_liability:  { status: 'liability_transferred', action_path: 'transfer_liability',  audience: 'driver',           chargesByDefault: true },
+  pay_direct:          { status: 'driver_notified_pay',   action_path: 'pay_direct',          audience: 'driver',           chargesByDefault: false },
+  pay_recharge:        { status: 'paid_recharged',        action_path: 'pay_recharge',        audience: 'client',           chargesByDefault: true },
+  request_driver_id:   { status: 'awaiting_driver_id',    action_path: null,                  audience: 'client',           chargesByDefault: false },
+  internal_ooosh:      { status: 'internal_ooosh',        action_path: 'internal_ooosh',      audience: 'client',           chargesByDefault: false },
+  internal_freelancer: { status: 'internal_freelancer',   action_path: 'internal_freelancer', audience: 'freelancer_only',  chargesByDefault: false },
+  query:               { status: 'under_query',           action_path: 'query',               audience: 'client',           chargesByDefault: false },
 };
+
+// Which template each action sends, if any. `internal_freelancer` is opt-in:
+// it only mails when staff tick "notify the freelancer" on the confirm panel.
+export function templateForAction(action: PcnAction, fineType?: string | null): string | null {
+  switch (action) {
+    case 'transfer_liability':  return 'pcn_transfer_liability';
+    case 'pay_direct':          return 'pcn_pay_direct';
+    case 'pay_recharge':        return 'pcn_pay_recharge';
+    case 'request_driver_id':   return fineType === 'police_nip' ? 'pcn_police_nip_urgent' : 'pcn_request_driver_id';
+    case 'internal_freelancer': return 'pcn_internal_freelancer';
+    default:                    return null;
+  }
+}
 
 const fmtDate = (d: string | Date | null | undefined) =>
   d ? new Date(d).toLocaleDateString('en-GB') : '—';
@@ -59,11 +82,20 @@ interface ApplyOptions {
   add_charge?: boolean;       // override the default for the action
   email_override?: string | null;
   resolution_note?: string | null;  // "they paid direct / deduct from next invoice" — posterity
+  notify_freelancer?: boolean;      // internal_freelancer only — opt-in heads-up to the freelancer
+  freelancer_message?: string | null; // optional line added to that email (kept separate from
+                                      // resolution_note, which is internal and must not leak out)
 }
 
 interface ActionResult {
   status: string;
-  emailed: { sent: boolean; to: string | null; fallback: boolean; error: string | null };
+  emailed: {
+    sent: boolean; to: string | null; fallback: boolean; error: string | null;
+    kind: PcnRecipientKind | null;      // where the address came from
+    clientFallback: boolean;            // a driver-facing action that landed on the client
+    label: string | null;               // human summary, e.g. "Lewis Hoadley (freelancer)"
+    skippedReason: string | null;       // set when there was nobody to email
+  };
   charge: { attempted: boolean; applied: boolean; message: string | null };
   fineRecharge: { attempted: boolean; applied: boolean; amount: number | null; message: string | null };
 }
@@ -121,14 +153,8 @@ export async function applyPcnAction(
   opts: ApplyOptions,
   userId: string
 ): Promise<ActionResult> {
-  const r = await query(
-    `SELECT p.*, d.full_name AS driver_name, d.email AS driver_email
-     FROM pcns p LEFT JOIN drivers d ON d.id = p.driver_id
-     WHERE p.id = $1 AND p.is_deleted = false`,
-    [pcnId]
-  );
-  if (r.rows.length === 0) throw new Error('PCN not found');
-  const pcn = r.rows[0];
+  const pcn = await loadPcnWithDrivers(pcnId);
+  if (!pcn) throw new Error('PCN not found');
 
   const map = ACTION_MAP[opts.action];
   const addCharge = (opts.add_charge ?? map.chargesByDefault) === true;
@@ -139,7 +165,7 @@ export async function applyPcnAction(
 
   const result: ActionResult = {
     status: map.status,
-    emailed: { sent: false, to: null, fallback: false, error: null },
+    emailed: { sent: false, to: null, fallback: false, error: null, kind: null, clientFallback: false, label: null, skippedReason: null },
     charge: { attempted: false, applied: false, message: null },
     fineRecharge: { attempted: false, applied: false, amount: null, message: null },
   };
@@ -189,16 +215,12 @@ export async function applyPcnAction(
   }
 
   // ── 2. Client / driver email ──
-  const templateByAction: Record<string, string | null> = {
-    transfer_liability: 'pcn_transfer_liability',
-    pay_direct: 'pcn_pay_direct',
-    pay_recharge: 'pcn_pay_recharge',
-    request_driver_id: pcn.fine_type === 'police_nip' ? 'pcn_police_nip_urgent' : 'pcn_request_driver_id',
-    internal_ooosh: null,
-    internal_freelancer: null,
-    query: null,
-  };
-  const templateId = templateByAction[opts.action];
+  // internal_freelancer is the one opt-in template: it only mails when staff
+  // ticked "notify the freelancer" on the confirm panel.
+  const wantsEmail = opts.action === 'internal_freelancer'
+    ? opts.notify_freelancer === true
+    : opts.send_email;
+  const templateId = wantsEmail ? templateForAction(opts.action, pcn.fine_type as string | null) : null;
 
   // Pay-direct closed loop: mint a status-bound receipt-upload token so the
   // email carries a private "upload your proof" link. Reused by the chase
@@ -210,84 +232,99 @@ export async function applyPcnAction(
     receiptUploadUrl = `${getFrontendUrl()}/pcn-receipt/${token}`;
   }
 
-  if (opts.send_email && templateId) {
-    try {
-      // Resolve recipient
-      let to: string | null = opts.email_override?.trim() || null;
-      let recipientName = pcn.driver_name || 'Sir/Madam';
-      let cc: string[] = [];
-      let fallback = false;
-      let clientName: string | null = pcn.client_organisation_name || null;
+  if (templateId) {
+    // Resolve ONCE, via the shared helper — the same call the preview endpoint
+    // makes, so what staff confirmed on screen is what actually gets used.
+    const rcpt = await resolvePcnRecipient(pcn, {
+      audience: map.audience,
+      templateId,
+      emailOverride: opts.email_override,
+    });
 
-      if (!to && map.driverFacing && pcn.driver_email) {
-        to = pcn.driver_email;
-        recipientName = pcn.driver_name || recipientName;
+    if (!rcpt.to) {
+      // Only reachable on the freelancer-only path, which deliberately has no
+      // client / info@ fallback. Say so rather than sending it somewhere else.
+      result.emailed.skippedReason = rcpt.reason || 'No recipient could be resolved.';
+    } else {
+      try {
+        const to = rcpt.to;
+        const cc = rcpt.cc;
+
+        // Notice attachments (front + back, best-effort) — the back page usually
+        // carries the issuer's payment options, which the client templates point to.
+        const attachments = await collectNoticeAttachments(pcn);
+
+        const reduced = money(pcn.reduced_amount);
+        const fineLine = money(pcn.fine_amount)
+          ? `${money(pcn.fine_amount)}${reduced ? ` (${reduced} if paid by ${fmtDate(pcn.reduced_deadline)})` : ''}`
+          : '—';
+        // Reflect what actually landed on the client's account (don't over-claim
+        // the fine if the recharge couldn't push to a locked/closed HH job).
+        let handlingSentence: string;
+        if (opts.action === 'pay_recharge') {
+          const fineBilled = result.fineRecharge.applied;
+          const adminBilled = result.charge.applied;
+          const fineStr = fineBilled && result.fineRecharge.amount != null
+            ? `the fine of ${money(result.fineRecharge.amount)}`
+            : 'the fine';
+          if (fineBilled && adminBilled) handlingSentence = `We've added ${fineStr} plus an administration fee of ${handlingFee}+VAT to your account.`;
+          else if (fineBilled) handlingSentence = `We've added ${fineStr} to your account.`;
+          else if (adminBilled) handlingSentence = `We've added an administration fee of ${handlingFee}+VAT to your account; the fine will be added separately.`;
+          else handlingSentence = `The fine and any administration fee will be added to your account.`;
+        } else {
+          handlingSentence = addCharge ? `As per our hire terms, an administration fee of ${handlingFee}+VAT applies for processing this notice.` : '';
+        }
+        // A freelancer in one of our vans wasn't "hired" the vehicle — say what
+        // actually happened, or the driver-facing templates read as nonsense to
+        // the very people this fix routes them to.
+        const noticeContext = rcpt.kind === 'freelancer'
+          ? 'for one of our vehicles you were driving at the time of the alleged offence'
+          : 'for a vehicle hired to you at the time of the alleged offence';
+        const jobRef = pcn.hh_job_number ? `#${pcn.hh_job_number}` : '';
+        const jobRefSentence = pcn.hh_job_number ? ` (our ref #${pcn.hh_job_number})` : '';
+
+        await emailService.send(templateId, {
+          to,
+          cc: cc.length ? cc : undefined,
+          attachments: attachments.length ? attachments : undefined,
+          variables: {
+            // {{driverName}} greets the driver-facing templates, {{clientName}}
+            // the client-facing ones — not interchangeable, so resolve each.
+            driverName: rcpt.name,
+            clientName: rcpt.clientName || 'Sir/Madam',
+            recipientName: rcpt.name,
+            vehicleReg: pcn.vehicle_reg || '—',
+            pcnReference: pcn.reference || '—',
+            issuer: pcn.issuing_authority || '—',
+            offenceDateTime: `${fmtDate(pcn.offence_at)}${pcn.offence_time_text ? ` ${pcn.offence_time_text}` : ''}`,
+            offenceDate: fmtDate(pcn.offence_at),
+            location: pcn.location || '—',
+            fineLine,
+            finalDeadline: fmtDate(pcn.final_deadline),
+            handlingFee,
+            handlingSentence,
+            noticeContext,
+            staffMessage: opts.freelancer_message?.trim() || '',
+            driverListSentence: '',
+            jobRef,
+            jobRefSentence,
+            receiptUploadUrl,
+            oooshEmail: OOOSH_EMAIL,
+            oooshPhone: OOOSH_PHONE,
+          },
+        });
+        result.emailed = {
+          sent: true, to, fallback: rcpt.isInfoFallback, error: null,
+          kind: rcpt.kind, clientFallback: rcpt.isClientFallback,
+          label: rcpt.label, skippedReason: null,
+        };
+      } catch (err) {
+        result.emailed = {
+          sent: false, to: null, fallback: false, error: (err as Error).message,
+          kind: rcpt.kind, clientFallback: rcpt.isClientFallback,
+          label: rcpt.label, skippedReason: null,
+        };
       }
-      if (!to && pcn.job_id) {
-        const tgt = await resolveClientEmailTarget(pcn.job_id, templateId);
-        to = tgt.primaryEmail;
-        cc = tgt.ccEmails || [];
-        fallback = tgt.isFallback;
-        clientName = tgt.clientName || clientName;
-        if (!map.driverFacing) recipientName = tgt.primaryFirstName || recipientName;
-      }
-      if (!to) { to = OOOSH_EMAIL; fallback = true; }
-
-      // Notice attachments (front + back, best-effort) — the back page usually
-      // carries the issuer's payment options, which the client templates point to.
-      const attachments = await collectNoticeAttachments(pcn);
-
-      const reduced = money(pcn.reduced_amount);
-      const fineLine = money(pcn.fine_amount)
-        ? `${money(pcn.fine_amount)}${reduced ? ` (${reduced} if paid by ${fmtDate(pcn.reduced_deadline)})` : ''}`
-        : '—';
-      // Reflect what actually landed on the client's account (don't over-claim
-      // the fine if the recharge couldn't push to a locked/closed HH job).
-      let handlingSentence: string;
-      if (opts.action === 'pay_recharge') {
-        const fineBilled = result.fineRecharge.applied;
-        const adminBilled = result.charge.applied;
-        const fineStr = fineBilled && result.fineRecharge.amount != null
-          ? `the fine of ${money(result.fineRecharge.amount)}`
-          : 'the fine';
-        if (fineBilled && adminBilled) handlingSentence = `We've added ${fineStr} plus an administration fee of ${handlingFee}+VAT to your account.`;
-        else if (fineBilled) handlingSentence = `We've added ${fineStr} to your account.`;
-        else if (adminBilled) handlingSentence = `We've added an administration fee of ${handlingFee}+VAT to your account; the fine will be added separately.`;
-        else handlingSentence = `The fine and any administration fee will be added to your account.`;
-      } else {
-        handlingSentence = addCharge ? `As per our hire terms, an administration fee of ${handlingFee}+VAT applies for processing this notice.` : '';
-      }
-      const jobRef = pcn.hh_job_number ? `#${pcn.hh_job_number}` : '';
-      const jobRefSentence = pcn.hh_job_number ? ` (our ref #${pcn.hh_job_number})` : '';
-
-      await emailService.send(templateId, {
-        to,
-        cc: cc.length ? cc : undefined,
-        attachments: attachments.length ? attachments : undefined,
-        variables: {
-          driverName: pcn.driver_name || 'Sir/Madam',
-          clientName: clientName || 'Sir/Madam',
-          vehicleReg: pcn.vehicle_reg || '—',
-          pcnReference: pcn.reference || '—',
-          issuer: pcn.issuing_authority || '—',
-          offenceDateTime: `${fmtDate(pcn.offence_at)}${pcn.offence_time_text ? ` ${pcn.offence_time_text}` : ''}`,
-          offenceDate: fmtDate(pcn.offence_at),
-          location: pcn.location || '—',
-          fineLine,
-          finalDeadline: fmtDate(pcn.final_deadline),
-          handlingFee,
-          handlingSentence,
-          driverListSentence: '',
-          jobRef,
-          jobRefSentence,
-          receiptUploadUrl,
-          oooshEmail: OOOSH_EMAIL,
-          oooshPhone: OOOSH_PHONE,
-        },
-      });
-      result.emailed = { sent: true, to, fallback, error: null };
-    } catch (err) {
-      result.emailed = { sent: false, to: null, fallback: false, error: (err as Error).message };
     }
   }
 
@@ -312,7 +349,22 @@ export async function applyPcnAction(
 
   // ── 5. Event timeline ──
   const bits: string[] = [`Action: ${opts.action.replace(/_/g, ' ')}`];
-  if (result.emailed.sent) bits.push(`emailed ${result.emailed.to}${result.emailed.fallback ? ' (fallback)' : ''}`);
+  // Name WHO was emailed, not just the address. The old line read "emailed
+  // <address>" even when a driver-facing action had quietly fallen through to
+  // the client — the timeline looked like it had done exactly what was asked.
+  if (result.emailed.sent) {
+    const who = result.emailed.clientFallback
+      ? ' (CLIENT — no driver contact on file)'
+      : result.emailed.fallback
+        ? ' (fallback — no contact on file)'
+        : result.emailed.kind === 'freelancer' ? ' (freelancer)'
+        : result.emailed.kind === 'driver' ? ' (hire driver)'
+        : result.emailed.kind === 'override' ? ' (manually entered)'
+        : result.emailed.kind === 'client' ? ' (client)'
+        : '';
+    bits.push(`emailed ${result.emailed.to}${who}`);
+  }
+  if (result.emailed.skippedReason) bits.push(`no email sent — ${result.emailed.skippedReason}`);
   if (result.charge.applied) bits.push('£35+VAT charge added to HH');
   if (result.fineRecharge.applied && result.fineRecharge.amount != null) bits.push(`fine ${money(result.fineRecharge.amount)} recharged to HH`);
   if (resNote) bits.push(`note: ${resNote}`);

@@ -56,6 +56,12 @@ export interface ScheduleJob {
   return_time: string | null;
   end_time: string | null;
   has_ooh_return?: boolean;
+  /** Allocated van(s) on this job (self-drive / van-hire only) + their fleet
+   *  prep-readiness. Populated for the Today section's going-out + returning
+   *  rows. Empty when no van is allocated (or not a van job). */
+  vehicles?: Array<{ reg: string; hire_status: string | null }>;
+  /** Going-out only: job needs a van but none is allocated yet. */
+  van_unassigned?: boolean;
 }
 
 export interface TransportQuote {
@@ -264,6 +270,24 @@ export interface OnTodayItem {
   href: string;
 }
 
+export interface HoldingUnlinkedItem {
+  id: string;
+  description: string | null;
+  found_in: string | null;
+  found_vehicle_reg: string | null;
+  /** For link_owner this is the found/logged date — an AGE, never a deadline. */
+  action_due: string | null;
+}
+
+export interface ClaimAttentionItem {
+  id: string;
+  stage: string;
+  vehicle_reg: string | null;
+  hh_job_number: number | null;
+  next_check_on: string | null;
+  owner_name: string | null;
+}
+
 export interface PcnAttentionItem {
   id: string;
   reference: string | null;
@@ -311,6 +335,9 @@ export interface OperationsData {
     total_overdue_count?: number;
     client_intros: ClientIntroJob[];
     carnet_count?: number;
+    /** Held items nobody has identified yet (Holding next_action = 'link_owner'). */
+    holding_unlinked_count?: number;
+    holding_unlinked?: HoldingUnlinkedItem[];
     referral_count: number;
     referrals: PendingReferral[];
     excess_count: number;
@@ -327,14 +354,25 @@ export interface OperationsData {
     receipts_outstanding?: ReceiptOutstanding[];
     /** Company-card (COT) costs with no receipt attached, older than 3 days. */
     cot_receipts_outstanding_count?: number;
+    /** Pending/lapsed staff-document assignments (managers only). */
+    staff_documents_outstanding_count?: number;
     /** Client recharges flagged but not yet resolved (push/external/absorb). */
     recharges_to_resolve_count?: number;
     recharges_to_resolve_total?: number;
+    /** High-priority backline demand with no acquisition plan — purchasing prompt. */
+    backline_to_buy_count?: number;
     /** PCN buckets (Step 8) — internal surfacing, never client comms. */
     pcn_nip_urgent?: PcnAttentionItem[];
     pcn_ready_to_transfer?: PcnAttentionItem[];
     pcn_deadline_approaching?: PcnAttentionItem[];
     pcn_awaiting_action?: PcnAttentionItem[];
+    /** Possible insurance claims whose check date has passed or is missing (docs/INCIDENT-CLAIMS-SPEC.md §9.3). */
+    claim_check_overdue?: ClaimAttentionItem[];
+    claim_check_overdue_total?: number;
+    /** Client forms submitted and waiting for a manager's review (next_check_on carries the submitted date). */
+    claim_to_review?: ClaimAttentionItem[];
+    /** Four reminders and no form — chasing stopped (next_check_on carries the last reminder's date). */
+    claim_chase_exhausted?: ClaimAttentionItem[];
   };
   transport_ops: {
     summary: Record<string, number>;

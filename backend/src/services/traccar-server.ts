@@ -20,6 +20,10 @@ interface TraccarPositionRow {
   longitude: number;
   fixTime: string;
   serverTime: string;
+  /** Knots (Traccar's unit). */
+  speed?: number;
+  course?: number;
+  address?: string | null;
 }
 
 let deviceCache: { rows: TraccarDeviceRow[]; expiresAt: number } | null = null;
@@ -47,6 +51,55 @@ function normaliseReg(s: string): string {
   return s.replace(/\s+/g, '').toUpperCase();
 }
 
+/** The Traccar device named after this registration (devices are named by reg). */
+async function findDeviceForReg(reg: string): Promise<TraccarDeviceRow | null> {
+  const now = Date.now();
+  if (!deviceCache || deviceCache.expiresAt < now) {
+    const rows = await traccarFetch<TraccarDeviceRow[]>('/devices');
+    deviceCache = { rows, expiresAt: now + DEVICE_CACHE_MS };
+  }
+  const target = normaliseReg(reg);
+  return deviceCache.rows.find(d => normaliseReg(d.name || '') === target) || null;
+}
+
+export interface RoutePoint {
+  /** ISO fix time (UTC). */
+  time: string;
+  lat: number;
+  lng: number;
+  speedKph: number;
+  course: number | null;
+  address: string | null;
+}
+
+/**
+ * A van's recorded positions between two times (docs/INCIDENT-CLAIMS-SPEC.md §14).
+ * null = Traccar isn't configured or has no device for this reg; [] = the
+ * device exists but has no positions then (not moving, or already purged).
+ * Throws on a Traccar error so the caller can tell "nothing" from "failed".
+ */
+export async function getRouteForReg(reg: string, from: Date, to: Date): Promise<RoutePoint[] | null> {
+  if (!TRACCAR_EMAIL || !TRACCAR_PASSWORD) return null;
+  const device = await findDeviceForReg(reg);
+  if (!device) return null;
+  const rows = await traccarFetch<TraccarPositionRow[]>('/positions', {
+    deviceId: String(device.id),
+    from: from.toISOString(),
+    to: to.toISOString(),
+  });
+  return rows
+    .filter((p) => Number.isFinite(p.latitude) && Number.isFinite(p.longitude))
+    .map((p) => ({
+      time: p.fixTime,
+      lat: p.latitude,
+      lng: p.longitude,
+      speedKph: Math.round((p.speed || 0) * 1.852 * 10) / 10,
+      course: typeof p.course === 'number' ? p.course : null,
+      address: p.address || null,
+    }))
+    .sort((a, b) => a.time.localeCompare(b.time));
+}
+
 /**
  * Look up the latest Traccar position for a vehicle by registration. Returns
  * null if no device exists or no position is available.
@@ -60,14 +113,7 @@ export async function getLatestPositionForReg(reg: string): Promise<{
   try {
     if (!TRACCAR_EMAIL || !TRACCAR_PASSWORD) return null;
 
-    const now = Date.now();
-    if (!deviceCache || deviceCache.expiresAt < now) {
-      const rows = await traccarFetch<TraccarDeviceRow[]>('/devices');
-      deviceCache = { rows, expiresAt: now + DEVICE_CACHE_MS };
-    }
-
-    const target = normaliseReg(reg);
-    const device = deviceCache.rows.find(d => normaliseReg(d.name || '') === target);
+    const device = await findDeviceForReg(reg);
     if (!device) return null;
 
     const positions = await traccarFetch<TraccarPositionRow[]>('/positions', {

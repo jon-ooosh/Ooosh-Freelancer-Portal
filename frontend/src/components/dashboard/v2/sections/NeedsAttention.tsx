@@ -297,6 +297,16 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     items: [],
     viewAllHref: '/money/costs?missing_receipt=1',
   };
+  // Staff with outstanding documents to read/sign (managers only — the backend
+  // returns 0 for non-managers so this hides). Deep-links to the admin library.
+  const staffDocs: NABucket = {
+    key: 'staff_documents',
+    title: 'Staff Documents',
+    accent: 'amber',
+    count: na.staff_documents_outstanding_count || 0,
+    items: [],
+    viewAllHref: '/staff/documents/admin',
+  };
   // Client recharges flagged but not yet resolved (pushed to HH / billed
   // externally / absorbed) on active or finished hires. Amber — money we could
   // be billing back that's sitting unactioned. Deep-links to the Recharges tab.
@@ -307,6 +317,18 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     count: na.recharges_to_resolve_count || 0,
     items: [],
     viewAllHref: '/money/costs?view=recharge',
+  };
+  // High-priority backline gaps with no acquisition plan — kit we've flagged
+  // high priority that we don't stock and haven't decided to get. Blue —
+  // informational purchasing prompt, not time-critical. Deep-links to the
+  // Backline Matcher filtered to high-priority.
+  const backlineToBuy: NABucket = {
+    key: 'backline_to_buy',
+    title: 'Backline to Buy',
+    accent: 'blue',
+    count: na.backline_to_buy_count || 0,
+    items: [],
+    viewAllHref: '/operations/backline-matcher?priority=high',
   };
 
   // Transport arrangements to action — quotes in next 7 days on a
@@ -439,6 +461,48 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
   const pcnBuckets = [pcnNip, pcnTransfer, pcnDeadline, pcnAwaiting].filter((b) => b.count > 0);
 
+  // Possible insurance claims nobody is watching: check date passed or never
+  // set (docs/INCIDENT-CLAIMS-SPEC.md §9.2–9.3). Hidden when there are none.
+  const claimChecks: NABucket = {
+    key: 'claim_checks', title: 'Insurance claims to check on', accent: 'amber',
+    count: na.claim_check_overdue_total || 0,
+    items: (na.claim_check_overdue || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: c.next_check_on ? deadlineLabel(c.next_check_on) : 'no check date',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  // A client submitted the form — a manager needs to review it before anything else happens.
+  const claimReview: NABucket = {
+    key: 'claim_review', title: 'Claim forms to review', accent: 'amber',
+    count: na.claim_to_review?.length || 0,
+    items: (na.claim_to_review || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: c.next_check_on ? `submitted ${c.next_check_on.split('-').reverse().join('/')}` : 'submitted',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  // Four client reminders and still no form — the chase has stopped; phone them.
+  const claimChase: NABucket = {
+    key: 'claim_chase', title: 'Claim forms not coming back', accent: 'red',
+    count: na.claim_chase_exhausted?.length || 0,
+    items: (na.claim_chase_exhausted || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: '4 reminders sent',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  const claimBuckets = [claimChase, claimReview, claimChecks].filter((b) => b.count > 0);
+
   // Studio-sitter cover gaps (Rehearsals) — evenings in the next 14 days that
   // need a sitter but have none assigned. Amber — action-needed planning.
   const sitterGaps: NABucket = {
@@ -455,12 +519,35 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     viewAllHref: '/operations/studio-sitters',
   };
 
+  // Holding — items nobody has identified. Self-hiding (like the PCN buckets):
+  // the secondary row already renders 13 cards unconditionally, greying the
+  // empty ones, and a surface meant to say "a human is needed here" shouldn't
+  // grow another permanent grey tile. Filtered out below when zero.
+  const holdingUnlinked: NABucket = {
+    key: 'holding-unlinked',
+    title: 'Unidentified items',
+    accent: 'amber',
+    count: na.holding_unlinked_count || 0,
+    items: (na.holding_unlinked || []).map((h) => ({
+      id: h.id,
+      label: h.description || 'Held item',
+      // action_due here is the found/logged date, so it reads as an age.
+      age: h.action_due
+        ? `${Math.max(0, Math.floor((Date.now() - new Date(h.action_due).getTime()) / 86400000))}d old`
+        : undefined,
+      tag: h.found_vehicle_reg || undefined,
+      href: `/holding?item=${h.id}`,
+    })),
+    viewAllHref: '/holding?action=link_owner',
+  };
+
   const allClear = overdueTotal === 0;
   const overdueBuckets = [departures, completions, backline, transport];
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, rechargesToResolve, ...pcnBuckets, carnets, referrals, excess, sitterGaps, transportArrangements, fleetBucket, problemsBucket];
+  const selfHiding = [holdingUnlinked].filter((b) => b.count > 0);
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...claimBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

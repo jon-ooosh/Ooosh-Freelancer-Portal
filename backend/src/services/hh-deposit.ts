@@ -15,6 +15,7 @@
  */
 
 import { hhBroker } from './hirehop-broker';
+import { syncSavedRowToXero, sendXeroSyncFailedAlert } from './hh-xero-sync';
 
 // HireHop bank account IDs — shared by money.ts (deposit pushes), excess.ts
 // (reimburse + refund payment applications), and any future hire-side refund
@@ -67,7 +68,9 @@ export interface PushDepositOpts {
   amount: number;                 // GBP, positive
   paymentMethod: string;          // OP method key (worldpay, stripe_gbp, etc.)
   paymentReference?: string | null;
-  paymentType: 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'other';
+  // 'shop_sale' labels a till sale ("16750 - shop sale") — it used to go as
+  // 'other', which is what reached HireHop and Xero and told nobody anything.
+  paymentType: 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'shop_sale' | 'other';
   notes?: string | null;
   // When set, this exact HireHop bank account ID is used instead of mapping from
   // paymentMethod. Used by the Combine-bookings reallocation so the recreated
@@ -79,6 +82,8 @@ export interface PushDepositOpts {
 export interface PushDepositResult {
   hhDepositId: number | null;
   xeroSynced: boolean;
+  /** Why Xero refused, when xeroSynced is false. Null when it succeeded. */
+  xeroError: string | null;
   error: string | null;           // human-readable; null on success
 }
 
@@ -118,7 +123,9 @@ export async function pushDepositToHH(opts: PushDepositOpts): Promise<PushDeposi
       ? 'excess'
       : paymentType === 'deposit'
         ? 'deposit'
-        : paymentType;
+        : paymentType === 'shop_sale'
+          ? 'shop sale'
+          : paymentType;
     const description = `${hhJobNumber} - ${typeLabel}`;
     const memo = `${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)} ${formattedDate} via ${methodLabel}${paymentReference ? ` (Ref: ${paymentReference})` : ''}${notes ? ` — ${notes}` : ''} (recorded via Ooosh OP)`;
 
@@ -153,7 +160,7 @@ export async function pushDepositToHH(opts: PushDepositOpts): Promise<PushDeposi
     if (!hhResult.success || !hhResult.data) {
       const reason = hhResult.error || 'HireHop returned no data';
       console.error('[hh-deposit] HH deposit creation failed:', reason, hhResult.data);
-      return { hhDepositId: null, xeroSynced: false, error: reason };
+      return { hhDepositId: null, xeroSynced: false, xeroError: null, error: reason };
     }
 
     const data = hhResult.data as any;
@@ -163,33 +170,34 @@ export async function pushDepositToHH(opts: PushDepositOpts): Promise<PushDeposi
       // it's the silent-failure case that bit job 15624 historically.
       const reason = `HireHop accepted the deposit but returned no ID (response keys: ${Object.keys(data).join(', ') || 'none'})`;
       console.error('[hh-deposit]', reason);
-      return { hhDepositId: null, xeroSynced: false, error: reason };
+      return { hhDepositId: null, xeroSynced: false, xeroError: null, error: reason };
     }
 
     console.log('[hh-deposit] HH deposit created:', hhDepositId);
 
-    // STEP 2: Trigger Xero sync. Failure here is non-fatal — the deposit
-    // exists in HH and Xero will pick it up on the next nightly sync.
-    let xeroSynced = false;
-    try {
-      const syncResult = await hhBroker.post('/php_functions/accounting/tasks.php', {
-        hh_package_type: 1,
-        hh_acc_package_id: 3,  // Xero
-        hh_task: 'post_deposit',
-        hh_id: hhDepositId,
-        hh_acc_id: '',
-      }, { priority: 'high' });
-      xeroSynced = syncResult.success;
-      console.log('[hh-deposit] Xero sync triggered:', xeroSynced ? 'success' : 'failed');
-    } catch (syncError) {
-      console.error('[hh-deposit] Xero sync trigger failed (non-fatal):', syncError);
+    // STEP 2: Push to Xero. Non-fatal — the deposit exists in HH either way —
+    // but `xeroError` now comes back with it so callers can say WHY rather than
+    // just showing a false `xeroSynced` and moving on.
+    //
+    // `post_deposit` is the default here, not `post_payment`: a deposit is a new
+    // document in Xero, not a payment against one. syncSavedRowToXero prefers
+    // whatever HireHop names in the save response and only falls back to this.
+    const sync = await syncSavedRowToXero(
+      `deposit ${hhDepositId} on job ${hhJobNumber}`,
+      { hh_task: 'post_deposit', ...(hhResult.data as Record<string, unknown>), hh_id: hhDepositId },
+    );
+    if (!sync.ok) {
+      void sendXeroSyncFailedAlert({
+        jobId: null, hhJobNumber, what: `${typeLabel} deposit`, amount,
+        hhRowId: hhDepositId, moneyMoved: true, error: sync.error || 'Unknown error',
+      });
     }
 
-    return { hhDepositId, xeroSynced, error: null };
+    return { hhDepositId, xeroSynced: sync.ok, xeroError: sync.error, error: null };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.error('[hh-deposit] HH deposit write-back failed:', reason);
-    return { hhDepositId: null, xeroSynced: false, error: reason };
+    return { hhDepositId: null, xeroSynced: false, xeroError: null, error: reason };
   }
 }
 
@@ -220,13 +228,51 @@ export interface ReverseDepositOpts {
  */
 export async function reverseDepositOnHH(opts: ReverseDepositOpts): Promise<PushDepositResult> {
   const { hhJobNumber, hhDepositId, amount, bankId, movedToHhJob, notes } = opts;
+  console.log('[hh-deposit] Reattributing £' + amount, 'from HH job', hhJobNumber, '(deposit', hhDepositId + ') →', movedToHhJob);
+  return refundDepositOnHH({
+    hhJobNumber,
+    hhDepositId,
+    amount,
+    bankId,
+    description: `${hhJobNumber} - deposit reallocated to job ${movedToHhJob}`,
+    memo: `Deposit reallocated to job #${movedToHhJob} (bookings combined)${notes ? ` — ${notes}` : ''} (via Ooosh OP)`,
+    what: `deposit reattribution to job ${movedToHhJob}`,
+  });
+}
+
+export interface RefundDepositOpts {
+  hhJobNumber: number;            // HH job the deposit sits on
+  hhDepositId: number;            // the original HH deposit ID to refund against
+  amount: number;                 // GBP, positive
+  bankId: number;                 // exact HH bank account the original used
+  description: string;
+  memo: string;
+  /** For logs and the Xero-failure alert, e.g. "shop refund OT-SHOP-00101". */
+  what: string;
+}
+
+/**
+ * Take money back OUT of a deposit — a refund payment application against it.
+ *
+ * The general form of the combine-bookings "out" leg above, which is now a thin
+ * wrapper round this. Also used by shop reversals (Window B,
+ * SHOP-SALES-SPEC.md §8), where the deposit was a till sale and the customer is
+ * getting their money back.
+ *
+ * `billing_payments_save.php` with `OWNER: 0, deposit: <id>` — NOT a negative
+ * deposit (HireHop rejects those, and the rejected row never syncs to Xero).
+ * Xero sync is post_payment, not post_deposit. HireHop answers error 370 when
+ * the deposit has already been applied to an invoice; that is surfaced as the
+ * error rather than worked round here.
+ *
+ * `hhDepositId` in the result is the PAYMENT-APPLICATION id HireHop created.
+ */
+export async function refundDepositOnHH(opts: RefundDepositOpts): Promise<PushDepositResult> {
+  const { hhJobNumber, hhDepositId, amount, bankId, description, memo, what } = opts;
 
   try {
     const currentDate = new Date().toISOString().split('T')[0];
-    const description = `${hhJobNumber} - deposit reallocated to job ${movedToHhJob}`;
-    const memo = `Deposit reallocated to job #${movedToHhJob} (bookings combined)${notes ? ` — ${notes}` : ''} (via Ooosh OP)`;
 
-    console.log('[hh-deposit] Reattributing £' + amount, 'from HH job', hhJobNumber, '(deposit', hhDepositId + ') →', movedToHhJob);
     const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
       id: 0,
       date: currentDate,
@@ -241,35 +287,35 @@ export async function reverseDepositOnHH(opts: ReverseDepositOpts): Promise<Push
 
     if (!hhResult.success || !hhResult.data) {
       const reason = hhResult.error || 'HireHop returned no data';
-      console.error('[hh-deposit] HH deposit reattribution failed:', reason, hhResult.data);
-      return { hhDepositId: null, xeroSynced: false, error: reason };
+      console.error(`[hh-deposit] ${what} failed:`, reason, hhResult.data);
+      return { hhDepositId: null, xeroSynced: false, xeroError: null, error: reason };
     }
 
     const data = hhResult.data as any;
     const paymentAppId = data.hh_id || data.id || data.ID || null;
     if (!paymentAppId) {
-      const reason = `HireHop accepted the reattribution but returned no ID (response keys: ${Object.keys(data).join(', ') || 'none'})`;
+      const reason = `HireHop accepted the ${what} but returned no ID (response keys: ${Object.keys(data).join(', ') || 'none'})`;
       console.error('[hh-deposit]', reason);
-      return { hhDepositId: null, xeroSynced: false, error: reason };
+      return { hhDepositId: null, xeroSynced: false, xeroError: null, error: reason };
     }
 
     // Xero sync — post_payment (a payment application, NOT post_deposit).
-    let xeroSynced = false;
-    try {
-      const syncResult = await hhBroker.post('/php_functions/accounting/tasks.php', {
-        hh_package_type: 1, hh_acc_package_id: 3, hh_task: 'post_payment',
-        hh_id: paymentAppId, hh_acc_id: '',
-      }, { priority: 'high' });
-      xeroSynced = syncResult.success;
-    } catch (syncError) {
-      console.error('[hh-deposit] Xero sync trigger failed (non-fatal):', syncError);
+    const sync = await syncSavedRowToXero(
+      `${what} against deposit ${hhDepositId} on job ${hhJobNumber}`,
+      hhResult.data as Record<string, unknown>,
+    );
+    if (!sync.ok) {
+      void sendXeroSyncFailedAlert({
+        jobId: null, hhJobNumber, what,
+        amount, hhRowId: paymentAppId, hhDepositId, error: sync.error || 'Unknown error',
+      });
     }
 
-    return { hhDepositId: paymentAppId, xeroSynced, error: null };
+    return { hhDepositId: paymentAppId, xeroSynced: sync.ok, xeroError: sync.error, error: null };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.error('[hh-deposit] HH deposit reattribution failed:', reason);
-    return { hhDepositId: null, xeroSynced: false, error: reason };
+    console.error(`[hh-deposit] ${what} failed:`, reason);
+    return { hhDepositId: null, xeroSynced: false, xeroError: null, error: reason };
   }
 }
 

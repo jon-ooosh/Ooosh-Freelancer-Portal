@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { LOST_REASON_OPTIONS } from '@shared/index';
+import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
 
 type ValueBucket = '' | 'under_500' | '500_2000' | '2000_10000' | 'over_10000';
 
@@ -27,6 +28,10 @@ interface LostCancelledJob {
   job_name: string | null;
   company_name: string | null;
   client_name: string | null;
+  // Canonical org names from the API (see lib/jobOrgName.ts). Render via
+  // jobDisplayOrgNameOr(job), never the raw client_name/company_name strings.
+  client_org_name?: string | null;
+  lead_org_name?: string | null;
   job_date: string | null;
   job_end: string | null;
   job_value: number | null;
@@ -464,7 +469,7 @@ export default function LostCancelledPage() {
                     </div>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-600">
-                    {job.company_name || job.client_name || '—'}
+                    {jobDisplayOrgNameOr(job)}
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-500">
                     {formatDate(job.job_date)}

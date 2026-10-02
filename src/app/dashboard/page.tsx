@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import type { PortalDayBooking, DayBookingsResponse } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES (matching API response)
@@ -60,6 +61,31 @@ interface JobsApiResponse {
   upcoming?: DisplayItem[]
   completed?: DisplayItem[]
   cancelled?: DisplayItem[]
+  error?: string
+}
+
+// Studio sitter shifts (Rehearsals — Phase D portal surface)
+interface ShiftJob {
+  job_id: string
+  hh_job_number: number | null
+  label: string
+  rooms: string[]
+}
+
+interface SitterShift {
+  date: string
+  planned_start: string | null
+  planned_end: string | null
+  status: string
+  assignment_status: string
+  fee: number | null
+  report_submitted_at?: string | null
+  jobs: ShiftJob[]
+}
+
+interface ShiftsApiResponse {
+  success: boolean
+  shifts?: SitterShift[]
   error?: string
 }
 
@@ -366,8 +392,209 @@ function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStar
 }
 
 /**
+ * Whether a YYYY-MM-DD string is today (local time).
+ */
+function isTodayIso(dateStr: string): boolean {
+  if (!dateStr) return false
+  const now = new Date()
+  const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  return dateStr === iso
+}
+
+/**
+ * SQL TIME ("17:00:00" / "17:00") → "5:00pm". '' for null/unparseable.
+ */
+function formatShiftTime(timeStr: string | null): string {
+  if (!timeStr) return ''
+  const match = timeStr.match(/(\d{1,2}):(\d{2})/)
+  if (!match) return ''
+  const hours = parseInt(match[1], 10)
+  const minutes = match[2]
+  const ampm = hours >= 12 ? 'pm' : 'am'
+  const displayHours = hours % 12 || 12
+  return `${displayHours}:${minutes}${ampm}`
+}
+
+function formatShiftEnvelope(start: string | null, end: string | null): string {
+  const s = formatShiftTime(start)
+  const e = formatShiftTime(end)
+  if (s && e) return `${s} – ${e}`
+  if (s) return `from ${s}`
+  if (e) return `until ${e}`
+  return ''
+}
+
+/**
+ * Studio Sitter Shift Card — one rostered evening (whole-building night).
+ */
+function ShiftCard({ shift }: { shift: SitterShift }) {
+  const tonight = isTodayIso(shift.date)
+  const envelope = formatShiftEnvelope(shift.planned_start, shift.planned_end)
+  const isConfirmed = shift.assignment_status === 'confirmed'
+  const isCompleted = !!shift.report_submitted_at  // locked up = done
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+      <div className="flex items-start justify-between">
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 bg-violet-100 rounded-lg flex items-center justify-center">
+            <span className="text-violet-600">🎸</span>
+          </div>
+          <div>
+            <p className="font-medium text-gray-900 flex items-center gap-2">
+              Studio Sitter
+              {tonight && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 font-semibold uppercase tracking-wide">
+                  Tonight
+                </span>
+              )}
+            </p>
+            <p className="text-sm text-gray-500">
+              {formatDate(shift.date)}
+              {envelope && ` · ${envelope}`}
+            </p>
+          </div>
+        </div>
+        <div className="text-right">
+          {shift.fee !== null && shift.fee > 0 && (
+            <span className="text-sm font-medium text-green-600 block">{formatFee(shift.fee)}</span>
+          )}
+          <span
+            className={`inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+              isCompleted ? 'bg-green-100 text-green-700' : isConfirmed ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+            }`}
+          >
+            {isCompleted ? 'Completed' : isConfirmed ? 'Confirmed' : 'Assigned'}
+          </span>
+        </div>
+      </div>
+
+      {/* Who's in that night */}
+      {shift.jobs.length > 0 && (
+        <div className="mt-3 pl-13 space-y-1">
+          {shift.jobs.map((job) => (
+            <p key={job.job_id} className="text-xs text-gray-500">
+              {job.label}
+              {job.rooms.length > 0 && (
+                <span className="text-gray-400"> · {job.rooms.join(', ')}</span>
+              )}
+            </p>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-3 flex items-center justify-between">
+        <Link
+          href={`/shift/${shift.date}`}
+          className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500"
+        >
+          View details →
+        </Link>
+        {/* Lock-up quick action — only on the night, and only until it's done. */}
+        {tonight && !isCompleted && (
+          <Link
+            href={`/shift/${shift.date}/lockup`}
+            className="text-sm font-medium text-green-600 hover:text-green-500 flex items-center gap-1"
+          >
+            🔒 Lock up
+          </Link>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
  * Empty State Component
  */
+/**
+ * One yard day, in the dashboard's card idiom (spec §9.3).
+ *
+ * Read-only plus accept / decline — no counter-offer, because the negotiation
+ * happens in the freelance WhatsApp group and OP sends the revised offer
+ * afterwards.
+ *
+ * An ACCEPTED day shows no buttons. Pulling out is a phone call on purpose: a
+ * one-tap "actually no" on a day somebody is relying on should cost a
+ * conversation, and staff record it as `withdrew` so it reads differently from
+ * never having wanted the day.
+ */
+function YardDayCard({ day, busy, onAnswer }: {
+  day: PortalDayBooking
+  busy: boolean
+  onAnswer: (response: 'accepted' | 'declined') => void
+}) {
+  const hours =
+    day.durationType === 'full_day' ? 'Full day'
+    : day.durationType === 'half_day' ? 'Half day'
+    : day.startTime && day.endTime ? `${day.startTime}–${day.endTime}`
+    : 'Set hours'
+
+  const fee =
+    day.agreedRate === null ? null
+    : day.rateType === 'hourly' ? `${formatFee(day.agreedRate)}/hr`
+    : formatFee(day.agreedRate)
+
+  // Only a day still to come can be answered. The backend refuses a response
+  // to one that has passed, so offering the buttons would be a lie the server
+  // then contradicts.
+  const isPast = day.date < new Date().toISOString().slice(0, 10)
+  const pending = day.status === 'offered' && !isPast
+
+  return (
+    <div className={`bg-white rounded-xl border p-4 shadow-sm ${
+      pending ? 'border-amber-200' : 'border-gray-100'} ${isPast ? 'opacity-75' : ''}`}>
+      <div className="flex items-start justify-between">
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
+            <span className="text-amber-600">🔧</span>
+          </div>
+          <div>
+            <p className="font-medium text-gray-900">{formatDate(day.date)}</p>
+            <p className="text-sm text-gray-500">{hours}</p>
+          </div>
+        </div>
+        {fee && <span className="text-sm font-medium text-green-600">{fee}</span>}
+      </div>
+
+      {day.notes && <p className="mt-3 text-sm text-gray-600">{day.notes}</p>}
+
+      {pending ? (
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onAnswer('accepted')}
+            className="px-4 py-3 rounded-lg text-sm font-semibold bg-green-700 text-white disabled:opacity-40"
+          >
+            {busy ? 'Sending…' : 'Yes, I can do it'}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onAnswer('declined')}
+            className="px-4 py-3 rounded-lg text-sm font-semibold bg-white border-2 border-gray-300 text-gray-700 disabled:opacity-40"
+          >
+            {busy ? '…' : 'Sorry, I cannot'}
+          </button>
+        </div>
+      ) : day.status === 'offered' ? (
+        <p className="mt-3 text-xs font-medium text-gray-500">
+          That day has passed and we never heard back — get in touch if that is wrong
+        </p>
+      ) : isPast ? (
+        <p className="mt-3 text-xs font-medium text-gray-500">
+          {day.invoiceReceived ? 'Done — we have your invoice' : 'Done — send us your invoice when you can'}
+        </p>
+      ) : (
+        <p className="mt-3 text-xs font-medium text-green-700">
+          Confirmed — we have you down for this one
+        </p>
+      )}
+    </div>
+  )
+}
+
 function EmptyState({ message }: { message: string }) {
   return (
     <div className="bg-white rounded-xl border border-gray-100 p-6 text-center">
@@ -424,6 +651,76 @@ export default function DashboardPage() {
   const [completedJobs, setCompletedJobs] = useState<DisplayItem[]>([])
   const [cancelledJobs, setCancelledJobs] = useState<DisplayItem[]>([])
 
+  // Studio sitter shifts (only populated for freelancers who are rostered as sitters)
+  const [sitterShifts, setSitterShifts] = useState<SitterShift[]>([])
+  const [yardDays, setYardDays] = useState<PortalDayBooking[]>([])
+  const [yardBusy, setYardBusy] = useState<string | null>(null)
+  const [yardError, setYardError] = useState('')
+
+  /**
+   * Yard days (spec §9.3). Independent of the jobs fetch, like the sitter
+   * shifts above: a failure here must never break the jobs dashboard, and the
+   * section simply hides when there is nothing to show.
+   */
+  const fetchYardDays = useCallback(async () => {
+    try {
+      const res = await fetch('/api/day-bookings')
+      const data: DayBookingsResponse = await res.json()
+      // Upcoming first, then the recent past. A day that went by without them
+      // answering lives in `past` and has no buttons — visible, but not
+      // pretending there is still something to decide.
+      setYardDays(res.ok && data.success
+        ? [...(data.upcoming || []), ...(data.past || [])]
+        : [])
+    } catch (err) {
+      console.error('Failed to fetch yard days:', err)
+      setYardDays([])
+    }
+  }, [])
+
+  async function answerYardDay(id: string, response: 'accepted' | 'declined') {
+    setYardBusy(id)
+    setYardError('')
+    try {
+      const res = await fetch(`/api/day-bookings/${id}/respond`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) {
+        // A 409 is a real answer — already accepted, cancelled, passed — so
+        // show what it says and re-read rather than leaving a stale card.
+        setYardError(data?.error || 'That did not save. Please try again.')
+      }
+      await fetchYardDays()
+    } catch {
+      setYardError('That did not save — you may have lost signal.')
+    } finally {
+      setYardBusy(null)
+    }
+  }
+
+  /**
+   * Fetch the sitter's rostered studio shifts. Runs alongside the jobs fetch
+   * but independently — a shifts failure never breaks the jobs dashboard, and
+   * the section simply hides when there's nothing to show.
+   */
+  const fetchShifts = useCallback(async () => {
+    try {
+      const response = await fetch('/api/studio-sitter/shifts')
+      const data: ShiftsApiResponse = await response.json()
+      if (response.ok && data.success) {
+        setSitterShifts(data.shifts || [])
+      } else {
+        setSitterShifts([])
+      }
+    } catch (err) {
+      console.error('Failed to fetch studio shifts:', err)
+      setSitterShifts([])
+    }
+  }, [])
+
   /**
    * Fetch jobs from the API
    */
@@ -463,16 +760,20 @@ export default function DashboardPage() {
     }
   }, [router])
 
-  // Fetch jobs on mount
+  // Fetch jobs + shifts + yard days on mount
   useEffect(() => {
     fetchJobs()
-  }, [fetchJobs])
+    fetchShifts()
+    fetchYardDays()
+  }, [fetchJobs, fetchShifts, fetchYardDays])
 
   /**
    * Handle refresh button click
    */
   const handleRefresh = () => {
     fetchJobs()
+    fetchShifts()
+    fetchYardDays()
   }
 
   /**
@@ -567,6 +868,35 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* Yard days (spec §9.3). ABOVE Today on purpose: an unanswered offer
+            is the only thing on this screen that needs them to do something,
+            and burying it under the jobs they already have is how it gets
+            missed. Hidden entirely when there is nothing. */}
+        {yardDays.length > 0 && (
+          <section>
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center">
+              <span className="mr-2">🔧</span>
+              Ooosh work
+              <span className="ml-2 text-ooosh-600">({yardDays.length})</span>
+            </h2>
+            {yardError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm mb-3">
+                {yardError}
+              </div>
+            )}
+            <div className="space-y-3">
+              {yardDays.map((day) => (
+                <YardDayCard
+                  key={day.id}
+                  day={day}
+                  busy={yardBusy === day.id}
+                  onAnswer={(r) => answerYardDay(day.id, r)}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Today Section */}
         <section>
           <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center">
@@ -589,6 +919,22 @@ export default function DashboardPage() {
             <EmptyState message="No jobs scheduled for today" />
           )}
         </section>
+
+        {/* Studio Shifts Section — only for sitters (hidden when empty) */}
+        {sitterShifts.length > 0 && (
+          <section>
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center">
+              <span className="mr-2">🎸</span>
+              Studio Shifts
+              <span className="ml-2 text-ooosh-600">({sitterShifts.length})</span>
+            </h2>
+            <div className="space-y-3">
+              {sitterShifts.map((shift) => (
+                <ShiftCard key={shift.date} shift={shift} />
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Upcoming Section */}
         <section>

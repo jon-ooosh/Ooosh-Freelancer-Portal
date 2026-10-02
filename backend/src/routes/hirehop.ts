@@ -121,7 +121,10 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
     } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
-    let whereClause = 'WHERE is_deleted = false';
+    // jobs.is_deleted must stay QUALIFIED: the list query below joins
+    // organisations, which has an is_deleted column of its own, so a bare
+    // reference is ambiguous. Still valid in the join-free COUNT query.
+    let whereClause = 'WHERE jobs.is_deleted = false';
     const params: unknown[] = [];
 
     if (status !== undefined && status !== '') {
@@ -151,7 +154,14 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
 
     if (search && (search as string).trim()) {
       params.push(`%${(search as string).trim()}%`);
-      whereClause += ` AND (job_name ILIKE $${params.length} OR client_name ILIKE $${params.length} OR company_name ILIKE $${params.length} OR venue_name ILIKE $${params.length} OR CAST(hh_job_number AS TEXT) ILIKE $${params.length})`;
+      // Also match the org names the list actually DISPLAYS (client org via
+      // client_id, and any linked org incl. the ★ lead) — otherwise a row can
+      // show a name that search cannot find. EXISTS rather than a join so the
+      // join-free COUNT query above keeps agreeing with this one.
+      whereClause += ` AND (job_name ILIKE $${params.length} OR client_name ILIKE $${params.length} OR company_name ILIKE $${params.length} OR venue_name ILIKE $${params.length} OR CAST(hh_job_number AS TEXT) ILIKE $${params.length}
+        OR EXISTS (SELECT 1 FROM organisations co WHERE co.id = jobs.client_id AND co.is_deleted = false AND co.name ILIKE $${params.length})
+        OR EXISTS (SELECT 1 FROM job_organisations sjo JOIN organisations so ON so.id = sjo.organisation_id
+                    WHERE sjo.job_id = jobs.id AND so.is_deleted = false AND so.name ILIKE $${params.length}))`;
     }
 
     // OOH return filter — only show jobs with at least one assignment
@@ -280,9 +290,21 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
              AND vha.return_overnight = TRUE
              AND vha.status NOT IN ('cancelled', 'returned')
          ) AS has_ooh_return,
-         jf.hire_value_inc_vat::float8 AS hire_value_inc_vat
+         jf.hire_value_inc_vat::float8 AS hire_value_inc_vat,
+         -- Canonical client name + the org explicitly flagged to headline this
+         -- job. Without these the list rendered HireHop's raw client_name /
+         -- company_name strings, so a job whose client had been changed showed
+         -- the old name here while Job Detail (which has always joined) showed
+         -- the new one — and the lead ★ did nothing outside the pipeline card.
+         -- Both joins are by primary key / LIMIT 1, so neither multiplies rows
+         -- (the separate COUNT query above stays join-free and still agrees).
+         o.name AS client_org_name,
+         (SELECT lo.name FROM job_organisations jo
+            JOIN organisations lo ON lo.id = jo.organisation_id
+           WHERE jo.job_id = jobs.id AND jo.is_primary = true LIMIT 1) AS lead_org_name
        FROM jobs
        LEFT JOIN job_financials jf ON jf.job_id = jobs.id
+       LEFT JOIN organisations o ON o.id = jobs.client_id AND o.is_deleted = false
        ${whereClause}
        ORDER BY ${orderBy}
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -352,7 +374,10 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const result = await query(
-      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+      `SELECT j.*, o.name AS client_org_name
+       FROM jobs j
+       LEFT JOIN organisations o ON o.id = j.client_id AND o.is_deleted = false
+       WHERE j.id = $1 AND j.is_deleted = false`,
       [id]
     );
 
@@ -613,6 +638,26 @@ router.patch('/jobs/:jobId/vehicle-slot-mode', authenticate, async (req: AuthReq
       [JSON.stringify(modes), jobId]
     );
 
+    // Audit trail — a V&D toggle suspends the hire-forms/excess chain, so log
+    // who flipped which slot. Logged before the re-derivation so the timeline
+    // entry survives even if derivation hits a transient error.
+    try {
+      const isVandD = mode === 'van_and_driver';
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          isVandD
+            ? `🚐 Vehicle slot switched to Van & Driver — hire forms and excess suspended for this van`
+            : `Vehicle slot switched to Self-Drive — hire forms and excess re-enabled for this van`,
+          jobId,
+          req.user!.id,
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Vehicle slot mode: timeline log failed (non-fatal):', logErr);
+    }
+
     // Re-derive requirements after slot change
     const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
     const derivation = await deriveRequirementsForJob(jobId);
@@ -692,6 +737,25 @@ router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthReques
       `UPDATE jobs SET vehicle_slot_modes = $1, is_van_and_driver = $2, updated_at = NOW() WHERE id = $3`,
       [JSON.stringify(modes), !!isVanAndDriver, jobId]
     );
+
+    // Audit trail — a V&D toggle suspends the hire-forms/excess chain, so log
+    // who flipped it. Logged before the re-derivation so the timeline entry
+    // survives even if derivation hits a transient error.
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          isVanAndDriver
+            ? '🚐 Job switched to Van & Driver — hire forms and excess suspended (we supply the driver)'
+            : 'Job switched to Self-Drive — hire forms and excess re-enabled',
+          jobId,
+          req.user!.id,
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Van & driver toggle: timeline log failed (non-fatal):', logErr);
+    }
 
     const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
     const derivation = await deriveRequirementsForJob(jobId);

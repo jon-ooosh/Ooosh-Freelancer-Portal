@@ -186,6 +186,7 @@ interface PersonOption {
   skills: string[];
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
+  freelancer_status?: string | null;
   current_organisations?: Array<{ organisation_name: string; role: string }> | null;
 }
 
@@ -598,7 +599,7 @@ export default function TransportOpsPage() {
   async function searchPeople(search: string) {
     try {
       const data = await api.get<{ data: PersonOption[] }>(
-        `/people?search=${encodeURIComponent(search)}&limit=10&is_freelancer=true&is_approved=true`
+        `/people?search=${encodeURIComponent(search)}&limit=10&is_freelancer=true&is_approved=true&include_pending=true`
       );
       setPeopleOptions(data.data);
     } catch {
@@ -1448,13 +1449,16 @@ export default function TransportOpsPage() {
                   {peopleOptions.map(p => {
                     const currentQuote = quotes.find(q => q.id === assignModalQuoteId);
                     const alreadyAssigned = currentQuote?.assignments?.some(a => a.person_id === p.id);
+                    const pending = !p.is_approved;   // surfaced by include_pending — not yet cleared to book
+                    const disabled = alreadyAssigned || pending;
                     return (
                       <button
                         key={p.id}
-                        disabled={alreadyAssigned}
+                        disabled={disabled}
+                        title={pending ? 'Pending approval — a manager needs to approve this freelancer before they can be assigned' : undefined}
                         onClick={() => assignPerson(assignModalQuoteId!, p.id, assignRole)}
                         className={`w-full text-left px-3 py-2.5 text-sm flex items-center justify-between ${
-                          alreadyAssigned ? 'opacity-40 cursor-not-allowed' : 'hover:bg-ooosh-50'
+                          disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-ooosh-50'
                         }`}
                       >
                         <div>
@@ -1470,6 +1474,9 @@ export default function TransportOpsPage() {
                         <div className="flex gap-1">
                           {p.is_insured_on_vehicles && (
                             <span className="text-xs bg-green-100 text-green-700 rounded px-1.5 py-0.5">Insured</span>
+                          )}
+                          {pending && (
+                            <span className="text-xs bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">Pending approval</span>
                           )}
                           {alreadyAssigned && (
                             <span className="text-xs bg-gray-100 text-gray-500 rounded px-1.5 py-0.5">Assigned</span>

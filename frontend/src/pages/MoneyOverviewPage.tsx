@@ -40,12 +40,20 @@ interface PendingRefundRow {
   id: number; job_id: string; hh_job_number: number | null;
   client_name: string | null; amount: string; notes: string | null; payment_date: string;
 }
+// Money we hold that a client is owed back, derived from HireHop's invoice
+// `owing` (usually a credit note raised after the invoice was paid). NOT an
+// IOU: there is no row to Process or Clear — it resolves by actually refunding.
+interface ClientOverpaidRow {
+  job_id: string; hh_job_number: number | null; job_name: string | null;
+  client_name: string | null; amount: string; last_synced_at: string | null;
+}
 interface OverviewData {
   balances_outstanding: BalanceRow[];
   balances_resolved: BalanceRow[];
   deposits_pending: DepositPendingRow[];
   excess_held: ExcessHeldRow[];
   pending_refunds: PendingRefundRow[];
+  client_overpaid: ClientOverpaidRow[];
   totals: {
     balance_outstanding: number; balances_count: number;
     balances_resolved_total: number; balances_resolved_count: number;
@@ -54,6 +62,8 @@ interface OverviewData {
     excess_held_upcoming: number; excess_held_upcoming_count: number;
     excess_held_past: number; excess_held_past_count: number;
     pending_refunds: number; pending_refunds_count: number;
+    client_overpaid: number; client_overpaid_count: number;
+    owed_to_clients: number;
   };
 }
 
@@ -267,6 +277,7 @@ function ResolveBalanceModal({ target, onClose, onDone }: {
 // Pending-refund dismiss reasons (mirror of money.ts DISMISS_REFUND_REASONS).
 const DISMISS_REASONS = [
   { value: 'refunded_externally', label: 'Already refunded outside OP (HireHop / Stripe / bank)' },
+  { value: 'refunded_via_op', label: 'Refunded in OP, but not through this IOU' },
   { value: 'not_required', label: 'Not required (artifact / superseded)' },
   { value: 'duplicate', label: 'Duplicate record' },
   { value: 'other', label: 'Other' },
@@ -825,7 +836,26 @@ export default function MoneyOverviewPage() {
         </>
       ),
     },
-    { key: 'refunds', label: 'Pending Refunds', value: gbp(t.pending_refunds), sub: `${t.pending_refunds_count} to process`, accent: 'text-purple-700' },
+    {
+      // Both kinds of "we owe this client money" under one figure, because that
+      // is the question someone glancing at the card is asking. The two rows
+      // below it stay separate — an IOU can be Processed or Cleared, an
+      // overpaid invoice can only be refunded.
+      key: 'refunds',
+      label: 'Owed to Clients',
+      value: gbp(t.owed_to_clients),
+      accent: 'text-purple-700',
+      sub: `${t.pending_refunds_count} refund IOU${t.pending_refunds_count === 1 ? '' : 's'}`,
+      subNode: (
+        <>
+          {t.pending_refunds_count} refund IOU{t.pending_refunds_count === 1 ? '' : 's'}
+          {t.client_overpaid_count > 0 && (
+            <> {' · '}<span className="text-amber-700 font-medium">{gbp(t.client_overpaid)} overpaid</span>
+              <span className="text-gray-400"> ({t.client_overpaid_count})</span></>
+          )}
+        </>
+      ),
+    },
   ];
 
   // Build rows per tab (cells + parallel sort values + search blob).
@@ -911,6 +941,24 @@ export default function MoneyOverviewPage() {
     ],
   }));
 
+  const overpaidRows: Row[] = data.client_overpaid.map((r) => ({
+    key: r.job_id, href: `/jobs/${r.job_id}?tab=money`,
+    search: `${r.hh_job_number ?? ''} ${r.client_name ?? ''} ${r.job_name ?? ''}`,
+    sort: [r.hh_job_number ?? 0, r.client_name ?? '', parseFloat(r.amount), dateMs(r.last_synced_at)],
+    cells: [
+      <JobRef hh={r.hh_job_number} name={r.job_name} />,
+      r.client_name || '—',
+      <span className="font-semibold text-amber-700">{gbp(r.amount)}</span>,
+      <span className="text-gray-500 text-xs">{fmtDate(r.last_synced_at)}</span>,
+    ],
+  }));
+
+  const overpaidColumns: Col[] = [
+    { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
+    { label: 'Overpaid', sortable: true, align: 'right' },
+    { label: 'Figures from', sortable: true },
+  ];
+
   const refundColumns: Col[] = [
     { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
     { label: 'Logged', sortable: true }, { label: 'Amount', sortable: true, align: 'right' },
@@ -925,7 +973,7 @@ export default function MoneyOverviewPage() {
         <button onClick={() => load()} className="text-sm text-ooosh-600 hover:text-ooosh-700 underline">Refresh</button>
       </div>
       <p className="text-xs text-gray-500 mb-4">
-        Cached per-job figures — each job refreshes when its Money tab is opened. Excess and pending refunds are live.
+        Cached per-job figures — each job refreshes when its Money tab is opened. Excess and pending refunds are live; overpaid invoices are cached.
       </p>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
@@ -1086,6 +1134,29 @@ export default function MoneyOverviewPage() {
               rows={refundRows}
               persistKey="refunds"
             />
+            {/* Separate table, same card. An overpaid invoice is the same
+                conclusion — we're holding a client's money — but a different
+                thing: there is no IOU row to Process or Clear, only a refund to
+                make. Listing them together under one set of actions would
+                promise a Clear button that can't exist. */}
+            {data.client_overpaid.length > 0 && (
+              <>
+                <div className="px-4 pt-5">
+                  <h3 className="text-sm font-semibold text-gray-900">Overpaid invoices</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    HireHop shows more paid than these invoices are worth — usually a credit note raised after payment.
+                    There's no IOU to clear: refund it from the job's Money tab and the row disappears on its own.
+                    Jobs appear here once their Money tab has been opened.
+                  </p>
+                </div>
+                <Table
+                  columns={overpaidColumns}
+                  empty="None."
+                  rows={overpaidRows}
+                  persistKey="overpaid"
+                />
+              </>
+            )}
           </>
         )}
       </div>

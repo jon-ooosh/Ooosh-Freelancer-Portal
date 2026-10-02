@@ -1,26 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
-
-const STATUS_MAP: Record<number, string> = {
-  0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
-  5: 'Dispatched', 6: 'Returned Incomplete', 7: 'Returned',
-  8: 'Requires Attention', 9: 'Cancelled', 10: 'Not Interested', 11: 'Completed',
-};
-
-const PIPELINE_LABELS: Record<string, { label: string; colour: string }> = {
-  new_enquiry: { label: 'Enquiry', colour: 'bg-blue-100 text-blue-700' },
-  chasing: { label: 'Chasing', colour: 'bg-amber-100 text-amber-700' },
-  provisional: { label: 'Provisional', colour: 'bg-red-100 text-red-700' },
-  paused: { label: 'Paused', colour: 'bg-gray-100 text-gray-600' },
-  confirmed: { label: 'Confirmed', colour: 'bg-green-100 text-green-700' },
-  lost: { label: 'Lost', colour: 'bg-gray-100 text-gray-500' },
-  prepped: { label: 'Prepped', colour: 'bg-purple-100 text-purple-700' },
-  dispatched: { label: 'Dispatched', colour: 'bg-indigo-100 text-indigo-700' },
-  returned: { label: 'Returned', colour: 'bg-teal-100 text-teal-700' },
-  returned_incomplete: { label: 'Checking In', colour: 'bg-yellow-100 text-yellow-800' },
-  completed: { label: 'Completed', colour: 'bg-emerald-100 text-emerald-700' },
-};
+import { jobStatusDisplay } from '../lib/pipelineStatus';
 
 const RETRO_COLOURS: Record<string, { bg: string; text: string; label: string }> = {
   great: { bg: 'bg-green-100', text: 'text-green-700', label: 'Great' },
@@ -160,10 +141,7 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
   }
 
   function getStatusDisplay(job: HireHistoryJob): { label: string; colour: string } {
-    if (job.pipeline_status && PIPELINE_LABELS[job.pipeline_status]) {
-      return PIPELINE_LABELS[job.pipeline_status];
-    }
-    return { label: STATUS_MAP[job.status] || `Status ${job.status}`, colour: 'bg-gray-100 text-gray-600' };
+    return jobStatusDisplay(job);
   }
 
   function csvEscape(v: unknown): string {
@@ -303,16 +281,20 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* Stats summary */}
+      {/* Stats summary — reflects the active filters (see the "· filtered" hint) */}
       {stats && totalJobs > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
             <div className="text-2xl font-bold text-gray-900">{stats.total_jobs}</div>
-            <div className="text-xs text-gray-500">Total Jobs</div>
+            <div className="text-xs text-gray-500">
+              Total Jobs{filtersActive && <span className="text-ooosh-500"> · filtered</span>}
+            </div>
           </div>
           <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
             <div className="text-2xl font-bold text-green-600">{stats.confirmed_jobs}</div>
-            <div className="text-xs text-gray-500">Confirmed</div>
+            <div className="text-xs text-gray-500">
+              Confirmed{filtersActive && <span className="text-ooosh-500"> · filtered</span>}
+            </div>
           </div>
           <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
             <div className="text-2xl font-bold text-gray-900">
@@ -320,7 +302,9 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
                 ? `£${parseFloat(stats.total_value).toLocaleString('en-GB', { maximumFractionDigits: 0 })}`
                 : '—'}
             </div>
-            <div className="text-xs text-gray-500">Total Value</div>
+            <div className="text-xs text-gray-500">
+              Total Value{filtersActive && <span className="text-ooosh-500"> · filtered</span>}
+            </div>
           </div>
           <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
             {totalRetros > 0 ? (
@@ -332,7 +316,9 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
             ) : (
               <div className="text-2xl font-bold text-gray-300">&mdash;</div>
             )}
-            <div className="text-xs text-gray-500 mt-0.5">Retros</div>
+            <div className="text-xs text-gray-500 mt-0.5">
+              Retros{filtersActive && <span className="text-ooosh-500"> · filtered</span>}
+            </div>
           </div>
         </div>
       )}

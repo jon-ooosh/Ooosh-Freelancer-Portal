@@ -16,6 +16,10 @@ dist/
 .env.test.local
 .env.production.local
 .env*.local
+# nano's emergency save (`<file>.save`) when it is killed mid-edit — a plaintext
+# copy of whatever was open, so on the server that means the production .env.
+# `.env` above is an exact-name match and does NOT cover `.env.save`.
+*.save
 
 # Secrets / service-account credentials (NEVER commit these!)
 gmail-sa.json

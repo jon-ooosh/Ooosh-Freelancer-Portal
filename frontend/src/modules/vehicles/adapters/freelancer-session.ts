@@ -119,28 +119,62 @@ export function isFreelancerSessionActive(): boolean {
 }
 
 /**
+ * One van the freelancer can pick from on a multi-van job.
+ *
+ * A job can have several vans out/allocated at once, handled by different
+ * freelancers. The resolver hands back this list instead of guessing which van
+ * is yours (HH 15307 — two freelancers, two locations, one van shown to both).
+ */
+export interface FreelancerVanCandidate {
+  /** vehicle_hire_assignments.id — send this back to claim the van */
+  assignmentId: string
+  vehicleId: string | null
+  registration: string | null
+  makeModel: string
+  vehicleType: string | null
+  status: string
+  /** The customer on the hire agreement for this van, if known yet */
+  customerDriverName: string | null
+  /**
+   * ISO timestamp — this van's leg is already done (collected / booked out).
+   * A warning badge in the picker, not a block: someone may legitimately need
+   * to redo one.
+   */
+  alreadyDoneAt: string | null
+}
+
+export type FreelancerResolveResult =
+  | { kind: 'ok'; token: string; context: FreelancerBookoutContext }
+  | { kind: 'select'; candidates: FreelancerVanCandidate[] }
+  | { kind: 'error'; error: string; code?: string }
+
+/**
  * Resolve an HMAC token (from the portal) for a scoped session JWT.
- * Returns the stored session on success; a string error message on failure.
+ *
+ * Three outcomes: a live session ('ok'), a "which van?" list ('select' — more
+ * than one van on the job and none chosen yet), or an error. Pass
+ * `assignmentId` to claim a specific van from a previous 'select' result; the
+ * server re-checks it really is one of that job's vans before minting.
  */
 export async function resolveFreelancerToken(
   opBaseUrl: string,
   hmacToken: string,
   returnUrl: string | null,
   resolvePath: 'freelancer-bookout/resolve' | 'freelancer-checkin/resolve' = 'freelancer-bookout/resolve',
-): Promise<
-  | { ok: true; token: string; context: FreelancerBookoutContext }
-  | { ok: false; error: string; code?: string }
-> {
+  assignmentId?: string,
+): Promise<FreelancerResolveResult> {
   try {
     const response = await fetch(`${opBaseUrl}/${resolvePath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: hmacToken }),
+      body: JSON.stringify(assignmentId ? { token: hmacToken, assignmentId } : { token: hmacToken }),
     })
 
     const data = (await response.json().catch(() => ({}))) as {
       success?: boolean
       sessionToken?: string
+      needsVehicleSelection?: boolean
+      candidates?: FreelancerVanCandidate[]
       assignment?: {
         id: string
         vehicleId: string
@@ -157,11 +191,17 @@ export async function resolveFreelancerToken(
       hint?: string
     }
 
+    // Multi-van job, no van chosen yet — the caller shows the picker and calls
+    // back with the chosen assignmentId. No session is minted until then.
+    if (response.ok && data.success && data.needsVehicleSelection && data.candidates?.length) {
+      return { kind: 'select', candidates: data.candidates }
+    }
+
     if (!response.ok || !data.success || !data.sessionToken || !data.assignment || !data.job || !data.driver) {
       const msg = data.error
         ? data.hint ? `${data.error}. ${data.hint}` : data.error
         : `Token exchange failed (HTTP ${response.status})`
-      return { ok: false, error: msg, code: data.code }
+      return { kind: 'error', error: msg, code: data.code }
     }
 
     const context: FreelancerBookoutContext = {
@@ -181,10 +221,10 @@ export async function resolveFreelancerToken(
       returnUrl,
     }
 
-    return { ok: true, token: data.sessionToken, context }
+    return { kind: 'ok', token: data.sessionToken, context }
   } catch (err) {
     return {
-      ok: false,
+      kind: 'error',
       error: err instanceof Error ? err.message : 'Network error contacting OP backend',
     }
   }
@@ -199,6 +239,7 @@ export function resolveFreelancerCheckinToken(
   opBaseUrl: string,
   hmacToken: string,
   returnUrl: string | null,
+  assignmentId?: string,
 ) {
-  return resolveFreelancerToken(opBaseUrl, hmacToken, returnUrl, 'freelancer-checkin/resolve')
+  return resolveFreelancerToken(opBaseUrl, hmacToken, returnUrl, 'freelancer-checkin/resolve', assignmentId)
 }

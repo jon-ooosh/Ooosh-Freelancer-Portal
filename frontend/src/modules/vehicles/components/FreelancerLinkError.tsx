@@ -9,24 +9,44 @@
  *
  * Never a hard error page: shows the specific reason, a "try again", a way back
  * to the portal, and the office number so the freelancer can always get moving.
+ *
+ * When the reason is "there's no van for this leg" (`no_out_vehicle` /
+ * `no_allocation`), the useful action isn't "try again" — reloading won't
+ * conjure a van. It's going back to the /start wizard to re-pick what they're
+ * actually delivering. That ALSO rewrites the job's leg declaration: HH 16448
+ * (12 Sep) was a backline collection started as "Both", and because the only
+ * route out of this page led to /complete, requires_van_leg stayed true and the
+ * quote couldn't auto-close for three days.
  */
 
 const OFFICE_PHONE = '+44 (0) 1273 911382'
 const OFFICE_EMAIL = 'info@oooshtours.co.uk'
 
+/** Failures a reload can never fix — they picked the wrong leg, or no van exists. */
+const WRONG_LEG_CODES = ['no_out_vehicle', 'no_allocation']
+
 export function FreelancerLinkError({
   message,
   returnUrl,
+  startUrl,
+  code,
   action = 'book-out',
 }: {
   message: string
   returnUrl?: string | null
+  startUrl?: string | null
+  code?: string
   action?: 'book-out' | 'check-in'
 }) {
   // On failure the URL is kept intact (token + returnUrl still present), so a
   // reload re-attempts the exchange — useful for a transient backend blip.
   const retry = () => window.location.reload()
-  const portalUrl = returnUrl || new URLSearchParams(window.location.search).get('returnUrl')
+  const params = new URLSearchParams(window.location.search)
+  const portalUrl = returnUrl || params.get('returnUrl')
+  const wizardUrl = startUrl || params.get('startUrl')
+  // Lead with the wizard when retrying is pointless. Older portal builds don't
+  // send startUrl, so fall back to the existing buttons rather than stranding.
+  const wrongLeg = !!wizardUrl && WRONG_LEG_CODES.includes(code || '')
 
   return (
     <div className="mx-auto max-w-md space-y-5 px-4 py-8">
@@ -37,19 +57,44 @@ export function FreelancerLinkError({
           </svg>
         </div>
         <h2 className="text-lg font-semibold text-amber-900">
-          We couldn&apos;t link your van automatically
+          {wrongLeg
+            ? "Looks like there's no van on this job"
+            : "We couldn't link your van automatically"}
         </h2>
         <p className="mt-2 text-sm text-amber-800">{message}</p>
         <p className="mt-3 text-xs text-amber-700">
-          Don&apos;t worry — you can still {action === 'check-in' ? 'check the van in' : 'take the van out'}.
-          Give the office a call and we&apos;ll sort it while you&apos;re on the phone.
+          {wrongLeg ? (
+            <>
+              Don&apos;t worry — nothing is lost. Go back, pick what you&apos;re really{' '}
+              {action === 'check-in' ? 'collecting' : 'delivering'}, and carry on. Call the
+              office if you&apos;re not sure.
+            </>
+          ) : (
+            <>
+              Don&apos;t worry — you can still{' '}
+              {action === 'check-in' ? 'check the van in' : 'take the van out'}. Give the
+              office a call and we&apos;ll sort it while you&apos;re on the phone.
+            </>
+          )}
         </p>
       </div>
 
       <div className="space-y-3">
+        {wrongLeg && (
+          <a
+            href={wizardUrl!}
+            className="block w-full rounded-lg bg-ooosh-navy py-3 text-center font-semibold text-white"
+          >
+            Change what I&apos;m {action === 'check-in' ? 'collecting' : 'delivering'}
+          </a>
+        )}
         <button
           onClick={retry}
-          className="w-full rounded-lg bg-ooosh-navy py-3 text-center font-semibold text-white"
+          className={
+            wrongLeg
+              ? 'w-full rounded-lg border border-gray-300 bg-white py-3 text-center font-semibold text-gray-700'
+              : 'w-full rounded-lg bg-ooosh-navy py-3 text-center font-semibold text-white'
+          }
         >
           Try again
         </button>
