@@ -572,6 +572,9 @@ export interface CashOutReminderResult {
  * once it sends, which is what stops it going out every morning until New Year
  * — the same lesson as rtw_chased_at.
  */
+/** The day in January the year-end overtime figures go out (§17.2). */
+const JANUARY_PAYROLL_DAY = 2;
+
 export async function runCashOutReminder(today = new Date()): Promise<CashOutReminderResult> {
   const year = today.getUTCFullYear();
   const empty: CashOutReminderResult = { sent: false, year, people: [], totalMinutes: 0 };
@@ -595,23 +598,25 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
   const target = month === 11 ? year : year - 1;
   const stampKey = 'staff.overtime_cashout_reminded_year';
 
-  if (month === 11) {
-    const fromDay = await getCashOutReminderDay();
-    if (today.getUTCDate() < fromDay) {
-      return { ...empty, year: target, skippedReason: `before ${fromDay} December` };
-    }
-  } else if (month === 0) {
-    // A few days' grace in January before nagging about a year just ended.
-    if (today.getUTCDate() < 5) {
-      return { ...empty, year: target, skippedReason: 'early January grace period' };
-    }
-  } else {
-    return { ...empty, year: target, skippedReason: 'not December or January' };
+  // ONE reminder, on 2 January (spec §17.2, settled 21 Sep 2026): whatever is
+  // still banked at 31 December goes into JANUARY payroll, which must be in
+  // before the 5th for the 10th pay run — so jon needs one figure per person
+  // on the 2nd, after the last December overtime is logged. The December
+  // leg (from `staff.overtime_cashout_reminder_day`, the 8th) predated that
+  // decision and was removed in Oct 2026: it asked for a pay-out before the
+  // year's overtime was finished. The old "grace until the 5th" would have
+  // landed the reminder AFTER the payroll deadline. The setting is now unused.
+  void getCashOutReminderDay;
+  if (month !== 0) {
+    return { ...empty, year: target, skippedReason: 'only runs in January' };
+  }
+  if (today.getUTCDate() < JANUARY_PAYROLL_DAY) {
+    return { ...empty, year: target, skippedReason: `before ${JANUARY_PAYROLL_DAY} January` };
   }
 
-  // The stamp records year AND phase, so December's send does not silence
-  // January's follow-up on the same leave year.
-  const phase = month === 11 ? 'dec' : 'jan';
+  // Phase kept in the stamp ("2026:jan") so stamps written before Oct 2026,
+  // when there was also a December send, still mean what they meant.
+  const phase = 'jan';
   const stamp = `${target}:${phase}`;
   if ((await getSystemSetting(stampKey)) === stamp) {
     return { ...empty, year: target, skippedReason: 'already sent for this year and phase' };
@@ -650,9 +655,7 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
 
   const totalMinutes = people.reduce((s, p) => s + p.minutes, 0);
 
-  const title = phase === 'dec'
-    ? `Banked overtime to pay out before ${target} closes`
-    : `${target} still has banked overtime left over`;
+  const title = `Overtime to pay in January payroll — ${target} banked hours`;
 
   for (const u of await approverUserIds()) {
     await notify(u.id, 'follow_up', title,
@@ -662,9 +665,7 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
 
   await emailApprovers(title, title,
     [
-      phase === 'dec'
-        ? `Hours already worked cannot be forfeited, so the bank is <strong>paid out</strong> rather than expired. This wants to land in <strong>December's payroll</strong>, so it needs doing before that closes — though anyone who would rather take the time off over a quiet Christmas still can.`
-        : `This is what is left in the ${target} bank after the sweep — most likely overtime worked between the cash-out and New Year, which accrues to ${target} and would otherwise sit there unseen. Run the sweep again for ${target}; it is idempotent and picks up exactly this.`,
+      `This is what is still banked from ${target}. Hours already worked cannot be forfeited, so it is <strong>paid out</strong> rather than expired — in <strong>January's payroll</strong>, which needs to be in before the 5th. These are the figures to send.`,
       ...people.map(p => `<strong>${esc(p.name)}</strong> — ${fmtH(p.minutes)}`),
       `<strong>Total: ${fmtH(totalMinutes)}</strong>`,
       `Nothing has been posted. Run the year-end cash-out on the Staff page when you are happy with the figures.`,

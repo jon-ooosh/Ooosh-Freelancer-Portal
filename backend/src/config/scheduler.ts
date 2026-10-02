@@ -1114,7 +1114,7 @@ export function startScheduler() {
   console.log('Scheduler: Holiday entitlement sync scheduled daily at 06:05 Europe/London');
 
   // ── Year-end overtime cash-out REMINDER (spec §6.3, §17.2) ────────────────
-  // Daily at 09:55 Europe/London; no-ops outside December and January.
+  // Daily at 09:55 Europe/London; sends once, on 2 January (spec §17.2), no-ops otherwise.
   //
   // It REMINDS, it does not sweep. Paying out seven people's banked overtime
   // is money out the door, and the platform rule is that a recomputed figure
@@ -1133,7 +1133,7 @@ export function startScheduler() {
       console.error('Scheduler: Year-end cash-out reminder failed:', err);
     }
   }, { timezone: 'Europe/London' });
-  console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (December + January)');
+  console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (sends 2 January)');
 
   // ── Company days for next year (spec §20.4) ───────────────────────────────
   // Daily at 09:58 Europe/London; no-ops outside the configured review month
