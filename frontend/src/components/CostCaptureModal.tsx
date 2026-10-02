@@ -841,6 +841,15 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
   // transaction — only affects the wording on the supporting-docs block.
   const isBillMethod = BILL_METHODS.includes(paymentMethod);
 
+  // Already in Xero, and the method now points at the OTHER kind of Xero object
+  // (Spend Money vs Bill)? Saving doesn't convert one into the other — warn.
+  // Legacy rows with no recorded type fall back to the method it was saved with.
+  const xeroKind = existing?.xero_object_id
+    ? (existing.xero_object_type
+      ?? (existing.payment_method && BILL_METHODS.includes(existing.payment_method) ? 'invoice' : 'banktransaction'))
+    : null;
+  const xeroKindMismatch = xeroKind !== null && (xeroKind === 'invoice') !== isBillMethod;
+
   // Recharge is only possible on a job-linked cost that's flagged "extra" — a
   // quote_actual cost is already billed via its quote.
   const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
@@ -1085,7 +1094,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
         }));
       }
       if (!isEdit) {
-        payload.platform_issue_id = presetIssueId || null;
+        payload.job_issue_id = presetIssueId || null;
         payload.status = 'confirmed';
         // One-click "Approve & save" — backend honours it only for a payable +
         // an approver (admin/manager), and fires the bill push on approval.
@@ -1911,6 +1920,14 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
                 </select>
               </div>
             </div>
+
+            {xeroKindMismatch && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                {xeroKind === 'banktransaction'
+                  ? 'This cost is already in Xero as a paid Spend Money. Changing it to pay-later won’t turn it into a bill, and it can’t then be re-synced or batch-paid. Delete the Spend Money in Xero, then ask an admin to point this cost at the bill.'
+                  : 'This cost is already in Xero as a bill. Changing it to a paid-now method won’t record a payment there — keep it pay-later and pay the bill (Mark paid or batch pay) instead.'}
+              </p>
+            )}
 
             {paymentMethod === 'cot_card' && !freshCardLast4 && (
               <p className="text-xs text-gray-500 italic">

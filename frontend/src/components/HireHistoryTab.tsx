@@ -1,26 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
-
-const STATUS_MAP: Record<number, string> = {
-  0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
-  5: 'Dispatched', 6: 'Returned Incomplete', 7: 'Returned',
-  8: 'Requires Attention', 9: 'Cancelled', 10: 'Not Interested', 11: 'Completed',
-};
-
-const PIPELINE_LABELS: Record<string, { label: string; colour: string }> = {
-  new_enquiry: { label: 'Enquiry', colour: 'bg-blue-100 text-blue-700' },
-  chasing: { label: 'Chasing', colour: 'bg-amber-100 text-amber-700' },
-  provisional: { label: 'Provisional', colour: 'bg-red-100 text-red-700' },
-  paused: { label: 'Paused', colour: 'bg-gray-100 text-gray-600' },
-  confirmed: { label: 'Confirmed', colour: 'bg-green-100 text-green-700' },
-  lost: { label: 'Lost', colour: 'bg-gray-100 text-gray-500' },
-  prepped: { label: 'Prepped', colour: 'bg-purple-100 text-purple-700' },
-  dispatched: { label: 'Dispatched', colour: 'bg-indigo-100 text-indigo-700' },
-  returned: { label: 'Returned', colour: 'bg-teal-100 text-teal-700' },
-  returned_incomplete: { label: 'Checking In', colour: 'bg-yellow-100 text-yellow-800' },
-  completed: { label: 'Completed', colour: 'bg-emerald-100 text-emerald-700' },
-};
+import { jobStatusDisplay } from '../lib/pipelineStatus';
 
 const RETRO_COLOURS: Record<string, { bg: string; text: string; label: string }> = {
   great: { bg: 'bg-green-100', text: 'text-green-700', label: 'Great' },
@@ -160,10 +141,7 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
   }
 
   function getStatusDisplay(job: HireHistoryJob): { label: string; colour: string } {
-    if (job.pipeline_status && PIPELINE_LABELS[job.pipeline_status]) {
-      return PIPELINE_LABELS[job.pipeline_status];
-    }
-    return { label: STATUS_MAP[job.status] || `Status ${job.status}`, colour: 'bg-gray-100 text-gray-600' };
+    return jobStatusDisplay(job);
   }
 
   function csvEscape(v: unknown): string {

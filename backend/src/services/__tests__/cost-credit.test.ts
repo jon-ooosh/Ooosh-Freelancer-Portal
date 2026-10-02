@@ -29,7 +29,7 @@ const parentRow = (over: Record<string, unknown> = {}) => ({
   xero_contact_id: 'xc-1', currency: 'GBP', vat_treatment: 'standard',
   payment_method: 'cot_card', cot_card_holder: 'Sam', cot_card_last4: '1234',
   xero_account_code: '412', category: 'Van parts', cost_type: 'vehicle',
-  vehicle_id: 'veh-1', quote_assignment_id: null, platform_issue_id: null,
+  vehicle_id: 'veh-1', quote_assignment_id: null, job_issue_id: null,
   vehicle_service_log_id: null, vehicle_fuel_log_id: null,
   allocation_count: 0,
   ...over,

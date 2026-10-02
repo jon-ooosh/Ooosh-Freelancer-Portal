@@ -9,16 +9,23 @@
  * the gist, this answers a specific question.
  *
  * Grounded strictly in the ingested `type='email'` interactions — never guesses.
- * Sonnet 5 (spec §4) because it's reasoning over a chain to pin "who asked for
+ * Sonnet (spec §4) because it's reasoning over a chain to pin "who asked for
  * what, when". The email chain is sent as a prompt-cached block so repeated
  * questions about the same job reuse it cheaply.
  */
 import { query } from '../config/database';
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
+import {
+  getAnthropicClient,
+  isAnthropicConfigured,
+  readStructuredJson,
+  CLAUDE_SONNET_MODEL,
+} from '../config/anthropic';
 import { buildQuoteVersionContext } from './quote-versions';
 
-const MODEL_ID = 'claude-sonnet-5';
-const MAX_TOKENS = 900;
+const MODEL_ID = CLAUDE_SONNET_MODEL;
+// Headroom for thinking as well as the answer — thinking counts towards
+// max_tokens on Sonnet 5.5.
+const MAX_TOKENS = 8000;
 
 const SYSTEM_PROMPT = `You answer an Ooosh Tours staff member's question about a client conversation for a specific hire. You are given the full email chain, and — when available — the succession of QUOTE PDF versions we emailed (with what changed between them). Answer ONLY from what you are given. This is used to settle "who asked for what, when" (disputes, "where's my X?", "did we confirm the dates?", "when did the second van come off the quote?").
 
@@ -30,7 +37,7 @@ RULES:
 - Attribute correctly: messages are marked as from the client or from Ooosh. Don't confuse who said what.
 - Concise and factual — this is an internal staff tool, not a client-facing message. British English. Plain text; short quotes in quotation marks are fine.
 
-Return ONLY the tool call with your answer.`;
+Return ONLY the JSON object with your answer.`;
 
 const SCHEMA = {
   type: 'object' as const,
@@ -122,22 +129,14 @@ export async function answerCommsQuery(jobId: string, question: string): Promise
     max_tokens: MAX_TOKENS,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content }],
-    tools: [
-      {
-        name: 'report_answer',
-        description: 'Return the answer to the question, grounded in the emails.',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input_schema: SCHEMA as any,
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'report_answer' },
+    // Structured outputs (json_schema) — replaced forced tool-use (400 on Sonnet
+    // 5.5). Effort 'medium': pinning "who asked for what, when" across a long
+    // chain is real reasoning, unlike the extraction-style callers.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    output_config: { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA as any } } as any,
   });
 
-  const toolBlock = response.content.find((b) => b.type === 'tool_use');
-  if (!toolBlock || toolBlock.type !== 'tool_use') {
-    throw new Error('Claude did not return an answer');
-  }
-  const out = toolBlock.input as { answer?: string };
+  const out = readStructuredJson<{ answer?: string }>(response, 'Comms query');
   const answer = (out.answer || '').trim();
   if (!answer) throw new Error('Empty answer returned');
   return { answer };

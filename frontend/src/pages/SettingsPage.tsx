@@ -5,6 +5,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { Navigate, Link } from 'react-router-dom';
 import XeroBankAccountsSection from '../components/XeroBankAccountsSection';
 import { compressImage } from '../modules/vehicles/lib/image-utils';
+import { DOC_TYPES as STAFF_DOC_TYPES } from '../components/StaffRecordFiles';
 
 interface TeamUser {
   id: string;
@@ -83,11 +84,17 @@ function SettingsContent() {
       {/* Vehicle Issues settings — admin & manager */}
       <VehicleIssueSettingsSection />
 
+      {/* Insurance claims: broker address, insured block, vehicle-value curve — admin & manager */}
+      <ClaimsSettingsSection />
+
       {/* Staff time thresholds & bank holidays — admin & manager */}
       <StaffTimeSettingsSection />
 
       {/* Links sent to a freelancer the moment they're approved — admin & manager */}
       <FreelancerLinksSection />
+
+      {/* Shop till settings — admin only (discount ceilings are money policy) */}
+      {currentUser?.role === 'admin' && <ShopSettingsSection />}
 
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
@@ -1930,6 +1937,180 @@ function VehicleIssueSettingsSection() {
  * email rather than sending a broken link, so clearing the WhatsApp link the
  * moment it leaks is a safe thing to do at 11pm.
  */
+/**
+ * Every `shop` system setting (docs/SHOP-SALES-SPEC.md §19), as plain boxes.
+ *
+ * Deliberately generic — the till's settings are few, change rarely, and are
+ * all read defensively by the backend (a bad value falls back, it never
+ * breaks a sale). JSON-typed values are checked here before saving so a typo
+ * can't be stored in the first place.
+ */
+function ShopSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=shop');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const row of res.data) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load the shop settings.');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const next = vals[row.key] ?? '';
+        if ((row.value ?? '') === next) continue;
+        if (row.value_type === 'json') {
+          try { JSON.parse(next); } catch {
+            setError(`"${row.label ?? row.key}" isn't valid JSON — nothing saved.`);
+            return;
+          }
+        }
+        changed[row.key] = next;
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} setting${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Shop till</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        The weekly shop job, discount limits, test accounts and reminders. Lists and limits are
+        JSON — e.g. <code className="font-mono text-xs">[16749, 16757]</code>.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {settings.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''}
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className={`px-2 py-1.5 rounded border border-gray-300 text-sm ${row.value_type === 'json' ? 'font-mono' : ''}`} />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Settings › Claims (docs/INCIDENT-CLAIMS-SPEC.md). The broker address, the
+ * insured block printed on every broker PDF, and the four numbers behind the
+ * estimated vehicle value (§6.6). Plain text boxes — each is one value.
+ */
+function ClaimsSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=claims');
+      // The default-watchers list is edited as JSON by hand for now; keep it out of this box list.
+      const rows = res.data.filter(r => r.key !== 'claims_default_watchers');
+      setSettings(rows);
+      const v: Record<string, string> = {};
+      for (const row of rows) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load claims settings (has migration 259 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const orig = row.value ?? '';
+        if (orig !== (vals[row.key] ?? '')) changed[row.key] = vals[row.key];
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} setting${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Insurance claims</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Where claim PDFs are emailed, the insured details printed on them, and the curve behind each van&apos;s
+        estimated value: a drop on first registration, then a yearly rate that falls each year down to a floor.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {settings.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''}
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function FreelancerLinksSection() {
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const [vals, setVals] = useState<Record<string, string>>({});
@@ -2011,6 +2192,117 @@ function FreelancerLinksSection() {
   );
 }
 
+/**
+ * Editors for the staff settings stored as JSON. Each takes the raw string
+ * and hands back a new one, so the section's save path does not change.
+ *
+ * Both fall back to the raw text box when the stored value doesn't parse:
+ * silently replacing somebody's hand-edited setting with an empty editor
+ * would lose it on the next save. The backend readers already tolerate junk
+ * (getReviewQuestions / getReviewIntervals fall back to built-in defaults).
+ */
+type JsonEditor = (p: { value: string; onChange: (next: string) => void }) => JSX.Element;
+
+function RawJsonBox({ value, onChange, why }: { value: string; onChange: (v: string) => void; why: string }) {
+  return (
+    <div>
+      <p className="text-xs text-amber-700 mb-1">{why} Showing the raw value — fix it here or clear it to start again.</p>
+      <textarea value={value} onChange={e => onChange(e.target.value)} rows={4}
+        className="w-full px-2 py-1.5 rounded border border-gray-300 text-sm font-mono" />
+    </div>
+  );
+}
+
+/** staff.review_questions — a JSON array of strings, asked of both sides. */
+const ReviewQuestionsEditor: JsonEditor = ({ value, onChange }) => {
+  let questions: string[] | null = null;
+  try {
+    const parsed = value.trim() ? JSON.parse(value) : [];
+    if (Array.isArray(parsed) && parsed.every(q => typeof q === 'string')) questions = parsed;
+  } catch { /* falls through to the raw box */ }
+  if (!questions) {
+    return <RawJsonBox value={value} onChange={onChange} why="This isn’t a list of questions." />;
+  }
+  const list = questions;
+  const write = (next: string[]) => onChange(JSON.stringify(next));
+  const move = (i: number, by: number) => {
+    const next = [...list];
+    const [q] = next.splice(i, 1);
+    next.splice(i + by, 0, q);
+    write(next);
+  };
+  return (
+    <div className="space-y-2">
+      {list.map((q, i) => (
+        <div key={i} className="flex items-start gap-2">
+          <span className="text-xs text-gray-400 w-5 pt-2 text-right">{i + 1}.</span>
+          <textarea value={q} rows={2}
+            onChange={e => write(list.map((x, j) => (j === i ? e.target.value : x)))}
+            className="flex-1 px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          <div className="flex flex-col gap-0.5 text-xs">
+            <button type="button" onClick={() => move(i, -1)} disabled={i === 0}
+              className="px-1.5 text-gray-500 hover:text-gray-800 disabled:opacity-30" aria-label="Move up">▲</button>
+            <button type="button" onClick={() => move(i, 1)} disabled={i === list.length - 1}
+              className="px-1.5 text-gray-500 hover:text-gray-800 disabled:opacity-30" aria-label="Move down">▼</button>
+          </div>
+          <button type="button" onClick={() => write(list.filter((_, j) => j !== i))}
+            className="text-xs text-red-600 hover:text-red-800 pt-2">Remove</button>
+        </div>
+      ))}
+      <button type="button" onClick={() => write([...list, ''])}
+        className="text-sm text-ooosh-600 hover:underline">+ Add a question</button>
+      <p className="text-xs text-gray-400">
+        Both sides answer the same questions before a review. Rewording one only affects future
+        reviews — past answers keep the wording they were asked with. Empty questions are ignored.
+      </p>
+    </div>
+  );
+};
+
+/** staff.doc_review_intervals — months per staff document type; 0 = never. */
+const DocIntervalsEditor: JsonEditor = ({ value, onChange }) => {
+  let map: Record<string, number> | null = null;
+  try {
+    const parsed = value.trim() ? JSON.parse(value) : {};
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) map = parsed;
+  } catch { /* falls through to the raw box */ }
+  if (!map) {
+    return <RawJsonBox value={value} onChange={onChange} why="This isn’t a table of months." />;
+  }
+  const current = map;
+  const known = STAFF_DOC_TYPES.map(t => t.value);
+  // Keep anything the setting mentions that the form doesn't know, so a
+  // hand-added type isn't dropped on save.
+  const rows = [...STAFF_DOC_TYPES, ...Object.keys(current).filter(k => !known.includes(k)).map(k => ({ value: k, label: k }))];
+  return (
+    <div>
+      <div className="grid grid-cols-[minmax(0,1fr)_6rem] sm:grid-cols-[16rem_6rem] gap-x-3 gap-y-1.5 items-center">
+        {rows.map(t => (
+          <div key={t.value} className="contents">
+            <label htmlFor={`interval-${t.value}`} className="text-sm text-gray-700">{t.label}</label>
+            <input id={`interval-${t.value}`} type="number" min={0} max={600} inputMode="numeric"
+              value={String(current[t.value] ?? 0)}
+              onChange={e => {
+                const n = Math.max(0, Math.min(600, Math.round(Number(e.target.value) || 0)));
+                onChange(JSON.stringify({ ...current, [t.value]: n }));
+              }}
+              className="px-2 py-1 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-gray-400 mt-2">
+        Months. Used to suggest the “then, on” date when a record is filed — 0 means don’t suggest
+        one. It never changes a date already set on a record.
+      </p>
+    </div>
+  );
+};
+
+const STRUCTURED_EDITORS: Record<string, JsonEditor> = {
+  'staff.review_questions': ReviewQuestionsEditor,
+  'staff.doc_review_intervals': DocIntervalsEditor,
+};
+
 function StaffTimeSettingsSection() {
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const [vals, setVals] = useState<Record<string, string>>({});
@@ -2076,7 +2368,23 @@ function StaffTimeSettingsSection() {
       {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
 
       <div className="space-y-3">
-        {thresholdRows.map(row => (
+        {thresholdRows.map(row => STRUCTURED_EDITORS[row.key] ? (
+          // A JSON setting gets a real editor rather than a one-line box.
+          // It still reads and writes the same string, so saving is unchanged.
+          <div key={row.key} className="pt-2">
+            <p className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </p>
+            <div className="mt-2">
+              {(() => {
+                const Editor = STRUCTURED_EDITORS[row.key];
+                return <Editor value={vals[row.key] ?? ''}
+                  onChange={next => setVals(v => ({ ...v, [row.key]: next }))} />;
+              })()}
+            </div>
+          </div>
+        ) : (
           <div key={row.key} className="grid sm:grid-cols-[minmax(0,1fr)_10rem] gap-2 sm:items-center">
             <label htmlFor={row.key} className="text-sm text-gray-700">
               {row.label ?? row.key}

@@ -66,7 +66,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let paramIndex = 1;
 
     if (search) {
-      sql += ` AND (name ILIKE $${paramIndex} OR address ILIKE $${paramIndex} OR city ILIKE $${paramIndex})`;
+      // `postcode` is searched too: it lives in its own column, so without it
+      // typing a venue's postcode returned nothing — the one identifier most
+      // likely to be pasted in from an email.
+      sql += ` AND (name ILIKE $${paramIndex} OR address ILIKE $${paramIndex} OR city ILIKE $${paramIndex} OR postcode ILIKE $${paramIndex})`;
       params.push(`%${search}%`);
       paramIndex++;
     }
@@ -125,6 +128,71 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Get venue error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/venues/:id/history — every job this venue has been linked to.
+//
+// A venue is reachable two ways and BOTH have to count, because in practice the
+// second is the common one: `jobs.venue_id` (set from the HireHop sync) and
+// `quotes.venue_id` (set by the transport calculator). A job quoted to a venue
+// very often has no venue_id of its own, so a jobs-only query would report
+// "nothing here" on a venue with a decade of work through it.
+//
+// Deliberately NOT the org/person hire-history endpoint in miniature: no role
+// filters, no CSV, no stat cards. A venue has tens of jobs, not thousands, so
+// one newest-first list is the whole requirement.
+router.get('/:id/history', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // bool_or collapses the two link routes into one row per job, so a job
+    // linked BOTH directly and via a quote appears once, flagged as both.
+    const result = await query(
+      `WITH linked AS (
+         SELECT j.id AS job_id, true AS via_job, false AS via_quote
+         FROM jobs j
+         WHERE j.venue_id = $1 AND j.is_deleted = false
+         UNION ALL
+         SELECT q.job_id, false AS via_job, true AS via_quote
+         FROM quotes q
+         WHERE q.venue_id = $1 AND q.job_id IS NOT NULL
+       ),
+       agg AS (
+         SELECT job_id, bool_or(via_job) AS via_job, bool_or(via_quote) AS via_quote
+         FROM linked
+         GROUP BY job_id
+       )
+       SELECT
+         j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
+         j.job_date, j.job_end, j.pipeline_status, j.status,
+         a.via_job, a.via_quote,
+         COUNT(*) OVER() AS total_count
+       FROM agg a
+       JOIN jobs j ON j.id = a.job_id AND j.is_deleted = false
+       ORDER BY j.job_date DESC NULLS LAST, j.hh_job_number DESC NULLS LAST
+       LIMIT 200`,
+      [id]
+    );
+
+    // Quotes saved against this venue that never got attached to a job. Surfaced
+    // as a count rather than rows — there is nothing to link to, but silently
+    // dropping them would make the list quietly understate the venue's history.
+    const orphanResult = await query(
+      'SELECT COUNT(*)::int AS count FROM quotes WHERE venue_id = $1 AND job_id IS NULL',
+      [id]
+    );
+
+    const total = result.rows.length > 0 ? parseInt(result.rows[0].total_count, 10) : 0;
+
+    res.json({
+      data: result.rows.map(({ total_count, ...row }) => row),
+      total,
+      orphan_quotes: orphanResult.rows[0]?.count ?? 0,
+    });
+  } catch (error) {
+    console.error('Venue history error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

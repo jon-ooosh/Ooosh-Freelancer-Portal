@@ -9,6 +9,7 @@ import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r
 import { query } from '../config/database';
 import emailService from '../services/email-service';
 import { STAFF_RECORDS_PREFIX, STAFF_RECORD_ROLES } from './staff-records';
+import { CLAIMS_PREFIX } from './incident-claims';
 
 const router = Router();
 router.use(authenticate);
@@ -200,6 +201,13 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
     if (key.startsWith(STAFF_RECORDS_PREFIX)) {
       if (!STAFF_RECORD_ROLES.includes(req.user?.role as typeof STAFF_RECORD_ROLES[number])) {
         res.status(403).json({ error: 'Not authorised to view staff records' });
+        return;
+      }
+    } else if (key.startsWith(CLAIMS_PREFIX)) {
+      // Insurance case files (docs/INCIDENT-CLAIMS-SPEC.md §6.4) — photos of
+      // injuries and other people's details. Staff only, never freelancers.
+      if (!(STAFF_ROLES as readonly string[]).includes(req.user?.role || '')) {
+        res.status(403).json({ error: 'Not authorised to view claim files' });
         return;
       }
     } else if (!allowedPrefixes.some((p) => key.startsWith(p))) {

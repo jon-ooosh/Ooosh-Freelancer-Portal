@@ -461,6 +461,48 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
   const pcnBuckets = [pcnNip, pcnTransfer, pcnDeadline, pcnAwaiting].filter((b) => b.count > 0);
 
+  // Possible insurance claims nobody is watching: check date passed or never
+  // set (docs/INCIDENT-CLAIMS-SPEC.md §9.2–9.3). Hidden when there are none.
+  const claimChecks: NABucket = {
+    key: 'claim_checks', title: 'Insurance claims to check on', accent: 'amber',
+    count: na.claim_check_overdue_total || 0,
+    items: (na.claim_check_overdue || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: c.next_check_on ? deadlineLabel(c.next_check_on) : 'no check date',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  // A client submitted the form — a manager needs to review it before anything else happens.
+  const claimReview: NABucket = {
+    key: 'claim_review', title: 'Claim forms to review', accent: 'amber',
+    count: na.claim_to_review?.length || 0,
+    items: (na.claim_to_review || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: c.next_check_on ? `submitted ${c.next_check_on.split('-').reverse().join('/')}` : 'submitted',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  // Four client reminders and still no form — the chase has stopped; phone them.
+  const claimChase: NABucket = {
+    key: 'claim_chase', title: 'Claim forms not coming back', accent: 'red',
+    count: na.claim_chase_exhausted?.length || 0,
+    items: (na.claim_chase_exhausted || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: '4 reminders sent',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  const claimBuckets = [claimChase, claimReview, claimChecks].filter((b) => b.count > 0);
+
   // Studio-sitter cover gaps (Rehearsals) — evenings in the next 14 days that
   // need a sitter but have none assigned. Amber — action-needed planning.
   const sitterGaps: NABucket = {
@@ -505,7 +547,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
   const selfHiding = [holdingUnlinked].filter((b) => b.count > 0);
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...claimBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

@@ -76,6 +76,110 @@ export function startScheduler() {
     console.log('Scheduler: Backup retention sweep scheduled daily at 02:30');
   }
 
+  // ── Shop transaction drain ────────────────────────────────────────────
+  // Sends queued shop rows to HireHop. Deliberately deferred rather than pushed
+  // inline: the counter must never wait on HireHop, and the delay IS Window A —
+  // inside it a cancel is a true undo because nothing has reached HireHop or
+  // Xero (docs/SHOP-SALES-SPEC.md §7-8). Consumption AND sales.
+  if (!isHireHopConfigured()) {
+    console.log('Scheduler: HireHop not configured — shop drain disabled');
+  } else {
+    cron.schedule('*/2 * * * *', async () => {
+      try {
+        const { drainShop } = await import('../services/shop-drain');
+        const r = await drainShop();
+        const errors = [...r.consumption.errors, ...r.sales.errors, ...r.reversals.errors];
+        if (errors.length) {
+          console.error('Scheduler: shop drain errors:', errors.join(' | '));
+        }
+      } catch (err) {
+        // Never throw out of a scheduled task — a HireHop wobble must not take
+        // the scheduler down, and the rows stay queued for the next pass.
+        console.error('Scheduler: shop drain failed:', err instanceof Error ? err.message : err);
+      }
+    });
+  }
+
+  // ── Shop balance check ────────────────────────────────────────────────
+  // Every 15 min: compare each recent, un-invoiced week's shop job in HireHop
+  // with what OP put on it (goods, money, lines, status), and chase stuck or
+  // failed transactions. Emails jon once per distinct problem
+  // (docs/SHOP-SALES-SPEC.md §12). The shop job is never in OP's `jobs`
+  // table, so the lost/cancelled + is_internal gates don't apply here.
+  if (isHireHopConfigured()) {
+    cron.schedule('*/15 * * * *', async () => {
+      try {
+        const { runShopReconcileScan } = await import('../services/shop-reconcile');
+        const r = await runShopReconcileScan();
+        if (r.alerted > 0) console.log(`Scheduler: shop balance check — ${r.weeks} week(s), ${r.alerted} alert(s), ${r.stuck} stuck`);
+      } catch (err) {
+        console.error('Scheduler: shop balance check failed:', err instanceof Error ? err.message : err);
+      }
+    });
+  }
+
+  // ── Shop weekly close reminder ────────────────────────────────────────
+  // Monday 08:55 (UK): email jon which finished weeks are waiting to be closed
+  // — ready, or what's stopping them (docs/SHOP-SALES-SPEC.md §20.2). The close
+  // itself is a button until it has proven itself. Shop jobs are never in OP's
+  // `jobs` table, so the lost/cancelled + is_internal gates don't apply here.
+  if (isHireHopConfigured()) {
+    cron.schedule('55 8 * * 1', async () => {
+      try {
+        const { sendShopCloseDigest } = await import('../services/shop-close');
+        const n = await sendShopCloseDigest();
+        if (n > 0) console.log(`Scheduler: shop close reminder — ${n} week(s) to close`);
+      } catch (err) {
+        console.error('Scheduler: shop close reminder failed:', err instanceof Error ? err.message : err);
+      }
+    }, { timezone: 'Europe/London' });
+  }
+
+  // ── Shop contact check ────────────────────────────────────────────────
+  // Daily 06:40 (UK): has the "OP Shop Sales" HireHop contact — the client on
+  // every weekly shop invoice — had its name or address edited? Emails jon once
+  // per change (docs/SHOP-SALES-SPEC.md §6.0). Not a job, so the lost/cancelled
+  // + is_internal gates don't apply.
+  if (isHireHopConfigured()) {
+    cron.schedule('40 6 * * *', async () => {
+      try {
+        const { checkShopContact } = await import('../services/shop-contact-check');
+        const r = await checkShopContact();
+        if (r === 'changed') console.log('Scheduler: shop contact check — the OP Shop Sales contact changed; jon emailed');
+      } catch (err) {
+        console.error('Scheduler: shop contact check failed:', err instanceof Error ? err.message : err);
+      }
+    }, { timezone: 'Europe/London' });
+  }
+
+  // ── Shop sale-stock catalogue mirror ──────────────────────────────────
+  // Keeps `shop_stock_cache` fresh so the till never calls HireHop to search or
+  // price an item (docs/SHOP-SALES-SPEC.md §10). A few HireHop calls per refresh
+  // at 'low' priority, so it yields to anything user-facing.
+  if (!isHireHopConfigured()) {
+    console.log('Scheduler: HireHop not configured — shop stock mirror disabled');
+  } else {
+    const refreshShopStock = async (reason: string) => {
+      try {
+        const { refreshShopStockCache } = await import('../services/shop-stock');
+        const r = await refreshShopStockCache();
+        console.log(`Scheduler: shop stock mirror (${reason}) — ${r.upserted} items, ${r.pages} page(s), ${r.retired} retired`);
+      } catch (err) {
+        // Never throw out of a scheduled task: a HireHop wobble must not take
+        // the scheduler down, and the previous catalogue is still serving.
+        console.error(`Scheduler: shop stock mirror (${reason}) failed:`, err instanceof Error ? err.message : err);
+      }
+    };
+
+    // Every 15 minutes. Shelf counts are advisory, so this is deliberately not
+    // chasing real-time — the till labels how stale the number is.
+    cron.schedule('*/15 * * * *', () => { void refreshShopStock('scheduled'); });
+
+    // And once shortly after boot, so a restart doesn't leave the till with an
+    // empty (or 15-minute-stale) catalogue until the next tick.
+    setTimeout(() => { void refreshShopStock('startup'); }, 20_000);
+  }
+
   // ── HireHop Job Sync ──────────────────────────────────────────────────
   if (!isHireHopConfigured()) {
     console.log('Scheduler: HireHop not configured — job sync disabled');
@@ -568,18 +672,19 @@ export function startScheduler() {
   // migration 102) guarantee at most ONE email per transition.
   cron.schedule('*/15 * * * *', async () => {
     try {
-      const { runDispatchSanityScan, runReturnedBookedOutScan, runBookedOutNoTimestampScan, runFreelancerLegStalledScan, runStuckOnHireScan, runBookedSplitScan } = await import('../services/sanity-check-scanner');
-      const [dispatch, returned, noTs, stalledLeg, stuckOnHire, bookedSplit] = await Promise.all([
+      const { runDispatchSanityScan, runReturnedBookedOutScan, runBookedOutNoTimestampScan, runFreelancerLegStalledScan, runStuckOnHireScan, runBookedSplitScan, runDoubleHeldExcessScan } = await import('../services/sanity-check-scanner');
+      const [dispatch, returned, noTs, stalledLeg, stuckOnHire, bookedSplit, doubleHeld] = await Promise.all([
         runDispatchSanityScan(),
         runReturnedBookedOutScan(),
         runBookedOutNoTimestampScan(),
         runFreelancerLegStalledScan(),
         runStuckOnHireScan(),
         runBookedSplitScan(),
+        runDoubleHeldExcessScan(),
       ]);
-      if (dispatch.warned > 0 || returned.warned > 0 || noTs.warned > 0 || stalledLeg.warned > 0 || stuckOnHire.warned > 0 || bookedSplit.warned > 0) {
+      if (dispatch.warned > 0 || returned.warned > 0 || noTs.warned > 0 || stalledLeg.warned > 0 || stuckOnHire.warned > 0 || bookedSplit.warned > 0 || doubleHeld.warned > 0) {
         console.log(
-          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}, booked_out-no-ts ${noTs.warned}/${noTs.checked}, stalled-leg ${stalledLeg.warned}/${stalledLeg.checked}, stuck-on-hire ${stuckOnHire.warned}/${stuckOnHire.checked}, booked-split ${bookedSplit.warned}/${bookedSplit.checked}`
+          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}, booked_out-no-ts ${noTs.warned}/${noTs.checked}, stalled-leg ${stalledLeg.warned}/${stalledLeg.checked}, stuck-on-hire ${stuckOnHire.warned}/${stuckOnHire.checked}, booked-split ${bookedSplit.warned}/${bookedSplit.checked}, double-held-excess ${doubleHeld.warned}/${doubleHeld.checked}`
         );
       }
     } catch (err) {
@@ -1071,6 +1176,77 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Return-to-work chase scheduled daily at 08:50 Europe/London');
 
+  // ── Staff records daily reminders (spec §5, §6) ───────────────────────────
+  // Daily at 09:45 Europe/London, in the 09:00–10:00 reminder block between
+  // the pre-auth expiry sweep (09:40) and Stripe discovery (09:50).
+  //
+  // Three scans in ONE cron entry rather than three: they share a block, they
+  // are all cheap, and three more entries in a list this long is how a
+  // scheduler becomes unreadable. Each is independently try/caught so one
+  // failing cannot silence the other two.
+  //
+  //   tasks     — nudge, then RE-ARM next_chase_date (pipeline model)
+  //   follow-ups — the setter's own date on a task given to somebody else
+  //   records   — a staff record's action date (remind / flag for deletion)
+  //   reviews   — somebody's review falling due, once per cycle, to admins
+  cron.schedule('45 9 * * *', async () => {
+    const notifications = await import('../services/staff-notifications');
+    try {
+      // Repeating to-dos: repair any active series left with no open
+      // occurrence — BEFORE the chase, so a repaired one is nudged today.
+      const { ensureSeriesOccurrences } = await import('../services/staff-task-series');
+      const r = await ensureSeriesOccurrences();
+      if (r.made) console.log(`Scheduler: Repeating to-dos — ${r.made} repaired`);
+    } catch (err) {
+      console.error('Scheduler: Repeating to-do repair failed:', err);
+    }
+    try {
+      const r = await notifications.runTaskChase();
+      console.log(`Scheduler: To-do chase — ${r.chased} nudged`);
+    } catch (err) {
+      console.error('Scheduler: To-do chase failed:', err);
+    }
+    try {
+      // Untaken list items → the list's watchers (docs/TASKS-SPEC.md §7).
+      const r = await notifications.runListItemChase();
+      console.log(`Scheduler: List items — ${r.chased} nudged`);
+    } catch (err) {
+      console.error('Scheduler: List item chase failed:', err);
+    }
+    try {
+      // The setter's side: "did they do it?" (docs/TASKS-SPEC.md §5.2).
+      const r = await notifications.runTaskFollowUpChase();
+      console.log(`Scheduler: To-do follow-ups — ${r.chased} sent`);
+    } catch (err) {
+      console.error('Scheduler: To-do follow-ups failed:', err);
+    }
+    try {
+      // ONE clock per staff record since mig 243 — it replaced the separate
+      // printed-expiry and re-check scans. docs/STAFF-RECORDS-SPEC.md §22.
+      const r = await notifications.runRecordActionChase();
+      console.log(`Scheduler: Staff record actions — ${r.chased} fired`);
+    } catch (err) {
+      console.error('Scheduler: Staff record actions failed:', err);
+    }
+    try {
+      const r = await notifications.runReviewDueScan();
+      console.log(`Scheduler: Staff reviews due — ${r.flagged} flagged`);
+    } catch (err) {
+      console.error('Scheduler: Staff review due scan failed:', err);
+    }
+    // Retention. Last in the block, and independently caught: a purge that
+    // fails must not stop the nudges, and a nudge that fails must not stop
+    // the purge — this one has a legal reason to run.
+    try {
+      const { runAbsenceDetailPurge } = await import('../services/staff-retention');
+      const r = await runAbsenceDetailPurge();
+      console.log(`Scheduler: Absence detail purge — ${r.purged} spell(s)`);
+    } catch (err) {
+      console.error('Scheduler: Absence detail purge failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Staff records reminders scheduled daily at 09:45 Europe/London');
+
   // ── Freelancer yard-day offer chase (spec §9.4) ───────────────────────────
   // Daily at 09:05 Europe/London — after the 09:00 cluster, before the carnet
   // forms at 09:15. Two legs, each firing at most once per booking:
@@ -1160,6 +1336,21 @@ export function startScheduler() {
   cron.schedule('0 18 * * 0', runForecastBatch, { timezone: 'Europe/London' });
   console.log('Scheduler: Vehicle forecast assessments scheduled weekly Sun 18:00 Europe/London');
 
+  // ── DVSA MOT history ─────────────────────────────────────────────────────
+  // Weekly: Monday 07:30 Europe/London — BEFORE the 08:00 compliance check, so
+  // a mot_due moved forward from DVSA is what that check sees. Refreshes every
+  // active van's MOT history. See services/dvsa-mot.ts.
+  cron.schedule('30 7 * * 1', async () => {
+    try {
+      const { runScheduledMotRefresh } = await import('../services/dvsa-mot');
+      const r = await runScheduledMotRefresh();
+      console.log(`Scheduler: DVSA MOT refresh — ${r.done} done, ${r.failed} failed${r.stopped ? `, stopped (${r.stopped})` : ''}`);
+    } catch (err) {
+      console.error('Scheduler: DVSA MOT refresh failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: DVSA MOT refresh scheduled weekly Mon 07:30 Europe/London');
+
   // ── PCN pay-direct chase ladder ──────────────────────────────────────────
   // Daily at 09:35 Europe/London. Chases drivers who were told to pay a charge
   // direct but haven't sent proof, on the 3/5/7-day ladder. info@ alerted at
@@ -1194,6 +1385,49 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: PCN deadline / NIP nudges scheduled daily at 09:37 Europe/London');
+
+  // ── Possible-claim check dates ───────────────────────────────────────────
+  // Daily at 09:22 Europe/London. Bells the owner of every insurance case
+  // whose next check date has arrived (docs/INCIDENT-CLAIMS-SPEC.md §9.2).
+  // Stamp-first dedup per check date; moving the date re-arms it. Cases that
+  // stay overdue sit on the dashboard Needs Attention bucket instead of being
+  // re-belled daily. Claims outlive their jobs, so this deliberately does NOT
+  // apply the lost/cancelled job gate — the case's own stage decides.
+  cron.schedule('22 9 * * *', async () => {
+    try {
+      const { runClaimCheckReminders } = await import('../services/incident-claims');
+      const r = await runClaimCheckReminders();
+      if (r.belled) console.log(`Scheduler: claim check reminders — ${r.belled} bell(s)`);
+    } catch (err) {
+      console.error('Scheduler: claim check reminders failed:', err);
+    }
+    // Same slot: save each new case's GPS trace while Traccar still has it (§21).
+    try {
+      const { runClaimGpsAutoCapture } = await import('../services/claim-gps');
+      const g = await runClaimGpsAutoCapture();
+      if (g.saved || g.empty || g.failed) console.log(`Scheduler: claim GPS capture — ${g.saved} saved, ${g.empty} empty, ${g.noGps} no tracker, ${g.failed} failed`);
+    } catch (err) {
+      console.error('Scheduler: claim GPS capture failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: claim check-date reminders + GPS capture scheduled daily at 09:22 Europe/London');
+
+  // ── Possible-claim client chase ──────────────────────────────────────────
+  // Daily at 09:21 Europe/London, weekends included (tours run through them).
+  // Reminds everyone holding a live link on a case with the form out, up to 4
+  // times, then flags it to staff (docs/INCIDENT-CLAIMS-SPEC.md §9.1). Stamp-
+  // first per UK day. Like the check dates, the case's own stage decides — no
+  // lost/cancelled job gate (claims outlive their jobs).
+  cron.schedule('21 9 * * *', async () => {
+    try {
+      const { runClaimClientChase } = await import('../services/claim-chase');
+      const r = await runClaimClientChase();
+      if (r.chased || r.escalated) console.log(`Scheduler: claim client chase — ${r.chased} chased, ${r.escalated} flagged, ${r.skipped} skipped`);
+    } catch (err) {
+      console.error('Scheduler: claim client chase failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: claim client chase scheduled daily at 09:21 Europe/London');
 
   // ── Pre-auth expiry reconciliation (silent housekeeping) ─────────────────
   // Daily at 09:40 Europe/London. Closes out held pre-auths past their window.

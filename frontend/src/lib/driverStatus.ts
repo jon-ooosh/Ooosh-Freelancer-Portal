@@ -69,9 +69,27 @@ function isExpired(date: string | null | undefined): boolean {
  */
 function isUkLicence(driver: DriverStatusInput): boolean {
   const issuedBy = (driver.licence_issued_by || '').trim().toUpperCase();
-  if (issuedBy.includes('DVLA') || issuedBy === 'DVA') return true;
+  if (issuedBy.includes('DVLA') || issuedBy === DVA_ISSUER) return true;
   const country = (driver.licence_issue_country || '').trim().toUpperCase();
   return ['GB', 'UK', 'GBR', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(country);
+}
+
+/** The issuer string iDenfy returns for a Northern Ireland licence. */
+const DVA_ISSUER = 'DVA';
+
+/**
+ * Mirrors `isNiLicence` in backend/src/services/driver-validity.ts.
+ *
+ * NI is the UK, so these drivers need a licence record check like any other UK
+ * driver — they just cannot produce one themselves, because
+ * viewdrivingrecord.service.gov.uk holds GB licences only. DVA run their own
+ * check-code service at nidirect and a member of staff has to run the lookup.
+ *
+ * Display only — nothing gates on it. It changes which instructions staff are
+ * shown on the record-check panel, never whether the check is required.
+ */
+export function isNiLicence(driver: { licence_issued_by?: string | null }): boolean {
+  return (driver.licence_issued_by || '').trim().toUpperCase() === DVA_ISSUER;
 }
 
 export function deriveDriverStatus(driver: DriverStatusInput): DriverStatus {
@@ -111,4 +129,41 @@ export function deriveDriverStatus(driver: DriverStatusInput): DriverStatus {
   }
 
   return { label: 'Approved', colour: green };
+}
+
+export interface ReferralBadge {
+  label: string;
+  /** Tailwind classes for a small bordered pill. */
+  className: string;
+  /** True while the referral still needs a human decision. */
+  unresolved: boolean;
+}
+
+/**
+ * Insurance-referral pill for a driver on a JOB surface (requirement card,
+ * Drivers & Vehicles row). Same vocabulary as `deriveDriverStatus` above.
+ *
+ * An approval is a STANDING approval for the driver (jon, Oct 2026): a later
+ * hire form that declares the same issue re-sets `requires_referral` but
+ * leaves `referral_status = 'approved'`. Keying a red "Referral" pill on the
+ * flag alone shouted three times on an already-cleared driver while the
+ * Drivers tab said nothing (Tyler Meadham, Oct 2026). So the pill shows the
+ * OUTCOME, and only an unresolved referral is red/amber.
+ *
+ * Returns null for a driver who was never referred.
+ */
+export function referralBadge(
+  requiresReferral: boolean | null | undefined,
+  referralStatus: string | null | undefined,
+): ReferralBadge | null {
+  const green = 'bg-green-50 text-green-700 border-green-200';
+  const amber = 'bg-amber-50 text-amber-700 border-amber-200';
+  const red = 'bg-red-50 text-red-600 border-red-200';
+
+  if (referralStatus === 'approved') return { label: 'Referral approved', className: green, unresolved: false };
+  if (referralStatus === 'waived') return { label: 'Referral waived', className: green, unresolved: false };
+  if (!requiresReferral) return null;
+  if (referralStatus === 'declined') return { label: 'Referral declined', className: red, unresolved: true };
+  if (referralStatus === 'pending' || referralStatus === 'submitted') return { label: 'Referred & waiting', className: amber, unresolved: true };
+  return { label: 'Refer to insurers', className: red, unresolved: true };
 }

@@ -593,7 +593,7 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
   4. Confirmation email already handled by hire form app (no OP duplication needed)
 - [x] **Post-signature automations (OP backend)** — `POST /api/hire-forms/:id/post-signature` BUILT:
   - Count `vehicle_hire_assignments` for job → count vehicles in HH → add additional driver charge (item 1324, £20+VAT per extra driver beyond 2 per vehicle)
-  - Check if job is dispatched (HH status 5/6) → mid-tour driver flow:
+  - Check if job is out on the road → mid-tour driver flow. **Primary signal is OP's own book-out records** (any van on the job `booked_out`/`active`); HH status 5/6 is secondary. HH alone missed job 16491 (Sep 2026): one unscanned line (a VE103B cert) held HH at 4 "Part Dispatched" with the van on the road, so the driver was neither auto-added nor flagged. Never key "is the hire out?" on HH status alone.
     - Set hire_start to NOW (not original job start — driver shouldn't have been driving before form submission)
     - Send mid-tour notification email to team (bell notification + email)
     - Driver appears on Job Detail > Drivers & Vehicles with "Hire form complete — not yet booked out" status
@@ -804,3 +804,114 @@ When a vehicle breaks down mid-hire and needs swapping to a replacement.
 - [ ] Client notification of vehicle change
 
 *Immediate follow-on after PR 2:* freelancer-led interim check-in UI (reuses the soft check-in primitive shipped in PR 1 — see spec §6 + §9).
+
+---
+
+##### Northern Ireland (DVA) licences + the licence-excess port ✅ SHIPPED (Oct 2026)
+
+**Motivation incident (Declan Haughian, job 16286, Sep 2026).** A driver with a
+Northern Ireland licence completed every step of the hire form — identity, both
+POAs, and a passport (his licence address didn't match his POAs, which is fine
+under the insurer's T&Cs with a passport) — and then could not finish. The form
+kept asking for a DVLA check he had no way to produce.
+
+His record read: `licence_issued_by = 'DVA'`, `licence_issue_country = 'United
+Kingdom'`, `licence_number = 32095753` (8 digits — DVA numbers are 8, GB are 16),
+`dvla_check_date` NULL.
+
+**Why he was stuck.** `isUkLicence()` returns true for `'DVA'`, which is
+*correct*: Northern Ireland is the UK, and an NI driver needs a licence record
+check, not a passport. But every consumer then read `isUkDriver === true` as
+"needs a **DVLA** check":
+
+- `outstandingDocuments()` → `dvla: isUkDriver && !dvla.valid` → `hasAllRequiredDocuments()` false
+- `calculateNextStep()` → `if (isUkDriver && !dvla.valid) return 'dvla-check'` in **six** branches including the default fallback
+- `DVLAPreviewPage` → hardcoded link to `viewdrivingrecord.service.gov.uk`, which holds **GB licences only**
+
+So the router sent him somewhere correct, and that somewhere sent him to a
+service that would never hold his licence. No error, no log, no way out.
+
+**What NI drivers actually have.** DVA run their own service at nidirect: the
+driver creates a **single-use check code** (valid 21 days) and a **third party**
+runs the lookup. His summary PDF is a near-twin of the DVLA one — name, licence
+number, check code (`BML1s646` — note the **mixed case**), "Date summary
+generated", driving status, an offences/points counter, entitlement tables, and a
+full endorsements table on page 2. Everything we need is on its face.
+
+**What shipped:**
+
+- `isNiLicence()` in `services/driver-validity.ts`, sharing one `DVA_ISSUER`
+  token with `isUkLicence()` so the two can never disagree about one driver.
+- **No router change at all.** `dvla-check` was already the right destination;
+  the hire-form app branches *within* the step (`App.js` → `DVACheckPage` for NI,
+  `DVLAPreviewPage` for GB), which sidesteps the `stepMapping[nextStep] ||
+  'poa1'` trap entirely. All six `calculateNextStep` branches are untouched.
+- `DVACheckPage` — explains why NI is different, links to nidirect, collects the
+  check code, and parks the driver on a terminal "we're checking this by hand"
+  screen. Self-healing on reload: OP keeps routing them here, the page sees a
+  stored code and shows the waiting state rather than re-asking.
+- `POST /driver-verification/dva-check-code` — writes `dvla_check_code` and
+  **structurally cannot** write `dvla_check_date` (the general `/update`
+  whitelists both). The date opens the 30-day window and releases the driver to
+  signature; a driver who could set it would reach a signed agreement on a check
+  nobody ran, with 0 points and a floor excess assumed.
+- `services/dva-check-alert.ts` — email + bell to the vehicle-notification
+  targets, on a **changed** code only. This is what makes parking the driver
+  acceptable: a terminal screen nobody is told about is the Jul 2026
+  spinning-wheel pattern.
+- `POST /api/drivers/:id/licence-record-check` + the staff panel on
+  `DriverDetailPage` — one surface for DVA *and* manual DVLA re-entry, writing
+  date + code + points + endorsements **together**.
+
+**The deeper problem it exposed: OP could not price excess at all.** The rule
+lived entirely in the hire-form app — tiers in `functions/document-processor.js`
+`calculateInsuranceDecision()`, and the `(base + additional) * 1.2` arithmetic in
+the **driver's browser** at `src/DVLAProcessingPage.js`. OP only ever received
+the finished string (`"£2,400"`).
+
+That was survivable while a GB driver's own browser was the only way a check
+could be recorded. It stopped being survivable the moment a *staff member* had to
+type an NI driver's points in: nothing would have re-priced the excess, so we'd
+have insured them on an assumed clean licence at the £1,200 floor. Declan
+happened to be 0 points / 0 offences. The next one might not be.
+
+So `services/licence-excess.ts` is now THE definition (Markerstudy tiers: £1,200
+floor; single 6-pt SP30/SP50/CU80 → £2,400; 9 pts as exactly three 3-pointers →
+£1,800; serious codes, bans, 7–8 and 10+ → insurer referral). Notes:
+
+- **A referral returns `amount: null`, never the floor.** We don't quote a figure
+  on a record the insurer hasn't seen, and writing the floor would read as
+  "priced and approved". The insurer's answer still comes back through
+  `adjusted_excess` on `resolve-referral`.
+- **7 and 8 points fall through to referral.** That has always been the
+  behaviour — the app's tiers go `<= 6`, then `=== 9`, then else — but it
+  recorded the reason as "10+ points". The decision is ported unchanged; only
+  the wording is now accurate.
+- **`POST /drivers/licence-excess-preview`** exists so the staff panel can show
+  the figure before saving without the browser holding a copy of the rule.
+- ⚠️ **It is a PORT, not a move.** The hire-form app still computes its own copy
+  during the GB DVLA flow. Changing the GB path in the same release as adding the
+  NI one would have risked the path that runs hundreds of times for the sake of
+  the one that runs twice a year. **The follow-up is to have the app call OP and
+  delete its copy** — until then, any tier change must be mirrored in both repos.
+- `excess_rules` (migration 017) is a **third, dead** schema that no endpoint has
+  ever read (`routes/excess.ts:466` says so). Deliberately not revived.
+
+**Also fixed in passing** — three live `licenseIssuedBy === 'DVLA'` comparisons
+in the hire-form app that classified an NI driver as non-UK:
+
+- `SignaturePage` hid his points/excess summary, showed him a **passport** row in
+  the document checklist, and — worst — withheld the *"I understand my insurance
+  excess is £X"* declaration bullet, so an NI driver signed with no excess stated.
+- `App.js` POA2 fallback routing (used when the router call fails) sent NI
+  drivers to `passport-upload`.
+- `driver-status.js:529` held a fourth copy. Inert under `DATA_BACKEND=op` (its
+  `overallStatus` is discarded; only `documents` is used) but a landmine, so it
+  was corrected rather than deleted — the Monday-mode branch still reads it.
+
+Left alone deliberately: the Monday-legacy copies in `functions/get-next-step.js`
+and `functions/monday-integration.js`. Monday is dead and those branches don't
+run; rewriting untested legacy code for an inert bug is churn.
+
+**No migration.** Every column already existed — `dvla_check_date`,
+`dvla_check_code`, `licence_points`, `licence_endorsements`.

@@ -35,6 +35,18 @@ const CARNET_AUTHORITY_TERMS =
   'changes to the agreed equipment, accepting no responsibility for any charges, losses or damages ' +
   'incurred as a result of any such changes.';
 
+// Client-arranged variant: the client applies for the carnet themselves, but with
+// Ooosh as the named UK holder — so the liability block is the same, the
+// "we process it / we supply the equipment list" wording is not.
+const CARNET_AUTHORITY_TERMS_CLIENT_ARRANGES =
+  'Ooosh Tours Ltd agrees to be named as the holder of an ATA Carnet that you will apply for and arrange ' +
+  'yourselves, appointing the lead person named above as our agent for dealing with and signing the Carnet, ' +
+  'under the appropriate International Convention and guaranteed by the appropriate Chamber of Commerce.\n\n' +
+  'By signing, the lead person accepts full responsibility for any charges, fees, taxes or similar that ' +
+  'may become due by the use or misuse of the Carnet — under no circumstances will Ooosh! Tours Ltd be ' +
+  'held responsible for any such costs. This responsibility lasts until the closure of the Carnet in the ' +
+  'usual timeframe (usually eighteen (18) months from the end date of the Carnet).';
+
 const TERMINAL_FORM_STATUSES = ['discharged', 'closed', 'cancelled'];
 
 // ════════════════════════════════════════════════════════════════════════
@@ -53,7 +65,7 @@ const publicLimiter = rateLimit({
 router.get('/form/:token', publicLimiter, async (req: Request, res: Response) => {
   try {
     const result = await query(
-      `SELECT c.id, c.status, c.lead_name, c.lead_email, c.lead_role, c.form_submitted_at,
+      `SELECT c.id, c.mode, c.status, c.lead_name, c.lead_email, c.lead_role, c.form_submitted_at,
               j.hh_job_number, j.job_name, j.client_name,
               COALESCE(c.carnet_start_date, j.out_date, j.job_date) AS default_start_date
        FROM job_carnets c JOIN jobs j ON j.id = c.job_id
@@ -74,7 +86,8 @@ router.get('/form/:token', publicLimiter, async (req: Request, res: Response) =>
         lead_email: c.lead_email,
         lead_role: c.lead_role,
         default_start_date: c.default_start_date ? new Date(c.default_start_date).toISOString().slice(0, 10) : null,
-        authority_terms: CARNET_AUTHORITY_TERMS,
+        mode: c.mode,
+        authority_terms: c.mode === 'client_arranges' ? CARNET_AUTHORITY_TERMS_CLIENT_ARRANGES : CARNET_AUTHORITY_TERMS,
       },
     });
   } catch (err) {
@@ -112,6 +125,11 @@ router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Resp
     if (!b.accepted) return res.status(400).json({ error: 'Please accept the terms.' });
     if (!b.signature || !String(b.signature).startsWith('data:image')) return res.status(400).json({ error: 'Please provide a signature.' });
 
+    // Client-arranged carnets have their own (short) status list — the form only
+    // records the signed authority + liability window, it doesn't move the status.
+    const isClientArranges = carnet.mode === 'client_arranges';
+    const nextStatus = isClientArranges ? carnet.status : 'info_received';
+
     const expiry = addMonthsISO(String(b.carnet_start_date), length);
     const liability = addMonthsISO(expiry, 18);
 
@@ -130,19 +148,19 @@ router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Resp
       `UPDATE job_carnets SET
          carnet_length_months = $1, carnet_start_date = $2, carnet_expiry_date = $3, liability_until = $4,
          eu_countries = $5, non_eu_countries = $6, lead_name = $7, lead_email = $8, lead_role = $9,
-         additional_names = $10, form_submitted_at = NOW(), status = 'info_received', updated_at = NOW()
+         additional_names = $10, form_submitted_at = NOW(), status = $12, updated_at = NOW()
        WHERE id = $11`,
       [
         length, b.carnet_start_date, expiry, liability,
         euCountries, nonEuCountries,
         leadName, leadEmail || null, leadRole || null,
-        JSON.stringify(additionalNames), carnet.id,
+        JSON.stringify(additionalNames), carnet.id, nextStatus,
       ]
     );
 
     // Seed GMRs from the crossings (only if none exist yet).
     const existingGmrs = await query(`SELECT COUNT(*) AS n FROM carnet_gmrs WHERE carnet_id = $1`, [carnet.id]);
-    if (parseInt(existingGmrs.rows[0].n, 10) === 0 && b.gmr_needed && Array.isArray(b.crossings)) {
+    if (!isClientArranges && parseInt(existingGmrs.rows[0].n, 10) === 0 && b.gmr_needed && Array.isArray(b.crossings)) {
       let order = 0;
       for (const x of b.crossings) {
         if (!x?.crossing_date && !x?.crossing_location) continue;
@@ -182,7 +200,7 @@ router.post('/form/:token/submit', publicLimiter, async (req: Request, res: Resp
       console.error('[carnets] authority PDF generation on submit failed:', err);
     }
 
-    await syncCarnetRequirementStatus(carnet.job_id, 'info_received');
+    if (!isClientArranges) await syncCarnetRequirementStatus(carnet.job_id, 'info_received');
     await logCarnetInteraction(carnet.job_id, `📄 Carnet request form submitted by ${leadName} — authority signed`, undefined);
 
     // Email: signed copy to the client + notification to the office.
@@ -420,12 +438,15 @@ router.post('/', async (req: AuthRequest, res: Response) => {
          (job_id, mode, status, format, notes, chase_date, lead_name, lead_email, lead_role,
           spreadsheet_requested_at, created_by)
        VALUES ($1, $2, $3, COALESCE($4, 'paper'), $5, $6, $7, $8, $9,
-          CASE WHEN $2 = 'client_arranges' THEN NOW() ELSE NULL END, $10)
+          CASE WHEN $11::boolean THEN NOW() ELSE NULL END, $10)
        RETURNING *`,
       [
         b.job_id, mode, initStatus, b.format || null, b.notes || null, b.chase_date || null,
         b.lead_name || null, b.lead_email || null, b.lead_role || null,
         req.user?.id || SYSTEM_USER_ID,
+        // Own param, not a reuse of $2 — comparing the varchar $2 to a text literal
+        // made Postgres reject the insert with 42P08.
+        mode === 'client_arranges',
       ]
     );
     await logCarnetInteraction(
@@ -788,7 +809,9 @@ router.post('/:id/generate-authority', async (req: AuthRequest, res: Response) =
 });
 
 // POST /api/carnets/:id/send-form — mint (or reuse) the client form token and
-// return the link; optionally email it to the client. we_supply only.
+// return the link; optionally email it to the client. For client_arranges the
+// form just collects the signed authority (Ooosh named as holder) — link only,
+// as the carnet_request email is worded for us applying on the client's behalf.
 router.post('/:id/send-form', async (req: AuthRequest, res: Response) => {
   try {
     const cur = await query(
@@ -797,7 +820,7 @@ router.post('/:id/send-form', async (req: AuthRequest, res: Response) => {
     );
     if (cur.rows.length === 0) return res.status(404).json({ error: 'Carnet not found' });
     const carnet = cur.rows[0];
-    if (carnet.mode !== 'we_supply') return res.status(400).json({ error: 'Request form only applies to we-supply carnets' });
+    const isClientArranges = carnet.mode === 'client_arranges';
 
     // Reuse an existing token (so a re-send keeps the same link); else mint one.
     let token: string = carnet.form_token;
@@ -817,7 +840,7 @@ router.post('/:id/send-form', async (req: AuthRequest, res: Response) => {
     let sent = false;
     let recipient: string | null = null;
 
-    if (req.body?.send_email) {
+    if (req.body?.send_email && !isClientArranges) {
       try {
         const target = await resolveClientEmailTarget(carnet.job_id, 'carnet_request');
         if (target?.primaryEmail) {

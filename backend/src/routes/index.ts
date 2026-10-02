@@ -30,9 +30,9 @@ import moneyRouter from './money';
 import ve103bRouter from './ve103b';
 import backlineRouter from './backline';
 import cancellationsRouter from './cancellations';
-import issuesRouter from './issues';
 import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
+import shopRouter from './shop';
 import systemSettingsRouter from './system-settings';
 import freelancerDaysPublicRouter from './freelancer-days';
 import oohReturnRouter from './ooh-return';
@@ -43,6 +43,9 @@ import costsRouter from './costs';
 import storageRouter from './storage';
 import holdingRouter from './holding';
 import pcnsRouter from './pcns';
+import incidentClaimsRouter from './incident-claims';
+import vehicleSalesRouter from './vehicle-sales';
+import claimFormRouter from './claim-form';
 import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
 import carnetsRouter from './carnets';
@@ -55,6 +58,7 @@ import leadsRouter from './leads';
 import staffDocumentsRouter from './staff-documents';
 import staffCalendarRouter from './staff-calendar';
 import staffRecordsRouter from './staff-records';
+import staffTasksRouter from './staff-tasks';
 import freelancersRouter from './freelancers';
 import enquiryIntakeRouter from './enquiry-intake';
 
@@ -89,11 +93,13 @@ router.use('/backline-matcher', backlineMatcherRouter);  // AI equipment matcher
 router.use('/wise', wiseRouter);  // Wise supplier payments — scaffolding (read-only health check; spec Part 2)
 router.use('/cancellations', cancellationsRouter);
 router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
-router.use('/issues', issuesRouter);
-router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute) — distinct from /issues platform tracker
+router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute). The old /issues platform tracker was retired Sep 2026; its tables remain.
 router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing receipt/cost workflow
 router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)
+router.use('/claim-form', claimFormRouter);  // PUBLIC token-authenticated client claim form (Phase 2)
+router.use('/claims', incidentClaimsRouter);  // Possible insurance claims (Vehicles › Claims) — docs/INCIDENT-CLAIMS-SPEC.md
+router.use('/vehicle-sales', vehicleSalesRouter);  // Selling a van — docs/VEHICLE-SALES-SPEC.md
 router.use('/pcns', pcnsRouter);  // PCN module — Penalty Charge Notice management (Vehicles), replaces Monday PCN boards
 router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token
 router.use('/staging', stagingRouter);  // Staging Calculator — stock/availability/push + 3D plan short-links (embedded vanilla-JS tool)
@@ -104,11 +110,13 @@ router.use('/auto-chase', autoChaseRouter);  // Auto-Chase Phase 1 — Gmail ing
 router.use('/leads', leadsRouter);  // Lead Finder (Tour Finder → OP) — Ticketmaster cold-lead discovery + scoring
 router.use('/staff-documents', staffDocumentsRouter);  // Staff Documents & Training — versioned policies/agreements, tick/sign completion + tracking
 router.use('/staff-calendar', staffCalendarRouter);  // Staff Calendar & Time — working patterns, who's-in calendar (Phase A)
-router.use('/staff-records', staffRecordsRouter);  // Staff Records — private files held ABOUT staff (admin only). NOT staff-documents, which publishes TO staff.
+router.use('/staff-records', staffRecordsRouter);
+router.use('/staff-tasks', staffTasksRouter);  // My To Do — general task list, owned per person. NOT admin-only.  // Staff Records — private files held ABOUT staff (admin only). NOT staff-documents, which publishes TO staff.
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
 router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
+router.use('/shop', shopRouter);  // Shop till — ad-hoc sales, internal stock consumption, sale-stock lookup
 router.use('/system-settings', systemSettingsRouter);
 router.use('/freelancer-days', freelancerDaysPublicRouter);  // PUBLIC accept/decline for a yard-day offer (token auth, no JWT)
 router.use('/ooh-return', oohReturnRouter);  // Public parking-form (token auth) + staff endpoints

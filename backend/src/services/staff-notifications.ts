@@ -750,3 +750,429 @@ export async function runCompanyDaysReview(today = new Date()): Promise<CompanyD
   await setSystemSetting('staff.company_days_reviewed_year', String(nextYear));
   return { sent: true, year: nextYear, recurring: recurring.map(r => r.label), oneOffs };
 }
+
+// ── Staff records: the daily chases ─────────────────────────────────────────
+
+/**
+ * My To Do — nudge about an outstanding task, and RE-ARM.
+ *
+ * Phase 3 shipped this as a one-shot stamp and that was wrong. `rtw_chased_at`
+ * is once-only because a return-to-work conversation is a one-time event; a
+ * to-do is an open-ended commitment, and one nudge followed by eternal silence
+ * is exactly the evaporation spec §6 exists to prevent.
+ *
+ * So this follows the pipeline chaser instead (services/auto-chase-runner.ts):
+ * fire when `next_chase_date` comes round, then push it forward by the
+ * interval while the task stays open. NULL means never — a someday-maybe item
+ * opts out, and finishing or dropping a task clears the date entirely.
+ *
+ * Bell only. The Step-7 escalation scheduler turns it into email per the
+ * recipient's own preferences, so nothing is hand-rolled here.
+ */
+export async function runTaskChase(): Promise<{ chased: number }> {
+  const { getTaskChaseDays } = await import('./staff-settings');
+  const intervalDays = await getTaskChaseDays();
+
+  const due = await query(
+    `SELECT t.id, t.title, t.due_date::text AS due_date, u.id AS user_id
+       FROM staff_tasks t
+       JOIN users u ON u.person_id = t.person_id AND u.is_active = true
+      WHERE t.status = 'open'
+        AND t.next_chase_date IS NOT NULL
+        AND t.next_chase_date <= CURRENT_DATE`
+  );
+
+  let chased = 0;
+  for (const row of due.rows) {
+    // Re-arm FIRST. A duplicate nudge tomorrow is worse than a missed one
+    // today, and this runs daily so the cadence self-corrects either way.
+    // Same order as the staff-documents reminders.
+    await query(
+      `UPDATE staff_tasks
+          SET chased_at = NOW(),
+              next_chase_date = (CURRENT_DATE + ($2 || ' days')::interval)::date
+        WHERE id = $1`,
+      [row.id, String(intervalDays)]
+    );
+    const when = row.due_date
+      ? (row.due_date < new Date().toISOString().slice(0, 10)
+          ? `was due ${fmtDate(row.due_date)}`
+          : `is due ${fmtDate(row.due_date)}`)
+      : 'has no date on it';
+    await notify(
+      row.user_id,
+      'staff_task_due',
+      'A to-do needs you',
+      `“${esc(row.title)}” ${when}.`,
+      'staff_tasks',
+      row.id,
+      '/me?tab=todo',
+      'normal'
+    );
+    chased++;
+  }
+
+  if (chased) console.log(`[staff-notifications] task chase: nudged ${chased}`);
+  return { chased };
+}
+
+/**
+ * List items nobody has taken yet (spec §7): the nudge goes to the list's
+ * WATCHERS. Same fire-then-re-arm shape as runTaskChase. Only items with a
+ * chase date — an undated list item never nags (createTask leaves it null).
+ * A list with no watchers nudges nobody; the item still shows on the list.
+ */
+export async function runListItemChase(): Promise<{ chased: number }> {
+  const { getTaskChaseDays } = await import('./staff-settings');
+  const intervalDays = await getTaskChaseDays();
+  const due = await query(
+    `SELECT t.id, t.title, t.due_date::text AS due_date, t.list_id, l.name AS list_name
+       FROM staff_tasks t
+       JOIN staff_task_lists l ON l.id = t.list_id AND l.archived_at IS NULL
+      WHERE t.status = 'open'
+        AND t.person_id IS NULL
+        AND t.next_chase_date IS NOT NULL
+        AND t.next_chase_date <= CURRENT_DATE`
+  );
+  let chased = 0;
+  for (const row of due.rows) {
+    await query(
+      `UPDATE staff_tasks
+          SET chased_at = NOW(),
+              next_chase_date = (CURRENT_DATE + ($2 || ' days')::interval)::date
+        WHERE id = $1`,
+      [row.id, String(intervalDays)]
+    );
+    const watchers = await query(
+      `SELECT u.id FROM staff_task_list_watchers w
+         JOIN users u ON u.person_id = w.person_id AND u.is_active = true
+        WHERE w.list_id = $1`,
+      [row.list_id]
+    );
+    const when = row.due_date
+      ? (row.due_date < new Date().toISOString().slice(0, 10) ? `was due ${fmtDate(row.due_date)}` : `is due ${fmtDate(row.due_date)}`)
+      : 'is still on the list';
+    for (const w of watchers.rows) {
+      await notify(
+        w.id, 'staff_list_item_due', `On ${esc(row.list_name)}: something needs doing`,
+        `“${esc(row.title)}” ${when} — nobody has taken it yet.`,
+        'staff_tasks', row.id, `/me?tab=todo&view=lists&list=${row.list_id}`, 'normal'
+      );
+    }
+    chased++;
+  }
+  if (chased) console.log(`[staff-notifications] list items: nudged watchers about ${chased}`);
+  return { chased };
+}
+
+// ── To Do: assigning (docs/TASKS-SPEC.md §5) ────────────────────────────────
+//
+// Bells only. The escalation scheduler turns them into email per each
+// person's own preferences, same as every other staff bell.
+
+const TODO_URL = '/me?tab=todo';
+
+/** The active login behind a person, if any. People without one get no bell. */
+async function userForPerson(personId: string): Promise<string | null> {
+  const r = await query(
+    'SELECT id FROM users WHERE person_id = $1 AND is_active = true ORDER BY created_at LIMIT 1',
+    [personId]
+  );
+  return r.rows[0]?.id ?? null;
+}
+
+/** "Sam gave you a to-do" — to the new owner. */
+export async function notifyTaskAssigned(
+  ownerPersonId: string, taskId: string, title: string, byName: string | null, dueDate: string | null
+): Promise<void> {
+  const userId = await userForPerson(ownerPersonId);
+  if (!userId) return;
+  await notify(
+    userId, 'staff_task_assigned', 'You’ve been given a to-do',
+    `${esc(byName || 'Somebody')} gave you “${esc(title)}”${dueDate ? `, due ${fmtDate(dueDate)}` : ''}.`,
+    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal'
+  );
+}
+
+/** "Will handed it back" — to whoever set it, with the reason. */
+export async function notifyTaskHandedBack(
+  setterUserId: string, taskId: string, title: string, byName: string | null, reason: string
+): Promise<void> {
+  await notify(
+    setterUserId, 'staff_task_handed_back', 'A to-do was handed back to you',
+    `${esc(byName || 'Somebody')} handed back “${esc(title)}”: ${esc(reason)}. It’s on your list now.`,
+    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal'
+  );
+}
+
+/** "Will finished it" — closes the loop for the setter. Low: nothing to do. */
+export async function notifyTaskDone(
+  setterUserId: string, taskId: string, title: string, byName: string | null
+): Promise<void> {
+  await notify(
+    setterUserId, 'staff_task_done', 'A to-do you set is done',
+    `${esc(byName || 'Somebody')} finished “${esc(title)}”.`,
+    'staff_tasks', taskId, `${TODO_URL}&view=assigned`, 'low'
+  );
+}
+
+// ── To Do: repeating (docs/TASKS-SPEC.md §6) ────────────────────────────────
+
+/** "Sam wants to give you a repeating to-do — OK?" — to the person asked. */
+export async function notifySeriesProposed(
+  ownerPersonId: string, seriesId: string, title: string, byName: string | null, ruleText: string
+): Promise<void> {
+  const userId = await userForPerson(ownerPersonId);
+  if (!userId) return;
+  await notify(
+    userId, 'staff_task_series_proposed', 'A repeating to-do needs your OK',
+    // Only the first letter lowered: "every week on Thu", not "…on thu".
+    `${esc(byName || 'Somebody')} wants to give you “${esc(title)}” — ` +
+    `${esc(ruleText.charAt(0).toLowerCase() + ruleText.slice(1))}. ` +
+    'Accept or decline it on your To Do.',
+    'staff_task_series', seriesId, `${TODO_URL}&view=mine`, 'normal'
+  );
+}
+
+/** Accepted / declined — back to whoever set it. */
+export async function notifySeriesResponse(
+  setterUserId: string, seriesId: string, title: string, byName: string | null,
+  accepted: boolean, reason: string | null
+): Promise<void> {
+  await notify(
+    setterUserId, 'staff_task_series_response',
+    accepted ? 'A repeating to-do was accepted' : 'A repeating to-do was declined',
+    accepted
+      ? `${esc(byName || 'Somebody')} accepted “${esc(title)}”.`
+      : `${esc(byName || 'Somebody')} declined “${esc(title)}”${reason ? `: ${esc(reason)}` : ''}.`,
+    'staff_task_series', seriesId, `${TODO_URL}&view=assigned`, accepted ? 'low' : 'normal'
+  );
+}
+
+/** Stopped — to the other party (the setter, or the owner), by user or person. */
+export async function notifySeriesEnded(
+  toUserId: string | null, toPersonId: string | null, seriesId: string, title: string,
+  byName: string | null, reason: string | null
+): Promise<void> {
+  const userId = toUserId ?? (toPersonId ? await userForPerson(toPersonId) : null);
+  if (!userId) return;
+  await notify(
+    userId, 'staff_task_series_ended', 'A repeating to-do was stopped',
+    `${esc(byName || 'Somebody')} stopped “${esc(title)}”${reason ? `: ${esc(reason)}` : ''}.`,
+    'staff_task_series', seriesId, TODO_URL, 'normal'
+  );
+}
+
+/**
+ * The SETTER's follow-up (spec §5.2): "Will's 'Book the refresher' — still
+ * open". A second clock beside runTaskChase, which nudges the owner. Once per
+ * date, stamped; moving the date clears the stamp (updateTask), which is what
+ * "reset the follow-up" means.
+ */
+export async function runTaskFollowUpChase(): Promise<{ chased: number }> {
+  const due = await query(
+    `SELECT t.id, t.title, t.created_by, t.due_date::text AS due_date,
+            NULLIF(TRIM(COALESCE(op.preferred_name, op.first_name, '') || ' ' ||
+                        COALESCE(op.last_name, '')), '') AS owner_name
+       FROM staff_tasks t
+       JOIN people op ON op.id = t.person_id
+       JOIN users cu ON cu.id = t.created_by AND cu.is_active = true
+      WHERE t.status = 'open'
+        AND t.follow_up_on IS NOT NULL
+        AND t.follow_up_on <= CURRENT_DATE
+        AND t.follow_up_chased_at IS NULL
+        -- Only while it is still somebody ELSE's: a task handed back to its
+        -- setter is on their own list, where the owner's nudge covers it.
+        AND cu.person_id IS DISTINCT FROM t.person_id`
+  );
+  let chased = 0;
+  for (const row of due.rows) {
+    await query('UPDATE staff_tasks SET follow_up_chased_at = NOW() WHERE id = $1', [row.id]);
+    await notify(
+      row.created_by, 'staff_task_follow_up', 'A to-do you set is still open',
+      `${esc(row.owner_name || 'Somebody')}’s “${esc(row.title)}” is still open` +
+      `${row.due_date ? ` (due ${fmtDate(row.due_date)})` : ''}.`,
+      'staff_tasks', row.id, `${TODO_URL}&view=assigned`, 'normal'
+    );
+    chased++;
+  }
+  if (chased) console.log(`[staff-notifications] to-do follow-ups: ${chased}`);
+  return { chased };
+}
+
+/**
+ * Somebody's review is coming round (spec §5.6).
+ *
+ * Cadence is per person — `staff_employment.review_interval_months`, falling
+ * back to the company setting, the same shape `entitlement_weeks` already uses.
+ *
+ * Due FROM: the last completed review's `next_review_due` if it has one, else
+ * the completion date plus the interval, else — for somebody never reviewed —
+ * their employment start date plus the interval. That last case is the one
+ * that matters: a person nobody has ever reviewed is exactly who a reminder
+ * system is for, and keying only off previous reviews would miss them forever.
+ *
+ * Skipped when a review is already booked (status proposed/confirmed): being
+ * told to arrange something already in the diary is noise. One nudge per
+ * cycle, stamped on staff_employment and cleared when a review is booked or
+ * completed.
+ */
+export async function runReviewDueScan(): Promise<{ flagged: number }> {
+  const { getReviewLeadDays } = await import('./staff-settings');
+  const { listReviewsDue } = await import('./staff-employment');
+  const lead = await getReviewLeadDays();
+
+  // THE definition lives in staff-employment.ts so this scan and the Staff
+  // page's attention list cannot drift. onlyUnchased keeps this to one nudge
+  // per person per cycle; the page wants them all, chased or not.
+  const due = await listReviewsDue({ onlyUnchased: true, withinDays: lead });
+  if (!due.length) return { flagged: 0 };
+
+  const admins = await approverUserIds();
+  let flagged = 0;
+  for (const row of due) {
+    await query(
+      'UPDATE staff_employment SET review_due_chased_at = NOW() WHERE person_id = $1',
+      [row.person_id]
+    );
+    for (const admin of admins) {
+      await notify(
+        admin.id,
+        'staff_review_due',
+        'A staff review is due',
+        `${esc(row.person_name || 'Somebody')}’s review is due ${fmtDate(row.due_on)}. ` +
+        'Agree a date with them, then record it on the Staff page.',
+        'people',
+        row.person_id,
+        `${STAFF_URL}?person=${row.person_id}&tab=reviews`,
+        'normal'
+      );
+    }
+    flagged++;
+  }
+
+  if (flagged) console.log(`[staff-notifications] review due: flagged ${flagged}`);
+  return { flagged };
+}
+
+/**
+ * "Your review is booked" — to the person being reviewed, with the prep
+ * questions attached (spec §5.2/§5.3).
+ *
+ * Bell rather than a hand-rolled email: the Step-7 escalation scheduler turns
+ * it into email per the recipient's own preferences, so this respects whatever
+ * they have chosen instead of overriding it.
+ *
+ * Called once per review, from sendReviewInvite(), which owns the stamp that
+ * keeps it once.
+ */
+export async function notifyStaffReviewBooked(
+  userId: string, reviewId: string, scheduledFor: string
+): Promise<void> {
+  await notify(
+    userId,
+    'staff_review_booked',
+    'Your review is booked',
+    `${fmtDate(scheduledFor)}. There are a few questions to think about beforehand — ` +
+    'have a look when you get a minute, and I will have answered the same ones.',
+    'staff_reviews',
+    reviewId,
+    '/me?tab=review',
+    'normal'
+  );
+}
+
+
+/**
+ * A staff record's action date has come round (spec §22, mig 243).
+ *
+ * THE one clock for staff records. It replaced two — the printed-expiry chase
+ * and the re-check cycle — which each kept their own stamp and could nag twice
+ * about one passport. The date is whatever the admin set on the record; the
+ * form pre-fills it from those two old rules, so they survive as the default.
+ *
+ * Fires once per date, stamped on action_chased_at. Moving the date clears the
+ * stamp (routes/staff-records.ts), so a renewed promise earns a fresh nudge.
+ * Until the date is moved or cleared, the record also stays on the Staff
+ * page's Needs attention list — the bell is the push, the list is the memory.
+ *
+ * 'delete' NEVER deletes. It tells the admin the record is due for deletion
+ * and links to it; a human presses Delete. Destroying a right-to-work copy by
+ * mistake is irreversible, and CLAUDE.md's policy is warnings, not silent
+ * action.
+ *
+ * Delivery follows the job remind-me form (and storage-reminders.ts):
+ *   notification → a low-priority bell, which the escalation scheduler never emails
+ *   both         → a normal bell, which it emails per the recipient's preferences
+ *   email        → sent now, and the bell stamped email_sent_at so it isn't sent twice
+ *
+ * Recipient: action_user_id if it is still an active admin, else every admin.
+ * These are records the staff member cannot see, so it never goes to them.
+ */
+export async function runRecordActionChase(): Promise<{ chased: number }> {
+  const { listRecordActionsDue, markActionChased } = await import('./staff-doc-cycles');
+  const due = await listRecordActionsDue({ onlyUnchased: true, withinDays: 0 });
+  if (!due.length) return { chased: 0 };
+
+  const admins = await approverUserIds();
+  const { getFrontendUrl } = await import('../config/app-urls');
+  let chased = 0;
+
+  for (const rec of due) {
+    // Stamp FIRST — a duplicate tomorrow is worse than a missed one today.
+    await markActionChased(rec.id);
+
+    let recipients = admins;
+    if (rec.action_user_id) {
+      const chosen = await query(
+        `SELECT id, email FROM users WHERE id = $1 AND role = 'admin' AND is_active = true`,
+        [rec.action_user_id]
+      );
+      // The chosen admin may have gone since the date was set — fall back to
+      // everyone rather than letting the reminder vanish.
+      if (chosen.rows.length) recipients = chosen.rows;
+    }
+
+    const who = esc(rec.person_name || 'Somebody');
+    const what = `\u201c${esc(rec.label)}\u201d`;
+    const isDelete = rec.action_kind === 'delete';
+    const title = isDelete ? 'A staff record is due for deletion' : 'A staff record needs looking at';
+    const expiry = rec.expires_on
+      ? ` ${rec.expires_on < new Date().toISOString().slice(0, 10) ? 'It expired' : 'It expires'} ${fmtDate(rec.expires_on)}.`
+      : '';
+    const content = isDelete
+      ? `${who}\u2019s ${what} is due for deletion. Open it and delete it if you agree \u2014 nothing is removed automatically.`
+      : `${who}\u2019s ${what}: reminder for ${fmtDate(rec.action_on)}.${expiry}`;
+    const fullContent = rec.action_note?.trim() ? `${content} Note: ${esc(rec.action_note.trim())}` : content;
+    const url = `${STAFF_URL}?person=${rec.person_id}&tab=records`;
+    const priority = rec.action_delivery === 'notification' ? 'low' : 'normal';
+    const emailNow = rec.action_delivery === 'email';
+
+    for (const admin of recipients) {
+      await query(
+        `INSERT INTO notifications
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
+         VALUES ($1, $2, $3, $4, 'staff_record_files', $5, $6, $7, $8)`,
+        [admin.id, isDelete ? 'staff_record_delete_due' : 'staff_record_action_due',
+         title, fullContent, rec.id, url, priority, emailNow ? new Date() : null]
+      ).catch(e => console.error('[staff-notifications] record action bell failed:', e));
+
+      if (emailNow && admin.email) {
+        try {
+          await emailService.sendRaw({
+            to: admin.email,
+            subject: title,
+            variant: 'internal',
+            html: `<p>${fullContent}</p><p><a href="${getFrontendUrl()}${url}">Open it on the Staff page</a></p>`,
+          });
+        } catch (err) {
+          console.warn('[staff-notifications] record action email failed:', err);
+        }
+      }
+    }
+    chased++;
+  }
+
+  console.log(`[staff-notifications] record actions: fired ${chased}`);
+  return { chased };
+}

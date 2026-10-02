@@ -292,6 +292,29 @@ export async function postSitterThreadWithFilesOP(
 }
 
 // =============================================================================
+// STUDIO SITTER SHOP TILL (docs/SHOP-SALES-SPEC.md §5)
+// =============================================================================
+
+/**
+ * One call into the sitter till on OP: `/studio-sitter/shifts/:date/till/<subpath>`.
+ * The till's endpoints are thin and all gated OP-side (rostered to the night),
+ * so one helper serves them rather than five near-identical wrappers. POSTs are
+ * not retried (opFetch) — a blind retry could ring a sale up twice.
+ */
+export async function sitterTillOP<T = unknown>(
+  sessionToken: string,
+  date: string,
+  subpath: string,
+  init: { method?: 'GET' | 'POST'; body?: unknown; search?: string } = {},
+): Promise<T> {
+  const qs = init.search ? `?${init.search}` : ''
+  return opFetch<T>(`/studio-sitter/shifts/${date}/till/${subpath}${qs}`, sessionToken, {
+    method: init.method || 'GET',
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+  })
+}
+
+// =============================================================================
 // STUDIO SITTER LOCK-UP REPORT (Rehearsals — Phase E)
 // =============================================================================
 

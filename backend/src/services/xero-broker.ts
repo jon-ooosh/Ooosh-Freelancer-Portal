@@ -526,6 +526,37 @@ class XeroBroker {
   }
 
   /**
+   * One overpayment — its `RemainingCredit` and what it is already applied to.
+   * A HireHop deposit lands in Xero as an overpayment (`ACC_DATA.OverpaymentID`
+   * on the HireHop row). Granular `accounting.payments` → the bills token.
+   */
+  async getOverpayment(overpaymentId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.request<{ Overpayments?: Array<Record<string, unknown>> }>(
+      'GET', `/Overpayments/${overpaymentId}`, { billsScope: true },
+    );
+    return r.Overpayments?.[0] ?? null;
+  }
+
+  /**
+   * Apply part or all of an overpayment to a sales invoice — Xero's "Apply
+   * credit". HireHop allocates a deposit to an invoice on its side but never
+   * pushes that allocation to Xero (shop weekly close, Sep 2026), so OP does it.
+   */
+  async allocateOverpayment(input: {
+    overpaymentId: string;
+    invoiceId: string;
+    amount: number;
+    date: string;         // YYYY-MM-DD — on or after both the overpayment and the invoice
+  }): Promise<void> {
+    await this.request('PUT', `/Overpayments/${input.overpaymentId}/Allocations`, {
+      body: {
+        Allocations: [{ Invoice: { InvoiceID: input.invoiceId }, Amount: input.amount, Date: input.date }],
+      },
+      billsScope: true,
+    });
+  }
+
+  /**
    * ONE payment covering MANY bills — Xero's BatchPayments.
    *
    * The reason this exists rather than a loop over payInvoice(): a single bank

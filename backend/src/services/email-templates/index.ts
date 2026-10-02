@@ -122,7 +122,7 @@ const templates: Record<string, EmailTemplate> = {
         <li>Disability/medical conditions: <strong>{{hasDisability}}</strong></li>
         <li>Motoring convictions: <strong>{{hasConvictions}}</strong></li>
         <li>Pending prosecutions: <strong>{{hasProsecution}}</strong></li>
-        <li>Accidents (last 5 years): <strong>{{hasAccidents}}</strong></li>
+        <li>Accidents (last 3 years): <strong>{{hasAccidents}}</strong></li>
         <li>Insurance issues: <strong>{{hasInsuranceIssues}}</strong></li>
         <li>Driving bans: <strong>{{hasDrivingBan}}</strong></li>
       </ul>
@@ -1124,6 +1124,45 @@ const templates: Record<string, EmailTemplate> = {
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
         <a href="{{driverUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Review the photos in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
+  // ── Northern Ireland (DVA) licence check waiting on staff ──────────────
+
+  dva_check_pending: {
+    variant: 'internal',
+    preheader: 'A Northern Ireland driver is waiting on a licence check only we can run',
+    subject: 'NI licence check needed — {{driverName}}{{#if jobNumber}} (job #{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Northern Ireland Licence Check Needed</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        This driver&rsquo;s licence was issued by the DVA in Northern Ireland, not the DVLA{{#if jobNumber}}, on job <strong>#{{jobNumber}}</strong>{{/if}}.
+        NI licences are not held by the GOV.UK share-code service, so they <strong>cannot run their own check</strong> &mdash;
+        they generate a code and somebody here has to do the lookup. Their hire form is parked
+        until that happens, and they cannot get past it on their own.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#fff7ed;border-radius:8px;border:1px solid #fed7aa;">
+            <p style="margin:0 0 8px;font-size:13px;color:#9a3412;font-weight:600;">Driver</p>
+            <p style="margin:0 0 4px;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
+            <p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{driverEmail}}</p>
+            <p style="margin:0 0 4px;font-size:13px;color:#9a3412;font-weight:600;">What you need for the lookup</p>
+            <p style="margin:0 0 2px;font-size:14px;color:#1e293b;">Check code: <strong style="font-family:monospace;">{{checkCode}}</strong></p>
+            <p style="margin:0;font-size:14px;color:#1e293b;">Licence number: <strong style="font-family:monospace;">{{licenceNumber}}</strong></p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Run the check at
+        <a href="https://www.nidirect.gov.uk/services/check-someones-ni-driving-licence-information" style="color:#7B5EA7;">nidirect</a>,
+        then record the result on the driver&rsquo;s record. The code is
+        <strong>single use and expires 21 days after the driver created it</strong> &mdash; if it fails,
+        ask them for a fresh one rather than retrying.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{driverUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Record the check in Ooosh &rarr;</a>
       </p>
     `,
   },
@@ -2309,11 +2348,20 @@ const templates: Record<string, EmailTemplate> = {
             <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{statusLine}}</p>
             {{#if exceptionsText}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Needs attention</p><p style="margin:0 0 8px;font-size:14px;color:#b45309;white-space:pre-line;">{{exceptionsText}}</p>{{/if}}
             {{#if notes}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Sitter's notes</p><p style="margin:0 0 8px;font-size:14px;color:#1e293b;white-space:pre-line;">{{notes}}</p>{{/if}}
+            {{#if shopLine}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Shop till tonight</p><p style="margin:0;font-size:14px;color:#1e293b;">🛒 {{shopLine}}</p>{{/if}}
           </td>
         </tr>
       </table>
+      {{#if shopReviewText}}<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fcd34d;">
+            <p style="margin:0 0 6px;font-size:14px;color:#92400e;font-weight:600;">To do: {{shopReviewText}}</p>
+            <p style="margin:0;font-size:14px;"><a href="{{shopReviewUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Review and tick them off →</a></p>
+          </td>
+        </tr>
+      </table>{{/if}}
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">{{linkLabel}} →</a>
       </p>
     `,
   },
@@ -2371,7 +2419,7 @@ const templates: Record<string, EmailTemplate> = {
         end-of-night lock-up report. They've been sent a reminder. Worth a check the studio was closed up OK.
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">{{linkLabel}} →</a>
       </p>
     `,
   },
@@ -2664,6 +2712,15 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{handlingSentence}} A copy of the notice is attached.</p>
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
     `,
+  },
+
+  // Sent when a review is marked complete (spec §5.5). Always with
+  // bodyHtmlOverride — the summary, actions and any pay change are assembled
+  // per person in services/staff-review-followup.ts.
+  staff_review_followup: {
+    variant: 'internal',
+    subject: 'Your review — {{reviewDate}}',
+    body: `<p>This template should be sent with bodyHtmlOverride. If you're seeing this, the caller forgot.</p>`,
   },
 
 };

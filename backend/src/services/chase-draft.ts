@@ -19,14 +19,21 @@
  * without a deploy.
  */
 import { query } from '../config/database';
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
+import {
+  getAnthropicClient,
+  isAnthropicConfigured,
+  readStructuredJson,
+  CLAUDE_SONNET_MODEL,
+} from '../config/anthropic';
 import { getSystemSetting } from '../routes/system-settings';
 import type { HHLineItem } from './hirehop-job-sync';
 
-// Spec §9.1 calls for Sonnet 5 — the drafting is nuance-heavy (tone varies by
+// Spec §9.1 calls for Sonnet — the drafting is nuance-heavy (tone varies by
 // relationship) and a client-facing email is the one place we don't cut corners.
-const MODEL_ID = 'claude-sonnet-5';
-const MAX_TOKENS = 800;
+const MODEL_ID = CLAUDE_SONNET_MODEL;
+// Headroom for thinking as well as the draft — thinking counts towards
+// max_tokens on Sonnet 5.5.
+const MAX_TOKENS = 8000;
 
 // The rails. Staff cannot edit these — the chase-voice setting is appended below.
 const SYSTEM_PROMPT = `You draft short chase emails for Ooosh Tours, a music & event transport / backline / rehearsal hire company. A quote went out to a client and we've heard nothing back; you write a brief, warm "just checking in" nudge.
@@ -43,7 +50,7 @@ HARD RULES — never break these:
 - If a prior email thread is provided, match its tone and reference it naturally; if it's a first contact, keep it friendly-neutral.
 - Plain text only. No markdown, no placeholders like [name], no subject-line clichés ("Just following up!!!").
 
-Return ONLY the tool call with the drafted subject + body.`;
+Return ONLY the JSON object with the drafted subject + body.`;
 
 const SCHEMA = {
   type: 'object' as const,
@@ -361,23 +368,15 @@ export async function draftChaseEmail(
     max_tokens: MAX_TOKENS,
     system,
     messages: [{ role: 'user', content: buildUserPrompt(context, opts.signOffName ?? null) }],
-    tools: [
-      {
-        name: 'report_draft',
-        description: 'Return the drafted chase email — subject + plain-text body.',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input_schema: SCHEMA as any,
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'report_draft' },
+    // Structured outputs (json_schema) — replaced forced tool-use, which Sonnet
+    // 5.5 rejects with a 400.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA as any } } as any,
   });
 
-  const toolBlock = response.content.find((b) => b.type === 'tool_use');
-  if (toolBlock && toolBlock.type === 'tool_use') {
-    const out = toolBlock.input as ChaseDraft;
-    return { draft: { subject: out.subject, body: out.body }, context };
-  }
-  throw new Error('Claude did not return a chase draft');
+  const out = readStructuredJson<ChaseDraft>(response, 'Chase draft');
+  if (!out.subject || !out.body) throw new Error('Claude did not return a chase draft');
+  return { draft: { subject: out.subject, body: out.body }, context };
 }
 
 // ── Example-driven voice tuning (spec §9.3 item 3) ──────────────────────────
@@ -389,8 +388,8 @@ export async function draftChaseEmail(
 // small at runtime (the existing knob), and fully human-in-the-loop (this only
 // PROPOSES; staff review + save via the normal Settings PUT).
 
-const VOICE_LEARN_MODEL = 'claude-sonnet-5'; // nuance-heavy, infrequent — worth Sonnet
-const VOICE_LEARN_MAX_TOKENS = 700;
+const VOICE_LEARN_MODEL = CLAUDE_SONNET_MODEL; // nuance-heavy, infrequent — worth Sonnet
+const VOICE_LEARN_MAX_TOKENS = 8000; // headroom for thinking as well as the note
 
 const VOICE_LEARN_SYSTEM = `You refine a short "voice guidance" note for an AI that drafts chase / follow-up emails for Ooosh Tours (a music & event transport / backline / rehearsal hire company).
 
@@ -403,7 +402,7 @@ RULES:
 - If current guidance is provided, MERGE — keep what still holds, refine or add from the examples, drop anything the examples contradict. Don't discard good existing guidance wholesale.
 - British English. Plain text, no markdown headers, no preamble.
 
-Return ONLY the tool call with the proposed guidance.`;
+Return ONLY the JSON object with the proposed guidance.`;
 
 const VOICE_LEARN_SCHEMA = {
   type: 'object' as const,
@@ -452,22 +451,13 @@ export async function learnChaseVoice(examples: string, current?: string | null)
     max_tokens: VOICE_LEARN_MAX_TOKENS,
     system: [{ type: 'text' as const, text: VOICE_LEARN_SYSTEM, cache_control: { type: 'ephemeral' as const } }],
     messages: [{ role: 'user', content: parts.join('\n') }],
-    tools: [
-      {
-        name: 'report_voice',
-        description: 'Return the proposed voice-guidance note.',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input_schema: VOICE_LEARN_SCHEMA as any,
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'report_voice' },
+    // Structured outputs (json_schema) — replaced forced tool-use (400 on Sonnet 5.5).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: VOICE_LEARN_SCHEMA as any } } as any,
   });
 
-  const toolBlock = response.content.find((b) => b.type === 'tool_use');
-  if (toolBlock && toolBlock.type === 'tool_use') {
-    const out = toolBlock.input as { guidance?: string };
-    const guidance = (out.guidance || '').trim();
-    if (guidance) return guidance;
-  }
+  const out = readStructuredJson<{ guidance?: string }>(response, 'Chase voice learn');
+  const guidance = (out.guidance || '').trim();
+  if (guidance) return guidance;
   throw new Error('Claude did not return voice guidance');
 }

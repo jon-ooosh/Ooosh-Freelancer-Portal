@@ -24,9 +24,11 @@ import {
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
+  updateKeyData, revealNiNumber, recordReviewOutcome,
+  listPensionHistory, addPensionRecord, updatePersonalDetails,
   listUnlinkedLogins, linkLoginToPerson,
   createPattern, listPatterns, createExceptions, listExceptions,
-  addSalaryEntry, listSalaryHistory, upsertReview, listReviews,
+  addSalaryEntry, listSalaryHistory, upsertReview, listReviews, markCheckInDone,
 } from '../services/staff-employment';
 import {
   getBalance, getTeamBalances, syncEntitlement, postEntry, reverseEntry,
@@ -433,6 +435,8 @@ router.post('/overtime', async (req: AuthRequest, res: Response) => {
   let minutes = parsed.data.minutes ?? 0;
   if (!minutes && parsed.data.startTime && parsed.data.endTime) {
     minutes = minutesBetween(parsed.data.startTime, parsed.data.endTime);
+    // 22:00–02:00 runs past midnight, logged on the day it started.
+    if (minutes <= 0) minutes += 1440;
   }
   if (!minutes || minutes <= 0) {
     res.status(400).json({ error: 'Give either a start and end time, or a number of minutes' }); return;
@@ -443,6 +447,32 @@ router.post('/overtime', async (req: AuthRequest, res: Response) => {
   const snapped = Math.ceil(minutes / MIN_INCREMENT) * MIN_INCREMENT;
 
   try {
+    // Overtime is time OUTSIDE contracted hours — the same rule My Time's form
+    // enforces, held here too so a stale bundle or a direct call cannot bank
+    // the middle of somebody's working day. Only a plain working day is
+    // checked (not a day off, leave, or a part day — see staff-calendar.md),
+    // and the unpaid break counts as hours: working through lunch is not
+    // overtime here (jon, Sep 2026). The "not in the future" check stays in
+    // the browser: only the person's own clock knows what "now" is for them.
+    if (parsed.data.startTime && parsed.data.endTime) {
+      const [row] = await getStaffCalendar(parsed.data.workDate, parsed.data.workDate,
+        { isAdmin: true, personId: target.personId });
+      const day = row?.days?.[0];
+      if (day && day.status === 'working' && day.startTime && day.endTime) {
+        const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+        const s = toMin(parsed.data.startTime);
+        // End at or before start = past midnight; only the part on this day
+        // is checked against this day's hours.
+        const e = toMin(parsed.data.endTime) <= s ? 1440 : toMin(parsed.data.endTime);
+        if (s < toMin(day.endTime) && e > toMin(day.startTime)) {
+          res.status(400).json({
+            error: `That overlaps contracted hours (${day.startTime.slice(0, 5)}–${day.endTime.slice(0, 5)}) — overtime is time before or after them.`,
+          });
+          return;
+        }
+      }
+    }
+
     const id = await createOvertime({
       personId: target.personId,
       workDate: parsed.data.workDate,
@@ -1011,7 +1041,8 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
     // them explicitly so My Time can say which it is.
     const { query: dbQuery } = await import('../config/database');
     const emp = await dbQuery(
-      `SELECT 1 FROM staff_employment WHERE person_id = $1 AND employment_status = 'employed'`,
+      `SELECT bank_holiday_policy FROM staff_employment
+        WHERE person_id = $1 AND employment_status = 'employed'`,
       [personId]);
     if (emp.rows.length === 0) { res.json({ data: null, hasStaffRecord: false }); return; }
 
@@ -1032,11 +1063,19 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
     // holding the previous JS bundle read balanceMinutes, got undefined, and
     // rendered "NaNh NaNm". A cached bundle is the normal state of affairs
     // right after a deploy, so response shapes here only ever gain fields.
+    // The person's OWN bank holiday rule: their staff record's override if it
+    // has one, else the company-wide setting. /bank-holidays only knows the
+    // company one, so My Time read that and ignored the per-person override
+    // (spec §17 item 3 — "it varies per person").
+    const bankHolidayPolicy =
+      (emp.rows[0].bank_holiday_policy as 'use_allowance' | 'granted' | null)
+      ?? await getBankHolidayPolicy();
     res.json({
       data: {
         personId, year,
         holiday: { ...holiday, balanceMinutes: holiday.availableMinutes },
         overtime: { ...overtime, balanceMinutes: overtime.availableMinutes },
+        bankHolidayPolicy,
       },
       hasStaffRecord: true,
     });
@@ -1203,6 +1242,19 @@ router.get('/employees', adminOnly, async (_req: AuthRequest, res: Response) => 
   }
 });
 
+// GET /api/staff-calendar/attention
+// The Staff page's "needs attention" list — every row derived, nothing stored.
+// See services/staff-attention.ts for why this surface exists at all.
+router.get('/attention', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getStaffAttention } = await import('../services/staff-attention');
+    res.json({ data: await getStaffAttention() });
+  } catch (err) {
+    console.error('[staff-calendar] attention error:', err);
+    res.status(500).json({ error: 'Failed to load the attention list' });
+  }
+});
+
 // GET /api/staff-calendar/employees/:personId
 router.get('/employees/:personId', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
@@ -1212,6 +1264,230 @@ router.get('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   } catch (err) {
     console.error('[staff-calendar] employee error:', err);
     res.status(500).json({ error: 'Failed to load employee' });
+  }
+});
+
+// ── My review — the staff-facing half (spec §5.3) ───────────────────────────
+// NOT adminOnly: this is the one part of the staff-records module the reviewee
+// themselves uses. Ownership is enforced in the service against person_id, and
+// the read selects column by column so private_notes and manager_prep cannot
+// leak by being added to the table later.
+
+// GET /api/staff-calendar/me/review
+router.get('/me/review', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: null, questions: [], linked: false }); return; }
+    const { getMyReview, getReviewQuestions } = await import('../services/staff-review-prep');
+    const [review, questions] = await Promise.all([getMyReview(personId), getReviewQuestions()]);
+    res.json({ data: review, questions, linked: true });
+  } catch (err) {
+    console.error('[staff-calendar] my review error:', err);
+    res.status(500).json({ error: 'Failed to load your review' });
+  }
+});
+
+// The reviewee's prep answers — one shape for the draft and the submit.
+const reviewAnswersSchema = z.object({
+  answers: z.array(z.object({ q: z.string().max(500), a: z.string().max(10000) })).max(40),
+});
+
+// The reviewee's private autosave (mig 262) is never for the reviewer's eyes.
+// The admin review writes return `RETURNING *` rows, which would carry it, so
+// strip it on the way out. The admin list selects column by column already.
+function withoutReviewDraft<T extends Record<string, unknown> | null>(row: T): T {
+  if (!row) return row;
+  const { self_assessment_draft: _d, self_assessment_draft_saved_at: _s, ...rest } = row;
+  return rest as T;
+}
+
+// PUT /api/staff-calendar/me/review/:reviewId/draft
+// Save-as-you-go. Writes ONLY the caller's private draft; the reviewer sees
+// nothing until the POST /answers below. Same ownership check and same open
+// window (proposed/confirmed) as the submit.
+router.put('/me/review/:reviewId/draft', async (req: AuthRequest, res: Response) => {
+  const parsed = reviewAnswersSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  const reviewId = req.params.reviewId as string;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reviewId)) {
+    res.status(404).json({ error: 'Review not found' }); return;
+  }
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.status(400).json({ error: 'Your login is not linked to a person record' }); return; }
+    const { saveSelfAssessmentDraft } = await import('../services/staff-review-prep');
+    const data = await saveSelfAssessmentDraft(reviewId, personId, parsed.data.answers);
+    res.json({ data });
+  } catch (err) {
+    const { ReviewClosedError } = await import('../services/staff-review-prep');
+    if (err instanceof ReviewClosedError) { res.status(400).json({ error: err.message }); return; }
+    if (err instanceof Error && err.message === 'Review not found') { res.status(404).json({ error: err.message }); return; }
+    console.error('[staff-calendar] review draft error:', err);
+    res.status(500).json({ error: 'Failed to save your draft' });
+  }
+});
+
+// POST /api/staff-calendar/me/review/:reviewId/answers
+// Submit to reviewer: copies the answers into self_assessment, stamps it sent
+// and clears the draft.
+router.post('/me/review/:reviewId/answers', async (req: AuthRequest, res: Response) => {
+  const schema = reviewAnswersSchema;
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.status(400).json({ error: 'Your login is not linked to a person record' }); return; }
+    const { submitSelfAssessment } = await import('../services/staff-review-prep');
+    const data = await submitSelfAssessment(req.params.reviewId as string, personId, parsed.data.answers);
+    res.json({ data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to save your answers';
+    res.status(msg === 'Review not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
+// GET /api/staff-calendar/review-questions — the same set, for the admin side
+router.get('/review-questions', adminOnly, async (_req: AuthRequest, res: Response) => {
+  try {
+    const { getReviewQuestions } = await import('../services/staff-review-prep');
+    res.json({ data: await getReviewQuestions() });
+  } catch (err) {
+    console.error('[staff-calendar] review questions error:', err);
+    res.status(500).json({ error: 'Failed to load the questions' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/reviews/:reviewId/prep
+router.post('/employees/:personId/reviews/:reviewId/prep', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    answers: z.array(z.object({ q: z.string().max(500), a: z.string().max(10000) })).max(40),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const { saveManagerPrep } = await import('../services/staff-review-prep');
+    const data = await saveManagerPrep(
+      req.params.reviewId as string, req.params.personId as string, parsed.data.answers);
+    res.json({ data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to save';
+    res.status(msg === 'Review not found' ? 404 : 400).json({ error: msg });
+  }
+});
+
+// ── Personal details (spec §18.1) ───────────────────────────────────────────
+// These columns have been on `people` since migration 001 and were simply
+// never editable from the staff area. A write path, not new storage.
+const personalSchema = z.object({
+  phone: z.string().max(50).nullish(),
+  mobile: z.string().max(50).nullish(),
+  internationalPhone: z.string().max(50).nullish(),
+  homeAddress: z.string().max(2000).nullish(),
+  dateOfBirth: z.union([dateStr, z.literal('')]).nullish(),
+  maritalStatus: z.string().max(40).nullish(),
+  emergencyContactName: z.string().max(255).nullish(),
+  emergencyContactPhone: z.string().max(50).nullish(),
+  emergencyContactRelationship: z.string().max(100).nullish(),
+  emergencyContact2Name: z.string().max(255).nullish(),
+  emergencyContact2Phone: z.string().max(50).nullish(),
+  emergencyContact2Relationship: z.string().max(100).nullish(),
+});
+
+// PUT /api/staff-calendar/employees/:personId/personal
+router.put('/employees/:personId/personal', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = personalSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const rec = await updatePersonalDetails(req.params.personId as string, parsed.data);
+    res.json({ data: rec });
+  } catch (err) {
+    console.error('[staff-calendar] personal details error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save' });
+  }
+});
+
+// ── Pension (spec §18.2) ────────────────────────────────────────────────────
+// Append-only, like salary: a change is a new row so the history survives.
+router.get('/employees/:personId/pension', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listPensionHistory(req.params.personId as string) });
+  } catch (err) {
+    console.error('[staff-calendar] pension error:', err);
+    res.status(500).json({ error: 'Failed to load pension history' });
+  }
+});
+
+router.post('/employees/:personId/pension', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    isMember: z.boolean(),
+    schemeName: z.string().max(200).nullish(),
+    employeePercent: z.number().min(0).max(100).nullish(),
+    employerPercent: z.number().min(0).max(100).nullish(),
+    effectiveFrom: dateStr,
+    reason: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const row = await addPensionRecord(req.params.personId as string, parsed.data, req.user!.id);
+    res.status(201).json({ data: row });
+  } catch (err) {
+    console.error('[staff-calendar] add pension error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record the pension change' });
+  }
+});
+
+// ── Key data: NI + right to work (spec §3.2) ────────────────────────────────
+// A separate endpoint from the employment save on purpose: a routine edit to
+// somebody's job title must not be able to blank their NI number, and the NI
+// write wants one audited path rather than being buried in a general upsert.
+
+const keyDataSchema = z.object({
+  // '' clears. Absent leaves it alone — the UI never round-trips the stored
+  // value, so an omitted key genuinely means "not touched".
+  niNumber: z.string().max(20).nullish(),
+  rtwDocumentType: z.string().max(50).nullish(),
+  rtwCheckedOn: z.union([dateStr, z.literal('')]).nullish(),
+  rtwExpiresOn: z.union([dateStr, z.literal('')]).nullish(),
+});
+
+// PUT /api/staff-calendar/employees/:personId/key-data
+router.put('/employees/:personId/key-data', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = keyDataSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+
+  // Refuse cleanly rather than 500 on a server with no ENCRYPTION_KEY, and
+  // refuse BEFORE writing anything — a half-saved right-to-work check with a
+  // silently dropped NI number would be worse than an error.
+  const wantsNi = parsed.data.niNumber !== undefined
+    && parsed.data.niNumber !== null
+    && parsed.data.niNumber !== '';
+  if (wantsNi) {
+    const { isEncryptionConfigured } = await import('../services/encryption');
+    if (!isEncryptionConfigured()) {
+      res.status(503).json({ error: 'Encryption is not configured on this server — cannot store an NI number.' });
+      return;
+    }
+  }
+
+  try {
+    const rec = await updateKeyData(req.params.personId as string, parsed.data, req.user!.id);
+    res.json({ data: rec });
+  } catch (err) {
+    console.error('[staff-calendar] key data error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save' });
+  }
+});
+
+// GET /api/staff-calendar/employees/:personId/ni-number
+// The ONLY way the number itself leaves the server. Audited on every call.
+router.get('/employees/:personId/ni-number', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const value = await revealNiNumber(req.params.personId as string, req.user!.id);
+    res.json({ data: { niNumber: value } });
+  } catch (err) {
+    console.error('[staff-calendar] ni reveal error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to read' });
   }
 });
 
@@ -1228,6 +1504,9 @@ const employmentSchema = z.object({
   notes: z.string().nullish(),
   preferredName: z.string().max(100).nullish(),
   pronouns: z.string().max(40).nullish(),
+  // Per-person review cadence (spec §5.6). NULL inherits the company setting,
+  // exactly as bankHolidayPolicy and entitlementWeeks already do.
+  reviewIntervalMonths: z.number().int().min(1).max(60).nullish(),
 });
 
 // PUT /api/staff-calendar/employees/:personId
@@ -1240,6 +1519,41 @@ router.put('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   } catch (err) {
     console.error('[staff-calendar] upsert employment error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save employment record' });
+  }
+});
+
+// ── 2026 backfill from BrightHR ─────────────────────────────────────────────
+
+// POST /api/staff-calendar/history-import — admin only. { rows, commit }.
+// commit:false is a preview that writes nothing; commit:true writes through
+// the module's own services (no notifications). See staff-history-import.ts.
+router.post('/history-import', adminOnly, async (req: AuthRequest, res: Response) => {
+  const hhmmOrHalf = z.string().regex(/^(\d{2}:\d{2}|AM|PM|am|pm|CHECK)$/).nullable();
+  const schema = z.object({
+    commit: z.boolean(),
+    rows: z.array(z.object({
+      person: z.string().min(1).max(200),
+      kind: z.enum(['holiday', 'toil_taken', 'unpaid', 'overtime_earned', 'toil_paid']),
+      status: z.enum(['approved', 'pending']),
+      date: dateStr,
+      endDate: dateStr.nullable(),
+      startTime: hhmmOrHalf,
+      endTime: hhmmOrHalf,
+      minutes: z.number().int().positive().nullable(),
+      note: z.string().max(500).nullable(),
+    })).min(1).max(1000),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    const i = parsed.error.issues[0];
+    res.status(400).json({ error: `${i?.path.join('.') ?? 'input'}: ${i?.message ?? 'Invalid input'}` }); return;
+  }
+  try {
+    const { runHistoryImport } = await import('../services/staff-history-import');
+    res.json({ data: await runHistoryImport(parsed.data.rows, req.user!.id, !parsed.data.commit) });
+  } catch (err) {
+    console.error('[staff-calendar] history import error:', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Import failed' });
   }
 });
 
@@ -1368,9 +1682,11 @@ router.post('/employees/:personId/salary', adminOnly, async (req: AuthRequest, r
   }
 });
 
+// Admin surface, so includePrivate = true. Anything staff-facing must call
+// listReviews() without it — private_notes never leaves the server otherwise.
 router.get('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, res: Response) => {
   try {
-    res.json({ data: await listReviews(req.params.personId as string) });
+    res.json({ data: await listReviews(req.params.personId as string, true) });
   } catch (err) {
     console.error('[staff-calendar] reviews error:', err);
     res.status(500).json({ error: 'Failed to load reviews' });
@@ -1382,21 +1698,66 @@ router.post('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, 
     id: z.string().uuid().nullish(),
     reviewType: z.enum(['quarterly', 'annual', 'probation', 'ad_hoc']).optional(),
     scheduledFor: dateStr,
+    status: z.enum(['proposed', 'confirmed', 'completed', 'cancelled']).optional(),
     completedAt: z.string().nullish(),
-    notes: z.string().nullish(),
-    outcome: z.string().nullish(),
+    sharedSummary: z.string().max(20000).nullish(),
+    privateNotes: z.string().max(20000).nullish(),
+    outcome: z.string().max(4000).nullish(),
     nextReviewDue: dateStr.nullish(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
   try {
-    const { id, ...rest } = parsed.data;
-    const row = await upsertReview(id ?? null, req.params.personId as string, rest, req.user!.id);
-    if (!row) { res.status(404).json({ error: 'Review not found' }); return; }
-    res.json({ data: row });
+    const { id, ...input } = parsed.data;
+    const row = await upsertReview(id ?? null, req.params.personId as string, input, req.user!.id);
+    res.json({ data: withoutReviewDraft(row) });
   } catch (err) {
     console.error('[staff-calendar] review error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save the review' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/reviews/:reviewId/complete
+// Stamps the review, derives when the next one falls due from the person's own
+// cadence, and — when a rise came out of it — writes the salary row and links
+// the two. Pay is decided AFTER the meeting (spec §5.1), which is why it
+// arrives here rather than on the review form.
+router.post('/employees/:personId/reviews/:reviewId/complete', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    sharedSummary: z.string().max(20000).nullish(),
+    privateNotes: z.string().max(20000).nullish(),
+    outcome: z.string().max(4000).nullish(),
+    newSalary: z.number().min(0).max(10_000_000).nullish(),
+    salaryEffectiveFrom: dateStr.nullish(),
+    salaryReason: z.string().max(500).nullish(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  try {
+    const row = await recordReviewOutcome(
+      req.params.reviewId as string,
+      req.params.personId as string,
+      parsed.data,
+      req.user!.id
+    );
+    res.json({ data: withoutReviewDraft(row) });
+  } catch (err) {
+    console.error('[staff-calendar] review complete error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to complete the review' });
+  }
+});
+
+// POST /api/staff-calendar/employees/:personId/reviews/:reviewId/checkin
+// Ticks off the half-way check-in on a completed review (spec §5.6, §22), which
+// clears the "Check-in due" row on Needs attention until the next review.
+router.post('/employees/:personId/reviews/:reviewId/checkin', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const ok = await markCheckInDone(req.params.personId as string, req.params.reviewId as string);
+    if (!ok) { res.status(404).json({ error: 'Completed review not found' }); return; }
+    res.json({ data: { reviewId: req.params.reviewId } });
+  } catch (err) {
+    console.error('[staff-calendar] review check-in error:', err);
+    res.status(500).json({ error: 'Failed to record the check-in' });
   }
 });
 

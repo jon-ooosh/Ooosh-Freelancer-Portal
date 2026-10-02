@@ -66,8 +66,10 @@ export type PhotoAngle =
   | 'interior_front'
   | 'sliding_door'
   | 'interior_rear'
+  | 'right_panel'
   | 'rear_right'
   | 'rear_doors'
+  | 'rear_door_driver'
   | 'rear_left'
   | 'left_panel'
   | 'driver_door'
@@ -84,8 +86,14 @@ export const REQUIRED_PHOTOS: { angle: PhotoAngle; label: string }[] = [
   { angle: 'interior_front', label: 'Interior Front' },
   { angle: 'sliding_door', label: 'Sliding Door' },
   { angle: 'interior_rear', label: 'Interior Rear' },
+  { angle: 'right_panel', label: 'Right Panel' },
   { angle: 'rear_right', label: 'Rear Right' },
-  { angle: 'rear_doors', label: 'Rear Doors' },
+  // One photo per rear door since Sep 2026. `rear_doors` keeps its key so a
+  // book-out from before (one shot of both doors) still lines up with its
+  // check-in; it now means the sliding-door side's door. Named by side, not
+  // left/right, because which is "left" depends on where you stand.
+  { angle: 'rear_doors', label: 'Rear Door — Sliding-Door Side' },
+  { angle: 'rear_door_driver', label: 'Rear Door — Driver Side' },
   { angle: 'rear_left', label: 'Rear Left' },
   { angle: 'left_panel', label: 'Left Panel' },
   { angle: 'driver_door', label: 'Driver Door' },

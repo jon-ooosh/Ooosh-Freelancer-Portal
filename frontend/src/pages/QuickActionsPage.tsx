@@ -81,7 +81,7 @@ export default function QuickActionsPage() {
       )}
       {active === 'handover' && <HandoverSheet onClose={() => setActive(null)} onSaved={() => done('✓ Marked collected')} />}
       {/* The SAME component My Time uses, not a second copy of the form — the
-          5-minute rounding, the times-or-minutes toggle and the approval rules
+          5-minute grid, the not-in-the-future check and the approval rules
           all live in one place and cannot drift. */}
       {active === 'overtime' && (
         <Sheet title="⏱️ Log overtime" onClose={() => setActive(null)}>
