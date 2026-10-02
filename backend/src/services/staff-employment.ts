@@ -34,6 +34,8 @@ export interface PatternDayInput {
   startTime?: string | null;  // 'HH:MM'
   endTime?: string | null;
   breakMinutes?: number;
+  /** A regular agreed working-from-home day (spec §19, mig 269). */
+  atHome?: boolean;
 }
 
 export interface EmploymentInput {
@@ -263,9 +265,9 @@ export async function createPattern(
     for (const d of rows) {
       await client.query(
         `INSERT INTO staff_working_pattern_days
-           (pattern_id, cycle_week, weekday, is_working, start_time, end_time, break_minutes, minutes)
-         VALUES ($1, $2, $3, $4, $5::time, $6::time, $7, $8)`,
-        [patternId, d.cycleWeek, d.weekday, d.isWorking, d.startTime, d.endTime, d.breakMinutes, d.minutes]
+           (pattern_id, cycle_week, weekday, is_working, start_time, end_time, break_minutes, minutes, at_home)
+         VALUES ($1, $2, $3, $4, $5::time, $6::time, $7, $8, $9)`,
+        [patternId, d.cycleWeek, d.weekday, d.isWorking, d.startTime, d.endTime, d.breakMinutes, d.minutes, d.atHome]
       );
     }
 
@@ -294,7 +296,7 @@ export function normalisePatternDay(d: PatternDayInput, cycleWeeks = 1) {
     throw new Error(`cycleWeek ${cycleWeek} outside a ${cycleWeeks}-week cycle`);
   }
   if (!d.isWorking) {
-    return { cycleWeek, weekday: d.weekday, isWorking: false, startTime: null, endTime: null, breakMinutes: 0, minutes: 0 };
+    return { cycleWeek, weekday: d.weekday, isWorking: false, startTime: null, endTime: null, breakMinutes: 0, minutes: 0, atHome: false };
   }
   if (!d.startTime || !d.endTime) throw new Error('A working day needs both a start and an end time');
 
@@ -310,6 +312,7 @@ export function normalisePatternDay(d: PatternDayInput, cycleWeeks = 1) {
   return {
     cycleWeek, weekday: d.weekday, isWorking: true,
     startTime: d.startTime, endTime: d.endTime, breakMinutes, minutes,
+    atHome: d.atHome === true,
   };
 }
 
@@ -327,7 +330,7 @@ export async function listPatterns(personId: string) {
   const days = await query(
     `SELECT pattern_id, cycle_week, weekday, is_working,
             start_time::text AS start_time, end_time::text AS end_time,
-            break_minutes, minutes
+            break_minutes, minutes, at_home
        FROM staff_working_pattern_days
       WHERE pattern_id = ANY($1::uuid[])
       ORDER BY cycle_week, weekday`,

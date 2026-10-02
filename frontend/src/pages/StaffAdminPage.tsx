@@ -12,6 +12,7 @@ import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
 import LeaveApprovals from '../components/LeaveApprovals';
 import PayrollReportPanel from '../components/PayrollReportPanel';
+import MyTimePage from './MyTimePage';
 
 /**
  * Staff — the single surface for everyone who works here (Staff Calendar).
@@ -77,6 +78,8 @@ interface RosterRow {
 interface PatternDay {
   cycle_week: number; weekday: number; is_working: boolean;
   start_time: string | null; end_time: string | null; break_minutes: number; minutes: number;
+  /** A regular agreed home day (spec §19, mig 269). Absent from an older backend. */
+  at_home?: boolean;
 }
 interface Pattern {
   id: string; effective_from: string; effective_to: string | null;
@@ -86,6 +89,7 @@ interface PersonSearchRow { id: string; first_name: string; last_name: string; e
 interface DraftDay {
   weekday: number; cycleWeek: number; isWorking: boolean;
   startTime: string; endTime: string; breakMinutes: number;
+  atHome?: boolean;
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -283,10 +287,6 @@ export default function StaffAdminPage() {
           {isAdmin && (
             <Link to="/staff/absence" className="text-sm text-ooosh-600 hover:underline">Absence →</Link>
           )}
-          {/* The 2026 BrightHR backfill — a one-off for the October go-live. */}
-          {isAdmin && (
-            <Link to="/staff/import" className="text-sm text-ooosh-600 hover:underline">Import from BrightHR →</Link>
-          )}
           <Link to="/staff/calendar" className="text-sm text-ooosh-600 hover:underline">View calendar →</Link>
         </div>
       </div>
@@ -458,6 +458,7 @@ function initials(row: RosterRow): string {
 const PERSON_TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'employment', label: 'Employment' },
+  { id: 'time', label: 'Time off' },
   { id: 'records', label: 'Records' },
   { id: 'reviews', label: 'Reviews' },
   { id: 'access', label: 'Access' },
@@ -479,7 +480,11 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
 }) {
   // Records and Reviews hold passports, NI numbers and private review notes.
   // A manager reaching this page sees the person, not those tabs.
-  const tabs = PERSON_TABS.filter(x => isAdmin || (x.id !== 'records' && x.id !== 'reviews'));
+  // Time off reads that person's leave and overtime, which only an admin may
+  // list for somebody else — and only an employee has any.
+  const tabs = PERSON_TABS.filter(x =>
+    (isAdmin || (x.id !== 'records' && x.id !== 'reviews' && x.id !== 'time'))
+    && (x.id !== 'time' || !!row.employment));
   const active = tabs.some(x => x.id === tab) ? tab : 'overview';
   const urgent = attention.filter(a => a.severity === 'urgent').length;
 
@@ -567,6 +572,13 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
           attention={attention}
           onOpenTab={onTab}
         />
+      )}
+
+      {/* The same page staff see as Me › My Time, for this person — keyed so
+          moving between people starts clean. Approve / Decline sit on
+          whatever is still waiting. */}
+      {active === 'time' && isAdmin && row.employment && (
+        <MyTimePage key={row.personId} personId={row.personId} />
       )}
 
       {active === 'employment' && (
@@ -1130,6 +1142,7 @@ function PatternHistory({ patterns }: { patterns: Pattern[] }) {
                     {d.start_time?.slice(0, 5)}–{d.end_time?.slice(0, 5)}
                     {d.break_minutes > 0 && <span className="text-gray-400"> (−{d.break_minutes}m)</span>}
                     {' = '}{fmt(d.minutes)}
+                    {d.at_home && <span className="text-teal-700"> · ⌂ home</span>}
                   </span>
                 ))}
               </div>
@@ -1165,6 +1178,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
         startTime: src.start_time?.slice(0, 5) || '09:00',
         endTime: src.end_time?.slice(0, 5) || '17:00',
         breakMinutes: src.break_minutes,
+        atHome: !!src.at_home,
       };
     }));
   }, [seed]);
@@ -1197,6 +1211,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
           startTime: d.isWorking ? d.startTime : null,
           endTime: d.isWorking ? d.endTime : null,
           breakMinutes: d.isWorking ? d.breakMinutes : 0,
+          atHome: d.isWorking && !!d.atHome,
         })),
       });
       setOpen(false); setNotes('');
@@ -1259,6 +1274,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
               <th className="text-left font-medium py-1 pr-3">Start</th>
               <th className="text-left font-medium py-1 pr-3">End</th>
               <th className="text-left font-medium py-1 pr-3">Unpaid break</th>
+              <th className="text-left font-medium py-1 pr-3" title="A regular agreed day working from home — still working, just not in the building">From home</th>
               <th className="text-right font-medium py-1">Paid</th>
             </tr>
           </thead>
@@ -1292,6 +1308,11 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
                       onChange={e => update(i, { breakMinutes: Number(e.target.value) })}
                       className="w-20 px-2 py-1 border border-gray-300 rounded text-sm bg-white disabled:bg-gray-100 disabled:text-gray-400" />
                     <span className="text-xs text-gray-500 ml-1">min</span>
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    <input type="checkbox" checked={d.isWorking && !!d.atHome} disabled={!d.isWorking}
+                      onChange={e => update(i, { atHome: e.target.checked })}
+                      className="w-4 h-4 rounded border-gray-300 disabled:opacity-40" />
                   </td>
                   <td className={`py-1.5 text-right tabular-nums ${bad ? 'text-red-600 font-medium' : 'text-gray-700'}`}>
                     {d.isWorking ? (bad ? 'invalid' : fmt(mins)) : <span className="text-gray-300">—</span>}

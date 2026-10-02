@@ -142,10 +142,10 @@ reminders, Problems and the vehicle module — read it before putting any "thing
 anywhere. §15 is the phase 3–4 log, §16 the close and what is deliberately not built.
 Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.md`.
 
-**PHASES 1–4 BUILT, Oct 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
+**CLOSED, Oct 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
 (Vehicles › Claims, replacing the broker's Word claim form). Always opened from a Problem
 (`job_issues.claim_id`); the broker is never contacted automatically — only a manager's "Send to
-broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built). Claim files live under the
+broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built), §22 troubleshooting. Claim files live under the
 `claims/` R2 prefix, which `GET /api/files/download` gates to staff — never file them under `files/`.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
@@ -187,7 +187,7 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 fleet closes its open sale as sold.
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
-in place as `?person=<id>&tab=overview|employment|records|reviews|access`. The person is
+in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
 that answers it — new bells should link that way, not at the bare page. The page is
 manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
@@ -263,6 +263,8 @@ existing definition:
 | Does this module need a new person field? | Check `people` first — it already has phone, mobile, home address, DOB and both emergency contacts (mig 001) |
 | When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` — the record's own `action_on` fires; the per-type intervals only pre-fill it (never `driver-validity.ts` — different people) |
 | What staff data has expired? | `services/staff-retention.ts` |
+| Is this person in the building / working from home? | `services/staff-day-status.ts` (`StaffDay.location`; requests in `services/staff-wfh.ts`) |
+| What goes in a person's calendar feed? | `services/staff-ical.ts` — own time only, never a colleague's |
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
@@ -358,12 +360,12 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 
 Backups 02:00 · job financials 03:00 · holiday entitlement 06:05 · Xero reconcile 07:45 ·
 bill payment pull-back 07:50 · compliance 08:00 ·
-chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff time digest
+chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
-09:55 (December + January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
+09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop close reminder Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·

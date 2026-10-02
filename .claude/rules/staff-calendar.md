@@ -1,18 +1,20 @@
 ---
 paths:
-  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,freelancer-days}.ts"
-  - "backend/src/routes/staff-calendar.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214}_*.sql"
+  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-ical,freelancer-days}.ts"
+  - "backend/src/routes/{staff-calendar,staff-calendar-feed}.ts"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
-  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals}.tsx"
+  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
 ---
 
 # Staff Calendar & Time — load-bearing rules
 
-Full design: `docs/STAFF-CALENDAR-SPEC.md`. This file is the "never do X" list.
-**Hard deadline: live 1 January 2027** (BrightHR expires; the leave year is
-calendar Jan–Dec so 1 Jan is the only cutover with no balances to migrate).
+Full design: `docs/STAFF-CALENDAR-SPEC.md` — **§18 "Where it stands" is the
+handover**. This file is the "never do X" list.
+**LIVE since October 2026** (earlier than the original 1 January 2027 plan;
+2026 history backfilled from BrightHR). Expected to be complete — what is
+deliberately not built is in spec §16.
 
 ## Minutes are the only stored unit
 
@@ -37,6 +39,8 @@ neither can be shown to be wrong.
 | Is this person off sick, and for how long? | `services/staff-absence.ts` |
 | What is the threshold / policy / bank holiday? | `services/staff-settings.ts` |
 | Is the company shut on this date? | `services/staff-company-days.ts` |
+| Is this person working from home? | `services/staff-wfh.ts` (merged into `StaffDay.location` by `staff-day-status.ts`) |
+| What goes in somebody's calendar feed? | `services/staff-ical.ts` |
 
 ## The ledger is append-only and the database enforces it
 
@@ -296,16 +300,16 @@ invent an allowance nobody can take.
 
 `runCashOutReminder` **emails the figures and posts nothing.** Paying out
 banked overtime is money out the door, and the platform rule is to surface a
-recomputed figure for a human. The sweep stays a button. Its deadline is
-DECEMBER payroll (§17.2), not 31 December, which is why the reminder defaults
-to the 8th. It stamps `staff.overtime_cashout_reminded_year` so it cannot nag
-every morning — same lesson as `rtw_chased_at`.
+recomputed figure for a human. The sweep stays a button.
 
-It also runs in **January, for the year just ended**, because the sweep does
-not close a year, it empties it at a moment in time: overtime worked between
-the cash-out and New Year accrues to the swept year and nothing would ever look
-at it again. The stamp carries year *and* phase (`2027:dec`, `2027:jan`) so the
-December send does not silence the January follow-up.
+**It sends ONCE, on 2 January, for the year just ended** (§17.2, settled with
+jon 21 Sep 2026): whatever is banked at 31 December goes into JANUARY payroll,
+which must be in before the 5th for the 10th pay run. Until Oct 2026 it also
+sent on 8 December (`staff.overtime_cashout_reminder_day`, now unused) and
+waited until the 5th in January — asking for a pay-out before December's
+overtime was in, and following up after the payroll deadline had passed. Do
+not bring either back. It stamps `staff.overtime_cashout_reminded_year`
+(`2026:jan`) so it cannot nag every morning — same lesson as `rtw_chased_at`.
 
 ## An absence is a whole day, a morning or an afternoon — never timed
 
@@ -368,6 +372,63 @@ which is what the catch-up then fills.
 `getAbsenceOverlay()` lives in `staff-day-status.ts`, next to
 `getLeaveOverlay()` and not in `staff-absence.ts`, because `staff-absence.ts`
 reads the calendar to price days — a static import both ways is a cycle.
+
+## The calendar shows "Off" — one colour for leave AND absence
+
+Leave and absence are the same violet and the same word on the team calendar
+(jon, Oct 2026). A separate colour for sickness would tell everybody WHY
+somebody is not in, which is what `maskForViewer` exists to prevent; admins
+get the reason on hover from `detail`. Do not split them back apart.
+
+A **requested** (not yet approved) day is `status: 'partial'` with
+`pending: true` — still counted in, because nothing is agreed — and shows as a
+dashed "Requested", never "Part". "Part" is only a genuinely part day.
+
+## An admin's list calls must say whose
+
+`GET /leave` and `GET /overtime` with no `personId` return EVERYBODY's records
+to an admin — the approvals list depends on it. A page showing one person's
+time must pass `personId=` or `mine=1`; My Time once listed the whole team's
+leave as an admin's own. The Staff page's Time off tab is `MyTimePage
+personId={…}` — one page, two viewers, so the figures cannot drift.
+
+## Working from home is a LOCATION on a working day, not leave
+
+Spec §19 (Oct 2026, migration 269). `StaffDay.location = 'home'` comes from the
+pattern's `at_home` tick (a regular day, admin-set) or an APPROVED
+`staff_wfh_requests` row (a one-off, asked for and approved like holiday).
+`mergeWfhLayer()` is the ONE place they are applied, after the absence merge.
+
+- **Nothing here touches the ledger, a balance or an absence.** If a WFH
+  change needs `staff-balance.ts`, something has gone wrong.
+- **Only on a day actually worked.** A day off, on leave or off sick carries no
+  location — the merge strips it.
+- **Pending is not home.** A request waiting is `homePending`; until somebody
+  says yes they are expected in, and they still count as on site.
+- **Two states, whole days** (jon): in the building, or working but not here.
+  Do not add `on_site` / `travelling` / half days without asking.
+- **Cover counts the BUILDING.** `getImpact()` coverage and
+  `staff.min_headcount_by_weekday` count `status === 'working' && location !==
+  'home'`. The calendar footer shows the on-site number, plus `+n⌂` only when
+  somebody is home; the dashboard strip does the same.
+- Not special-category — every viewer sees it.
+
+## The calendar feed is the person's OWN time — nothing else, ever
+
+`services/staff-ical.ts` is the only thing that decides what is in a feed
+(spec §10, migration 270). Own approved + requested time off, own home days,
+company days. **Never** a colleague's time, never overtime, never absence: a
+calendar app syncs and shares far beyond this platform, and what has left
+cannot be recalled. The token is a credential — `/me/calendar-feed` takes no
+`personId`, admin or not, and resolves only while the person is `employed`.
+
+## The payroll report emails itself on the 1st
+
+`runPayrollReportEmail()` (08:20 daily) emails last month's figures to every
+admin from the 1st, once — jon submits to payroll before the 4th. It stamps
+`staff.payroll_report_sent_month` only after a send SUCCEEDS (a failed day
+retries tomorrow); clear that setting to resend. Figures come from
+`getPayrollReport()` — never a second SUM.
 
 ## Special-category data is masked in the service, not the browser
 

@@ -28,6 +28,12 @@ interface StaffDay {
   isException: boolean;
   /** The company has granted this day to everyone — "Christmas Day". */
   companyDay?: string;
+  /** Requested, not yet approved — shown as "Requested", still counted in. */
+  pending?: boolean;
+  /** Working, but from home (spec §19) — counted as working, not as here. */
+  location?: 'home';
+  /** A working-from-home request for the day is waiting for a decision. */
+  homePending?: boolean;
   detail?: { leaveType?: string; absenceType?: string };
 }
 /**
@@ -84,12 +90,6 @@ function weekdayIndex(date: string): number {
 function mondayOf(date: string): string {
   return addDays(date, -weekdayIndex(date));
 }
-function fmtMinutes(min: number): string {
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  if (h === 0) return `${m}m`;
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
-}
 function shortDay(date: string): string {
   return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][weekdayIndex(date)];
 }
@@ -102,9 +102,25 @@ function fmtLongDate(date: string): string {
   return Number.isNaN(dt.getTime()) ? date
     : dt.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
-function monthLabel(date: string): string {
+/**
+ * What the visible range is called. The view rolls week to week, so a window
+ * that starts on 31 August is mostly September — naming it after its first
+ * day said "August" over a fortnight of September. Name the span instead.
+ */
+function rangeLabel(from: string, to: string): string {
+  const fmt = (d: string, opts: Intl.DateTimeFormatOptions) => {
+    const [y, m, dd] = d.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, dd)).toLocaleDateString('en-GB', { ...opts, timeZone: 'UTC' });
+  };
+  if (from.slice(0, 7) === to.slice(0, 7)) return fmt(from, { month: 'long', year: 'numeric' });
+  const sameYear = from.slice(0, 4) === to.slice(0, 4);
+  return `${fmt(from, { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) })} – ${
+    fmt(to, { day: 'numeric', month: 'short', year: 'numeric' })}`;
+}
+/** Three-letter month for the header, shown where a month starts. */
+function monthShort(date: string): string {
   const [y, m] = date.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
 }
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -160,19 +176,53 @@ const BOOKING_STATUS: Record<
   withdrew:  { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Pulled out after accepting', counts: false },
 };
 
+/**
+ * Quiet for in, loud for off (Oct 2026). Most of the grid is people in on their
+ * usual hours, and when every one of those cells was a green box with "09:00"
+ * in it the few that mattered disappeared. Now "in" is a pale wash, and the eye
+ * goes to what is different.
+ *
+ * Leave and absence are deliberately the SAME colour and the same word, "Off"
+ * (jon): a different colour for sickness would tell everybody why somebody is
+ * not in, which is exactly what maskForViewer exists to stop. Admins get the
+ * reason on hover.
+ */
 const CELL: Record<DayStatus, { bg: string; label: string }> = {
-  working:       { bg: 'bg-emerald-100 text-emerald-900', label: 'In' },
-  partial:       { bg: 'bg-amber-100 text-amber-900',     label: 'Part' },
-  leave:         { bg: 'bg-sky-100 text-sky-900',         label: 'Leave' },
-  absent:        { bg: 'bg-rose-100 text-rose-900',       label: 'Out' },
-  not_scheduled: { bg: 'bg-gray-50 text-gray-400',        label: '' },
+  working:       { bg: 'bg-emerald-100/70 text-gray-500',      label: 'In' },
+  partial:       { bg: 'bg-amber-100 text-amber-900',          label: 'Part' },
+  leave:         { bg: 'bg-violet-600 text-white font-medium', label: 'Off' },
+  absent:        { bg: 'bg-violet-600 text-white font-medium', label: 'Off' },
+  not_scheduled: { bg: '',                                     label: '' },
 };
+/** A requested day — dashed, like an offered freelancer: coming, not agreed. */
+const REQUESTED = { bg: 'bg-amber-50 text-amber-800 border border-dashed border-amber-400', label: 'Requested' };
+/** Working from home — working, but not in the building (spec §19). */
+const HOME = { bg: 'bg-teal-50 text-teal-800 border border-teal-200', label: '⌂ Home' };
+const HOME_ASKED = { bg: 'bg-emerald-100/70 text-teal-700 border border-dashed border-teal-400', label: 'Home?' };
+
+/** Somebody's usual start across the days on screen — only a DIFFERENT one is
+ *  worth printing in the cell. */
+function usualStart(days: StaffDay[]): string | null {
+  const counts = new Map<string, number>();
+  for (const d of days) {
+    if (d.status === 'working' && d.startTime) {
+      const t = d.startTime.slice(0, 5);
+      counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+  }
+  let best: string | null = null, n = 0;
+  counts.forEach((c, t) => { if (c > n) { best = t; n = c; } });
+  return best;
+}
 
 export default function StaffCalendarPage() {
   const role = useAuthStore(s => s.user?.role);
   const isAdmin = role === 'admin';
 
   const [weeks, setWeeks] = useState(2);
+  // "Who is physically here?" as a view rather than a sum in your head
+  // (spec §19.3, jon): home days fade out and the footer counts the building.
+  const [onSiteOnly, setOnSiteOnly] = useState(false);
   const [from, setFrom] = useState(() => mondayOf(TODAY));
   const [people, setPeople] = useState<CalendarPerson[]>([]);
   const [bankHolidays, setBankHolidays] = useState<string[]>([]);
@@ -248,6 +298,11 @@ export default function StaffCalendarPage() {
         const day = p.days.find(x => x.date === d);
         return day?.status === 'working' || day?.status === 'partial';
       }).length,
+      // In the BUILDING — working, and not from home.
+      onSite: people.filter(p => {
+        const day = p.days.find(x => x.date === d);
+        return (day?.status === 'working' || day?.status === 'partial') && day.location !== 'home';
+      }).length,
       // CONFIRMED only. Counting an unanswered offer would tell you that you
       // have cover you have not actually got, which is the one thing this
       // number exists to get right.
@@ -278,7 +333,7 @@ export default function StaffCalendarPage() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Staff calendar</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Who&apos;s in, who&apos;s not. {monthLabel(from)}
+            Who&apos;s in, who&apos;s not. {rangeLabel(from, to)}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -300,6 +355,10 @@ export default function StaffCalendarPage() {
             className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Today</button>
           <button onClick={() => setFrom(addDays(from, weeks * 7))}
             className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Forward →</button>
+          <label className="flex items-center gap-1.5 px-2 py-1.5 text-sm rounded border border-gray-300 cursor-pointer select-none">
+            <input type="checkbox" checked={onSiteOnly} onChange={e => setOnSiteOnly(e.target.checked)} />
+            On site only
+          </label>
           <select value={weeks} onChange={e => setWeeks(Number(e.target.value))}
             className="px-2 py-1.5 text-sm rounded border border-gray-300">
             <option value={1}>1 week</option>
@@ -362,7 +421,14 @@ export default function StaffCalendarPage() {
       ) : (
         /* Wide grids scroll inside their own container — the page body must not. */
         <div className="overflow-x-auto border border-gray-200 rounded-lg bg-white">
-          <table className="min-w-full border-collapse text-sm">
+          {/* Fixed layout: every day column the same width whatever is in
+              it — auto layout let a "Requested" cell widen its whole column. */}
+          <table className="w-full border-collapse text-sm table-fixed"
+            style={{ minWidth: 160 + dates.length * 58 }}>
+            <colgroup>
+              <col style={{ width: 160 }} />
+              {dates.map(d => <col key={d} />)}
+            </colgroup>
             <thead>
               <tr className="bg-gray-50">
                 <th className="sticky left-0 z-10 bg-gray-50 text-left font-medium text-gray-600 px-3 py-2 border-b border-gray-200 min-w-[10rem]">
@@ -380,10 +446,16 @@ export default function StaffCalendarPage() {
                       }
                       return undefined;
                     })()}
-                    className={`px-1 py-2 border-b border-gray-200 font-medium text-center min-w-[3rem] ${
+                    className={`px-1 py-2 border-b border-gray-200 font-medium text-center ${
+                      d !== from && dayNum(d) === '1' ? 'border-l-2 border-l-ooosh-300' : ''} ${
                       d === TODAY ? 'bg-ooosh-50 text-ooosh-700' : 'text-gray-600'
                     } ${weekdayIndex(d) >= 5 ? 'bg-gray-100' : ''} ${
                       marker(d)?.kind === 'company' ? 'bg-emerald-50 text-emerald-800' : ''}`}>
+                    {/* The month is named where it starts — and on the first
+                        column, so the grid never opens on an unnamed month. */}
+                    <div className="h-3 text-[9px] font-semibold uppercase tracking-wide text-ooosh-700 leading-3">
+                      {(d === from || dayNum(d) === '1') ? monthShort(d) : ''}
+                    </div>
                     <div className="text-[10px] uppercase tracking-wide">{shortDay(d)}</div>
                     <div className="text-xs">{dayNum(d)}</div>
                     {/* A dot, not a colour fill: under `use_allowance` a bank
@@ -392,7 +464,7 @@ export default function StaffCalendarPage() {
                     <div className="h-1.5 leading-none">
                       {marker(d)?.kind === 'company'
                         ? <span className="text-[9px] text-emerald-600">★</span>
-                        : marker(d)?.kind === 'bank' && <span className="text-[9px] text-violet-500">●</span>}
+                        : marker(d)?.kind === 'bank' && <span className="text-[9px] text-ooosh-400">●</span>}
                     </div>
                   </th>
                 ))}
@@ -401,38 +473,61 @@ export default function StaffCalendarPage() {
             <tbody>
               {people.map(p => (
                 <tr key={p.personId} className="hover:bg-gray-50/60">
-                  <td className="sticky left-0 z-10 bg-white px-3 py-2 border-b border-gray-100 whitespace-nowrap">
+                  {/* Job title on hover: a second line under every name doubled
+                      the row height for something you rarely need. */}
+                  <td className="sticky left-0 z-10 bg-white px-3 py-1.5 border-b border-gray-100 whitespace-nowrap"
+                    title={p.jobTitle ?? undefined}>
                     <div className="font-medium text-gray-900">{p.preferredName || p.name}</div>
-                    {p.jobTitle && <div className="text-xs text-gray-500">{p.jobTitle}</div>}
                   </td>
-                  {p.days.map(day => {
-                    const cell = CELL[day.status];
-                    // A day can carry several windows now; fall back to the
-                    // single `window` so a cached bundle keeps working.
-                    const wins = day.windows ?? (day.window ? [day.window] : []);
-                    const title = day.status === 'working' && day.startTime
-                      ? `${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)} · ${fmtMinutes(day.scheduledMinutes)}`
-                      : wins.length > 0
-                        ? `Out ${wins.map(w => `${w.start}–${w.end}`).join(', ')}`
-                        : cell.label || 'Not scheduled';
-                    return (
-                      <td key={day.date}
-                        className={`px-1 py-1.5 border-b border-gray-100 text-center align-middle ${
-                          weekdayIndex(day.date) >= 5 ? 'bg-gray-50/60' : ''
-                        }`}>
-                        <div title={title}
-                          className={`rounded px-1 py-1 text-[10px] leading-tight ${cell.bg} ${
-                            day.isException ? 'ring-1 ring-inset ring-ooosh-400' : ''
+                  {(() => {
+                    const usual = usualStart(p.days);
+                    return p.days.map(day => {
+                      const worked = day.status === 'working' || day.status === 'partial';
+                      const home = worked && day.location === 'home';
+                      const cell = day.pending ? REQUESTED
+                        : home && day.status === 'working' ? (onSiteOnly ? { bg: 'text-gray-300', label: '⌂' } : HOME)
+                        : day.homePending && day.status === 'working' ? HOME_ASKED
+                        : CELL[day.status];
+                      // A day can carry several windows now; fall back to the
+                      // single `window` so a cached bundle keeps working.
+                      const wins = day.windows ?? (day.window ? [day.window] : []);
+                      // Why somebody is off is admin-only: detail never reaches
+                      // anybody else (maskForViewer), so peers just see "Off".
+                      const why = day.detail?.absenceType ?? day.detail?.leaveType;
+                      const title = home
+                        ? `Working from home${day.startTime ? ` ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}` : ''}`
+                        : day.homePending && day.status === 'working'
+                          ? 'Asked to work from home — not approved yet, so expected in'
+                          : day.pending
+                        ? `Requested${wins.length ? ` ${wins.map(w => `${w.start}–${w.end}`).join(', ')}` : ''}, not yet approved${why ? ` — ${why}` : ''}`
+                        : day.status === 'working' && day.startTime
+                          ? `In ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}`
+                          : wins.length > 0
+                            ? `Off ${wins.map(w => `${w.start}–${w.end}`).join(', ')}${why ? ` — ${why}` : ''}`
+                            : day.status === 'leave' || day.status === 'absent'
+                              ? `Off${why ? ` — ${why}` : ''}`
+                              : cell.label || (day.companyDay ? `Closed — ${day.companyDay}` : 'Not working');
+                      const text = day.pending || (home && day.status === 'working') || (day.homePending && day.status === 'working') ? cell.label
+                        : day.status === 'working'
+                          ? (day.startTime && day.startTime.slice(0, 5) !== usual ? day.startTime.slice(0, 5) : '')
+                          : day.companyDay ? 'Closed' : cell.label;
+                      return (
+                        <td key={day.date}
+                          className={`px-1 py-1 border-b border-gray-100 text-center align-middle ${
+                            day.date !== from && dayNum(day.date) === '1' ? 'border-l-2 border-l-ooosh-300' : ''} ${
+                            day.date === TODAY ? 'bg-ooosh-50/40' : weekdayIndex(day.date) >= 5 ? 'bg-gray-50/60' : ''
                           }`}>
-                          {day.status === 'working' && day.startTime
-                            ? day.startTime.slice(0, 5)
-                            : day.companyDay
-                              ? 'Closed'
-                              : cell.label || '·'}
-                        </div>
-                      </td>
-                    );
-                  })}
+                          <div title={title}
+                            className={`rounded px-1 py-1 min-h-[22px] text-[10px] leading-tight ${
+                              day.companyDay && day.status === 'not_scheduled' ? 'text-gray-400' : cell.bg} ${
+                              day.isException ? 'ring-1 ring-inset ring-ooosh-400' : ''
+                            }`}>
+                            {text}
+                          </div>
+                        </td>
+                      );
+                    });
+                  })()}
                 </tr>
               ))}
               {/* A separate, visually distinct lane below the staff rows
@@ -443,7 +538,7 @@ export default function StaffCalendarPage() {
               {freelancerLanes.length > 0 && (
                 <tr>
                   <td colSpan={dates.length + 1}
-                    className="sticky left-0 bg-amber-50/70 px-3 py-1 text-[10px] uppercase tracking-wide text-amber-800 border-t border-amber-200">
+                    className="sticky left-0 bg-amber-200 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-950 border-t-2 border-amber-400">
                     Freelance — offered and confirmed
                   </td>
                 </tr>
@@ -498,11 +593,18 @@ export default function StaffCalendarPage() {
                 {headcount.map((n, i) => (
                   <td key={dates[i]} className="px-1 py-2 text-center text-gray-700"
                     title={[
-                      `${n.staff} staff`,
+                      n.onSite === n.staff ? `${n.staff} staff in`
+                        : `${n.onSite} in the building · ${n.staff - n.onSite} working from home`,
                       n.freelancers > 0 ? `${n.freelancers} freelance confirmed` : null,
                       n.pending > 0 ? `${n.pending} offered, no reply yet` : null,
                     ].filter(Boolean).join(' · ')}>
-                    {n.staff}
+                    {/* One number when everyone working is here; when somebody
+                        is at home, the building count leads and home trails
+                        (spec §19.3 — the two-number form is the exception). */}
+                    {n.onSite}
+                    {n.onSite !== n.staff && !onSiteOnly && (
+                      <span className="text-teal-700 font-normal text-xs"> +{n.staff - n.onSite}⌂</span>
+                    )}
                     {n.freelancers > 0 && (
                       <span className="text-amber-700"> +{n.freelancers}</span>
                     )}
@@ -518,10 +620,17 @@ export default function StaffCalendarPage() {
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-gray-500">
-        {(['working', 'partial', 'leave', 'absent', 'not_scheduled'] as DayStatus[]).map(s => (
-          <span key={s} className="inline-flex items-center gap-1.5">
-            <span className={`inline-block w-3 h-3 rounded ${CELL[s].bg}`} />
-            {s === 'not_scheduled' ? 'Not scheduled' : CELL[s].label}
+        {[
+          { bg: CELL.working.bg, label: 'In (a time shows only when it is not their usual start)' },
+          { bg: CELL.partial.bg, label: 'Part day' },
+          { bg: REQUESTED.bg, label: 'Requested — not approved yet' },
+          { bg: HOME.bg, label: 'Working from home' },
+          { bg: CELL.leave.bg, label: 'Off' },
+          { bg: 'border border-gray-200', label: 'Not working' },
+        ].map(l => (
+          <span key={l.label} className="inline-flex items-center gap-1.5">
+            <span className={`inline-block w-3 h-3 rounded ${l.bg}`} />
+            {l.label}
           </span>
         ))}
         <span className="inline-flex items-center gap-1.5">
@@ -530,7 +639,7 @@ export default function StaffCalendarPage() {
         </span>
         {dates.some(d => marker(d)?.kind === 'bank') && (
           <span className="inline-flex items-center gap-1.5">
-            <span className="text-violet-500">●</span>
+            <span className="text-ooosh-400">●</span>
             Bank holiday{bhPolicy === 'use_allowance' && ' — a normal working day here'}
           </span>
         )}
