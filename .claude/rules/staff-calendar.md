@@ -296,16 +296,16 @@ invent an allowance nobody can take.
 
 `runCashOutReminder` **emails the figures and posts nothing.** Paying out
 banked overtime is money out the door, and the platform rule is to surface a
-recomputed figure for a human. The sweep stays a button. Its deadline is
-DECEMBER payroll (§17.2), not 31 December, which is why the reminder defaults
-to the 8th. It stamps `staff.overtime_cashout_reminded_year` so it cannot nag
-every morning — same lesson as `rtw_chased_at`.
+recomputed figure for a human. The sweep stays a button.
 
-It also runs in **January, for the year just ended**, because the sweep does
-not close a year, it empties it at a moment in time: overtime worked between
-the cash-out and New Year accrues to the swept year and nothing would ever look
-at it again. The stamp carries year *and* phase (`2027:dec`, `2027:jan`) so the
-December send does not silence the January follow-up.
+**It sends ONCE, on 2 January, for the year just ended** (§17.2, settled with
+jon 21 Sep 2026): whatever is banked at 31 December goes into JANUARY payroll,
+which must be in before the 5th for the 10th pay run. Until Oct 2026 it also
+sent on 8 December (`staff.overtime_cashout_reminder_day`, now unused) and
+waited until the 5th in January — asking for a pay-out before December's
+overtime was in, and following up after the payroll deadline had passed. Do
+not bring either back. It stamps `staff.overtime_cashout_reminded_year`
+(`2026:jan`) so it cannot nag every morning — same lesson as `rtw_chased_at`.
 
 ## An absence is a whole day, a morning or an afternoon — never timed
 

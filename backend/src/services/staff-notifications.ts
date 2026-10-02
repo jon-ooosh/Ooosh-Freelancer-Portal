@@ -57,6 +57,11 @@ function esc(s: string): string {
  * unseen and silently, which is exactly the problem this exists to solve. The
  * fallback logs why so the cause is visible rather than mysterious.
  */
+/** One person's Time off tab on the Staff page (CLAUDE.md: deep-link the tab). */
+function timeOffUrl(personId: string): string {
+  return `${STAFF_URL}?person=${encodeURIComponent(personId)}&tab=time`;
+}
+
 async function approverUserIds(): Promise<{ id: string; email: string }[]> {
   const employed = await query(
     `SELECT u.id, u.email
@@ -102,13 +107,16 @@ async function notify(
 export async function notifyLeaveRequested(requestId: string) {
   try {
     const r = await query(
-      `SELECT r.id, r.leave_type, r.total_minutes, r.request_note,
+      `SELECT r.id, r.person_id, r.leave_type, r.total_minutes, r.request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
         WHERE r.id = $1`, [requestId]);
     const q = r.rows[0];
     if (!q) return;
+    // Straight to that person's Time off tab, where Approve / Decline sit
+    // beside their balance and the rest of their year.
+    const link = timeOffUrl(q.person_id);
     const range = q.start_date === q.end_date
       ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
     const what = q.leave_type === 'holiday' ? 'holiday' : q.leave_type === 'toil' ? 'TOIL' : 'unpaid leave';
@@ -116,7 +124,7 @@ export async function notifyLeaveRequested(requestId: string) {
       await notify(u.id, 'follow_up',
         `${q.name} has requested ${what}`,
         `${range} · ${fmtH(Number(q.total_minutes))}`,
-        'staff_leave_request', q.id, STAFF_URL);
+        'staff_leave_request', q.id, link);
     }
     await emailApprovers(
       `${q.name} has requested ${what}`,
@@ -125,24 +133,25 @@ export async function notifyLeaveRequested(requestId: string) {
         `<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))}`,
         ...(q.request_note ? [`<span style="color:#64748b;">“${esc(q.request_note)}”</span>`] : []),
       ],
-      STAFF_URL);
+      link);
   } catch (e) { console.error('[staff-notifications] leave requested:', e); }
 }
 
 export async function notifyOvertimeLogged(entryId: string) {
   try {
     const r = await query(
-      `SELECT e.id, e.minutes, e.reason, e.work_date::text AS work_date,
+      `SELECT e.id, e.person_id, e.minutes, e.reason, e.work_date::text AS work_date,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_overtime_entries e JOIN people p ON p.id = e.person_id
         WHERE e.id = $1`, [entryId]);
     const q = r.rows[0];
     if (!q) return;
+    const link = timeOffUrl(q.person_id);
     for (const u of await approverUserIds()) {
       await notify(u.id, 'follow_up',
         `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
         `${fmtDate(q.work_date)} — ${q.reason}`,
-        'staff_overtime_entry', q.id, STAFF_URL);
+        'staff_overtime_entry', q.id, link);
     }
     await emailApprovers(
       `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
@@ -151,7 +160,7 @@ export async function notifyOvertimeLogged(entryId: string) {
         `<strong>${esc(fmtDate(q.work_date))}</strong> — ${fmtH(Number(q.minutes))}`,
         `<span style="color:#64748b;">${esc(q.reason)}</span>`,
       ],
-      STAFF_URL);
+      link);
   } catch (e) { console.error('[staff-notifications] overtime logged:', e); }
 }
 
@@ -210,16 +219,42 @@ export async function notifyDecision(opts: {
 }) {
   try {
     const u = await query(
-      `SELECT id FROM users WHERE person_id = $1 AND is_active = true LIMIT 1`, [opts.personId]);
+      `SELECT id, email FROM users WHERE person_id = $1 AND is_active = true LIMIT 1`, [opts.personId]);
     const userId = u.rows[0]?.id;
     if (!userId) return;   // no login — nothing to notify to
     const what = opts.kind === 'leave' ? 'Time off' : 'Overtime';
+    // The routes pass ISO dates and raw minutes; say them the way people do.
+    const summary = opts.summary
+      .replace(/\d{4}-\d{2}-\d{2}/g, d => fmtDate(d))
+      .replace(/(\d+) min\b/g, (_m, n: string) => fmtH(Number(n)));
+    const MY_TIME = '/me?tab=time';
     await notify(userId, 'system',
-      `${what} ${opts.outcome}: ${opts.summary}`,
+      `${what} ${opts.outcome}: ${summary}`,
       opts.note ?? '',
       opts.kind === 'leave' ? 'staff_leave_request' : 'staff_overtime_entry',
-      opts.entityId, '/staff/me',
+      opts.entityId, MY_TIME,
       opts.outcome === 'declined' ? 'high' : 'normal');
+
+    // And by email. The approvers have been emailed about every request since
+    // Phase B; the person who ASKED only ever got a bell, so a decision made
+    // while they were out of the app reached nobody (jon, Oct 2026). Same
+    // rule as everywhere else in this module: a bell alone is not an alert.
+    const to = u.rows[0]?.email as string | undefined;
+    if (to) {
+      const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
+      const word = opts.outcome === 'approved' ? 'approved' : opts.outcome === 'declined' ? 'declined' : 'cancelled';
+      const heading = `Your ${opts.kind === 'leave' ? 'time off' : 'overtime'} has been ${word}`;
+      const body =
+        `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">${esc(heading)}</h2>` +
+        `<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;"><strong>${esc(summary)}</strong></p>` +
+        (opts.note ? `<p style="margin:0 0 8px;font-size:15px;color:#64748b;line-height:1.6;">“${esc(opts.note)}”</p>` : '') +
+        `<p style="margin:24px 0 0;"><a href="${base}${MY_TIME}" ` +
+        `style="display:inline-block;padding:10px 18px;background:#0074c6;color:#fff;` +
+        `border-radius:6px;text-decoration:none;font-size:15px;">Open My Time</a></p>`;
+      await emailService.send('staff_time_decision', {
+        to, subjectOverride: heading, bodyHtmlOverride: body,
+      }).catch(e => console.error('[staff-notifications] decision email failed:', e));
+    }
   } catch (e) { console.error('[staff-notifications] decision:', e); }
 }
 
@@ -537,6 +572,9 @@ export interface CashOutReminderResult {
  * once it sends, which is what stops it going out every morning until New Year
  * — the same lesson as rtw_chased_at.
  */
+/** The day in January the year-end overtime figures go out (§17.2). */
+const JANUARY_PAYROLL_DAY = 2;
+
 export async function runCashOutReminder(today = new Date()): Promise<CashOutReminderResult> {
   const year = today.getUTCFullYear();
   const empty: CashOutReminderResult = { sent: false, year, people: [], totalMinutes: 0 };
@@ -560,23 +598,25 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
   const target = month === 11 ? year : year - 1;
   const stampKey = 'staff.overtime_cashout_reminded_year';
 
-  if (month === 11) {
-    const fromDay = await getCashOutReminderDay();
-    if (today.getUTCDate() < fromDay) {
-      return { ...empty, year: target, skippedReason: `before ${fromDay} December` };
-    }
-  } else if (month === 0) {
-    // A few days' grace in January before nagging about a year just ended.
-    if (today.getUTCDate() < 5) {
-      return { ...empty, year: target, skippedReason: 'early January grace period' };
-    }
-  } else {
-    return { ...empty, year: target, skippedReason: 'not December or January' };
+  // ONE reminder, on 2 January (spec §17.2, settled 21 Sep 2026): whatever is
+  // still banked at 31 December goes into JANUARY payroll, which must be in
+  // before the 5th for the 10th pay run — so jon needs one figure per person
+  // on the 2nd, after the last December overtime is logged. The December
+  // leg (from `staff.overtime_cashout_reminder_day`, the 8th) predated that
+  // decision and was removed in Oct 2026: it asked for a pay-out before the
+  // year's overtime was finished. The old "grace until the 5th" would have
+  // landed the reminder AFTER the payroll deadline. The setting is now unused.
+  void getCashOutReminderDay;
+  if (month !== 0) {
+    return { ...empty, year: target, skippedReason: 'only runs in January' };
+  }
+  if (today.getUTCDate() < JANUARY_PAYROLL_DAY) {
+    return { ...empty, year: target, skippedReason: `before ${JANUARY_PAYROLL_DAY} January` };
   }
 
-  // The stamp records year AND phase, so December's send does not silence
-  // January's follow-up on the same leave year.
-  const phase = month === 11 ? 'dec' : 'jan';
+  // Phase kept in the stamp ("2026:jan") so stamps written before Oct 2026,
+  // when there was also a December send, still mean what they meant.
+  const phase = 'jan';
   const stamp = `${target}:${phase}`;
   if ((await getSystemSetting(stampKey)) === stamp) {
     return { ...empty, year: target, skippedReason: 'already sent for this year and phase' };
@@ -615,9 +655,7 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
 
   const totalMinutes = people.reduce((s, p) => s + p.minutes, 0);
 
-  const title = phase === 'dec'
-    ? `Banked overtime to pay out before ${target} closes`
-    : `${target} still has banked overtime left over`;
+  const title = `Overtime to pay in January payroll — ${target} banked hours`;
 
   for (const u of await approverUserIds()) {
     await notify(u.id, 'follow_up', title,
@@ -627,9 +665,7 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
 
   await emailApprovers(title, title,
     [
-      phase === 'dec'
-        ? `Hours already worked cannot be forfeited, so the bank is <strong>paid out</strong> rather than expired. This wants to land in <strong>December's payroll</strong>, so it needs doing before that closes — though anyone who would rather take the time off over a quiet Christmas still can.`
-        : `This is what is left in the ${target} bank after the sweep — most likely overtime worked between the cash-out and New Year, which accrues to ${target} and would otherwise sit there unseen. Run the sweep again for ${target}; it is idempotent and picks up exactly this.`,
+      `This is what is still banked from ${target}. Hours already worked cannot be forfeited, so it is <strong>paid out</strong> rather than expired — in <strong>January's payroll</strong>, which needs to be in before the 5th. These are the figures to send.`,
       ...people.map(p => `<strong>${esc(p.name)}</strong> — ${fmtH(p.minutes)}`),
       `<strong>Total: ${fmtH(totalMinutes)}</strong>`,
       `Nothing has been posted. Run the year-end cash-out on the Staff page when you are happy with the figures.`,
@@ -738,7 +774,7 @@ export async function runCompanyDaysReview(today = new Date()): Promise<CompanyD
     [
       'A yearly check, so nobody turns up to a building that is shut.',
       recurring.length > 0
-        ? `These recur and need <strong>no action</strong>: ${recurring.map(r => `${esc(r.label)} (${esc(fmt(r.dayDate).replace(/ \\d{4}$/, ''))})`).join(', ')}.`
+        ? `These recur and need <strong>no action</strong>: ${recurring.map(r => `${esc(r.label)} (${esc(fmt(r.dayDate).replace(/ \d{4}$/, ''))})`).join(', ')}.`
         : 'No recurring company days are set up.',
       oneOffs > 0
         ? `${oneOffs} one-off day${oneOffs === 1 ? ' is' : 's are'} already set for ${nextYear}.`

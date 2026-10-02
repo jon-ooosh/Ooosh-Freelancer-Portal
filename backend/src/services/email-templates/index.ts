@@ -27,6 +27,16 @@ const templates: Record<string, EmailTemplate> = {
     body: '<p>A request is waiting for a decision in the Ooosh Operations Platform.</p>',
   },
 
+  // Staff Calendar: tells the PERSON who asked what happened to their leave
+  // request or overtime entry — approved, declined (with the reason) or
+  // cancelled. Body built by notifyDecision() in services/staff-notifications.ts.
+  staff_time_decision: {
+    variant: 'internal',
+    preheader: 'An update on your time off or overtime',
+    subject: 'Your request has been decided',
+    body: '<p>Your request has been decided in the Ooosh Operations Platform.</p>',
+  },
+
   // Staff Calendar: one digest a day listing leave requests and overtime
   // waiting for a decision. Only sent when something is actually pending —
   // never an empty email. Body is built by services/staff-notifications.ts and
