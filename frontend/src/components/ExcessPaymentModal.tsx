@@ -815,6 +815,10 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
             method: 'rolled_over',
             reference: null,
             push_to_hirehop: false, // No HH push — no money moves; backend handles linkage + HH note
+            // Name the hop the money is coming from — the one available-rollover
+            // showed — so the backend flips exactly that record to rolled_over
+            // (Oct 2026: guessing by updated_at re-flipped the wrong hop).
+            source_excess_id: rolloverInfo?.source_excess_id ?? null,
           });
           break;
         }
@@ -940,20 +944,25 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   }
 
   // Available actions based on current status
-  const availableActions: { action: ModalAction; label: string; icon: string; recommended?: boolean }[] = [];
+  // `recommended` is the badge text — set it to surface the option first, in
+  // green (pre-auth on a short hire; applying excess the client already has).
+  const availableActions: { action: ModalAction; label: string; icon: string; recommended?: string }[] = [];
   const s = excess.excess_status;
 
   // Rollover-apply lands at the TOP when available — most natural action when
   // staff have just confirmed a hire and the client already has rolled-over
   // money on file. No money moves; we just apply that balance to this record.
+  // Badged green like the short-hire pre-auth, so it isn't mistaken for just
+  // another option next to "Record Excess Payment" (which would take the
+  // money a second time).
   if (needsCollection && rolloverInfo?.available) {
-    availableActions.push({ action: 'rollover_apply', label: 'Apply Rolled Over Excess', icon: '↻' });
+    availableActions.push({ action: 'rollover_apply', label: 'Apply Rolled Over Excess', icon: '↻', recommended: 'Recommended · excess on account' });
   }
   // Pre-auth hold available from a clean "needed" state with no money/hold yet.
   // For SHORT hires it's the recommended route, so push it FIRST + badge it.
   const preAuthAvailable = (s === 'needed' || s === 'pending') && preAuthHeld === 0 && Number(excess.excess_amount_taken || 0) === 0;
   if (preAuthAvailable && isShortHire) {
-    availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth Hold', icon: '◫', recommended: true });
+    availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth Hold', icon: '◫', recommended: 'Recommended · short hire' });
   }
   if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
     availableActions.push({ action: 'payment', label: 'Record Excess Payment', icon: '£' });
@@ -1214,7 +1223,7 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                   <span className="text-sm font-medium text-gray-900">{a.label}</span>
                   {a.recommended && (
                     <span className="ml-2 inline-block text-[10px] font-semibold uppercase tracking-wide text-emerald-700 bg-emerald-100 border border-emerald-200 rounded-full px-2 py-0.5">
-                      Recommended · short hire
+                      {a.recommended}
                     </span>
                   )}
                 </button>
