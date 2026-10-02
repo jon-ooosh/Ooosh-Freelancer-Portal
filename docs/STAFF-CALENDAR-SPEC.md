@@ -1703,7 +1703,10 @@ are live. Holiday and overtime-as-time-off already taken in 2026, and overtime
 earned, are backfilled as ordinary approved records (so "where did it go?" is
 answerable on My Time), without notifications, and then each person's figure is
 reconciled against what BrightHR says is left. Sickness is not imported —
-BrightHR never tracked it. Prerequisite: each person's start date and working
+BrightHR never tracked it. DONE 2 Oct 2026 (151 rows, every holiday balance
+matching BrightHR); the one-off import page and endpoint were then REMOVED —
+an admin route that writes the ledger has no business staying live unused.
+It is in git history (PR #1352) if a second backfill is ever needed. Prerequisite: each person's start date and working
 pattern must cover 1 Jan 2026, or the 2026 allowance is pro-rated from whenever
 the record was typed in and the backfilled days are refused as not contracted.
 

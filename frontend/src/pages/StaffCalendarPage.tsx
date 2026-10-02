@@ -28,6 +28,8 @@ interface StaffDay {
   isException: boolean;
   /** The company has granted this day to everyone — "Christmas Day". */
   companyDay?: string;
+  /** Requested, not yet approved — shown as "Requested", still counted in. */
+  pending?: boolean;
   detail?: { leaveType?: string; absenceType?: string };
 }
 /**
@@ -160,13 +162,41 @@ const BOOKING_STATUS: Record<
   withdrew:  { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Pulled out after accepting', counts: false },
 };
 
+/**
+ * Quiet for in, loud for off (Oct 2026). Most of the grid is people in on their
+ * usual hours, and when every one of those cells was a green box with "09:00"
+ * in it the few that mattered disappeared. Now "in" is a pale wash, and the eye
+ * goes to what is different.
+ *
+ * Leave and absence are deliberately the SAME colour and the same word, "Off"
+ * (jon): a different colour for sickness would tell everybody why somebody is
+ * not in, which is exactly what maskForViewer exists to stop. Admins get the
+ * reason on hover.
+ */
 const CELL: Record<DayStatus, { bg: string; label: string }> = {
-  working:       { bg: 'bg-emerald-100 text-emerald-900', label: 'In' },
-  partial:       { bg: 'bg-amber-100 text-amber-900',     label: 'Part' },
-  leave:         { bg: 'bg-sky-100 text-sky-900',         label: 'Leave' },
-  absent:        { bg: 'bg-rose-100 text-rose-900',       label: 'Out' },
-  not_scheduled: { bg: 'bg-gray-50 text-gray-400',        label: '' },
+  working:       { bg: 'bg-emerald-100/70 text-gray-500',      label: 'In' },
+  partial:       { bg: 'bg-amber-100 text-amber-900',          label: 'Part' },
+  leave:         { bg: 'bg-violet-600 text-white font-medium', label: 'Off' },
+  absent:        { bg: 'bg-violet-600 text-white font-medium', label: 'Off' },
+  not_scheduled: { bg: '',                                     label: '' },
 };
+/** A requested day — dashed, like an offered freelancer: coming, not agreed. */
+const REQUESTED = { bg: 'bg-amber-50 text-amber-800 border border-dashed border-amber-400', label: 'Requested' };
+
+/** Somebody's usual start across the days on screen — only a DIFFERENT one is
+ *  worth printing in the cell. */
+function usualStart(days: StaffDay[]): string | null {
+  const counts = new Map<string, number>();
+  for (const d of days) {
+    if (d.status === 'working' && d.startTime) {
+      const t = d.startTime.slice(0, 5);
+      counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+  }
+  let best: string | null = null, n = 0;
+  counts.forEach((c, t) => { if (c > n) { best = t; n = c; } });
+  return best;
+}
 
 export default function StaffCalendarPage() {
   const role = useAuthStore(s => s.user?.role);
@@ -392,7 +422,7 @@ export default function StaffCalendarPage() {
                     <div className="h-1.5 leading-none">
                       {marker(d)?.kind === 'company'
                         ? <span className="text-[9px] text-emerald-600">★</span>
-                        : marker(d)?.kind === 'bank' && <span className="text-[9px] text-violet-500">●</span>}
+                        : marker(d)?.kind === 'bank' && <span className="text-[9px] text-ooosh-400">●</span>}
                     </div>
                   </th>
                 ))}
@@ -401,38 +431,51 @@ export default function StaffCalendarPage() {
             <tbody>
               {people.map(p => (
                 <tr key={p.personId} className="hover:bg-gray-50/60">
-                  <td className="sticky left-0 z-10 bg-white px-3 py-2 border-b border-gray-100 whitespace-nowrap">
+                  {/* Job title on hover: a second line under every name doubled
+                      the row height for something you rarely need. */}
+                  <td className="sticky left-0 z-10 bg-white px-3 py-1.5 border-b border-gray-100 whitespace-nowrap"
+                    title={p.jobTitle ?? undefined}>
                     <div className="font-medium text-gray-900">{p.preferredName || p.name}</div>
-                    {p.jobTitle && <div className="text-xs text-gray-500">{p.jobTitle}</div>}
                   </td>
-                  {p.days.map(day => {
-                    const cell = CELL[day.status];
-                    // A day can carry several windows now; fall back to the
-                    // single `window` so a cached bundle keeps working.
-                    const wins = day.windows ?? (day.window ? [day.window] : []);
-                    const title = day.status === 'working' && day.startTime
-                      ? `${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)} · ${fmtMinutes(day.scheduledMinutes)}`
-                      : wins.length > 0
-                        ? `Out ${wins.map(w => `${w.start}–${w.end}`).join(', ')}`
-                        : cell.label || 'Not scheduled';
-                    return (
-                      <td key={day.date}
-                        className={`px-1 py-1.5 border-b border-gray-100 text-center align-middle ${
-                          weekdayIndex(day.date) >= 5 ? 'bg-gray-50/60' : ''
-                        }`}>
-                        <div title={title}
-                          className={`rounded px-1 py-1 text-[10px] leading-tight ${cell.bg} ${
-                            day.isException ? 'ring-1 ring-inset ring-ooosh-400' : ''
+                  {(() => {
+                    const usual = usualStart(p.days);
+                    return p.days.map(day => {
+                      const cell = day.pending ? REQUESTED : CELL[day.status];
+                      // A day can carry several windows now; fall back to the
+                      // single `window` so a cached bundle keeps working.
+                      const wins = day.windows ?? (day.window ? [day.window] : []);
+                      // Why somebody is off is admin-only: detail never reaches
+                      // anybody else (maskForViewer), so peers just see "Off".
+                      const why = day.detail?.absenceType ?? day.detail?.leaveType;
+                      const title = day.pending
+                        ? `Requested${wins.length ? ` ${wins.map(w => `${w.start}–${w.end}`).join(', ')}` : ''}, not yet approved${why ? ` — ${why}` : ''}`
+                        : day.status === 'working' && day.startTime
+                          ? `In ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)} · ${fmtMinutes(day.scheduledMinutes)}`
+                          : wins.length > 0
+                            ? `Off ${wins.map(w => `${w.start}–${w.end}`).join(', ')}${why ? ` — ${why}` : ''}`
+                            : day.status === 'leave' || day.status === 'absent'
+                              ? `Off${why ? ` — ${why}` : ''}`
+                              : cell.label || (day.companyDay ? `Closed — ${day.companyDay}` : 'Not working');
+                      const text = day.pending ? cell.label
+                        : day.status === 'working'
+                          ? (day.startTime && day.startTime.slice(0, 5) !== usual ? day.startTime.slice(0, 5) : '')
+                          : day.companyDay ? 'Closed' : cell.label;
+                      return (
+                        <td key={day.date}
+                          className={`px-1 py-1 border-b border-gray-100 text-center align-middle ${
+                            day.date === TODAY ? 'bg-ooosh-50/40' : weekdayIndex(day.date) >= 5 ? 'bg-gray-50/60' : ''
                           }`}>
-                          {day.status === 'working' && day.startTime
-                            ? day.startTime.slice(0, 5)
-                            : day.companyDay
-                              ? 'Closed'
-                              : cell.label || '·'}
-                        </div>
-                      </td>
-                    );
-                  })}
+                          <div title={title}
+                            className={`rounded px-1 py-1 min-h-[22px] text-[10px] leading-tight ${
+                              day.companyDay && day.status === 'not_scheduled' ? 'text-gray-400' : cell.bg} ${
+                              day.isException ? 'ring-1 ring-inset ring-ooosh-400' : ''
+                            }`}>
+                            {text}
+                          </div>
+                        </td>
+                      );
+                    });
+                  })()}
                 </tr>
               ))}
               {/* A separate, visually distinct lane below the staff rows
@@ -518,10 +561,16 @@ export default function StaffCalendarPage() {
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-gray-500">
-        {(['working', 'partial', 'leave', 'absent', 'not_scheduled'] as DayStatus[]).map(s => (
-          <span key={s} className="inline-flex items-center gap-1.5">
-            <span className={`inline-block w-3 h-3 rounded ${CELL[s].bg}`} />
-            {s === 'not_scheduled' ? 'Not scheduled' : CELL[s].label}
+        {[
+          { bg: CELL.working.bg, label: 'In (a time shows only when it is not their usual start)' },
+          { bg: CELL.partial.bg, label: 'Part day' },
+          { bg: REQUESTED.bg, label: 'Requested — not approved yet' },
+          { bg: CELL.leave.bg, label: 'Off' },
+          { bg: 'border border-gray-200', label: 'Not working' },
+        ].map(l => (
+          <span key={l.label} className="inline-flex items-center gap-1.5">
+            <span className={`inline-block w-3 h-3 rounded ${l.bg}`} />
+            {l.label}
           </span>
         ))}
         <span className="inline-flex items-center gap-1.5">
@@ -530,7 +579,7 @@ export default function StaffCalendarPage() {
         </span>
         {dates.some(d => marker(d)?.kind === 'bank') && (
           <span className="inline-flex items-center gap-1.5">
-            <span className="text-violet-500">●</span>
+            <span className="text-ooosh-400">●</span>
             Bank holiday{bhPolicy === 'use_allowance' && ' — a normal working day here'}
           </span>
         )}

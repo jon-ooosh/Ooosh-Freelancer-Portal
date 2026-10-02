@@ -187,7 +187,7 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 fleet closes its open sale as sold.
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
-in place as `?person=<id>&tab=overview|employment|records|reviews|access`. The person is
+in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
 that answers it — new bells should link that way, not at the bare page. The page is
 manager-tier but Records, Reviews and the Overview's data are admin-only, so anything

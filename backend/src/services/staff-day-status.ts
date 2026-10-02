@@ -147,6 +147,14 @@ export interface StaffDay {
    * blank the same shape as a weekend.
    */
   companyDay?: string;
+  /**
+   * Set when the leave on this day is REQUESTED, not yet approved. The status
+   * stays 'partial' — until somebody says yes they are still expected in, so
+   * coverage counts them — but the calendar must not call a whole requested
+   * week "Part": it reads as half a day in. Not special-category (a request
+   * for holiday says nothing about health), so it reaches every viewer.
+   */
+  pending?: boolean;
   /** ADMIN ONLY. Stripped by maskForViewer() for everyone else. */
   detail?: DayDetail;
 }
@@ -361,6 +369,7 @@ export function mergeAbsenceLayer(
     return {
       ...d,
       status: approved ? (wholeDay ? 'leave' : 'partial') : 'partial',
+      ...(approved ? {} : { pending: true }),
       portion: l!.portion,
       ...(win ? { window: win, windows: [win] } : {}),
       detail: leaveDetail,

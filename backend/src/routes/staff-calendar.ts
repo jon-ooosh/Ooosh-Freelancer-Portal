@@ -251,7 +251,11 @@ router.get('/leave', async (req: AuthRequest, res: Response) => {
   try {
     const own = await personIdForUser(req.user!.id);
     const requested = req.query.personId ? String(req.query.personId) : undefined;
-    const personId = isAdmin(req) ? requested : (own ?? '__none__');
+    // ?mine=1 is "my own, whoever I am". Without it an admin gets EVERYBODY's
+    // (the approvals list relies on that) — which is how an admin's own My
+    // Time came to list the whole team's leave as theirs.
+    const mine = req.query.mine === '1';
+    const personId = mine ? (own ?? '__none__') : isAdmin(req) ? requested : (own ?? '__none__');
     const status = req.query.status ? String(req.query.status) as LeaveStatus : undefined;
     res.json({
       data: await listRequests({
@@ -396,9 +400,11 @@ router.post('/leave/:id/cancel', adminOnly, async (req: AuthRequest, res: Respon
 router.get('/overtime', async (req: AuthRequest, res: Response) => {
   try {
     const own = await personIdForUser(req.user!.id);
-    const personId = isAdmin(req)
-      ? (req.query.personId ? String(req.query.personId) : undefined)
-      : (own ?? '__none__');
+    // ?mine=1 — see GET /leave above.
+    const personId = req.query.mine === '1' ? (own ?? '__none__')
+      : isAdmin(req)
+        ? (req.query.personId ? String(req.query.personId) : undefined)
+        : (own ?? '__none__');
     res.json({
       data: await listOvertime({
         personId,
@@ -1033,7 +1039,11 @@ router.get('/bank-holidays', async (req: AuthRequest, res: Response) => {
 
 router.get('/me/balances', async (req: AuthRequest, res: Response) => {
   try {
-    const personId = await personIdForUser(req.user!.id);
+    // An admin may ask for anybody's — the Staff page's Time off tab mounts
+    // My Time for that person, and one shape for both keeps the two views
+    // from drifting. Everyone else always gets their own.
+    const asked = typeof req.query.personId === 'string' && req.query.personId ? req.query.personId : null;
+    const personId = asked && isAdmin(req) ? asked : await personIdForUser(req.user!.id);
     if (!personId) { res.json({ data: null, hasStaffRecord: false }); return; }
 
     // A zero balance and "you are not set up as staff" look identical if both
@@ -1519,41 +1529,6 @@ router.put('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   } catch (err) {
     console.error('[staff-calendar] upsert employment error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save employment record' });
-  }
-});
-
-// ── 2026 backfill from BrightHR ─────────────────────────────────────────────
-
-// POST /api/staff-calendar/history-import — admin only. { rows, commit }.
-// commit:false is a preview that writes nothing; commit:true writes through
-// the module's own services (no notifications). See staff-history-import.ts.
-router.post('/history-import', adminOnly, async (req: AuthRequest, res: Response) => {
-  const hhmmOrHalf = z.string().regex(/^(\d{2}:\d{2}|AM|PM|am|pm|CHECK)$/).nullable();
-  const schema = z.object({
-    commit: z.boolean(),
-    rows: z.array(z.object({
-      person: z.string().min(1).max(200),
-      kind: z.enum(['holiday', 'toil_taken', 'unpaid', 'overtime_earned', 'toil_paid']),
-      status: z.enum(['approved', 'pending']),
-      date: dateStr,
-      endDate: dateStr.nullable(),
-      startTime: hhmmOrHalf,
-      endTime: hhmmOrHalf,
-      minutes: z.number().int().positive().nullable(),
-      note: z.string().max(500).nullable(),
-    })).min(1).max(1000),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) {
-    const i = parsed.error.issues[0];
-    res.status(400).json({ error: `${i?.path.join('.') ?? 'input'}: ${i?.message ?? 'Invalid input'}` }); return;
-  }
-  try {
-    const { runHistoryImport } = await import('../services/staff-history-import');
-    res.json({ data: await runHistoryImport(parsed.data.rows, req.user!.id, !parsed.data.commit) });
-  } catch (err) {
-    console.error('[staff-calendar] history import error:', err);
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Import failed' });
   }
 });
 

@@ -12,6 +12,7 @@ import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
 import LeaveApprovals from '../components/LeaveApprovals';
 import PayrollReportPanel from '../components/PayrollReportPanel';
+import MyTimePage from './MyTimePage';
 
 /**
  * Staff — the single surface for everyone who works here (Staff Calendar).
@@ -283,10 +284,6 @@ export default function StaffAdminPage() {
           {isAdmin && (
             <Link to="/staff/absence" className="text-sm text-ooosh-600 hover:underline">Absence →</Link>
           )}
-          {/* The 2026 BrightHR backfill — a one-off for the October go-live. */}
-          {isAdmin && (
-            <Link to="/staff/import" className="text-sm text-ooosh-600 hover:underline">Import from BrightHR →</Link>
-          )}
           <Link to="/staff/calendar" className="text-sm text-ooosh-600 hover:underline">View calendar →</Link>
         </div>
       </div>
@@ -458,6 +455,7 @@ function initials(row: RosterRow): string {
 const PERSON_TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'employment', label: 'Employment' },
+  { id: 'time', label: 'Time off' },
   { id: 'records', label: 'Records' },
   { id: 'reviews', label: 'Reviews' },
   { id: 'access', label: 'Access' },
@@ -479,7 +477,11 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
 }) {
   // Records and Reviews hold passports, NI numbers and private review notes.
   // A manager reaching this page sees the person, not those tabs.
-  const tabs = PERSON_TABS.filter(x => isAdmin || (x.id !== 'records' && x.id !== 'reviews'));
+  // Time off reads that person's leave and overtime, which only an admin may
+  // list for somebody else — and only an employee has any.
+  const tabs = PERSON_TABS.filter(x =>
+    (isAdmin || (x.id !== 'records' && x.id !== 'reviews' && x.id !== 'time'))
+    && (x.id !== 'time' || !!row.employment));
   const active = tabs.some(x => x.id === tab) ? tab : 'overview';
   const urgent = attention.filter(a => a.severity === 'urgent').length;
 
@@ -567,6 +569,13 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
           attention={attention}
           onOpenTab={onTab}
         />
+      )}
+
+      {/* The same page staff see as Me › My Time, for this person — keyed so
+          moving between people starts clean. Approve / Decline sit on
+          whatever is still waiting. */}
+      {active === 'time' && isAdmin && row.employment && (
+        <MyTimePage key={row.personId} personId={row.personId} />
       )}
 
       {active === 'employment' && (
