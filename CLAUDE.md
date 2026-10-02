@@ -252,6 +252,7 @@ existing definition:
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
+| Who can be given something to do? | `services/assignable-staff.ts` — active + staff role + a CURRENT employment record. Shared by To Do's "For" picker and `/users?assignable=true` |
 | May this person change this task? | `services/staff-tasks.ts` `assertCanTouch()` — owner, setter or admin |
 | When does a repeating to-do fall next? | `services/task-recurrence.ts` (pure; the form asks it via `/staff-tasks/series/preview`) |
 | Shared To Do lists, watchers, archiving | `services/staff-task-lists.ts` (take / put back: `staff-tasks.ts` `takeTask()` / `releaseTask()`) |

@@ -25,9 +25,11 @@
  * constraint above doesn't apply to quotes.
  *
  * Unattended callers pass `actorUserId: null`. A triggered reminder with no
- * `assigned_to` then goes to every active admin/manager, matching the
- * close-out chase scanner's convention — the alternative is a reminder that
- * fires into nobody's inbox.
+ * `assigned_to` goes to whoever CREATED it ("Me" in the reminder modal writes
+ * no assignee, so the creator is the intended recipient); only a reminder with
+ * neither falls back to every active admin/manager, matching the close-out
+ * chase scanner's convention — the alternative is a reminder that fires into
+ * nobody's inbox.
  */
 import { query } from '../config/database';
 import emailService from './email-service';
@@ -85,9 +87,9 @@ async function adminFallbackUserIds(): Promise<string[]> {
  * Exported separately because `confirmed` transitions fire triggers WITHOUT
  * any sweep — a confirmed job's requirements are the work, not litter.
  *
- * Each fired reminder notifies its assignee (or every admin/manager when it
- * has none), optionally emails per `delivery_method`, then self-marks `done`
- * so the sweep that follows can't cancel it.
+ * Each fired reminder notifies its assignee, falling back to its creator and
+ * then to every admin/manager, optionally emails per `delivery_method`, then
+ * self-marks `done` so the sweep that follows can't cancel it.
  */
 export async function fireEventTriggeredReminders(
   jobId: string,
@@ -97,7 +99,7 @@ export async function fireEventTriggeredReminders(
   const logTag = `[RequirementClose/${event}]`;
   try {
     const triggered = await query(
-      `SELECT jr.id, jr.custom_label, jr.assigned_to, jr.notes, jr.delivery_method, jr.job_id
+      `SELECT jr.id, jr.custom_label, jr.assigned_to, jr.created_by, jr.notes, jr.delivery_method, jr.job_id
        FROM job_requirements jr
        WHERE jr.job_id = $1
          AND jr.requirement_type = 'reminder'
@@ -118,9 +120,19 @@ export async function fireEventTriggeredReminders(
     let fallbackIds: string[] | null = null;
 
     for (const rem of triggered.rows) {
+      // Who the reminder is FOR. `assigned_to` is NULL when staff pick "Me"
+      // in the reminder modal — the option writes no id, so the creator IS
+      // the intended recipient. Falling straight through to `actorUserId`
+      // sent "remind ME if this job is lost" to whoever happened to mark it
+      // lost, and to every admin on the unattended paths. Same order the
+      // hourly date-based scanner uses (config/scheduler.ts), deliberately:
+      // one reminder must not mean two different people depending on which
+      // route fires it.
       let targets: string[];
       if (rem.assigned_to) {
         targets = [rem.assigned_to];
+      } else if (rem.created_by) {
+        targets = [rem.created_by];
       } else if (actorUserId) {
         targets = [actorUserId];
       } else {

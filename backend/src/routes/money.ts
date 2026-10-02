@@ -28,6 +28,7 @@ import {
   type SilentSkipIssue,
 } from '../services/confirmation-hooks';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
+import { fireEventTriggeredReminders } from '../services/requirement-close-sweep';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
 import {
@@ -2316,6 +2317,22 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         console.error('[money] Status transition failed (non-fatal):', err);
       }
 
+      // Event-triggered reminders ("notify me if this job confirms"). Gated on
+      // `statusChanged`, which is true only when THIS payment won the booking —
+      // same invariant the hire form email below uses. Until now only the OP
+      // pipeline route fired these, so a job won by a deposit fired none of
+      // them. Never throws, and self-marks the reminder done, so another route
+      // firing the same trigger is a no-op.
+      if (statusChanged) {
+        // `authenticateFlexible` sets req.user.id to an api_keys row id — NOT a
+        // users id — for API-key callers, and that would fail the notifications
+        // FK, so only a real logged-in staff user is passed as the actor. The
+        // cast is because that middleware assigns role 'service' through an
+        // `as any`, so AuthRequest's role union doesn't admit it.
+        const actorId = req.user && (req.user.role as string) !== 'service' ? req.user.id : null;
+        await fireEventTriggeredReminders(job.id, 'confirmed', actorId);
+      }
+
       // Hire form email: if job has self-drive vehicle and starts within 10 days, send now.
       // Only fires when this payment actually confirmed the booking — subsequent
       // payments on an already-confirmed job must not re-send the hire form email.
@@ -3529,6 +3546,14 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     // Derivation inside triggerHireFormEmailOnConfirmationShared covers the common
     // "HH-synced job whose requirements hadn't been derived yet" timing gap.
     const silentSkipIssues: SilentSkipIssue[] = [];
+
+    // Event-triggered reminders ("notify me if this job confirms"). The payment
+    // portal is where most confirmations actually happen, and it fired none of
+    // these before. Unattended — no logged-in user — so the actor is null and
+    // the reminder goes to its assignee or, for a "Me" reminder, its creator.
+    if (statusChanged) {
+      await fireEventTriggeredReminders(job.id, 'confirmed', null);
+    }
 
     if (statusChanged) {
       try {
