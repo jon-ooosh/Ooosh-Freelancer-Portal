@@ -37,6 +37,7 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | — | External tools (PCN, staging calculator, backline matcher, leads, auto-chase) | All integrated into OP | `INTEGRATIONS.md` |
 | — | Freelancer onboarding | Phases A–C shipped; D next | `INTEGRATIONS.md` |
 | — | Staff documents & training | Live | `INTEGRATIONS.md` |
+| — | Possible insurance claims (replaces the broker's Word form) | **Closed, Oct 2026** — case file, client form, reminders, GPS trace, SMS all live; video and retention not built | `docs/INCIDENT-CLAIMS-SPEC.md` (§22 troubleshooting) |
 | 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **Phases A–E live** (Sep 2026) — patterns, ledger, leave, overtime bank, payroll export, absence, freelancer days, company days; Me area redesigned. **Staff using it from Oct 2026** (earlier than the 1 Jan plan — 2026 history is being backfilled from BrightHR, see spec §14). F (coverage, iCal) and working location remain, post-go-live | `docs/STAFF-CALENDAR-SPEC.md` §18 |
 
 **Monday.com is fully retired** (Jul 2026). Some fallback code and unused env vars
