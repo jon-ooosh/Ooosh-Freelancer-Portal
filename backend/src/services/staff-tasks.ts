@@ -589,21 +589,13 @@ export async function listEveryone(userId: string, role: string | undefined) {
  * behind it. A person with no login would get no bell and could never see it.
  */
 export async function listAssignablePeople() {
-  const { STAFF_ROLES } = await import('../middleware/auth');
-  const r = await query(
-    `SELECT DISTINCT p.id AS person_id,
-            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
-                        COALESCE(p.last_name, '')), '') AS name
-       FROM users u JOIN people p ON p.id = u.person_id
-      WHERE u.is_active = true AND u.role = ANY($1::text[])
-        -- The platform's own service account (same id as in
-        -- carnet-auto-email.ts / gmail-ingestion.ts) is an admin with a
-        -- person row, and would otherwise be offered as somebody to ask.
-        AND u.id <> '00000000-0000-0000-0000-000000000000'
-      ORDER BY name`,
-    [STAFF_ROLES as readonly string[]]
-  );
-  return r.rows as { person_id: string; name: string | null }[];
+  // Moved to services/assignable-staff.ts so the To Do "For" picker and the
+  // job reminder picker cannot drift. The role test and the service-account
+  // guard that lived here are both still in it; it ALSO requires a current
+  // employment record, which is what drops the shared Front Desk login, the
+  // TEST account and anyone who has left but whose login is still active.
+  const { listAssignablePeople: shared } = await import('./assignable-staff');
+  return shared();
 }
 
 /** Cancel, never delete — CLAUDE.md. A dropped review action is a fact. */
