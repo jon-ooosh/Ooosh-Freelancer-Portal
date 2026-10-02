@@ -262,6 +262,8 @@ existing definition:
 | Does this module need a new person field? | Check `people` first — it already has phone, mobile, home address, DOB and both emergency contacts (mig 001) |
 | When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` — the record's own `action_on` fires; the per-type intervals only pre-fill it (never `driver-validity.ts` — different people) |
 | What staff data has expired? | `services/staff-retention.ts` |
+| Is this person in the building / working from home? | `services/staff-day-status.ts` (`StaffDay.location`; requests in `services/staff-wfh.ts`) |
+| What goes in a person's calendar feed? | `services/staff-ical.ts` — own time only, never a colleague's |
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
@@ -357,7 +359,7 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 
 Backups 02:00 · job financials 03:00 · holiday entitlement 06:05 · Xero reconcile 07:45 ·
 bill payment pull-back 07:50 · compliance 08:00 ·
-chase alerts 08:10 · auto-chase runner 08:10 · lock-up chaser 08:45 · staff time digest
+chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·

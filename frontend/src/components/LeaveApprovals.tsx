@@ -68,21 +68,30 @@ interface OvertimeEntry {
   minutes: number; reason: string; status: string;
 }
 
+/** A one-off working-from-home request (spec §19). */
+interface WfhRequest {
+  id: string; personName: string; startDate: string; endDate: string; requestNote: string | null;
+}
+
 export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }) {
   const [pending, setPending] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
+  const [wfh, setWfh] = useState<WfhRequest[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [leave, ot] = await Promise.all([
+      const [leave, ot, wf] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave?status=pending'),
         api.get<{ data: OvertimeEntry[] }>('/staff-calendar/overtime?status=pending'),
+        api.get<{ data: WfhRequest[] }>('/staff-calendar/wfh?status=pending')
+          .catch(() => ({ data: [] as WfhRequest[] })),
       ]);
       setPending(leave.data);
       setOvertime(ot.data);
+      setWfh(wf.data ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load requests');
     } finally { setLoaded(true); }
@@ -142,7 +151,75 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
           </div>
         </div>
       )}
+
+      {wfh.length > 0 && (
+        <div className="mt-4">
+          <div className="flex items-baseline gap-2 mb-2">
+            <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Working from home</h3>
+            <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
+              {wfh.length} waiting
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 mb-2">
+            Costs nothing and touches no balance — the question is only who is left in the building.
+            Check the calendar for those days.
+          </p>
+          <div className="space-y-2">
+            {wfh.map(w => (
+              <WfhApprovalRow key={w.id} request={w}
+                onDecided={async () => { setError(null); await load(); onChanged?.(); }}
+                onError={setError} />
+            ))}
+          </div>
+        </div>
+      )}
     </section>
+  );
+}
+
+function WfhApprovalRow({ request, onDecided, onError }: {
+  request: WfhRequest; onDecided: () => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function decide(action: 'approve' | 'decline') {
+    let body: Record<string, string> = {};
+    if (action === 'decline') {
+      const note = prompt(`Why are you declining ${request.personName}'s home day?`);
+      if (!note) return;
+      body = { note };
+    }
+    setBusy(true);
+    try {
+      await api.post(`/staff-calendar/wfh/${request.id}/${action}`, body);
+      await onDecided();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-white">
+      <div className="min-w-0">
+        <div className="font-medium text-gray-900">
+          {request.personName}
+          <span className="ml-2 text-sm font-normal text-gray-600">
+            {fmtDate(request.startDate)}{request.endDate !== request.startDate && ` – ${fmtDate(request.endDate)}`}
+          </span>
+        </div>
+        {request.requestNote && <div className="text-xs text-gray-500">{request.requestNote}</div>}
+      </div>
+      <div className="flex gap-2 shrink-0">
+        <button onClick={() => void decide('approve')} disabled={busy}
+          className="px-2.5 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+          Approve
+        </button>
+        <button onClick={() => void decide('decline')} disabled={busy}
+          className="px-2.5 py-1.5 text-sm rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50">
+          Decline
+        </button>
+      </div>
+    </div>
   );
 }
 

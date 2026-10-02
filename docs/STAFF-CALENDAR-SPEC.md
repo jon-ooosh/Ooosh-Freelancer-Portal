@@ -1,8 +1,11 @@
 # Staff Calendar & Time Module — Spec
 
-**Status (15 Sep 2026): Phases A, B1, B2 and C are BUILT, deployed and in use.**
-Phases D, E and F remain. See §18 for exactly what is done, what changed during
-the build, and what is left.
+**Status (2 Oct 2026): BUILT and LIVE — staff are using it from October 2026.**
+Phases A–E, company days (§20), working from home (§19), the personal calendar
+feed (§10) and the monthly payroll email (§12.1) have all shipped; 2026 history
+is backfilled from BrightHR. This is expected to be the module's last chunk.
+**§18 "Where it stands" is the handover**: what is built, what was deliberately
+not built, and where to start if something needs picking up.
 
 Fleshes out `docs/SPEC.md` §3.9 "Staff & HR Management", which was written in
 Phase 1, scheduled into Phase 3, and then dropped out of `ROADMAP.md` entirely.
@@ -1038,16 +1041,43 @@ A booked freelancer with a van-prep task deep-links into the existing prep flow.
 | Dashboard strip | dashboard section `WhosIn` | All staff. Compact: today's names + status pips, plus a 7-day mini heat row. |
 | Avatar menu | `Layout.tsx` | "My Time" for everyone; "Staff Calendar" (admin) alongside it. |
 | Freelancer portal | `src/app/day/[date]` | Booked freelancers. |
-| iCal | `GET /staff/ical/:token.ics` | Personal feed only. |
+| iCal | `GET /api/staff-calendar-feed/:token.ics` | Personal feed only — BUILT Oct 2026, see below. |
 
 **The dashboard gets a strip, not a month grid.** The dashboard is already dense and has
 user-ordered sections; a full calendar belongs at its own route. Registered via
 `dashboard/v2/registry.ts` per PLATFORM-CONVENTIONS §"Dashboard extension points", with
 aggregate data added to `GET /api/dashboard/operations` in a backwards-compatible shape.
 
-**iCal:** per-user revocable token in `users.preferences.ical_token`. The feed contains
-the person's own entries in full plus the team's in/out with no types or reasons. No team
-export (§1, out of scope).
+**iCal — AS BUILT (Oct 2026, migration 270).** This replaces the paragraph that
+was here, which put the token in `users.preferences` and included the team's
+in/out. jon's decisions:
+
+- **The person's OWN time only.** Approved and requested (labelled "Requested:")
+  time off, home days (pattern and approved one-offs, plus requested ones), and
+  company days. **Nobody else's time** — a calendar app syncs and shares well
+  beyond this platform, and "who else is off" is looked up in OP behind a login.
+- **No overtime** — it is not a day off. A day taken FROM banked overtime is
+  TOIL and does appear. **No absence** either: sickness is recorded for
+  somebody, and its type is special-category.
+- **Token**: `staff_calendar_feeds (person_id PK, token UNIQUE, created_at,
+  last_fetched_at)`, 32 random characters. "Make a new link" replaces it and the
+  old URL dies at once. Only resolves while the person is `employed`.
+- **Window**: 3 months back to 12 months ahead. Whole-day leave is one event per
+  request; part days are per-day events (timed leave as a floating-local-time
+  event). Home days are grouped into runs and marked free (`TRANSPARENT`).
+- **Where**: `services/staff-ical.ts` decides the contents (THE definition);
+  `routes/staff-calendar-feed.ts` is the public route (rate-limited, no JWT);
+  `GET /staff-calendar/me/calendar-feed` and `POST …/reset` are the signed-in
+  half, always the CALLER's own — there is deliberately no `personId`, admin or
+  not, because the link is a credential. The card is at the foot of My Time.
+- **Refresh**: Apple honours the 6-hour hint; Google polls on its own clock,
+  sometimes only daily. Nothing we can do about Google.
+- Tested on Android by jon; iPhone is first tested by colleagues after go-live.
+  If an iPhone will not subscribe, check the `webcal://` button first, then the
+  Settings › Calendar › Accounts › Add Subscribed Calendar route with the
+  pasted `https://` link.
+
+No team export (§1, out of scope; §16).
 
 ---
 
@@ -1099,6 +1129,16 @@ immutable ledger.
 
 A scheduler task on the 1st of each month notifies admin that the previous month's report
 is ready.
+
+**AS BUILT (Oct 2026):** `runPayrollReportEmail()` (`staff-notifications.ts`),
+daily at 08:20 Europe/London. From the 1st it EMAILS every admin last month's
+figures — a table in the body and the CSV attached (`staff_payroll_report`
+template) — plus a bell, because jon submits to the payroll company before the
+4th. It stamps `staff.payroll_report_sent_month` (`YYYY-MM`) only after at least
+one send succeeded, so a failed day retries the next morning; clear the setting
+to make it send again. Figures come from `getPayrollReport()` in
+`staff-overtime.ts` — never a second SUM. The Payroll report panel on the Staff
+page has "This month", "Last month" and "Year so far" presets.
 
 ### 12.2 Other reports
 
@@ -1183,7 +1223,18 @@ needs a season of real data to calibrate against, so it is correctly last.
   consents, one approval, any leg unwindable. Admin creates both sides in v1. Revisit if
   it happens more than monthly.
 - **Team iCal export.** A team feed in a personal Google account exports colleagues'
-  absence data outside the company and cannot be recalled.
+  absence data outside the company and cannot be recalled. The personal feed
+  that DID ship (§10) carries the person's own time only.
+- **Cover intelligence** (Phase F). What exists: `staff.min_headcount_by_weekday`
+  (empty by default, so nothing fires until jon fills it in under Settings),
+  which the approval impact checks against people IN THE BUILDING. Not built: a
+  view across weeks of where cover is thin, operational load (jobs out, preps
+  due) weighed against who is in, or suggesting who could cover. Wants a season
+  of real data first.
+- **Working-location detail beyond home** — `on_site` / `travelling` and a
+  note ("at Brighton Dome all day"), proposed in §19.2. Cut by jon to two states:
+  in the building, or working but not here.
+- **Half-day working from home.** Whole days only (jon, Oct 2026).
 - **SSP calculation.** We flag qualifying days; the accountants compute. Building SSP
   logic means owning its correctness, which is not worth it for 7 people.
 - **Carry-over.** Entry type reserved, no UI. Policy is that nothing carries over.
@@ -1278,14 +1329,26 @@ more than the tick.
 *Written 15 Sep 2026. Phases D, D0, D0.1, §20 and E appended over the following
 two days, each after jon used the previous one in production and fed back.*
 
-**HANDING OVER — read this first.** Every phase A–E has SHIPPED and is running
-on `staff.oooshtours.co.uk`. The module is in use by jon alone, testing ahead of
-the Oct–Dec parallel run, so live data is his test data and there is no staff
-rollout yet. What is left is listed under **Still to build** below; the next
-thing to build is the freelancer OFFER EMAIL (§9.4), which jon signed off on
-17 Sep 2026 along with three items that must ship WITH it — a way to close out a
-passed unanswered offer, an amend endpoint (there is none at all today), and
-separating "pulled out after accepting" from "declined". §9.4 items 5–7.
+**WHERE IT STANDS (2 Oct 2026) — read this first.** Everything planned for go-live
+has SHIPPED and staff are using it on `staff.oooshtours.co.uk` from October
+2026, with 2026 holiday and overtime backfilled from BrightHR. The last chunk
+(working from home, the personal calendar feed, the payroll email) is expected
+to close the module. Nothing is half-built. What is deliberately NOT built is
+in §16 and under **Still to build** below — each with enough shape to pick up
+cold. If something misbehaves, start with `.claude/rules/staff-calendar.md`,
+then the "Bugs found" list below; the module's facts each have ONE definition
+(the table at the top of that rules file).
+
+Where things are, for troubleshooting:
+
+| Area | Code |
+|---|---|
+| Is somebody in / home / off on a date | `services/staff-day-status.ts` (`getStaffCalendar`, the merge layers) |
+| Working from home | `services/staff-wfh.ts`, routes `/staff-calendar/wfh*` |
+| Personal calendar feed | `services/staff-ical.ts`, `routes/staff-calendar-feed.ts` |
+| Emails and bells (requests, decisions, digest, cash-out, payroll) | `services/staff-notifications.ts` |
+| Balances | `services/staff-balance.ts` — the only SUM of the ledger |
+| Screens | `MyTimePage.tsx` (also the Staff page's Time off tab), `StaffCalendarPage.tsx`, `StaffAdminPage.tsx`, `LeaveApprovals.tsx`, `PayrollReportPanel.tsx` |
 
 ### Shipped
 
@@ -1306,6 +1369,11 @@ separating "pulled out after accepting" from "declined". §9.4 items 5–7.
 | **E.2** | The offer CHASE (§9.4) — one nudge to them, the day-before alert to admin, and `lapsed` so a passed unanswered offer can be closed out | 227 |
 | **E.3** | AMEND without cancel-and-rebook, and `withdrew` as distinct from `declined` (§9.4 items 6–7) | 228 |
 | **E.4** | The PORTAL view (§9.3) — yard days on the freelancer dashboard, accept / decline while logged in | — |
+| — | Me area redesign (My Time, To Do, Documents, Profile); overtime checked against contracted hours and the clock; past-midnight overtime as one entry | — |
+| — | Going live early: 2026 BrightHR backfill (151 rows; the importer then removed), the Staff page's Time off tab, decision emails, team calendar redraw ("Off" one colour, "Requested" dashed), cash-out reminder moved to 2 January | — |
+| **§19** | Working from home — one-off requests approved like holiday, regular days on the pattern, two-number headcount, on-site filter, cover counts the building | 269 |
+| **§10** | Personal read-only calendar feed — own time only | 270 |
+| **§12.1** | Payroll report emailed on the 1st; date presets on the panel | — |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1670,13 +1738,13 @@ with 222; the offer email, the reply page, the chase, close-out, amend and
   anything already answered, so pulling out is a phone call and staff record it.
   Deliberate for now; revisit with the portal, where they will be logged in.
 
-**Phase F — coverage intelligence and personal iCal** (§10, §16). Post-go-live,
-and it wants a season of real data to calibrate against.
+**Phase F — coverage intelligence** (§16). Post-go-live, and it wants a season
+of real data to calibrate against. The personal iCal half of Phase F SHIPPED
+(§10).
 
-**Working location** (§19) — agreed in principle with jon, including that the
-headcount shows two numbers and collapses to one when they match, and that the
-calendar needs a location filter. Phase F; must NOT land before the parallel
-run, because moving what "In" means mid-run muddies the comparison.
+**Working location** (§19) — SHIPPED Oct 2026 as working from home only. The
+"not before the parallel run" caution below §19.4 was overtaken by going live
+early: there is no parallel run to muddy.
 
 **Carried over:**
 - ~~Absence retention~~ — **SHIPPED**: `runAbsenceDetailPurge()`
@@ -1749,10 +1817,49 @@ that, and it took a solo re-run to tell them from real ones.
 
 ---
 
-## 19. Proposed — working location ("boots on the ground")
+## 19. Working from home ("boots on the ground") — SHIPPED (migration 269)
 
-**Not agreed, not built.** Raised by jon after the timed markers came out (§7.5),
-as a better answer to the need that feature was reaching for.
+### 19.0 As built (Oct 2026) — this supersedes the proposal below
+
+jon's decisions, 2 Oct 2026:
+
+1. **Two routes in.** A ONE-OFF home day is requested and approved like holiday
+   (same approvers, bell + email both ways, the morning digest, Approve/Decline
+   on the approvals list and the Staff page's Time off tab; an admin can call
+   off an approved day that has not finished). A REGULAR agreed home day is a
+   tick on the working pattern ("From home" per day, admin-set,
+   effective-dated like the rest of the pattern) — never requested.
+2. **Two states only**: in the building, or working but not here. No
+   `on_site` / `travelling` / note (§16).
+3. **Whole days only.**
+4. **Everyone can see it** — location is not special-category.
+
+Shape (simpler than §19.2): `staff_working_pattern_days.at_home BOOLEAN` and
+`staff_wfh_requests (person_id, start_date, end_date, status pending /
+approved / declined / withdrawn / cancelled, notes, decided_by…)`. No per-date
+table. `mergeWfhLayer()` in `staff-day-status.ts` runs after the absence merge
+and sets `StaffDay.location = 'home'` (pattern day or APPROVED request) or
+`homePending` (a request waiting), only on a day actually worked — a day off,
+on leave or off sick carries no location. A pending request shows as asked
+for, never as home: until somebody says yes they are expected in.
+
+Refused at request time (they corrupt rather than inconvenience): no
+contracted day in the range, an overlap with another live request, more than
+31 days (that is a pattern change).
+
+**The number** (§19.3 option 3, as agreed): the team calendar footer shows
+in-the-building first and `+n⌂` for home when they differ, one number when they
+agree; an "On site only" filter hides people at home. **Cover counts the
+building**: `getImpact()`'s coverage and `staff.min_headcount_by_weekday`
+count people in the building only (`location !== 'home'`). The dashboard
+summary (`getTodaySummary`) gains `onSite` beside `in`.
+
+The proposal is kept below as the record of why.
+
+### The original proposal (Sep 2026)
+
+Raised by jon after the timed markers came out (§7.5), as a better answer to
+the need that feature was reaching for.
 
 ### Is this the marker again?
 

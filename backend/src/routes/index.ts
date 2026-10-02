@@ -35,6 +35,7 @@ import warehouseRouter from './warehouse';
 import shopRouter from './shop';
 import systemSettingsRouter from './system-settings';
 import freelancerDaysPublicRouter from './freelancer-days';
+import staffCalendarFeedRouter from './staff-calendar-feed';
 import oohReturnRouter from './ooh-return';
 import mobileUploadRouter from './mobile-upload';
 import preHireBriefingRouter from './pre-hire-briefing';
@@ -118,6 +119,7 @@ router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not
 router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
 router.use('/shop', shopRouter);  // Shop till — ad-hoc sales, internal stock consumption, sale-stock lookup
 router.use('/system-settings', systemSettingsRouter);
+router.use('/staff-calendar-feed', staffCalendarFeedRouter);  // PUBLIC personal iCal feed (token auth, no JWT) — services/staff-ical.ts decides what is in it
 router.use('/freelancer-days', freelancerDaysPublicRouter);  // PUBLIC accept/decline for a yard-day offer (token auth, no JWT)
 router.use('/ooh-return', oohReturnRouter);  // Public parking-form (token auth) + staff endpoints
 router.use('/mobile-upload', mobileUploadRouter);  // Public token-auth file capture (phone QR handoff)
