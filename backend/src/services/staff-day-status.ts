@@ -155,6 +155,15 @@ export interface StaffDay {
    * for holiday says nothing about health), so it reaches every viewer.
    */
   pending?: boolean;
+  /**
+   * Where a working day is worked (spec §19). Set ONLY to 'home' and only on a
+   * working or part day — absent means "in the building", the default. From
+   * the pattern's `at_home` (a regular agreed day) or an approved request
+   * (services/staff-wfh.ts). Not special-category; reaches every viewer.
+   */
+  location?: 'home';
+  /** A working-from-home request for this day is waiting for a decision. */
+  homePending?: boolean;
   /** ADMIN ONLY. Stripped by maskForViewer() for everyone else. */
   detail?: DayDetail;
 }
@@ -183,6 +192,8 @@ interface PatternDayRow {
   start_time: string | null;
   end_time: string | null;
   minutes: number;
+  /** A regular agreed home day (mig 269). */
+  at_home?: boolean;
 }
 interface ExceptionRow {
   person_id: string;
@@ -242,7 +253,33 @@ export function resolveScheduledDay(
     startTime: day.start_time,
     endTime: day.end_time,
     isException: false,
+    ...(day.at_home ? { location: 'home' as const } : {}),
   };
+}
+
+/**
+ * Overlay working-from-home requests (spec §19). Runs LAST, after company
+ * days, leave and absence have decided whether the day is worked at all —
+ * a location on a day off means nothing, so it is stripped there.
+ *
+ * Approved → home. Pending → still expected in, flagged as asked-for.
+ */
+export function mergeWfhLayer(
+  days: StaffDay[],
+  requests: { start: string; end: string; status: 'pending' | 'approved' }[] = []
+): StaffDay[] {
+  return days.map(d => {
+    const worked = d.status === 'working' || d.status === 'partial';
+    if (!worked) {
+      if (!d.location && !d.homePending) return d;
+      const { location: _l, homePending: _h, ...rest } = d;
+      return rest;
+    }
+    const covering = requests.filter(r => r.start <= d.date && r.end >= d.date);
+    if (covering.some(r => r.status === 'approved')) return { ...d, location: 'home' };
+    if (d.location !== 'home' && covering.some(r => r.status === 'pending')) return { ...d, homePending: true };
+    return d;
+  });
 }
 
 /**
@@ -555,7 +592,7 @@ export async function getStaffCalendar(
       `SELECT pattern_id, cycle_week, weekday, is_working,
               start_time::text AS start_time,
               end_time::text   AS end_time,
-              minutes
+              minutes, at_home
          FROM staff_working_pattern_days
         WHERE pattern_id = ANY($1::uuid[])`,
       [patterns.map(p => p.id)]
@@ -592,6 +629,9 @@ export async function getStaffCalendar(
   const companyDays = opts.includeCompanyDays === false
     ? new Map<string, { label: string }>()
     : await (await import('./staff-company-days')).getCompanyDayOverlay(from, to);
+  // Dynamic, like company days: staff-wfh.ts reads the calendar to validate a
+  // request, so a static import both ways would be a cycle.
+  const wfhByPerson = await (await import('./staff-wfh')).getWfhOverlay(ids, from, to);
   const dates = dateRange(from, to);
 
   return people.map(p => {
@@ -609,10 +649,13 @@ export async function getStaffCalendar(
       jobTitle: p.job_title,
       department: p.department,
       days: maskForViewer(
-        mergeAbsenceLayer(
-          days,
-          leaveByPerson.get(p.person_id) ?? [],
-          absenceByPerson.get(p.person_id) ?? []
+        mergeWfhLayer(
+          mergeAbsenceLayer(
+            days,
+            leaveByPerson.get(p.person_id) ?? [],
+            absenceByPerson.get(p.person_id) ?? []
+          ),
+          wfhByPerson.get(p.person_id) ?? []
         ),
         opts.isAdmin
       ),
@@ -644,6 +687,8 @@ export async function getTodaySummary(date: string, isAdmin: boolean) {
       scheduledMinutes: d.scheduledMinutes,
       window: d.window,
       detail: d.detail,
+      location: d.location,
+      pending: d.pending,
     };
   });
   const rank = (s: DayStatus) => (s === 'working' ? 0 : s === 'partial' ? 1 : 2);
@@ -651,6 +696,8 @@ export async function getTodaySummary(date: string, isAdmin: boolean) {
   return {
     date,
     in: rows.filter(r => r.status === 'working' || r.status === 'partial').length,
+    // In the BUILDING — "in" minus anyone working from home (spec §19).
+    onSite: rows.filter(r => (r.status === 'working' || r.status === 'partial') && r.location !== 'home').length,
     total: rows.length,
     people: rows,
   };

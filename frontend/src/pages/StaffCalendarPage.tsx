@@ -30,6 +30,10 @@ interface StaffDay {
   companyDay?: string;
   /** Requested, not yet approved — shown as "Requested", still counted in. */
   pending?: boolean;
+  /** Working, but from home (spec §19) — counted as working, not as here. */
+  location?: 'home';
+  /** A working-from-home request for the day is waiting for a decision. */
+  homePending?: boolean;
   detail?: { leaveType?: string; absenceType?: string };
 }
 /**
@@ -192,6 +196,9 @@ const CELL: Record<DayStatus, { bg: string; label: string }> = {
 };
 /** A requested day — dashed, like an offered freelancer: coming, not agreed. */
 const REQUESTED = { bg: 'bg-amber-50 text-amber-800 border border-dashed border-amber-400', label: 'Requested' };
+/** Working from home — working, but not in the building (spec §19). */
+const HOME = { bg: 'bg-teal-50 text-teal-800 border border-teal-200', label: '⌂ Home' };
+const HOME_ASKED = { bg: 'bg-emerald-100/70 text-teal-700 border border-dashed border-teal-400', label: 'Home?' };
 
 /** Somebody's usual start across the days on screen — only a DIFFERENT one is
  *  worth printing in the cell. */
@@ -213,6 +220,9 @@ export default function StaffCalendarPage() {
   const isAdmin = role === 'admin';
 
   const [weeks, setWeeks] = useState(2);
+  // "Who is physically here?" as a view rather than a sum in your head
+  // (spec §19.3, jon): home days fade out and the footer counts the building.
+  const [onSiteOnly, setOnSiteOnly] = useState(false);
   const [from, setFrom] = useState(() => mondayOf(TODAY));
   const [people, setPeople] = useState<CalendarPerson[]>([]);
   const [bankHolidays, setBankHolidays] = useState<string[]>([]);
@@ -288,6 +298,11 @@ export default function StaffCalendarPage() {
         const day = p.days.find(x => x.date === d);
         return day?.status === 'working' || day?.status === 'partial';
       }).length,
+      // In the BUILDING — working, and not from home.
+      onSite: people.filter(p => {
+        const day = p.days.find(x => x.date === d);
+        return (day?.status === 'working' || day?.status === 'partial') && day.location !== 'home';
+      }).length,
       // CONFIRMED only. Counting an unanswered offer would tell you that you
       // have cover you have not actually got, which is the one thing this
       // number exists to get right.
@@ -340,6 +355,10 @@ export default function StaffCalendarPage() {
             className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Today</button>
           <button onClick={() => setFrom(addDays(from, weeks * 7))}
             className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Forward →</button>
+          <label className="flex items-center gap-1.5 px-2 py-1.5 text-sm rounded border border-gray-300 cursor-pointer select-none">
+            <input type="checkbox" checked={onSiteOnly} onChange={e => setOnSiteOnly(e.target.checked)} />
+            On site only
+          </label>
           <select value={weeks} onChange={e => setWeeks(Number(e.target.value))}
             className="px-2 py-1.5 text-sm rounded border border-gray-300">
             <option value={1}>1 week</option>
@@ -463,14 +482,23 @@ export default function StaffCalendarPage() {
                   {(() => {
                     const usual = usualStart(p.days);
                     return p.days.map(day => {
-                      const cell = day.pending ? REQUESTED : CELL[day.status];
+                      const worked = day.status === 'working' || day.status === 'partial';
+                      const home = worked && day.location === 'home';
+                      const cell = day.pending ? REQUESTED
+                        : home && day.status === 'working' ? (onSiteOnly ? { bg: 'text-gray-300', label: '⌂' } : HOME)
+                        : day.homePending && day.status === 'working' ? HOME_ASKED
+                        : CELL[day.status];
                       // A day can carry several windows now; fall back to the
                       // single `window` so a cached bundle keeps working.
                       const wins = day.windows ?? (day.window ? [day.window] : []);
                       // Why somebody is off is admin-only: detail never reaches
                       // anybody else (maskForViewer), so peers just see "Off".
                       const why = day.detail?.absenceType ?? day.detail?.leaveType;
-                      const title = day.pending
+                      const title = home
+                        ? `Working from home${day.startTime ? ` ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}` : ''}`
+                        : day.homePending && day.status === 'working'
+                          ? 'Asked to work from home — not approved yet, so expected in'
+                          : day.pending
                         ? `Requested${wins.length ? ` ${wins.map(w => `${w.start}–${w.end}`).join(', ')}` : ''}, not yet approved${why ? ` — ${why}` : ''}`
                         : day.status === 'working' && day.startTime
                           ? `In ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}`
@@ -479,7 +507,7 @@ export default function StaffCalendarPage() {
                             : day.status === 'leave' || day.status === 'absent'
                               ? `Off${why ? ` — ${why}` : ''}`
                               : cell.label || (day.companyDay ? `Closed — ${day.companyDay}` : 'Not working');
-                      const text = day.pending ? cell.label
+                      const text = day.pending || (home && day.status === 'working') || (day.homePending && day.status === 'working') ? cell.label
                         : day.status === 'working'
                           ? (day.startTime && day.startTime.slice(0, 5) !== usual ? day.startTime.slice(0, 5) : '')
                           : day.companyDay ? 'Closed' : cell.label;
@@ -565,11 +593,18 @@ export default function StaffCalendarPage() {
                 {headcount.map((n, i) => (
                   <td key={dates[i]} className="px-1 py-2 text-center text-gray-700"
                     title={[
-                      `${n.staff} staff`,
+                      n.onSite === n.staff ? `${n.staff} staff in`
+                        : `${n.onSite} in the building · ${n.staff - n.onSite} working from home`,
                       n.freelancers > 0 ? `${n.freelancers} freelance confirmed` : null,
                       n.pending > 0 ? `${n.pending} offered, no reply yet` : null,
                     ].filter(Boolean).join(' · ')}>
-                    {n.staff}
+                    {/* One number when everyone working is here; when somebody
+                        is at home, the building count leads and home trails
+                        (spec §19.3 — the two-number form is the exception). */}
+                    {n.onSite}
+                    {n.onSite !== n.staff && !onSiteOnly && (
+                      <span className="text-teal-700 font-normal text-xs"> +{n.staff - n.onSite}⌂</span>
+                    )}
                     {n.freelancers > 0 && (
                       <span className="text-amber-700"> +{n.freelancers}</span>
                     )}
@@ -589,6 +624,7 @@ export default function StaffCalendarPage() {
           { bg: CELL.working.bg, label: 'In (a time shows only when it is not their usual start)' },
           { bg: CELL.partial.bg, label: 'Part day' },
           { bg: REQUESTED.bg, label: 'Requested — not approved yet' },
+          { bg: HOME.bg, label: 'Working from home' },
           { bg: CELL.leave.bg, label: 'Off' },
           { bg: 'border border-gray-200', label: 'Not working' },
         ].map(l => (

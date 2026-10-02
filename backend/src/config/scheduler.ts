@@ -1074,7 +1074,7 @@ export function startScheduler() {
       const { runStaffTimeDigest } = await import('../services/staff-notifications');
       const r = await runStaffTimeDigest();
       if (r.emailed) {
-        console.log(`Scheduler: Staff time digest sent — ${r.pendingLeave} leave, ${r.pendingOvertime} overtime`);
+        console.log(`Scheduler: Staff time digest sent — ${r.pendingLeave} leave, ${r.pendingOvertime} overtime, ${r.pendingWfh ?? 0} home`);
       } else {
         console.log(`Scheduler: Staff time digest not sent (${r.skippedReason})`);
       }
@@ -1134,6 +1134,27 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (sends 2 January)');
+
+  // ── Monthly payroll report (spec §12.1) ───────────────────────────────────
+  // Daily at 08:20 Europe/London; emails LAST month's payroll changes (with the
+  // CSV) to the staff admins once, from the 1st — payroll goes in before the
+  // 4th. Daily rather than a cron on the 1st so a server down that morning
+  // still sends on the 2nd; `staff.payroll_report_sent_month` stops a repeat
+  // and is stamped only on a successful send.
+  cron.schedule('20 8 * * *', async () => {
+    try {
+      const { runPayrollReportEmail } = await import('../services/staff-notifications');
+      const r = await runPayrollReportEmail();
+      if (r.sent) {
+        console.log(`Scheduler: Payroll report for ${r.month} sent — ${r.people} people`);
+      } else if (r.skippedReason !== 'already sent for this month') {
+        console.log(`Scheduler: Payroll report for ${r.month} not sent (${r.skippedReason})`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Payroll report failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Payroll report scheduled daily at 08:20 Europe/London (sends once a month, from the 1st)');
 
   // ── Company days for next year (spec §20.4) ───────────────────────────────
   // Daily at 09:58 Europe/London; no-ops outside the configured review month

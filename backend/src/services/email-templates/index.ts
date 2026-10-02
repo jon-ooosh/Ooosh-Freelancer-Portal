@@ -48,6 +48,18 @@ const templates: Record<string, EmailTemplate> = {
     body: '<p>Requests are waiting for a decision in the Ooosh Operations Platform.</p>',
   },
 
+  // Staff Calendar: last month's payroll changes (paid overtime, unpaid leave,
+  // sickness), sent once a month from the 1st so the figures reach the payroll
+  // company before the 4th. CSV attached. Body is built by
+  // runPayrollReportEmail() in services/staff-notifications.ts and passed as
+  // bodyHtmlOverride, so the template is just the shell.
+  staff_payroll_report: {
+    variant: 'internal',
+    preheader: "Last month's payroll changes, ready to send",
+    subject: 'Payroll changes for last month',
+    body: '<p>Last month\'s payroll changes are ready in the Ooosh Operations Platform.</p>',
+  },
+
   // ── Client-facing templates ────────────────────────────────────────────
 
   // Driver hire-form email verification code (OTP). Sent by the hire form app

@@ -1,18 +1,20 @@
 ---
 paths:
-  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,freelancer-days}.ts"
-  - "backend/src/routes/staff-calendar.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214}_*.sql"
+  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-ical,freelancer-days}.ts"
+  - "backend/src/routes/{staff-calendar,staff-calendar-feed}.ts"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
-  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals}.tsx"
+  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
 ---
 
 # Staff Calendar & Time — load-bearing rules
 
-Full design: `docs/STAFF-CALENDAR-SPEC.md`. This file is the "never do X" list.
-**Hard deadline: live 1 January 2027** (BrightHR expires; the leave year is
-calendar Jan–Dec so 1 Jan is the only cutover with no balances to migrate).
+Full design: `docs/STAFF-CALENDAR-SPEC.md` — **§18 "Where it stands" is the
+handover**. This file is the "never do X" list.
+**LIVE since October 2026** (earlier than the original 1 January 2027 plan;
+2026 history backfilled from BrightHR). Expected to be complete — what is
+deliberately not built is in spec §16.
 
 ## Minutes are the only stored unit
 
@@ -37,6 +39,8 @@ neither can be shown to be wrong.
 | Is this person off sick, and for how long? | `services/staff-absence.ts` |
 | What is the threshold / policy / bank holiday? | `services/staff-settings.ts` |
 | Is the company shut on this date? | `services/staff-company-days.ts` |
+| Is this person working from home? | `services/staff-wfh.ts` (merged into `StaffDay.location` by `staff-day-status.ts`) |
+| What goes in somebody's calendar feed? | `services/staff-ical.ts` |
 
 ## The ledger is append-only and the database enforces it
 
@@ -387,6 +391,44 @@ to an admin — the approvals list depends on it. A page showing one person's
 time must pass `personId=` or `mine=1`; My Time once listed the whole team's
 leave as an admin's own. The Staff page's Time off tab is `MyTimePage
 personId={…}` — one page, two viewers, so the figures cannot drift.
+
+## Working from home is a LOCATION on a working day, not leave
+
+Spec §19 (Oct 2026, migration 269). `StaffDay.location = 'home'` comes from the
+pattern's `at_home` tick (a regular day, admin-set) or an APPROVED
+`staff_wfh_requests` row (a one-off, asked for and approved like holiday).
+`mergeWfhLayer()` is the ONE place they are applied, after the absence merge.
+
+- **Nothing here touches the ledger, a balance or an absence.** If a WFH
+  change needs `staff-balance.ts`, something has gone wrong.
+- **Only on a day actually worked.** A day off, on leave or off sick carries no
+  location — the merge strips it.
+- **Pending is not home.** A request waiting is `homePending`; until somebody
+  says yes they are expected in, and they still count as on site.
+- **Two states, whole days** (jon): in the building, or working but not here.
+  Do not add `on_site` / `travelling` / half days without asking.
+- **Cover counts the BUILDING.** `getImpact()` coverage and
+  `staff.min_headcount_by_weekday` count `status === 'working' && location !==
+  'home'`. The calendar footer shows the on-site number, plus `+n⌂` only when
+  somebody is home; the dashboard strip does the same.
+- Not special-category — every viewer sees it.
+
+## The calendar feed is the person's OWN time — nothing else, ever
+
+`services/staff-ical.ts` is the only thing that decides what is in a feed
+(spec §10, migration 270). Own approved + requested time off, own home days,
+company days. **Never** a colleague's time, never overtime, never absence: a
+calendar app syncs and shares far beyond this platform, and what has left
+cannot be recalled. The token is a credential — `/me/calendar-feed` takes no
+`personId`, admin or not, and resolves only while the person is `employed`.
+
+## The payroll report emails itself on the 1st
+
+`runPayrollReportEmail()` (08:20 daily) emails last month's figures to every
+admin from the 1st, once — jon submits to payroll before the 4th. It stamps
+`staff.payroll_report_sent_month` only after a send SUCCEEDS (a failed day
+retries tomorrow); clear that setting to resend. Figures come from
+`getPayrollReport()` — never a second SUM.
 
 ## Special-category data is masked in the service, not the browser
 

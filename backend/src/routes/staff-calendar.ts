@@ -1037,6 +1037,38 @@ router.get('/bank-holidays', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Personal calendar feed (spec §10) ──────────────────────────────────────
+// The caller's OWN secret iCal link. Never another person's — there is no
+// personId here on purpose, admin or not: the link is a credential.
+function feedUrl(token: string): string {
+  const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
+  return `${base}/api/staff-calendar-feed/${token}.ics`;
+}
+
+router.get('/me/calendar-feed', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    const { getOrCreateFeedToken } = await import('../services/staff-ical');
+    res.json({ data: { url: feedUrl(await getOrCreateFeedToken(own)) } });
+  } catch (err) {
+    console.error('[staff-calendar] calendar feed error:', err);
+    res.status(500).json({ error: 'Failed to get your calendar link' });
+  }
+});
+
+router.post('/me/calendar-feed/reset', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    const { resetFeedToken } = await import('../services/staff-ical');
+    res.json({ data: { url: feedUrl(await resetFeedToken(own)) } });
+  } catch (err) {
+    console.error('[staff-calendar] calendar feed reset error:', err);
+    res.status(500).json({ error: 'Failed to reset your calendar link' });
+  }
+});
+
 router.get('/me/balances', async (req: AuthRequest, res: Response) => {
   try {
     // An admin may ask for anybody's — the Staff page's Time off tab mounts
@@ -1532,6 +1564,110 @@ router.put('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   }
 });
 
+// ── Working from home (spec §19) ────────────────────────────────────────────
+//
+// A one-off home day is REQUESTED and approved like holiday; a regular one
+// lives on the working pattern (`atHome`). Same "whose?" rule as /leave: an
+// admin with no personId gets everybody's, `mine=1` gets your own.
+
+router.get('/wfh', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    const requested = req.query.personId ? String(req.query.personId) : undefined;
+    const personId = req.query.mine === '1' ? (own ?? '__none__') : isAdmin(req) ? requested : (own ?? '__none__');
+    const { listWfhRequests, countPendingWfh } = await import('../services/staff-wfh');
+    res.json({
+      data: await listWfhRequests({
+        personId,
+        status: req.query.status ? String(req.query.status) as never : undefined,
+        from: DATE_RE.test(String(req.query.from)) ? String(req.query.from) : undefined,
+        to: DATE_RE.test(String(req.query.to)) ? String(req.query.to) : undefined,
+      }),
+      pendingCount: isAdmin(req) ? await countPendingWfh() : undefined,
+    });
+  } catch (err) {
+    console.error('[staff-calendar] list wfh error:', err);
+    res.status(500).json({ error: 'Failed to load working-from-home requests' });
+  }
+});
+
+router.post('/wfh', async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({
+    personId: z.string().uuid().optional(),
+    startDate: dateStr, endDate: dateStr,
+    note: z.string().max(500).nullish(),
+  }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  const target = await resolveLeaveTarget(req, parsed.data.personId);
+  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+  try {
+    const { createWfhRequest, getWfhRequest } = await import('../services/staff-wfh');
+    const id = await createWfhRequest({ personId: target.personId, startDate: parsed.data.startDate,
+      endDate: parsed.data.endDate, note: parsed.data.note ?? null }, req.user!.id);
+    const { notifyWfhRequested } = await import('../services/staff-notifications');
+    void notifyWfhRequested(id);
+    res.status(201).json({ data: await getWfhRequest(id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to request it' });
+  }
+});
+
+router.post('/wfh/:id/approve', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const { decideWfhRequest } = await import('../services/staff-wfh');
+    const w = await decideWfhRequest(req.params.id as string, 'approved',
+      typeof req.body?.note === 'string' && req.body.note.trim() ? req.body.note.trim() : null, req.user!.id);
+    void notifyDecision({ personId: w.personId, kind: 'wfh', outcome: 'approved',
+      summary: `${w.startDate}${w.endDate !== w.startDate ? ` – ${w.endDate}` : ''}`,
+      note: w.decisionNote, entityId: w.id });
+    res.json({ data: w });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to approve' });
+  }
+});
+
+router.post('/wfh/:id/decline', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ note: z.string().min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required when declining' }); return; }
+  try {
+    const { decideWfhRequest } = await import('../services/staff-wfh');
+    const w = await decideWfhRequest(req.params.id as string, 'declined', parsed.data.note, req.user!.id);
+    void notifyDecision({ personId: w.personId, kind: 'wfh', outcome: 'declined',
+      summary: `${w.startDate}${w.endDate !== w.startDate ? ` – ${w.endDate}` : ''}`,
+      note: w.decisionNote, entityId: w.id });
+    res.json({ data: w });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to decline' });
+  }
+});
+
+router.post('/wfh/:id/withdraw', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    const { withdrawWfhRequest } = await import('../services/staff-wfh');
+    await withdrawWfhRequest(req.params.id as string, own);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to withdraw' });
+  }
+});
+
+router.post('/wfh/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ reason: z.string().min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Say why it is being cancelled' }); return; }
+  try {
+    const { cancelWfhRequest } = await import('../services/staff-wfh');
+    const w = await cancelWfhRequest(req.params.id as string, parsed.data.reason, req.user!.id);
+    void notifyDecision({ personId: w.personId, kind: 'wfh', outcome: 'cancelled',
+      summary: `${w.startDate}${w.endDate !== w.startDate ? ` – ${w.endDate}` : ''}`,
+      note: w.decisionNote, entityId: w.id });
+    res.json({ data: w });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
+  }
+});
+
 // ── Working patterns ────────────────────────────────────────────────────────
 
 // GET /api/staff-calendar/employees/:personId/patterns — own record or admin
@@ -1559,6 +1695,7 @@ const patternSchema = z.object({
     startTime: timeStr.nullish(),
     endTime: timeStr.nullish(),
     breakMinutes: z.number().int().min(0).max(480).optional(),
+    atHome: z.boolean().optional(),
   })).min(1).max(14),
 });
 

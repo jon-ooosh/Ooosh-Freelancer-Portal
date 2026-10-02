@@ -63,6 +63,16 @@ interface MyBalances {
    *  company-wide policy from /bank-holidays. */
   bankHolidayPolicy?: BhPolicy;
 }
+/** A one-off working-from-home request (spec §19) — GET /staff-calendar/wfh. */
+interface WfhRequest {
+  id: string;
+  startDate: string;
+  endDate: string;
+  status: 'pending' | 'approved' | 'declined' | 'withdrawn' | 'cancelled';
+  requestNote: string | null;
+  decidedByName: string | null;
+  decisionNote: string | null;
+}
 interface OvertimeEntry {
   id: string;
   workDate: string;
@@ -202,6 +212,8 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const who = personId ? `personId=${encodeURIComponent(personId)}` : 'mine=1';
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
+  const [wfh, setWfh] = useState<WfhRequest[]>([]);
+  const [wfhOpen, setWfhOpen] = useState(false);
   const [balances, setBalances] = useState<MyBalances | null>(null);
   const [hasStaffRecord, setHasStaffRecord] = useState(true);
   // The leave year being looked at. Everything on this page is per leave year
@@ -226,7 +238,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
     try {
       const from = `${year}-01-01`;
       const to = `${year}-12-31`;
-      const [leave, ot, bal, bh, cd] = await Promise.all([
+      const [leave, ot, bal, bh, cd, wf] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}&${who}`),
         api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}&${who}`),
         api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>(
@@ -235,7 +247,12 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
           `/staff-calendar/bank-holidays?year=${year}`),
         api.get<{ occurrences: { date: string; label: string }[] }>(
           `/staff-calendar/company-days?year=${year}`),
+        // Decoration on this page — a failure leaves the list without home
+        // days rather than taking the balances down with it.
+        api.get<{ data: WfhRequest[] }>(`/staff-calendar/wfh?from=${from}&to=${to}&${who}`)
+          .catch(() => ({ data: [] as WfhRequest[] })),
       ]);
+      setWfh(wf.data ?? []);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
@@ -252,15 +269,18 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
 
   // Admin only — the same approve / decline calls the approvals list makes.
   // A decline needs a reason; the person is told it.
-  async function decide(kind: 'leave' | 'overtime', id: string, action: 'approve' | 'decline') {
+  async function decide(kind: 'leave' | 'overtime' | 'wfh', id: string, action: 'approve' | 'decline' | 'cancel') {
     let note: string | null = null;
-    if (action === 'decline') {
-      note = window.prompt('Why is this declined? They will see this.');
+    if (action !== 'approve') {
+      note = window.prompt(action === 'cancel'
+        ? 'Why is this home day called off? They will see this.'
+        : 'Why is this declined? They will see this.');
       if (!note?.trim()) return;
     }
     try {
-      await api.post(`/staff-calendar/${kind}/${id}/${action}`, action === 'decline' ? { note } : {});
-      setNotice(action === 'approve' ? 'Approved.' : 'Declined.');
+      await api.post(`/staff-calendar/${kind}/${id}/${action}`,
+        action === 'decline' ? { note } : action === 'cancel' ? { reason: note } : {});
+      setNotice(action === 'approve' ? 'Approved.' : action === 'cancel' ? 'Called off.' : 'Declined.');
       setError(null);
       await load();
     } catch (err) {
@@ -280,6 +300,17 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
     setCalMonth(y === CURRENT_YEAR
       ? { y, m: Number(TODAY.slice(5, 7)) - 1 }
       : { y, m: 0 });
+  }
+
+  async function withdrawWfh(id: string) {
+    if (!confirm('Withdraw this working-from-home request?')) return;
+    try {
+      await api.post(`/staff-calendar/wfh/${id}/withdraw`, {});
+      setNotice('Request withdrawn.');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to withdraw');
+    }
   }
 
   async function withdraw(id: string) {
@@ -399,6 +430,12 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
                 className="w-full py-2.5 rounded-lg border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50 text-sm font-medium">
                 Use overtime as time off
               </button>
+              {/* Not time off — working, just not here (spec §19). A one-off
+                  day is asked for; a regular one is on the working pattern. */}
+              <button onClick={() => setWfhOpen(true)}
+                className="w-full py-2.5 rounded-lg border border-teal-300 text-teal-800 hover:bg-teal-50 text-sm font-medium">
+                ⌂ Work from home
+              </button>
               {!isCurrentYear && (
                 <p className="text-xs text-gray-500">
                   Books against {year} — next year&apos;s allowance is already set.
@@ -438,6 +475,17 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
       </div>
       )}
 
+      {wfhOpen && !adminView && (
+        <WfhForm seedDate={formSeedDate}
+          onClose={() => setWfhOpen(false)}
+          onDone={async () => {
+            setWfhOpen(false); setError(null);
+            setNotice('Asked — you’ll hear when it’s been looked at.');
+            await load();
+          }}
+          onError={setError} />
+      )}
+
       {booking && (
         <BookTimeOff key={`${booking.type}:${booking.seed}`}
           balances={balances} seedDate={booking.seed} initialType={booking.type}
@@ -450,7 +498,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         <div className="px-4 sm:px-5 py-3.5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-baseline gap-x-2.5">
             <h2 className="text-[17px] font-semibold text-gray-900">{adminView ? 'Time off and overtime' : 'Your time'}</h2>
-            <span className="hidden sm:inline text-[13px] text-gray-500">Holiday, overtime and company days together</span>
+            <span className="hidden sm:inline text-[13px] text-gray-500">Holiday, overtime, home days and company days together</span>
           </div>
           <div className="flex bg-gray-100 rounded-lg p-[3px]">
             {(['list', 'calendar'] as const).map(v => (
@@ -466,7 +514,8 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         {loading ? (
           <div className="px-5 py-6 text-sm text-gray-500">Loading…</div>
         ) : view === 'list' ? (
-          <TimeList year={year} requests={requests} overtime={overtime} companyDays={companyDays}
+          <TimeList year={year} requests={requests} overtime={overtime} wfh={wfh} onWithdrawWfh={withdrawWfh}
+            companyDays={companyDays}
             bankHolidaysToBook={bh.toBook} freshIds={freshIds}
             onWithdraw={withdraw} onCancelOvertime={cancelOvertime}
             onDecide={adminView ? decide : undefined}
@@ -480,11 +529,164 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
               if (next.y !== year) setYear(next.y);
             }}
             onThisMonth={() => changeYear(CURRENT_YEAR)}
-            requests={requests} overtime={overtime} companyDays={companyDays}
+            requests={requests} overtime={overtime} wfh={wfh} companyDays={companyDays}
             bankHolidays={bankHolidays} bankHolidaysToBook={bh.toBook}
             onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         )}
       </section>
+
+      {/* The person's own link only — never on an admin's view of somebody
+          else, since the link is a credential for THEIR calendar. */}
+      {!adminView && <CalendarFeedCard />}
+    </div>
+  );
+}
+
+/**
+ * "Add to your phone's calendar" — a read-only iCal feed of your OWN time off,
+ * home days and company days (spec §10; contents decided by
+ * services/staff-ical.ts). Collapsed until asked for: the link is only
+ * fetched — and so only created — when somebody opens this.
+ */
+function CalendarFeedCard() {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open || url) return;
+    api.get<{ data: { url: string } }>('/staff-calendar/me/calendar-feed')
+      .then(r => setUrl(r.data.url))
+      .catch(e => setErr(e instanceof Error ? e.message : 'Could not get your link'));
+  }, [open, url]);
+
+  async function copy() {
+    if (!url) return;
+    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+    catch { setErr('Could not copy — press and hold the link to copy it instead.'); }
+  }
+
+  async function reset() {
+    if (!confirm('Make a new link? Any calendar using the old one stops updating, and you will need to add the new one.')) return;
+    setBusy(true);
+    try {
+      const r = await api.post<{ data: { url: string } }>('/staff-calendar/me/calendar-feed/reset', {});
+      setUrl(r.data.url); setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not reset the link');
+    } finally { setBusy(false); }
+  }
+
+  const webcal = url ? url.replace(/^https?:/, 'webcal:') : null;
+  const google = webcal ? `https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}` : null;
+
+  return (
+    <section className="mt-4 bg-white border border-gray-200 rounded-2xl sm:rounded-xl p-5">
+      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between text-left">
+        <span>
+          <span className="block text-[15px] font-semibold text-gray-900">Add your time to your phone&apos;s calendar</span>
+          <span className="block text-[13px] text-gray-500">Your holiday, requests, home days and company days — nobody else&apos;s.</span>
+        </span>
+        <span className="text-gray-400 text-sm ml-3">{open ? 'Hide' : 'Show'}</span>
+      </button>
+
+      {open && (
+        <div className="mt-4 text-sm text-gray-700 space-y-3">
+          {err && <div className="p-2.5 rounded bg-red-50 border border-red-200 text-red-700">{err}</div>}
+          {!url && !err && <p className="text-gray-500">Getting your link…</p>}
+          {url && (
+            <>
+              <div className="flex gap-2">
+                <input readOnly value={url} onFocus={e => e.currentTarget.select()}
+                  className="flex-1 min-w-0 px-2 py-1.5 border border-gray-300 rounded text-xs font-mono bg-gray-50" />
+                <button onClick={() => void copy()}
+                  className="px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50 text-sm shrink-0">
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <a href={webcal!} className="px-3 py-1.5 rounded bg-ooosh-600 hover:bg-ooosh-700 text-white text-sm font-medium">
+                  iPhone / Mac: add it
+                </a>
+                <a href={google!} target="_blank" rel="noreferrer"
+                  className="px-3 py-1.5 rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50 text-sm font-medium">
+                  Android / Google: add it
+                </a>
+              </div>
+              <ul className="text-[13px] text-gray-600 list-disc pl-5 space-y-1">
+                <li><strong>iPhone:</strong> tap the first button, then Subscribe. Or Settings › Calendar › Accounts › Add Account › Other › Add Subscribed Calendar, and paste the link.</li>
+                <li><strong>Android:</strong> the second button opens Google Calendar on the web — choose Add. If it doesn&apos;t, open calendar.google.com, then Other calendars › + › From URL, and paste the link. It then appears in the Calendar app on your phone (check it is ticked in the app&apos;s menu).</li>
+                <li>It is read-only and updates itself — iPhone every few hours, Google sometimes only once a day. To change anything, use this page.</li>
+                <li>Treat the link like a password: anyone with it can see your time off.{' '}
+                  <button onClick={() => void reset()} disabled={busy} className="text-red-600 underline disabled:opacity-50">
+                    Make a new link
+                  </button>{' '}if it has gone somewhere it shouldn&apos;t.</li>
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Ask to work from home — whole days only (jon, Oct 2026). Costs nothing and
+ * touches no balance, so there is no impact panel: the approver sees the
+ * calendar. A REGULAR home day is not asked for here; it goes on the working
+ * pattern, set by an admin.
+ */
+function WfhForm({ seedDate, onClose, onDone, onError }: {
+  seedDate: string; onClose: () => void; onDone: () => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [startDate, setStartDate] = useState(seedDate);
+  const [endDate, setEndDate] = useState(seedDate);
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (endDate < startDate) setEndDate(startDate); }, [startDate, endDate]);
+
+  async function submit() {
+    setSaving(true);
+    try {
+      await api.post('/staff-calendar/wfh', { startDate, endDate, note: note.trim() || null });
+      await onDone();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not send that');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="p-5 rounded-2xl sm:rounded-xl border border-teal-200 bg-white">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-[17px] font-semibold text-gray-900">Work from home</h2>
+        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+      <p className="text-[13px] text-gray-500 mb-3">
+        Whole days. You are still working — this just says you won&apos;t be in the building.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">From</span>
+          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">To</span>
+          <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Note (optional)</span>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. waiting in for a delivery"
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm" />
+        </label>
+      </div>
+      <button onClick={() => void submit()} disabled={saving}
+        className="px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold disabled:opacity-50">
+        {saving ? 'Sending…' : 'Ask to work from home'}
+      </button>
     </div>
   );
 }
@@ -1440,10 +1642,10 @@ const DEAD = new Set(['declined', 'cancelled', 'withdrawn']);
  * IS time off — they just did not have to ask for it and it cost nothing — so
  * it sits in the same list as their own bookings.
  */
-type Decide = (kind: 'leave' | 'overtime', id: string, action: 'approve' | 'decline') => void;
+type Decide = (kind: 'leave' | 'overtime' | 'wfh', id: string, action: 'approve' | 'decline' | 'cancel') => void;
 
 /** What a pending row offers: the person withdraws it; an admin decides it. */
-function pendingActions(kind: 'leave' | 'overtime', id: string, onWithdraw: () => void, onDecide?: Decide) {
+function pendingActions(kind: 'leave' | 'overtime' | 'wfh', id: string, onWithdraw: () => void, onDecide?: Decide) {
   return onDecide
     ? [
         { label: 'Approve', onClick: () => onDecide(kind, id, 'approve'), className: 'text-emerald-700 font-semibold' },
@@ -1452,8 +1654,9 @@ function pendingActions(kind: 'leave' | 'overtime', id: string, onWithdraw: () =
     : [{ label: 'Withdraw', onClick: onWithdraw, className: 'text-red-600' }];
 }
 
-function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
+function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
+  wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
@@ -1526,11 +1729,35 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
         ? pendingActions('leave', r.id, () => onWithdraw(r.id), onDecide) : undefined,
     });
   }
+
+  // Working from home: not time off and costs nothing, but it belongs on the
+  // same timeline — "where was I working?" is the same kind of question.
+  for (const w of wfh) {
+    const dead = DEAD.has(w.status);
+    rows.push({
+      key: `wfh:${w.id}`, date: w.startDate, until: w.endDate,
+      title: 'Working from home',
+      meta: `${w.startDate === w.endDate ? fmtDate(w.startDate) : fmtRange(w.startDate, w.endDate)}${w.requestNote ? ` · “${w.requestNote}”` : ''}`,
+      extra: w.decisionNote ? `${w.decidedByName ? `${w.decidedByName}: ` : ''}${w.decisionNote}` : null,
+      amount: '', amountClass: '',
+      pill: w.status === 'pending' ? 'Waiting for approval' : statusWord(w.status),
+      pillClass: w.status === 'approved' ? 'bg-teal-100 text-teal-800' : STATUS_STYLE[w.status as LeaveStatus] ?? 'bg-gray-100 text-gray-600',
+      statusClass: w.status === 'pending' ? 'text-amber-800' : w.status === 'approved' ? 'text-teal-700' : 'text-gray-500',
+      dot: dead ? 'bg-gray-300' : w.status === 'pending' ? 'bg-amber-500' : 'bg-teal-500',
+      actions: w.status === 'pending'
+        ? pendingActions('wfh', w.id, () => onWithdrawWfh?.(w.id), onDecide)
+        // An admin can call off an approved home day that has not finished yet.
+        : w.status === 'approved' && onDecide && w.endDate >= localIso(new Date())
+          ? [{ label: 'Call off', onClick: () => onDecide('wfh', w.id, 'cancel'), className: 'text-red-600' }]
+          : undefined,
+    });
+  }
   return rows;
 }
 
 function TimeList(props: {
   year: number; requests: LeaveRequest[]; overtime: OvertimeEntry[];
+  wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
@@ -1593,11 +1820,12 @@ interface CalEvent { label: string; cls: string; dot: string; onClick?: () => vo
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 /** A month grid, Monday first, of the same facts the list shows. */
-function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
+function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [], companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
   month: { y: number; m: number };
   onMonth: (next: { y: number; m: number }) => void;
   onThisMonth: () => void;
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
+  wfh?: WfhRequest[];
   companyDays: { date: string; label: string }[];
   bankHolidays: string[]; bankHolidaysToBook: string[];
   onBook?: (date: string) => void;
@@ -1633,8 +1861,16 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, company
         }
       }
     }
+    for (const w of wfh) {
+      if (w.status !== 'pending' && w.status !== 'approved') continue;
+      for (let d = w.startDate; d <= w.endDate; d = addDaysIso(d, 1)) {
+        add(d, w.status === 'approved'
+          ? { label: '⌂ Home', cls: 'bg-teal-50 text-teal-800', dot: 'bg-teal-500' }
+          : { label: '⌂ Home — waiting', cls: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' });
+      }
+    }
     return map;
-  }, [requests, overtime, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
+  }, [requests, overtime, wfh, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
 
   const { y, m } = month;
   const first = new Date(Date.UTC(y, m, 1));
@@ -1718,6 +1954,7 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, company
           ['bg-gray-100 border border-gray-200', 'Time off'],
           ['bg-ooosh-600', 'Holiday'],
           ['bg-emerald-100', 'Company day'],
+          ['bg-teal-50 border border-teal-300', 'Home'],
         ].map(([cls, text]) => (
           <span key={text} className="flex items-center gap-1.5">
             <i className={`w-2.5 h-2.5 rounded-[3px] ${cls}`} />{text}
