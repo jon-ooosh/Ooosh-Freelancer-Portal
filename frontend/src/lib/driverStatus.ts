@@ -69,9 +69,27 @@ function isExpired(date: string | null | undefined): boolean {
  */
 function isUkLicence(driver: DriverStatusInput): boolean {
   const issuedBy = (driver.licence_issued_by || '').trim().toUpperCase();
-  if (issuedBy.includes('DVLA') || issuedBy === 'DVA') return true;
+  if (issuedBy.includes('DVLA') || issuedBy === DVA_ISSUER) return true;
   const country = (driver.licence_issue_country || '').trim().toUpperCase();
   return ['GB', 'UK', 'GBR', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(country);
+}
+
+/** The issuer string iDenfy returns for a Northern Ireland licence. */
+const DVA_ISSUER = 'DVA';
+
+/**
+ * Mirrors `isNiLicence` in backend/src/services/driver-validity.ts.
+ *
+ * NI is the UK, so these drivers need a licence record check like any other UK
+ * driver — they just cannot produce one themselves, because
+ * viewdrivingrecord.service.gov.uk holds GB licences only. DVA run their own
+ * check-code service at nidirect and a member of staff has to run the lookup.
+ *
+ * Display only — nothing gates on it. It changes which instructions staff are
+ * shown on the record-check panel, never whether the check is required.
+ */
+export function isNiLicence(driver: { licence_issued_by?: string | null }): boolean {
+  return (driver.licence_issued_by || '').trim().toUpperCase() === DVA_ISSUER;
 }
 
 export function deriveDriverStatus(driver: DriverStatusInput): DriverStatus {

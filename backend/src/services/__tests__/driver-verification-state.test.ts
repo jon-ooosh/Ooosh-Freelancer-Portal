@@ -46,6 +46,67 @@ describe('healthy driver', () => {
   });
 });
 
+describe('Northern Ireland (DVA) licence', () => {
+  // Declan Haughian / 16286: everything done, parked forever on a DVLA step he
+  // could never complete. A DVA licence has no GOV.UK share code.
+  const ni = { ...healthy, licence_issued_by: 'DVA', dvla_check_date: null, dvla_check_code: null };
+
+  it('still requires the record check — NI is UK', () => {
+    const state = computeVerificationState(ni, TODAY);
+    expect(stage(state, 'dvla').state).not.toBe('not_required');
+    expect(stage(state, 'passport').state).toBe('not_required');
+  });
+
+  it('says the driver cannot run it themselves, and does not ask for a hire form', () => {
+    const state = computeVerificationState(ni, TODAY);
+    const action = state.actions.find(a => a.slot === 'dvla')!;
+    expect(action.kind).toBe('run_dva_check');
+    expect(action.message).toMatch(/nidirect/);
+    expect(action.message).not.toMatch(/hire form/);
+  });
+
+  it('names the supplied check code so staff can run the lookup', () => {
+    // Mixed case is real and must survive — upper-casing it breaks the lookup.
+    const state = computeVerificationState({ ...ni, dvla_check_code: 'BML1s646' }, TODAY);
+    expect(stage(state, 'dvla').detail).toMatch(/BML1s646/);
+    expect(state.actions.find(a => a.slot === 'dvla')!.message).toMatch(/BML1s646/);
+  });
+
+  it('asks for a code when the driver has not supplied one', () => {
+    const state = computeVerificationState(ni, TODAY);
+    expect(state.actions.find(a => a.slot === 'dvla')!.message).toMatch(/Ask the driver/);
+  });
+
+  it('goes quiet once the check is recorded with its evidence', () => {
+    const done = { ...ni, dvla_check_date: addDaysYmd(TODAY, -5), dvla_check_code: 'BML1s646' };
+    const state = computeVerificationState(done, TODAY);
+    expect(stage(state, 'dvla').state).toBe('done');
+    expect(state.actions.find(a => a.slot === 'dvla')).toBeUndefined();
+    expect(state.allClear).toBe(true);
+  });
+
+  it('still flags a recorded check with no summary attached', () => {
+    // Staff ran the lookup and didn't upload the PDF — the generic "evidence is
+    // missing" remedy is the right one here, so the NI branch must not swallow it.
+    const noFile = {
+      ...ni,
+      dvla_check_date: addDaysYmd(TODAY, -5),
+      files: healthy.files.filter(f => f.tag !== 'dvla_check'),
+    };
+    const state = computeVerificationState(noFile, TODAY);
+    const action = state.actions.find(a => a.slot === 'dvla')!;
+    expect(action.kind).toBe('upload_document');
+    expect(action.message).toMatch(/DVA check/);
+  });
+
+  it('leaves a GB driver on the DVLA wording', () => {
+    const state = computeVerificationState({ ...healthy, dvla_check_date: null }, TODAY);
+    const action = state.actions.find(a => a.slot === 'dvla')!;
+    expect(action.kind).not.toBe('run_dva_check');
+    expect(stage(state, 'dvla').label).toBe('DVLA');
+  });
+});
+
 describe('identity review', () => {
   it('blocks the identity stage and leads the actions', () => {
     const state = computeVerificationState(
