@@ -793,8 +793,8 @@ Decided with jon before the build: GPS and SMS yes; **video and retention flaggi
 
 **SMS** (jon: the first send and the 3rd reminder only — texts are more intrusive than email)
 - Templates `claim_form_link` and `claim_form_reminder` in `sms-templates.ts` — one 160-character
-  segment with the link. They go live like the existing texts: `SMS_LIVE_TEMPLATES=claim_form_link,claim_form_reminder`
-  (or `SMS_MODE=live`); until then they go to the test number.
+  segment with the link. Production runs `SMS_MODE=live`, so they went live on deploy (Oct 2026). In
+  `SMS_MODE=test` they'd go to the test number unless listed in `SMS_LIVE_TEMPLATES`.
 - Only to people we have a mobile for: a driver's from their hire form, a job contact's from the
   address book (mobile, else international, else phone). Someone a client forwarded the form to has
   only an email, so gets emails only. A resend is email-only.
@@ -816,7 +816,7 @@ timeline are now clickable (`components/LinkifiedText.tsx`, shared with the stud
 | Driver code email not arriving | Code goes to the address on the DRIVER record (`drivers.email`), not the link's. 30 s resend throttle, 10 min expiry, 5 tries. `journalctl -u ooosh-portal \| grep -i "incident form"`. |
 | No reminders going out | `runClaimClientChase()` 09:21 daily. Case must be `form_out`, not paused, `chase_level` < 5. Skipped (not counted) within 20 h of the form going out or client activity. `chase_sent_for` = last run date. `journalctl … \| grep "claim client chase"`. |
 | Reminders stopped | `chase_level = 5` = four sent, flagged ("Claim forms not coming back"). Restart on the case page. |
-| No texts | Texts only on first send + reminder 3, and only with a mobile on file (driver: hire form; contact: address book). Test mode sends to `SMS_TEST_REDIRECT` until the templates are in `SMS_LIVE_TEMPLATES`. Every attempt is in `sms_log`. EU numbers need Twilio Geo Permissions. |
+| No texts | Texts only on first send + reminder 3, and only with a mobile on file (driver: hire form; contact: address book). Production runs `SMS_MODE=live` (Oct 2026), so every template sends for real; `SMS_LIVE_TEMPLATES` only matters if the mode is put back to `test`. Every attempt is in `sms_log`. EU numbers need Twilio Geo Permissions. |
 | GPS card says no tracker | The Traccar device must be named exactly the van's reg (spaces ignored). |
 | GPS card shows nothing | Van parked, or Traccar no longer has that day — check the automatically saved trace in Files (saved the day after the incident date was set; `gps_auto_captured_at`). |
 | Owner not told about a submit | Bell + email go to the case owner (or `claims_default_watchers` when none). Needs Attention › "Claim forms to review" lists every submitted case regardless. |
