@@ -1,8 +1,9 @@
 # INCIDENT & POSSIBLE-CLAIMS SPEC — replacing the broker's Word/PDF claim form
 
-**Status:** ✅ PHASES 1–4 BUILT (Sep–Oct 2026) — the case file, the client form, client chasing and
-the extras that were kept (GPS trace, SMS). Video and retention flagging were dropped (§21). See §18–21
-for what actually shipped and where it differs from the plan below.
+**Status:** ✅ CLOSED (Oct 2026) — all four phases built and live: the case file, the client form,
+client chasing, GPS trace and SMS. Video and retention flagging deliberately not built (§21). §18–21
+are what actually shipped and where it differs from the plan below; **§22 is the troubleshooting
+guide** — start there when something goes wrong.
 **Shaped:** Sep 2026 — jon + Claude, revising a spec drafted months earlier in a non-code session
 against the codebase as it actually is. Where this document and that draft disagree, this wins.
 
@@ -572,10 +573,10 @@ and a map image as case files. Needs a backend `getRouteForReg(reg, from, to)` a
 ## 16. Open items
 
 1. **Broker:** preferred subject line / file naming (ask before Phase 1's send button goes live).
-2. **Van outline artwork** — Claude draws them at the start of Phase 2; jon judges whether they're good
-   enough.
-3. **Depreciation rate** (§6.6) — jon to pick the starting figure.
-4. **Retention enforcement** — part of the wider driver-data retention discussion, not this module.
+2. **Retention enforcement** — part of the wider driver-data retention discussion, not this module.
+
+**Resolved since:** van artwork (jon's shaded outline sheets, §19.2); depreciation curve (§6.6, built
+in Phase 1).
 
 **Resolved:** privacy notice approved (hyphens, not dashes); injury and declaration answers visible to
 all `STAFF_ROLES`; broker address SelfDriveHire@alanboswell.com; photos as thumbnails + full-size links.
@@ -804,4 +805,26 @@ Decided with jon before the build: GPS and SMS yes; **video and retention flaggi
 timeline are now clickable (`components/LinkifiedText.tsx`, shared with the studio shift notes).
 
 **Retention:** deferred to the wider driver-data retention discussion (§16 item 4).
+
+## 22. Troubleshooting (where to look)
+
+| Symptom | Look at |
+|---|---|
+| Client says the link doesn't work | `incident_claim_links` row for their email: `status = 'revoked'` → switched off; case stage past `form_out` → the form is closed to edits (409 by design). |
+| Client's answers "not in OP" | Check you're on the right case: `SELECT id, stage, vehicle_reg, hh_job_number FROM incident_claims ORDER BY created_at DESC` — the link belongs to one case (the Sep 2026 "missing answers" was a second case on the same job). |
+| A section won't tick | It saves but only ticks when its required answers are in — `sectionMissing()` in `claim-form-fields.ts`; the page lists what's still needed. |
+| Driver code email not arriving | Code goes to the address on the DRIVER record (`drivers.email`), not the link's. 30 s resend throttle, 10 min expiry, 5 tries. `journalctl -u ooosh-portal \| grep -i "incident form"`. |
+| No reminders going out | `runClaimClientChase()` 09:21 daily. Case must be `form_out`, not paused, `chase_level` < 5. Skipped (not counted) within 20 h of the form going out or client activity. `chase_sent_for` = last run date. `journalctl … \| grep "claim client chase"`. |
+| Reminders stopped | `chase_level = 5` = four sent, flagged ("Claim forms not coming back"). Restart on the case page. |
+| No texts | Texts only on first send + reminder 3, and only with a mobile on file (driver: hire form; contact: address book). Test mode sends to `SMS_TEST_REDIRECT` until the templates are in `SMS_LIVE_TEMPLATES`. Every attempt is in `sms_log`. EU numbers need Twilio Geo Permissions. |
+| GPS card says no tracker | The Traccar device must be named exactly the van's reg (spaces ignored). |
+| GPS card shows nothing | Van parked, or Traccar no longer has that day — check the automatically saved trace in Files (saved the day after the incident date was set; `gps_auto_captured_at`). |
+| Owner not told about a submit | Bell + email go to the case owner (or `claims_default_watchers` when none). Needs Attention › "Claim forms to review" lists every submitted case regardless. |
+| Broker PDF missing photos | Only files ticked "Share with insurers" go in. |
+| Marks in the wrong place on an old case | Marks saved before the Oct 2026 artwork swap were placed on the old drawing (§19.2). |
+
+Key files: `services/incident-claims.ts` (cases, reminders, attention), `claim-form-fields.ts` (the form),
+`claim-links.ts` + `routes/claim-form.ts` (public form), `claim-chase.ts` (reminders), `claim-gps.ts`
+(GPS), `claim-pdf.ts` (broker PDF), `routes/incident-claims.ts` (staff API); frontend
+`pages/ClaimDetailPage.tsx`, `pages/ClaimFormPage.tsx`, `components/claims/*`.
 
