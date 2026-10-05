@@ -89,6 +89,7 @@ export interface PortalJobDetailResponse {
     id: string
     name: string
     address?: string
+    loadInAddress?: string | null
     whatThreeWords?: string
     contact1?: string
     phone?: string | null

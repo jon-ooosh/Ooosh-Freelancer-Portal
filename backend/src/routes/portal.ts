@@ -2107,7 +2107,9 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address,
-        v.city as venue_city, v.w3w_address as venue_w3w,
+        v.city as venue_city, v.postcode as venue_postcode,
+        v.country as venue_country, v.load_in_address as venue_load_in_address,
+        v.w3w_address as venue_w3w,
         v.files as venue_files,
         COALESCE(v.approach_notes, v.general_notes) as venue_access_notes,
         qcx.contacts as leg_contacts
@@ -2197,7 +2199,16 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
       venue = {
         id: row.venue_id,
         name: row.linked_venue_name || row.venue_name,
-        address: row.venue_address,
+        // The venue's address lives in four columns (street, city, postcode,
+        // country). The portal shows this string AND feeds it to its Google
+        // Maps link, so it must carry the postcode: the street line alone
+        // ("32 Tavistock Road") pinned the wrong town. Same join as the
+        // delivery note below and OP's own venue page.
+        address: [row.venue_address, row.venue_city, row.venue_postcode, row.venue_country]
+          .filter(Boolean).join(', ') || null,
+        // Load-in address (loading dock round the back etc.) is shown as a
+        // second line alongside the postal address, never instead of it.
+        loadInAddress: row.venue_load_in_address || null,
         whatThreeWords: row.venue_w3w,
         // Venue contacts not stored on venues table — placeholder until a
         // person-link-based contact lookup is added
