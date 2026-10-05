@@ -99,12 +99,24 @@ async function notify(
    */
   entityId: string | null,
   actionUrl: string,
-  priority: 'low' | 'normal' | 'high' = 'normal'
+  priority: 'low' | 'normal' | 'high' = 'normal',
+  /**
+   * True when the caller ALSO emails this straight away (emailApprovers, or
+   * a decision email). The bell is then stamped `email_sent_at` so the
+   * 15-minute escalator does not email it a second time four hours later —
+   * which is exactly what happened with every TOIL request (jon, Oct 2026):
+   * requested → emailed → approved → the still-unread bell escalated as
+   * "X has requested TOIL" again. Approving never marks the bell read, so
+   * the stamp is the only thing that stops it (email-and-notifications
+   * rules). Bells WITHOUT a direct email (the task and review chases) leave
+   * this false so the escalator still does its job for them.
+   */
+  emailedDirectly = false,
 ) {
   await query(
-    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [userId, type, title, content, entityType, entityId, actionUrl, priority]
+    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CASE WHEN $9::boolean THEN NOW() END)`,
+    [userId, type, title, content, entityType, entityId, actionUrl, priority, emailedDirectly]
   ).catch(e => console.error(`[staff-notifications] notify failed (${type}, ${entityType}):`, e));
 }
 
@@ -128,7 +140,7 @@ export async function notifyLeaveRequested(requestId: string) {
       await notify(u.id, 'follow_up',
         `${q.name} has requested ${what}`,
         `${range} · ${fmtH(Number(q.total_minutes))}`,
-        'staff_leave_request', q.id, link);
+        'staff_leave_request', q.id, link, 'normal', true);
     }
     await emailApprovers(
       `${q.name} has requested ${what}`,
@@ -155,7 +167,7 @@ export async function notifyOvertimeLogged(entryId: string) {
       await notify(u.id, 'follow_up',
         `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
         `${fmtDate(q.work_date)} — ${q.reason}`,
-        'staff_overtime_entry', q.id, link);
+        'staff_overtime_entry', q.id, link, 'normal', true);
     }
     await emailApprovers(
       `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
@@ -185,7 +197,7 @@ export async function notifyWfhRequested(requestId: string) {
     for (const u of await approverUserIds()) {
       await notify(u.id, 'follow_up',
         `${q.name} has asked to work from home`, range,
-        'staff_wfh_request', q.id, link);
+        'staff_wfh_request', q.id, link, 'normal', true);
     }
     await emailApprovers(
       `${q.name} has asked to work from home`,
@@ -267,7 +279,7 @@ export async function notifyDecision(opts: {
       opts.note ?? '',
       opts.kind === 'leave' ? 'staff_leave_request' : opts.kind === 'wfh' ? 'staff_wfh_request' : 'staff_overtime_entry',
       opts.entityId, MY_TIME,
-      opts.outcome === 'declined' ? 'high' : 'normal');
+      opts.outcome === 'declined' ? 'high' : 'normal', true);
 
     // And by email. The approvers have been emailed about every request since
     // Phase B; the person who ASKED only ever got a bell, so a decision made
@@ -314,7 +326,7 @@ export async function notifyRtwDue(absenceId: string) {
       await notify(u.id, 'follow_up',
         `Return-to-work due for ${q.name}`,
         `Back on ${fmtDate(q.end_date)} — record the conversation`,
-        'staff_absence', q.id, ABSENCE_URL);
+        'staff_absence', q.id, ABSENCE_URL, 'normal', true);
     }
     await emailApprovers(
       `Return-to-work due for ${q.name}`,
@@ -350,7 +362,7 @@ export async function runRtwChase(chaseDays?: number): Promise<RtwChaseResult> {
       await notify(u.id, 'follow_up',
         `Return-to-work still outstanding for ${a.personName}`,
         `Back on ${fmtDate(a.endDate)} — ${a.daysWaiting} days ago`,
-        'staff_absence', a.id, ABSENCE_URL, 'high');
+        'staff_absence', a.id, ABSENCE_URL, 'high', true);
     }
     await emailApprovers(
       `Return-to-work still outstanding for ${a.personName}`,
@@ -442,7 +454,7 @@ export async function runFreelancerOfferChase(chaseDays?: number): Promise<Offer
       await notify(u.id, 'follow_up',
         `${who} has not confirmed for tomorrow`,
         `Offered a yard day on ${fmtDate(row.booking_date)} and has not replied`,
-        'freelancer_day_booking', row.id as string, CALENDAR_URL, 'high');
+        'freelancer_day_booking', row.id as string, CALENDAR_URL, 'high', true);
     }
     await emailApprovers(
       `${who} has not confirmed for tomorrow`,
@@ -715,7 +727,7 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
   for (const u of await approverUserIds()) {
     await notify(u.id, 'follow_up', title,
       `${people.length} ${people.length === 1 ? 'person has' : 'people have'} ${fmtH(totalMinutes)} between them`,
-      'staff_overtime_entry', null, STAFF_URL, 'high');
+      'staff_overtime_entry', null, STAFF_URL, 'high', true);
   }
 
   await emailApprovers(title, title,
@@ -931,7 +943,7 @@ export async function notifyEntitlementPosted(result: {
         headline,
         `${result.changed.length} updated${result.failed.length > 0 ? `, ${result.failed.length} failed` : ''}`,
         'staff_employment', null, STAFF_URL,
-        result.failed.length > 0 ? 'high' : 'normal');
+        result.failed.length > 0 ? 'high' : 'normal', true);
     }
     await emailApprovers(headline, headline, lines, STAFF_URL);
   } catch (e) { console.error('[staff-notifications] entitlement posted:', e); }
@@ -988,7 +1000,7 @@ export async function runCompanyDaysReview(today = new Date()): Promise<CompanyD
       recurring.length > 0
         ? `${recurring.length} recurring day${recurring.length === 1 ? '' : 's'} carry over automatically — add any one-offs`
         : 'Nothing is set up yet for next year',
-      'staff_employment', null, SETTINGS_URL);
+      'staff_employment', null, SETTINGS_URL, 'normal', true);
   }
 
   await emailApprovers(
