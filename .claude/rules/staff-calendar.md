@@ -133,6 +133,12 @@ that decides which statuses are real cover.
 `offered` currently means "we intend to ask", not "we asked". Do not lean on it
 meaning more than that until the email ships.
 
+**Booking one is the whole team's job** (jon, Oct 2026): every freelancer-day
+route is `authorize(...STAFF_ROLES)` and the calendar's "Book a freelancer"
+is ungated. That is a separate gate from `STAFF_ADMIN_ROLES` / `adminOnly`,
+which guards HR records and stays admin-only — never widen one by way of the
+other.
+
 Only YARD days — people physically in the building. A freelancer booked to
 drive a delivery lives in `quote_assignments` and does not belong here, because
 the only question this answers is "have we got enough people in".

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react'
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { displayFirstName, displayFullName, nameSearchText } from '../lib/displayName';
+import { CHASE_STAGES } from '../lib/pipelineStatus';
 import {
   AttachmentList,
   PendingAttachmentStrip,
@@ -95,6 +96,8 @@ interface ActivityTimelineProps {
   entityId: string;
   interactions: Interaction[];
   onInteractionAdded: () => void;
+  /** The job's pipeline_status — decides whether the chase-date opt-out is shown. */
+  pipelineStatus?: string | null;
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -175,11 +178,18 @@ function emailToLabel(header: string | null | undefined): string {
   return parts.length > 1 ? `${name} +${parts.length - 1}` : name;
 }
 
-export default function ActivityTimeline({ entityType, entityId, interactions, onInteractionAdded }: ActivityTimelineProps) {
+export default function ActivityTimeline({ entityType, entityId, interactions, onInteractionAdded, pipelineStatus }: ActivityTimelineProps) {
   const user = useAuthStore((s) => s.user);
 
   const [content, setContent] = useState('');
   const [interactionType, setInteractionType] = useState<string>('note');
+
+  // The chase date only moves while the job is still an enquiry (CHASE_STAGES —
+  // the backend ignores the bump past that), so the opt-out is only offered then.
+  // Past confirmation the box was a dead control: ticking it changed nothing.
+  const chaseBumpApplies = entityType === 'job_id'
+    && ['call', 'email', 'meeting'].includes(interactionType)
+    && (CHASE_STAGES as readonly string[]).includes(pipelineStatus ?? '');
   const [submitting, setSubmitting] = useState(false);
 
   // Chase-specific fields
@@ -503,8 +513,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         if (nextChaseDate) payload.next_chase_date = nextChaseDate;
         if (chaseAlertUserId) payload.chase_alert_user_id = chaseAlertUserId;
       }
-      // Pass through skip_chase_bump only when relevant (job + contact type)
-      if (entityType === 'job_id' && ['call', 'email', 'meeting'].includes(interactionType) && skipChaseBump) {
+      // Pass through skip_chase_bump only when relevant (job + contact type + enquiry stage)
+      if (chaseBumpApplies && skipChaseBump) {
         payload.skip_chase_bump = true;
       }
       const attachments = topAttach.payload();
@@ -1046,8 +1056,9 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         )}
 
         {/* Skip-chase-bump opt-out — only relevant when logging a contact
-            event on a job. Checked = don't push next_chase_date forward. */}
-        {entityType === 'job_id' && ['call', 'email', 'meeting'].includes(interactionType) && (
+            event on a job that is still an enquiry. Checked = don't push
+            next_chase_date forward. */}
+        {chaseBumpApplies && (
           <label
             className="flex items-center gap-1.5 text-xs text-gray-500 mt-2 cursor-pointer"
             title="By default, logging a call/email/meeting pushes the chase date forward by your usual chase interval. Tick this to keep the chase date as-is — useful for backdated entries or non-consequential events."

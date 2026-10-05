@@ -189,7 +189,10 @@ fleet closes its open sale as sold.
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
-that answers it — new bells should link that way, not at the bare page. The page is
+that answers it — new bells should link that way, not at the bare page. **Exception:
+anything waiting for an approval** (leave, overtime, WFH requests) links to the bare page,
+because the "Waiting for you" panel there is the approvals surface; the person's Time
+off tab is not reliable for it (jon, Oct 2026 — see `staff-notifications.ts`). The page is
 manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
 added to those tabs must degrade for a manager rather than 403.
 
