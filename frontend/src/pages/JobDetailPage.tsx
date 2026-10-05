@@ -4622,6 +4622,7 @@ function JobDetailContent() {
           entityType="job_id"
           entityId={id}
           interactions={interactions}
+          pipelineStatus={job.pipeline_status}
           onInteractionAdded={() => { loadInteractions(); setPrepChecklistKey(k => k + 1); }}
         />
       )}

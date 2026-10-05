@@ -758,22 +758,28 @@ router.post('/company-days/:id/cancel', adminOnly, async (req: AuthRequest, res:
 // ── Freelancer day bookings — "yard days" (Phase E, spec §9) ────────────────
 //
 // On THIS router rather than one of their own, because they exist to answer a
-// staff-calendar question: have we got enough people in. Reads are open to the
-// team for the same reason; writes are admin.
+// staff-calendar question: have we got enough people in. Reads AND writes are
+// open to the whole team (jon, Oct 2026): whoever is looking at a thin day
+// books the cover. `freelancerDays` below is deliberately NOT `adminOnly` —
+// that constant guards HR records, which stay admin-only, and the two must
+// never be widened together.
 //
 // Structurally separate from everything above — no ledger, no pattern, no
 // entitlement (§9.1). The language is offered → accepted / declined, never
 // "rostered": a decline is a response, not a penalty.
 
+const freelancerDays = authorize(...STAFF_ROLES);
+
 // GET /api/staff-calendar/freelancer-days?from=&to=
-router.get('/freelancer-days', async (req: AuthRequest, res: Response) => {
+router.get('/freelancer-days', freelancerDays, async (req: AuthRequest, res: Response) => {
   const range = resolveRange(req);
   if ('error' in range) { res.status(400).json({ error: range.error }); return; }
   try {
     res.json({
       data: await listForRange(range.from, range.to),
       range,
-      spend: isAdmin(req) ? await getSpendSummary(range.from, range.to) : undefined,
+      // Everyone who can book sees every agreed rate, so the sum is not a secret.
+      spend: await getSpendSummary(range.from, range.to),
     });
   } catch (err) {
     console.error('[staff-calendar] freelancer days error:', err);
@@ -782,7 +788,7 @@ router.get('/freelancer-days', async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/staff-calendar/freelancer-days/bookable — who can be booked, + rates
-router.get('/freelancer-days/bookable', adminOnly, async (_req: AuthRequest, res: Response) => {
+router.get('/freelancer-days/bookable', freelancerDays, async (_req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await listBookableFreelancers() });
   } catch (err) {
@@ -792,7 +798,7 @@ router.get('/freelancer-days/bookable', adminOnly, async (_req: AuthRequest, res
 });
 
 // POST /api/staff-calendar/freelancer-days
-router.post('/freelancer-days', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days', freelancerDays, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
     personId: z.string().uuid(),
     bookingDate: dateStr,
@@ -823,7 +829,7 @@ router.post('/freelancer-days', adminOnly, async (req: AuthRequest, res: Respons
 // the rate and the notes do not. This route just decides which email follows
 // from that, and never lets an email failure lose the amendment — the booking
 // is the record, the mail is a courtesy on top of it.
-router.patch('/freelancer-days/:id', adminOnly, async (req: AuthRequest, res: Response) => {
+router.patch('/freelancer-days/:id', freelancerDays, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
     bookingDate: dateStr.optional(),
     durationType: z.enum(['full_day', 'half_day', 'hours']).optional(),
@@ -852,7 +858,7 @@ router.patch('/freelancer-days/:id', adminOnly, async (req: AuthRequest, res: Re
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/withdraw — they pulled out
-router.post('/freelancer-days/:id/withdraw', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/withdraw', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({ note: z.string().max(500).nullish() }).safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: 'Invalid input' }); return; }
   try {
@@ -866,7 +872,7 @@ router.post('/freelancer-days/:id/withdraw', adminOnly, async (req: AuthRequest,
 // Passed and still unanswered — the list §9.4 decision 1 creates by refusing to
 // auto-decline, and item 5 exists to clear. Unbounded by date on purpose: an
 // offer from last March is exactly the one that should still be shouting.
-router.get('/freelancer-days/needs-closing', adminOnly, async (_req: AuthRequest, res: Response) => {
+router.get('/freelancer-days/needs-closing', freelancerDays, async (_req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await listNeedsClosing() });
   } catch (err) {
@@ -876,7 +882,7 @@ router.get('/freelancer-days/needs-closing', adminOnly, async (_req: AuthRequest
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/close
-router.post('/freelancer-days/:id/close', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/close', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({ outcome: z.enum(['completed', 'lapsed']) }).safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Say whether they came anyway or it did not happen' });
@@ -893,7 +899,7 @@ router.post('/freelancer-days/:id/close', adminOnly, async (req: AuthRequest, re
 // Without this, a bounced or mistyped address is a dead end: the booking sits
 // `offered`, nobody has been asked, and there is no way to ask again short of
 // cancelling and re-booking.
-router.post('/freelancer-days/:id/resend-offer', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/resend-offer', freelancerDays, async (req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await sendOfferEmail(req.params.id as string, { resend: true }) });
   } catch (err) {
@@ -902,7 +908,7 @@ router.post('/freelancer-days/:id/resend-offer', adminOnly, async (req: AuthRequ
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/respond — accepted or declined
-router.post('/freelancer-days/:id/respond', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/respond', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({
     response: z.enum(['accepted', 'declined']),
     note: z.string().max(500).nullish(),
@@ -916,7 +922,7 @@ router.post('/freelancer-days/:id/respond', adminOnly, async (req: AuthRequest, 
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/complete
-router.post('/freelancer-days/:id/complete', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/complete', freelancerDays, async (req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await markCompleted(req.params.id as string) });
   } catch (err) {
@@ -925,7 +931,7 @@ router.post('/freelancer-days/:id/complete', adminOnly, async (req: AuthRequest,
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/cancel
-router.post('/freelancer-days/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/cancel', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({ reason: z.string().min(1).max(500) }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
   try {
@@ -944,7 +950,7 @@ router.post('/freelancer-days/:id/cancel', adminOnly, async (req: AuthRequest, r
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/invoice
-router.post('/freelancer-days/:id/invoice', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/invoice', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({
     received: z.boolean(),
     amount: z.number().nonnegative().nullish(),

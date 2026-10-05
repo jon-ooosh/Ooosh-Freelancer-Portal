@@ -57,10 +57,16 @@ function esc(s: string): string {
  * unseen and silently, which is exactly the problem this exists to solve. The
  * fallback logs why so the cause is visible rather than mysterious.
  */
-/** One person's Time off tab on the Staff page (CLAUDE.md: deep-link the tab). */
-function timeOffUrl(personId: string): string {
-  return `${STAFF_URL}?person=${encodeURIComponent(personId)}&tab=time`;
-}
+/**
+ * A request waiting for a decision links to the BARE Staff page, where the
+ * "Waiting for you" panel (LeaveApprovals) lists every pending request with
+ * Approve / Decline and the impact preview. Not the person's Time off tab:
+ * that opens in whichever view the approver last used on their own My Time
+ * (the Calendar view has no buttons), only loads the current leave year, and
+ * buries the decision in a year-long timeline. Deliberate one-off departure
+ * from CLAUDE.md's "deep-link the tab" (jon, Oct 2026).
+ */
+const APPROVALS_URL = STAFF_URL;
 
 async function approverUserIds(): Promise<{ id: string; email: string }[]> {
   const employed = await query(
@@ -114,9 +120,7 @@ export async function notifyLeaveRequested(requestId: string) {
         WHERE r.id = $1`, [requestId]);
     const q = r.rows[0];
     if (!q) return;
-    // Straight to that person's Time off tab, where Approve / Decline sit
-    // beside their balance and the rest of their year.
-    const link = timeOffUrl(q.person_id);
+    const link = APPROVALS_URL;
     const range = q.start_date === q.end_date
       ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
     const what = q.leave_type === 'holiday' ? 'holiday' : q.leave_type === 'toil' ? 'TOIL' : 'unpaid leave';
@@ -146,7 +150,7 @@ export async function notifyOvertimeLogged(entryId: string) {
         WHERE e.id = $1`, [entryId]);
     const q = r.rows[0];
     if (!q) return;
-    const link = timeOffUrl(q.person_id);
+    const link = APPROVALS_URL;
     for (const u of await approverUserIds()) {
       await notify(u.id, 'follow_up',
         `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
@@ -177,7 +181,7 @@ export async function notifyWfhRequested(requestId: string) {
     if (!q) return;
     const range = q.start_date === q.end_date
       ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
-    const link = timeOffUrl(q.person_id);
+    const link = APPROVALS_URL;
     for (const u of await approverUserIds()) {
       await notify(u.id, 'follow_up',
         `${q.name} has asked to work from home`, range,
