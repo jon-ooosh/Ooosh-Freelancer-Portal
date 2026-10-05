@@ -10,7 +10,6 @@
  * sharing of vehicle data with clients) can reuse them.
  */
 
-import { useState } from 'react';
 
 // ── Payload (keep in step with BuyerPayload in the backend) ────────────────
 
@@ -109,39 +108,26 @@ export function BuyerHeadline({ p }: { p: BuyerPayload }) {
   );
 }
 
+/**
+ * Each photo is a plain link to the full-size image in a new tab (jon, Oct
+ * 2026). It was an in-page lightbox, which on a phone could not be zoomed and
+ * let a swipe scroll the page underneath instead of the picture. The browser's
+ * own image view does pinch-zoom and scrolling properly, and the photos are on
+ * the public bucket so a bare link needs no auth.
+ */
 export function BuyerPhotos({ photos }: { photos: BuyerPayload['photos'] }) {
-  const [open, setOpen] = useState<number | null>(null);
   if (photos.length === 0) return null;
-  const current = open != null ? photos[open] : null;
   return (
-    <>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {photos.map((ph, i) => (
-          <button key={ph.url} type="button" onClick={() => setOpen(i)}
-            className={`overflow-hidden rounded-lg bg-gray-100 ${i === 0 ? 'col-span-2 sm:col-span-3' : ''}`}>
-            <img src={ph.url} alt={ph.label ?? 'Vehicle photo'} loading={i < 3 ? 'eager' : 'lazy'}
-              className={`w-full object-cover ${i === 0 ? 'aspect-[16/9]' : 'aspect-[4/3]'}`} />
-          </button>
-        ))}
-      </div>
-      {current && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-black/90" onClick={() => setOpen(null)}>
-          <div className="flex items-center justify-between px-4 py-3 text-sm text-white">
-            <span>{current.label ?? ''} <span className="text-white/60">({(open ?? 0) + 1} of {photos.length})</span></span>
-            <button type="button" className="rounded px-2 py-1 text-white/80 hover:text-white" aria-label="Close">✕</button>
-          </div>
-          <div className="flex flex-1 items-center justify-center p-2" onClick={(e) => e.stopPropagation()}>
-            <img src={current.url} alt={current.label ?? 'Vehicle photo'} className="max-h-full max-w-full object-contain" />
-          </div>
-          <div className="flex justify-between px-4 py-3" onClick={(e) => e.stopPropagation()}>
-            <button type="button" disabled={open === 0} onClick={() => setOpen((o) => (o ?? 1) - 1)}
-              className="rounded bg-white/10 px-4 py-2 text-white disabled:opacity-30">← Previous</button>
-            <button type="button" disabled={open === photos.length - 1} onClick={() => setOpen((o) => (o ?? 0) + 1)}
-              className="rounded bg-white/10 px-4 py-2 text-white disabled:opacity-30">Next →</button>
-          </div>
-        </div>
-      )}
-    </>
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {photos.map((ph, i) => (
+        <a key={ph.url} href={ph.url} target="_blank" rel="noopener noreferrer"
+          title={`${ph.label ?? 'Vehicle photo'} — opens full size in a new tab`}
+          className={`block overflow-hidden rounded-lg bg-gray-100 ${i === 0 ? 'col-span-2 sm:col-span-3' : ''}`}>
+          <img src={ph.url} alt={ph.label ?? 'Vehicle photo'} loading={i < 3 ? 'eager' : 'lazy'}
+            className={`w-full object-cover ${i === 0 ? 'aspect-[16/9]' : 'aspect-[4/3]'}`} />
+        </a>
+      ))}
+    </div>
   );
 }
 
