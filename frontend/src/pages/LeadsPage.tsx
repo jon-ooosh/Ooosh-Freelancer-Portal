@@ -9,7 +9,7 @@
  * reason. Expand a row for the history, contacts, venues and match detail.
  */
 import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
@@ -115,6 +115,7 @@ function prevTourLine(l: Lead): { text: string; flag: boolean } | null {
 export default function LeadsPage() {
   const { user } = useAuthStore();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const canRun = hasManagerRole(user?.role);
 
   const [tab, setTab] = useState<Tab>('cold');
@@ -163,6 +164,23 @@ export default function LeadsPage() {
       } finally { setLoading(false); }
     })();
   }, [loadLeads, loadRun]);
+
+  // Deep link from the dashboard's "Leads to look at" card: ?lead=<id> opens
+  // that lead (right tab, expanded, scrolled to). The param is then dropped so
+  // a later refresh doesn't keep yanking the view back.
+  const deepLinkId = searchParams.get('lead');
+  useEffect(() => {
+    if (!deepLinkId || loading) return;
+    const target = leads.find((l) => l.id === deepLinkId);
+    if (target) {
+      setTab(target.stream);
+      setExpanded(target.id);
+      setTimeout(() => document.getElementById(`lead-${target.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('lead');
+    setSearchParams(next, { replace: true });
+  }, [deepLinkId, loading, leads, searchParams, setSearchParams]);
 
   // The Dismissed tab loads on first open (and after any change while it's open).
   useEffect(() => {
@@ -232,6 +250,9 @@ export default function LeadsPage() {
   const confirmMatch = (id: string, organisation_id: string) => act(() => api.post(`/leads/${id}/confirm-match`, { organisation_id }));
   const rejectMatch = (id: string) => act(() => api.post(`/leads/${id}/reject-match`, {}));
   const restore = (id: string) => act(() => api.post(`/leads/${id}/restore`, {}));
+  // "I've been in touch outside OP" — takes it off the dashboard card without
+  // dismissing it or starting an enquiry.
+  const markContacted = (id: string) => act(() => api.patch(`/leads/${id}`, { status: 'contacted' }));
 
   const sv = (k: string) => settings.find((s) => s.key === k)?.value ?? '';
   const coldCount = leads.filter((l) => l.stream === 'cold').length;
@@ -385,7 +406,7 @@ export default function LeadsPage() {
                 const top = l.match_candidates?.[0];
                 return (
                 <Fragment key={l.id}>
-                  <tr className="hover:bg-gray-50 align-top cursor-pointer" onClick={() => setExpanded(expanded === l.id ? null : l.id)}>
+                  <tr id={`lead-${l.id}`} className={`hover:bg-gray-50 align-top cursor-pointer ${expanded === l.id ? 'bg-purple-50/40' : ''}`} onClick={() => setExpanded(expanded === l.id ? null : l.id)}>
                     <td className="px-3 py-2 font-medium text-gray-900">
                       <span className="mr-1 text-gray-300">{expanded === l.id ? '▾' : '▸'}</span>
                       {l.artist_name}
@@ -457,6 +478,10 @@ export default function LeadsPage() {
                             <button onClick={() => setModal({ kind: 'address', lead: l })}
                               className="text-xs px-2 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-50">Add to address book</button>
                           )}
+                          {(l.status === 'new' || l.status === 'reviewing') && (
+                            <button onClick={() => markContacted(l.id)} className="text-xs text-gray-500 hover:text-[#7B5EA7]"
+                              title="You've been in touch outside OP — takes it off the dashboard">Mark contacted</button>
+                          )}
                           {l.status !== 'converted' && (
                             <button onClick={() => setModal({ kind: 'dismiss', lead: l })} className="text-xs text-gray-400 hover:text-red-600" title="Dismiss this lead">Dismiss</button>
                           )}
@@ -471,8 +496,8 @@ export default function LeadsPage() {
                           <p className="mb-2"><span className="text-gray-400">Dismiss note:</span> {l.status_note}</p>
                         )}
                         {l.ai_summary && <p className="mb-2 text-gray-700">{l.ai_summary}</p>}
-                        {l.client_history && l.client_history.lost_reasons.length > 0 && (
-                          <p className="mb-2"><span className="text-gray-400">Why we lost them:</span> {l.client_history.lost_reasons.map((r) => `${r.reason} ×${r.count}`).join(', ')}</p>
+                        {(l.client_history?.lost_reasons?.length ?? 0) > 0 && (
+                          <p className="mb-2"><span className="text-gray-400">Why we lost them:</span> {(l.client_history?.lost_reasons ?? []).map((r) => `${r.reason} ×${r.count}`).join(', ')}</p>
                         )}
                         {l.venues?.length > 0 && <p className="mb-2"><span className="text-gray-400">Venues:</span> {l.venues.join(', ')}</p>}
                         {l.reasoning && l.reasoning !== l.ai_summary && <p className="mb-2"><span className="text-gray-400">Assessment:</span> {l.reasoning}</p>}
