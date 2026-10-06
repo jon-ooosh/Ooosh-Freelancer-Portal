@@ -256,3 +256,39 @@ Value:
 - Exact next free **migration number** and add to `run.ts`.
 - Final **route path** under Jobs (`/jobs/leads` vs `/leads`) to match sibling routes.
 - Whether `interactions` gets a `lead_id` anchor or lead-notes hang off the matched org.
+
+## 14. Oct 2026 slice — act on leads, weigh history (BUILT)
+
+Agreed with jon, Oct 2026. Migration 271. Detail in `docs/reference/INTEGRATIONS.md`
+("Leads Module").
+
+**Decisions**
+- **Scheduled run: NOT wired** — keep it manual for now. `lead_auto_run_enabled` stays seeded and unused.
+- **Outreach drafting (§6 Phase 7): parked** — it folds into the auto-chase "voice" work on the
+  Enquiries pipeline rather than being a Leads-only build.
+- **Exact matching only for automatic links.** The website intake and Leads share one
+  exact-email / exact-name resolver (`services/address-book-resolve.ts`). Fuzzy
+  matches are only ever suggestions a human confirms ("it's a risk to link without an exact
+  match" — jon).
+- **Two actions, not one ("option c"):** *Add to address book* (band org + chosen contacts)
+  and *Start enquiry* are separate, because most cold leads want saving for later rather than
+  an immediate job.
+- **Warm = start an enquiry against the known client**, and the AI weighs their history:
+  "if we've quoted ten jobs and they've declined them all, not much point sending an 11th".
+
+**Built**
+1. Match before score; `history.ts` client history → scorer prompt + lead row. Outcome
+   buckets shared with the org Hire History tab (`services/job-outcomes.ts`).
+2. Deeper matching: jobs named after the band → their client org (management/agency) as a
+   suggestion; researched contacts already in the book (exact email) as "known contacts".
+3. Rejected suggestions remembered (`rejected_org_ids`).
+4. Dismiss reasons + `lead_suppressions` ("not a fit" never comes back) + Dismissed tab
+   with Restore + the previous tour's outcome on the next one.
+5. Re-detection by overlapping dates (a dismissed tour stays dismissed when TM adds a date).
+6. Per-run search window ("tours starting between X and Y").
+7. Add to address book / Start enquiry (OP-native, never pushed to HireHop).
+
+**After deploying:** run **✨ Match & research existing** once. It finds job-name
+suggestions on existing leads, fills in client history, and re-scores existing warm leads
+with that history (they were scored before matching existed).
+
