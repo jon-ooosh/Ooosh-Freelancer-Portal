@@ -284,6 +284,8 @@ existing definition:
 | A shop sale's receipt / refund receipt | `services/shop-receipts.ts` |
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
 | The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
+| Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
+| A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
