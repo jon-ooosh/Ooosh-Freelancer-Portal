@@ -17,6 +17,8 @@
  *   POST  /:id/add-to-address-book   — create / pick the band org, add chosen contacts          STAFF
  *   GET   /:id/enquiry-preview       — the org + its people, to pick enquiry contacts           STAFF
  *   POST  /:id/start-enquiry         — OP-native enquiry from this lead (never pushes to HH)    STAFF
+ *   POST  /:id/log-outreach          — "I've contacted them": note + optional Cold enquiry so
+ *                                      the pipeline chases the follow-up                          STAFF
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
@@ -35,7 +37,7 @@ import {
 } from '../services/leads/matcher';
 import {
   splitName, findPersonByEmail, findOrCreatePersonByEmail, findOrgByExactName,
-  createOrganisation, linkPersonToOrganisation,
+  createOrganisation, linkPersonToOrganisation, isGenericMailbox, addOrganisationEmail,
 } from '../services/address-book-resolve';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
 
@@ -393,7 +395,12 @@ router.get('/:id/address-book-preview', authorize(...STAFF_ROLES), async (req: A
           existing = { id: pid, name: String(p.rows[0]?.name ?? '').trim() };
         }
       }
-      return { idx, ...c, can_add: Boolean(email), existing_person: existing, role: CONTACT_ROLE[c.contact_type] ?? 'General Contact' };
+      return {
+        idx, ...c, can_add: Boolean(email), existing_person: existing,
+        role: CONTACT_ROLE[c.contact_type] ?? 'General Contact',
+        // info@ / bookings@ … — offered as the band's own email, not a person.
+        generic: isGenericMailbox(email),
+      };
     }));
 
     res.json({ data: { proposed_name: lead.artist_name, similar, contacts } });
@@ -409,7 +416,16 @@ router.get('/:id/address-book-preview', authorize(...STAFF_ROLES), async (req: A
 const addSchema = z.object({
   organisation_id: z.string().uuid().optional(),
   create_name: z.string().trim().min(1).max(300).optional(),
-  contact_indexes: z.array(z.number().int().min(0)).default([]),
+  // Each chosen researched contact: add as a PERSON (with the name staff
+  // typed — the research often has none, or just "info") or as the band's own
+  // EMAIL (shared inboxes: info@, bookings@…).
+  contacts: z.array(z.object({
+    idx: z.number().int().min(0),
+    as: z.enum(['person', 'org_email']).default('person'),
+    name: z.string().trim().max(200).nullable().optional(),
+  })).optional(),
+  /** Older client shape: indexes, added as people under the researched name. */
+  contact_indexes: z.array(z.number().int().min(0)).optional(),
 }).refine((b) => Boolean(b.organisation_id) !== Boolean(b.create_name), { message: 'Pick an existing organisation or give a name to create' });
 router.post('/:id/add-to-address-book', authorize(...STAFF_ROLES), validate(addSchema), async (req: AuthRequest, res: Response) => {
   try {
@@ -442,30 +458,49 @@ router.post('/:id/add-to-address-book', authorize(...STAFF_ROLES), validate(addS
     // Contacts — only ones with an email (exact-email match is the dedup).
     const contacts = (lead.contacts ?? []) as LeadContact[];
     const added: { name: string; outcome: 'existing' | 'created' }[] = [];
+    const orgEmails: { email: string; outcome: 'set' | 'noted' | 'already' }[] = [];
     const skipped: string[] = [];
-    for (const idx of Array.from(new Set(body.contact_indexes))) {
-      const c = contacts[idx];
+    const chosen = body.contacts
+      ?? (body.contact_indexes ?? []).map((idx) => ({ idx, as: 'person' as const, name: null }));
+    const seenIdx = new Set<number>();
+    for (const choice of chosen) {
+      if (seenIdx.has(choice.idx)) continue;
+      seenIdx.add(choice.idx);
+      const c = contacts[choice.idx];
       if (!c) continue;
       const email = c.contact_email?.trim();
       if (!email) { skipped.push(c.contact_name || c.contact_type); continue; }
-      const { first, last } = c.contact_name?.trim() ? splitName(c.contact_name) : { first: email.split('@')[0], last: '' };
+      if (choice.as === 'org_email') {
+        orgEmails.push({ email, outcome: await addOrganisationEmail(orgId, email, `Lead Finder, ${c.source || 'research'}`) });
+        continue;
+      }
+      // Staff's typed name wins; then the researched name; then the email's
+      // local part as a last resort. (An EXISTING person keeps their name.)
+      const typed = choice.name?.trim() || c.contact_name?.trim() || '';
+      const { first, last } = typed ? splitName(typed) : { first: email.split('@')[0], last: '' };
       const person = await findOrCreatePersonByEmail({
         email, firstName: first, lastName: last, phone: c.contact_phone?.trim() || null,
         notes: `Added from the Lead Finder — ${c.contact_type.replace('_', ' ')} for ${lead.artist_name}${c.source ? ` (found via ${c.source})` : ''}.`,
         createdBy: userId,
       });
       await linkPersonToOrganisation(person.id, orgId, CONTACT_ROLE[c.contact_type] ?? 'General Contact');
-      added.push({ name: c.contact_name || email, outcome: person.outcome });
+      added.push({ name: typed || email, outcome: person.outcome });
     }
 
     // Picking an existing org is a confirmed match (warm); a band created here
     // is in the address book but has no relationship yet (stays cold).
     const cand = ((lead.match_candidates ?? []) as MatchCandidate[]).find((c) => c.id === orgId);
-    const via = created ? 'created' : cand?.via === 'job_name' ? 'job_name' : 'org_name';
+    // Re-adding contacts to the band this lead already created keeps it 'created'
+    // (cold) — re-linking must not quietly promote it to a warm "match".
+    const keepCreated = lead.matched_organisation_id === orgId && lead.match_via === 'created';
+    const via = created || keepCreated ? 'created' : cand?.via === 'job_name' ? 'job_name' : 'org_name';
     await linkLeadToOrg(lead.id, orgId, via, { enrichOrg: true });
     await linkKnownContacts();
 
-    res.json({ data: { lead: await loadLead(lead.id), organisation_id: orgId, created, contacts_added: added, contacts_skipped: skipped } });
+    res.json({ data: {
+      lead: await loadLead(lead.id), organisation_id: orgId, created,
+      contacts_added: added, org_emails: orgEmails, contacts_skipped: skipped,
+    } });
   } catch (error) {
     console.error('[leads] add-to-address-book error:', error);
     res.status(500).json({ error: 'Failed to add to address book' });
@@ -496,9 +531,96 @@ router.get('/:id/enquiry-preview', authorize(...STAFF_ROLES), async (req: AuthRe
   }
 });
 
-// POST /api/leads/:id/start-enquiry — create an OP-native pipeline enquiry via
-// the shared createPipelineEnquiry (same path as the staff form and the website
-// intake). OP only — never pushes to HireHop.
+/**
+ * Create an OP-native pipeline enquiry from a lead, via the shared
+ * createPipelineEnquiry (same path as the staff form and the website intake).
+ * OP only — never pushes to HireHop. Used by Start enquiry and Log outreach.
+ * Throws a { status, message } object for the route to return.
+ */
+async function createEnquiryFromLead(
+  lead: Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
+  userId: string,
+  opts: {
+    contactIds: string[];
+    primaryId: string | null | undefined;
+    details: string | null | undefined;
+    /** Log outreach: the note goes on the enquiry and the first chase is this many days out. */
+    outreach?: { note: string | null; chaseInDays: number };
+  },
+): Promise<string> {
+  if (!lead.matched_organisation_id) throw { status: 400, message: 'Add this band to the address book first' };
+  if (lead.converted_job_id) {
+    const existing = await query(`SELECT id FROM jobs WHERE id = $1 AND is_deleted = false`, [lead.converted_job_id]);
+    if (existing.rows[0]) throw { status: 409, message: 'An enquiry already exists for this lead', job_id: lead.converted_job_id };
+  }
+  const org = await query(`SELECT id, name FROM organisations WHERE id = $1 AND is_deleted = false`, [lead.matched_organisation_id]);
+  if (!org.rows[0]) throw { status: 404, message: 'The matched organisation no longer exists' };
+  const orgName = org.rows[0].name as string;
+
+  const first = ymd(lead.first_date);
+  const last = ymd(lead.last_date);
+  const venues = ((lead.venues ?? []) as string[]).join(', ');
+  const dates = ((lead.all_dates ?? []) as string[]).join(', ');
+  const tourLine = `${lead.artist_name} touring the UK — ${lead.uk_date_count} date(s)${first ? `, ${first} to ${last ?? '?'}` : ''}.`;
+  const details = opts.details?.trim() || (opts.outreach
+    ? `Cold outreach — we contacted ${lead.artist_name} about their UK tour. ${tourLine}${opts.outreach.note ? ` ${opts.outreach.note}` : ''}`
+    : `${tourLine} Found by the Lead Finder.`);
+  const notesLines = ['— Lead Finder —'];
+  if (opts.outreach) notesLines.push(`Outreach: we contacted them first${opts.outreach.note ? ` — ${opts.outreach.note}` : ''}. Not a client enquiry yet.`);
+  if (lead.relevance_score != null) {
+    notesLines.push(`Score ${lead.relevance_score}/10${lead.client_tier ? ` · Tier ${lead.client_tier}` : ''}${lead.origin_country ? ` · ${lead.origin_country}` : ''}`);
+  }
+  if (dates) notesLines.push(`Tour dates: ${dates}`);
+  if (venues) notesLines.push(`Venues: ${venues}`);
+  if (lead.ai_summary) notesLines.push(String(lead.ai_summary));
+  if (lead.reasoning && lead.reasoning !== lead.ai_summary) notesLines.push(`Assessment: ${lead.reasoning}`);
+
+  const isWarm = lead.stream === 'warm';
+  const bandDiffers = normaliseArtist(orgName) !== normaliseArtist(lead.artist_name);
+  const contactIds = Array.from(new Set(opts.contactIds));
+  const primary = opts.primaryId && contactIds.includes(opts.primaryId) ? opts.primaryId : (contactIds[0] ?? null);
+
+  let nextChase: string | null = null;
+  if (opts.outreach) {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + opts.outreach.chaseInDays);
+    nextChase = d.toISOString().slice(0, 10);
+  }
+
+  const job = await createPipelineEnquiry({
+    client_name: orgName,
+    client_id: lead.matched_organisation_id,
+    // Booked under a management / agency org → keep the band in the job name.
+    band_name: bandDiffers ? lead.artist_name : null,
+    details,
+    notes: notesLines.join('\n'),
+    // Existing pipeline values (validated by the job edit form): 'repeat' =
+    // returning client, 'cold_lead' = cold. leads.converted_job_id is what
+    // marks it as Lead-Finder-sourced.
+    enquiry_source: isWarm ? 'repeat' : 'cold_lead',
+    likelihood: isWarm ? 'warm' : 'cold',
+    job_date: first,
+    job_end: last,
+    contact_person_ids: contactIds.length ? contactIds : null,
+    primary_contact_person_id: primary,
+    next_chase_date: nextChase,
+    chase_interval_days: opts.outreach ? opts.outreach.chaseInDays : null,
+  }, userId);
+  return job.id as string;
+}
+
+function sendLeadError(res: Response, error: unknown, fallback: string, label: string): void {
+  if (error instanceof EnquiryValidationError) { res.status(400).json({ error: error.message }); return; }
+  if (error && typeof error === 'object' && 'status' in error && 'message' in error) {
+    const e = error as { status: number; message: string; job_id?: string };
+    res.status(e.status).json({ error: e.message, ...(e.job_id ? { job_id: e.job_id } : {}) });
+    return;
+  }
+  console.error(`[leads] ${label} error:`, error);
+  res.status(500).json({ error: fallback });
+}
+
+// POST /api/leads/:id/start-enquiry — they're interested: a real enquiry.
 const enquirySchema = z.object({
   contact_person_ids: z.array(z.string().uuid()).default([]),
   primary_contact_person_id: z.string().uuid().nullable().optional(),
@@ -507,66 +629,65 @@ const enquirySchema = z.object({
 router.post('/:id/start-enquiry', authorize(...STAFF_ROLES), validate(enquirySchema), async (req: AuthRequest, res: Response) => {
   try {
     const body = req.body as z.infer<typeof enquirySchema>;
+    const lead = await loadLead(req.params.id as string);
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const jobId = await createEnquiryFromLead(lead, req.user!.id, {
+      contactIds: body.contact_person_ids, primaryId: body.primary_contact_person_id, details: body.details,
+    });
+    await query(
+      `UPDATE leads SET converted_job_id = $2, status = 'converted', updated_at = NOW() WHERE id = $1`,
+      [lead.id, jobId],
+    );
+    res.status(201).json({ data: { job_id: jobId, lead: await loadLead(lead.id) } });
+  } catch (error) {
+    sendLeadError(res, error, 'Failed to create enquiry', 'start-enquiry');
+  }
+});
+
+// POST /api/leads/:id/log-outreach — "we've contacted them". Records the note
+// on the lead (status 'contacted' — off the dashboard card) and, by default,
+// opens a Cold enquiry in the pipeline whose first chase is `chase_in_days`
+// out, so the chase model reminds us to follow up. An unanswered outreach that
+// the 09:00 auto-loser later closes as "No Decision" is NOT counted as a loss in
+// the band's history (services/leads/history.ts).
+const outreachSchema = z.object({
+  note: z.string().max(2000).nullable().optional(),
+  create_enquiry: z.boolean().default(true),
+  chase_in_days: z.number().int().min(1).max(90).default(7),
+  contact_person_ids: z.array(z.string().uuid()).default([]),
+  primary_contact_person_id: z.string().uuid().nullable().optional(),
+});
+router.post('/:id/log-outreach', authorize(...STAFF_ROLES), validate(outreachSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = req.body as z.infer<typeof outreachSchema>;
     const userId = req.user!.id;
     const lead = await loadLead(req.params.id as string);
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
-    if (!lead.matched_organisation_id) return res.status(400).json({ error: 'Add this band to the address book first' });
-    if (lead.converted_job_id) {
-      const existing = await query(`SELECT id FROM jobs WHERE id = $1 AND is_deleted = false`, [lead.converted_job_id]);
-      if (existing.rows[0]) return res.status(409).json({ error: 'An enquiry already exists for this lead', job_id: lead.converted_job_id });
+    const note = body.note?.trim() || null;
+
+    let jobId: string | null = null;
+    if (body.create_enquiry) {
+      jobId = await createEnquiryFromLead(lead, userId, {
+        contactIds: body.contact_person_ids, primaryId: body.primary_contact_person_id, details: null,
+        outreach: { note, chaseInDays: body.chase_in_days },
+      });
+      // On the job's timeline too, so whoever picks up the chase sees what was sent.
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, $3, 'new_enquiry', 'system')`,
+        [`Cold outreach logged from the Lead Finder${note ? `: ${note}` : '.'} First chase in ${body.chase_in_days} day(s).`, jobId, userId],
+      );
     }
-    const org = await query(`SELECT id, name FROM organisations WHERE id = $1 AND is_deleted = false`, [lead.matched_organisation_id]);
-    if (!org.rows[0]) return res.status(404).json({ error: 'The matched organisation no longer exists' });
-    const orgName = org.rows[0].name as string;
-
-    const first = ymd(lead.first_date);
-    const last = ymd(lead.last_date);
-    const venues = ((lead.venues ?? []) as string[]).join(', ');
-    const dates = ((lead.all_dates ?? []) as string[]).join(', ');
-    const details = body.details?.trim() ||
-      `${lead.artist_name} touring the UK — ${lead.uk_date_count} date(s)${first ? `, ${first} to ${last ?? '?'}` : ''}. Found by the Lead Finder.`;
-    const notesLines = ['— Lead Finder —'];
-    if (lead.relevance_score != null) {
-      notesLines.push(`Score ${lead.relevance_score}/10${lead.client_tier ? ` · Tier ${lead.client_tier}` : ''}${lead.origin_country ? ` · ${lead.origin_country}` : ''}`);
-    }
-    if (dates) notesLines.push(`Tour dates: ${dates}`);
-    if (venues) notesLines.push(`Venues: ${venues}`);
-    if (lead.ai_summary) notesLines.push(String(lead.ai_summary));
-    if (lead.reasoning && lead.reasoning !== lead.ai_summary) notesLines.push(`Assessment: ${lead.reasoning}`);
-
-    const isWarm = lead.stream === 'warm';
-    const bandDiffers = normaliseArtist(orgName) !== normaliseArtist(lead.artist_name);
-    const contactIds = Array.from(new Set(body.contact_person_ids));
-    const primary = body.primary_contact_person_id && contactIds.includes(body.primary_contact_person_id)
-      ? body.primary_contact_person_id : (contactIds[0] ?? null);
-
-    const job = await createPipelineEnquiry({
-      client_name: orgName,
-      client_id: lead.matched_organisation_id,
-      // Booked under a management / agency org → keep the band in the job name.
-      band_name: bandDiffers ? lead.artist_name : null,
-      details,
-      notes: notesLines.join('\n'),
-      // Existing pipeline values (validated by the job edit form): 'repeat' =
-      // returning client, 'cold_lead' = cold. leads.converted_job_id is what
-      // marks it as Lead-Finder-sourced.
-      enquiry_source: isWarm ? 'repeat' : 'cold_lead',
-      likelihood: isWarm ? 'warm' : 'cold',
-      job_date: first,
-      job_end: last,
-      contact_person_ids: contactIds.length ? contactIds : null,
-      primary_contact_person_id: primary,
-    }, userId);
 
     await query(
-      `UPDATE leads SET converted_job_id = $2, status = 'converted', updated_at = NOW() WHERE id = $1`,
-      [lead.id, job.id],
+      `UPDATE leads SET status = 'contacted', status_note = $2,
+         converted_job_id = COALESCE($3, converted_job_id), updated_at = NOW()
+       WHERE id = $1`,
+      [lead.id, note, jobId],
     );
-    res.status(201).json({ data: { job_id: job.id, lead: await loadLead(lead.id) } });
+    res.status(201).json({ data: { job_id: jobId, lead: await loadLead(lead.id) } });
   } catch (error) {
-    if (error instanceof EnquiryValidationError) return res.status(400).json({ error: error.message });
-    console.error('[leads] start-enquiry error:', error);
-    res.status(500).json({ error: 'Failed to create enquiry' });
+    sendLeadError(res, error, 'Failed to log outreach', 'log-outreach');
   }
 });
 

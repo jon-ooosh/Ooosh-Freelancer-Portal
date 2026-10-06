@@ -28,6 +28,8 @@ export interface ClientHistory {
   open: number;
   lost: number;
   cancelled: number;
+  /** Our cold outreach that got no reply — not a loss. Absent on older snapshots. */
+  outreach_no_reply?: number;
   lost_reasons: { reason: string; count: number }[];
   last_enquiry: string | null;
   last_booked: string | null;

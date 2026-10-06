@@ -109,3 +109,49 @@ export async function linkPersonToOrganisation(personId: string, orgId: string, 
   );
   return true;
 }
+
+/**
+ * A shared inbox rather than a person — info@, bookings@, hello@… Saving one
+ * as a "person" gives the address book someone called "Info". The Lead
+ * Finder offers these as the ORGANISATION's email instead.
+ */
+const GENERIC_MAILBOXES = new Set([
+  'info', 'information', 'hello', 'hi', 'contact', 'contactus', 'enquiries', 'enquiry', 'inquiries',
+  'booking', 'bookings', 'management', 'mgmt', 'admin', 'office', 'mail', 'email', 'general',
+  'team', 'press', 'media', 'pr', 'music', 'band', 'tour', 'touring', 'live', 'shows', 'agent',
+  'agency', 'support', 'sales', 'studio', 'label', 'records', 'hq', 'all',
+]);
+
+export function isGenericMailbox(email: string | null | undefined): boolean {
+  const local = (email ?? '').trim().toLowerCase().split('@')[0];
+  if (!local) return false;
+  return GENERIC_MAILBOXES.has(local.replace(/[^a-z]/g, ''));
+}
+
+/**
+ * Put a shared inbox on an organisation: as its email if it has none, otherwise
+ * noted (never overwrites an email staff entered). Returns what it did.
+ */
+export async function addOrganisationEmail(orgId: string, email: string, source: string): Promise<'set' | 'noted' | 'already'> {
+  const r = await query(`SELECT email, notes FROM organisations WHERE id = $1`, [orgId]);
+  const row = r.rows[0];
+  if (!row) return 'already';
+  const clean = email.trim();
+  const current = (row.email as string | null)?.trim() || '';
+  if (current.toLowerCase() === clean.toLowerCase() || (row.notes as string | null)?.toLowerCase().includes(clean.toLowerCase())) {
+    return 'already';
+  }
+  if (!current) {
+    await query(`UPDATE organisations SET email = $2, updated_at = NOW() WHERE id = $1`, [orgId, clean]);
+    return 'set';
+  }
+  await query(
+    `UPDATE organisations
+        SET notes = CASE WHEN notes IS NULL OR notes = '' THEN $2 ELSE notes || E'\\n' || $2 END,
+            updated_at = NOW()
+      WHERE id = $1`,
+    [orgId, `Other email: ${clean} (${source})`],
+  );
+  return 'noted';
+}
+

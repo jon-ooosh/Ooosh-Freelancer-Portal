@@ -500,6 +500,14 @@ still sellable + warm ≥ `lead_min_relevance_score` or cold ≥ `lead_dashboard
 (default 8). Items deep-link to `/jobs/leads?lead=<id>`. A lead leaves the card when an
 enquiry is started, it's dismissed, or it's marked contacted (a new row action). Spec §15.
 
+**Log outreach** (Oct 2026, replaces "Mark contacted"): `POST /:id/log-outreach`. It notes the
+contact on the lead, and by default opens a Cold enquiry (OP only) whose first chase is N days out,
+so the chase model follows it up. Shares `createEnquiryFromLead()` with Start enquiry. An
+outreach enquiry auto-lost as "No Decision" counts as `outreach_no_reply` in the client
+history, not as a loss. Add to address book now takes editable names and can save shared
+inboxes (info@, bookings@…) as the band's own email (`isGenericMailbox()` /
+`addOrganisationEmail()` in `services/address-book-resolve.ts`). Spec §16.
+
 **Deferred (agreed, not built):** scheduled weekly run (jon: keep manual for now); outreach-email drafting — folds into the auto-chase "voice"
 work on the Enquiries pipeline rather than being built separately.
 

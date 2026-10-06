@@ -18,6 +18,7 @@ import DismissLeadModal from '../components/leads/DismissLeadModal';
 import RunSearchModal from '../components/leads/RunSearchModal';
 import AddToAddressBookModal from '../components/leads/AddToAddressBookModal';
 import StartEnquiryModal from '../components/leads/StartEnquiryModal';
+import LogOutreachModal from '../components/leads/LogOutreachModal';
 
 interface Run {
   id: string;
@@ -46,6 +47,7 @@ type Modal =
   | { kind: 'dismiss'; lead: Lead }
   | { kind: 'address'; lead: Lead }
   | { kind: 'enquiry'; lead: Lead }
+  | { kind: 'outreach'; lead: Lead }
   | { kind: 'run' }
   | null;
 
@@ -89,11 +91,14 @@ function sortValue(l: Lead, key: SortKey): string | number {
 function historyChip(l: Lead): string | null {
   const h = l.client_history;
   if (!h) return null;
-  if (h.enquiries === 0) return 'no hires yet';
+  const noReply = h.outreach_no_reply ?? 0;
+  const noReplyBit = noReply ? `${noReply} outreach, no reply` : null;
+  if (h.enquiries === 0) return noReplyBit ?? 'no hires yet';
   const bits = [`${h.booked} booked`];
   if (h.lost) bits.push(`${h.lost} lost`);
   if (h.cancelled) bits.push(`${h.cancelled} cancelled`);
   if (h.open) bits.push(`${h.open} open`);
+  if (noReplyBit) bits.push(noReplyBit);
   return bits.join(' · ');
 }
 
@@ -128,7 +133,7 @@ export default function LeadsPage() {
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; href?: string; linkText?: string } | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [search, setSearch] = useState('');
@@ -250,9 +255,7 @@ export default function LeadsPage() {
   const confirmMatch = (id: string, organisation_id: string) => act(() => api.post(`/leads/${id}/confirm-match`, { organisation_id }));
   const rejectMatch = (id: string) => act(() => api.post(`/leads/${id}/reject-match`, {}));
   const restore = (id: string) => act(() => api.post(`/leads/${id}/restore`, {}));
-  // "I've been in touch outside OP" — takes it off the dashboard card without
-  // dismissing it or starting an enquiry.
-  const markContacted = (id: string) => act(() => api.patch(`/leads/${id}`, { status: 'contacted' }));
+
 
   const sv = (k: string) => settings.find((s) => s.key === k)?.value ?? '';
   const coldCount = leads.filter((l) => l.stream === 'cold').length;
@@ -352,7 +355,10 @@ export default function LeadsPage() {
       {error && <div className="rounded-lg bg-red-50 text-red-800 px-4 py-3 mb-4 text-sm">{error}</div>}
       {notice && (
         <div className="rounded-lg bg-green-50 text-green-800 px-4 py-3 mb-4 text-sm flex justify-between gap-2">
-          <span>{notice}</span>
+          <span>
+            {notice.text}
+            {notice.href && <> <Link to={notice.href} className="underline font-medium">{notice.linkText ?? 'Open'} →</Link></>}
+          </span>
           <button onClick={() => setNotice(null)} className="text-green-700 hover:text-green-900" aria-label="Dismiss">×</button>
         </div>
       )}
@@ -478,9 +484,11 @@ export default function LeadsPage() {
                             <button onClick={() => setModal({ kind: 'address', lead: l })}
                               className="text-xs px-2 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-50">Add to address book</button>
                           )}
-                          {(l.status === 'new' || l.status === 'reviewing') && (
-                            <button onClick={() => markContacted(l.id)} className="text-xs text-gray-500 hover:text-[#7B5EA7]"
-                              title="You've been in touch outside OP — takes it off the dashboard">Mark contacted</button>
+                          {!l.converted_job_id && ['new', 'reviewing', 'contacted'].includes(l.status) && (
+                            <button onClick={() => setModal({ kind: 'outreach', lead: l })} className="text-xs text-gray-500 hover:text-[#7B5EA7]"
+                              title="You've contacted them — note it, and put a Cold enquiry in the pipeline so it gets chased">
+                              {l.status === 'contacted' ? 'Log outreach again' : 'Log outreach'}
+                            </button>
                           )}
                           {l.status !== 'converted' && (
                             <button onClick={() => setModal({ kind: 'dismiss', lead: l })} className="text-xs text-gray-400 hover:text-red-600" title="Dismiss this lead">Dismiss</button>
@@ -492,6 +500,9 @@ export default function LeadsPage() {
                   {expanded === l.id && (
                     <tr className="bg-gray-50">
                       <td colSpan={8} className="px-6 py-3 text-xs text-gray-600">
+                        {l.status === 'contacted' && l.status_note && (
+                          <p className="mb-2"><span className="text-gray-400">Outreach:</span> {l.status_note}</p>
+                        )}
                         {tab === 'dismissed' && l.status_note && (
                           <p className="mb-2"><span className="text-gray-400">Dismiss note:</span> {l.status_note}</p>
                         )}
@@ -577,7 +588,18 @@ export default function LeadsPage() {
       )}
       {modal?.kind === 'address' && (
         <AddToAddressBookModal lead={modal.lead} onClose={() => setModal(null)}
-          onDone={async (msg) => { setModal(null); setNotice(msg); await reloadAll(); }} />
+          onDone={async (msg) => { setModal(null); setNotice({ text: msg }); await reloadAll(); }} />
+      )}
+      {modal?.kind === 'outreach' && (
+        <LogOutreachModal lead={modal.lead} onClose={() => setModal(null)}
+          onAddToAddressBook={() => setModal({ kind: 'address', lead: modal.lead })}
+          onDone={async ({ jobId, chaseInDays }) => {
+            setModal(null);
+            setNotice(jobId
+              ? { text: `Outreach to ${modal.lead.artist_name} logged — Cold enquiry created, first chase in ${chaseInDays} days.`, href: `/jobs/${jobId}`, linkText: 'Open enquiry' }
+              : { text: `Outreach to ${modal.lead.artist_name} logged.` });
+            await reloadAll();
+          }} />
       )}
       {modal?.kind === 'enquiry' && (
         <StartEnquiryModal lead={modal.lead} onClose={() => setModal(null)}
