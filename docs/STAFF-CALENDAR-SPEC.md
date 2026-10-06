@@ -1346,6 +1346,7 @@ Where things are, for troubleshooting:
 | Is somebody in / home / off on a date | `services/staff-day-status.ts` (`getStaffCalendar`, the merge layers) |
 | Working from home | `services/staff-wfh.ts`, routes `/staff-calendar/wfh*` |
 | Personal calendar feed | `services/staff-ical.ts`, `routes/staff-calendar-feed.ts` |
+| Your working hours (My Time card) | `GET /staff-calendar/me/patterns` — current pattern + scheduled changes, days and times only; never notes, breaks or history (jon, Oct 2026). Pattern notes are also stripped from `/employees/:id/patterns` for a non-admin reading their own |
 | Emails and bells (requests, decisions, digest, cash-out, payroll) | `services/staff-notifications.ts` |
 | Balances | `services/staff-balance.ts` — the only SUM of the ledger |
 | Screens | `MyTimePage.tsx` (also the Staff page's Time off tab), `StaffCalendarPage.tsx`, `StaffAdminPage.tsx`, `LeaveApprovals.tsx`, `PayrollReportPanel.tsx` |
