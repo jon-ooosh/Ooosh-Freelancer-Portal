@@ -3,7 +3,7 @@ import { bandNameRegex, describeHistory, ClientHistory } from '../leads/history'
 
 const base: ClientHistory = {
   org_id: 'o', org_name: 'Big Mgmt', scope: 'org',
-  enquiries: 0, booked: 0, open: 0, lost: 0, cancelled: 0, lost_reasons: [],
+  enquiries: 0, booked: 0, open: 0, lost: 0, cancelled: 0, outreach_no_reply: 0, lost_reasons: [],
   last_enquiry: null, last_booked: null, booked_value: 0,
   retros: { great: 0, ok: 0, issues: 0 }, do_not_hire: false, working_terms: null,
 };
@@ -39,6 +39,14 @@ describe('describeHistory', () => {
     expect(s).toBe(
       'Via Big Mgmt (jobs named after the band): 10 enquiries — 0 booked, 9 lost (Price ×6, No Decision ×3), 1 still open. '
       + 'Last enquiry 2025-11-02. ⚠ Flagged Do Not Hire.',
+    );
+  });
+  it('shows unanswered outreach separately, never as a loss', () => {
+    expect(describeHistory({ ...base, outreach_no_reply: 1 })).toBe(
+      'As Big Mgmt: no enquiries or hires on record; 1 cold outreach from us with no reply (not counted as lost).',
+    );
+    expect(describeHistory({ ...base, enquiries: 2, booked: 2, outreach_no_reply: 2 })).toBe(
+      'As Big Mgmt: 2 enquiries — 2 booked. 2 cold outreaches from us with no reply (not counted as lost).',
     );
   });
 });

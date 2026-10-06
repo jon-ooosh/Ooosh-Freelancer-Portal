@@ -23,15 +23,29 @@ import { normaliseArtist } from './normalise';
 /** A lost reason that isn't really a loss: we re-quoted and THAT one booked. */
 const SUPERSEDED_REASON = 'Confirmed Alternative Quote (from us)';
 
+/**
+ * Outreach that got no reply — not a quote they turned down (jon, Oct 2026).
+ * WE started it (a Cold-lead enquiry, or any enquiry made from a lead) and it
+ * was closed as "No Decision" — what the 09:00 stale-enquiry auto-loser writes
+ * when nobody answers. Counted separately, never as a loss. A lead-made
+ * enquiry lost for a real reason (Price, Competitor…) is still a loss.
+ */
+const OUTREACH_NO_REPLY_SQL = `(${JOB_OUTCOME_SQL.lostOnly}
+  AND j.lost_reason = 'No Decision'
+  AND (j.enquiry_source = 'cold_lead' OR EXISTS (SELECT 1 FROM leads ld WHERE ld.converted_job_id = j.id)))`;
+
 export interface ClientHistory {
   org_id: string;
   org_name: string;
   scope: 'org' | 'band_jobs';
+  /** Enquiries, NOT counting unanswered outreach (that's outreach_no_reply). */
   enquiries: number;
   booked: number;
   open: number;
   lost: number;
   cancelled: number;
+  /** Our cold outreach that got no reply — shown, but not a loss. */
+  outreach_no_reply: number;
   lost_reasons: { reason: string; count: number }[];
   last_enquiry: string | null;
   last_booked: string | null;
@@ -89,10 +103,11 @@ export async function getClientHistory(
   const stats = await query(
     `${jobSet}
      SELECT
-       COUNT(*)::int AS enquiries,
+       COUNT(*) FILTER (WHERE NOT ${OUTREACH_NO_REPLY_SQL})::int AS enquiries,
+       COUNT(*) FILTER (WHERE ${OUTREACH_NO_REPLY_SQL})::int AS outreach_no_reply,
        COUNT(*) FILTER (WHERE ${JOB_BOOKED_SQL})::int AS booked,
        COUNT(*) FILTER (WHERE ${JOB_OUTCOME_SQL.open})::int AS open,
-       COUNT(*) FILTER (WHERE ${JOB_OUTCOME_SQL.lostOnly} AND COALESCE(j.lost_reason, '') <> $3::text)::int AS lost,
+       COUNT(*) FILTER (WHERE ${JOB_OUTCOME_SQL.lostOnly} AND COALESCE(j.lost_reason, '') <> $3::text AND NOT ${OUTREACH_NO_REPLY_SQL})::int AS lost,
        COUNT(*) FILTER (WHERE ${JOB_OUTCOME_SQL.cancelled})::int AS cancelled,
        MAX(j.created_at) AS last_enquiry,
        MAX(COALESCE(j.job_date, j.out_date)) FILTER (WHERE ${JOB_BOOKED_SQL}) AS last_booked,
@@ -106,6 +121,7 @@ export async function getClientHistory(
      SELECT COALESCE(NULLIF(TRIM(j.lost_reason), ''), 'No reason given') AS reason, COUNT(*)::int AS count
        FROM lead_jobs j
       WHERE ${JOB_OUTCOME_SQL.lostOnly} AND COALESCE(j.lost_reason, '') <> $3::text
+        AND NOT ${OUTREACH_NO_REPLY_SQL}
       GROUP BY 1 ORDER BY 2 DESC`,
     withReason,
   );
@@ -132,6 +148,7 @@ export async function getClientHistory(
     open: s.open ?? 0,
     lost: s.lost ?? 0,
     cancelled: s.cancelled ?? 0,
+    outreach_no_reply: s.outreach_no_reply ?? 0,
     lost_reasons: reasons.rows.map((r) => ({ reason: r.reason as string, count: r.count as number })),
     last_enquiry: isoDate(s.last_enquiry),
     last_booked: isoDate(s.last_booked),
@@ -154,8 +171,15 @@ export async function getClientHistory(
 export function describeHistory(h: ClientHistory): string {
   const bits: string[] = [];
   const via = h.scope === 'band_jobs' ? `Via ${h.org_name} (jobs named after the band)` : `As ${h.org_name}`;
+  // Older stored snapshots predate this field.
+  const noReply = h.outreach_no_reply ?? 0;
+  const noReplyLine = noReply
+    ? `${noReply} cold outreach${noReply === 1 ? '' : 'es'} from us with no reply (not counted as lost).`
+    : null;
   if (h.enquiries === 0) {
-    bits.push(`${via}: in the address book, but no enquiries or hires on record.`);
+    bits.push(noReply
+      ? `${via}: no enquiries or hires on record; ${noReplyLine}`
+      : `${via}: in the address book, but no enquiries or hires on record.`);
   } else {
     const parts = [`${h.booked} booked`];
     if (h.lost) {
@@ -165,6 +189,7 @@ export function describeHistory(h: ClientHistory): string {
     if (h.cancelled) parts.push(`${h.cancelled} cancelled after booking`);
     if (h.open) parts.push(`${h.open} still open`);
     bits.push(`${via}: ${h.enquiries} enquir${h.enquiries === 1 ? 'y' : 'ies'} — ${parts.join(', ')}.`);
+    if (noReplyLine) bits.push(noReplyLine.charAt(0).toUpperCase() + noReplyLine.slice(1));
     if (h.last_booked) bits.push(`Last booked ${h.last_booked}${h.booked_value ? ` (booked total ~£${h.booked_value.toLocaleString('en-GB')})` : ''}.`);
     if (h.last_enquiry) bits.push(`Last enquiry ${h.last_enquiry}.`);
     const r = h.retros;

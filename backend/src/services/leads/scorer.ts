@@ -80,6 +80,7 @@ Some artists come with an "OOOSH history" line — what OOOSH's own records say 
 - Bookings cancelled after confirming, and retros "with issues", are warning signs.
 - "Flagged Do Not Hire" → score 1 and say so in reasoning.
 - "No enquiries or hires on record" is neutral — score on the profile.
+- "Cold outreach from us with no reply" is NOT a loss — they never quoted or declined. At most a mild signal; don't score down for one.
 History does not change origin_country or client_tier; those describe the act.
 Mention the history in reasoning whenever it moved the score.
 Valid skip_reason values: "tribute", "comedy", "too_big", "dj", "not_music", "electronic", "theatre", "unknown_insufficient_data".`;
