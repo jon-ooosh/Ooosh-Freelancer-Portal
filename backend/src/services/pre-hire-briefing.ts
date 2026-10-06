@@ -20,6 +20,7 @@ import { emailService } from './email-service';
 import { renderBriefingHtml, buildSubject } from './email-templates/pre-hire-briefing';
 import { resolveHireFormContacts, ResolvedContact } from './hire-form-contacts';
 import { calculateVatAdjustment } from './vat-adjustment';
+import { getPaymentPortalLink } from './payment-portal-link';
 
 /** Match the OP-wide convention pinned in CLAUDE.md: requirements with a
  *  `[Suspended: <reason>]` marker in `notes` (Van & Driver or Internal) are
@@ -187,6 +188,10 @@ export interface JobBriefing {
    *  reference the previous send and include the link. Null on non-self-
    *  drive hires or when we don't have a HH job number. */
   hire_form_link: BriefingHireFormLink | null;
+  /** The client's payment portal link (computed live from HireHop, see
+   *  services/payment-portal-link.ts). Null when the job has no HH number or
+   *  HireHop couldn't supply the job data. */
+  payment_portal_url: string | null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -627,6 +632,19 @@ export async function buildBriefing(
   const has_backline = !!derivedFlags?.has_backline;
   const equipment_summary = summariseEquipment(derivedFlags);
 
+  // ── Payment portal link ────────────────────────────────────────────
+  // Live from HireHop so it matches the quote document's link. Best-effort:
+  // the client draft falls back to "the blue link at the bottom of the quote".
+  let payment_portal_url: string | null = null;
+  if (hhJobNumber) {
+    try {
+      const link = await getPaymentPortalLink(hhJobNumber);
+      payment_portal_url = link?.url ?? null;
+    } catch (err) {
+      console.warn(`[pre-hire-briefing] payment portal link failed for HH#${hhJobNumber}:`, err);
+    }
+  }
+
   // ── Hire form link + last-send metadata ────────────────────────────
   // Only populate for self-drive hires with a HH number — these are the
   // only jobs where the link is meaningful. Parses last-send info from the
@@ -781,6 +799,7 @@ export async function buildBriefing(
     contacts,
     holding,
     hire_form_link,
+    payment_portal_url,
   };
 }
 
