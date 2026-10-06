@@ -42,6 +42,9 @@ interface IncomingRow {
   hh_push_error: string | null;
   resolved_at: string | null;
   resolved_by_name: string | null;
+  xero_invoice_id: string | null;
+  xero_invoice_number: string | null;
+  xero_payment_id: string | null;
 }
 
 const money = (v: string | number | null | undefined) => `£${(parseFloat(String(v ?? 0)) || 0).toFixed(2)}`;
@@ -120,6 +123,8 @@ export default function IncomingPaymentsPanel() {
                         <Link to={`/jobs/${r.matched_job_id}`} className="text-ooosh-600 hover:underline">
                           #{r.matched_hh_job_number} {r.payment_type === 'excess' ? 'excess' : 'hire'}
                         </Link>
+                      ) : r.status === 'recorded' && r.xero_payment_id ? (
+                        <span className="text-gray-700">Xero {r.xero_invoice_number}</span>
                       ) : r.status === 'ignored' ? (
                         <span className="text-gray-500" title={r.match_notes || ''}>ignored</span>
                       ) : null}
@@ -163,6 +168,20 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to record');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recordXero = async () => {
+    if (!row.xero_invoice_id) return;
+    if (!window.confirm(`Record ${money(row.amount)} in Xero as a payment on invoice ${row.xero_invoice_number}?`)) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await api.post(`/money/incoming-payments/${row.id}/record-xero`, {});
+      onDone();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to record in Xero');
     } finally {
       setBusy(false);
     }
@@ -243,6 +262,17 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
           >
             {busy ? 'Recording…' : `Record ${money(row.amount)}`}
           </button>
+          {row.xero_invoice_id && (
+            <button
+              type="button"
+              onClick={recordXero}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm font-medium text-ooosh-700 border border-ooosh-300 bg-white hover:bg-ooosh-50 rounded disabled:opacity-50"
+              title="This reference matched a Xero-only invoice (not a HireHop job)"
+            >
+              Record in Xero against {row.xero_invoice_number}
+            </button>
+          )}
           <button
             type="button"
             onClick={ignore}
