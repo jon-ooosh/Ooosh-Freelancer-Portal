@@ -361,6 +361,9 @@ export interface OperationsData {
     recharges_to_resolve_total?: number;
     /** High-priority backline demand with no acquisition plan — purchasing prompt. */
     backline_to_buy_count?: number;
+    /** Lead Finder leads to look at — services/leads/attention.ts (full count + top 5). */
+    leads_to_review_count?: number;
+    leads_to_review?: LeadToReview[];
     /** PCN buckets (Step 8) — internal surfacing, never client comms. */
     pcn_nip_urgent?: PcnAttentionItem[];
     pcn_ready_to_transfer?: PcnAttentionItem[];
@@ -393,3 +396,16 @@ export interface OperationsData {
   team_activity: TeamMember[];
   recent_activity: RecentActivity[];
 }
+
+/** A lead on the dashboard's "Leads to look at" card. */
+export interface LeadToReview {
+  id: string;
+  artist_name: string;
+  stream: 'cold' | 'warm';
+  relevance_score: number | null;
+  first_date: string | null;
+  origin_country: string | null;
+  matched_org_name: string | null;
+  client_history: { enquiries: number; booked: number; lost: number } | null;
+}
+

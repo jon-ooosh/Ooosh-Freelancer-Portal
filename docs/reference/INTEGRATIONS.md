@@ -494,8 +494,13 @@ to main + deploys manually + validates against a test list before the next.
 matching, remembered rejections, dismiss reasons + suppression, overlap re-detection, search
 window, Add to address book, Start enquiry. Spec §14.
 
-**Deferred (agreed, not built):** scheduled weekly run (jon: keep manual for now); dashboard
-surfacing of new high-score leads; outreach-email drafting — folds into the auto-chase "voice"
+**Dashboard** (Oct 2026, migration 272): a blue, self-hiding **"Leads to look at"** card in
+Needs Attention. Defined in `services/leads/attention.ts` `getLeadAttention()`: new +
+still sellable + warm ≥ `lead_min_relevance_score` or cold ≥ `lead_dashboard_min_score`
+(default 8). Items deep-link to `/jobs/leads?lead=<id>`. A lead leaves the card when an
+enquiry is started, it's dismissed, or it's marked contacted (a new row action). Spec §15.
+
+**Deferred (agreed, not built):** scheduled weekly run (jon: keep manual for now); outreach-email drafting — folds into the auto-chase "voice"
 work on the Enquiries pipeline rather than being built separately.
 
 #### Auto-Chase — Gmail ingestion + AI chase drafts (LIVE, Jul 2026)

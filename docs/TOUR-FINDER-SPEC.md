@@ -292,3 +292,26 @@ Agreed with jon, Oct 2026. Migration 271. Detail in `docs/reference/INTEGRATIONS
 suggestions on existing leads, fills in client history, and re-scores existing warm leads
 with that history (they were scored before matching existed).
 
+## 15. Dashboard surfacing (BUILT, Oct 2026)
+
+A **"Leads to look at"** card in the dashboard's Needs Attention section. It's blue
+(informational: an opportunity, not a fault) and hides itself when empty, like the Holding
+"Unidentified items" card. The definition is `services/leads/attention.ts`
+`getLeadAttention()`, fed into `GET /api/dashboard/operations` as
+`needs_attention.leads_to_review(_count)`. Migration 272.
+
+**On the card:** leads still `status = 'new'` whose first UK date is beyond the
+`lead_lookahead_min_weeks` floor (a lead ages off once it's too late to sell into), and
+- **warm** leads at `lead_min_relevance_score` (the normal minimum — returning bands are the
+  best leads), or
+- **cold** leads at `lead_dashboard_min_score` (new setting, default 8), so a big search
+  doesn't flood the dashboard.
+
+Ordered warm first, then score, then soonest tour. The count is the full total.
+Each item deep-links to `/jobs/leads?lead=<id>`, which opens the right tab, expands the lead
+and scrolls to it. The param is then dropped from the URL.
+
+**Off the card:** start an enquiry (→ `converted`), dismiss it, or **Mark contacted** (new
+row action, `status = 'contacted'`). Mark contacted is for "I've emailed their manager
+outside OP": the lead stays on the Leads page, it just stops asking for attention.
+
