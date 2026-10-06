@@ -310,6 +310,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '268_claim_gps.sql',
         '269_staff_work_from_home.sql',
         '270_staff_calendar_feed.sql',
+        '271_leads_actions_and_history.sql',
       ];
 
       for (const migration of migrations) {

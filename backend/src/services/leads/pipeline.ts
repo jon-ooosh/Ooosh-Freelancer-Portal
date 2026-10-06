@@ -1,17 +1,19 @@
 /**
  * Lead Finder pipeline orchestrator.
  *
- * Runs collect → detect → score as one background job, writing progress/counts
- * to `lead_runs`. Guards against concurrent runs. Triggered manually from the
- * Leads page (POST /api/leads/run); a scheduled trigger lands in a later slice.
+ * Runs collect → detect → match → score → research → known contacts as one
+ * background job, writing progress/counts to `lead_runs`. Match runs BEFORE
+ * score so a lead matched to a client is scored with its OOOSH history in view.
+ * Guards against concurrent runs. Manual only (POST /api/leads/run) — jon,
+ * Oct 2026: keep it manual for now; `lead_auto_run_enabled` stays unwired.
  */
 import { query } from '../../config/database';
 import { getSystemSetting } from '../../routes/system-settings';
 import { resetTicketmasterCallBudget, getTicketmasterCallCount } from './ticketmaster';
 import { collectAll } from './collector';
-import { detectTours } from './detector';
+import { detectTours, SearchWindow } from './detector';
 import { scoreLeads } from './scorer';
-import { runMatching } from './matcher';
+import { runMatching, linkKnownContacts } from './matcher';
 import { researchContacts } from './researcher';
 
 async function num(key: string, fallback: number): Promise<number> {
@@ -41,6 +43,25 @@ export async function sweepZombieLeadRuns(reason = 'Interrupted (server restart)
   return r.rowCount ?? 0;
 }
 
+function ymd(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The default search window from the settings: tours starting between
+ * today + lead_lookahead_min_weeks and today + lead_lookahead_max_weeks.
+ */
+export async function defaultSearchWindow(): Promise<SearchWindow> {
+  const minLeadWeeks = await num('lead_lookahead_min_weeks', 3);
+  const maxWeeks = await num('lead_lookahead_max_weeks', 17);
+  const now = Date.now();
+  const week = 7 * 24 * 60 * 60 * 1000;
+  return { from: ymd(new Date(now + minLeadWeeks * week)), to: ymd(new Date(now + maxWeeks * week)) };
+}
+
+/** Longest window a staff-chosen search may cover (Ticketmaster call budget). */
+export const MAX_WINDOW_DAYS = 366;
+
 export async function createRun(triggeredBy: string | null, trigger: 'manual' | 'scheduled'): Promise<string> {
   const r = await query(
     `INSERT INTO lead_runs (triggered_by, trigger, status) VALUES ($1, $2, 'running') RETURNING id`,
@@ -49,25 +70,32 @@ export async function createRun(triggeredBy: string | null, trigger: 'manual' | 
   return r.rows[0].id as string;
 }
 
-/** Run the full pipeline for an already-created run row. Never throws. */
-export async function runPipeline(runId: string): Promise<void> {
+/**
+ * Run the full pipeline for an already-created run row. Never throws.
+ * `window` = the staff-chosen "tours starting between" dates; omitted → the
+ * settings default.
+ */
+export async function runPipeline(runId: string, window?: SearchWindow): Promise<void> {
   try {
     resetTicketmasterCallBudget();
 
-    const minLeadWeeks = await num('lead_lookahead_min_weeks', 3);
-    const maxWeeks = await num('lead_lookahead_max_weeks', 17);
+    const searchWindow = window ?? await defaultSearchWindow();
     const tourMinDates = await num('lead_tour_min_dates', 3);
     const tourWindowWeeks = await num('lead_tour_window_weeks', 6);
 
-    const collection = await collectAll(maxWeeks);
-    const detection = await detectTours(runId, { minLeadWeeks, maxWeeks, tourMinDates, tourWindowWeeks });
-    const scoring = await scoreLeads();
+    const collection = await collectAll(searchWindow);
+    const detection = await detectTours(runId, { window: searchWindow, tourMinDates, tourWindowWeeks });
     const matching = await runMatching();
+    const scoring = await scoreLeads();
     const research = await researchContacts();
+    const known = await linkKnownContacts();
 
     await query(
       `UPDATE lead_runs SET status = 'complete', finished_at = NOW(), counts = $2 WHERE id = $1`,
-      [runId, JSON.stringify({ collection, detection, scoring, matching, research, tmCalls: getTicketmasterCallCount() })],
+      [runId, JSON.stringify({
+        window: searchWindow, custom_window: Boolean(window),
+        collection, detection, matching, scoring, research, known, tmCalls: getTicketmasterCallCount(),
+      })],
     );
     console.log('[leads/pipeline] run %s complete', runId);
   } catch (err) {
@@ -79,15 +107,18 @@ export async function runPipeline(runId: string): Promise<void> {
   }
 }
 
-/** Run ONLY the address-book match + contact research against existing leads —
- *  no Ticketmaster crawl. Fast way to (re)process leads already found. */
+/** Run match → score → research → known contacts against existing leads — no
+ *  Ticketmaster crawl. Fast way to (re)process leads already found; also
+ *  re-scores matched leads whose score hasn't yet weighed their history. */
 export async function runProcessExisting(runId: string): Promise<void> {
   try {
     const matching = await runMatching();
+    const scoring = await scoreLeads();
     const research = await researchContacts();
+    const known = await linkKnownContacts();
     await query(
       `UPDATE lead_runs SET status = 'complete', finished_at = NOW(), counts = $2 WHERE id = $1`,
-      [runId, JSON.stringify({ mode: 'process_existing', matching, research })],
+      [runId, JSON.stringify({ mode: 'process_existing', matching, scoring, research, known })],
     );
     console.log('[leads/pipeline] process-existing run %s complete', runId);
   } catch (err) {

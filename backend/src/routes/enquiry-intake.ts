@@ -31,6 +31,9 @@ import { verifyApiKey } from '../middleware/api-key';
 import { getFrontendUrl } from '../config/app-urls';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
+import {
+  splitName, findOrCreatePersonByEmail, resolveOrCreateOrganisation, linkPersonToOrganisation,
+} from '../services/address-book-resolve';
 
 const router = Router();
 
@@ -142,11 +145,6 @@ const SERVICE_TYPE_MAP: Record<string, 'self_drive_van' | 'backline' | 'rehearsa
   'backline hire': 'backline',
   'rehearsals': 'rehearsal',
 };
-
-function splitName(full: string): { first: string; last: string } {
-  const parts = full.trim().split(/\s+/);
-  return { first: parts[0] || full.trim(), last: parts.slice(1).join(' ') };
-}
 
 function formatAddress(a?: z.infer<typeof addressSchema> | null): string | null {
   if (!a) return null;
@@ -321,71 +319,30 @@ router.post('/', intakeLimiter, authenticateEnquiryIntake, async (req: Request, 
     const { first, last } = splitName(payload.name);
     const phone = payload.phone?.trim() || [payload.phone_code, payload.phone_number].filter(Boolean).join(' ').trim() || null;
 
+    // Steps 1–3 go through the shared exact-match resolver
+    // (services/address-book-resolve.ts) — the Lead Finder uses the same one.
+
     // ── 1. Resolve / create person (exact email) ───────────────────────────
-    let personId: string;
-    let personOutcome: 'existing' | 'created';
-    const personLookup = await query(
-      `SELECT id FROM people
-       WHERE LOWER(email) = $1 AND is_deleted = false
-       ORDER BY updated_at DESC LIMIT 1`,
-      [email]
-    );
-    if (personLookup.rows.length > 0) {
-      personId = personLookup.rows[0].id;
-      personOutcome = 'existing';
-    } else {
-      const created = await query(
-        `INSERT INTO people (first_name, last_name, email, phone, notes, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-        [first, last, email, phone, 'Created from website enquiry form.', SYSTEM_USER_ID]
-      );
-      personId = created.rows[0].id;
-      personOutcome = 'created';
-    }
+    const person = await findOrCreatePersonByEmail({
+      email, firstName: first, lastName: last, phone,
+      notes: 'Created from website enquiry form.', createdBy: SYSTEM_USER_ID,
+    });
+    const personId = person.id;
+    const personOutcome = person.outcome;
 
     // ── 2. Resolve / create org ────────────────────────────────────────────
     // Exact normalised-name match → link. No match → create a new 'client' org.
     // Multiple exact matches → leave unlinked (don't guess), client_name kept.
     // No company given → fall back to the person's name (sole-trader shape).
     const orgName = companyName || payload.name.trim();
-    let orgId: string | null = null;
-    let orgOutcome: 'existing' | 'created' | 'unlinked' = 'unlinked';
-
-    const orgLookup = await query(
-      `SELECT id FROM organisations
-       WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND is_deleted = false
-       LIMIT 2`,
-      [orgName]
-    );
-    if (orgLookup.rows.length === 1) {
-      orgId = orgLookup.rows[0].id;
-      orgOutcome = 'existing';
-    } else if (orgLookup.rows.length === 0) {
-      const created = await query(
-        `INSERT INTO organisations (name, type, notes, created_by)
-         VALUES ($1, 'client', $2, $3) RETURNING id`,
-        [orgName, 'Created from website enquiry form.', SYSTEM_USER_ID]
-      );
-      orgId = created.rows[0].id;
-      orgOutcome = 'created';
-    }
-    // else: 2+ exact matches → orgId stays null (ambiguous), orgOutcome 'unlinked'
+    const org = await resolveOrCreateOrganisation({
+      name: orgName, type: 'client', notes: 'Created from website enquiry form.', createdBy: SYSTEM_USER_ID,
+    });
+    const orgId = org.id;
+    const orgOutcome = org.outcome;
 
     // ── 3. Link person ↔ org (active role) if not already linked ────────────
-    if (orgId) {
-      const existingLink = await query(
-        `SELECT id FROM person_organisation_roles
-         WHERE person_id = $1 AND organisation_id = $2 AND status = 'active' LIMIT 1`,
-        [personId, orgId]
-      );
-      if (existingLink.rows.length === 0) {
-        await query(
-          `INSERT INTO person_organisation_roles (person_id, organisation_id, role, status)
-           VALUES ($1, $2, 'General Contact', 'active')`,
-          [personId, orgId]
-        );
-      }
-    }
+    if (orgId) await linkPersonToOrganisation(personId, orgId, 'General Contact');
 
     // ── 4. Dedup guard — same email in new_enquiry in the last 15 min ───────
     // Guards against double-submits / Worker retries without touching the form.
