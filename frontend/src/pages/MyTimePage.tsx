@@ -535,9 +535,103 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         )}
       </section>
 
+      {/* Your own hours only — an admin looking at somebody already has them,
+          with their history, on the Employment tab. */}
+      {!adminView && <WorkingHoursCard />}
+
       {/* The person's own link only — never on an admin's view of somebody
           else, since the link is a credential for THEIR calendar. */}
       {!adminView && <CalendarFeedCard />}
+    </div>
+  );
+}
+
+interface MyPatternDay { cycleWeek: number; weekday: number; startTime: string | null; endTime: string | null }
+interface MyPattern { effectiveFrom: string; cycleWeeks: number; days: MyPatternDay[]; thisCycleWeek?: number }
+
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+/**
+ * "Your working hours" — what the system THINKS you work, which is what holiday
+ * and overtime are measured against. Shown so a wrong pattern gets spotted by
+ * the one person who would know. Current pattern plus any change already
+ * scheduled; days and times only (jon, Oct 2026) — no notes, breaks or
+ * history. Patterns vary too much here to squeeze into a one-line summary, so
+ * every day is listed as it is.
+ */
+function WorkingHoursCard() {
+  const [data, setData] = useState<{ current: MyPattern | null; upcoming: MyPattern[] } | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ data: { current: MyPattern | null; upcoming: MyPattern[] } | null }>('/staff-calendar/me/patterns')
+      .then(res => { if (!cancelled) setData(res.data); })
+      // Reference information — a failure hides the card rather than the page.
+      .catch(() => { /* leave it hidden */ })
+      .finally(() => { if (!cancelled) setLoaded(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // No staff record: the page already says so at the top.
+  if (!loaded || !data) return null;
+
+  return (
+    <section className="mt-4 bg-white border border-gray-200 rounded-2xl sm:rounded-xl p-5">
+      <h2 className="text-[15px] font-semibold text-gray-900">Your working hours</h2>
+      <p className="text-[13px] text-gray-500">
+        What we have you down to work — your holiday and overtime are worked out from this.
+        If it isn&apos;t right, tell an admin.
+      </p>
+
+      {data.current ? (
+        <PatternWeeks pattern={data.current} />
+      ) : (
+        <p className="mt-3 text-sm text-gray-500">
+          {data.upcoming.length > 0 ? 'No working hours set for now.' : 'No working hours set for you yet — ask an admin.'}
+        </p>
+      )}
+
+      {data.upcoming.map(p => (
+        <div key={p.effectiveFrom} className="mt-4 pt-4 border-t border-gray-100">
+          <h3 className="text-sm font-medium text-gray-900">Changing from {fmtDate(p.effectiveFrom)}</h3>
+          <PatternWeeks pattern={p} />
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function PatternWeeks({ pattern }: { pattern: MyPattern }) {
+  const weeks = pattern.cycleWeeks === 2 ? [1, 2] : [1];
+  // A 2-week pattern alternates; for the current one, say which week is which.
+  function weekLabel(w: number): string | null {
+    if (weeks.length === 1) return null;
+    if (pattern.thisCycleWeek) return w === pattern.thisCycleWeek ? 'This week' : 'Next week';
+    return w === 1 ? 'First week' : 'Second week';
+  }
+  // This week first, then next.
+  const ordered = pattern.thisCycleWeek === 2 ? [2, 1] : weeks;
+  return (
+    <div className={`mt-3 grid gap-4 ${weeks.length === 2 ? 'sm:grid-cols-2' : ''}`}>
+      {ordered.map(w => (
+        <div key={w}>
+          {weekLabel(w) && <div className="text-xs font-medium text-gray-500 mb-1">{weekLabel(w)}</div>}
+          <dl className="text-sm divide-y divide-gray-100">
+            {WEEKDAY_NAMES.map((name, i) => {
+              const d = pattern.days.find(x => x.cycleWeek === w && x.weekday === i);
+              return (
+                <div key={i} className="flex justify-between py-1.5">
+                  <dt className={d ? 'text-gray-900' : 'text-gray-400'}>{name}</dt>
+                  <dd className={`tabular-nums ${d ? 'text-gray-900' : 'text-gray-400'}`}>
+                    {d ? `${d.startTime?.slice(0, 5) ?? '?'}–${d.endTime?.slice(0, 5) ?? '?'}` : 'Not working'}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+        </div>
+      ))}
     </div>
   );
 }

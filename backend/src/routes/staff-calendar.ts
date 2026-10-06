@@ -20,7 +20,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import {
-  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE,
+  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE, cycleWeekFor,
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
@@ -1683,10 +1683,56 @@ router.get('/employees/:personId/patterns', async (req: AuthRequest, res: Respon
     if (!isAdmin(req) && (await personIdForUser(req.user!.id)) !== personId) {
       res.status(403).json({ error: 'Insufficient permissions' }); return;
     }
-    res.json({ data: await listPatterns(personId) });
+    const patterns = await listPatterns(personId);
+    // Notes are written for admins (jon, Oct 2026) — never back to the person.
+    res.json({ data: isAdmin(req) ? patterns : patterns.map(p => ({ ...p, notes: null })) });
   } catch (err) {
     console.error('[staff-calendar] patterns error:', err);
     res.status(500).json({ error: 'Failed to load working patterns' });
+  }
+});
+
+// GET /api/staff-calendar/me/patterns — your own working hours, for My Time.
+// Current pattern plus any change already scheduled; no history. Days and
+// times only (jon, Oct 2026) — no notes, breaks or home days. `data` is null
+// when the login has no staff record.
+router.get('/me/patterns', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: null }); return; }
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+    // listPatterns' rows are loosely typed; name the columns used here.
+    const patterns = (await listPatterns(personId)) as unknown as {
+      effective_from: string; effective_to: string | null; cycle_weeks: number;
+      days: { cycle_week: number; weekday: number; is_working: boolean;
+        start_time: string | null; end_time: string | null }[];
+    }[];
+    const shape = (p: (typeof patterns)[number]) => ({
+      effectiveFrom: p.effective_from,
+      cycleWeeks: Number(p.cycle_weeks) || 1,
+      days: p.days
+        .filter(d => d.is_working)
+        .map(d => ({ cycleWeek: d.cycle_week, weekday: d.weekday, startTime: d.start_time, endTime: d.end_time })),
+    });
+    // effective_to is inclusive: a change closes the old pattern the day before.
+    const current = patterns.find(p => p.effective_from <= today
+      && (p.effective_to === null || p.effective_to >= today));
+    const upcoming = patterns.filter(p => p.effective_from > today)
+      .sort((a, b) => (a.effective_from < b.effective_from ? -1 : 1));
+    res.json({
+      data: {
+        current: current ? {
+          ...shape(current),
+          // Which week of a 2-week cycle today falls in, so the page can say
+          // "this week" / "next week" rather than an unexplained W1 / W2.
+          thisCycleWeek: cycleWeekFor(today, current.effective_from, Number(current.cycle_weeks) || 1),
+        } : null,
+        upcoming: upcoming.map(shape),
+      },
+    });
+  } catch (err) {
+    console.error('[staff-calendar] my patterns error:', err);
+    res.status(500).json({ error: 'Failed to load your working hours' });
   }
 });
 
