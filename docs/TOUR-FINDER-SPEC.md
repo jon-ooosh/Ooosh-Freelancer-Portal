@@ -315,3 +315,36 @@ and scrolls to it. The param is then dropped from the URL.
 row action, `status = 'contacted'`). Mark contacted is for "I've emailed their manager
 outside OP": the lead stays on the Leads page, it just stops asking for attention.
 
+## 16. Log outreach, band emails, editable names (BUILT, Oct 2026)
+
+From jon's first real cold reach-out. No migration.
+
+1. **Log outreach** replaces "Mark contacted". It records a note on the lead
+   (`status = 'contacted'`, `status_note`), which takes it off the dashboard card. By default it
+   also opens a **Cold enquiry** (OP only, never HireHop) through the same
+   `createEnquiryFromLead()` as Start enquiry: `enquiry_source = 'cold_lead'`,
+   `likelihood = 'cold'`, first chase after 3–21 days (staff choose; default 7),
+   `chase_interval_days` set to match, contacts chosen, and an outreach note on the job's
+   timeline. So the existing chase model does the follow-up — no new reminder system.
+   - The enquiry option needs the band in the address book. The dialog links to "Add them
+     first"; without it, it's just a note.
+   - The pipeline's existing **Cold** likelihood filter is where these outreach enquiries
+     are tracked.
+2. **Unanswered outreach is not a loss.** If nobody replies, the 09:00 stale-enquiry
+   auto-loser closes the enquiry as "No Decision". In the band's client history
+   (`history.ts` `OUTREACH_NO_REPLY_SQL`), a job WE started (`enquiry_source = 'cold_lead'`
+   or `leads.converted_job_id` points at it) that was lost as "No Decision" counts as
+   `outreach_no_reply`. It is shown, but not counted in `enquiries` or `lost`, and the
+   scorer is told not to mark a band down for it. A lead-made enquiry lost for a real
+   reason (Price, Competitor…) is still a loss, and so is a client's own enquiry lost as
+   No Decision.
+3. **Add to address book: editable names + band emails.**
+   - Each chosen contact is added as a **person**, under a name staff can edit (required
+     for a new person, so nobody ends up called "info"), or saved as the **band's email**.
+   - Shared inboxes (`isGenericMailbox()` in `services/address-book-resolve.ts`: info@,
+     bookings@, hello@, management@…) default to the band's email.
+     `addOrganisationEmail()` sets `organisations.email` if it's empty, otherwise adds
+     "Other email: …" to the org notes. It never overwrites an email staff entered.
+   - Re-adding contacts to a band the lead itself created keeps `match_via = 'created'`, so
+     it doesn't quietly become a warm match.
+
