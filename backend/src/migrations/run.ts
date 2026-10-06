@@ -313,6 +313,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '271_leads_actions_and_history.sql',
         '272_leads_dashboard_threshold.sql',
         '273_incoming_bank_payments.sql',
+        '274_incoming_bank_payments_xero.sql',
       ];
 
       for (const migration of migrations) {
