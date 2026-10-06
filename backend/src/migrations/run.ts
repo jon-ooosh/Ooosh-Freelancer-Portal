@@ -312,6 +312,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '270_staff_calendar_feed.sql',
         '271_leads_actions_and_history.sql',
         '272_leads_dashboard_threshold.sql',
+        '273_incoming_bank_payments.sql',
       ];
 
       for (const migration of migrations) {

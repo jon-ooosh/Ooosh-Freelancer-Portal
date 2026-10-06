@@ -25,6 +25,7 @@
 import { query } from '../config/database';
 import { getGmailProfile, gmailApiGet, getPrimaryMailbox, isGmailConfigured } from '../config/gmail';
 import { matchEmailToJob, extractEmailAddress, extractReferencedJobNumbers } from './email-matcher';
+import { isWiseMoneyReceivedEmail, handleWiseEmail } from './wise-incoming';
 import { getSystemSetting } from '../routes/system-settings';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
@@ -187,6 +188,8 @@ export interface GmailMessage {
   threadId: string;
   snippet?: string;
   labelIds?: string[];
+  /** ms since epoch, as a string (Gmail `format=full`). */
+  internalDate?: string;
   payload?: GmailPart;
 }
 interface GmailHistoryRecord {
@@ -379,6 +382,24 @@ export async function ingestGmailMessage(
   const to = headerValue(headers, 'To');
   const cc = headerValue(headers, 'Cc');
   const subject = headerValue(headers, 'Subject');
+
+  // Wise "Money received from …" notifications (jon@ gets one per incoming bank
+  // transfer) are money, not conversation: hand them to the incoming-payment matcher
+  // BEFORE the automated-mail / internal-sender skips below would drop them, and never
+  // put them on a job timeline. See services/wise-incoming.ts.
+  if (isWiseMoneyReceivedEmail(from, subject)) {
+    const { body: wiseBody } = extractBodyAndAttachments(msg.payload);
+    await handleWiseEmail({
+      mailbox,
+      rfcMessageId,
+      from,
+      subject,
+      body: wiseBody,
+      headers: headers || [],
+      internalDate: msg.internalDate ?? null,
+    });
+    return 'skipped';
+  }
 
   // What to ingest: genuine staff↔client conversation, BOTH directions. What to
   // skip: our own transactional templates, internal↔internal notification
