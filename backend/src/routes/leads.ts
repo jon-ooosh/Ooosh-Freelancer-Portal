@@ -369,8 +369,14 @@ router.get('/:id/address-book-preview', authorize(...STAFF_ROLES), async (req: A
     const lead = await loadLead(req.params.id as string);
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
+    // "Did you mean…?": orgs booked under jobs named after the band (the
+    // management-company case) first, then similar org names.
     const target = normaliseArtist(lead.artist_name);
-    const similar = (await findOrgNameCandidates(lead.artist_name))
+    const rejected = new Set((lead.rejected_org_ids ?? []) as string[]);
+    const jobNamed = ((lead.match_candidates ?? []) as MatchCandidate[]).filter((c) => c.via === 'job_name');
+    const byName = (await findOrgNameCandidates(lead.artist_name)).filter((c) => !jobNamed.some((j) => j.id === c.id));
+    const similar = [...jobNamed, ...byName]
+      .filter((c) => !rejected.has(c.id))
       .slice(0, 6)
       .map((c) => ({ ...c, exact: normaliseArtist(c.name) === target }));
 
