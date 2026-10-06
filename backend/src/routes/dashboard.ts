@@ -849,6 +849,17 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       backlineToBuy = parseInt(bb.rows[0].count as string, 10) || 0;
     } catch { /* non-fatal — pre-migration or table absent */ }
 
+    // Leads to look at (Lead Finder) — new, still-sellable, good-scoring leads.
+    // The definition lives in services/leads/attention.ts; blue, self-hiding
+    // bucket. Defensive so a pre-271 DB can't 500 the dashboard.
+    let leadAttention: { total: number; items: unknown[] } = { total: 0, items: [] };
+    try {
+      const { getLeadAttention } = await import('../services/leads/attention');
+      leadAttention = await getLeadAttention();
+    } catch (err) {
+      console.warn('Dashboard leads attention skipped:', (err as Error).message);
+    }
+
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
       job_count: number; vehicle_count: number;
@@ -1099,6 +1110,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // ── Backline to buy (demand tracker) ──
         // High-priority gaps with no acquisition plan yet — purchasing prompt.
         backline_to_buy_count: backlineToBuy,
+        // ── Leads to look at (Lead Finder) — full count + top 5 ──
+        leads_to_review_count: leadAttention.total,
+        leads_to_review: leadAttention.items,
         // ── Outstanding staff documents (managers) ──
         // Pending/lapsed tracked-document assignments across active staff.
         staff_documents_outstanding_count: staffDocsOutstanding,

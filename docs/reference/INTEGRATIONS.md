@@ -402,31 +402,75 @@ top-level nav group (jon's call — "streamline rather than expand"). Migration 
   `lead_tour_window_weeks` (6), `lead_min_relevance_score` (6), `lead_contact_research_cap`
   (20), `lead_auto_run_enabled` (false — the future scheduled-run toggle, not yet wired).
 
-**The pipeline** (`runPipeline`): collect → detect → score → match → research, run as one
-background `setImmediate` job writing progress/counts to `lead_runs`.
+**The pipeline** (`runPipeline`): collect → detect → **match → score** → research → known
+contacts, run as one background `setImmediate` job writing progress/counts to `lead_runs`.
+Match runs BEFORE score (Oct 2026) so a matched lead is scored with its OOOSH history in view.
+Manual only — jon (Oct 2026) wants it kept manual; `lead_auto_run_enabled` stays unwired.
+- **Search window:** `POST /run` takes an optional `{ from, to }` — "tours whose FIRST UK
+  date falls between". Default (`defaultSearchWindow()`) = today + min weeks → today + max
+  weeks from the settings. Collection fetches only the window; detection still looks up each
+  act's full UK dates from TODAY, so a tour that really started earlier is still dropped.
 - **Lookahead fix** (the headline value over the old tool): `detector.ts` drops any tour
   whose earliest *visible* UK date is under `today + lead_lookahead_min_weeks` — no point
   surfacing a tour that's already on the road or too soon to sell into.
 - **Scoring** (`scorer.ts`): ported ai_filter prompt (Tier 1 international / Tier 2 within
   70mi of Shoreham / Tier 3), Claude `CLAUDE_SONNET_MODEL` with structured outputs (json_schema)
   + prompt caching, batched 30.
-- **Matching** (`matcher.ts`): `pg_trgm` fuzzy match of the artist name against
-  `organisations` (the `%` operator + `similarity()`; `CREATE EXTENSION pg_trgm` in migration
-  175, though the existing trgm index already required it). Exact (normalised equality) →
-  auto-links + enriches the org's AI Summary; partial (≥ threshold) → surfaces "could this be
-  [Org]?" candidates for a human confirm/reject; none → stays cold. Warm summary
-  (`getWarmSummary` → `composeWarmSummary`) writes a dated `[Lead Finder YYYY-MM-DD] …` block
-  into `organisations.ai_summary` (`appendOrgSummary`).
+- **Matching** (`matcher.ts`), three ways:
+  1. **Band org by name** — `pg_trgm` against `organisations`. Exact (normalised equality) →
+     auto-links (warm) + enriches the org's AI Summary; partial (≥ threshold) → "could this be
+     [Org]?" for a human.
+  2. **Jobs named after the band** (Oct 2026, the Wedding Present case) — whole-word regex on
+     `jobs.job_name` (`bandNameRegex()`, trgm index from migration 271; names under 5 letters
+     are skipped as too ambiguous), grouped by the job's client org → "booked via [Mgmt]?" —
+     always a suggestion, never automatic.
+  3. **Known contacts** (`linkKnownContacts()`) — researched contacts whose EMAIL is already a
+     person. Flags the lead (`known_contacts`); doesn't make it warm.
+  Rejecting suggestions stores them in `leads.rejected_org_ids` — never re-offered (they used
+  to come straight back on the next run).
+- **Client history** (`history.ts` `getClientHistory()` → `describeHistory()`): enquiries /
+  booked / lost (+ reasons) / cancelled / open, last enquiry + booking, retros, Do Not Hire.
+  Outcome buckets are `services/job-outcomes.ts` — the SAME definitions as the org Hire
+  History tab. A lost reason of "Confirmed Alternative Quote (from us)" is NOT a loss. Scope
+  depends on `leads.match_via`: `org_name`/`created` → every job on the org; `job_name` →
+  only that org's jobs named after the band (a management company books many acts). Stored on
+  `leads.client_history`, refreshed every run; the scorer prompt weighs it (repeat bookers up,
+  a run of losses down, DNH → 1). `history_scored_at` NULL on a matched lead = re-score it.
+  The summary line is also prepended to the org's AI Summary as a dated
+  `[Lead Finder YYYY-MM-DD] …` block (`appendOrgSummary`).
 - **Contact research** (`researcher.ts`): cold/unmatched leads ≥ min score with no contacts →
   Claude + the **web-search tool** (`{ type: 'web_search_20250305', name: 'web_search',
   max_uses: 5 }`) finds management/booking contacts, 90s request timeout, capped per run,
   JSON-parsed with a fence/brace fallback. Errors surface on the run banner (`lastError`).
 
-**Endpoints** (`routes/leads.ts`): `GET /` (list, filter stream/status/min-score),
-`GET /runs/latest`, `GET /settings`, `POST /run` (MANAGER_ROLES — full crawl),
-`POST /process-existing` (MANAGER_ROLES — match+research existing leads only, no TM crawl —
-the fast reprocess path), `POST /cancel` (stop/reset a stuck run), `PATCH /:id` (lifecycle),
-`POST /:id/confirm-match` + `POST /:id/reject-match` (partial-match resolution).
+- **Dismiss reasons** (`POST /:id/dismiss`, `status_reason` + `status_note`): `not_a_fit`
+  (writes `lead_suppressions` — the detector skips that act before any TM call, and its other
+  open tours are dismissed), `timing`, `next_time`, `already_handled`, `other` (note
+  required). `POST /:id/restore` undoes it and lifts the suppression. The list joins each
+  lead's PREVIOUS tour (`prev_*`) so "passed last time: not this time — note" shows on the next.
+- **Re-detection** matches an existing lead by name or TM id with OVERLAPPING dates (not an
+  identical first date), so TM adding/dropping an opening date doesn't resurface a dismissed tour.
+
+**Acting on a lead (Oct 2026):**
+- **Add to address book** (`GET /:id/address-book-preview` → `POST /:id/add-to-address-book`):
+  staff pick a suggested org (job-name ones first, then similar names) or create the band
+  (`type='band'`; an exact-name clash is refused — pick it instead). Chosen researched contacts
+  are found-or-created by EXACT email and linked with their role (manager → Manager,
+  booking_agent → Booking Agent, …); contacts with no email are skipped. Creating a band links
+  the lead with `match_via='created'` but leaves it COLD (in the book, no relationship yet).
+- **Start enquiry** (`GET /:id/enquiry-preview` → `POST /:id/start-enquiry`): OP-native enquiry
+  via the shared `createPipelineEnquiry` — never pushed to HireHop. `enquiry_source` uses the
+  EXISTING pipeline values (`repeat` for warm, `cold_lead` for cold — a new value would fail the
+  job edit form's validation); `leads.converted_job_id` is what marks it Lead-Finder-sourced.
+  Band name goes into the job name when the org is a management company.
+- Find-or-create is shared with the website enquiry intake: `services/address-book-resolve.ts`.
+
+**Endpoints** (`routes/leads.ts`): `GET /` (list; `?view=hidden` = dismissed/not-relevant),
+`GET /runs/latest`, `GET /settings` (+ `default_window`), `POST /run` (MANAGER_ROLES — full
+crawl, optional window), `POST /process-existing` (MANAGER_ROLES — match → score → research
+existing leads, no TM crawl), `POST /cancel`, `PATCH /:id`, `POST /:id/dismiss`,
+`POST /:id/restore`, `POST /:id/confirm-match`, `POST /:id/reject-match`, plus the four
+lead-action endpoints above.
 
 **Zombie-run recovery (the `setImmediate` convention):** the pipeline runs in-process, so a
 deploy restart mid-run kills it while the `lead_runs` row stays `status='running'` forever —
@@ -446,12 +490,18 @@ web-search contact research), #1002 (PR 3 — zombie-run recovery, "Match & rese
 fast path, research timeout/error surfacing, table search + click-to-sort). jon merges each
 to main + deploys manually + validates against a test list before the next.
 
-**Deferred slices (agreed, not built):** scheduled weekly run (`lead_auto_run_enabled` toggle
-is seeded but unwired); dashboard surfacing of new high-score leads; "Create band + link" for
-cold leads (staff-gated address-book create + convert-to-job); outreach-email drafting via the
-Gmail auto-chase infra ("here's a lead + a ready-to-send intro"). **Open discussion:** deepen
-warm matching beyond org-name — some bands are booked under a management/agency org rather than
-a "The Band" org, so a future pass could also match band-role links / people, not just org names.
+**Oct 2026 slice** (migration 271): client history in scoring, job-name + known-contact
+matching, remembered rejections, dismiss reasons + suppression, overlap re-detection, search
+window, Add to address book, Start enquiry. Spec §14.
+
+**Dashboard** (Oct 2026, migration 272): a blue, self-hiding **"Leads to look at"** card in
+Needs Attention. Defined in `services/leads/attention.ts` `getLeadAttention()`: new +
+still sellable + warm ≥ `lead_min_relevance_score` or cold ≥ `lead_dashboard_min_score`
+(default 8). Items deep-link to `/jobs/leads?lead=<id>`. A lead leaves the card when an
+enquiry is started, it's dismissed, or it's marked contacted (a new row action). Spec §15.
+
+**Deferred (agreed, not built):** scheduled weekly run (jon: keep manual for now); outreach-email drafting — folds into the auto-chase "voice"
+work on the Enquiries pipeline rather than being built separately.
 
 #### Auto-Chase — Gmail ingestion + AI chase drafts (LIVE, Jul 2026)
 

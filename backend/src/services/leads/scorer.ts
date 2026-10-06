@@ -6,6 +6,11 @@
  * no fragile ```json``` fence-stripping) + prompt caching on the static system
  * prompt (identical across every batch → served at ~10% input cost from batch
  * 2). Model: Claude Sonnet (CLAUDE_SONNET_MODEL).
+ *
+ * Runs AFTER address-book matching, so a lead matched to a client carries its
+ * OOOSH history (enquiries, bookings, losses and why, retros) into the prompt
+ * and the score weighs it. A matched lead is re-scored once its history is in
+ * view (`history_scored_at` NULL → score again).
  */
 import {
   getAnthropicClient,
@@ -14,6 +19,7 @@ import {
   CLAUDE_SONNET_MODEL,
 } from '../../config/anthropic';
 import { query } from '../../config/database';
+import { describeHistory, ClientHistory } from './history';
 
 const MODEL_ID = CLAUDE_SONNET_MODEL;
 const BATCH_SIZE = 30;
@@ -65,6 +71,17 @@ EXCLUDE: DJs, electronic acts (unless clearly a live band setup), comedy, theatr
 
 Be decisive. If you're unsure about an artist, make your best guess rather than skipping.
 If you genuinely cannot identify an artist at all, give them a score of 4 and note it in reasoning.
+
+## Existing-client history
+Some artists come with an "OOOSH history" line — what OOOSH's own records say about past enquiries with this act. When present, weigh it heavily; it is better evidence than the general profile:
+- Repeat bookers (jobs booked, good retros) are the best leads there are — score them 8-10 even if the profile fit is only moderate.
+- A run of lost quotes with nothing booked means another quote is unlikely to land — score down (3-5) and say why, unless the most recent enquiry was booked.
+- Read the lost reasons: repeatedly lost on Price or to a Competitor is a weak lead; one-off Timing / Availability losses matter much less.
+- Bookings cancelled after confirming, and retros "with issues", are warning signs.
+- "Flagged Do Not Hire" → score 1 and say so in reasoning.
+- "No enquiries or hires on record" is neutral — score on the profile.
+History does not change origin_country or client_tier; those describe the act.
+Mention the history in reasoning whenever it moved the score.
 Valid skip_reason values: "tribute", "comedy", "too_big", "dj", "not_music", "electronic", "theatre", "unknown_insufficient_data".`;
 
 const SCHEMA = {
@@ -112,6 +129,7 @@ interface LeadRow {
   last_date: string | null;
   venues: string[];
   all_dates: string[];
+  client_history: ClientHistory | null;
 }
 
 function buildPrompt(batch: LeadRow[]): string {
@@ -122,6 +140,7 @@ function buildPrompt(batch: LeadRow[]): string {
     lines.push(`UK dates: ${t.uk_date_count}`);
     lines.push(`Date range: ${t.first_date ?? '?'} to ${t.last_date ?? '?'}`);
     lines.push(`Venues: ${(t.venues ?? []).join(', ')}`);
+    if (t.client_history) lines.push(`OOOSH history: ${describeHistory(t.client_history)}`);
     lines.push('');
   });
   lines.push(`Assess all ${batch.length} artists. Return one assessment per artist, matching artist_name exactly.`);
@@ -157,9 +176,12 @@ export async function scoreLeads(): Promise<ScoreSummary> {
   }
 
   const result = await query(
-    `SELECT id, artist_name, uk_date_count, first_date, last_date, venues, all_dates
-       FROM leads WHERE relevance_score IS NULL AND status = 'new'
-       ORDER BY uk_date_count DESC`,
+    `SELECT id, artist_name, uk_date_count, first_date, last_date, venues, all_dates, client_history
+       FROM leads
+      WHERE status = 'new'
+        AND (relevance_score IS NULL
+             OR (matched_organisation_id IS NOT NULL AND history_scored_at IS NULL))
+      ORDER BY uk_date_count DESC`,
   );
   const leads = result.rows as LeadRow[];
   if (leads.length === 0) return { scored: 0, skipped: 0, failed: 0 };
@@ -185,10 +207,14 @@ export async function scoreLeads(): Promise<ScoreSummary> {
         continue;
       }
       const isSkip = Boolean(a.skip);
+      // A matched lead's ai_summary is the tour + history line the matcher
+      // wrote — keep it; only an unmatched lead takes the reasoning as summary.
       await query(
         `UPDATE leads SET
            relevance_score = $2, client_tier = $3, origin_country = $4,
-           is_international = $5, reasoning = $6, ai_summary = $6,
+           is_international = $5, reasoning = $6,
+           ai_summary = CASE WHEN matched_organisation_id IS NULL THEN $6 ELSE ai_summary END,
+           history_scored_at = CASE WHEN matched_organisation_id IS NOT NULL THEN NOW() ELSE history_scored_at END,
            scored_at = NOW(), updated_at = NOW(),
            status = CASE WHEN $7 THEN 'not_relevant' ELSE status END,
            status_reason = CASE WHEN $7 THEN $8 ELSE status_reason END
