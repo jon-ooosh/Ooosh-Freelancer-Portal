@@ -186,6 +186,14 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
+**PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
+on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
+Stripe account, money on HireHop bank 267, recording ONLY through `services/record-payment.ts`,
+pre-auths via extended authorisation (window depends on the account's merchant category — §9.1,
+unverified), no phone card payments (policy), shop + sitter till in Phase 3. Read it before
+building anything that takes a card in person. The week's payments work it builds on (PayPal via
+Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
+
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab

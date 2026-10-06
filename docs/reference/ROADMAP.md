@@ -24,7 +24,8 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | 1 | Vehicle module integration | Mostly complete | `VEHICLES-AND-FLEET.md` |
 | 1b | Vehicle maintenance & compliance | Phases A/C/D/E complete; F (turnaround schedule) in progress; B (AI extraction) deferred | `VEHICLES-AND-FLEET.md` |
 | 2 | Driver hire forms & excess | Live since Apr 2026. Verification cockpit, document validity, identity review, referral gate all shipped. Phase 4 (document extraction) next, not built | `DRIVERS-AND-HIRE-FORMS.md` |
-| 3 | Money system | Phases A–F largely shipped — Money tab, excess lifecycle, pre-auth, top-N reconciliation, VAT adjustment, payment-portal repointing, OP-initiated refunds | `MONEY-AND-EXCESS.md` |
+| 3 | Money system | Phases A–F largely shipped — Money tab, excess lifecycle, pre-auth, top-N reconciliation, VAT adjustment, payment-portal repointing, OP-initiated refunds. **Oct 2026:** PayPal via Stripe, portal redesign + hash lockdown, portal link in OP, **Wise incoming-payment matcher (live, awaiting its first real email)** | `MONEY-AND-EXCESS.md` ("Payments, Oct 2026") |
+| 3b | Stripe Terminal — in-person card payments driven from OP, replacing Worldpay/Amex | **Planned** (6 Oct 2026). Reader on order; crossover deadline March 2027. Pre-auth viability depends on the account's merchant category | `docs/STRIPE-TERMINAL-SPEC.md` |
 | 4 | Status transition engine | Mostly complete — bidirectional HireHop sync live | `PIPELINE-AND-ORGS.md` |
 | 4b | Returns & close-out | Phases A–D mostly complete | `RETURNS-AND-CANCELLATIONS.md` |
 | 4c | Cancellation system | Foundation complete; combine-bookings shipped | `RETURNS-AND-CANCELLATIONS.md` |
@@ -47,6 +48,12 @@ remain in the portal repos and can be swept.
 
 Roughly 100 unchecked items remain across the reference docs. The ones most likely
 to come up:
+
+**Watching (Oct 2026)**
+- **Wise matcher** — live since 6 Oct, no real email processed yet. First one decides: auto-recorded (check HireHop deposit + client email), queued (info@ email + Money overview panel), or nothing (`journalctl … | grep wise-incoming`). Then switch off the jon@ → info@ auto-forward.
+- **Portal: bare `?jobId=` links no longer work** — anyone still using one needs the Money-tab link.
+- Vehicles module `useAuth.tsx` still carries a dead `hubToken` exchange (Staff Hub retired) — tidy-up.
+- Portal "Half now" option rounds to whole pounds (pre-existing logic, now visibly odd next to penny figures).
 
 **Known bugs / gaps**
 - Portal shared files don't reach the portal UI (flag persists, endpoint returns them, the Next.js page expects the Monday-era shape).
