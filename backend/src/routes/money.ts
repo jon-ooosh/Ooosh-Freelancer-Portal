@@ -39,6 +39,7 @@ import {
 } from '../services/stripe-event-claim';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import { getPaymentPortalLink } from '../services/payment-portal-link';
 
 const router = Router();
 
@@ -1122,6 +1123,40 @@ router.get('/:jobId/vat-adjustment', async (req: AuthRequest, res: Response) => 
 });
 
 // ── GET /api/money/:jobId/summary — Full financial summary for a job ──
+
+// ── GET /api/money/:jobId/payment-link — the client's payment portal link ──
+// Computed live from HireHop (see services/payment-portal-link.ts) so it always matches
+// the quote document, which re-issues the link whenever the hire dates change.
+router.get('/:jobId/payment-link', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
+    const jobResult = await query(
+      isUuid
+        ? `SELECT id, hh_job_number FROM jobs WHERE id = $1`
+        : `SELECT id, hh_job_number FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId)]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const hhJobNumber = jobResult.rows[0].hh_job_number as number | null;
+    if (!hhJobNumber) {
+      res.json({ data: null, reason: 'no_hh_job_number' });
+      return;
+    }
+    const link = await getPaymentPortalLink(hhJobNumber);
+    if (!link) {
+      res.json({ data: null, reason: 'hirehop_unavailable' });
+      return;
+    }
+    res.json({ data: link });
+  } catch (err) {
+    console.error('[money] payment-link failed:', err);
+    res.status(500).json({ error: 'Failed to build payment link' });
+  }
+});
 
 router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
   try {

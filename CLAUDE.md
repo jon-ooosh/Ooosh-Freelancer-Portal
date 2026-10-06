@@ -283,6 +283,7 @@ existing definition:
 | The till's payment methods (backend / sitter till) | `services/shop-tenders.ts` — mirrors `frontend/src/lib/shopTenders.ts` |
 | A shop sale's receipt / refund receipt | `services/shop-receipts.ts` |
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
+| The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,

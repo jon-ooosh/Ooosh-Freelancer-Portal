@@ -536,7 +536,11 @@ function buildClientDraft(b: JobBriefing): string {
       }
     }
 
-    const paymentLink = 'Payment options through the blue link at the bottom of the quote.';
+    // Prefer the real portal link (card, PayPal or bank transfer, with the job's
+    // reference pre-filled) over pointing the client back at the quote document.
+    const paymentLink = b.payment_portal_url
+      ? `You can pay by card, PayPal or bank transfer here: ${b.payment_portal_url}`
+      : 'Payment options through the blue link at the bottom of the quote.';
 
     if (hireFeeOutstanding && excessOutstanding) {
       // Both due — single payment ask.
