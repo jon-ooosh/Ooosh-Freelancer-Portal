@@ -16,6 +16,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StudioShiftNotes from '../components/StudioShiftNotes';
 import StudioLockupReport from '../components/StudioLockupReport';
+import FreelancerTasksPanel from '../components/FreelancerTasksPanel';
 
 interface RosterJobEntry {
   job_id: string;
@@ -36,7 +37,7 @@ interface RosterRow {
   speculative?: boolean;
   jobs: RosterJobEntry[];
   shift: {
-    id: string; status: string; manual_override: boolean; override_reason: string | null; note_count?: number;
+    id: string; status: string; manual_override: boolean; override_reason: string | null; note_count?: number; task_count?: number;
     report?: { submitted_at: string; submitted_by_name: string | null; exceptions_count: number } | null;
   } | null;
   assignee: RosterAssignee | null;
@@ -112,6 +113,16 @@ export default function StudioSittersPage() {
   // Handover notes: which shift ids have their notes panel expanded
   const [openNotes, setOpenNotes] = useState<Set<string>>(new Set());
   const toggleNotes = (id: string) => setOpenNotes((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  // Freelancer tasks (STAFF-CALENDAR-SPEC §21): which shift ids have the tasks
+  // panel open, and live open-task counts reported back by the panel (so the
+  // badge updates without reloading the roster, which would unmount the panel).
+  const [openTasks, setOpenTasks] = useState<Set<string>>(new Set());
+  const [taskCounts, setTaskCounts] = useState<Record<string, number>>({});
+  const toggleTasks = (id: string) => setOpenTasks((prev) => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
@@ -408,6 +419,18 @@ export default function StudioSittersPage() {
                         </button>
                       );
                     })()}
+                    {row.shift?.id && (() => {
+                      const shiftId = row.shift.id;
+                      const count = taskCounts[shiftId] ?? row.shift.task_count ?? 0;
+                      const active = openTasks.has(shiftId);
+                      return (
+                        <button onClick={() => toggleTasks(shiftId)}
+                          title="Things for the sitter to do this evening"
+                          className={`px-2.5 py-1 text-xs rounded-lg border ${active || count > 0 ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-gray-200 text-gray-500 hover:bg-white'}`}>
+                          📋 Tasks{count > 0 ? ` (${count})` : ''}
+                        </button>
+                      );
+                    })()}
                     {row.shift?.report && (() => {
                       const ex = row.shift.report.exceptions_count;
                       return (
@@ -424,6 +447,18 @@ export default function StudioSittersPage() {
                 {row.shift?.id && openNotes.has(row.shift.id) && (
                   <div className="mt-3 pt-3 border-t border-gray-200">
                     <StudioShiftNotes shiftId={row.shift.id} />
+                  </div>
+                )}
+
+                {row.shift?.id && openTasks.has(row.shift.id) && (
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <FreelancerTasksPanel
+                      owner={{ shiftId: row.shift.id }}
+                      onOpenCountChange={(n) => {
+                        const id = row.shift!.id;
+                        setTaskCounts((prev) => (prev[id] === n ? prev : { ...prev, [id]: n }));
+                      }}
+                    />
                   </div>
                 )}
 

@@ -67,6 +67,7 @@ export interface RosterRow {
     planned_start: string | null;
     planned_end: string | null;
     note_count: number;
+    task_count: number;                // open freelancer tasks on this evening (§21)
     report: {
       submitted_at: string;
       submitted_by_name: string | null;
@@ -140,7 +141,8 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
             rp.first_name AS report_first, rp.last_name AS report_last,
             a.status AS assignment_status, a.person_id,
             p.first_name, p.last_name, p.tags,
-            (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count
+            (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count,
+            (SELECT COUNT(*) FROM freelancer_tasks ft WHERE ft.shift_id = s.id AND ft.status = 'open')::int AS task_count
      FROM studio_sitter_shifts s
      LEFT JOIN studio_sitter_shift_assignments a
        ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
@@ -201,6 +203,7 @@ export async function getRoster(from: string, to: string, includeSpeculative = f
             planned_start: shiftRow.planned_start,
             planned_end: shiftRow.planned_end,
             note_count: shiftRow.note_count ?? 0,
+            task_count: shiftRow.task_count ?? 0,
             report: shiftRow.report_submitted_at && lockupTemplate
               ? {
                   submitted_at: shiftRow.report_submitted_at,

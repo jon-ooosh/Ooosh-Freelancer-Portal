@@ -2878,6 +2878,21 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
 
     await writeR2Json(indexKey, indexData);
 
+    // A finished prep ticks off any freelancer task to prep this van
+    // (STAFF-CALENDAR-SPEC §21) — whoever did it. Fire-and-forget: it never
+    // throws, and the prep save must not wait on it.
+    if (String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-') === 'prep-completed') {
+      void (async () => {
+        const { autoTickPrep } = await import('../services/freelancer-tasks');
+        let personId: string | null = null;
+        if (req.user?.id) {
+          const u = await query('SELECT person_id FROM users WHERE id = $1', [req.user.id]).catch(() => null);
+          personId = u?.rows[0]?.person_id ?? null;
+        }
+        await autoTickPrep(reg, personId);
+      })().catch(err => console.warn('[vehicles/events] freelancer task tick failed:', err));
+    }
+
     // If hire status change included, update fleet_vehicles table
     if (event.hireStatus) {
       await query(
