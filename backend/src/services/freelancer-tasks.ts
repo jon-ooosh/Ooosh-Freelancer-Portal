@@ -300,7 +300,41 @@ export async function setDoneByStaff(id: string, done: boolean, userId: string):
         [id]
       );
   if (!r.rows[0]) throw new Error(done ? 'Only an open task can be ticked' : 'Only a done task can be re-opened');
+  if (done) await noteJobOnDone(id, userId);
   return (await getTask(id))!;
+}
+
+// ── The job's timeline ──────────────────────────────────────────────────────
+
+const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * A task that names a job was done: say so on that job's timeline (jon, Oct
+ * 2026). ONLY on completion and ONLY for tasks with a job — not when a task is
+ * set (they change freely), and not for preps that were never a task.
+ * Best-effort: never throws, a timeline note must not undo a tick.
+ */
+async function noteJobOnDone(taskId: string, actorUserId: string | null): Promise<void> {
+  try {
+    const task = await getTask(taskId);
+    if (!task?.jobId || task.status !== 'done') return;
+    const ctx = await getOwnerContext(ownerOf(task));
+    // The job is the page it lands on, so the title drops "for #16791".
+    const what = taskTitle({ ...task, hhJobNumber: null });
+    const who = ctx?.person ? fullDisplayName(ctx.person) : null;
+    const role = task.shiftId ? 'studio sitter' : 'freelancer in for the day';
+    const how = task.doneVia === 'prep_saved' ? 'prep sheet saved'
+      : task.doneVia === 'portal' ? 'ticked on the portal'
+      : `ticked off${task.doneByName ? ` by ${task.doneByName}` : ''}`;
+    const content = `✅ Freelancer task done: ${what}${who ? ` — ${who} (${role})` : ''}. ${how[0].toUpperCase()}${how.slice(1)}.`;
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by, source)
+       VALUES ('note', $1, $2, $3, 'system')`,
+      [content, task.jobId, actorUserId ?? SYSTEM_USER_ID]
+    );
+  } catch (err) {
+    console.error('[freelancer-tasks] job timeline note failed (non-fatal):', err);
+  }
 }
 
 // ── The freelancer's side ───────────────────────────────────────────────────
@@ -320,12 +354,13 @@ export async function markDoneFromPortal(id: string, personId: string): Promise<
     throw Object.assign(new Error('Saving the prep sheet ticks this one off'), { status: 409 });
   }
   if (task.status === 'done') return task;
-  await query(
+  const u = await query(
     `UPDATE freelancer_tasks
         SET status = 'done', done_at = NOW(), done_via = 'portal', done_by_person = $2, updated_at = NOW()
       WHERE id = $1 AND status = 'open'`,
     [id, personId]
   );
+  if (u.rowCount) await noteJobOnDone(id, null);
   return (await getTask(id))!;
 }
 
@@ -378,6 +413,7 @@ export async function autoTickPrep(reg: string, personId: string | null): Promis
         RETURNING t.id`,
       [reg, personId, todayLondon()]
     );
+    for (const row of r.rows) await noteJobOnDone(row.id, null);
     return r.rowCount ?? 0;
   } catch (err) {
     console.error('[freelancer-tasks] autoTickPrep failed (non-fatal):', err);
