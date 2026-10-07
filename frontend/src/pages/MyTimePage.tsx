@@ -72,6 +72,8 @@ interface MyBalances {
  */
 interface Adjustment {
   id: string;
+  /** 'company_day_lieu' for a day in lieu (spec §20.5b), else 'manual'. */
+  sourceType?: string | null;
   account: 'holiday' | 'overtime';
   minutes: number;
   effectiveDate: string;
@@ -288,8 +290,9 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         const all = ledgers.flat();
         // A reversed adjustment and its reversal cancel out — show neither.
         const reversed = new Set(all.map(e => e.reversesEntryId).filter(Boolean) as string[]);
-        setAdjustments(all.filter(e => e.sourceType === 'manual' && e.entryType === 'adjustment'
-          && !e.reversesEntryId && !reversed.has(e.id)));
+        // Manual adjustments, and days in lieu for company days on a day off.
+        setAdjustments(all.filter(e => (e.sourceType === 'manual' || e.sourceType === 'company_day_lieu')
+          && e.entryType === 'adjustment' && !e.reversesEntryId && !reversed.has(e.id)));
       } else {
         setAdjustments([]);
       }
@@ -1796,15 +1799,20 @@ function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, adjustments = 
   // the person will recognise ("brought across from BrightHR").
   for (const a of adjustments) {
     const plus = a.minutes > 0;
+    const lieu = a.sourceType === 'company_day_lieu';
     rows.push({
       key: `adj:${a.id}`, date: a.effectiveDate, until: a.effectiveDate,
       title: a.note || 'Adjustment',
-      meta: `Adjustment to your ${a.account === 'holiday' ? 'holiday' : 'overtime bank'}`,
-      extra: a.createdByName ? `Added by ${a.createdByName}` : null,
+      meta: lieu
+        ? 'Added to your holiday — book it whenever you like'
+        : `Adjustment to your ${a.account === 'holiday' ? 'holiday' : 'overtime bank'}`,
+      extra: !lieu && a.createdByName ? `Added by ${a.createdByName}` : null,
       amount: `${plus ? '+' : '−'}${fmtH(Math.abs(a.minutes))}`,
       amountClass: plus ? 'text-emerald-700' : 'text-gray-900',
-      pill: 'Adjustment', pillClass: 'bg-gray-100 text-gray-700', statusClass: 'text-gray-600',
-      dot: 'bg-gray-400',
+      pill: lieu ? 'Day in lieu' : 'Adjustment',
+      pillClass: lieu ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-700',
+      statusClass: lieu ? 'text-emerald-700' : 'text-gray-600',
+      dot: lieu ? 'bg-emerald-500' : 'bg-gray-400',
     });
   }
 
