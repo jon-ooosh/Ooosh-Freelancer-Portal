@@ -1376,7 +1376,7 @@ Where things are, for troubleshooting:
 | **§19** | Working from home — one-off requests approved like holiday, regular days on the pattern, two-number headcount, on-site filter, cover counts the building | 269 |
 | **§10** | Personal read-only calendar feed — own time only | 270 |
 | **§12.1** | Payroll report emailed on the 1st; date presets on the panel | — |
-| **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 277 |
+| **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
 | — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
 
 ### Decisions taken during the build that CHANGE this spec
@@ -2035,7 +2035,7 @@ are not normal working days. The staff calendar carries an admin link to it,
 since noticing you need one and configuring it are different moments and only
 the second wants a form.
 
-### 20.5b Company day on your day off — BUILT (jon, Oct 2026; migration 277)
+### 20.5b Company day on your day off — BUILT (jon, Oct 2026; migration 278)
 
 Raised by Will and Matt: a company day only helps whoever was rostered that
 day, so where Christmas falls decides who gets it. Christmas 2026 is Fri + Sat
@@ -2055,7 +2055,7 @@ check; build before Christmas 2026, since 26 Dec 2026 is a Saturday.
 
 **As built:** `syncCompanyDayLieu()` in `staff-company-days.ts`, called from
 `syncEntitlement()` and refreshed when a company day is added or withdrawn. An
-`adjustment` with source_type `company_day_lieu` (migration 277 widened the
+`adjustment` with source_type `company_day_lieu` (migration 278 widened the
 CHECK), dated on the company day. It follows the calendar — idempotent per
 date, so a change of working days or a withdrawn company day takes the lieu
 day back (unlike the reclaim, which is never re-debited). My Time shows it as

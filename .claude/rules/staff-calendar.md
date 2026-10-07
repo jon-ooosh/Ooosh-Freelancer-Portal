@@ -394,7 +394,7 @@ for everyone, not pro-rata (jon). It runs inside `syncEntitlement()`, so the
 06:05 sync and "Update entitlement" keep it right, and adding or withdrawing a
 company day refreshes it at once. Credited in advance, dated on the company day.
 
-- **Its own `source_type`, `company_day_lieu`** (migration 277). Never `system`
+- **Its own `source_type`, `company_day_lieu`** (migration 278). Never `system`
   — `syncEntitlement` sums that for its own delta and would correct the lieu
   away — and never `manual`, or it cannot tell its own postings apart.
 - **It follows the calendar**: idempotent per date, posting the difference, so

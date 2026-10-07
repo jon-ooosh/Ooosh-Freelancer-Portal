@@ -7,6 +7,8 @@ export interface LeadContact {
   contact_phone: string | null;
   source: string | null;
   confidence: string;
+  /** Added by staff — survives any re-research. */
+  manual?: boolean;
 }
 
 export interface MatchCandidate {
@@ -84,7 +86,87 @@ export interface Lead {
   prev_last_date: string | null;
   prev_converted_job_id: string | null;
   updated_at: string;
+  created_at: string;
+  /** Where it's got to — backend STAGE_SQL is the one definition. */
+  stage: LeadStage;
+  first_run_id: string | null;
+  contacted_at: string | null;
+  researched_at: string | null;
+  /** 'running' while a Research again is in flight. */
+  research_status: 'found' | 'none' | 'failed' | 'running' | null;
+  external_links: Record<string, string[]> | null;
+  last_event: string | null;
+  last_event_detail: string | null;
+  last_event_at: string | null;
+  last_event_by: string | null;
 }
+
+export type LeadStage = 'review' | 'contacted' | 'pipeline' | 'dismissed';
+
+export const STAGE_TABS: { key: LeadStage; label: string; empty: string }[] = [
+  { key: 'review', label: 'To review', empty: 'Nothing waiting for review. Run a search to find touring bands.' },
+  { key: 'contacted', label: 'Contacted', empty: 'Nobody contacted yet — use “Log outreach” on a lead once you’ve been in touch.' },
+  { key: 'pipeline', label: 'In pipeline', empty: 'No leads have become enquiries yet.' },
+  { key: 'dismissed', label: 'Dismissed', empty: 'Nothing dismissed.' },
+];
+
+export interface LeadRun {
+  id: string;
+  trigger?: string;
+  status: 'running' | 'complete' | 'failed';
+  counts: {
+    mode?: string;
+    window?: { from: string; to: string };
+    custom_window?: boolean;
+    collection?: { newEvents: number };
+    detection?: { toursCreated: number; droppedTooImminent: number; droppedAfterWindow?: number; droppedNotTour: number; skippedSuppressed?: number };
+    scoring?: { scored: number; skipped: number };
+    matching?: { exact: number; partial: number };
+    research?: { researched: number; contactsFound: number; withContacts?: number; nothingFound?: number; failed?: number; lastError?: string };
+    known?: { leadsWithKnown: number };
+  } | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+  triggered_by_name: string | null;
+  /** History only: how many leads this run FOUND. */
+  leads_found?: number;
+}
+
+/** A lead's activity log entry (GET /leads/:id/events). */
+export interface LeadEvent {
+  id: string;
+  event: string;
+  detail: string | null;
+  created_at: string;
+  actor: string | null;
+}
+
+export const EVENT_LABEL: Record<string, string> = {
+  found: 'Found by a search',
+  matched: 'Matched to the address book',
+  match_confirmed: 'Match confirmed',
+  match_rejected: 'Suggested matches rejected',
+  researched: 'Contacts researched',
+  research_failed: 'Contact research failed',
+  research_requested: 'Research requested',
+  address_book: 'Added to the address book',
+  contact_added: 'Contact added by hand',
+  contact_removed: 'Contact removed',
+  outreach: 'Outreach logged',
+  enquiry: 'Enquiry started',
+  dismissed: 'Dismissed',
+  restored: 'Restored',
+  status: 'Status changed',
+};
+
+/** Short form for the "Last activity" column. */
+export const EVENT_SHORT: Record<string, string> = {
+  found: 'Found', matched: 'Matched', match_confirmed: 'Matched', match_rejected: 'Reviewed',
+  researched: 'Researched', research_failed: 'Research failed', research_requested: 'Researching',
+  address_book: 'Added to book', contact_added: 'Contact added', contact_removed: 'Contact removed',
+  outreach: 'Contacted', enquiry: 'Enquiry', dismissed: 'Dismissed', restored: 'Restored', status: 'Updated',
+};
 
 /** Dismiss reasons — keys match the backend's DISMISS_REASONS. */
 export const DISMISS_REASONS: { key: string; label: string; hint: string }[] = [
