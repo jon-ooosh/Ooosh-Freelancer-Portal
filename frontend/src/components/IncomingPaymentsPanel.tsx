@@ -192,6 +192,18 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
     }
   };
 
+  const recheck = async () => {
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await api.post(`/money/incoming-payments/${row.id}/rematch`, {});
+      onDone();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to re-check');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const ignore = async () => {
     const note = window.prompt('Why is this not a job payment? (kept on the record)');
     if (!note || !note.trim()) return;
@@ -280,6 +292,15 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
               Record in Xero against {xeroLabel} ({money(xeroDue)} due)
             </button>
           )}
+          <button
+            type="button"
+            onClick={recheck}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 underline disabled:opacity-50"
+            title="Run the matcher again on this payment (nothing is recorded)"
+          >
+            Re-check
+          </button>
           <button
             type="button"
             onClick={ignore}

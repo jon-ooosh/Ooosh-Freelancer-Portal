@@ -41,7 +41,7 @@ import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { getPaymentPortalLink } from '../services/payment-portal-link';
 import { recordPayment } from '../services/record-payment';
-import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment } from '../services/wise-incoming';
+import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment } from '../services/wise-incoming';
 
 const router = Router();
 
@@ -1222,6 +1222,21 @@ router.post('/incoming-payments/:id/record-xero', authorize('admin', 'manager'),
   } catch (err) {
     console.error('[money] incoming-payments record-xero failed:', err);
     res.status(500).json({ error: 'Failed to record in Xero' });
+  }
+});
+
+// Re-run the matcher on a queued row (refreshes candidates/notes, never records).
+router.post('/incoming-payments/:id/rematch', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await rematchIncomingPayment(req.params.id as string);
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ data: { ok: true, kind: result.kind } });
+  } catch (err) {
+    console.error('[money] incoming-payments rematch failed:', err);
+    res.status(500).json({ error: 'Failed to re-check incoming payment' });
   }
 });
 

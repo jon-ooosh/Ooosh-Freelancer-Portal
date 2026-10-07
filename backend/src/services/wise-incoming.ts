@@ -715,6 +715,34 @@ export async function recordIncomingPaymentOnJob(opts: {
   return { ok: true, hh_push_error: result.body?.hh_push_error || null };
 }
 
+/**
+ * Re-run the matcher on a queued row (after a fix to the matcher, or once the invoice
+ * exists in Xero) — refreshes candidates, Xero invoices and the note. Never records:
+ * the human presses Record from what it found.
+ */
+export async function rematchIncomingPayment(incomingId: string): Promise<{ ok: boolean; error?: string; kind?: string }> {
+  const r = await query(`SELECT * FROM incoming_bank_payments WHERE id = $1`, [incomingId]);
+  const row = r.rows[0];
+  if (!row) return { ok: false, error: 'Incoming payment not found' };
+  if (row.status === 'recorded') return { ok: false, error: 'Already recorded' };
+  if (!(parseFloat(row.amount) > 0)) return { ok: false, error: 'This row has no amount to match (unreadable email)' };
+  const outcome = await matchIncomingPayment({
+    payerName: row.payer_name, amount: parseFloat(row.amount), currency: row.currency || 'GBP', reference: row.reference,
+  });
+  const xi = outcome.xeroInvoices || [];
+  await query(
+    `UPDATE incoming_bank_payments
+        SET status = 'unmatched', match_method = $2, match_notes = $3, candidates = $4,
+            xero_invoice_id = $5, xero_invoice_number = $6, xero_invoices = $7,
+            matched_job_id = CASE WHEN $8::uuid IS NULL THEN matched_job_id ELSE $8::uuid END
+      WHERE id = $1`,
+    [incomingId, outcome.method, `${outcome.notes}${outcome.kind === 'confident' || outcome.kind === 'confident_xero' ? ' (would match automatically now — press Record to confirm)' : ''}`,
+     JSON.stringify(outcome.candidates), xi[0]?.invoice_id ?? null, xi.map(i => i.invoice_number).join(' + ') || null, JSON.stringify(xi),
+     null],
+  );
+  return { ok: true, kind: outcome.kind };
+}
+
 export async function ignoreIncomingPayment(incomingId: string, actorUserId: string, note: string): Promise<void> {
   await query(
     `UPDATE incoming_bank_payments
