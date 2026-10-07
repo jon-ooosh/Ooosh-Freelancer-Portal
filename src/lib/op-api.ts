@@ -186,15 +186,29 @@ export interface PortalFreelancerTask {
   vehicleReg: string | null
   status: 'open' | 'done' | 'cancelled'
   doneAt: string | null
+  /** True when THEY ticked it on the portal — the only kind they can un-tick. */
+  doneByMe?: boolean
 }
 
-/** Tick a task off. A van prep is ticked by saving the prep sheet, not here. */
+/** Tick a task off (or back on, `done = false`). A van prep is ticked by saving the prep sheet, not here. */
 export async function markFreelancerTaskDoneFromOP(
   sessionToken: string,
   taskId: string,
+  done = true,
 ): Promise<{ success: boolean; task?: PortalFreelancerTask; error?: string }> {
   // NOT retried, per opFetch's rule for POSTs.
-  return opFetch(`/freelancer-tasks/${taskId}/done`, sessionToken, { method: 'POST', body: '{}' })
+  return opFetch(`/freelancer-tasks/${taskId}/done`, sessionToken, {
+    method: 'POST',
+    body: JSON.stringify({ done }),
+  })
+}
+
+/** A link into OP's prep page for a van-prep task (15-minute token). */
+export async function getFreelancerPrepLinkFromOP(
+  sessionToken: string,
+  taskId: string,
+): Promise<{ success: boolean; url?: string; error?: string }> {
+  return opFetch(`/freelancer-tasks/${taskId}/prep-link`, sessionToken, { method: 'POST', body: '{}' })
 }
 
 export interface PortalDayBooking {

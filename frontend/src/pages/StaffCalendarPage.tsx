@@ -4,6 +4,8 @@ import { api } from '../services/api';
 import { dayMarker } from '../lib/companyCalendar';
 import { QuarterHourSelect } from '../components/QuarterHourSelect';
 import FreelancerTasksPanel from '../components/FreelancerTasksPanel';
+import ModalShell from '../components/ModalShell';
+import SearchPicker from '../components/SearchPicker';
 import { useAuthStore } from '../hooks/useAuthStore';
 
 /**
@@ -473,8 +475,7 @@ export default function StaffCalendarPage() {
       {openBooking && (
         <BookingActions booking={openBooking}
           onClose={() => setOpenBooking(null)}
-          onChanged={async () => { setOpenBooking(null); await load(); }}
-          onError={setError} />
+          onChanged={async () => { setOpenBooking(null); await load(); }} />
       )}
 
       {/* Freelance summary — hidden when there is nothing in view. */}
@@ -764,6 +765,11 @@ export default function StaffCalendarPage() {
 
 // ── Booking a freelancer in (spec §9.2) ─────────────────────────────────────
 
+// Field styles for the freelancer pop-ups, so the two read alike.
+const LABEL = 'block text-sm font-medium text-gray-700 mb-1';
+const INPUT_BASE = 'w-full px-3 py-2 rounded-lg border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-ooosh-200 focus:border-ooosh-400';
+const INPUT = `${INPUT_BASE} border-gray-300`;
+
 interface Bookable {
   personId: string; name: string; email: string | null;
   defaultDayRate: number | null; defaultHalfDayRate: number | null;
@@ -797,11 +803,13 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
   const [notes, setNotes] = useState('');
   const [backdateOk, setBackdateOk] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Shown INSIDE the pop-up — the page's error bar sits behind it.
+  const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<{ data: Bookable[] }>('/staff-calendar/freelancer-days/bookable')
       .then(r => setPeople(r.data))
-      .catch(() => onError('Could not load the freelancer list.'));
+      .catch(() => setFormError('Could not load the freelancer list.'));
   }, [onError]);
 
   // Pre-fill from the person and the duration, but never overwrite a figure
@@ -842,9 +850,9 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
       : rate;
 
   async function save() {
-    if (!personId) { onError('Pick who you are booking.'); return; }
-    if (timed && endTime <= startTime) { onError('The end time needs to be after the start.'); return; }
-    if (isBackdated && !backdateOk) { onError('Tick the box to confirm the date is in the past.'); return; }
+    if (!personId) { setFormError('Pick who you are booking.'); return; }
+    if (timed && endTime <= startTime) { setFormError('The end time needs to be after the start.'); return; }
+    if (isBackdated && !backdateOk) { setFormError('Tick the box to confirm the date is in the past.'); return; }
     setSaving(true);
     try {
       await api.post('/staff-calendar/freelancer-days', {
@@ -855,63 +863,65 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
       });
       await onBooked();
     } catch (e) {
-      onError(e instanceof Error ? e.message : 'Failed to book that day');
+      setFormError(e instanceof Error ? e.message : 'Failed to book that day');
     } finally { setSaving(false); }
   }
 
   return (
-    <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-amber-50/50 space-y-3">
-      <div>
-        <h2 className="text-sm font-semibold text-gray-900">Book a freelancer in</h2>
-        <p className="text-xs text-gray-600 mt-0.5">
-          A day at the yard — prep, warehouse, an extra pair of hands. It is an{' '}
-          <strong>offer</strong> until they reply, and it has nothing to do with holiday,
-          overtime or working patterns.
-        </p>
-      </div>
+    <ModalShell
+      title="Book a freelancer in"
+      subtitle={<>A day at the yard — prep, warehouse, an extra pair of hands. It is an{' '}
+        <strong className="font-medium text-gray-700">offer</strong> until they reply, and has nothing
+        to do with holiday, overtime or working patterns.</>}
+      onClose={onClose}
+    >
+      <div className="space-y-4">
+        <label className="block text-sm">
+          <span className={LABEL}>Who</span>
+          {/* Searchable rather than a long scroll (jon, Oct 2026). */}
+          <SearchPicker
+            autoFocus
+            value={chosen ? { value: chosen.personId, label: chosen.name } : null}
+            onChange={(o) => setPersonId(o?.value ?? '')}
+            options={people.map(p => ({ value: p.personId, label: p.name, hint: p.email ?? undefined }))}
+            placeholder="Start typing a name…"
+          />
+        </label>
 
-      <div className="grid sm:grid-cols-3 gap-3">
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Who</span>
-          <select value={personId} onChange={e => setPersonId(e.target.value)}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
-            <option value="">Pick someone…</option>
-            {people.map(p => <option key={p.personId} value={p.personId}>{p.name}</option>)}
-          </select>
-        </label>
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Day</span>
-          <input type="date" value={bookingDate} onChange={e => setBookingDate(e.target.value)}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
-        </label>
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">How long</span>
-          <select value={durationType}
-            onChange={e => setDurationType(e.target.value as DayBooking['durationType'])}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
-            <option value="full_day">Full day</option>
-            <option value="half_day">Half day</option>
-            <option value="hours">Set hours</option>
-          </select>
-        </label>
-      </div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <label className="block text-sm">
+            <span className={LABEL}>Day</span>
+            <input type="date" value={bookingDate} onChange={e => setBookingDate(e.target.value)}
+              className={INPUT} />
+          </label>
+          <label className="block text-sm">
+            <span className={LABEL}>How long</span>
+            <select value={durationType}
+              onChange={e => setDurationType(e.target.value as DayBooking['durationType'])}
+              className={INPUT}>
+              <option value="full_day">Full day</option>
+              <option value="half_day">Half day</option>
+              <option value="hours">Set hours</option>
+            </select>
+          </label>
+        </div>
 
       {timed && (
         <div className="grid sm:grid-cols-3 gap-3">
           <label className="text-sm">
-            <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">From</span>
+            <span className={LABEL}>From</span>
             {/* Quarter hours, and a <select> rather than a time input because
                 Chrome's time picker ignores `step` and offered all sixty
                 minutes. Overtime deliberately stays on 5-minute steps —
                 staff_overtime_entries has a `minutes % 5 = 0` CHECK and the two
                 are answering different questions. */}
             <QuarterHourSelect value={startTime} onChange={setStartTime} aria-label="Start time"
-              className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+              className={INPUT} />
           </label>
           <label className="text-sm">
-            <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
+            <span className={LABEL}>To</span>
             <QuarterHourSelect value={endTime} onChange={setEndTime} aria-label="End time"
-              className={`w-full px-2 py-1.5 rounded border bg-white ${
+              className={`${INPUT_BASE} ${
                 timesBackwards ? 'border-red-400' : 'border-gray-300'}`} />
           </label>
           {/* The third column of the row the two pickers sit in. Reading the
@@ -935,66 +945,70 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
         </div>
       )}
 
-      <div className="grid sm:grid-cols-3 gap-3">
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Rate basis</span>
-          <select value={rateType} onChange={e => setRateType(e.target.value as DayBooking['rateType'])}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
-            <option value="day">Day rate</option>
-            <option value="half_day">Half-day rate</option>
-            {timed && <option value="hourly">Hourly</option>}
-            <option value="fixed">Fixed for the job</option>
-          </select>
-        </label>
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
-            Agreed rate (£)
+        <div className="grid sm:grid-cols-2 gap-4">
+          <label className="block text-sm">
+            <span className={LABEL}>Rate basis</span>
+            <select value={rateType} onChange={e => setRateType(e.target.value as DayBooking['rateType'])}
+              className={INPUT}>
+              <option value="day">Day rate</option>
+              <option value="half_day">Half-day rate</option>
+              {timed && <option value="hourly">Hourly</option>}
+              <option value="fixed">Fixed for the job</option>
+            </select>
+          </label>
+          <label className="block text-sm">
+            <span className={LABEL}>Agreed rate (£)</span>
+            <input type="number" min={0} step="0.01" value={agreedRate}
+              onChange={e => setAgreedRate(e.target.value)}
+              placeholder={chosen?.defaultDayRate ? String(chosen.defaultDayRate) : '—'}
+              className={INPUT} />
+          </label>
+        </div>
+
+        <label className="block text-sm">
+          <span className={LABEL}>What are they doing</span>
+          <input value={notes} onChange={e => setNotes(e.target.value)}
+            placeholder="Van prep for the Thursday get-out"
+            className={INPUT} />
+          <span className="block mt-1 text-xs text-gray-400">
+            A line for the calendar. Individual tasks (with van and job) can be added once the day is booked.
           </span>
-          <input type="number" min={0} step="0.01" value={agreedRate}
-            onChange={e => setAgreedRate(e.target.value)}
-            placeholder={chosen?.defaultDayRate ? String(chosen.defaultDayRate) : '—'}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
         </label>
-        <div className="text-sm flex items-end pb-1.5">
+
+        {isBackdated && (
+          <label className="flex items-start gap-2 p-3 rounded-lg border border-amber-300 bg-amber-50 text-sm text-amber-900">
+            <input type="checkbox" checked={backdateOk} className="mt-0.5"
+              onChange={e => setBackdateOk(e.target.checked)} />
+            <span>
+              <strong>{fmtLongDate(bookingDate)} is in the past.</strong> That is fine if you
+              are recording something that already happened — tick to confirm you meant it.
+            </span>
+          </label>
+        )}
+
+        {formError && (
+          <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2" role="alert">{formError}</p>
+        )}
+
+        <div className="flex flex-wrap items-center gap-3 pt-3 border-t border-gray-100">
           {expected !== null && (
-            <span className="text-gray-600">
+            <span className="text-sm text-gray-600">
               Expected: <strong className="text-gray-900">£{expected.toFixed(2)}</strong>
             </span>
           )}
+          <span className="ml-auto flex gap-2">
+            <button onClick={onClose}
+              className="px-4 py-2 text-sm rounded-lg border border-gray-300 bg-white hover:bg-gray-50">
+              Cancel
+            </button>
+            <button disabled={saving || timesBackwards || (isBackdated && !backdateOk)} onClick={() => void save()}
+              className="px-4 py-2 text-sm font-medium rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+              {saving ? 'Saving…' : isBackdated ? 'Record the day' : 'Offer the day'}
+            </button>
+          </span>
         </div>
       </div>
-
-      <label className="block text-sm">
-        <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
-          What are they doing
-        </span>
-        <input value={notes} onChange={e => setNotes(e.target.value)}
-          placeholder="Van prep for the Thursday get-out"
-          className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
-      </label>
-
-      {isBackdated && (
-        <label className="flex items-start gap-2 p-2 rounded border border-amber-300 bg-amber-100/60 text-sm text-amber-900">
-          <input type="checkbox" checked={backdateOk} className="mt-0.5"
-            onChange={e => setBackdateOk(e.target.checked)} />
-          <span>
-            <strong>{fmtLongDate(bookingDate)} is in the past.</strong> That is fine if you
-            are recording something that already happened — tick to confirm you meant it.
-          </span>
-        </label>
-      )}
-
-      <div className="flex gap-2">
-        <button disabled={saving || timesBackwards || (isBackdated && !backdateOk)} onClick={() => void save()}
-          className="px-3 py-1.5 text-sm rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
-          {isBackdated ? 'Record the day' : 'Offer the day'}
-        </button>
-        <button onClick={onClose}
-          className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50">
-          Cancel
-        </button>
-      </div>
-    </div>
+    </ModalShell>
   );
 }
 
@@ -1083,11 +1097,10 @@ function UnansweredOffers({ onError }: { onError: (m: string) => void }) {
  * version is spec §9.3 and is not built. A decline is recorded and nothing else
  * happens to them; that is the whole point of the wording.
  */
-function BookingActions({ booking, onClose, onChanged, onError }: {
+function BookingActions({ booking, onClose, onChanged }: {
   booking: DayBooking;
   onClose: () => void;
   onChanged: () => void | Promise<void>;
-  onError: (m: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [amending, setAmending] = useState(false);
@@ -1101,21 +1114,31 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
     booking.invoiceAmount !== null ? String(booking.invoiceAmount)
       : booking.expectedTotal !== null ? String(booking.expectedTotal) : '');
 
+  // Shown INSIDE the pop-up — the page's error bar sits behind it.
+  const [actError, setActError] = useState<string | null>(null);
+
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
+    setActError(null);
     try { await fn(); await onChanged(); }
-    catch (e) { onError(e instanceof Error ? e.message : 'That did not work'); }
+    catch (e) { setActError(e instanceof Error ? e.message : 'That did not work'); }
     finally { setBusy(false); }
   }
 
   return (
-    <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-white space-y-3">
+    // A pop-up rather than a panel at the top of the page: clicking a booking
+    // near the bottom of a four-week calendar opened it off-screen (jon, Oct 2026).
+    <ModalShell
+      title={<Link to={`/people/${booking.personId}`} className="hover:text-ooosh-700 hover:underline">
+        {booking.personName}</Link>}
+      subtitle={fmtLongDate(booking.bookingDate)}
+      onClose={onClose}
+    >
+    <div className="space-y-3">
+      {actError && (
+        <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2" role="alert">{actError}</p>
+      )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <Link to={`/people/${booking.personId}`}
-          className="font-medium text-gray-900 hover:text-ooosh-700 hover:underline">
-          {booking.personName}
-        </Link>
-        <span className="text-sm text-gray-600">{booking.bookingDate}</span>
         <span className="text-sm text-gray-500">
           {booking.durationType === 'hours' ? `${booking.startTime}–${booking.endTime}`
             : booking.durationType === 'half_day' ? 'Half day' : 'Full day'}
@@ -1126,14 +1149,13 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
         {booking.expectedTotal !== null && (
           <span className="text-sm text-gray-600">£{booking.expectedTotal.toFixed(2)} expected</span>
         )}
-        <button onClick={onClose} className="ml-auto text-sm text-gray-500 hover:underline">Close</button>
       </div>
       {booking.notes && <p className="text-sm text-gray-600">{booking.notes}</p>}
 
       {/* What they are doing on the day — a live list (STAFF-CALENDAR-SPEC §21).
           Read-only once the day is no longer offered / accepted. */}
       {['offered', 'accepted', 'completed'].includes(booking.status) && (
-        <div className="pt-2 border-t border-amber-100">
+        <div className="pt-3 border-t border-gray-100">
           <FreelancerTasksPanel key={booking.id} owner={{ bookingId: booking.id }} />
         </div>
       )}
@@ -1293,5 +1315,6 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
         </div>
       )}
     </div>
+    </ModalShell>
   );
 }

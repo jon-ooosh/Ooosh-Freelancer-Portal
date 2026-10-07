@@ -2042,7 +2042,7 @@ visible on the calendar and a one-off covers it if that was the intent.
 
 ---
 
-## 21. Freelancer tasks — PHASE 1 BUILT (Oct 2026, migration 276)
+## 21. Freelancer tasks — PHASES 1–2 BUILT (Oct 2026, migration 276)
 
 Replaces the `freelancer_day_booking_tasks` sketch in §3.8, which was never
 built. Agreed with jon, 7 Oct 2026, before any code.
@@ -2180,8 +2180,8 @@ narrow session JWT.
 ### 21.8 Settled at build (8 Oct 2026)
 
 - **One email template**, `freelancer_tasks_updated`, for both owners; body
-  built in `freelancer-tasks.ts` and passed as `bodyHtmlOverride`. Needs adding
-  to `EMAIL_LIVE_TEMPLATES` while the server is in `EMAIL_MODE=test`.
+  built in `freelancer-tasks.ts` and passed as `bodyHtmlOverride`. Production
+  runs `EMAIL_MODE=live`, so nothing needs adding to `EMAIL_LIVE_TEMPLATES`.
 - **Sitters are told by the 16:00 summary** (decision 4), confirmed or not.
 
 ### 21.9 Phase 1 — what shipped
@@ -2208,4 +2208,51 @@ narrow session JWT.
 - **Known gap:** a sitter swapped in after the previous sitter was told (by
   Send update or the 16:00 summary) is not emailed unless a task then changes —
   they see the list on the portal.
-- **Next:** phase 2, the prep link (§21.6).
+- **Next:** phase 2, the prep link (§21.6) — done, see §21.10.
+
+### 21.10 Phase 2 + feedback round — what shipped (8 Oct 2026)
+
+**The prep link.** Built differently from the §21.6 sketch in one respect: no
+portal HMAC. The portal calls OP with the freelancer's own session, so OP
+already knows who is asking and mints the link itself — no shared secret, one
+fewer moving part.
+
+- `POST /api/portal/freelancer-tasks/:id/prep-link` → a URL into
+  `/vehicles/freelancer-prep?prepToken=…&returnUrl=…` carrying a **15-minute
+  redeem token** (scope `freelancer_prep_redeem`). Short, because a URL lands
+  in history and logs.
+- `POST /api/vehicles/freelancer-prep/resolve` (public, before the vehicle
+  auth) swaps it for a **4h session** (scope `freelancer_prep`: task, person,
+  van). Both steps call `assertPrepEligible()` — open van prep, theirs via the
+  owner, owner live, day yesterday → tomorrow — so they cannot disagree.
+- Neither token has `id`/`role`, so neither passes `authorize()`; the portal's
+  `portalAuth` now also refuses any token carrying a `scope` (its secret can
+  fall back to `JWT_SECRET`).
+- `routes/vehicles.ts`: `FREELANCER_PREP_ALLOW` + ONE checkpoint middleware
+  holding every call to the session's van — fleet (only its van), events, prep
+  history, save-event (prep events only), save-prep (plain eventId; "prepared
+  by" forced to the person), hire-status (Available / Not Ready only), stock.
+  Upload-photo checks the key inside the handler (multipart).
+- **Flags from a freelancer prep do not open Problems** — `/api/problems` is
+  staff-only and a Problem is reported by a user. The flags stay in the saved
+  prep and the fleet's notification targets get a bell listing them
+  (`notifyFreelancerPrepFlags`); the results screen says "N sent to the office
+  to review" rather than skipping silently.
+- Frontend: `FreelancerPrepShell` (public route), session kept under its own
+  keys (`adapters/freelancer-prep-session.ts`); on that page the PAGE decides
+  which session is sent, so a book-out session on the same phone never stands
+  in. `PrepPage` takes `freelancerPrep` — opens on the van, hides the
+  turnaround widget and the staff-only issues banner, finishes with "Back to
+  the freelancer portal".
+
+**Feedback round (jon, 8 Oct).**
+- Calendar: the booking panel and "Book a freelancer" are now pop-ups
+  (`components/ModalShell.tsx`) — the panel used to open at the top of a long
+  calendar, unseen. Who, the van and the job are searchable
+  (`components/SearchPicker.tsx`; jobs via `/hirehop/jobs?search=`). Tasks
+  store the picked job by id (`jobId`; the HireHop-number path is kept).
+- Portal: an 'other' task's whole row is the tick; tapping again un-ticks a
+  mis-tap, but only a tick they made on the portal (`doneByMe`).
+
+**Not built, offered:** a note on the job's activity timeline when a task with
+a job is completed.

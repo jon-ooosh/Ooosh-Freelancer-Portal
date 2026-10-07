@@ -14,7 +14,7 @@
 
 import { query } from '../config/database';
 import emailService from './email-service';
-import { greetingName, DISPLAY_NAME_SQL } from './display-name';
+import { greetingName, fullDisplayName, DISPLAY_NAME_SQL } from './display-name';
 import { todayLondon } from './staff-tasks';
 import { formatBookingDate } from './freelancer-day-offer';
 
@@ -38,6 +38,7 @@ export interface FreelancerTask {
   status: FreelancerTaskStatus;
   doneAt: string | null;
   doneByName: string | null;
+  doneByPersonId: string | null;
   doneVia: 'prep_saved' | 'portal' | 'staff' | null;
   createdAt: string;
   updatedAt: string;
@@ -83,6 +84,7 @@ function mapRow(r: Record<string, any>): FreelancerTask {
     status: r.status,
     doneAt: r.done_at ? new Date(r.done_at).toISOString() : null,
     doneByName: r.done_by_name ?? null,
+    doneByPersonId: r.done_by_person ?? null,
     doneVia: r.done_via ?? null,
     createdAt: new Date(r.created_at).toISOString(),
     updatedAt: new Date(r.updated_at).toISOString(),
@@ -101,14 +103,14 @@ export interface OwnerContext {
   /** Can tasks still be added / is anybody still expected to do them? */
   live: boolean;
   lastNotifiedAt: string | null;
-  person: { id: string; email: string | null; first_name: string | null; preferred_name: string | null } | null;
+  person: { id: string; email: string | null; first_name: string | null; last_name: string | null; preferred_name: string | null } | null;
 }
 
 export async function getOwnerContext(owner: TaskOwner): Promise<OwnerContext | null> {
   if (owner.kind === 'booking') {
     const r = await query(
       `SELECT b.booking_date::text AS d, b.status, b.last_tasks_notified_at,
-              p.id AS person_id, p.email, p.first_name, p.preferred_name
+              p.id AS person_id, p.email, p.first_name, p.last_name, p.preferred_name
          FROM freelancer_day_bookings b JOIN people p ON p.id = b.person_id
         WHERE b.id = $1`,
       [owner.id]
@@ -119,13 +121,13 @@ export async function getOwnerContext(owner: TaskOwner): Promise<OwnerContext | 
       date: String(row.d).slice(0, 10),
       live: LIVE_BOOKING.includes(row.status),
       lastNotifiedAt: row.last_tasks_notified_at ? new Date(row.last_tasks_notified_at).toISOString() : null,
-      person: { id: row.person_id, email: row.email, first_name: row.first_name, preferred_name: row.preferred_name },
+      person: { id: row.person_id, email: row.email, first_name: row.first_name, last_name: row.last_name, preferred_name: row.preferred_name },
     };
   }
   // A shift's person is its LIVE assignment — whoever is on tonight.
   const r = await query(
     `SELECT s.shift_date::text AS d, s.status, s.last_tasks_notified_at,
-            p.id AS person_id, p.email, p.first_name, p.preferred_name
+            p.id AS person_id, p.email, p.first_name, p.last_name, p.preferred_name
        FROM studio_sitter_shifts s
        LEFT JOIN studio_sitter_shift_assignments a
          ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
@@ -140,7 +142,7 @@ export async function getOwnerContext(owner: TaskOwner): Promise<OwnerContext | 
     live: row.status !== 'cancelled',
     lastNotifiedAt: row.last_tasks_notified_at ? new Date(row.last_tasks_notified_at).toISOString() : null,
     person: row.person_id
-      ? { id: row.person_id, email: row.email, first_name: row.first_name, preferred_name: row.preferred_name }
+      ? { id: row.person_id, email: row.email, first_name: row.first_name, last_name: row.last_name, preferred_name: row.preferred_name }
       : null,
   };
 }
@@ -184,6 +186,9 @@ export async function changesSinceNotified(owner: TaskOwner, lastNotifiedAt: str
 export interface TaskInput {
   taskType: FreelancerTaskType;
   vehicleId?: string | null;
+  /** The job, by OP id (the staff picker sends this)… */
+  jobId?: string | null;
+  /** …or by HireHop number. jobId wins when both are given. */
   hhJobNumber?: number | null;
   description?: string | null;
 }
@@ -196,6 +201,18 @@ async function resolveJobId(hhJobNumber: number | null | undefined): Promise<str
   );
   if (!r.rows[0]) throw new Error(`No job #${hhJobNumber} in OP`);
   return r.rows[0].id;
+}
+
+/** The job a task input names: undefined = not mentioned, null = cleared. */
+async function resolveJob(input: Partial<TaskInput>): Promise<string | null | undefined> {
+  if (input.jobId !== undefined) {
+    if (input.jobId === null) return null;
+    const r = await query(`SELECT id FROM jobs WHERE id = $1 AND is_deleted = false`, [input.jobId]);
+    if (!r.rows[0]) throw new Error('That job is not in OP');
+    return r.rows[0].id;
+  }
+  if (input.hhJobNumber !== undefined) return resolveJobId(input.hhJobNumber);
+  return undefined;
 }
 
 async function assertVehicle(vehicleId: string | null | undefined): Promise<void> {
@@ -223,7 +240,7 @@ export async function createTask(owner: TaskOwner, input: TaskInput, userId: str
   const description = cleanDescription(input.description);
   validateShape(input.taskType, vehicleId, description);
   await assertVehicle(vehicleId);
-  const jobId = await resolveJobId(input.hhJobNumber);
+  const jobId = (await resolveJob(input)) ?? null;
 
   const col = ownerColumn(owner);
   const r = await query(
@@ -246,7 +263,8 @@ export async function updateTask(id: string, input: Partial<TaskInput>): Promise
   const description = input.description !== undefined ? cleanDescription(input.description) : task.description;
   validateShape(task.taskType, vehicleId, description);
   await assertVehicle(vehicleId);
-  const jobId = input.hhJobNumber !== undefined ? await resolveJobId(input.hhJobNumber) : task.jobId;
+  const named = await resolveJob(input);
+  const jobId = named === undefined ? task.jobId : named;
 
   await query(
     `UPDATE freelancer_tasks SET vehicle_id = $2, job_id = $3, description = $4, updated_at = NOW() WHERE id = $1`,
@@ -312,6 +330,28 @@ export async function markDoneFromPortal(id: string, personId: string): Promise<
 }
 
 /**
+ * Un-tick from the portal — for a mis-tap. Only a task THIS person ticked on
+ * the portal: one staff ticked, or a prep sheet closed, is not theirs to undo.
+ */
+export async function reopenFromPortal(id: string, personId: string): Promise<FreelancerTask> {
+  const task = await getTask(id);
+  const ctx = task ? await getOwnerContext(ownerOf(task)) : null;
+  if (!task || !ctx || ctx.person?.id !== personId || task.status === 'cancelled') {
+    throw Object.assign(new Error('We cannot find that task'), { status: 404 });
+  }
+  if (task.status === 'open') return task;
+  const r = await query(
+    `UPDATE freelancer_tasks
+        SET status = 'open', done_at = NULL, done_via = NULL, done_by_person = NULL, updated_at = NOW()
+      WHERE id = $1 AND status = 'done' AND done_via = 'portal' AND done_by_person = $2
+      RETURNING id`,
+    [id, personId]
+  );
+  if (!r.rows[0]) throw Object.assign(new Error('That one was ticked off by the office'), { status: 409 });
+  return (await getTask(id))!;
+}
+
+/**
  * A prep was saved for this van: close its open van-prep tasks on any live
  * owner dated yesterday, today or tomorrow — whoever did the prep, staff
  * included. Never throws; a failure here must not fail the prep save.
@@ -343,6 +383,51 @@ export async function autoTickPrep(reg: string, personId: string | null): Promis
     console.error('[freelancer-tasks] autoTickPrep failed (non-fatal):', err);
     return 0;
   }
+}
+
+// ── The prep link (§21.6) ───────────────────────────────────────────────────
+
+export interface PrepEligible {
+  task: FreelancerTask;
+  personName: string;
+  vehicleReg: string;
+  date: string;
+}
+
+/**
+ * May this person open the prep sheet for this task, right now? THE rule for
+ * both minting the link and redeeming it, so the two cannot disagree: the
+ * task is an open van prep, it is theirs (via its owner), the owner is live,
+ * and its day is yesterday, today or tomorrow. Throws a 404 for "not yours"
+ * and "does not exist" alike, a 409 for "yours, but not now".
+ */
+export async function assertPrepEligible(taskId: string, personId: string): Promise<PrepEligible> {
+  const task = await getTask(taskId);
+  const ctx = task ? await getOwnerContext(ownerOf(task)) : null;
+  if (!task || !ctx || ctx.person?.id !== personId || task.status === 'cancelled') {
+    throw Object.assign(new Error('We cannot find that task'), { status: 404 });
+  }
+  if (task.taskType !== 'van_prep' || !task.vehicleId || !task.vehicleReg) {
+    throw Object.assign(new Error('That task has no prep sheet'), { status: 409 });
+  }
+  if (task.status === 'done') {
+    throw Object.assign(new Error('That van has already been prepped'), { status: 409 });
+  }
+  if (!ctx.live) {
+    throw Object.assign(new Error('That day is no longer going ahead'), { status: 409 });
+  }
+  const today = todayLondon();
+  const d = new Date(`${today}T12:00:00Z`);
+  const shift = (n: number) => { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+  if (ctx.date < shift(-1) || ctx.date > shift(1)) {
+    throw Object.assign(new Error('The prep sheet opens the day before'), { status: 409 });
+  }
+  return {
+    task,
+    personName: fullDisplayName(ctx.person) || 'Freelancer',
+    vehicleReg: task.vehicleReg,
+    date: ctx.date,
+  };
 }
 
 // ── Telling them ────────────────────────────────────────────────────────────
