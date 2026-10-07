@@ -99,7 +99,43 @@ export interface Lead {
   last_event_detail: string | null;
   last_event_at: string | null;
   last_event_by: string | null;
+  /** Jobs for THIS tour (linked or suggested) — backend services/leads/tour-jobs.ts. */
+  tour_jobs: TourJob[] | null;
 }
+
+export interface TourJob {
+  job_id: string;
+  hh_job_number: number | null;
+  job_name: string | null;
+  status: 'linked' | 'suggested';
+  link_type: 'auto' | 'name' | 'manual';
+  /** backend TOUR_JOB_OUTCOME_SQL */
+  outcome: 'open' | 'booked' | 'lost' | 'cancelled' | 'dismissed' | 'other';
+  pipeline_status: string | null;
+  lost_reason: string | null;
+  job_value: number | string | null;
+  start: string | null;
+  end: string | null;
+}
+
+/** Badge text + colour for a tour job's outcome. */
+export function tourJobBadge(j: TourJob): { text: string; cls: string; icon: string } {
+  const num = j.hh_job_number ? `#${j.hh_job_number}` : 'enquiry';
+  switch (j.outcome) {
+    case 'open': {
+      const stage = j.pipeline_status === 'quoting' ? 'Quoting' : j.pipeline_status === 'provisional' ? 'Provisional'
+        : j.pipeline_status === 'paused' ? 'Paused' : 'Enquiry';
+      return { text: `${stage} ${num}`, cls: 'bg-blue-100 text-blue-800', icon: '📋' };
+    }
+    case 'booked': return { text: `Booked ${num}`, cls: 'bg-green-100 text-green-800', icon: '✅' };
+    case 'lost': return { text: `Lost ${num}${j.lost_reason ? ` (${j.lost_reason})` : ''}`, cls: 'bg-gray-100 text-gray-600', icon: '✗' };
+    case 'cancelled': return { text: `Cancelled ${num}`, cls: 'bg-gray-100 text-gray-600', icon: '✗' };
+    case 'dismissed': return { text: `Dismissed enquiry ${num}`, cls: 'bg-gray-100 text-gray-600', icon: '✗' };
+    default: return { text: num, cls: 'bg-gray-100 text-gray-600', icon: '•' };
+  }
+}
+
+export const isLiveTourJob = (j: TourJob) => j.status === 'linked' && (j.outcome === 'open' || j.outcome === 'booked');
 
 export type LeadStage = 'review' | 'contacted' | 'pipeline' | 'dismissed';
 
@@ -158,6 +194,8 @@ export const EVENT_LABEL: Record<string, string> = {
   dismissed: 'Dismissed',
   restored: 'Restored',
   status: 'Status changed',
+  tour_job_linked: 'Job for this tour linked',
+  tour_job_unlinked: 'Job unlinked from this tour',
 };
 
 /** Short form for the "Last activity" column. */
@@ -166,6 +204,7 @@ export const EVENT_SHORT: Record<string, string> = {
   researched: 'Researched', research_failed: 'Research failed', research_requested: 'Researching',
   address_book: 'Added to book', contact_added: 'Contact added', contact_removed: 'Contact removed',
   outreach: 'Contacted', enquiry: 'Enquiry', dismissed: 'Dismissed', restored: 'Restored', status: 'Updated',
+  tour_job_linked: 'Job linked', tour_job_unlinked: 'Job unlinked',
 };
 
 /** Dismiss reasons — keys match the backend's DISMISS_REASONS. */

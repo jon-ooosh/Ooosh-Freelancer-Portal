@@ -25,6 +25,10 @@
  *                                      in the background                                          STAFF
  *   POST  /:id/contacts              — add a contact by hand (kept through any re-research)      STAFF
  *   DELETE /:id/contacts/:idx        — remove a contact                                          STAFF
+ *   GET   /:id/tour-jobs/candidates  — the band's other jobs, to link one by hand                STAFF
+ *   POST  /:id/tour-jobs             — link a job to this tour (by job id or HireHop number)    STAFF
+ *   POST  /:id/tour-jobs/:jobId/confirm — confirm a suggested job                               STAFF
+ *   DELETE /:id/tour-jobs/:jobId     — unlink (never re-linked automatically)                   STAFF
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
@@ -47,7 +51,9 @@ import {
 } from '../services/address-book-resolve';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
 import { logLeadEvent } from '../services/leads/events';
+import { dateOnly } from '../services/leads/dates';
 import { researchLead } from '../services/leads/researcher';
+import { liveTourJobSql, syncTourJobs, TOUR_JOB_OUTCOME_SQL } from '../services/leads/tour-jobs';
 
 const router = Router();
 router.use(authenticate);
@@ -70,12 +76,13 @@ const HIDDEN_STATUSES = `('dismissed', 'not_relevant')`;
  * reads `stage` off the row rather than re-deriving it):
  *   review    — new / reviewing: nobody has acted yet
  *   contacted — outreach logged, no enquiry
- *   pipeline  — an enquiry exists (Start enquiry, or outreach with an enquiry)
+ *   pipeline  — an enquiry exists (Start enquiry, or outreach with an enquiry), or
+ *               an open / booked job for this tour is linked (tour-jobs.ts)
  *   dismissed — dismissed, or the AI marked it not relevant
  */
 const STAGE_SQL = `CASE
     WHEN l.status IN ${HIDDEN_STATUSES} THEN 'dismissed'
-    WHEN l.converted_job_id IS NOT NULL OR l.status = 'converted' THEN 'pipeline'
+    WHEN l.converted_job_id IS NOT NULL OR l.status = 'converted' OR ${liveTourJobSql('l')} THEN 'pipeline'
     WHEN l.status = 'contacted' THEN 'contacted'
     ELSE 'review' END`;
 
@@ -102,11 +109,8 @@ interface LeadContact {
   manual?: boolean;
 }
 
-function ymd(v: unknown): string | null {
-  if (!v) return null;
-  const d = new Date(v as string);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
-}
+/** DATE → 'YYYY-MM-DD' (timezone-safe — see dates.ts). */
+const ymd = dateOnly;
 
 async function loadLead(id: string) {
   const r = await query(`SELECT ${LEAD_COLUMNS} FROM leads WHERE id = $1`, [id]);
@@ -136,7 +140,7 @@ router.get('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respons
     const result = await query(
       `SELECT ${LEAD_COLUMNS_PREFIXED}, o.name AS matched_org_name, ${STAGE_SQL} AS stage,
               le.event AS last_event, le.detail AS last_event_detail, le.created_at AS last_event_at,
-              le.actor AS last_event_by,
+              le.actor AS last_event_by, tj.tour_jobs,
               cj.hh_job_number AS converted_job_number, cj.job_name AS converted_job_name,
               cj.pipeline_status AS converted_job_status,
               prev.id AS prev_lead_id, prev.status AS prev_status, prev.status_reason AS prev_status_reason,
@@ -158,6 +162,16 @@ router.get('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respons
              FROM lead_events e WHERE e.lead_id = l.id
             ORDER BY e.created_at DESC LIMIT 1
          ) le ON true
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(json_agg(json_build_object(
+                    'job_id', j.id, 'hh_job_number', j.hh_job_number, 'job_name', j.job_name,
+                    'status', ltj.status, 'link_type', ltj.link_type, 'outcome', ${TOUR_JOB_OUTCOME_SQL},
+                    'pipeline_status', j.pipeline_status, 'lost_reason', j.lost_reason, 'job_value', j.job_value,
+                    'start', COALESCE(j.out_date, j.job_date), 'end', COALESCE(j.return_date, j.job_end))
+                  ORDER BY COALESCE(j.out_date, j.job_date)), '[]'::json) AS tour_jobs
+             FROM lead_tour_jobs ltj JOIN jobs j ON j.id = ltj.job_id AND j.is_deleted = false
+            WHERE ltj.lead_id = l.id AND ltj.status IN ('linked', 'suggested')
+         ) tj ON true
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY ${hiddenView ? 'l.updated_at DESC' : 'l.relevance_score DESC NULLS LAST, l.first_date ASC NULLS LAST'}
        LIMIT 2000`,
@@ -177,7 +191,7 @@ router.get('/runs/latest', authorize(...STAFF_ROLES), async (_req: AuthRequest, 
   try {
     const r = await query(
       `SELECT lr.id, lr.trigger, lr.status, lr.counts, lr.error, lr.started_at, lr.finished_at,
-              p.first_name AS triggered_by_name
+              COALESCE(NULLIF(p.preferred_name, ''), p.first_name) AS triggered_by_name
          FROM lead_runs lr
          LEFT JOIN users u ON u.id = lr.triggered_by
          LEFT JOIN people p ON p.id = u.person_id
@@ -390,6 +404,7 @@ router.post('/:id/restore', authorize(...STAFF_ROLES), async (req: AuthRequest, 
       [lead.id],
     );
     await logLeadEvent(lead.id, 'restored', { userId: req.user?.id });
+    await syncTourJobs(lead.id);
     res.json({ data: await loadLead(lead.id) });
   } catch (error) {
     console.error('[leads] restore error:', error);
@@ -411,6 +426,7 @@ router.post('/:id/confirm-match', authorize(...STAFF_ROLES), validate(confirmSch
     const cand = ((lead.match_candidates ?? []) as MatchCandidate[]).find((c) => c.id === orgId);
     await linkLeadToOrg(lead.id, orgId, cand?.via === 'job_name' ? 'job_name' : 'org_name', { enrichOrg: true });
     await logLeadEvent(lead.id, 'match_confirmed', { detail: cand?.name ?? null, userId: req.user?.id });
+    await syncTourJobs(lead.id);
     res.json({ data: await loadLead(lead.id) });
   } catch (error) {
     console.error('[leads] confirm-match error:', error);
@@ -582,6 +598,7 @@ router.post('/:id/add-to-address-book', authorize(...STAFF_ROLES), validate(addS
       await logLeadEvent(lead.id, 'address_book', { detail: bits.join(' · '), userId });
     }
     await linkKnownContacts();
+    await syncTourJobs(lead.id);
 
     res.json({ data: {
       lead: await loadLead(lead.id), organisation_id: orgId, created,
@@ -635,6 +652,22 @@ async function createEnquiryFromLead(
   },
 ): Promise<string> {
   if (!lead.matched_organisation_id) throw { status: 400, message: 'Add this band to the address book first' };
+  // A job for this tour already exists (quoted / booked) — a second enquiry would
+  // duplicate it in the pipeline and in the band's history.
+  const live = await query(
+    `SELECT j.id, j.hh_job_number FROM lead_tour_jobs ltj JOIN jobs j ON j.id = ltj.job_id
+      WHERE ltj.lead_id = $1 AND ltj.status = 'linked' AND j.is_deleted = false AND j.dismissed_at IS NULL
+        AND (${TOUR_JOB_OUTCOME_SQL}) IN ('open', 'booked')
+      LIMIT 1`,
+    [lead.id],
+  );
+  if (live.rows[0]) {
+    throw {
+      status: 409,
+      message: `There's already a job for this tour${live.rows[0].hh_job_number ? ` (#${live.rows[0].hh_job_number})` : ''} — use that rather than a new enquiry`,
+      job_id: live.rows[0].id,
+    };
+  }
   if (lead.converted_job_id) {
     const existing = await query(`SELECT id FROM jobs WHERE id = $1 AND is_deleted = false`, [lead.converted_job_id]);
     if (existing.rows[0]) throw { status: 409, message: 'An enquiry already exists for this lead', job_id: lead.converted_job_id };
@@ -873,6 +906,101 @@ router.delete('/:id/contacts/:idx', authorize(...STAFF_ROLES), async (req: AuthR
   } catch (error) {
     console.error('[leads] remove contact error:', error);
     res.status(500).json({ error: 'Failed to remove contact' });
+  }
+});
+
+// GET /api/leads/:id/tour-jobs/candidates — the band's recent jobs (any dates),
+// so staff can link one the date window missed.
+router.get('/:id/tour-jobs/candidates', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const lead = await loadLead(req.params.id as string);
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    if (!lead.matched_organisation_id) return res.json({ data: [] });
+    const r = await query(
+      `SELECT j.id AS job_id, j.hh_job_number, j.job_name, ${TOUR_JOB_OUTCOME_SQL} AS outcome,
+              COALESCE(j.out_date, j.job_date) AS start, COALESCE(j.return_date, j.job_end) AS "end"
+         FROM jobs j
+        WHERE j.is_deleted = false
+          AND (j.client_id = $1 OR j.id IN (SELECT jo.job_id FROM job_organisations jo WHERE jo.organisation_id = $1))
+          AND j.id NOT IN (SELECT ltj.job_id FROM lead_tour_jobs ltj WHERE ltj.lead_id = $2 AND ltj.status <> 'rejected')
+        ORDER BY COALESCE(j.out_date, j.job_date) DESC NULLS LAST
+        LIMIT 15`,
+      [lead.matched_organisation_id, lead.id],
+    );
+    res.json({ data: r.rows });
+  } catch (error) {
+    console.error('[leads] tour-job candidates error:', error);
+    res.status(500).json({ error: 'Failed to load jobs' });
+  }
+});
+
+// POST /api/leads/:id/tour-jobs — link a job to this tour by hand.
+const linkJobSchema = z.object({
+  job_id: z.string().uuid().optional(),
+  hh_job_number: z.coerce.number().int().positive().optional(),
+}).refine((b) => Boolean(b.job_id) !== Boolean(b.hh_job_number), { message: 'Give a job or a HireHop job number' });
+router.post('/:id/tour-jobs', authorize(...STAFF_ROLES), validate(linkJobSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const b = req.body as z.infer<typeof linkJobSchema>;
+    const lead = await loadLead(req.params.id as string);
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const j = b.job_id
+      ? await query(`SELECT id, hh_job_number, job_name FROM jobs WHERE id = $1 AND is_deleted = false`, [b.job_id])
+      : await query(`SELECT id, hh_job_number, job_name FROM jobs WHERE hh_job_number = $1 AND is_deleted = false LIMIT 1`, [b.hh_job_number]);
+    if (!j.rows[0]) return res.status(404).json({ error: b.hh_job_number ? `No job #${b.hh_job_number} found` : 'Job not found' });
+    await query(
+      `INSERT INTO lead_tour_jobs (lead_id, job_id, status, link_type, created_by) VALUES ($1, $2, 'linked', 'manual', $3)
+       ON CONFLICT (lead_id, job_id) DO UPDATE SET status = 'linked', link_type = 'manual', created_by = $3, updated_at = NOW()`,
+      [lead.id, j.rows[0].id, req.user?.id ?? null],
+    );
+    await logLeadEvent(lead.id, 'tour_job_linked', {
+      detail: `${j.rows[0].hh_job_number ? `#${j.rows[0].hh_job_number} ` : ''}${j.rows[0].job_name ?? ''}`.trim(), userId: req.user?.id,
+    });
+    res.status(201).json({ data: await loadLead(lead.id) });
+  } catch (error) {
+    console.error('[leads] link tour job error:', error);
+    res.status(500).json({ error: 'Failed to link job' });
+  }
+});
+
+// POST /api/leads/:id/tour-jobs/:jobId/confirm — a suggested (named-after-the-band) job is this tour's.
+router.post('/:id/tour-jobs/:jobId/confirm', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `UPDATE lead_tour_jobs SET status = 'linked', created_by = $3, updated_at = NOW()
+        WHERE lead_id = $1 AND job_id = $2 RETURNING job_id`,
+      [req.params.id, req.params.jobId, req.user?.id ?? null],
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: 'Not linked to this lead' });
+    const j = await query(`SELECT hh_job_number, job_name FROM jobs WHERE id = $1`, [req.params.jobId]);
+    await logLeadEvent(req.params.id as string, 'tour_job_linked', {
+      detail: `${j.rows[0]?.hh_job_number ? `#${j.rows[0].hh_job_number} ` : ''}${j.rows[0]?.job_name ?? ''} (confirmed)`.trim(), userId: req.user?.id,
+    });
+    res.json({ data: await loadLead(req.params.id as string) });
+  } catch (error) {
+    console.error('[leads] confirm tour job error:', error);
+    res.status(500).json({ error: 'Failed to confirm job' });
+  }
+});
+
+// DELETE /api/leads/:id/tour-jobs/:jobId — not this tour's job. Kept as
+// 'rejected' so the automatic link never puts it back.
+router.delete('/:id/tour-jobs/:jobId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `UPDATE lead_tour_jobs SET status = 'rejected', created_by = $3, updated_at = NOW()
+        WHERE lead_id = $1 AND job_id = $2 RETURNING job_id`,
+      [req.params.id, req.params.jobId, req.user?.id ?? null],
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: 'Not linked to this lead' });
+    const j = await query(`SELECT hh_job_number, job_name FROM jobs WHERE id = $1`, [req.params.jobId]);
+    await logLeadEvent(req.params.id as string, 'tour_job_unlinked', {
+      detail: `${j.rows[0]?.hh_job_number ? `#${j.rows[0].hh_job_number} ` : ''}${j.rows[0]?.job_name ?? ''}`.trim(), userId: req.user?.id,
+    });
+    res.json({ data: await loadLead(req.params.id as string) });
+  } catch (error) {
+    console.error('[leads] unlink tour job error:', error);
+    res.status(500).json({ error: 'Failed to unlink job' });
   }
 });
 
