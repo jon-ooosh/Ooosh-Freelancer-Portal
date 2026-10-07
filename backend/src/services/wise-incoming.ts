@@ -370,8 +370,8 @@ export interface MatchOutcome {
   /** Set for a confident job match. */
   job?: JobRow;
   paymentType?: RecordPaymentType;
-  /** Xero-only invoice the reference pointed at (confident_xero, or evidence on unmatched). */
-  xeroInvoice?: XeroInvoiceCandidate;
+  /** Xero-only invoices the reference or payer pointed at (confident_xero: the ones to pay; unmatched: evidence). */
+  xeroInvoices?: XeroInvoiceCandidate[];
 }
 
 /** "OT-6787" (but not OT-INV-…, OT-SHOP-…) → "OT-6787"; bare 3-7 digit numbers are tried as OT-<n> too. */
@@ -385,28 +385,67 @@ function extractXeroInvoiceNumbers(reference: string | null): string[] {
   return [...out].slice(0, 5);
 }
 
-/** Tier 3: look the invoice number(s) up in Xero. Open ACCREC invoices only. */
-async function findXeroInvoice(numbers: string[]): Promise<XeroInvoiceCandidate | null> {
-  if (numbers.length === 0 || !isXeroConfigured()) return null;
+function toXeroCandidate(inv: Record<string, unknown>, fallbackNumber = ''): XeroInvoiceCandidate {
+  return {
+    invoice_id: String(inv.InvoiceID),
+    invoice_number: String(inv.InvoiceNumber || fallbackNumber),
+    contact_name: ((inv.Contact as Record<string, unknown> | undefined)?.Name as string | undefined) ?? null,
+    status: String(inv.Status || ''),
+    amount_due: parseFloat(String(inv.AmountDue ?? '0')) || 0,
+    total: parseFloat(String(inv.Total ?? '0')) || 0,
+  };
+}
+
+/**
+ * Tier 3: look the invoice number(s) up in Xero. ACCREC only. A reference can name
+ * several ("OT6797 OT6805" — two storage invoices paid in one transfer), so this returns
+ * every one it finds, open or not; the caller decides what the amount explains.
+ */
+async function findXeroInvoicesByNumber(numbers: string[]): Promise<XeroInvoiceCandidate[]> {
+  if (numbers.length === 0 || !isXeroConfigured()) return [];
+  const out: XeroInvoiceCandidate[] = [];
   for (const num of numbers) {
     try {
       const safe = num.replace(/"/g, '');
       const rows = await xeroBroker.getInvoices(`Type=="ACCREC" AND InvoiceNumber=="${safe}"`);
       const inv = rows.find(r => String(r.Status || '') === 'AUTHORISED') || rows[0];
-      if (!inv) continue;
-      return {
-        invoice_id: String(inv.InvoiceID),
-        invoice_number: String(inv.InvoiceNumber || num),
-        contact_name: ((inv.Contact as Record<string, unknown> | undefined)?.Name as string | undefined) ?? null,
-        status: String(inv.Status || ''),
-        amount_due: parseFloat(String(inv.AmountDue ?? '0')) || 0,
-        total: parseFloat(String(inv.Total ?? '0')) || 0,
-      };
+      if (inv) out.push(toXeroCandidate(inv, num));
     } catch (err) {
       console.warn(`[wise-incoming] Xero invoice lookup failed for ${num}:`, err);
     }
   }
-  return null;
+  return out;
+}
+
+/**
+ * Tier 3b: no number anywhere ("STORAGE") — the OPEN Xero invoices of a contact whose
+ * name resembles the payer. Wise truncates payer names ("BELLA UNION LIMITE"), so the
+ * search uses the first two significant words. Evidence unless the amounts add up.
+ */
+async function findOpenXeroInvoicesByPayer(payerName: string | null): Promise<XeroInvoiceCandidate[]> {
+  if (!isXeroConfigured()) return [];
+  const words = normaliseName(payerName).split(' ').filter(w => w.length >= 3);
+  if (words.length === 0) return [];
+  const needle = words.slice(0, 2).join(' ').replace(/"/g, '').toLowerCase();
+  try {
+    const rows = await xeroBroker.getInvoices(
+      `Type=="ACCREC" AND Status=="AUTHORISED" AND Contact.Name.ToLower().Contains("${needle}")`,
+    );
+    return rows.map(r => toXeroCandidate(r)).filter(c => c.amount_due > 0).slice(0, 10);
+  } catch (err) {
+    console.warn(`[wise-incoming] Xero contact lookup failed for "${needle}":`, err);
+    return [];
+  }
+}
+
+/** The subset of open invoices whose amounts due add up to the amount sent (all of them, or exactly one). */
+function xeroInvoicesExplaining(amount: number, invoices: XeroInvoiceCandidate[]): XeroInvoiceCandidate[] | null {
+  const open = invoices.filter(i => i.status === 'AUTHORISED' && i.amount_due > 0);
+  if (open.length === 0) return null;
+  const total = open.reduce((s, i) => s + i.amount_due, 0);
+  if (near(amount, total)) return open;
+  const single = open.filter(i => near(amount, i.amount_due));
+  return single.length === 1 ? single : null;
 }
 
 function near(a: number, b: number): boolean {
@@ -453,23 +492,29 @@ export async function matchIncomingPayment(p: {
     }
   }
 
-  // Tier 3 — Xero-only invoice (storage and the like). Only when no job surfaced.
-  let xeroInvoice: XeroInvoiceCandidate | undefined;
+  // Tier 3 — Xero-only invoices (storage and the like). Only when no job surfaced.
+  // 3a: invoice numbers in the reference; 3b: the payer's open invoices when there are none.
+  let xeroInvoices: XeroInvoiceCandidate[] = [];
   if (candidates.length === 0) {
-    const found = await findXeroInvoice(extractXeroInvoiceNumbers(p.reference));
-    if (found) {
-      xeroInvoice = found;
-      notes.push(`Xero invoice ${found.invoice_number} (${found.contact_name || 'no contact'}, ${found.status}, £${found.amount_due.toFixed(2)} due)`);
-      if (found.status === 'AUTHORISED' && near(p.amount, found.amount_due)) {
+    let via = 'xero_invoice';
+    xeroInvoices = await findXeroInvoicesByNumber(extractXeroInvoiceNumbers(p.reference));
+    if (xeroInvoices.length === 0) {
+      xeroInvoices = await findOpenXeroInvoicesByPayer(p.payerName);
+      via = 'xero_contact';
+    }
+    if (xeroInvoices.length > 0) {
+      notes.push(`Xero: ${xeroInvoices.map(i => `${i.invoice_number} (${i.contact_name || 'no contact'}, ${i.status}, £${i.amount_due.toFixed(2)} due)`).join(', ')}`);
+      const explaining = xeroInvoicesExplaining(p.amount, xeroInvoices);
+      if (explaining) {
         return {
           kind: 'confident_xero',
-          method: 'xero_invoice',
-          notes: `${notes.join('; ')}; £${p.amount.toFixed(2)} equals the amount due`,
+          method: via,
+          notes: `${notes.join('; ')}; £${p.amount.toFixed(2)} equals ${explaining.length === 1 ? 'the amount due' : `the ${explaining.length} invoices' amounts due together`}`,
           candidates: [],
-          xeroInvoice: found,
+          xeroInvoices: explaining,
         };
       }
-      notes.push(found.status !== 'AUTHORISED' ? 'invoice is not open' : `amount £${p.amount.toFixed(2)} does not equal the amount due`);
+      notes.push(`amount £${p.amount.toFixed(2)} does not equal the open amount${xeroInvoices.length > 1 ? 's, singly or together' : ''}`);
     }
   }
 
@@ -534,24 +579,27 @@ export async function matchIncomingPayment(p: {
   for (const c of candidates) delete (c as any)._depositPaid;
   return {
     kind: 'unmatched',
-    method: strongCandidates.length > 0 ? 'amount_mismatch' : (xeroInvoice ? 'xero_amount_mismatch' : 'no_reference'),
+    method: strongCandidates.length > 0 ? 'amount_mismatch' : (xeroInvoices.length > 0 ? 'xero_amount_mismatch' : 'no_reference'),
     notes: notes.join('; '),
     candidates,
-    xeroInvoice,
+    xeroInvoices,
   };
 }
 
 // ── Recording against a Xero-only invoice ──────────────────────────────────
 
 /**
- * Record an incoming payment as a Payment on an ACCREC invoice in Xero, against the Wise
+ * Record an incoming payment as Payments on ACCREC invoices in Xero, against the Wise
  * bank account. Used for Xero-only invoices (no HireHop job). The bank feed line then
- * matches this payment at reconciliation, exactly as a HireHop-pushed deposit does.
+ * matches these payments at reconciliation, exactly as a HireHop-pushed deposit does.
+ *
+ * Several invoices: the amount is applied to each in order, up to its amount due, and
+ * must be fully explained by them (within tolerance) — Xero rejects an overpayment and we
+ * never leave money half-recorded.
  */
 export async function recordIncomingPaymentInXero(opts: {
   incomingId: string;
-  invoiceId: string;
-  invoiceNumber: string;
+  invoices: Array<{ invoice_id: string; invoice_number: string; amount_due: number }>;
   amount?: number;
   actorUserId: string | null;
   matchMethod: string;
@@ -562,34 +610,47 @@ export async function recordIncomingPaymentInXero(opts: {
   if (!row) return { ok: false, error: 'Incoming payment not found' };
   if (row.status === 'recorded') return { ok: false, error: 'Already recorded' };
   if (!isXeroConfigured()) return { ok: false, error: 'Xero is not configured' };
+  if (opts.invoices.length === 0) return { ok: false, error: 'No Xero invoice to record against' };
   const accountId = (await getSystemSetting('xero_bank_wise') || '').trim();
   if (!accountId) return { ok: false, error: 'No Xero bank account is mapped for Wise (Settings → Xero bank accounts)' };
 
   const amount = opts.amount ?? parseFloat(row.amount);
+  const totalDue = opts.invoices.reduce((s, i) => s + (i.amount_due || 0), 0);
+  if (amount > totalDue + AMOUNT_TOLERANCE) {
+    return { ok: false, error: `£${amount.toFixed(2)} is more than the £${totalDue.toFixed(2)} due on ${opts.invoices.map(i => i.invoice_number).join(' + ')} — Xero would reject the overpayment` };
+  }
   const date = new Date(row.received_at).toISOString().slice(0, 10);
+  const reference = wisePaymentReference(row);
+  const paid: Array<{ invoice_id: string; invoice_number: string; amount: number; payment_id: string }> = [];
+  let remaining = amount;
   try {
-    const payment = await xeroBroker.payInvoice({
-      invoiceId: opts.invoiceId,
-      accountId,
-      amount,
-      date,
-      reference: wisePaymentReference(row),
-    });
+    for (const inv of opts.invoices) {
+      if (remaining <= AMOUNT_TOLERANCE) break;
+      const slice = round2(Math.min(remaining, inv.amount_due));
+      if (slice <= 0) continue;
+      const payment = await xeroBroker.payInvoice({ invoiceId: inv.invoice_id, accountId, amount: slice, date, reference });
+      paid.push({ invoice_id: inv.invoice_id, invoice_number: inv.invoice_number, amount: slice, payment_id: payment.PaymentID });
+      remaining = round2(remaining - slice);
+    }
+    const first = paid[0];
     await query(
       `UPDATE incoming_bank_payments
           SET status = 'recorded', xero_invoice_id = $2, xero_invoice_number = $3, xero_payment_id = $4,
-              match_method = $5, match_notes = $6, resolved_by = $7, resolved_at = NOW()
+              xero_invoices = $5, match_method = $6, match_notes = $7, resolved_by = $8, resolved_at = NOW()
         WHERE id = $1`,
-      [opts.incomingId, opts.invoiceId, opts.invoiceNumber, payment.PaymentID, opts.matchMethod, opts.matchNotes, opts.actorUserId],
+      [opts.incomingId, first?.invoice_id ?? null, paid.map(p => p.invoice_number).join(' + ') || null, first?.payment_id ?? null,
+       JSON.stringify(paid), opts.matchMethod, opts.matchNotes, opts.actorUserId],
     );
     return { ok: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Anything already paid is recorded on the row so nobody pays it twice.
     await query(
-      `UPDATE incoming_bank_payments SET match_method = $2, match_notes = $3 WHERE id = $1`,
-      [opts.incomingId, opts.matchMethod, `${opts.matchNotes}; Xero payment failed: ${msg}`],
+      `UPDATE incoming_bank_payments SET xero_invoices = $2, match_method = $3, match_notes = $4 WHERE id = $1`,
+      [opts.incomingId, JSON.stringify(paid), opts.matchMethod,
+       `${opts.matchNotes}; Xero payment failed after ${paid.length} of ${opts.invoices.length}: ${msg}`],
     );
-    return { ok: false, error: msg };
+    return { ok: false, error: paid.length ? `${msg} (already recorded in Xero: ${paid.map(p => `${p.invoice_number} £${p.amount.toFixed(2)}`).join(', ')})` : msg };
   }
 }
 
@@ -654,6 +715,34 @@ export async function recordIncomingPaymentOnJob(opts: {
   return { ok: true, hh_push_error: result.body?.hh_push_error || null };
 }
 
+/**
+ * Re-run the matcher on a queued row (after a fix to the matcher, or once the invoice
+ * exists in Xero) — refreshes candidates, Xero invoices and the note. Never records:
+ * the human presses Record from what it found.
+ */
+export async function rematchIncomingPayment(incomingId: string): Promise<{ ok: boolean; error?: string; kind?: string }> {
+  const r = await query(`SELECT * FROM incoming_bank_payments WHERE id = $1`, [incomingId]);
+  const row = r.rows[0];
+  if (!row) return { ok: false, error: 'Incoming payment not found' };
+  if (row.status === 'recorded') return { ok: false, error: 'Already recorded' };
+  if (!(parseFloat(row.amount) > 0)) return { ok: false, error: 'This row has no amount to match (unreadable email)' };
+  const outcome = await matchIncomingPayment({
+    payerName: row.payer_name, amount: parseFloat(row.amount), currency: row.currency || 'GBP', reference: row.reference,
+  });
+  const xi = outcome.xeroInvoices || [];
+  await query(
+    `UPDATE incoming_bank_payments
+        SET status = 'unmatched', match_method = $2, match_notes = $3, candidates = $4,
+            xero_invoice_id = $5, xero_invoice_number = $6, xero_invoices = $7,
+            matched_job_id = CASE WHEN $8::uuid IS NULL THEN matched_job_id ELSE $8::uuid END
+      WHERE id = $1`,
+    [incomingId, outcome.method, `${outcome.notes}${outcome.kind === 'confident' || outcome.kind === 'confident_xero' ? ' (would match automatically now — press Record to confirm)' : ''}`,
+     JSON.stringify(outcome.candidates), xi[0]?.invoice_id ?? null, xi.map(i => i.invoice_number).join(' + ') || null, JSON.stringify(xi),
+     null],
+  );
+  return { ok: true, kind: outcome.kind };
+}
+
 export async function ignoreIncomingPayment(incomingId: string, actorUserId: string, note: string): Promise<void> {
   await query(
     `UPDATE incoming_bank_payments
@@ -680,10 +769,11 @@ export async function sendUnmatchedIncomingAlert(incomingId: string): Promise<vo
   const row = r.rows[0];
   if (!row || row.alert_sent_at) return;
   const amount = parseFloat(row.amount);
-  const link = frontendLink(`/money?incoming=${row.id}`);
+  const link = frontendLink(`/money/overview?incoming=${row.id}`);
   const candidates: IncomingCandidate[] = Array.isArray(row.candidates) ? row.candidates : [];
-  const xeroHtml = row.xero_invoice_number
-    ? `<p><strong>Xero invoice:</strong> ${esc(row.xero_invoice_number)} — see the note above for why it was not recorded automatically. The queue in OP can record it against that invoice.</p>`
+  const xeroList: XeroInvoiceCandidate[] = Array.isArray(row.xero_invoices) ? row.xero_invoices : [];
+  const xeroHtml = xeroList.length
+    ? `<p><strong>Xero invoice${xeroList.length > 1 ? 's' : ''}:</strong> ${xeroList.map(i => `${esc(i.invoice_number)} (${esc(i.contact_name || '')}, £${Number(i.amount_due).toFixed(2)} due)`).join(', ')} — see the note above for why it was not recorded automatically. The queue in OP can record it against ${xeroList.length > 1 ? 'them' : 'that invoice'}.</p>`
     : '';
   const candidateHtml = candidates.length
     ? `<p><strong>Possible jobs:</strong></p><ul>${candidates.map(c =>
@@ -743,8 +833,27 @@ async function sendHhPushFailedAlert(incomingId: string, hhPushError: string): P
  * record it or queue it with an alert. Idempotent on the RFC822 Message-ID.
  * Never throws — a failure here must not stall the mailbox batch.
  */
-export async function handleWiseEmail(input: WiseEmailInput): Promise<'stored' | 'duplicate' | 'rejected' | 'unparsed'> {
+/**
+ * Only ONE mailbox is a Wise source. The same Wise email reaches several mailboxes
+ * (jonwood@ directly, info@ via jon's auto-forward, and onward to whoever info@ fans
+ * out to), each copy with its own Message-ID — on the first live night that meant three
+ * rows and three alerts per transfer. Staff-editable: system_settings.wise_source_mailboxes
+ * (comma-separated); default jonwood@, the mailbox Wise actually addresses (jon@ is its alias).
+ */
+const DEFAULT_SOURCE_MAILBOXES = ['jonwood@oooshtours.co.uk'];
+async function wiseSourceMailboxes(): Promise<string[]> {
+  const raw = await getSystemSetting('wise_source_mailboxes');
+  const list = raw && raw.trim() ? raw.split(',') : DEFAULT_SOURCE_MAILBOXES;
+  return list.map(x => x.trim().toLowerCase()).filter(Boolean);
+}
+
+export async function handleWiseEmail(input: WiseEmailInput): Promise<'stored' | 'duplicate' | 'rejected' | 'unparsed' | 'skipped'> {
   try {
+    const sources = await wiseSourceMailboxes();
+    if (!sources.includes(input.mailbox.toLowerCase())) {
+      console.log(`[wise-incoming] "${input.subject}" seen in ${input.mailbox} — not a Wise source mailbox, skipped (copy of the ${sources.join('/')} email)`);
+      return 'skipped';
+    }
     if (!wiseDkimPasses(input.headers)) {
       console.warn(`[wise-incoming] DKIM check failed for "${input.subject}" (${input.rfcMessageId}) — rejected`);
       return 'rejected';
@@ -754,6 +863,18 @@ export async function handleWiseEmail(input: WiseEmailInput): Promise<'stored' |
 
     const parsed = parseWiseMoneyReceived(input.body, input.subject);
     const receivedAt = input.internalDate ? new Date(parseInt(input.internalDate, 10)) : new Date();
+
+    // Second dedup key: Wise's own transfer number (survives a forwarded copy's new Message-ID).
+    if (parsed?.transferNumber) {
+      const seen = await query(
+        `SELECT 1 FROM incoming_bank_payments WHERE transfer_number = $1 AND match_method IS DISTINCT FROM 'duplicate_copy'`,
+        [parsed.transferNumber],
+      );
+      if (seen.rows.length > 0) {
+        console.log(`[wise-incoming] transfer #${parsed.transferNumber} already recorded — duplicate email copy skipped`);
+        return 'duplicate';
+      }
+    }
 
     if (!parsed) {
       // Template changed? Store what we can so it is visible, and alert — the
@@ -782,22 +903,22 @@ export async function handleWiseEmail(input: WiseEmailInput): Promise<'stored' |
     if (!id) return 'duplicate';
 
     const outcome = await matchIncomingPayment(parsed);
+    const xi = outcome.xeroInvoices || [];
     await query(
       `UPDATE incoming_bank_payments
           SET match_method = $2, match_notes = $3, candidates = $4,
-              xero_invoice_id = $5, xero_invoice_number = $6
+              xero_invoice_id = $5, xero_invoice_number = $6, xero_invoices = $7
         WHERE id = $1`,
       [id, outcome.method, outcome.notes, JSON.stringify(outcome.candidates),
-       outcome.xeroInvoice?.invoice_id ?? null, outcome.xeroInvoice?.invoice_number ?? null],
+       xi[0]?.invoice_id ?? null, xi.map(i => i.invoice_number).join(' + ') || null, JSON.stringify(xi)],
     );
 
-    if (outcome.kind === 'confident_xero' && outcome.xeroInvoice) {
+    if (outcome.kind === 'confident_xero' && xi.length > 0) {
       const rec = await recordIncomingPaymentInXero({
-        incomingId: id, invoiceId: outcome.xeroInvoice.invoice_id, invoiceNumber: outcome.xeroInvoice.invoice_number,
-        actorUserId: null, matchMethod: outcome.method, matchNotes: outcome.notes,
+        incomingId: id, invoices: xi, actorUserId: null, matchMethod: outcome.method, matchNotes: outcome.notes,
       });
       if (rec.ok) {
-        console.log(`[wise-incoming] recorded £${parsed.amount} from ${parsed.payerName} in Xero against ${outcome.xeroInvoice.invoice_number}`);
+        console.log(`[wise-incoming] recorded £${parsed.amount} from ${parsed.payerName} in Xero against ${xi.map(i => i.invoice_number).join(' + ')}`);
         return 'stored';
       }
       console.error(`[wise-incoming] Xero auto-record failed for ${id}: ${rec.error}`);

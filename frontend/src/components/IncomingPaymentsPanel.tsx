@@ -5,7 +5,7 @@
  * Resolving a row = pick the job (HireHop number) and whether it is hire money or the
  * excess; the backend then records it through the same path as "Record Payment"
  * (OP row, HireHop deposit on the Wise bank, client email). "Not a job payment" marks
- * it ignored with a note - nothing is deleted. Deep link: /money?incoming=<id>.
+ * it ignored with a note - nothing is deleted. Deep link: /money/overview?incoming=<id>.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -45,6 +45,7 @@ interface IncomingRow {
   xero_invoice_id: string | null;
   xero_invoice_number: string | null;
   xero_payment_id: string | null;
+  xero_invoices: Array<{ invoice_id: string; invoice_number: string; contact_name: string | null; status: string; amount_due: number }> | null;
 }
 
 const money = (v: string | number | null | undefined) => `£${(parseFloat(String(v ?? 0)) || 0).toFixed(2)}`;
@@ -173,15 +174,31 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
     }
   };
 
+  const openXero = (row.xero_invoices || []).filter(i => i.status === 'AUTHORISED' && i.amount_due > 0);
+  const xeroLabel = openXero.map(i => i.invoice_number).join(' + ');
+  const xeroDue = openXero.reduce((s, i) => s + (Number(i.amount_due) || 0), 0);
+
   const recordXero = async () => {
-    if (!row.xero_invoice_id) return;
-    if (!window.confirm(`Record ${money(row.amount)} in Xero as a payment on invoice ${row.xero_invoice_number}?`)) return;
+    if (openXero.length === 0) return;
+    if (!window.confirm(`Record ${money(row.amount)} in Xero against ${xeroLabel} (${money(xeroDue)} due)?`)) return;
     setBusy(true); setError(''); setNotice('');
     try {
       await api.post(`/money/incoming-payments/${row.id}/record-xero`, {});
       onDone();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to record in Xero');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recheck = async () => {
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await api.post(`/money/incoming-payments/${row.id}/rematch`, {});
+      onDone();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to re-check');
     } finally {
       setBusy(false);
     }
@@ -262,17 +279,28 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
           >
             {busy ? 'Recording…' : `Record ${money(row.amount)}`}
           </button>
-          {row.xero_invoice_id && (
+          {openXero.length > 0 && (
             <button
               type="button"
               onClick={recordXero}
-              disabled={busy}
+              disabled={busy || parseFloat(row.amount) > xeroDue + 0.02}
               className="px-3 py-1.5 text-sm font-medium text-ooosh-700 border border-ooosh-300 bg-white hover:bg-ooosh-50 rounded disabled:opacity-50"
-              title="This reference matched a Xero-only invoice (not a HireHop job)"
+              title={parseFloat(row.amount) > xeroDue + 0.02
+                ? `More than the ${money(xeroDue)} due on ${xeroLabel} - Xero would reject the overpayment`
+                : 'Xero-only invoice(s), not a HireHop job'}
             >
-              Record in Xero against {row.xero_invoice_number}
+              Record in Xero against {xeroLabel} ({money(xeroDue)} due)
             </button>
           )}
+          <button
+            type="button"
+            onClick={recheck}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 underline disabled:opacity-50"
+            title="Run the matcher again on this payment (nothing is recorded)"
+          >
+            Re-check
+          </button>
           <button
             type="button"
             onClick={ignore}

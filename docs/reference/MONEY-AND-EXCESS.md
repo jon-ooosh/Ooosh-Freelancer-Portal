@@ -816,8 +816,16 @@ or "Record in Xero against OT-nnnn") or marks it "Not a job payment" with a note
 "Amount received" (what the client sent); Xero owns the fee.** Non-GBP → queue (jon converts
 in Wise by hand, ~once a year). `J WOOD` ignored (`system_settings.wise_ignore_payers`). An
 unreadable email is queued and alerted, never dropped. Verified against the three real shapes
-in the mailbox; **not yet exercised end to end — the first Wise email after 6 Oct is the real
-test.** The jon@ → info@ auto-forward stays on until that has been handled.
+in the mailbox. **First live night (6–7 Oct):** jon's own transfer correctly ignored; two
+Xero-only storage payments correctly queued — but THREE alerts each, because the same Wise
+email reached three mailboxes (jonwood@ directly, info@ via jon's auto-forward, and onward),
+each copy with its own Message-ID. Fixed the same day: only `system_settings.wise_source_mailboxes`
+(default jonwood@) is a Wise source, Wise's transfer number is a second dedup key (partial
+unique index, migration 275 marks the first night's copies `duplicate_copy`), the alert link
+is `/money/overview?incoming=<id>` (it pointed at a non-route), a reference naming SEVERAL
+Xero invoices ("OT6797 OT6805") is matched against their amounts due together, and a payment
+with no number at all ("STORAGE") is matched against the payer's open Xero invoices by contact
+name. Auto-forward can now be switched off.
 
 **`services/record-payment.ts`** is the staff "Record Payment" route's 330 lines lifted into a
 service (route = validate + relay, same HTTP contract) so the matcher — and the planned
