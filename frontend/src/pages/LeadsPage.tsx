@@ -24,6 +24,7 @@ import StartEnquiryModal from '../components/leads/StartEnquiryModal';
 import LogOutreachModal from '../components/leads/LogOutreachModal';
 import SearchHistoryModal from '../components/leads/SearchHistoryModal';
 import LeadTimeline from '../components/leads/LeadTimeline';
+import LeadContacts from '../components/leads/LeadContacts';
 import RunStrip from '../components/leads/RunStrip';
 import LeadFilters, {
   LeadFilterState, filtersFromParams, filtersToParams, applyLeadFilters, tourStarted,
@@ -232,6 +233,19 @@ export default function LeadsPage() {
     }
     return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
   }, [isRunning, loadRun, loadLeads, loadRuns]);
+
+  // A "Research again" runs in the background — poll the list until it lands
+  // (gives up after 3 minutes; a stuck one shows Research again after 5).
+  const researchingCount = leads.filter((l) => l.research_status === 'running').length;
+  useEffect(() => {
+    if (researchingCount === 0) return;
+    const started = Date.now();
+    const t = setInterval(() => {
+      if (Date.now() - started > 180_000) { clearInterval(t); return; }
+      loadLeads().catch(() => { /* transient */ });
+    }, 5000);
+    return () => clearInterval(t);
+  }, [researchingCount, loadLeads]);
 
   // Elapsed-time ticker while running (reassurance the search is alive).
   useEffect(() => {
@@ -476,7 +490,9 @@ export default function LeadsPage() {
                     </td>
                     <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{l.origin_country ?? '—'}</td>
                     <td className="px-3 py-2 text-center text-gray-500">
-                      {l.contacts?.length ? l.contacts.length : (l.research_status === 'none' ? <span title="Researched — nothing found">✗</span> : '—')}
+                      {l.research_status === 'running' ? <span className="text-blue-600 animate-pulse" title="Researching…">●</span>
+                        : l.contacts?.length ? l.contacts.length
+                        : l.research_status === 'none' ? <span title="Researched — nothing found">✗</span> : '—'}
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">
                       {activity ? (
@@ -551,25 +567,7 @@ export default function LeadsPage() {
                                 </ul>
                               </div>
                             )}
-                            {l.contacts?.length > 0 ? (
-                              <div className="mb-1">
-                                <div className="text-gray-400 mb-1">Contacts found:</div>
-                                <ul className="space-y-1">
-                                  {l.contacts.map((c, i) => (
-                                    <li key={i} className="flex flex-wrap gap-x-2">
-                                      <span className="font-medium">{c.contact_name || c.contact_type}</span>
-                                      <span className="text-gray-400">({c.contact_type})</span>
-                                      {c.contact_email && <a href={`mailto:${c.contact_email}`} className="text-blue-600 hover:underline">{c.contact_email}</a>}
-                                      {c.contact_phone && <span>{c.contact_phone}</span>}
-                                      <span className={`text-[10px] px-1 rounded ${c.confidence === 'high' ? 'bg-green-100 text-green-700' : c.confidence === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{c.confidence}</span>
-                                      {c.source && <span className="text-gray-400">· {c.source}</span>}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            ) : l.stream === 'cold' ? (
-                              <p className="text-gray-400">{l.research_status === 'none' ? 'Researched — no contacts found.' : 'No contacts found yet.'}</p>
-                            ) : null}
+                            <LeadContacts lead={l} onChanged={() => { void reloadAll(); }} />
                             {tab !== 'dismissed' && !l.matched_organisation_id && l.match_candidates?.length > 0 && (
                               <div className="mt-2">
                                 <div className="text-gray-400 mb-1">Possible address-book matches:</div>

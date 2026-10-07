@@ -21,6 +21,10 @@
  *   POST  /:id/start-enquiry         — OP-native enquiry from this lead (never pushes to HH)    STAFF
  *   POST  /:id/log-outreach          — "I've contacted them": note + optional Cold enquiry so
  *                                      the pipeline chases the follow-up                          STAFF
+ *   POST  /:id/research              — "Research again": contact research for this one lead,
+ *                                      in the background                                          STAFF
+ *   POST  /:id/contacts              — add a contact by hand (kept through any re-research)      STAFF
+ *   DELETE /:id/contacts/:idx        — remove a contact                                          STAFF
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
@@ -43,6 +47,7 @@ import {
 } from '../services/address-book-resolve';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
 import { logLeadEvent } from '../services/leads/events';
+import { researchLead } from '../services/leads/researcher';
 
 const router = Router();
 router.use(authenticate);
@@ -83,6 +88,7 @@ const CONTACT_ROLE: Record<string, string> = {
   manager: 'Manager',
   booking_agent: 'Booking Agent',
   tour_manager: 'Tour Manager',
+  band: 'General Contact',
   general: 'General Contact',
 };
 
@@ -93,6 +99,7 @@ interface LeadContact {
   contact_phone: string | null;
   source: string | null;
   confidence: string;
+  manual?: boolean;
 }
 
 function ymd(v: unknown): string | null {
@@ -772,6 +779,100 @@ router.post('/:id/log-outreach', authorize(...STAFF_ROLES), validate(outreachSch
     res.status(201).json({ data: { job_id: jobId, lead: await loadLead(lead.id) } });
   } catch (error) {
     sendLeadError(res, error, 'Failed to log outreach', 'log-outreach');
+  }
+});
+
+// POST /api/leads/:id/research — "Research again". A web search can take a
+// minute, longer than the proxy will hold a request open, so it runs in the
+// background: the lead is marked 'running' and the page polls until it clears.
+// A 'running' mark older than 5 minutes is a casualty of a restart — allowed again.
+router.post('/:id/research', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isAnthropicConfigured()) return res.status(503).json({ error: 'Anthropic not configured' });
+    const r = await query(
+      `UPDATE leads SET research_status = 'running', updated_at = NOW()
+        WHERE id = $1 AND NOT (COALESCE(research_status, '') = 'running' AND updated_at > NOW() - INTERVAL '5 minutes')
+        RETURNING id`,
+      [req.params.id],
+    );
+    if (!r.rows[0]) {
+      const exists = await query(`SELECT 1 FROM leads WHERE id = $1`, [req.params.id]);
+      return exists.rows[0]
+        ? res.status(409).json({ error: 'Already researching this lead' })
+        : res.status(404).json({ error: 'Lead not found' });
+    }
+    const userId = req.user?.id ?? null;
+    await logLeadEvent(r.rows[0].id, 'research_requested', { userId });
+    setImmediate(() => { void researchLead(r.rows[0].id, userId); });
+    res.status(202).json({ data: await loadLead(r.rows[0].id) });
+  } catch (error) {
+    console.error('[leads] research error:', error);
+    res.status(500).json({ error: 'Failed to start research' });
+  }
+});
+
+// POST /api/leads/:id/contacts — a contact found by hand. Marked manual so a
+// later re-research never drops it; Add to address book treats it like any other.
+const contactSchema = z.object({
+  contact_type: z.enum(['manager', 'band', 'tour_manager', 'booking_agent', 'general']),
+  contact_name: z.string().trim().max(200).nullable().optional(),
+  contact_email: z.string().trim().email().max(300).nullable().optional().or(z.literal('')),
+  contact_phone: z.string().trim().max(50).nullable().optional(),
+  note: z.string().trim().max(300).nullable().optional(),
+}).refine((b) => Boolean(b.contact_name || b.contact_email || b.contact_phone), { message: 'Give at least a name, email or phone' });
+router.post('/:id/contacts', authorize(...STAFF_ROLES), validate(contactSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const b = req.body as z.infer<typeof contactSchema>;
+    const lead = await loadLead(req.params.id as string);
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const who = req.user?.id
+      ? (await query(
+          `SELECT COALESCE(NULLIF(p.preferred_name, ''), p.first_name) AS n FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
+          [req.user.id],
+        )).rows[0]?.n
+      : null;
+    const contact: LeadContact = {
+      contact_type: b.contact_type,
+      contact_name: b.contact_name || null,
+      contact_email: b.contact_email || null,
+      contact_phone: b.contact_phone || null,
+      source: [`added by ${who ?? 'staff'}`, b.note || null].filter(Boolean).join(' — '),
+      confidence: 'high',
+      manual: true,
+    };
+    const contacts = [...((lead.contacts ?? []) as LeadContact[]), contact];
+    await query(`UPDATE leads SET contacts = $2, updated_at = NOW() WHERE id = $1`, [lead.id, JSON.stringify(contacts)]);
+    await logLeadEvent(lead.id, 'contact_added', {
+      detail: [contact.contact_name, contact.contact_email, contact.contact_type.replace('_', ' ')].filter(Boolean).join(' · '),
+      userId: req.user?.id,
+    });
+    await linkKnownContacts();
+    res.status(201).json({ data: await loadLead(lead.id) });
+  } catch (error) {
+    console.error('[leads] add contact error:', error);
+    res.status(500).json({ error: 'Failed to add contact' });
+  }
+});
+
+// DELETE /api/leads/:id/contacts/:idx — drop a contact (wrong person, dead email…).
+router.delete('/:id/contacts/:idx', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const idx = Number(req.params.idx);
+    const lead = await loadLead(req.params.id as string);
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const contacts = (lead.contacts ?? []) as LeadContact[];
+    if (!Number.isInteger(idx) || idx < 0 || idx >= contacts.length) return res.status(404).json({ error: 'Contact not found' });
+    const [removed] = contacts.splice(idx, 1);
+    await query(`UPDATE leads SET contacts = $2, updated_at = NOW() WHERE id = $1`, [lead.id, JSON.stringify(contacts)]);
+    await logLeadEvent(lead.id, 'contact_removed', {
+      detail: [removed.contact_name, removed.contact_email].filter(Boolean).join(' · ') || removed.contact_type,
+      userId: req.user?.id,
+    });
+    await linkKnownContacts();
+    res.json({ data: await loadLead(lead.id) });
+  } catch (error) {
+    console.error('[leads] remove contact error:', error);
+    res.status(500).json({ error: 'Failed to remove contact' });
   }
 });
 

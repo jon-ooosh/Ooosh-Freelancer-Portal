@@ -348,3 +348,62 @@ From jon's first real cold reach-out. No migration.
    - Re-adding contacts to a band the lead itself created keeps `match_via = 'created'`, so
      it doesn't quietly become a warm match.
 
+## 17. Layout for batch working (BUILT, Oct 2026)
+
+jon uses Leads in batches (a search every few weeks, or before a quiet spell) and
+wanted better visibility of what's been done and when, and less text at the top.
+Migration 277.
+
+- **Tabs by stage**, not cold/warm. The backend's `STAGE_SQL` in `routes/leads.ts` is the
+  one definition; rows carry `stage`.
+  - **To review:** new or reviewing.
+  - **Contacted:** outreach logged, no enquiry.
+  - **In pipeline:** an enquiry exists.
+  - **Dismissed:** dismissed or not relevant.
+
+  Warm is a filter plus a green badge. To review and Contacted hide tours that have already
+  started, with a "show" link.
+- **Filters**, kept in the URL and validated on read: search, which search found the lead,
+  tour start month, score 6+ / 8+, warm or cold, contacts (has / none / known),
+  international, and "no reply in 14+ days" on the Contacted tab.
+- **Batches.** `leads.first_run_id` is the search that FOUND the lead; `last_run_id` still
+  moves on every re-detection. `GET /leads/runs` lists the last 30 searches with
+  `leads_found`. The Search history dialog and the strip's "N new" chip jump to a batch.
+- **Activity.** `lead_events` records who did what and when (`services/leads/events.ts`
+  `logLeadEvent()`, which never fails the action). Events: found, matched, confirmed,
+  rejected, researched, address book, contact added/removed, outreach, enquiry, dismissed,
+  restored. They show as the "Last activity" column and a timeline in the expanded row.
+  The migration backfills found / enquiry / outreach / dismissed events from existing
+  data. `leads.contacted_at` drives the 14-day filter.
+- **Header.** One line plus "Run search…" and a ⋯ menu (Refresh, Search history,
+  Match & research existing). The run paragraph became a one-line strip with chips. The
+  tour rule moved into the Run search dialog. The old banner's "found contacts for N"
+  actually meant N *researched*; the strip now says both.
+
+## 18. Contact discovery (BUILT, Oct 2026)
+
+**Who we want** (jon): management, the band directly, and their tour manager. Booking
+agents and promoters are the lowest value: they rarely book a tour's worth of vans and
+backline, and local promoters already come to Ooosh. The research prompt asks for those
+three first and agents only as a last resort, and never returns promoters or venues.
+Paid directories were ruled out for the same reason.
+
+- **The band's own links.** `services/leads/links.ts` reads the Ticketmaster attraction's
+  `externalLinks` (homepage, socials). When Ticketmaster gives a MusicBrainz id, it also
+  reads MusicBrainz's URL relations (homepage, Bandcamp, socials). We never search
+  MusicBrainz by name, because it could return the wrong act. MusicBrainz is limited to one
+  call per second and sent an identifying User-Agent. The links are stored on
+  `leads.external_links`, given to the researcher as starting points, and shown in the
+  expanded row so staff can click through.
+- **Research tracking.** Each attempt stamps `researched_at` and `research_status`
+  (found / none / failed).
+  - A lead that came back empty is no longer retried every run (it used to eat the cap). A
+    run retries it after 30 days.
+  - Runs only research tours that haven't started.
+  - The per-run cap went 20 → 40 (20 was a testing number).
+- **Research again** (`POST /:id/research`) runs one lead in the background. The page polls
+  while `research_status = 'running'`; a mark older than 5 minutes is treated as stuck.
+- **Add contacts by hand** (`POST /:id/contacts`, `DELETE /:id/contacts/:idx`). These are
+  `manual: true` and survive any re-research; researched duplicates of them, matched by
+  email, are dropped. Add to address book treats them like any other contact.
+

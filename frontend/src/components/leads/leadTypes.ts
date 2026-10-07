@@ -7,6 +7,8 @@ export interface LeadContact {
   contact_phone: string | null;
   source: string | null;
   confidence: string;
+  /** Added by staff — survives any re-research. */
+  manual?: boolean;
 }
 
 export interface MatchCandidate {
@@ -90,7 +92,8 @@ export interface Lead {
   first_run_id: string | null;
   contacted_at: string | null;
   researched_at: string | null;
-  research_status: 'found' | 'none' | 'failed' | null;
+  /** 'running' while a Research again is in flight. */
+  research_status: 'found' | 'none' | 'failed' | 'running' | null;
   external_links: Record<string, string[]> | null;
   last_event: string | null;
   last_event_detail: string | null;
