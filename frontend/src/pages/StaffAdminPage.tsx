@@ -606,7 +606,7 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
       )}
 
       {active === 'records' && isAdmin && (
-        <div className="space-y-6">
+        <div className="space-y-4">
           <StaffKeyData personId={row.personId} personName={row.name} onSaved={onSaved} onError={onError} />
           <StaffRecordFiles personId={row.personId} personName={row.name} onError={onError} />
         </div>
@@ -620,7 +620,7 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
       )}
 
       {active === 'access' && (
-        <div className="space-y-6">
+        <div className="space-y-4">
           <AccountSection row={row} isAdmin={isAdmin} onSaved={onSaved} onError={onError} />
           {isAdmin && <CotCardSection row={row} onSaved={onSaved} onError={onError} />}
         </div>
@@ -705,33 +705,35 @@ function AccountSection({ row, isAdmin, onSaved, onError }: {
 
   if (!editing) {
     return (
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-medium text-gray-900">Login &amp; role</h3>
-          <div className="flex items-center gap-3 text-xs">
-            <button onClick={() => setEditing(true)} className="text-ooosh-600 hover:underline">Edit</button>
-            {isAdmin && <button onClick={() => void resetPassword()} className="text-ooosh-600 hover:underline">Reset password</button>}
-            {row.account.isActive
-              ? <button onClick={() => void deactivate()} className="text-red-600 hover:underline">Deactivate</button>
-              : <button onClick={() => void reactivate()} className="text-emerald-700 hover:underline">Reactivate</button>}
-          </div>
-        </div>
-        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-sm">
-          <div><dt className="text-xs text-gray-500">Email</dt><dd className="text-gray-900 truncate">{row.email || '—'}</dd></div>
-          <div><dt className="text-xs text-gray-500">Role</dt><dd className="text-gray-900">{ROLE_LABELS[row.account.role] || row.account.role}</dd></div>
-          <div><dt className="text-xs text-gray-500">HireHop user ID</dt><dd className="text-gray-900">{row.account.hhUserId ?? '—'}</dd></div>
-          <div><dt className="text-xs text-gray-500">Status</dt><dd className="text-gray-900">{row.account.isActive ? 'Active' : 'Inactive'}</dd></div>
+      <Card title="Login and role" subtitle="How they sign in to OP, and what they can see"
+        action={<button onClick={() => setEditing(true)} className={btnSecondary}>Edit</button>}>
+        <dl>
+          <InfoRow label="Email">{row.email || <span className="text-gray-400">—</span>}</InfoRow>
+          <InfoRow label="Role">{ROLE_LABELS[row.account.role] || row.account.role}</InfoRow>
+          <InfoRow label="HireHop user ID">{row.account.hhUserId ?? <span className="text-gray-400">—</span>}</InfoRow>
+          <InfoRow label="Status">
+            {row.account.isActive ? <Pill tone="ok">Active</Pill> : <Pill tone="muted">Deactivated</Pill>}
+          </InfoRow>
         </dl>
-      </div>
+        {/* The two irreversible-feeling actions sit apart from Edit, at the
+            foot, so neither is one stray click from the button people use. */}
+        <div className="flex flex-wrap items-center gap-4 mt-4 pt-4 border-t border-gray-100">
+          {isAdmin && (
+            <button onClick={() => void resetPassword()} className="text-sm font-medium text-ooosh-700 hover:underline">
+              Reset password
+            </button>
+          )}
+          {row.account.isActive
+            ? <button onClick={() => void deactivate()} className="text-sm font-medium text-red-600 hover:underline">Deactivate login</button>
+            : <button onClick={() => void reactivate()} className="text-sm font-medium text-emerald-700 hover:underline">Reactivate login</button>}
+        </div>
+      </Card>
     );
   }
 
   return (
-    <div className="p-3 rounded border border-ooosh-200 bg-ooosh-50/40">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-900">Login &amp; role</h3>
-        <button onClick={() => setEditing(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
-      </div>
+    <Card title="Edit login and role" className="border-ooosh-200"
+      action={<button onClick={() => setEditing(false)} className={btnQuiet}>Cancel</button>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <Field label="First name" value={first} onChange={setFirst} />
         <Field label="Last name" value={last} onChange={setLast} />
@@ -750,11 +752,10 @@ function AccountSection({ row, isAdmin, onSaved, onError }: {
           <span className="block text-xs text-gray-500 mt-1">Sets the manager on HH jobs this user creates.</span>
         </label>
       </div>
-      <button onClick={() => void save()} disabled={saving}
-        className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+      <button onClick={() => void save()} disabled={saving} className={btnPrimary}>
         {saving ? 'Saving…' : 'Save account'}
       </button>
-    </div>
+    </Card>
   );
 }
 
@@ -785,40 +786,31 @@ function CotCardSection({ row, onSaved, onError }: {
   }
 
   return (
-    <div>
-      <h3 className="text-sm font-medium text-gray-900 mb-1">Company card</h3>
-      <p className="text-xs text-gray-500 mb-2">
-        The cost-capture form stamps the holder and last 4 from here — staff never type card details.
-      </p>
+    <Card title="Company card"
+      subtitle="Cost capture stamps the holder and last 4 from here — staff never type card details"
+      action={
+        row.cotCard?.agreementCompletedAt
+          ? <Pill tone="ok">Agreement signed {new Date(row.cotCard.agreementCompletedAt).toLocaleDateString('en-GB')}</Pill>
+          : row.cotCard?.agreementStatus ? <Pill tone="warn">Agreement outstanding</Pill>
+          : <Pill tone="muted">No agreement assigned</Pill>
+      }>
       <div className="flex flex-wrap items-end gap-3">
-        <div className="text-sm">
-          <span className="block text-xs text-gray-600 mb-1">Card agreement</span>
-          <span className={`inline-block px-2 py-1 rounded text-xs ${
-            row.cotCard?.agreementCompletedAt ? 'bg-emerald-100 text-emerald-800'
-              : row.cotCard?.agreementStatus ? 'bg-amber-100 text-amber-800'
-              : 'bg-gray-100 text-gray-500'}`}>
-            {row.cotCard?.agreementCompletedAt
-              ? `Signed ${new Date(row.cotCard.agreementCompletedAt).toLocaleDateString('en-GB')}`
-              : row.cotCard?.agreementStatus ? 'Outstanding' : 'Not assigned'}
-          </span>
-        </div>
         <label className="text-sm">
-          <span className="block text-xs text-gray-600 mb-1">Last 4</span>
+          <span className="block text-xs text-gray-600 mb-1">Last 4 digits</span>
           <input value={last4} onChange={e => setLast4(e.target.value.replace(/\D/g, '').slice(0, 4))}
             placeholder="1234" inputMode="numeric"
-            className="w-24 px-2 py-1.5 border border-gray-300 rounded text-sm" />
+            className="w-28 px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
         </label>
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Label</span>
           <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. COT"
-            className="w-40 px-2 py-1.5 border border-gray-300 rounded text-sm" />
+            className="w-44 px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
         </label>
-        <button onClick={() => void save()} disabled={saving || !dirty}
-          className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
+        <button onClick={() => void save()} disabled={saving || !dirty} className={btnPrimary}>
           {saving ? 'Saving…' : 'Save card'}
         </button>
       </div>
-    </div>
+    </Card>
   );
 }
 

@@ -1,6 +1,6 @@
 # Staff Calendar & Time Module — Spec
 
-**Status (2 Oct 2026): BUILT and LIVE — staff are using it from October 2026.**
+**Status (7 Oct 2026): BUILT and LIVE — staff are using it from October 2026.**
 Phases A–E, company days (§20), working from home (§19), the personal calendar
 feed (§10) and the monthly payroll email (§12.1) have all shipped; 2026 history
 is backfilled from BrightHR. This is expected to be the module's last chunk.
@@ -1340,6 +1340,23 @@ cold. If something misbehaves, start with `.claude/rules/staff-calendar.md`,
 then the "Bugs found" list below; the module's facts each have ONE definition
 (the table at the top of that rules file).
 
+**Since then (7 Oct 2026).** Staff queried their figures against BrightHR. Two
+causes, both data rather than code, and worth knowing before the next query:
+
+- **A contract allowance above 5.6 weeks was never entered.** Will is on 33 days
+  (6.6 weeks); the import test assumed it, production did not have it. Set on
+  Employment › Edit; the entitlement sync posts only the difference.
+- **BrightHR's overtime totals are all-time, not per year.** The import carried
+  2026 only, so 2025 overtime still owed at the switchover was missing (Rich 3h,
+  Will 10h 30m). Added with the balance panel's manual adjustment, dated 1 Jan
+  2026, note "brought across from BrightHR". If another queries their TOIL,
+  compare BrightHR's TOIL balance with OP's bank: the known, accepted gaps are
+  Louis and Matt (+3h each in OP — whole TOIL days at 7h not 8h) and Chris
+  (+4h 40m in OP — BrightHR took his June payout partly from 2025 time).
+
+Then built: manual adjustments (shown to the person), days in lieu for company
+days (§20.5b), and every Staff page tab restyled on `components/StaffCard.tsx`.
+
 Where things are, for troubleshooting:
 
 | Area | Code |
@@ -1350,6 +1367,8 @@ Where things are, for troubleshooting:
 | Your working hours (My Time card) | `GET /staff-calendar/me/patterns` — current pattern + scheduled changes, days and times only; never notes, breaks or history (jon, Oct 2026). Pattern notes are also stripped from `/employees/:id/patterns` for a non-admin reading their own |
 | Emails and bells (requests, decisions, digest, cash-out, payroll) | `services/staff-notifications.ts` |
 | Balances | `services/staff-balance.ts` — the only SUM of the ledger |
+| Manual adjustments | Staff › Employment › balance panel (`StaffBalancePanel.tsx` `AdjustmentForm`) → `POST /employees/:id/ledger`, source `manual` |
+| Days in lieu for company days | `staff-company-days.ts` `syncCompanyDayLieu()`, run from `syncEntitlement()`, source `company_day_lieu` |
 | Screens | `MyTimePage.tsx` (also the Staff page's Time off tab), `StaffCalendarPage.tsx`, `StaffAdminPage.tsx`, `LeaveApprovals.tsx`, `PayrollReportPanel.tsx` |
 
 ### Shipped
@@ -1376,6 +1395,7 @@ Where things are, for troubleshooting:
 | **§19** | Working from home — one-off requests approved like holiday, regular days on the pattern, two-number headcount, on-site filter, cover counts the building | 269 |
 | **§10** | Personal read-only calendar feed — own time only | 270 |
 | **§12.1** | Payroll report emailed on the 1st; date presets on the panel | — |
+| — | Staff page restyle: every person tab (Overview, Employment, Time off, Records, Reviews, Access) in the Time off look, on shared `components/StaffCard.tsx`; Employment's allowance-days box fixed | — |
 | **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
 | — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
 
