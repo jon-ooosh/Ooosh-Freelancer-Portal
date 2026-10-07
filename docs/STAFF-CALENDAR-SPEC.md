@@ -2302,5 +2302,21 @@ fewer moving part.
 - Portal: an 'other' task's whole row is the tick; tapping again un-ticks a
   mis-tap, but only a tick they made on the portal (`doneByMe`).
 
-**Not built, offered:** a note on the job's activity timeline when a task with
-a job is completed.
+**Job timeline note (jon, 8 Oct — built).** When a task that NAMES a job is
+completed — ticked on the portal, ticked by staff, or closed by a saved prep —
+`noteJobOnDone()` writes a system note on that job: "✅ Freelancer task done:
+Prep RX21ABC (Premium) — Tom Free (freelancer in for the day). Prep sheet
+saved." Deliberately NOT when a task is set (tasks change freely), not on
+un-tick, not for tasks without a job, and not for preps that were never a
+task (jon: the job does not need "who prepped the van").
+
+### 21.11 Where it stands (8 Oct 2026)
+
+Built: phases 1–2 and the job note. Still to build: **phase 3, "Give to a
+freelancer" from the van side** — offered only when somebody is booked today
+or tomorrow (an offered/accepted day booking or an assigned sitter evening);
+needs `bookedFreelancersFor(dates)` in `freelancer-tasks.ts`.
+
+Settled, NOT to build: Problems from a freelancer's prep flags (jon, 8 Oct:
+keep the bell-for-review). Known, accepted: a sitter swapped in after the
+previous one was told is not emailed unless a task then changes.
