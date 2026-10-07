@@ -2034,6 +2034,24 @@ are not normal working days. The staff calendar carries an admin link to it,
 since noticing you need one and configuring it are different moments and only
 the second wants a form.
 
+### 20.5b Company day on your day off — DECIDED, NOT BUILT (jon, Oct 2026)
+
+Raised by Will and Matt: a company day only helps whoever was rostered that
+day, so where Christmas falls decides who gets it. Christmas 2026 is Fri + Sat
+(Mon–Fri staff get 1, weekend staff 2); 2027 is Sat + Sun (Mon–Fri staff get
+NONE). Likely a Part-time Workers Regulations problem too.
+
+**Decision: a day in lieu.** A company day that falls on someone's day off
+credits ONE of their normal days (`nominalDayMinutes`) to their holiday,
+labelled with the company day, booked like any holiday. Same number of days
+for everyone, not pro-rata (jon: "not a scrooge"). Credited IN ADVANCE — when
+the year's entitlement is granted, so it can be booked any time in the year,
+not squeezed into the last week of December. Computed from the pattern, so it
+belongs in the idempotent daily entitlement sync (posting the difference),
+which also corrects it if someone's working days change. Mechanism already
+exists: the §7.4 / reclaim `correction` credit. Wants an HR-advisor sanity
+check; build before Christmas 2026, since 26 Dec 2026 is a Saturday.
+
 ### 20.6 What 29 February does
 
 A recurring day on 29 February is **skipped** in a common year rather than slid
