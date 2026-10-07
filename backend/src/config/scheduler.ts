@@ -1307,6 +1307,22 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Studio lock-up chase scheduled daily at 08:45 Europe/London');
 
+  // ── Sitter task summary (STAFF-CALENDAR-SPEC §21) ─────────────────────────
+  // Daily at 16:00 Europe/London. Tonight's studio sitter gets ONE email
+  // listing their tasks — only if there are open tasks and something changed
+  // since they were last told. No tasks, no email. Changes after 16:00 are not
+  // chased; they show on the portal. See services/freelancer-tasks.ts.
+  cron.schedule('0 16 * * *', async () => {
+    try {
+      const { runSitterTaskDigest } = await import('../services/freelancer-tasks');
+      const n = await runSitterTaskDigest();
+      if (n) console.log(`Scheduler: Sitter task summary — ${n} sent`);
+    } catch (err) {
+      console.error('Scheduler: Sitter task summary failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Sitter task summary scheduled daily at 16:00 Europe/London');
+
   // ── Holding reminders (lost-property chase digest + temp hold-until) ──────
   // Daily at 09:25 Europe/London. Assembles a staff nudge for chases due (the
   // review queue — client emails are sent by a human from there, never here),

@@ -1,10 +1,10 @@
 ---
 paths:
-  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-ical,freelancer-days}.ts"
-  - "backend/src/routes/{staff-calendar,staff-calendar-feed}.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214,269,270}_*.sql"
+  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-ical,freelancer-days,freelancer-tasks}.ts"
+  - "backend/src/routes/{staff-calendar,staff-calendar-feed,freelancer-tasks}.ts"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
-  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel}.tsx"
+  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel,FreelancerTasksPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
 ---
 
@@ -160,6 +160,20 @@ the only question this answers is "have we got enough people in".
 Staff and freelancers are counted **separately** on the calendar ("4 +2"),
 collapsing to one number when there are no freelancers. Merging them would
 claim they are interchangeable.
+
+## Freelancer tasks belong to a booking or a shift — never a person (spec §21)
+
+`services/freelancer-tasks.ts` is the only place that decides whose a task is.
+A task has NO person and NO date: both come from its owner (a day booking, or a
+sitter shift's LIVE assignment), so a reassigned sitter inherits the evening's
+tasks and an amended booking moves its tasks. Never add either column.
+
+- Not To Do (staff-only) and never for freelancers on driving jobs.
+- **No email per change.** "Send update" is a deliberate staff press; the only
+  automatic email is the 16:00 sitter summary, and only when tasks changed.
+- **A van prep is ticked by saving the prep** (`save-event` → `autoTickPrep`),
+  not by a portal button — the portal refuses it.
+- Soft-cancel only (`status = 'cancelled'`); there is no DELETE.
 
 ## Freelancer day times are quarter hours, from a `<select>`
 

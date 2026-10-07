@@ -14,6 +14,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
+import FreelancerTaskList from '@/components/FreelancerTaskList'
+import type { PortalFreelancerTask } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES (mirror the OP portal response)
@@ -42,6 +44,7 @@ interface ShiftDetail {
   fee: number | null
   assignment_status: string | null
   jobs: ShiftJob[]
+  tasks?: PortalFreelancerTask[]
   error?: string
 }
 
@@ -464,6 +467,13 @@ export default function ShiftDetailPage() {
                     ))}
                   </div>
                 )}
+              </section>
+            )}
+
+            {/* Tonight's tasks (STAFF-CALENDAR-SPEC §21) — hidden when there are none */}
+            {shift.tasks && shift.tasks.some((t) => t.status !== 'cancelled') && (
+              <section className="bg-white rounded-xl border border-sky-100 p-4 shadow-sm">
+                <FreelancerTaskList tasks={shift.tasks} heading="Tasks tonight" />
               </section>
             )}
 

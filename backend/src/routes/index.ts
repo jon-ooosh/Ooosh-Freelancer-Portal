@@ -60,6 +60,7 @@ import staffDocumentsRouter from './staff-documents';
 import staffCalendarRouter from './staff-calendar';
 import staffRecordsRouter from './staff-records';
 import staffTasksRouter from './staff-tasks';
+import freelancerTasksRouter from './freelancer-tasks';
 import freelancersRouter from './freelancers';
 import enquiryIntakeRouter from './enquiry-intake';
 
@@ -113,6 +114,7 @@ router.use('/staff-documents', staffDocumentsRouter);  // Staff Documents & Trai
 router.use('/staff-calendar', staffCalendarRouter);  // Staff Calendar & Time — working patterns, who's-in calendar (Phase A)
 router.use('/staff-records', staffRecordsRouter);
 router.use('/staff-tasks', staffTasksRouter);  // My To Do — general task list, owned per person. NOT admin-only.  // Staff Records — private files held ABOUT staff (admin only). NOT staff-documents, which publishes TO staff.
+router.use('/freelancer-tasks', freelancerTasksRouter);  // Freelancer tasks — things to do on a day booking or a sitter evening (STAFF-CALENDAR-SPEC §21). NOT To Do.
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)

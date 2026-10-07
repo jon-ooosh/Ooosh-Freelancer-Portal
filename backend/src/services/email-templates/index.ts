@@ -874,6 +874,17 @@ const templates: Record<string, EmailTemplate> = {
       </table>
     `,
   },
+  // Freelancer tasks (STAFF-CALENDAR-SPEC §21): a freelancer's current list for
+  // a day booking or a sitter shift. Sent when staff press "Send update", and
+  // as the 16:00 summary to tonight's sitter when tasks changed. Body is built
+  // by services/freelancer-tasks.ts and passed as bodyHtmlOverride, so the
+  // template is just the shell.
+  freelancer_tasks_updated: {
+    variant: 'internal',
+    preheader: 'What we would like a hand with',
+    subject: 'Your list for the day',
+    body: '<p>Your list for the day is on the Ooosh freelancer portal.</p>',
+  },
   /**
    * Details changed, no reply needed (spec §9.4 item 6).
    *
