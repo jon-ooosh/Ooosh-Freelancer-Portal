@@ -62,6 +62,20 @@ by sickness posts a **`correction`** credit per day (§7.4). A reclaimed TOIL
 day credits the **overtime** account, not holiday — sending it to holiday
 would quietly convert banked overtime into annual leave.
 
+## Manual adjustments: for what no flow owns, and the person sees them
+
+Staff page › Employment › balance panel › "+ Add an adjustment" (Oct 2026)
+posts an `adjustment` with `source_type = 'manual'` through the existing
+`POST /employees/:personId/ledger`. It is for things no flow owns — a balance
+brought across from BrightHR (2025 overtime still owed at the switchover), an
+agreed one-off. **Never** for holiday booked, overtime worked or a pay-out:
+those have their own forms and their own entry types.
+
+The note is REQUIRED and the person sees it: My Time lists every un-reversed
+manual adjustment as a row, so the figure on the card is always explained by
+the list beneath it. A mistake is undone with Reverse; the adjustment and its
+reversal then cancel and neither shows.
+
 ## Working patterns are effective-dated and never edited in place
 
 Changing someone's hours **closes** the current pattern and opens a new one.
