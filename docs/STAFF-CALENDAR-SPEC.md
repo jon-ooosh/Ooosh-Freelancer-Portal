@@ -855,7 +855,8 @@ the moment you are looking at the week and seeing a thin day.
 - **One live booking per person per day** (unique index). Two stints in a day
   is one booking with the wider window and a note — the same call the leave
   design made, and for the same reason.
-- `freelancer_day_booking_tasks` (§3.8) is **not built**. Per-booking task
+- `freelancer_day_booking_tasks` (§3.8) is **not built** — superseded by
+  `freelancer_tasks`, planned in §21 (Oct 2026). Per-booking task
   breakdown does not help answer "are there enough people in", which is what
   this is for; the booking's note covers "what are they doing" for now.
 
@@ -2037,3 +2038,142 @@ the second wants a form.
 A recurring day on 29 February is **skipped** in a common year rather than slid
 to the 28th. Sliding would invent a day off nobody agreed to; skipping is
 visible on the calendar and a one-off covers it if that was the intent.
+
+---
+
+## 21. Freelancer tasks — PLANNED (Oct 2026)
+
+Replaces the `freelancer_day_booking_tasks` sketch in §3.8, which was never
+built. Agreed with jon, 7 Oct 2026, before any code.
+
+### 21.1 What it is for
+
+Telling a freelancer who is **in for the day** — or a **studio sitter on
+shift** — what we want doing, most of all "prep this van", with a button on
+their phone that opens that van's prep sheet. Staff use their phones as the
+input surface and freelancers will too, so the link is the point, not a
+nicety.
+
+### 21.2 Settled decisions
+
+1. **Not the To Do module.** To Do is staff-only (`assignable-staff.ts`
+   requires a current employment record) and stays that way.
+2. **Only two kinds of owner: a day booking or a sitter shift.** A
+   freelancer out on a driving job (crew/transport quote) never sees "can you
+   prep this van" — that is deliberate, not a gap.
+3. **A live list, not a one-shot.** Tasks can be added, edited or removed at
+   any point: before the offer, after acceptance, on the day itself. The
+   portal reads the current list every time it opens.
+4. **No email per change.** Staff add what they need, then press **"Send
+   update"** if they think the freelancer needs telling. The offer email lists
+   whatever tasks exist when it goes out.
+5. **Van prep ticks itself.** A saved prep for that van closes the task — the
+   freelancer never ticks twice. Other tasks get a "Done" button.
+6. **The prep link uses a narrow pass, like book-out** (option B of the
+   7 Oct discussion), not an OP login and not a shared account.
+7. **"Give to a freelancer" from the van side** is offered ONLY when somebody
+   is booked today or tomorrow (an offered/accepted day booking, or an
+   assigned sitter shift). No booked freelancer, no button.
+
+### 21.3 Data model
+
+```sql
+freelancer_tasks
+  id              UUID PK
+  task_date       DATE NOT NULL            -- the day it is for (= booking_date / shift_date)
+  day_booking_id  UUID REFERENCES freelancer_day_bookings(id)
+  shift_id        UUID REFERENCES studio_sitter_shifts(id)
+  -- exactly one owner:
+  CHECK ((day_booking_id IS NULL) <> (shift_id IS NULL))
+  task_type       VARCHAR(20) NOT NULL CHECK (task_type IN ('van_prep','other'))
+  vehicle_id      UUID REFERENCES fleet_vehicles(id)   -- required for van_prep (CHECK)
+  job_id          UUID REFERENCES jobs(id)             -- optional: "prep it for #16xxx"
+  description     TEXT
+  sort_order      INT NOT NULL DEFAULT 0
+  status          VARCHAR(20) NOT NULL DEFAULT 'open'
+                    CHECK (status IN ('open','done','cancelled'))
+  done_at         TIMESTAMPTZ
+  done_by_person  UUID REFERENCES people(id)
+  done_via        VARCHAR(20) CHECK (done_via IN ('prep_saved','portal','staff'))
+  created_by      UUID REFERENCES users(id)
+  created_at, updated_at
+```
+
+Plus `last_tasks_notified_at TIMESTAMPTZ` on both owners, so the "Send
+update" button can say "3 changes since you last told them".
+
+**There is no `person_id`, on purpose.** The person is read through the
+owner: the booking's `person_id`, or the shift's live assignment. So a sitter
+reassigned on the day takes the shift's tasks with them to the new sitter —
+the same reason handover notes are shift-anchored. A cancelled booking leaves
+its open tasks visible to staff as "nobody has these now" (a warning, never a
+silent drop — tasks are soft-cancelled, never deleted).
+
+**Each owner is looked up once**, in a new `services/freelancer-tasks.ts`:
+`tasksForBooking()`, `tasksForShift()`, `ownerPerson(task)`,
+`bookedFreelancersFor(dates)` (the "who could I give this to?" list, merging
+day bookings and sitter shifts). Nothing else re-derives who owns a task.
+
+### 21.4 Staff surfaces
+
+- **Staff calendar** — the freelancer's booking panel gains a Tasks section:
+  add (type, van picker, optional job, note), reorder, edit, cancel, and the
+  **Send update** button. Ticks show as they come in.
+- **Operations › Rehearsals** — each assigned evening gains the same Tasks
+  section, beside Notes and Lock-up. That is how a sitter gets "prep the van
+  for tomorrow's early hire" at busy times.
+- **Give to a freelancer** — a button on the van's page (and its prep status
+  wherever that is shown; exact spot settled at build). Shown only when
+  `bookedFreelancersFor([today, tomorrow])` is non-empty; the picker lists
+  them as "Charlie Stanley — sitter, tonight" / "Tom — in tomorrow".
+
+### 21.5 Freelancer surfaces (the portal, `src/`)
+
+- **Day booking** — the booking card on the dashboard lists its tasks.
+- **Sitter shift** — `src/app/shift/[date]` gains a "Tasks tonight" section
+  above the handover notes.
+- Each `van_prep` task: **"Open prep sheet"**. Each `other` task: **"Done"**.
+- Tasks show from the day before onwards, and on offered bookings too —
+  the freelancer should see what the day involves before accepting it.
+
+### 21.6 The prep link
+
+The book-out handoff is the pattern: the portal asks OP for a short-lived
+HMAC token, the browser opens OP with `?freelancerToken=`, OP redeems it for a
+narrow session JWT.
+
+- **A new scope, `freelancer_prep`** — NOT a third `mode` on
+  `freelancer_bookout`. That session is built around a `vehicle_hire_assignment`
+  and rejects a token without one; a prep has no assignment. Loosening that
+  check to fit prep would weaken book-out.
+- **Resolve** (`POST /api/vehicles/freelancer-prep/resolve`): the token names
+  the task; OP checks the task is open, is a `van_prep`, `task_date` is today
+  or tomorrow, and the caller is its current owner (via `ownerPerson`). The
+  session carries `taskId` + the vehicle reg and lasts 4h, like book-out.
+- **Allow-list**: only the endpoints the prep page actually calls (to be
+  listed from `PrepPage.tsx` at build — at least fleet read, checklist
+  settings, prep history, photo upload, `save-event`, `save-prep`), each
+  clamped to the session's reg.
+- **Frontend**: a `FreelancerPrepShell` (mirror of `FreelancerBookoutShell`)
+  opens `PrepPage` with the van already chosen and the picker locked.
+  `PrepPage` gains a "start on this van" input; staff can use it too.
+- **Ticking**: when a `Prep Completed` event is saved for a van, open
+  `van_prep` tasks for that van dated yesterday or today close with
+  `done_via = 'prep_saved'` — whoever did the prep, staff included, and the
+  task shows who.
+
+### 21.7 Build order
+
+1. Table + service + staff calendar Tasks section + Rehearsals Tasks section
+   + portal lists + "Done" + Send update + auto-tick from a saved prep. Useful
+   on its own: the task says "Prep RX21 ABC" even before the link exists.
+2. The prep link (§21.6) — the biggest single piece.
+3. "Give to a freelancer" from the van side.
+
+### 21.8 Open, to settle at build
+
+- The Send update email: one template for both owners
+  (`freelancer_tasks_updated`), or reuse `freelancer_day_updated` for bookings
+  and add one for sitters. Leaning one template.
+- Whether a sitter is told about tasks added to an evening they have not yet
+  confirmed.

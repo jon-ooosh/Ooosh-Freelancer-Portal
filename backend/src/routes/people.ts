@@ -5,6 +5,7 @@ import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware
 import { redactPrivateFields, redactPrivateFieldsAll } from '../services/people-private-fields';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { getSitterJobsByDate, type ShiftJobRef } from '../services/studio-sitter';
 
 const router = Router();
 
@@ -933,9 +934,22 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
       client_name: string | null;
       vehicle_reg: string | null;
       run_combined_fee: number | null;
+      // Sitter rows only: every job that needed a sitter that evening (a
+      // shift is per evening, so it can belong to more than one job).
+      jobs?: ShiftJobRef[];
     }
 
     const items: FreelancerHistoryItem[] = [];
+
+    // Non-fatal: a failure here only costs the sitter rows their job links.
+    let sitterJobs = new Map<string, ShiftJobRef[]>();
+    try {
+      sitterJobs = await getSitterJobsByDate(
+        sitterRes.rows.map((r: any) => r.shift_date).filter(Boolean),
+      );
+    } catch (err) {
+      console.error('[people] sitter job lookup failed (non-fatal):', err);
+    }
 
     for (const r of crewRes.rows) {
       // Fee for display: person's agreed rate wins, else quote-level fee.
@@ -984,6 +998,7 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
         client_name: null,
         vehicle_reg: null,
         run_combined_fee: null,
+        jobs: sitterJobs.get(r.shift_date) ?? [],
       });
     }
 
