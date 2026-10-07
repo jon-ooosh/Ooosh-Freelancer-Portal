@@ -66,11 +66,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 const taskBody = z.object({
   taskType: z.enum(['van_prep', 'other']),
   vehicleId: z.string().uuid().nullish(),
+  jobId: z.string().uuid().nullish(),
   hhJobNumber: z.number().int().positive().nullish(),
   description: z.string().max(500).nullish(),
 });
 
-// POST /api/freelancer-tasks  { bookingId | shiftId, taskType, vehicleId?, hhJobNumber?, description? }
+// POST /api/freelancer-tasks  { bookingId | shiftId, taskType, vehicleId?, jobId? | hhJobNumber?, description? }
 router.post('/', async (req: AuthRequest, res: Response) => {
   const owner = readOwner({ bookingId: req.body?.bookingId, shiftId: req.body?.shiftId });
   const body = taskBody.safeParse(req.body);
@@ -81,7 +82,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   } catch (err) { fail(res, err, 'Failed to add that task'); }
 });
 
-// PATCH /api/freelancer-tasks/:id  { vehicleId?, hhJobNumber?, description? }
+// PATCH /api/freelancer-tasks/:id  { vehicleId?, jobId? | hhJobNumber?, description? }
 router.patch('/:id', async (req: AuthRequest, res: Response) => {
   const body = taskBody.omit({ taskType: true }).safeParse(req.body ?? {});
   if (!body.success) { res.status(400).json({ error: body.error.issues[0]?.message ?? 'Invalid input' }); return; }

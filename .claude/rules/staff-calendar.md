@@ -174,6 +174,7 @@ tasks and an amended booking moves its tasks. Never add either column.
 - **A van prep is ticked by saving the prep** (`save-event` → `autoTickPrep`),
   not by a portal button — the portal refuses it.
 - Soft-cancel only (`status = 'cancelled'`); there is no DELETE.
+- **The prep link and its redeem step share ONE rule**, `assertPrepEligible()` — open van prep, theirs, owner live, day yesterday → tomorrow. Do not check eligibility anywhere else.
 
 ## Freelancer day times are quarter hours, from a `<select>`
 

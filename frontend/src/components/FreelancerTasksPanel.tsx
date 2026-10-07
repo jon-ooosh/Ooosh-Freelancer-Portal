@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
+import SearchPicker, { type PickerOption } from './SearchPicker';
 
 type Owner = { bookingId: string } | { shiftId: string };
 
@@ -20,6 +21,8 @@ interface Task {
   taskType: 'van_prep' | 'other';
   vehicleId: string | null;
   vehicleReg: string | null;
+  vehicleType: string | null;
+  jobId: string | null;
   hhJobNumber: number | null;
   jobName: string | null;
   description: string | null;
@@ -54,6 +57,17 @@ const DONE_VIA: Record<string, string> = {
   staff: 'ticked here',
 };
 
+function jobOption(id: string, hh: number | null, name: string | null): PickerOption {
+  return { value: id, label: hh ? `#${hh}` : (name || 'Job'), hint: hh ? (name ?? undefined) : undefined };
+}
+
+/** Jobs as you type — the same search the timeline's "move to job" uses. */
+async function searchJobs(q: string): Promise<PickerOption[]> {
+  const r = await api.get<{ data: Array<{ id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null }> }>(
+    `/hirehop/jobs?search=${encodeURIComponent(q)}&limit=10`);
+  return (r.data ?? []).map(j => jobOption(j.id, j.hh_job_number, j.job_name || j.client_name));
+}
+
 export default function FreelancerTasksPanel({ owner, onOpenCountChange }: {
   owner: Owner;
   /** Reports the open-task count after every load, so a parent can update a
@@ -75,8 +89,8 @@ export default function FreelancerTasksPanel({ owner, onOpenCountChange }: {
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [fType, setFType] = useState<'van_prep' | 'other'>('van_prep');
-  const [fVan, setFVan] = useState('');
-  const [fJob, setFJob] = useState('');
+  const [fVan, setFVan] = useState<PickerOption | null>(null);
+  const [fJob, setFJob] = useState<PickerOption | null>(null);
   const [fText, setFText] = useState('');
   const [vans, setVans] = useState<Van[] | null>(null);
 
@@ -124,25 +138,25 @@ export default function FreelancerTasksPanel({ owner, onOpenCountChange }: {
 
   function openAdd() {
     setEditingId(null);
-    setFType('van_prep'); setFVan(''); setFJob(''); setFText('');
+    setFType('van_prep'); setFVan(null); setFJob(null); setFText('');
     setFormOpen(true);
   }
 
   function openEdit(t: Task) {
     setEditingId(t.id);
     setFType(t.taskType);
-    setFVan(t.vehicleId ?? '');
-    setFJob(t.hhJobNumber ? String(t.hhJobNumber) : '');
+    // The picked value carries its own label, so a van no longer in the active
+    // fleet still shows rather than going blank (frontend.md select rule).
+    setFVan(t.vehicleId ? { value: t.vehicleId, label: t.vehicleReg ?? 'Van', hint: t.vehicleType ?? undefined } : null);
+    setFJob(t.jobId ? jobOption(t.jobId, t.hhJobNumber, t.jobName) : null);
     setFText(t.description ?? '');
     setFormOpen(true);
   }
 
   async function saveForm() {
-    const job = fJob.trim() === '' ? null : Number(fJob.trim());
-    if (job !== null && (!Number.isInteger(job) || job <= 0)) { setError('The job number should be a number'); return; }
     const payload = {
-      vehicleId: fVan || null,
-      hhJobNumber: job,
+      vehicleId: fVan?.value ?? null,
+      jobId: fJob?.value ?? null,
       description: fText.trim() || null,
     };
     await act(async () => {
@@ -257,25 +271,23 @@ export default function FreelancerTasksPanel({ owner, onOpenCountChange }: {
             </div>
           )}
           {fType === 'van_prep' && (
-            <select value={fVan} onChange={e => setFVan(e.target.value)}
-              className="w-full text-sm border border-gray-300 rounded px-2 py-1.5 bg-white">
-              <option value="">{vans === null ? 'Loading vans…' : 'Pick the van'}</option>
-              {(vans ?? []).map(v => (
-                <option key={v.id} value={v.id}>{v.reg}{v.simple_type ? ` — ${v.simple_type}` : ''}</option>
-              ))}
-              {/* A van no longer in the active fleet must still show, or the
-                  select renders blank and saves that blank (frontend.md). */}
-              {fVan && vans && !vans.some(v => v.id === fVan) && (
-                <option value={fVan}>{tasks.find(t => t.id === editingId)?.vehicleReg ?? 'Current van'}</option>
-              )}
-            </select>
+            <SearchPicker
+              value={fVan}
+              onChange={setFVan}
+              options={(vans ?? []).map(v => ({ value: v.id, label: v.reg, hint: v.simple_type ?? undefined }))}
+              placeholder={vans === null ? 'Loading vans…' : 'Find the van — type the reg or type'}
+            />
           )}
           <textarea value={fText} onChange={e => setFText(e.target.value)} rows={2} maxLength={500}
             placeholder={fType === 'van_prep' ? 'Anything to add (optional)' : 'What needs doing'}
-            className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
-          <input value={fJob} onChange={e => setFJob(e.target.value)} inputMode="numeric"
-            placeholder="Job number (optional)"
-            className="w-48 text-sm border border-gray-300 rounded px-2 py-1.5" />
+            className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2" />
+          <SearchPicker
+            value={fJob}
+            onChange={setFJob}
+            loadOptions={searchJobs}
+            minChars={2}
+            placeholder="Job (optional) — type a number, band or client"
+          />
           <div className="flex gap-2">
             <button onClick={() => void saveForm()} disabled={busy}
               className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
