@@ -194,6 +194,12 @@ unverified), no phone card payments (policy), shop + sitter till in Phase 3. Rea
 building anything that takes a card in person. The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
+**LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
+tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
+outreach → chased Cold enquiry, jobs-for-this-tour linking. **§20 is the current state and what's
+left.** Searches are run by hand on purpose (no scheduler). Contact research wants management /
+the band / tour managers — not promoters or agents.
+
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
@@ -265,6 +271,8 @@ existing definition:
 | What does OP know about a lead's band (enquiries, losses, retros)? | `services/leads/history.ts` `getClientHistory()` |
 | Which leads go on the dashboard? | `services/leads/attention.ts` `getLeadAttention()` |
 | Recording what happened to a lead (who, when) | `services/leads/events.ts` `logLeadEvent()` — never fails the action; read by the Leads timeline + Last activity |
+| Which existing jobs belong to a lead's tour? Is it already quoted / booked? | `services/leads/tour-jobs.ts` — `syncTourJobs()`, `liveTourJobSql()` (drives the In pipeline stage + the dashboard card), `TOUR_JOB_OUTCOME_SQL` |
+| A DATE column as `YYYY-MM-DD` in Leads code | `services/leads/dates.ts` `dateOnly()` — never `toISOString()` on a DATE (node-postgres gives local midnight; UK summer time shifts it a day) |
 | Showing a private-bucket file in the DOM | `frontend/src/hooks/useAuthedFileUrl.ts` |
 | Opening a private-bucket file in a new tab | `frontend/src/lib/openAuthedFile.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |

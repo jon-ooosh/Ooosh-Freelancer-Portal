@@ -16,7 +16,9 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import {
   Lead, LeadRun, LeadStage, STAGE_TABS, REASON_LABEL, EVENT_SHORT, fmtDate, fmtDateYear,
+  tourJobBadge, isLiveTourJob,
 } from '../components/leads/leadTypes';
+import LeadTourJobs from '../components/leads/LeadTourJobs';
 import DismissLeadModal from '../components/leads/DismissLeadModal';
 import RunSearchModal from '../components/leads/RunSearchModal';
 import AddToAddressBookModal from '../components/leads/AddToAddressBookModal';
@@ -297,6 +299,13 @@ export default function LeadsPage() {
   const confirmMatch = (id: string, organisation_id: string) => act(() => api.post(`/leads/${id}/confirm-match`, { organisation_id }));
   const rejectMatch = (id: string) => act(() => api.post(`/leads/${id}/reject-match`, {}));
   const restore = (id: string) => act(() => api.post(`/leads/${id}/restore`, {}));
+  // One click when the tour turns out to be one we've already quoted and lost /
+  // had cancelled / dismissed — "already handled", with the job named in the note.
+  const dismissAlreadyQuoted = (l: Lead) => {
+    const dead = (l.tour_jobs ?? []).filter((j) => j.status === 'linked');
+    const note = `Already quoted this tour — ${dead.map((j) => tourJobBadge(j).text).join(', ')}`;
+    return act(() => api.post(`/leads/${l.id}/dismiss`, { reason: 'already_handled', note }));
+  };
 
   const sv = (k: string) => settings.find((s) => s.key === k)?.value ?? '';
   const today = todayYmd();
@@ -437,6 +446,11 @@ export default function LeadsPage() {
                 const top = l.match_candidates?.[0];
                 const activity = lastActivity(l);
                 const started = tourStarted(l, today);
+                const tourJobs = l.tour_jobs ?? [];
+                const liveJob = tourJobs.find(isLiveTourJob);
+                const linkedJobs = tourJobs.filter((j) => j.status === 'linked');
+                const suggestedJob = tourJobs.find((j) => j.status === 'suggested');
+                const onlyDeadJobs = !liveJob && linkedJobs.length > 0;
                 return (
                 <Fragment key={l.id}>
                   <tr id={`lead-${l.id}`} className={`hover:bg-gray-50 align-top cursor-pointer ${expanded === l.id ? 'bg-purple-50/40' : ''}`} onClick={() => setExpanded(expanded === l.id ? null : l.id)}>
@@ -466,6 +480,25 @@ export default function LeadsPage() {
                       )}
                       {prev && (
                         <div className={`text-xs font-normal ${prev.flag ? 'text-amber-700' : 'text-gray-400'}`}>↻ {prev.text}</div>
+                      )}
+                      {linkedJobs.length > 0 && (
+                        <div className="mt-0.5 flex flex-wrap gap-1 font-normal" onClick={(e) => e.stopPropagation()}>
+                          {linkedJobs.slice(0, 2).map((j) => {
+                            const b = tourJobBadge(j);
+                            return (
+                              <Link key={j.job_id} to={`/jobs/${j.job_id}`} className={`text-[11px] px-1.5 py-0.5 rounded hover:underline ${b.cls}`}
+                                title={`${j.job_name ?? ''} — a job for this tour`}>
+                                {b.icon} {b.text}
+                              </Link>
+                            );
+                          })}
+                          {linkedJobs.length > 2 && <span className="text-[11px] text-gray-400">+{linkedJobs.length - 2}</span>}
+                        </div>
+                      )}
+                      {!liveJob && suggestedJob && (
+                        <div className="mt-0.5 text-xs font-normal text-amber-700">
+                          Possible job for this tour: {tourJobBadge(suggestedJob).text} — expand to confirm
+                        </div>
                       )}
                       {tab !== 'dismissed' && l.match_confidence === 'partial' && !l.matched_organisation_id && top && (
                         <div className="mt-1 text-xs font-normal" onClick={(e) => e.stopPropagation()}>
@@ -517,6 +550,11 @@ export default function LeadsPage() {
                             <Link to={`/jobs/${l.converted_job_id}`} className="text-xs text-green-700 hover:underline">
                               Open enquiry{l.converted_job_number ? ` #${l.converted_job_number}` : ''} →
                             </Link>
+                          ) : liveJob ? (
+                            <Link to={`/jobs/${liveJob.job_id}`} className="text-xs text-green-700 hover:underline"
+                              title="We already have a job for this tour">
+                              Open {liveJob.hh_job_number ? `#${liveJob.hh_job_number}` : 'job'} →
+                            </Link>
                           ) : l.matched_organisation_id ? (
                             <button onClick={() => setModal({ kind: 'enquiry', lead: l })}
                               className="text-xs px-2 py-1 rounded border border-[#7B5EA7] text-[#7B5EA7] hover:bg-purple-50">Start enquiry</button>
@@ -524,7 +562,13 @@ export default function LeadsPage() {
                             <button onClick={() => setModal({ kind: 'address', lead: l })}
                               className="text-xs px-2 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-50">Add to address book</button>
                           )}
-                          {!l.converted_job_id && ['new', 'reviewing', 'contacted'].includes(l.status) && (
+                          {onlyDeadJobs && l.status !== 'converted' && (
+                            <button onClick={() => dismissAlreadyQuoted(l)} className="text-xs text-gray-600 hover:text-red-600"
+                              title="We've already quoted this tour and it didn't go ahead — dismiss with that as the reason">
+                              Dismiss — already quoted
+                            </button>
+                          )}
+                          {!l.converted_job_id && !liveJob && ['new', 'reviewing', 'contacted'].includes(l.status) && (
                             <button onClick={() => setModal({ kind: 'outreach', lead: l })} className="text-xs text-gray-500 hover:text-[#7B5EA7]"
                               title="You've contacted them — note it, and put a Cold enquiry in the pipeline so it gets chased">
                               {l.status === 'contacted' ? 'Log outreach again' : 'Log outreach'}
@@ -567,6 +611,7 @@ export default function LeadsPage() {
                                 </ul>
                               </div>
                             )}
+                            <LeadTourJobs lead={l} onChanged={() => { void reloadAll(); }} />
                             <LeadContacts lead={l} onChanged={() => { void reloadAll(); }} />
                             {tab !== 'dismissed' && !l.matched_organisation_id && l.match_candidates?.length > 0 && (
                               <div className="mt-2">
