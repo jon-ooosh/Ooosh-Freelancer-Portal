@@ -202,7 +202,9 @@ anything waiting for an approval** (leave, overtime, WFH requests) links to the 
 because the "Waiting for you" panel there is the approvals surface; the person's Time
 off tab is not reliable for it (jon, Oct 2026 — see `staff-notifications.ts`). The page is
 manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
-added to those tabs must degrade for a manager rather than 403.
+added to those tabs must degrade for a manager rather than 403. Every tab is built
+from `components/StaffCard.tsx` (Oct 2026) — use it for anything new there so the
+tabs keep reading the same way.
 
 ---
 
@@ -262,6 +264,7 @@ existing definition:
 | Did this job book, get lost, get cancelled? (history views) | `services/job-outcomes.ts` `JOB_OUTCOME_SQL` — org Hire History tab + Leads client history |
 | What does OP know about a lead's band (enquiries, losses, retros)? | `services/leads/history.ts` `getClientHistory()` |
 | Which leads go on the dashboard? | `services/leads/attention.ts` `getLeadAttention()` |
+| Recording what happened to a lead (who, when) | `services/leads/events.ts` `logLeadEvent()` — never fails the action; read by the Leads timeline + Last activity |
 | Showing a private-bucket file in the DOM | `frontend/src/hooks/useAuthedFileUrl.ts` |
 | Opening a private-bucket file in a new tab | `frontend/src/lib/openAuthedFile.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
@@ -281,6 +284,7 @@ existing definition:
 | What staff data has expired? | `services/staff-retention.ts` |
 | Is this person in the building / working from home? | `services/staff-day-status.ts` (`StaffDay.location`; requests in `services/staff-wfh.ts`) |
 | What goes in a person's calendar feed? | `services/staff-ical.ts` — own time only, never a colleague's |
+| Building or restyling a tab on the Staff page | `frontend/src/components/StaffCard.tsx` — Card, StatCard, InfoRow, Pill, button classes (the Time off look) |
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |

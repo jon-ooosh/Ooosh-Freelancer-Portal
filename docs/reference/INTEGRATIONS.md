@@ -508,6 +508,16 @@ history, not as a loss. Add to address book now takes editable names and can sav
 inboxes (info@, bookings@…) as the band's own email (`isGenericMailbox()` /
 `addOrganisationEmail()` in `services/address-book-resolve.ts`). Spec §16.
 
+**Batch layout + contact discovery** (Oct 2026, migration 277): stage tabs (To review ·
+Contacted · In pipeline · Dismissed — `STAGE_SQL`), URL filters, batches (`first_run_id`,
+`GET /leads/runs`, Search history), activity log (`lead_events` via
+`services/leads/events.ts`), compact header + run strip. Research now targets management, the
+band and tour managers first (agents only as a last resort, promoters never), starts from the
+band's own links (`services/leads/links.ts`: Ticketmaster `externalLinks` + MusicBrainz by
+id), is tracked (`researched_at` / `research_status` — no retrying dead ends every run; 30-day
+retry), cap 40. Research again (`POST /:id/research`, background) and hand-added contacts
+(`POST/DELETE /:id/contacts`, `manual: true`, kept through re-research). Spec §17–18.
+
 **Deferred (agreed, not built):** scheduled weekly run (jon: keep manual for now); outreach-email drafting — folds into the auto-chase "voice"
 work on the Enquiries pipeline rather than being built separately.
 

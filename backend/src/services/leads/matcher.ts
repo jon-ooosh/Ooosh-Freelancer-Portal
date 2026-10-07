@@ -24,6 +24,7 @@ import { query } from '../../config/database';
 import { getSystemSetting } from '../../routes/system-settings';
 import { normaliseArtist } from './normalise';
 import { getClientHistory, describeHistory, bandNameRegex, ClientHistory } from './history';
+import { logLeadEvent } from './events';
 
 export { normaliseArtist };
 
@@ -212,6 +213,7 @@ export async function runMatching(): Promise<MatchRunSummary> {
       s.exact += 1;
       try {
         await linkLeadToOrg(lead.id, m.matched_organisation_id, 'org_name', { enrichOrg: true });
+        await logLeadEvent(lead.id, 'matched', { detail: m.candidates[0]?.name ?? null });
         s.enriched += 1;
       } catch (err) {
         console.error('[leads/match] linking failed for org %s:', m.matched_organisation_id, err);

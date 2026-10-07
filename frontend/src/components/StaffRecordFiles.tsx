@@ -24,6 +24,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
+import { Card, Pill, btnPrimary, btnSecondary, btnQuiet } from './StaffCard';
 import { openAuthedFile } from '../lib/openAuthedFile';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -163,6 +164,9 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
   const [busyId, setBusyId] = useState<string | null>(null);
 
   // Upload form
+  // The upload form is folded away until asked for — the list is what
+  // people come here for.
+  const [adding, setAdding] = useState(false);
   const [pending, setPending] = useState<File | null>(null);
   const [label, setLabel] = useState('');
   const [docType, setDocType] = useState('other');
@@ -238,6 +242,7 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
       setActionTouched(false);
       setActionKind('remind');
       setActionNote('');
+      setAdding(false);
       await load();
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Upload failed');
@@ -280,14 +285,11 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
     }
   }
 
+  // Not the same as Documents & Training, which is what we publish TO staff.
   return (
-    <div>
-      <h3 className="text-sm font-medium text-gray-900 mb-1">Private records</h3>
-      <p className="text-xs text-gray-500 mb-3">
-        Documents held about {personName} — contract, right to work, ID. Admin only;
-        {' '}{personName.split(' ')[0]} cannot see these. Not the same as Documents &amp; Training,
-        which is what we publish to staff.
-      </p>
+    <Card title="Private records"
+      subtitle={`Contract, right to work, ID — held about ${personName}. Admin only; ${personName.split(' ')[0]} cannot see these.`}
+      action={!adding && <button onClick={() => setAdding(true)} className={btnSecondary}>Add a file</button>}>
 
       {loading ? (
         <p className="text-sm text-gray-500">Loading…</p>
@@ -298,59 +300,68 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
       ) : files.length === 0 ? (
         <p className="text-sm text-gray-400 mb-3">No files yet.</p>
       ) : (
-        <ul className="divide-y divide-gray-100 border border-gray-200 rounded mb-3">
+        <ul className="-mx-5 mb-1">
           {files.map(f => (
-            <li key={f.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
-              <button
-                onClick={() => void open(f)}
-                className="text-sm text-ooosh-700 hover:text-ooosh-900 hover:underline text-left min-w-0 truncate"
-                title={f.filename}
-              >
-                {f.label}
-              </button>
-              <select
-                value={f.doc_type}
-                disabled={busyId === f.id}
-                onChange={e => void retype(f, e.target.value)}
-                className="text-[11px] border border-gray-200 rounded px-1 py-0.5 text-gray-600 bg-white"
-                aria-label={`Document type for ${f.label}`}
-              >
-                {DOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-              </select>
-              <ActionChip file={f} />
-              <span className="text-xs text-gray-400 ml-auto whitespace-nowrap">
-                {f.expires_on
-                  ? <span className={
-                      f.expires_on < new Date().toISOString().slice(0, 10)
-                        ? 'text-red-700 font-medium' : 'text-amber-700'
-                    }>expires {fmtDate(f.expires_on)} · </span>
-                  : null}
-                {f.document_date
-                  ? <span className="text-gray-600">dated {fmtDate(f.document_date)} · </span>
-                  : null}
-                {fmtDate(f.uploaded_at)}
-                {f.uploaded_by_name && ` · ${f.uploaded_by_name}`}
-                {fmtSize(f.size_bytes) && ` · ${fmtSize(f.size_bytes)}`}
-              </span>
-              <button
-                onClick={() => setEditing(f)}
-                disabled={busyId === f.id}
-                className="text-xs text-ooosh-600 hover:text-ooosh-800 disabled:opacity-40 shrink-0"
-              >
-                Dates
-              </button>
-              <button
-                onClick={() => void remove(f)}
-                disabled={busyId === f.id}
-                className="text-xs text-red-600 hover:text-red-800 disabled:opacity-40 shrink-0"
-              >
-                Delete
-              </button>
+            <li key={f.id} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3 border-t border-gray-100">
+              <div className="min-w-0 flex-1">
+                <button
+                  onClick={() => void open(f)}
+                  className="text-[15px] text-ooosh-700 hover:text-ooosh-900 hover:underline text-left max-w-full truncate"
+                  title={f.filename}
+                >
+                  {f.label}
+                </button>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 text-[13px] text-gray-500">
+                  <select
+                    value={f.doc_type}
+                    disabled={busyId === f.id}
+                    onChange={e => void retype(f, e.target.value)}
+                    className="text-xs border border-gray-200 rounded-full px-2 py-0.5 text-gray-700 bg-gray-50"
+                    aria-label={`Document type for ${f.label}`}
+                  >
+                    {DOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                  {f.expires_on && (
+                    <Pill tone={f.expires_on < new Date().toISOString().slice(0, 10) ? 'bad' : 'warn'}>
+                      expires {fmtDate(f.expires_on)}
+                    </Pill>
+                  )}
+                  <ActionChip file={f} />
+                  <span>
+                    {f.document_date ? `dated ${fmtDate(f.document_date)} · ` : ''}
+                    added {fmtDate(f.uploaded_at)}
+                    {f.uploaded_by_name && ` by ${f.uploaded_by_name}`}
+                    {fmtSize(f.size_bytes) && ` · ${fmtSize(f.size_bytes)}`}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-4 shrink-0">
+                <button
+                  onClick={() => setEditing(f)}
+                  disabled={busyId === f.id}
+                  className="text-sm font-medium text-ooosh-700 hover:underline disabled:opacity-40"
+                >
+                  Dates
+                </button>
+                <button
+                  onClick={() => void remove(f)}
+                  disabled={busyId === f.id}
+                  className="text-sm text-red-600 hover:underline disabled:opacity-40"
+                >
+                  Delete
+                </button>
+              </div>
             </li>
           ))}
         </ul>
       )}
 
+      {adding && (
+      <div className="mt-3 p-4 rounded-xl border border-ooosh-200 bg-ooosh-50/40">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-[15px] font-semibold text-gray-900">Add a file</h3>
+        <button onClick={() => setAdding(false)} className={btnQuiet}>Cancel</button>
+      </div>
       <div className="flex flex-wrap items-end gap-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">File</span>
@@ -404,13 +415,6 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
             {DOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
           </select>
         </label>
-        <button
-          onClick={() => void upload()}
-          disabled={!pending || uploading}
-          className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40"
-        >
-          {uploading ? 'Uploading…' : 'Upload'}
-        </button>
       </div>
       <ActionFields
         className="mt-3"
@@ -422,13 +426,21 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
         recipient={actionRecipient} onRecipient={setActionRecipient}
         note={actionNote} onNote={setActionNote}
       />
-      <p className="text-xs text-gray-400 mt-2">
-        PDFs, documents and images up to 25MB. <strong>Document date</strong> is when it was
-        signed, issued or checked; <strong>expires</strong> is the date printed on the document
-        itself. <strong>Then</strong> is when you want to hear about it again — suggested from
-        those two dates, yours to change. {TYPE_LABEL[docType]} files are kept until you delete
-        them; “flag for deletion” reminds you, it never deletes on its own.
+      <p className="text-xs text-gray-500 mt-2">
+        Up to 25MB. <strong>Document date</strong> = when signed, issued or checked;{' '}
+        <strong>expires</strong> = the date printed on it; <strong>then</strong> = when you want
+        to hear about it again (suggested, yours to change). {TYPE_LABEL[docType]} files are
+        kept until you delete them — “flag for deletion” only reminds you.
       </p>
+      <button
+        onClick={() => void upload()}
+        disabled={!pending || uploading}
+        className={`mt-3 ${btnPrimary}`}
+      >
+        {uploading ? 'Uploading…' : 'Upload'}
+      </button>
+      </div>
+      )}
 
       {editing && (
         <RecordDatesModal
@@ -440,7 +452,7 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
           onError={onError}
         />
       )}
-    </div>
+    </Card>
   );
 }
 

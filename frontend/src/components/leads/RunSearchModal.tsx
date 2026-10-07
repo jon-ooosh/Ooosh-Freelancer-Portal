@@ -7,11 +7,13 @@ import { useState } from 'react';
 import { api } from '../../services/api';
 import LeadModal from './LeadModal';
 
-export default function RunSearchModal({ defaultWindow, maxDays, onClose, onStarted }: {
+export default function RunSearchModal({ defaultWindow, maxDays, tourRule, onClose, onStarted }: {
   defaultWindow: { from: string; to: string } | null;
   maxDays: number;
   onClose: () => void;
   onStarted: () => void;
+  /** "A tour = 3+ UK dates within 6 weeks…" — moved here from the page header. */
+  tourRule?: string;
 }) {
   const today = new Date().toISOString().slice(0, 10);
   const [from, setFrom] = useState(defaultWindow?.from ?? today);
@@ -74,6 +76,7 @@ export default function RunSearchModal({ defaultWindow, maxDays, onClose, onStar
         {isDefault ? 'This is the standard window from the Leads settings.' : 'A one-off window — the settings aren’t changed.'}
         {' '}It runs in the background and takes a few minutes.
       </p>
+      {tourRule && <p className="mt-1 text-xs text-gray-400">{tourRule}</p>}
       {problem && <div className="mt-3 text-xs text-amber-700">{problem}</div>}
       {error && <div className="mt-3 rounded-lg bg-red-50 text-red-800 px-3 py-2">{error}</div>}
     </LeadModal>

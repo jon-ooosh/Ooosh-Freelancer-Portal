@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
+import { Card, Pill, btnPrimary, btnSecondary, btnQuiet } from './StaffCard';
 
 interface SalaryRow {
   id: string;
@@ -119,180 +120,172 @@ export default function StaffPay({ personId, personName, onSaved, onError }: {
   const current = salary[0];
   const currentPension = pension[0];
 
+  const field = 'w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white disabled:bg-gray-100';
+  const big = 'text-[32px] leading-none font-semibold tracking-[-0.02em] tabular-nums text-gray-900';
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {loadError && (
         <p className="text-sm text-red-700 rounded border border-red-200 bg-red-50 px-3 py-2">{loadError}</p>
       )}
 
-      {/* ── Salary ─────────────────────────────────────────────────────── */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex flex-wrap items-center gap-3 mb-3">
-          <h3 className="text-sm font-semibold text-gray-900">Salary</h3>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        {/* ── Salary ─────────────────────────────────────────────────── */}
+        <Card title="Salary"
+          action={!addingSalary && <button onClick={() => setAddingSalary(true)} className={btnSecondary}>Record a change</button>}>
           {current ? (
-            <span className="text-sm text-gray-900">
-              <strong>{money(current.annual_amount)}</strong> a year
-              <span className="text-gray-500"> since {fmtDate(current.effective_from)}</span>
-            </span>
+            <div className="mb-1">
+              <span className={big}>{money(current.annual_amount)}</span>
+              <span className="text-[15px] text-gray-700 ml-1.5">a year</span>
+              <div className="text-xs text-gray-500 mt-2">since {fmtDate(current.effective_from)}{current.reason ? ` · ${current.reason}` : ''}</div>
+            </div>
           ) : (
-            <span className="text-sm text-amber-700">Not recorded</span>
+            <Pill tone="warn">Not recorded</Pill>
           )}
-          {!addingSalary && (
-            <button onClick={() => setAddingSalary(true)} className="ml-auto text-xs text-ooosh-600 hover:underline">
-              Record a change
-            </button>
+
+          {addingSalary && (
+            <div className="mt-4 p-4 rounded-xl border border-ooosh-200 bg-ooosh-50/40 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-sm">
+                  <span className="block text-xs text-gray-600 mb-1">Annual salary (£)</span>
+                  <input value={amount} onChange={e => setAmount(e.target.value.replace(/[^\d.]/g, ''))}
+                    inputMode="decimal" placeholder="32000" className={field} />
+                </label>
+                <label className="text-sm">
+                  <span className="block text-xs text-gray-600 mb-1">Effective from</span>
+                  <input type="date" value={salaryFrom} onChange={e => setSalaryFrom(e.target.value)} className={field} />
+                </label>
+              </div>
+              <label className="block text-sm">
+                <span className="block text-xs text-gray-600 mb-1">Why</span>
+                <input value={salaryReason} onChange={e => setSalaryReason(e.target.value)}
+                  placeholder="e.g. Agreed at review" className={field} />
+              </label>
+              <div className="flex items-center gap-3">
+                <button onClick={() => void addSalary()} disabled={saving || !amount.trim() || !salaryFrom} className={btnPrimary}>
+                  {saving ? 'Saving…' : 'Record'}
+                </button>
+                <button onClick={() => setAddingSalary(false)} className={btnQuiet}>Cancel</button>
+              </div>
+            </div>
           )}
-        </div>
 
-        {addingSalary && (
-          <div className="flex flex-wrap items-end gap-3 mb-3 p-3 rounded bg-gray-50 border border-gray-200">
-            <label className="text-sm">
-              <span className="block text-xs text-gray-600 mb-1">Annual salary</span>
-              <input value={amount} onChange={e => setAmount(e.target.value.replace(/[^\d.]/g, ''))}
-                inputMode="decimal" placeholder="32000"
-                className="w-32 px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
-            </label>
-            <label className="text-sm">
-              <span className="block text-xs text-gray-600 mb-1">Effective from</span>
-              <input type="date" value={salaryFrom} onChange={e => setSalaryFrom(e.target.value)}
-                className="px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
-            </label>
-            <label className="text-sm flex-1 min-w-[12rem]">
-              <span className="block text-xs text-gray-600 mb-1">Why</span>
-              <input value={salaryReason} onChange={e => setSalaryReason(e.target.value)}
-                placeholder="e.g. Agreed at review"
-                className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
-            </label>
-            <button onClick={() => void addSalary()} disabled={saving || !amount.trim() || !salaryFrom}
-              className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
-              {saving ? 'Saving…' : 'Record'}
-            </button>
-            <button onClick={() => setAddingSalary(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
-          </div>
-        )}
+          {salary.length === 0 ? (
+            <p className="text-sm text-gray-400 mt-3">No salary history. Past figures can be added with their own dates.</p>
+          ) : (
+            <details className="mt-4">
+              <summary className="cursor-pointer text-sm text-ooosh-700 hover:underline select-none">
+                History ({salary.length})
+              </summary>
+              <ul className="mt-2">
+                {salary.map((row, i) => {
+                  // The previous row in a DESC list is the NEXT one down.
+                  const prev = salary[i + 1];
+                  const delta = prev ? Number(row.annual_amount) - Number(prev.annual_amount) : null;
+                  return (
+                    <li key={row.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 py-2.5 border-t border-gray-100">
+                      <span className="text-[13px] text-gray-500 w-24 shrink-0">{fmtDate(row.effective_from)}</span>
+                      <span className="text-[15px] text-gray-900 tabular-nums">{money(row.annual_amount)}</span>
+                      {delta !== null && delta !== 0 && (
+                        <span className={`text-[13px] ${delta > 0 ? 'text-emerald-700' : 'text-red-700'}`}>
+                          {delta > 0 ? '+' : '−'}{money(Math.abs(delta))}
+                          <span className="text-gray-500"> ({((delta / Number(prev!.annual_amount)) * 100).toFixed(1)}%)</span>
+                        </span>
+                      )}
+                      {row.reason && <span className="text-[13px] text-gray-500 w-full sm:w-auto sm:ml-auto">{row.reason}</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </details>
+          )}
+        </Card>
 
-        {salary.length === 0 ? (
-          <p className="text-sm text-gray-400">No salary history. Past figures can be added with their own dates.</p>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-[11px] uppercase tracking-wide text-gray-500 text-left">
-                <th className="py-1 font-medium">From</th>
-                <th className="py-1 font-medium">Amount</th>
-                <th className="py-1 font-medium">Change</th>
-                <th className="py-1 font-medium">Why</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {salary.map((row, i) => {
-                // The previous row in a DESC list is the NEXT one down.
-                const prev = salary[i + 1];
-                const delta = prev ? Number(row.annual_amount) - Number(prev.annual_amount) : null;
-                return (
-                  <tr key={row.id}>
-                    <td className="py-1.5 text-gray-900">{fmtDate(row.effective_from)}</td>
-                    <td className="py-1.5 text-gray-900">{money(row.annual_amount)}</td>
-                    <td className="py-1.5">
-                      {delta === null ? <span className="text-gray-400">—</span>
-                        : delta === 0 ? <span className="text-gray-500">no change</span>
-                        : <span className={delta > 0 ? 'text-emerald-700' : 'text-red-700'}>
-                            {delta > 0 ? '+' : '−'}{money(Math.abs(delta))}
-                            <span className="text-gray-500">
-                              {' '}({((delta / Number(prev!.annual_amount)) * 100).toFixed(1)}%)
-                            </span>
-                          </span>}
-                    </td>
-                    <td className="py-1.5 text-gray-600">{row.reason || '—'}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* ── Pension ────────────────────────────────────────────────────── */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex flex-wrap items-center gap-3 mb-3">
-          <h3 className="text-sm font-semibold text-gray-900">Pension</h3>
+        {/* ── Pension ────────────────────────────────────────────────── */}
+        <Card title="Pension"
+          action={!addingPension && <button onClick={() => setAddingPension(true)} className={btnSecondary}>Record a change</button>}>
           {currentPension ? (
             currentPension.is_member ? (
-              <span className="text-sm text-gray-900">
-                {currentPension.employee_percent ?? '—'}% employee · {currentPension.employer_percent ?? '—'}% employer
-                {currentPension.scheme_name && <span className="text-gray-500"> · {currentPension.scheme_name}</span>}
-              </span>
+              <div className="mb-1">
+                <span className={big}>{currentPension.employee_percent ?? '—'}%</span>
+                <span className="text-[15px] text-gray-700 ml-1.5">them</span>
+                <span className={`${big} ml-4`}>{currentPension.employer_percent ?? '—'}%</span>
+                <span className="text-[15px] text-gray-700 ml-1.5">us</span>
+                <div className="text-xs text-gray-500 mt-2">
+                  {currentPension.scheme_name ? `${currentPension.scheme_name} · ` : ''}since {fmtDate(currentPension.effective_from)}
+                </div>
+              </div>
             ) : (
-              <span className="text-sm text-gray-600">Opted out since {fmtDate(currentPension.effective_from)}</span>
+              <Pill tone="muted">Opted out since {fmtDate(currentPension.effective_from)}</Pill>
             )
           ) : (
-            <span className="text-sm text-amber-700">Not recorded</span>
+            <Pill tone="warn">Not recorded</Pill>
           )}
-          {!addingPension && (
-            <button onClick={() => setAddingPension(true)} className="ml-auto text-xs text-ooosh-600 hover:underline">
-              Record a change
-            </button>
+
+          {addingPension && (
+            <div className="mt-4 p-4 rounded-xl border border-ooosh-200 bg-ooosh-50/40 space-y-3">
+              <label className="text-sm inline-flex items-center gap-2 text-gray-800">
+                <input type="checkbox" checked={isMember} onChange={e => setIsMember(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300" />
+                In the scheme
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-sm">
+                  <span className="block text-xs text-gray-600 mb-1">Employee %</span>
+                  <input value={empPct} onChange={e => setEmpPct(e.target.value.replace(/[^\d.]/g, ''))}
+                    disabled={!isMember} inputMode="decimal" placeholder="5" className={field} />
+                </label>
+                <label className="text-sm">
+                  <span className="block text-xs text-gray-600 mb-1">Employer %</span>
+                  <input value={erPct} onChange={e => setErPct(e.target.value.replace(/[^\d.]/g, ''))}
+                    disabled={!isMember} inputMode="decimal" placeholder="3" className={field} />
+                </label>
+                <label className="text-sm">
+                  <span className="block text-xs text-gray-600 mb-1">Scheme</span>
+                  <input value={scheme} onChange={e => setScheme(e.target.value)} disabled={!isMember}
+                    placeholder="e.g. NEST" className={field} />
+                </label>
+                <label className="text-sm">
+                  <span className="block text-xs text-gray-600 mb-1">From</span>
+                  <input type="date" value={pensionFrom} onChange={e => setPensionFrom(e.target.value)} className={field} />
+                </label>
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={() => void addPension()} disabled={saving || !pensionFrom} className={btnPrimary}>
+                  {saving ? 'Saving…' : 'Record'}
+                </button>
+                <button onClick={() => setAddingPension(false)} className={btnQuiet}>Cancel</button>
+              </div>
+            </div>
           )}
-        </div>
 
-        {addingPension && (
-          <div className="flex flex-wrap items-end gap-3 mb-3 p-3 rounded bg-gray-50 border border-gray-200">
-            <label className="text-sm inline-flex items-center gap-1.5 text-gray-700">
-              <input type="checkbox" checked={isMember} onChange={e => setIsMember(e.target.checked)}
-                className="w-3.5 h-3.5 rounded border-gray-300" />
-              In the scheme
-            </label>
-            <label className="text-sm">
-              <span className="block text-xs text-gray-600 mb-1">Employee %</span>
-              <input value={empPct} onChange={e => setEmpPct(e.target.value.replace(/[^\d.]/g, ''))}
-                disabled={!isMember} inputMode="decimal" placeholder="5"
-                className="w-20 px-2 py-1.5 border border-gray-300 rounded text-sm bg-white disabled:bg-gray-100" />
-            </label>
-            <label className="text-sm">
-              <span className="block text-xs text-gray-600 mb-1">Employer %</span>
-              <input value={erPct} onChange={e => setErPct(e.target.value.replace(/[^\d.]/g, ''))}
-                disabled={!isMember} inputMode="decimal" placeholder="3"
-                className="w-20 px-2 py-1.5 border border-gray-300 rounded text-sm bg-white disabled:bg-gray-100" />
-            </label>
-            <label className="text-sm">
-              <span className="block text-xs text-gray-600 mb-1">Scheme</span>
-              <input value={scheme} onChange={e => setScheme(e.target.value)} disabled={!isMember}
-                placeholder="e.g. NEST"
-                className="w-36 px-2 py-1.5 border border-gray-300 rounded text-sm bg-white disabled:bg-gray-100" />
-            </label>
-            <label className="text-sm">
-              <span className="block text-xs text-gray-600 mb-1">From</span>
-              <input type="date" value={pensionFrom} onChange={e => setPensionFrom(e.target.value)}
-                className="px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
-            </label>
-            <button onClick={() => void addPension()} disabled={saving || !pensionFrom}
-              className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
-              {saving ? 'Saving…' : 'Record'}
-            </button>
-            <button onClick={() => setAddingPension(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
-          </div>
-        )}
-
-        {pension.length === 0 ? (
-          <p className="text-sm text-gray-400">
-            No pension history. Opting out is worth recording too — “no row” and “opted out on a date”
-            are different facts, and only the second is evidence.
-          </p>
-        ) : (
-          <ul className="divide-y divide-gray-100 text-sm">
-            {pension.map(row => (
-              <li key={row.id} className="py-1.5 flex flex-wrap gap-x-3">
-                <span className="text-gray-900 w-28">{fmtDate(row.effective_from)}</span>
-                <span className="text-gray-900">
-                  {row.is_member
-                    ? `${row.employee_percent ?? '—'}% / ${row.employer_percent ?? '—'}%`
-                    : 'Opted out'}
-                </span>
-                {row.scheme_name && <span className="text-gray-500">{row.scheme_name}</span>}
-                {row.reason && <span className="text-gray-500">{row.reason}</span>}
-              </li>
-            ))}
-          </ul>
-        )}
+          {pension.length === 0 ? (
+            <p className="text-sm text-gray-400 mt-3">
+              No pension history. Opting out is worth recording too — “no row” and “opted out on a date”
+              are different facts, and only the second is evidence.
+            </p>
+          ) : (
+            <details className="mt-4">
+              <summary className="cursor-pointer text-sm text-ooosh-700 hover:underline select-none">
+                History ({pension.length})
+              </summary>
+              <ul className="mt-2">
+                {pension.map(row => (
+                  <li key={row.id} className="flex flex-wrap items-baseline gap-x-3 py-2.5 border-t border-gray-100">
+                    <span className="text-[13px] text-gray-500 w-24 shrink-0">{fmtDate(row.effective_from)}</span>
+                    <span className="text-[15px] text-gray-900">
+                      {row.is_member
+                        ? `${row.employee_percent ?? '—'}% / ${row.employer_percent ?? '—'}%`
+                        : 'Opted out'}
+                    </span>
+                    {row.scheme_name && <span className="text-[13px] text-gray-500">{row.scheme_name}</span>}
+                    {row.reason && <span className="text-[13px] text-gray-500">{row.reason}</span>}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </Card>
       </div>
     </div>
   );
