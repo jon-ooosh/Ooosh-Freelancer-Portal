@@ -418,8 +418,23 @@ export async function syncEntitlement(
   const alreadyGranted = Number(granted.rows[0].total);
   const delta = Math.round(totalMinutes) - alreadyGranted;
 
+  // Company days that fall on this person's days off (spec §20.5b) — credited
+  // here so the same daily sync and the same "Update entitlement" button keep
+  // them right. Its own source_type, so it never touches the sum above. A
+  // failure must not stop the entitlement itself.
+  let lieuMinutes = 0;
+  try {
+    const { syncCompanyDayLieu } = await import('./staff-company-days');
+    lieuMinutes = await syncCompanyDayLieu(personId, year, userId);
+  } catch (err) {
+    console.error(`[staff-balance] day-in-lieu sync for ${personId} ${year} failed:`, err);
+  }
+
   if (delta === 0) {
-    return { targetMinutes: Math.round(totalMinutes), postedMinutes: 0, segments, reason: 'Already up to date' };
+    return {
+      targetMinutes: Math.round(totalMinutes), postedMinutes: lieuMinutes, segments,
+      reason: lieuMinutes !== 0 ? 'Days in lieu for company days updated' : 'Already up to date',
+    };
   }
 
   // An entitlement row cannot be negative (DB constraint), so a claw-back —
@@ -442,7 +457,7 @@ export async function syncEntitlement(
 
   return {
     targetMinutes: Math.round(totalMinutes),
-    postedMinutes: delta,
+    postedMinutes: delta + lieuMinutes,
     segments,
     reason: alreadyGranted === 0 ? 'Initial grant' : 'Recalculated',
   };

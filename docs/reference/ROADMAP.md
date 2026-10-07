@@ -39,7 +39,7 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | — | Freelancer onboarding | Phases A–C shipped; D next | `INTEGRATIONS.md` |
 | — | Staff documents & training | Live | `INTEGRATIONS.md` |
 | — | Possible insurance claims (replaces the broker's Word form) | **Closed, Oct 2026** — case file, client form, reminders, GPS trace, SMS all live; video and retention not built | `docs/INCIDENT-CLAIMS-SPEC.md` (§22 troubleshooting) |
-| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **LIVE, staff using it from Oct 2026 — expected complete.** Patterns, ledger, leave, overtime bank, payroll export (emailed on the 1st), absence, freelancer days, company days, working from home, personal calendar feed; Me area redesigned; 2026 backfilled from BrightHR. Only cover intelligence (Phase F) is deliberately left, see spec §16 | `docs/STAFF-CALENDAR-SPEC.md` §18 |
+| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **LIVE, staff using it from Oct 2026 — expected complete.** Patterns, ledger, leave, overtime bank, payroll export (emailed on the 1st), absence, freelancer days, company days, working from home, personal calendar feed, days in lieu for company days, manual balance adjustments; Me area and every Staff page tab redesigned; 2026 backfilled from BrightHR. Only cover intelligence (Phase F) is deliberately left, see spec §16 | `docs/STAFF-CALENDAR-SPEC.md` §18 |
 
 **Monday.com is fully retired** (Jul 2026). Some fallback code and unused env vars
 remain in the portal repos and can be swept.
@@ -73,7 +73,7 @@ to come up:
 - Interim assessment PDF on the swapped-out van.
 
 **Not started**
-- Staff calendar — **everything planned has shipped** (Oct 2026: working from home, the personal calendar feed and the payroll email closed it). Left on purpose, each shaped in `docs/STAFF-CALENDAR-SPEC.md` §16: **cover intelligence** (Phase F — wants a season of real data; jon to fill in `staff.min_headcount_by_weekday` first), on-site / travelling locations, half-day WFH, a team feed. §18 "Where it stands" is the handover.
+- Staff calendar — **everything planned has shipped** (Oct 2026: working from home, the personal calendar feed, the payroll email, days in lieu for company days and the Staff page restyle closed it). Open with jon, not code: an HR-advisor check on the lieu-day policy (spec §20.5b); compare Chris's and Matt's BrightHR TOIL balances for any more 2025 carry-over (add with the balance panel's adjustment form). Left on purpose, each shaped in `docs/STAFF-CALENDAR-SPEC.md` §16: **cover intelligence** (Phase F — wants a season of real data; jon to fill in `staff.min_headcount_by_weekday` first), on-site / travelling locations, half-day WFH, a team feed. §18 "Where it stands" is the handover.
 - Sub-hires module (`job_subhires`).
 - Global operations dashboard widgets (transport, crew, deliveries, carnets, lost property, rehearsals, payments).
 - Initial card collection from OP (PaymentIntent create) — staff still walk to the terminal.

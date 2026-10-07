@@ -697,6 +697,15 @@ router.get('/company-days', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// A company day added or withdrawn changes who is owed a day in lieu (spec
+// §20.5b). The 06:05 sync would catch it tomorrow; this makes it show today.
+// Fire-and-forget — the response does not wait on everybody's ledger.
+function refreshLieuDays(): void {
+  void import('../services/staff-balance')
+    .then(m => m.runEntitlementSyncForOpenYears())
+    .catch(err => console.error('[staff-calendar] day-in-lieu refresh failed:', err));
+}
+
 // POST /api/staff-calendar/company-days
 router.post('/company-days', adminOnly, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
@@ -710,6 +719,7 @@ router.post('/company-days', adminOnly, async (req: AuthRequest, res: Response) 
 
   try {
     const day = await createCompanyDay(parsed.data, req.user!.id);
+    refreshLieuDays();
     // Offered, never applied: anyone who had already booked the day off has
     // paid for something the company has now given them, and handing it back
     // is a decision a human makes (§20.3).
@@ -749,6 +759,7 @@ router.post('/company-days/:id/cancel', adminOnly, async (req: AuthRequest, res:
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
   try {
     await cancelCompanyDay(req.params.id as string, parsed.data.reason, req.user!.id);
+    refreshLieuDays();
     res.json({ data: await getCompanyDay(req.params.id as string) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel that day' });

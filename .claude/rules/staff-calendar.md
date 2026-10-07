@@ -386,6 +386,25 @@ something they are now being given. The create response carries
 `correction` credit and a stamp. **Offered, never automatic.** Withdrawing a
 company day deliberately does NOT re-debit what was handed back.
 
+## A company day on your day off is a day in lieu (§20.5b, Oct 2026)
+
+`syncCompanyDayLieu()` (`staff-company-days.ts`) credits ONE nominal day to
+anyone whose RAW pattern has them off on a company day — same number of days
+for everyone, not pro-rata (jon). It runs inside `syncEntitlement()`, so the
+06:05 sync and "Update entitlement" keep it right, and adding or withdrawing a
+company day refreshes it at once. Credited in advance, dated on the company day.
+
+- **Its own `source_type`, `company_day_lieu`** (migration 278). Never `system`
+  — `syncEntitlement` sums that for its own delta and would correct the lieu
+  away — and never `manual`, or it cannot tell its own postings apart.
+- **It follows the calendar**: idempotent per date, posting the difference, so
+  a change of working days or a withdrawn company day TAKES THE DAY BACK. This
+  is deliberately unlike the reclaim (a company day over a BOOKED holiday),
+  which is offered by a human and never re-debited.
+- Read the raw contract (`includeCompanyDays: false`) — with company days
+  applied every one of those dates reads "not scheduled" for everybody.
+- Shown on My Time as a "Day in lieu" row.
+
 ## Absence wins the calendar, and both rows survive
 
 `mergeAbsenceLayer()` in `staff-day-status.ts` is the ONLY place leave and
