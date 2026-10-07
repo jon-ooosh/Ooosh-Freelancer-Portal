@@ -908,7 +908,18 @@ router.get('/studio-sitter/shifts/:date', async (req: PortalRequest, res: Respon
     const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
     if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
     const detail = await getSitterShiftDetail(date, req.portalUser!.id);
-    res.json({ success: true, ...detail });
+    // Tonight's tasks (STAFF-CALENDAR-SPEC §21). A failure costs the list, not the page.
+    let tasks: ReturnType<typeof presentFreelancerTask>[] = [];
+    try {
+      const shiftId = await resolveOpenShiftId(date);
+      if (shiftId) {
+        const { listTasks } = await import('../services/freelancer-tasks');
+        tasks = (await listTasks({ kind: 'shift', id: shiftId })).map(presentFreelancerTask);
+      }
+    } catch (err) {
+      console.error('Portal sitter shift tasks error (non-fatal):', err);
+    }
+    res.json({ success: true, ...detail, tasks });
   } catch (error) {
     console.error('Portal sitter shift detail error:', error);
     res.status(500).json({ error: 'Failed to load shift' });
@@ -1845,6 +1856,20 @@ router.post('/settings/notifications', async (req: PortalRequest, res: Response)
  * cancelled it and the internal note are ours, not theirs — and `personName` is
  * pointless on a list of their own days.
  */
+/** What the portal shows of a task — the wording comes from taskTitle(). */
+function presentFreelancerTask(t: import('../services/freelancer-tasks').FreelancerTask) {
+  return {
+    id: t.id,
+    taskType: t.taskType,
+    title: t.title,
+    // An 'other' task's description IS its title; a van prep's is extra detail.
+    detail: t.taskType === 'van_prep' ? t.description : null,
+    vehicleReg: t.vehicleReg,
+    status: t.status,
+    doneAt: t.doneAt,
+  };
+}
+
 function presentDayBooking(b: import('../services/freelancer-days').DayBooking) {
   return {
     id: b.id,
@@ -1892,11 +1917,24 @@ router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
     const past = all.filter(b => b.bookingDate < today
       && ['offered', 'accepted', 'completed'].includes(b.status)).slice(0, 10);
 
+    // Each upcoming day's tasks (STAFF-CALENDAR-SPEC §21) — a live list, so it is
+    // read on every load. A failure costs the lists, not the page.
+    const { listTasks } = await import('../services/freelancer-tasks');
+    const upcomingWithTasks = await Promise.all(upcoming.map(async (b) => {
+      let tasks: ReturnType<typeof presentFreelancerTask>[] = [];
+      try {
+        tasks = (await listTasks({ kind: 'booking', id: b.id })).map(presentFreelancerTask);
+      } catch (err) {
+        console.error('Portal day-booking tasks error (non-fatal):', err);
+      }
+      return { ...presentDayBooking(b), tasks };
+    }));
+
     res.json({
       success: true,
       // The one they have to DO something about, so the portal can lead with it.
       awaitingReply: upcoming.filter(b => b.status === 'offered').length,
-      upcoming: upcoming.map(presentDayBooking),
+      upcoming: upcomingWithTasks,
       past: past.map(presentDayBooking),
     });
   } catch (error) {
@@ -1943,6 +1981,27 @@ router.post('/day-bookings/:id/respond', async (req: PortalRequest, res: Respons
     res.json({ success: true, booking: presentDayBooking(updated) });
   } catch (error) {
     console.error('Portal day-booking respond error:', error);
+    res.status(500).json({ success: false, error: 'That did not save' });
+  }
+});
+
+// ── Freelancer tasks: tick one off (STAFF-CALENDAR-SPEC §21) ──────────
+//
+// Only the person doing the day / on the evening can tick, and "not yours"
+// reads the same as "does not exist". A van prep is ticked by saving the prep
+// sheet, not here.
+router.post('/freelancer-tasks/:id/done', async (req: PortalRequest, res: Response) => {
+  try {
+    const { markDoneFromPortal } = await import('../services/freelancer-tasks');
+    const task = await markDoneFromPortal(String(req.params.id), req.portalUser!.id);
+    res.json({ success: true, task: presentFreelancerTask(task) });
+  } catch (error) {
+    const status = (error as { status?: number })?.status;
+    if (status === 404 || status === 409) {
+      res.status(status).json({ success: false, error: (error as Error).message });
+      return;
+    }
+    console.error('Portal freelancer task done error:', error);
     res.status(500).json({ success: false, error: 'That did not save' });
   }
 });

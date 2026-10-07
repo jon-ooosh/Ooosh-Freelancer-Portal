@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { dayMarker } from '../lib/companyCalendar';
 import { QuarterHourSelect } from '../components/QuarterHourSelect';
+import FreelancerTasksPanel from '../components/FreelancerTasksPanel';
 import { useAuthStore } from '../hooks/useAuthStore';
 
 /**
@@ -1128,6 +1129,14 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
         <button onClick={onClose} className="ml-auto text-sm text-gray-500 hover:underline">Close</button>
       </div>
       {booking.notes && <p className="text-sm text-gray-600">{booking.notes}</p>}
+
+      {/* What they are doing on the day — a live list (STAFF-CALENDAR-SPEC §21).
+          Read-only once the day is no longer offered / accepted. */}
+      {['offered', 'accepted', 'completed'].includes(booking.status) && (
+        <div className="pt-2 border-t border-amber-100">
+          <FreelancerTasksPanel key={booking.id} owner={{ bookingId: booking.id }} />
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-2">
         {booking.status === 'offered' && (

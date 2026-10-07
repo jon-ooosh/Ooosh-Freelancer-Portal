@@ -267,6 +267,7 @@ existing definition:
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
+| A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |
 | Who can be given something to do? | `services/assignable-staff.ts` — active + staff role + a CURRENT employment record. Shared by To Do's "For" picker and `/users?assignable=true` |
 | May this person change this task? | `services/staff-tasks.ts` `assertCanTouch()` — owner, setter or admin |
 | When does a repeating to-do fall next? | `services/task-recurrence.ts` (pure; the form asks it via `/staff-tasks/series/preview`) |
@@ -383,7 +384,7 @@ chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last mont
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
-09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
+09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 · sitter task summary 16:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop close reminder Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·

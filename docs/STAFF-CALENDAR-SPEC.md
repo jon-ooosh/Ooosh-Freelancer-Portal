@@ -2042,7 +2042,7 @@ visible on the calendar and a one-off covers it if that was the intent.
 
 ---
 
-## 21. Freelancer tasks — PLANNED (Oct 2026)
+## 21. Freelancer tasks — PHASE 1 BUILT (Oct 2026, migration 276)
 
 Replaces the `freelancer_day_booking_tasks` sketch in §3.8, which was never
 built. Agreed with jon, 7 Oct 2026, before any code.
@@ -2066,8 +2066,13 @@ nicety.
    any point: before the offer, after acceptance, on the day itself. The
    portal reads the current list every time it opens.
 4. **No email per change.** Staff add what they need, then press **"Send
-   update"** if they think the freelancer needs telling. The offer email lists
-   whatever tasks exist when it goes out.
+   update"** if they think the freelancer needs telling. Tonight's SITTER also
+   gets ONE summary at 16:00 — only if there are open tasks and something
+   changed since they were last told; no tasks, no email; changes after 16:00
+   are not chased, they show on the portal (jon, 8 Oct 2026). *(Built
+   differently from the first draft: the offer email does NOT list tasks. The
+   offer goes the moment the day is booked, before anyone has added a task, so
+   it would almost always be empty — "Send update" covers it.)*
 5. **Van prep ticks itself.** A saved prep for that van closes the task — the
    freelancer never ticks twice. Other tasks get a "Done" button.
 6. **The prep link uses a narrow pass, like book-out** (option B of the
@@ -2081,7 +2086,6 @@ nicety.
 ```sql
 freelancer_tasks
   id              UUID PK
-  task_date       DATE NOT NULL            -- the day it is for (= booking_date / shift_date)
   day_booking_id  UUID REFERENCES freelancer_day_bookings(id)
   shift_id        UUID REFERENCES studio_sitter_shifts(id)
   -- exactly one owner:
@@ -2103,17 +2107,18 @@ freelancer_tasks
 Plus `last_tasks_notified_at TIMESTAMPTZ` on both owners, so the "Send
 update" button can say "3 changes since you last told them".
 
-**There is no `person_id`, on purpose.** The person is read through the
-owner: the booking's `person_id`, or the shift's live assignment. So a sitter
+**There is no `person_id` and no date, on purpose** (the first draft had a
+`task_date`; it was dropped at build so an amended booking date cannot leave
+its tasks behind). Both are read through the owner: the booking's `person_id`, or the shift's live assignment. So a sitter
 reassigned on the day takes the shift's tasks with them to the new sitter —
 the same reason handover notes are shift-anchored. A cancelled booking leaves
 its open tasks visible to staff as "nobody has these now" (a warning, never a
 silent drop — tasks are soft-cancelled, never deleted).
 
-**Each owner is looked up once**, in a new `services/freelancer-tasks.ts`:
-`tasksForBooking()`, `tasksForShift()`, `ownerPerson(task)`,
-`bookedFreelancersFor(dates)` (the "who could I give this to?" list, merging
-day bookings and sitter shifts). Nothing else re-derives who owns a task.
+**Each owner is looked up once**, in `services/freelancer-tasks.ts`:
+`getOwnerContext(owner)` (its date, whether it is live, who is doing it),
+`listTasks(owner)`, `ownerOf(task)`. Phase 3 adds `bookedFreelancersFor(dates)`
+(the "who could I give this to?" list). Nothing else re-derives who owns a task.
 
 ### 21.4 Staff surfaces
 
@@ -2134,8 +2139,9 @@ day bookings and sitter shifts). Nothing else re-derives who owns a task.
 - **Sitter shift** — `src/app/shift/[date]` gains a "Tasks tonight" section
   above the handover notes.
 - Each `van_prep` task: **"Open prep sheet"**. Each `other` task: **"Done"**.
-- Tasks show from the day before onwards, and on offered bookings too —
-  the freelancer should see what the day involves before accepting it.
+- Tasks show on every upcoming day, offered ones included — the freelancer
+  should see what the day involves before accepting it. *(The draft said "from
+  the day before"; a live list has no reason to hide.)*
 
 ### 21.6 The prep link
 
@@ -2171,10 +2177,35 @@ narrow session JWT.
 2. The prep link (§21.6) — the biggest single piece.
 3. "Give to a freelancer" from the van side.
 
-### 21.8 Open, to settle at build
+### 21.8 Settled at build (8 Oct 2026)
 
-- The Send update email: one template for both owners
-  (`freelancer_tasks_updated`), or reuse `freelancer_day_updated` for bookings
-  and add one for sitters. Leaning one template.
-- Whether a sitter is told about tasks added to an evening they have not yet
-  confirmed.
+- **One email template**, `freelancer_tasks_updated`, for both owners; body
+  built in `freelancer-tasks.ts` and passed as `bodyHtmlOverride`. Needs adding
+  to `EMAIL_LIVE_TEMPLATES` while the server is in `EMAIL_MODE=test`.
+- **Sitters are told by the 16:00 summary** (decision 4), confirmed or not.
+
+### 21.9 Phase 1 — what shipped
+
+- Migration **276**: `freelancer_tasks` (CHECKs: exactly one owner; a van prep
+  names its van; an 'other' task has text) + `last_tasks_notified_at` on both
+  owners.
+- `services/freelancer-tasks.ts` — the owner lookup, CRUD (soft-cancel only),
+  `markDoneFromPortal()` (refuses a van prep: the prep sheet ticks those),
+  `autoTickPrep()`, `sendTasksUpdate()`, `runSitterTaskDigest()`.
+- `routes/freelancer-tasks.ts` (`/api/freelancer-tasks`, STAFF_ROLES): list,
+  add, edit, remove, tick/un-tick, send-update. A job is named by its HireHop
+  number and resolved to OP's job on save.
+- Auto-tick: `POST /vehicles/save-event` with a `Prep Completed` event closes
+  open van-prep tasks for that van on live owners dated yesterday → tomorrow,
+  fire-and-forget, recording the saver's person when it is staff.
+- Scheduler: sitter task summary daily at **16:00**.
+- Staff UI: `components/FreelancerTasksPanel.tsx`, on the calendar booking panel
+  (offered / accepted editable, completed read-only) and as a "📋 Tasks (N)"
+  button per evening on Operations › Rehearsals (`task_count` on the roster).
+- Portal: tasks on each upcoming yard-day card (dashboard) and a "Tasks
+  tonight" card on `shift/[date]`; `components/FreelancerTaskList.tsx`; "Done"
+  via `POST /api/portal/freelancer-tasks/:id/done`.
+- **Known gap:** a sitter swapped in after the previous sitter was told (by
+  Send update or the 16:00 summary) is not emailed unless a task then changes —
+  they see the list on the portal.
+- **Next:** phase 2, the prep link (§21.6).
