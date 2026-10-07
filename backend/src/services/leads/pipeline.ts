@@ -14,6 +14,7 @@ import { collectAll } from './collector';
 import { detectTours, SearchWindow } from './detector';
 import { scoreLeads } from './scorer';
 import { runMatching, linkKnownContacts } from './matcher';
+import { syncAllTourJobs } from './tour-jobs';
 import { researchContacts } from './researcher';
 
 async function num(key: string, fallback: number): Promise<number> {
@@ -86,6 +87,7 @@ export async function runPipeline(runId: string, window?: SearchWindow): Promise
     const collection = await collectAll(searchWindow);
     const detection = await detectTours(runId, { window: searchWindow, tourMinDates, tourWindowWeeks });
     const matching = await runMatching();
+    const tourJobs = await syncAllTourJobs();
     const scoring = await scoreLeads();
     const research = await researchContacts();
     const known = await linkKnownContacts();
@@ -94,7 +96,7 @@ export async function runPipeline(runId: string, window?: SearchWindow): Promise
       `UPDATE lead_runs SET status = 'complete', finished_at = NOW(), counts = $2 WHERE id = $1`,
       [runId, JSON.stringify({
         window: searchWindow, custom_window: Boolean(window),
-        collection, detection, matching, scoring, research, known, tmCalls: getTicketmasterCallCount(),
+        collection, detection, matching, tourJobs, scoring, research, known, tmCalls: getTicketmasterCallCount(),
       })],
     );
     console.log('[leads/pipeline] run %s complete', runId);
@@ -113,12 +115,13 @@ export async function runPipeline(runId: string, window?: SearchWindow): Promise
 export async function runProcessExisting(runId: string): Promise<void> {
   try {
     const matching = await runMatching();
+    const tourJobs = await syncAllTourJobs();
     const scoring = await scoreLeads();
     const research = await researchContacts();
     const known = await linkKnownContacts();
     await query(
       `UPDATE lead_runs SET status = 'complete', finished_at = NOW(), counts = $2 WHERE id = $1`,
-      [runId, JSON.stringify({ mode: 'process_existing', matching, scoring, research, known })],
+      [runId, JSON.stringify({ mode: 'process_existing', matching, tourJobs, scoring, research, known })],
     );
     console.log('[leads/pipeline] process-existing run %s complete', runId);
   } catch (err) {

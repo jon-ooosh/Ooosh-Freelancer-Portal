@@ -4,7 +4,8 @@
  *
  * A lead shows while it is:
  *   - still 'new' — nobody has started an enquiry, dismissed it, or marked it
- *     contacted (those are the ways off the card);
+ *     contacted (those are the ways off the card) — and the tour has no open or
+ *     booked job linked to it already (services/leads/tour-jobs.ts);
  *   - still sellable — its first UK date is beyond the same "too imminent"
  *     floor the search uses (lead_lookahead_min_weeks), so a lead ages off the
  *     card once it's too late to act, rather than lingering forever;
@@ -17,6 +18,7 @@
  */
 import { query } from '../../config/database';
 import { getSystemSetting } from '../../routes/system-settings';
+import { liveTourJobSql } from './tour-jobs';
 
 export interface LeadAttentionItem {
   id: string;
@@ -48,6 +50,8 @@ export async function getLeadAttention(limit = 5): Promise<{ total: number; item
        LEFT JOIN organisations o ON o.id = l.matched_organisation_id
       WHERE l.status = 'new'
         AND l.first_date >= CURRENT_DATE + ($3::int * 7)
+        -- Already quoted or booked for this tour — nothing to look at.
+        AND NOT ${liveTourJobSql('l')}
         AND (
           (l.stream = 'warm' AND l.relevance_score >= $1::numeric)
           OR (l.stream = 'cold' AND l.relevance_score >= $2::numeric)

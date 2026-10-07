@@ -518,6 +518,14 @@ id), is tracked (`researched_at` / `research_status` — no retrying dead ends e
 retry), cap 40. Research again (`POST /:id/research`, background) and hand-added contacts
 (`POST/DELETE /:id/contacts`, `manual: true`, kept through re-research). Spec §17–18.
 
+**Jobs for this tour** (Oct 2026, migration 279): `lead_tour_jobs` + `services/leads/tour-jobs.ts`
+— jobs whose dates overlap the tour ±14 days are auto-linked when the band's org matches
+(management-company matches: only jobs named after the band), suggested when only named after
+the band, or linked by hand; unlinking is remembered. An open/booked linked job → In pipeline,
+off the dashboard card, and Start enquiry / Log outreach refuse (no duplicate enquiries); only
+lost/cancelled/dismissed → "Dismiss — already quoted". Spec §19. **§20 of the spec is the
+current state + what's left.**
+
 **Deferred (agreed, not built):** scheduled weekly run (jon: keep manual for now); outreach-email drafting — folds into the auto-chase "voice"
 work on the Enquiries pipeline rather than being built separately.
 

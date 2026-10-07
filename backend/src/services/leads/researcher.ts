@@ -23,6 +23,7 @@ import { query } from '../../config/database';
 import { getSystemSetting } from '../../routes/system-settings';
 import { fetchArtistLinks, describeLinks, ArtistLinks } from './links';
 import { logLeadEvent } from './events';
+import { dateOnly } from './dates';
 
 const MODEL_ID = CLAUDE_SONNET_MODEL;
 /** An empty or failed result is tried again by a run only after this long. */
@@ -95,11 +96,8 @@ function parseJson(text: string): { contacts?: Contact[]; notes?: string } | nul
   try { return JSON.parse(t); } catch { return null; }
 }
 
-function ymd(v: unknown): string | null {
-  if (!v) return null;
-  const d = new Date(v as string);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
-}
+/** DATE → 'YYYY-MM-DD' (timezone-safe — see dates.ts). */
+const ymd = dateOnly;
 
 async function askClaude(lead: LeadRow, links: ArtistLinks): Promise<{ contacts: Contact[]; notes: string }> {
   const client = getAnthropicClient();

@@ -25,6 +25,7 @@ import { getSystemSetting } from '../../routes/system-settings';
 import { normaliseArtist } from './normalise';
 import { getClientHistory, describeHistory, bandNameRegex, ClientHistory } from './history';
 import { logLeadEvent } from './events';
+import { dateOnly } from './dates';
 
 export { normaliseArtist };
 
@@ -150,11 +151,8 @@ export async function appendOrgSummary(orgId: string, summary: string, today: st
   );
 }
 
-function iso(d: unknown): string | null {
-  if (!d) return null;
-  const x = new Date(d as string);
-  return Number.isNaN(x.getTime()) ? null : x.toISOString().slice(0, 10);
-}
+/** DATE → 'YYYY-MM-DD' (timezone-safe — see dates.ts). */
+const iso = dateOnly;
 
 /**
  * Link a lead to an org as its warm match and compute its history. Used by the

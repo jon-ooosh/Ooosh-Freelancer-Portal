@@ -1,5 +1,9 @@
 # TOUR-FINDER-SPEC.md — Leads module (Cold + Warm lead discovery)
 
+> **Status (Oct 2026): LIVE under Jobs → Leads.** §1–13 are the original design; §14–19 are
+> what was built on top of it, in order. **§20 is the current state and what's left — read
+> that first.**
+
 ## 1. Motivation
 
 Bring the standalone `ooosh-tour-finder` (a Python service on the Hetzner box, run
@@ -241,7 +245,7 @@ Value:
 9. *(Later)* Dashboard surfacing.
 10. *(Later)* Phase 7 Gmail outreach drafts.
 
-## 12. Out of scope / deferred (deliberate)
+## 12. Out of scope / deferred (deliberate) — original list; superseded by §20
 
 - Widening data sources beyond Ticketmaster + the 24 venues.
 - Auto-creating address-book records from cold leads (staff-gated create instead).
@@ -249,7 +253,7 @@ Value:
 - Dashboard/home surfacing (after v1).
 - A dedicated `lead_contacts` table (jsonb on the lead until it earns a table).
 
-## 13. Open items to confirm at build time
+## 13. Open items to confirm at build time — all resolved in the v1 build (historical)
 
 - Exact column/endpoint for the org **AI Summary / AI Research** panels (they exist as
   placeholders — confirm the field names).
@@ -406,4 +410,72 @@ Paid directories were ruled out for the same reason.
 - **Add contacts by hand** (`POST /:id/contacts`, `DELETE /:id/contacts/:idx`). These are
   `manual: true` and survive any re-research; researched duplicates of them, matched by
   email, are dropped. Add to address book treats them like any other contact.
+
+## 19. Jobs for this tour (BUILT, Oct 2026)
+
+Many leads turned out to be tours we'd already quoted, booked or lost. Migration 279
+adds `lead_tour_jobs`, and `services/leads/tour-jobs.ts` is the one definition.
+
+- **Window:** a job belongs to the tour if its dates overlap the tour widened by
+  **14 days either side**. jon: bands start or finish in the UK around EU legs, and
+  rehearsals and collections come before the first date. A job's dates are its out/job date
+  to its return/end date.
+- **Auto-link:** when the lead is matched to the band's org (by name, confirmed, or created),
+  any of that org's jobs in the window are linked. That uses the org Hire History set:
+  client or any `job_organisations` role. If the match is via a management company
+  (`match_via = 'job_name'`), only that company's jobs named after the band count.
+- **Suggest:** a job that's only *named* after the band is suggested, with Yes / Not this one.
+- **By hand:** a job can be linked by hand (the band's recent jobs, or a HireHop job number)
+  and unlinked. An unlinked job is kept as `rejected`, so automation never re-links it.
+- **Refresh:** links are re-synced after matching on every search and re-process, and on
+  confirm-match, add-to-address-book and restore. The job's outcome is always read live
+  (`TOUR_JOB_OUTCOME_SQL`: open / booked / lost / cancelled / dismissed — a dismissed
+  enquiry is an overlay, checked first).
+- **What a link does to the lead:**
+  - An **open or booked** linked job (`liveTourJobSql()`) moves the lead to **In pipeline**
+    (`STAGE_SQL`) and takes it off the dashboard card.
+  - Start enquiry and Log outreach-with-enquiry refuse with a 409 ("already a job for this
+    tour"), so the pipeline and the band's history never get a duplicate.
+  - Only **lost / cancelled / dismissed** jobs leave it in To review with a one-click
+    **Dismiss — already quoted**, which records reason `already_handled` and names the jobs.
+- **Scoring:** unchanged. The job is already in the band's history once. A linked job isn't
+  counted as a Lead Finder "win"; only enquiries made *from* a lead would be (jon, Oct 2026).
+- **Dates:** `services/leads/dates.ts` `dateOnly()` reads DATE columns timezone-safely.
+  node-postgres returns DATE as local midnight, so `toISOString()` moved summer dates back a
+  day on a UK-time server.
+
+## 20. Current state and what's left (Oct 2026)
+
+**Built and live (§14–19):**
+- Ticketmaster search with a per-run window, AI scoring that weighs OOOSH history, and
+  matching three ways: org name, jobs named after the band, known contacts.
+- Stage tabs, filters and batches, Search history, and an activity log per lead.
+- Contact research: management, band and tour manager first; the band's own links as
+  starting points; dead ends tracked; Research again; contacts added by hand.
+- Add to address book (editable names, shared inboxes saved as the band's email), Start
+  enquiry, and Log outreach (a chased Cold enquiry).
+- Unanswered outreach isn't counted as a loss.
+- Dismiss reasons with suppression, a dashboard card, and jobs for this tour.
+
+**Deliberately not built (decisions):**
+- **Scheduled weekly run** — jon wants searches run by hand (batches before quiet spells).
+  `lead_auto_run_enabled` is seeded but unwired. To build it: a node-cron entry calling
+  `createRun(null, 'scheduled')` + `runPipeline()`, gated on the setting.
+- **Promoters, booking agents and paid directories** as contact sources — the wrong people
+  for touring work.
+- **Agency grouping** — same reason.
+- **Lead Finder "wins" reporting** — not asked for. If it's built, count only enquiries made
+  FROM a lead (`converted_job_id`), never linked tour jobs.
+
+**Open / next candidates:**
+- **Outreach email drafting** (§6 Phase 7) — folds into the auto-chase "voice" work on the
+  Enquiries pipeline (AUTO-CHASE-SPEC) rather than being built separately.
+- **The reverse link** — a "Tour spotted by the Lead Finder" note on the job page, using
+  `lead_tour_jobs`.
+- **MusicBrainz value check** — jon expects little from it. Look at how often `external_links`
+  carries MusicBrainz-only links; drop it if it adds nothing.
+- **A DATE type parser platform-wide** — any code doing `toISOString()` on a DATE column has
+  the same day-shift risk on a UK-time server. Leads is fixed (`dateOnly()`). A global
+  `pg.types.setTypeParser(1082, v => v)` would fix the rest, but it changes every DATE from a
+  Date to a string, so it needs its own audit.
 
