@@ -316,6 +316,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '274_incoming_bank_payments_xero.sql',
         '275_incoming_bank_payments_dedup.sql',
         '276_freelancer_tasks.sql',
+        '277_leads_events_and_research.sql',
       ];
 
       for (const migration of migrations) {

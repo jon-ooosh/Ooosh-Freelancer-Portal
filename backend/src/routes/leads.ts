@@ -4,6 +4,8 @@
  * Endpoints:
  *   GET   /                          — list leads (?view=hidden for dismissed / not relevant)  STAFF
  *   GET   /runs/latest               — most recent pipeline run (status + counts)              STAFF
+ *   GET   /runs                      — search history (last 30 runs + how many leads each found) STAFF
+ *   GET   /:id/events                — the lead's activity timeline                             STAFF
  *   GET   /settings                  — the 'leads' system-settings (+ default search window)   STAFF
  *   POST  /run                       — kick off a pipeline run (optional {from, to} window)    MANAGER
  *   POST  /process-existing          — match → score → research existing leads, no crawl       MANAGER
@@ -40,6 +42,7 @@ import {
   createOrganisation, linkPersonToOrganisation, isGenericMailbox, addOrganisationEmail,
 } from '../services/address-book-resolve';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
+import { logLeadEvent } from '../services/leads/events';
 
 const router = Router();
 router.use(authenticate);
@@ -49,12 +52,31 @@ const LEAD_COLUMNS = `
   relevance_score, client_tier, origin_country, is_international, reasoning, ai_summary, scored_at,
   matched_organisation_id, match_confidence, match_candidates, match_via, rejected_org_ids, stream, contacts,
   client_history, history_scored_at, known_contacts,
-  status, status_reason, status_note, assigned_to, converted_job_id, created_at, updated_at`;
+  status, status_reason, status_note, assigned_to, converted_job_id, created_at, updated_at,
+  first_run_id, contacted_at, researched_at, research_status, external_links`;
 
 // Same columns, prefixed for the list query's joins.
 const LEAD_COLUMNS_PREFIXED = LEAD_COLUMNS.split(',').map((c) => `l.${c.trim()}`).join(', ');
 
 const HIDDEN_STATUSES = `('dismissed', 'not_relevant')`;
+
+/**
+ * Where a lead has got to — the Leads page tabs. ONE definition (the frontend
+ * reads `stage` off the row rather than re-deriving it):
+ *   review    — new / reviewing: nobody has acted yet
+ *   contacted — outreach logged, no enquiry
+ *   pipeline  — an enquiry exists (Start enquiry, or outreach with an enquiry)
+ *   dismissed — dismissed, or the AI marked it not relevant
+ */
+const STAGE_SQL = `CASE
+    WHEN l.status IN ${HIDDEN_STATUSES} THEN 'dismissed'
+    WHEN l.converted_job_id IS NOT NULL OR l.status = 'converted' THEN 'pipeline'
+    WHEN l.status = 'contacted' THEN 'contacted'
+    ELSE 'review' END`;
+
+/** "First name" of whoever did an event — users → people. */
+const EVENT_ACTOR_SQL = `(SELECT COALESCE(NULLIF(pp.preferred_name, ''), pp.first_name)
+     FROM users uu JOIN people pp ON pp.id = uu.person_id WHERE uu.id = e.user_id)`;
 
 /** Researched contact type → person ↔ org role (PERSON_ORG_ROLES). */
 const CONTACT_ROLE: Record<string, string> = {
@@ -105,7 +127,9 @@ router.get('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respons
     // prev_* = the act's previous tour lead, so "you passed last time because…"
     // (and "flag their next tour") shows on the new one.
     const result = await query(
-      `SELECT ${LEAD_COLUMNS_PREFIXED}, o.name AS matched_org_name,
+      `SELECT ${LEAD_COLUMNS_PREFIXED}, o.name AS matched_org_name, ${STAGE_SQL} AS stage,
+              le.event AS last_event, le.detail AS last_event_detail, le.created_at AS last_event_at,
+              le.actor AS last_event_by,
               cj.hh_job_number AS converted_job_number, cj.job_name AS converted_job_name,
               cj.pipeline_status AS converted_job_status,
               prev.id AS prev_lead_id, prev.status AS prev_status, prev.status_reason AS prev_status_reason,
@@ -122,12 +146,19 @@ router.get('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respons
             ORDER BY p.first_date DESC
             LIMIT 1
          ) prev ON true
+         LEFT JOIN LATERAL (
+           SELECT e.event, e.detail, e.created_at, ${EVENT_ACTOR_SQL} AS actor
+             FROM lead_events e WHERE e.lead_id = l.id
+            ORDER BY e.created_at DESC LIMIT 1
+         ) le ON true
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY ${hiddenView ? 'l.updated_at DESC' : 'l.relevance_score DESC NULLS LAST, l.first_date ASC NULLS LAST'}
-       LIMIT 500`,
+       LIMIT 2000`,
       params,
     );
-    res.json({ data: result.rows });
+    // The Dismissed tab's count, without loading those rows until it's opened.
+    const hidden = await query(`SELECT COUNT(*)::int AS n FROM leads WHERE status IN ${HIDDEN_STATUSES}`);
+    res.json({ data: result.rows, hidden_count: hidden.rows[0].n });
   } catch (error) {
     console.error('[leads] list error:', error);
     res.status(500).json({ error: 'Failed to load leads' });
@@ -149,6 +180,26 @@ router.get('/runs/latest', authorize(...STAFF_ROLES), async (_req: AuthRequest, 
   } catch (error) {
     console.error('[leads] latest run error:', error);
     res.status(500).json({ error: 'Failed to load run status' });
+  }
+});
+
+// GET /api/leads/runs — search history: the last 30 runs, newest first, with
+// how many leads each one FOUND (first_run_id) — the batch picker + History panel.
+router.get('/runs', authorize(...STAFF_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT lr.id, lr.trigger, lr.status, lr.counts, lr.error, lr.started_at, lr.finished_at,
+              COALESCE(NULLIF(p.preferred_name, ''), p.first_name) AS triggered_by_name,
+              (SELECT COUNT(*)::int FROM leads l WHERE l.first_run_id = lr.id) AS leads_found
+         FROM lead_runs lr
+         LEFT JOIN users u ON u.id = lr.triggered_by
+         LEFT JOIN people p ON p.id = u.person_id
+        ORDER BY lr.started_at DESC LIMIT 30`,
+    );
+    res.json({ data: r.rows });
+  } catch (error) {
+    console.error('[leads] runs error:', error);
+    res.status(500).json({ error: 'Failed to load search history' });
   }
 });
 
@@ -229,6 +280,22 @@ router.post('/cancel', authorize(...MANAGER_ROLES), async (_req: AuthRequest, re
   }
 });
 
+// GET /api/leads/:id/events — the lead's timeline, newest first.
+router.get('/:id/events', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT e.id, e.event, e.detail, e.created_at, e.run_id, ${EVENT_ACTOR_SQL} AS actor
+         FROM lead_events e WHERE e.lead_id = $1
+        ORDER BY e.created_at DESC LIMIT 100`,
+      [req.params.id],
+    );
+    res.json({ data: r.rows });
+  } catch (error) {
+    console.error('[leads] events error:', error);
+    res.status(500).json({ error: 'Failed to load activity' });
+  }
+});
+
 // PATCH /api/leads/:id — lifecycle action.
 const patchSchema = z.object({
   status: z.enum(['new', 'reviewing', 'contacted', 'converted', 'dismissed', 'not_relevant']).optional(),
@@ -249,6 +316,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), validate(patchSchema), async (re
       params,
     );
     if (!r.rows[0]) return res.status(404).json({ error: 'Lead not found' });
+    if (body.status !== undefined) await logLeadEvent(r.rows[0].id, 'status', { detail: body.status, userId: req.user?.id });
     res.json({ data: r.rows[0] });
   } catch (error) {
     console.error('[leads] patch error:', error);
@@ -296,6 +364,7 @@ router.post('/:id/dismiss', authorize(...STAFF_ROLES), validate(dismissSchema), 
       `UPDATE leads SET status = 'dismissed', status_reason = $2, status_note = $3, updated_at = NOW() WHERE id = $1`,
       [lead.id, reason, cleanNote],
     );
+    await logLeadEvent(lead.id, 'dismissed', { detail: `${reason}${cleanNote ? ` — ${cleanNote}` : ''}`, userId: req.user?.id });
     res.json({ data: await loadLead(lead.id) });
   } catch (error) {
     console.error('[leads] dismiss error:', error);
@@ -313,6 +382,7 @@ router.post('/:id/restore', authorize(...STAFF_ROLES), async (req: AuthRequest, 
       `UPDATE leads SET status = 'new', status_reason = NULL, status_note = NULL, updated_at = NOW() WHERE id = $1`,
       [lead.id],
     );
+    await logLeadEvent(lead.id, 'restored', { userId: req.user?.id });
     res.json({ data: await loadLead(lead.id) });
   } catch (error) {
     console.error('[leads] restore error:', error);
@@ -333,6 +403,7 @@ router.post('/:id/confirm-match', authorize(...STAFF_ROLES), validate(confirmSch
     // A job-name suggestion (management / agency org) keeps its narrower history scope.
     const cand = ((lead.match_candidates ?? []) as MatchCandidate[]).find((c) => c.id === orgId);
     await linkLeadToOrg(lead.id, orgId, cand?.via === 'job_name' ? 'job_name' : 'org_name', { enrichOrg: true });
+    await logLeadEvent(lead.id, 'match_confirmed', { detail: cand?.name ?? null, userId: req.user?.id });
     res.json({ data: await loadLead(lead.id) });
   } catch (error) {
     console.error('[leads] confirm-match error:', error);
@@ -356,6 +427,7 @@ router.post('/:id/reject-match', authorize(...STAFF_ROLES), async (req: AuthRequ
       [req.params.id],
     );
     if (!r.rows[0]) return res.status(404).json({ error: 'Lead not found' });
+    await logLeadEvent(r.rows[0].id, 'match_rejected', { userId: req.user?.id });
     res.json({ data: r.rows[0] });
   } catch (error) {
     console.error('[leads] reject-match error:', error);
@@ -495,6 +567,13 @@ router.post('/:id/add-to-address-book', authorize(...STAFF_ROLES), validate(addS
     const keepCreated = lead.matched_organisation_id === orgId && lead.match_via === 'created';
     const via = created || keepCreated ? 'created' : cand?.via === 'job_name' ? 'job_name' : 'org_name';
     await linkLeadToOrg(lead.id, orgId, via, { enrichOrg: true });
+    {
+      const orgName = (await query(`SELECT name FROM organisations WHERE id = $1`, [orgId])).rows[0]?.name ?? 'organisation';
+      const bits = [`${created ? 'Created' : 'Linked'} ${orgName}`];
+      if (added.length) bits.push(`${added.length} contact(s)`);
+      if (orgEmails.length) bits.push(`band email ${orgEmails.map((e) => e.email).join(', ')}`);
+      await logLeadEvent(lead.id, 'address_book', { detail: bits.join(' · '), userId });
+    }
     await linkKnownContacts();
 
     res.json({ data: {
@@ -638,6 +717,7 @@ router.post('/:id/start-enquiry', authorize(...STAFF_ROLES), validate(enquirySch
       `UPDATE leads SET converted_job_id = $2, status = 'converted', updated_at = NOW() WHERE id = $1`,
       [lead.id, jobId],
     );
+    await logLeadEvent(lead.id, 'enquiry', { detail: 'Enquiry started', userId: req.user!.id });
     res.status(201).json({ data: { job_id: jobId, lead: await loadLead(lead.id) } });
   } catch (error) {
     sendLeadError(res, error, 'Failed to create enquiry', 'start-enquiry');
@@ -680,11 +760,15 @@ router.post('/:id/log-outreach', authorize(...STAFF_ROLES), validate(outreachSch
     }
 
     await query(
-      `UPDATE leads SET status = 'contacted', status_note = $2,
+      `UPDATE leads SET status = 'contacted', status_note = $2, contacted_at = NOW(),
          converted_job_id = COALESCE($3, converted_job_id), updated_at = NOW()
        WHERE id = $1`,
       [lead.id, note, jobId],
     );
+    await logLeadEvent(lead.id, 'outreach', {
+      detail: [note, jobId ? `Cold enquiry, first chase in ${body.chase_in_days} days` : null].filter(Boolean).join(' · ') || null,
+      userId,
+    });
     res.status(201).json({ data: { job_id: jobId, lead: await loadLead(lead.id) } });
   } catch (error) {
     sendLeadError(res, error, 'Failed to log outreach', 'log-outreach');

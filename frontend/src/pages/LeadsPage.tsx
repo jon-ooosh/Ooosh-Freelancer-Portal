@@ -1,55 +1,47 @@
 /**
  * LeadsPage — Jobs > Leads. The Lead Finder (Tour Finder → OP).
- * Spec: docs/TOUR-FINDER-SPEC.md.
+ * Spec: docs/TOUR-FINDER-SPEC.md (§17 is this layout).
  *
- * Find touring bands that fit the Ooosh profile (Ticketmaster), match them
- * against the address book (Cold vs Warm/Remarketing — warm leads carry their
- * OOOSH history, which the AI score weighs), research contacts for cold leads,
- * and act on them: add to the address book, start an enquiry, or dismiss with a
- * reason. Expand a row for the history, contacts, venues and match detail.
+ * Organised by WHERE A LEAD HAS GOT TO — To review · Contacted · In pipeline ·
+ * Dismissed (the backend's `stage`) — with warm/cold as a filter + badge, since
+ * staff work it in batches (a search every few weeks). Filters live in the URL.
+ * The run strip says what the last search did; Search history lists them all and
+ * jumps to the leads each one found. Expand a row for history, contacts, venues,
+ * match suggestions and the lead's activity timeline.
  */
-import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment, useMemo } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
-import { Lead, REASON_LABEL, fmtDate, fmtDateYear } from '../components/leads/leadTypes';
+import {
+  Lead, LeadRun, LeadStage, STAGE_TABS, REASON_LABEL, EVENT_SHORT, fmtDate, fmtDateYear,
+} from '../components/leads/leadTypes';
 import DismissLeadModal from '../components/leads/DismissLeadModal';
 import RunSearchModal from '../components/leads/RunSearchModal';
 import AddToAddressBookModal from '../components/leads/AddToAddressBookModal';
 import StartEnquiryModal from '../components/leads/StartEnquiryModal';
 import LogOutreachModal from '../components/leads/LogOutreachModal';
+import SearchHistoryModal from '../components/leads/SearchHistoryModal';
+import LeadTimeline from '../components/leads/LeadTimeline';
+import RunStrip from '../components/leads/RunStrip';
+import LeadFilters, {
+  LeadFilterState, filtersFromParams, filtersToParams, applyLeadFilters, tourStarted,
+} from '../components/leads/LeadFilters';
 
-interface Run {
-  id: string;
-  status: 'running' | 'complete' | 'failed';
-  counts: {
-    mode?: string;
-    window?: { from: string; to: string };
-    custom_window?: boolean;
-    collection?: { newEvents: number };
-    detection?: { toursCreated: number; droppedTooImminent: number; droppedAfterWindow?: number; droppedNotTour: number; skippedSuppressed?: number };
-    scoring?: { scored: number; skipped: number };
-    matching?: { exact: number; partial: number };
-    research?: { researched: number; contactsFound: number; failed?: number; lastError?: string };
-    known?: { leadsWithKnown: number };
-  } | null;
-  error: string | null;
-  started_at: string;
-  finished_at: string | null;
-  triggered_by_name: string | null;
-}
 interface Setting { key: string; value: string | null; }
 interface SettingsResponse { data: Setting[]; default_window?: { from: string; to: string }; max_window_days?: number; }
 
-type Tab = 'cold' | 'warm' | 'dismissed';
 type Modal =
   | { kind: 'dismiss'; lead: Lead }
   | { kind: 'address'; lead: Lead }
   | { kind: 'enquiry'; lead: Lead }
   | { kind: 'outreach'; lead: Lead }
   | { kind: 'run' }
+  | { kind: 'history' }
   | null;
+
+const STAGES: LeadStage[] = ['review', 'contacted', 'pipeline', 'dismissed'];
 
 const SCORE_CLS = (s: number | null): string =>
   s == null ? 'bg-gray-100 text-gray-500'
@@ -58,14 +50,8 @@ const SCORE_CLS = (s: number | null): string =>
   : s >= 4 ? 'bg-amber-100 text-amber-800'
   : 'bg-gray-100 text-gray-600';
 const TIER_LABEL: Record<number, string> = { 1: 'Tier 1', 2: 'Tier 2', 3: 'Tier 3' };
-const STATUS_CLS: Record<string, string> = {
-  new: 'bg-blue-100 text-blue-700', reviewing: 'bg-indigo-100 text-indigo-700',
-  contacted: 'bg-purple-100 text-purple-700', converted: 'bg-green-100 text-green-700',
-  dismissed: 'bg-gray-100 text-gray-500', not_relevant: 'bg-gray-100 text-gray-500',
-};
-const STATUS_LABEL: Record<string, string> = { converted: 'enquiry', not_relevant: 'not relevant' };
 
-type SortKey = 'band' | 'dates' | 'uk' | 'score' | 'origin' | 'contacts' | 'status';
+type SortKey = 'band' | 'dates' | 'uk' | 'score' | 'origin' | 'contacts' | 'activity';
 const SORT_COLS: { key: SortKey; label: string; align: 'left' | 'right' | 'center'; defDir: 'asc' | 'desc' }[] = [
   { key: 'band', label: 'Band', align: 'left', defDir: 'asc' },
   { key: 'dates', label: 'Tour dates', align: 'left', defDir: 'asc' },
@@ -73,7 +59,7 @@ const SORT_COLS: { key: SortKey; label: string; align: 'left' | 'right' | 'cente
   { key: 'score', label: 'Score', align: 'center', defDir: 'desc' },
   { key: 'origin', label: 'Origin', align: 'left', defDir: 'asc' },
   { key: 'contacts', label: 'Contacts', align: 'center', defDir: 'desc' },
-  { key: 'status', label: 'Status', align: 'left', defDir: 'asc' },
+  { key: 'activity', label: 'Last activity', align: 'left', defDir: 'desc' },
 ];
 function sortValue(l: Lead, key: SortKey): string | number {
   switch (key) {
@@ -83,7 +69,7 @@ function sortValue(l: Lead, key: SortKey): string | number {
     case 'score': return l.relevance_score ?? -1;
     case 'origin': return (l.origin_country ?? '').toLowerCase();
     case 'contacts': return l.contacts?.length ?? 0;
-    case 'status': return l.status;
+    case 'activity': return l.last_event_at ?? '';
   }
 }
 
@@ -117,16 +103,33 @@ function prevTourLine(l: Lead): { text: string; flag: boolean } | null {
   return null;
 }
 
+const todayYmd = () => new Date().toISOString().slice(0, 10);
+
 export default function LeadsPage() {
   const { user } = useAuthStore();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const canRun = hasManagerRole(user?.role);
 
-  const [tab, setTab] = useState<Tab>('cold');
+  // Tab + filters come from the URL (validated — a bad value falls back to the default).
+  const tabParam = searchParams.get('tab');
+  const tab: LeadStage = STAGES.includes(tabParam as LeadStage) ? (tabParam as LeadStage) : 'review';
+  const filters = useMemo(() => filtersFromParams(searchParams), [searchParams]);
+  const setTab = (t: LeadStage) => {
+    const p = new URLSearchParams(searchParams);
+    if (t === 'review') p.delete('tab'); else p.set('tab', t);
+    if (t !== 'contacted') p.delete('stale');
+    setSearchParams(p, { replace: true });
+    setExpanded(null);
+  };
+  const setFilters = (f: LeadFilterState) => setSearchParams(filtersToParams(f, searchParams), { replace: true });
+
   const [leads, setLeads] = useState<Lead[]>([]);
   const [hidden, setHidden] = useState<Lead[] | null>(null);
-  const [run, setRun] = useState<Run | null>(null);
+  const [hiddenCount, setHiddenCount] = useState(0);
+  const [run, setRun] = useState<LeadRun | null>(null);
+  const [runs, setRuns] = useState<LeadRun[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
   const [settings, setSettings] = useState<Setting[]>([]);
   const [defaultWindow, setDefaultWindow] = useState<{ from: string; to: string } | null>(null);
   const [maxWindowDays, setMaxWindowDays] = useState(366);
@@ -136,31 +139,40 @@ export default function LeadsPage() {
   const [notice, setNotice] = useState<{ text: string; href?: string; linkText?: string } | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
-  const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [modal, setModal] = useState<Modal>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadLeads = useCallback(async () => {
-    const resp = await api.get<{ data: Lead[] }>('/leads');
+    const resp = await api.get<{ data: Lead[]; hidden_count?: number }>('/leads');
     setLeads(resp.data);
+    setHiddenCount(resp.hidden_count ?? 0);
   }, []);
   const loadHidden = useCallback(async () => {
     const resp = await api.get<{ data: Lead[] }>('/leads?view=hidden');
     setHidden(resp.data);
   }, []);
   const loadRun = useCallback(async () => {
-    const resp = await api.get<{ data: Run | null }>('/leads/runs/latest');
+    const resp = await api.get<{ data: LeadRun | null }>('/leads/runs/latest');
     setRun(resp.data);
     return resp.data;
+  }, []);
+  const loadRuns = useCallback(async () => {
+    setRunsLoading(true);
+    try {
+      const resp = await api.get<{ data: LeadRun[] }>('/leads/runs');
+      setRuns(resp.data);
+    } finally { setRunsLoading(false); }
   }, []);
 
   useEffect(() => {
     (async () => {
       try {
-        const [, , s] = await Promise.all([loadLeads(), loadRun(), api.get<SettingsResponse>('/leads/settings')]);
+        const [, , s] = await Promise.all([loadLeads(), loadRun(), api.get<SettingsResponse>('/leads/settings'), loadRuns()]);
         setSettings(s.data);
         if (s.default_window) setDefaultWindow(s.default_window);
         if (s.max_window_days) setMaxWindowDays(s.max_window_days);
@@ -168,7 +180,15 @@ export default function LeadsPage() {
         setError(e instanceof Error ? e.message : 'Failed to load leads');
       } finally { setLoading(false); }
     })();
-  }, [loadLeads, loadRun]);
+  }, [loadLeads, loadRun, loadRuns]);
+
+  // Close the ⋯ menu on an outside click.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [menuOpen]);
 
   // Deep link from the dashboard's "Leads to look at" card: ?lead=<id> opens
   // that lead (right tab, expanded, scrolled to). The param is then dropped so
@@ -177,13 +197,13 @@ export default function LeadsPage() {
   useEffect(() => {
     if (!deepLinkId || loading) return;
     const target = leads.find((l) => l.id === deepLinkId);
-    if (target) {
-      setTab(target.stream);
-      setExpanded(target.id);
-      setTimeout(() => document.getElementById(`lead-${target.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
-    }
     const next = new URLSearchParams(searchParams);
     next.delete('lead');
+    if (target) {
+      if (target.stage === 'review') next.delete('tab'); else next.set('tab', target.stage);
+      setExpanded(target.id);
+      setTimeout(() => document.getElementById(`lead-${target.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80);
+    }
     setSearchParams(next, { replace: true });
   }, [deepLinkId, loading, leads, searchParams, setSearchParams]);
 
@@ -204,14 +224,14 @@ export default function LeadsPage() {
           const latest = await loadRun();
           if (latest?.status !== 'running') {
             if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-            await loadLeads();
+            await Promise.all([loadLeads(), loadRuns()]);
             setHidden(null);
           }
         } catch { /* transient — try again next tick */ }
       }, 4000);
     }
     return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
-  }, [isRunning, loadRun, loadLeads]);
+  }, [isRunning, loadRun, loadLeads, loadRuns]);
 
   // Elapsed-time ticker while running (reassurance the search is alive).
   useEffect(() => {
@@ -232,9 +252,11 @@ export default function LeadsPage() {
     } catch { /* noop */ }
   };
   const refresh = async () => {
-    try { await Promise.all([reloadAll(), loadRun()]); } catch { /* noop */ }
+    setMenuOpen(false);
+    try { await Promise.all([reloadAll(), loadRun(), loadRuns()]); } catch { /* noop */ }
   };
   const processExisting = async () => {
+    setMenuOpen(false);
     setStarting(true); setError(null);
     try { await api.post('/leads/process-existing', {}); await loadRun(); }
     catch (e) { setError(e instanceof Error ? e.message : 'Failed to start'); }
@@ -242,6 +264,12 @@ export default function LeadsPage() {
   };
   const stopRun = async () => {
     try { await api.post('/leads/cancel', {}); await loadRun(); } catch { /* noop */ }
+  };
+  const showBatch = (runId: string) => {
+    setModal(null);
+    const p = filtersToParams({ ...filters, run: runId }, searchParams);
+    p.delete('tab');
+    setSearchParams(p, { replace: true });
   };
   const toggleSort = (key: SortKey, defDir: 'asc' | 'desc') => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -256,101 +284,79 @@ export default function LeadsPage() {
   const rejectMatch = (id: string) => act(() => api.post(`/leads/${id}/reject-match`, {}));
   const restore = (id: string) => act(() => api.post(`/leads/${id}/restore`, {}));
 
-
   const sv = (k: string) => settings.find((s) => s.key === k)?.value ?? '';
-  const coldCount = leads.filter((l) => l.stream === 'cold').length;
-  const warmCount = leads.filter((l) => l.stream === 'warm').length;
+  const today = todayYmd();
 
-  const q = search.trim().toLowerCase();
-  const source = tab === 'dismissed' ? (hidden ?? []) : leads.filter((l) => l.stream === tab);
-  const shown = source
-    .filter((l) => !q || l.artist_name.toLowerCase().includes(q) || (l.origin_country ?? '').toLowerCase().includes(q))
+  // Tab counts: the open stages from the loaded list (To review / Contacted
+  // without tours that have already started — the same rule the tab applies by
+  // default); Dismissed from the server's count until its rows are loaded.
+  const counts: Record<LeadStage, number> = { review: 0, contacted: 0, pipeline: 0, dismissed: hidden?.length ?? hiddenCount };
+  let startedHidden = 0;
+  for (const l of leads) {
+    if (l.stage === 'dismissed') continue;
+    if ((l.stage === 'review' || l.stage === 'contacted') && tourStarted(l, today)) continue;
+    counts[l.stage] = (counts[l.stage] ?? 0) + 1;
+  }
+
+  const stageRows = tab === 'dismissed' ? (hidden ?? []) : leads.filter((l) => l.stage === tab);
+  const hidesStarted = (tab === 'review' || tab === 'contacted') && !filters.started;
+  const afterStarted = hidesStarted ? stageRows.filter((l) => !tourStarted(l, today)) : stageRows;
+  startedHidden = stageRows.length - afterStarted.length;
+  const shown = applyLeadFilters(afterStarted, filters)
     .sort((a, b) => {
       const va = sortValue(a, sortKey), vb = sortValue(b, sortKey);
       const cmp = va < vb ? -1 : va > vb ? 1 : 0;
       return sortDir === 'asc' ? cmp : -cmp;
     });
+  const tabMeta = STAGE_TABS.find((t) => t.key === tab)!;
 
-  const runWindowText = (r: Run) => {
-    const w = r.counts?.window;
-    return w ? `tours starting ${fmtDateYear(w.from)} – ${fmtDateYear(w.to)}${r.counts?.custom_window ? ' (custom window)' : ''}` : '';
+  const lastActivity = (l: Lead) => {
+    if (!l.last_event || !l.last_event_at) return null;
+    return {
+      label: EVENT_SHORT[l.last_event] ?? l.last_event,
+      when: fmtDate(l.last_event_at),
+      by: l.last_event_by,
+    };
   };
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6">
-      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
-        <div>
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-gray-900">Leads</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Touring bands that fit the Ooosh profile, found via Ticketmaster, scored, and matched to your address book.
-          </p>
-          {settings.length > 0 && (
-            <p className="text-xs text-gray-400 mt-1">
-              Standard search: tours starting {sv('lead_lookahead_min_weeks')}–{sv('lead_lookahead_max_weeks')} weeks ahead ·
-              tour = {sv('lead_tour_min_dates')}+ UK dates within {sv('lead_tour_window_weeks')} weeks
-            </p>
-          )}
+          <p className="text-sm text-gray-500 truncate">Touring bands for Ooosh — found on Ticketmaster, scored, matched to your address book.</p>
         </div>
-        <div className="flex items-center gap-2 flex-wrap justify-end">
-          <button onClick={refresh} className="px-3 py-2 rounded-lg border border-gray-300 text-gray-600 text-sm hover:bg-gray-50">
-            ↻ Refresh
-          </button>
-          {canRun && isRunning && (
-            <button onClick={stopRun} className="px-3 py-2 rounded-lg border border-red-300 text-red-700 text-sm hover:bg-red-50">
-              ■ Stop
-            </button>
-          )}
-          {canRun && (
-            <button onClick={processExisting} disabled={starting || isRunning} title="Match, score + research the leads already found — no Ticketmaster crawl (fast)"
-              className="px-3 py-2 rounded-lg border border-[#7B5EA7] text-[#7B5EA7] text-sm font-medium hover:bg-purple-50 disabled:opacity-50">
-              ✨ Match &amp; research existing
-            </button>
-          )}
+        <div className="flex items-center gap-2 shrink-0">
           {canRun && (
             <button onClick={() => setModal({ kind: 'run' })} disabled={starting || isRunning}
               className="px-4 py-2 rounded-lg bg-[#7B5EA7] text-white text-sm font-medium hover:bg-[#6a4f92] disabled:opacity-50">
               {isRunning ? 'Searching…' : '🔍 Run search…'}
             </button>
           )}
+          <div className="relative" ref={menuRef}>
+            <button onClick={() => setMenuOpen((o) => !o)} aria-label="More"
+              className="px-3 py-2 rounded-lg border border-gray-300 text-gray-600 text-sm hover:bg-gray-50">⋯</button>
+            {menuOpen && (
+              <div className="absolute right-0 mt-1 w-64 rounded-lg border border-gray-200 bg-white shadow-lg z-20 py-1 text-sm">
+                <button onClick={refresh} className="block w-full text-left px-3 py-2 hover:bg-gray-50">↻ Refresh</button>
+                <button onClick={() => { setMenuOpen(false); setModal({ kind: 'history' }); void loadRuns(); }}
+                  className="block w-full text-left px-3 py-2 hover:bg-gray-50">🕘 Search history</button>
+                {canRun && (
+                  <button onClick={processExisting} disabled={starting || isRunning}
+                    className="block w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-50">
+                    ✨ Match &amp; research existing
+                    <span className="block text-xs text-gray-400">Re-match, re-score and research the leads already found — no new search.</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {run && (
-        <div className={`rounded-lg px-4 py-3 mb-4 text-sm ${
-          run.status === 'running' ? 'bg-blue-50 text-blue-800'
-          : run.status === 'failed' ? 'bg-red-50 text-red-800' : 'bg-gray-50 text-gray-600'}`}>
-          {run.status === 'running' && (
-            <>
-              <span className="inline-block animate-pulse mr-1">●</span>
-              Search running — {Math.floor(elapsed / 60)}m {elapsed % 60}s elapsed.
-              It runs in the background across ~24 venues and every band's UK dates, so it takes a few minutes.
-              <b> This page updates automatically — no need to refresh.</b>
-            </>
-          )}
-          {run.status === 'failed' && <>Last run failed: {run.error || 'unknown error'}</>}
-          {run.status === 'complete' && run.counts && (
-            <>
-              {run.counts.mode === 'process_existing' ? (
-                <>Processed existing leads {run.finished_at ? new Date(run.finished_at).toLocaleString('en-GB') : ''} — matched {run.counts.matching?.exact ?? 0} known band(s), {run.counts.matching?.partial ?? 0} possible; scored {run.counts.scoring?.scored ?? 0}; found contacts for {run.counts.research?.researched ?? 0} cold lead(s).</>
-              ) : (
-                <>
-                  Last search {run.finished_at ? new Date(run.finished_at).toLocaleString('en-GB') : ''}
-                  {run.triggered_by_name ? ` by ${run.triggered_by_name}` : ''}
-                  {runWindowText(run) ? ` (${runWindowText(run)})` : ''} —
-                  {' '}<b>{run.counts.detection?.toursCreated ?? 0}</b> new tours
-                  {' '}(scored {run.counts.scoring?.scored ?? 0}, dropped {run.counts.detection?.droppedTooImminent ?? 0} starting too soon
-                  {(run.counts.detection?.skippedSuppressed ?? 0) > 0 ? `, skipped ${run.counts.detection?.skippedSuppressed} you’d marked not a fit` : ''}).
-                  {' '}Matched {run.counts.matching?.exact ?? 0} known band(s), {run.counts.matching?.partial ?? 0} possible.
-                  {' '}Found contacts for {run.counts.research?.researched ?? 0} cold lead(s).
-                </>
-              )}
-              {(run.counts.research?.failed ?? 0) > 0 && run.counts.research?.lastError && (
-                <div className="mt-1 text-amber-700">⚠ Contact research errored on {run.counts.research.failed} lead(s): {run.counts.research.lastError}</div>
-              )}
-            </>
-          )}
-        </div>
-      )}
+      <RunStrip run={run} elapsed={elapsed} canRun={canRun} onStop={stopRun}
+        onHistory={() => { setModal({ kind: 'history' }); void loadRuns(); }} onShowBatch={showBatch} />
 
       {error && <div className="rounded-lg bg-red-50 text-red-800 px-4 py-3 mb-4 text-sm">{error}</div>}
       {notice && (
@@ -363,32 +369,37 @@ export default function LeadsPage() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-end justify-between gap-2 border-b border-gray-200 mb-4">
-        <div className="flex gap-1 overflow-x-auto">
-          {(['cold', 'warm', 'dismissed'] as const).map((t) => (
-            <button key={t} onClick={() => { setTab(t); setExpanded(null); }}
-              className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap ${tab === t ? 'border-[#7B5EA7] text-[#7B5EA7]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-              {t === 'cold' ? `Cold (${coldCount})` : t === 'warm' ? `Warm / Remarketing (${warmCount})` : `Dismissed${hidden ? ` (${hidden.length})` : ''}`}
-            </button>
-          ))}
-        </div>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search band or origin…"
-          className="mb-1 px-3 py-1.5 rounded-lg border border-gray-300 text-sm w-56 max-w-full"
-        />
+      {/* ── Stage tabs ─────────────────────────────────────────────────── */}
+      <div className="flex gap-1 border-b border-gray-200 mb-3 overflow-x-auto">
+        {STAGE_TABS.map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap ${tab === t.key ? 'border-[#7B5EA7] text-[#7B5EA7]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+            {t.label} <span className="text-xs text-gray-400">{counts[t.key]}</span>
+          </button>
+        ))}
       </div>
+
+      <LeadFilters value={filters} onChange={setFilters} leads={leads} runs={runs}
+        showStale={tab === 'contacted'} shown={shown.length} total={afterStarted.length} />
+
+      {hidesStarted && startedHidden > 0 && (
+        <div className="text-xs text-gray-400 mb-2">
+          {startedHidden} tour{startedHidden === 1 ? ' has' : 's have'} already started and {startedHidden === 1 ? 'is' : 'are'} hidden ·{' '}
+          <button onClick={() => setFilters({ ...filters, started: true })} className="text-[#7B5EA7] hover:underline">show</button>
+        </div>
+      )}
+      {(tab === 'review' || tab === 'contacted') && filters.started && (
+        <div className="text-xs text-gray-400 mb-2">
+          Including tours that have already started ·{' '}
+          <button onClick={() => setFilters({ ...filters, started: false })} className="text-[#7B5EA7] hover:underline">hide them</button>
+        </div>
+      )}
 
       {loading || (tab === 'dismissed' && hidden == null) ? (
         <div className="text-center text-gray-400 py-12">Loading…</div>
       ) : shown.length === 0 ? (
         <div className="text-center text-gray-400 py-12 text-sm">
-          {tab === 'warm'
-            ? 'No matches to bands you’ve worked with yet. Warm leads appear here when a detected tour matches your address book.'
-            : tab === 'dismissed'
-              ? 'Nothing dismissed.'
-              : `No leads yet.${canRun ? ' Run a search to find touring bands.' : ''}`}
+          {stageRows.length > 0 ? 'Nothing matches these filters.' : tabMeta.empty}
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -410,6 +421,8 @@ export default function LeadsPage() {
                 const chip = historyChip(l);
                 const prev = prevTourLine(l);
                 const top = l.match_candidates?.[0];
+                const activity = lastActivity(l);
+                const started = tourStarted(l, today);
                 return (
                 <Fragment key={l.id}>
                   <tr id={`lead-${l.id}`} className={`hover:bg-gray-50 align-top cursor-pointer ${expanded === l.id ? 'bg-purple-50/40' : ''}`} onClick={() => setExpanded(expanded === l.id ? null : l.id)}>
@@ -417,6 +430,9 @@ export default function LeadsPage() {
                       <span className="mr-1 text-gray-300">{expanded === l.id ? '▾' : '▸'}</span>
                       {l.artist_name}
                       {l.is_international && <span className="ml-1 text-xs text-gray-400" title="International act">✈</span>}
+                      {l.stream === 'warm' && (
+                        <span className="ml-1.5 align-middle text-[10px] font-semibold uppercase tracking-wide bg-green-100 text-green-700 px-1.5 py-0.5 rounded" title="A band we know — remarketing">Warm</span>
+                      )}
                       {l.matched_organisation_id && l.matched_org_name && (
                         <Link to={`/organisations/${l.matched_organisation_id}`} onClick={(e) => e.stopPropagation()}
                           className={`block text-xs hover:underline ${l.stream === 'warm' ? 'text-green-700' : 'text-gray-500'}`}>
@@ -449,18 +465,26 @@ export default function LeadsPage() {
                         </div>
                       )}
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap text-gray-600">{fmtDate(l.first_date)} – {fmtDate(l.last_date)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-gray-600">
+                      {fmtDate(l.first_date)} – {fmtDate(l.last_date)}
+                      {started && <div className="text-[10px] text-gray-400">already started</div>}
+                    </td>
                     <td className="px-3 py-2 text-right text-gray-600">{l.uk_date_count}</td>
                     <td className="px-3 py-2 text-center whitespace-nowrap">
                       <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${SCORE_CLS(l.relevance_score)}`}>{l.relevance_score ?? '—'}</span>
                       {l.client_tier && <div className="text-[10px] text-gray-400 mt-0.5">{TIER_LABEL[l.client_tier]}</div>}
                     </td>
                     <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{l.origin_country ?? '—'}</td>
-                    <td className="px-3 py-2 text-center text-gray-500">{l.contacts?.length ? l.contacts.length : '—'}</td>
-                    <td className="px-3 py-2">
-                      <span className={`inline-block px-2 py-0.5 rounded text-xs ${STATUS_CLS[l.status] ?? 'bg-gray-100 text-gray-600'}`}>
-                        {STATUS_LABEL[l.status] ?? l.status.replace('_', ' ')}
-                      </span>
+                    <td className="px-3 py-2 text-center text-gray-500">
+                      {l.contacts?.length ? l.contacts.length : (l.research_status === 'none' ? <span title="Researched — nothing found">✗</span> : '—')}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">
+                      {activity ? (
+                        <>
+                          <div>{activity.label} {activity.when}</div>
+                          {activity.by && <div className="text-gray-400">{activity.by}</div>}
+                        </>
+                      ) : '—'}
                       {tab === 'dismissed' && l.status_reason && (
                         <div className="text-[11px] text-gray-500 mt-0.5">{REASON_LABEL[l.status_reason] ?? l.status_reason}</div>
                       )}
@@ -500,69 +524,77 @@ export default function LeadsPage() {
                   {expanded === l.id && (
                     <tr className="bg-gray-50">
                       <td colSpan={8} className="px-6 py-3 text-xs text-gray-600">
-                        {l.status === 'contacted' && l.status_note && (
-                          <p className="mb-2"><span className="text-gray-400">Outreach:</span> {l.status_note}</p>
-                        )}
-                        {tab === 'dismissed' && l.status_note && (
-                          <p className="mb-2"><span className="text-gray-400">Dismiss note:</span> {l.status_note}</p>
-                        )}
-                        {l.ai_summary && <p className="mb-2 text-gray-700">{l.ai_summary}</p>}
-                        {(l.client_history?.lost_reasons?.length ?? 0) > 0 && (
-                          <p className="mb-2"><span className="text-gray-400">Why we lost them:</span> {(l.client_history?.lost_reasons ?? []).map((r) => `${r.reason} ×${r.count}`).join(', ')}</p>
-                        )}
-                        {l.venues?.length > 0 && <p className="mb-2"><span className="text-gray-400">Venues:</span> {l.venues.join(', ')}</p>}
-                        {l.reasoning && l.reasoning !== l.ai_summary && <p className="mb-2"><span className="text-gray-400">Assessment:</span> {l.reasoning}</p>}
-                        {l.known_contacts?.length > 0 && (
-                          <div className="mb-2">
-                            <div className="text-gray-400 mb-1">Already in your address book:</div>
-                            <ul className="space-y-0.5">
-                              {l.known_contacts.map((k) => (
-                                <li key={k.person_id}>
-                                  <Link to={`/people/${k.person_id}`} className="text-blue-600 hover:underline">{k.name}</Link>
-                                  <span className="text-gray-400"> · {k.email}{k.orgs ? ` · ${k.orgs}` : ''}{k.job_count ? ` · on ${k.job_count} job${k.job_count === 1 ? '' : 's'}` : ''}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        {l.contacts?.length > 0 ? (
-                          <div className="mb-1">
-                            <div className="text-gray-400 mb-1">Contacts found:</div>
-                            <ul className="space-y-1">
-                              {l.contacts.map((c, i) => (
-                                <li key={i} className="flex flex-wrap gap-x-2">
-                                  <span className="font-medium">{c.contact_name || c.contact_type}</span>
-                                  <span className="text-gray-400">({c.contact_type})</span>
-                                  {c.contact_email && <a href={`mailto:${c.contact_email}`} className="text-blue-600 hover:underline">{c.contact_email}</a>}
-                                  {c.contact_phone && <span>{c.contact_phone}</span>}
-                                  <span className={`text-[10px] px-1 rounded ${c.confidence === 'high' ? 'bg-green-100 text-green-700' : c.confidence === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{c.confidence}</span>
-                                  {c.source && <span className="text-gray-400">· {c.source}</span>}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        ) : l.stream === 'cold' ? (
-                          <p className="text-gray-400">No contacts found yet.</p>
-                        ) : null}
-                        {tab !== 'dismissed' && !l.matched_organisation_id && l.match_candidates?.length > 0 && (
-                          <div className="mt-2">
-                            <div className="text-gray-400 mb-1">Possible address-book matches:</div>
-                            {l.match_candidates.map((c) => (
-                              <div key={c.id} className="flex items-center gap-2">
-                                <span>
-                                  {c.name}{' '}
-                                  <span className="text-gray-400">
-                                    ({c.type ?? 'org'}, {c.via === 'job_name'
-                                      ? `${c.job_count} job${c.job_count === 1 ? '' : 's'} named after the band${c.sample_job_name ? ` — e.g. “${c.sample_job_name}”` : ''}`
-                                      : `${((c.similarity ?? 0) * 100).toFixed(0)}% similar name`})
-                                  </span>
-                                </span>
-                                <button onClick={() => confirmMatch(l.id, c.id)} className="text-green-700 hover:underline">Confirm this</button>
+                        <div className="grid gap-x-8 gap-y-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
+                          <div className="min-w-0">
+                            {l.status === 'contacted' && l.status_note && (
+                              <p className="mb-2"><span className="text-gray-400">Outreach:</span> {l.status_note}</p>
+                            )}
+                            {tab === 'dismissed' && l.status_note && (
+                              <p className="mb-2"><span className="text-gray-400">Dismiss note:</span> {l.status_note}</p>
+                            )}
+                            {l.ai_summary && <p className="mb-2 text-gray-700">{l.ai_summary}</p>}
+                            {(l.client_history?.lost_reasons?.length ?? 0) > 0 && (
+                              <p className="mb-2"><span className="text-gray-400">Why we lost them:</span> {(l.client_history?.lost_reasons ?? []).map((r) => `${r.reason} ×${r.count}`).join(', ')}</p>
+                            )}
+                            {l.venues?.length > 0 && <p className="mb-2"><span className="text-gray-400">Venues:</span> {l.venues.join(', ')}</p>}
+                            {l.reasoning && l.reasoning !== l.ai_summary && <p className="mb-2"><span className="text-gray-400">Assessment:</span> {l.reasoning}</p>}
+                            {l.known_contacts?.length > 0 && (
+                              <div className="mb-2">
+                                <div className="text-gray-400 mb-1">Already in your address book:</div>
+                                <ul className="space-y-0.5">
+                                  {l.known_contacts.map((k) => (
+                                    <li key={k.person_id}>
+                                      <Link to={`/people/${k.person_id}`} className="text-blue-600 hover:underline">{k.name}</Link>
+                                      <span className="text-gray-400"> · {k.email}{k.orgs ? ` · ${k.orgs}` : ''}{k.job_count ? ` · on ${k.job_count} job${k.job_count === 1 ? '' : 's'}` : ''}</span>
+                                    </li>
+                                  ))}
+                                </ul>
                               </div>
-                            ))}
-                            <button onClick={() => rejectMatch(l.id)} className="mt-1 text-gray-400 hover:underline">None of these</button>
+                            )}
+                            {l.contacts?.length > 0 ? (
+                              <div className="mb-1">
+                                <div className="text-gray-400 mb-1">Contacts found:</div>
+                                <ul className="space-y-1">
+                                  {l.contacts.map((c, i) => (
+                                    <li key={i} className="flex flex-wrap gap-x-2">
+                                      <span className="font-medium">{c.contact_name || c.contact_type}</span>
+                                      <span className="text-gray-400">({c.contact_type})</span>
+                                      {c.contact_email && <a href={`mailto:${c.contact_email}`} className="text-blue-600 hover:underline">{c.contact_email}</a>}
+                                      {c.contact_phone && <span>{c.contact_phone}</span>}
+                                      <span className={`text-[10px] px-1 rounded ${c.confidence === 'high' ? 'bg-green-100 text-green-700' : c.confidence === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{c.confidence}</span>
+                                      {c.source && <span className="text-gray-400">· {c.source}</span>}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : l.stream === 'cold' ? (
+                              <p className="text-gray-400">{l.research_status === 'none' ? 'Researched — no contacts found.' : 'No contacts found yet.'}</p>
+                            ) : null}
+                            {tab !== 'dismissed' && !l.matched_organisation_id && l.match_candidates?.length > 0 && (
+                              <div className="mt-2">
+                                <div className="text-gray-400 mb-1">Possible address-book matches:</div>
+                                {l.match_candidates.map((c) => (
+                                  <div key={c.id} className="flex items-center gap-2">
+                                    <span>
+                                      {c.name}{' '}
+                                      <span className="text-gray-400">
+                                        ({c.type ?? 'org'}, {c.via === 'job_name'
+                                          ? `${c.job_count} job${c.job_count === 1 ? '' : 's'} named after the band${c.sample_job_name ? ` — e.g. “${c.sample_job_name}”` : ''}`
+                                          : `${((c.similarity ?? 0) * 100).toFixed(0)}% similar name`})
+                                      </span>
+                                    </span>
+                                    <button onClick={() => confirmMatch(l.id, c.id)} className="text-green-700 hover:underline">Confirm this</button>
+                                  </div>
+                                ))}
+                                <button onClick={() => rejectMatch(l.id)} className="mt-1 text-gray-400 hover:underline">None of these</button>
+                              </div>
+                            )}
                           </div>
-                        )}
+                          <div>
+                            <div className="text-gray-400 mb-1">Activity</div>
+                            <LeadTimeline leadId={l.id} refreshKey={l.last_event_at ?? undefined} />
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   )}
@@ -578,9 +610,13 @@ export default function LeadsPage() {
         <RunSearchModal
           defaultWindow={defaultWindow}
           maxDays={maxWindowDays}
+          tourRule={settings.length ? `A “tour” = ${sv('lead_tour_min_dates')}+ UK dates within ${sv('lead_tour_window_weeks')} weeks. The standard window is ${sv('lead_lookahead_min_weeks')}–${sv('lead_lookahead_max_weeks')} weeks ahead.` : undefined}
           onClose={() => setModal(null)}
           onStarted={async () => { setModal(null); await loadRun(); }}
         />
+      )}
+      {modal?.kind === 'history' && (
+        <SearchHistoryModal runs={runs} loading={runsLoading} onClose={() => setModal(null)} onShowBatch={showBatch} />
       )}
       {modal?.kind === 'dismiss' && (
         <DismissLeadModal lead={modal.lead} onClose={() => setModal(null)}

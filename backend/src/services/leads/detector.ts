@@ -28,6 +28,7 @@ import { query } from '../../config/database';
 import { tmGet, tmDateTime } from './ticketmaster';
 import { EXCLUDE_CLASSIFICATIONS, EXCLUDE_EVENT_PATTERNS } from './venues';
 import { normaliseArtist } from './normalise';
+import { logLeadEvent } from './events';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -151,14 +152,15 @@ async function upsertLead(
     );
     return 'updated';
   }
-  await query(
-    `INSERT INTO leads (artist_name, tm_artist_id, uk_date_count, first_date, last_date, venues, all_dates, last_run_id)
-     VALUES ($1,$2,$3,$4::date,$5::date,$6,$7,$8)`,
+  const ins = await query(
+    `INSERT INTO leads (artist_name, tm_artist_id, uk_date_count, first_date, last_date, venues, all_dates, last_run_id, first_run_id)
+     VALUES ($1,$2,$3,$4::date,$5::date,$6,$7,$8,$8) RETURNING id`,
     [
       tour.artistName, tour.tmArtistId, tour.ukDateCount, tour.firstDate, tour.lastDate,
       JSON.stringify(tour.venues), JSON.stringify(tour.allDates), runId,
     ],
   );
+  await logLeadEvent(ins.rows[0].id, 'found', { runId, detail: `${tour.ukDateCount} UK date(s)` });
   return 'inserted';
 }
 
