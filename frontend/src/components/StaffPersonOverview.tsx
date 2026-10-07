@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
 import type { AttentionItem } from './StaffAttention';
+import { Card, StatCard, InfoRow, Pill } from './StaffCard';
 
 interface EmployeeRecord {
   has_ni_number: boolean;
@@ -29,19 +30,23 @@ interface TaskRow {
   owner_name: string | null;
 }
 
+/** The two balances, from the same /me/balances My Time reads (admins may pass personId). */
+interface Balances {
+  holiday: { availableMinutes: number; nominalDayMinutes: number | null };
+  overtime: { availableMinutes: number };
+}
+
+function fmtH(min: number): string {
+  const sign = min < 0 ? '-' : '';
+  const a = Math.abs(min);
+  const h = Math.floor(a / 60), m = a % 60;
+  if (h === 0) return `${sign}${m}m`;
+  return m === 0 ? `${sign}${h}h` : `${sign}${h}h ${m}m`;
+}
+
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '—';
   return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-}
-
-function Fact({ label, value, tone }: { label: string; value: string; tone?: 'warn' | 'bad' }) {
-  const colour = tone === 'bad' ? 'text-red-700' : tone === 'warn' ? 'text-amber-700' : 'text-gray-900';
-  return (
-    <div>
-      <dt className="text-[11px] uppercase tracking-wide text-gray-500">{label}</dt>
-      <dd className={`text-sm mt-0.5 ${colour}`}>{value}</dd>
-    </div>
-  );
 }
 
 export default function StaffPersonOverview({
@@ -57,6 +62,7 @@ export default function StaffPersonOverview({
 }) {
   const [rec, setRec] = useState<EmployeeRecord | null>(null);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
+  const [balances, setBalances] = useState<Balances | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -64,10 +70,14 @@ export default function StaffPersonOverview({
     setLoadError(null);
     // Settled, not all: somebody with no employment record 404s on the first
     // call, and Promise.all would throw away their task list with it.
-    const [r, t] = await Promise.allSettled([
+    const [r, t, b] = await Promise.allSettled([
       api.get<{ data: EmployeeRecord }>(`/staff-calendar/employees/${personId}`),
       api.get<{ data: TaskRow[] }>(`/staff-tasks/person/${personId}`),
+      api.get<{ data: Balances | null }>(
+        `/staff-calendar/me/balances?year=${new Date().getFullYear()}&personId=${encodeURIComponent(personId)}`),
     ]);
+    // Balances are a headline, not the page: without them the cards say so.
+    if (b.status === 'fulfilled') setBalances(b.value.data);
 
     if (r.status === 'fulfilled') {
       setRec(r.value.data);
@@ -98,77 +108,92 @@ export default function StaffPersonOverview({
     ? `${rec.emergency_contact_name || '—'}${rec.emergency_contact_relationship ? ` (${rec.emergency_contact_relationship})` : ''}${rec.emergency_contact_phone ? ` · ${rec.emergency_contact_phone}` : ''}`
     : 'Not recorded';
 
+  const hol = balances?.holiday;
+  const holDays = hol && hol.nominalDayMinutes ? (hol.availableMinutes / hol.nominalDayMinutes).toFixed(1) : null;
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
+      {/* The three things looked up most, each a way into the tab that holds it.
+          Employees only — somebody with no staff record has none of the three. */}
+      {rec && <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <StatCard label="Holiday left"
+          value={hol ? (holDays ?? fmtH(hol.availableMinutes)) : '—'}
+          unit={hol && holDays ? 'days' : undefined}
+          tone={hol && hol.availableMinutes < 0 ? 'bad' : undefined}
+          caption={hol ? (holDays ? `${fmtH(hol.availableMinutes)} this year` : 'this year') : 'No allowance set'}
+          onClick={() => onOpenTab('time')} />
+        <StatCard label="Overtime in the bank"
+          value={balances ? fmtH(balances.overtime.availableMinutes) : '—'}
+          caption="Earned, not yet taken or paid"
+          onClick={() => onOpenTab('time')} />
+        <StatCard label="Next review"
+          value={rec?.next_review_scheduled ? fmtDate(rec.next_review_scheduled) : 'None'}
+          tone={rec && !rec.next_review_scheduled ? 'warn' : undefined}
+          caption={rec?.next_review_scheduled ? 'Booked' : 'Nothing booked yet'}
+          onClick={() => onOpenTab('reviews')} />
+      </div>}
+
       {attention.length > 0 && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-          <h3 className="text-sm font-semibold text-amber-900 mb-2">Needs attention</h3>
-          <ul className="space-y-1.5">
+        <Card title="Needs attention" subtitle="Things about this person that want doing">
+          <ul className="-mx-5 -mb-5">
             {attention.map(a => (
-              <li key={a.id} className="flex flex-wrap items-center gap-2">
-                <span className={`w-1.5 h-1.5 rounded-full ${a.severity === 'urgent' ? 'bg-red-600' : a.severity === 'soon' ? 'bg-amber-500' : 'bg-gray-400'}`} aria-hidden="true" />
-                <span className="text-sm text-gray-900">{a.label}</span>
-                {a.detail && <span className="text-xs text-gray-600">{a.detail}</span>}
+              <li key={a.id} className="flex flex-wrap items-center gap-3 px-5 py-3 border-t border-gray-100">
+                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${a.severity === 'urgent' ? 'bg-red-600' : a.severity === 'soon' ? 'bg-amber-500' : 'bg-gray-400'}`} aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[15px] text-gray-900">{a.label}</div>
+                  {a.detail && <div className="text-[13px] text-gray-500">{a.detail}</div>}
+                </div>
                 {a.tab && (
                   <button onClick={() => onOpenTab(a.tab!)}
-                    className="ml-auto text-xs font-medium text-ooosh-700 hover:underline">
+                    className="text-sm font-medium text-ooosh-700 hover:underline">
                     {a.action || 'Open'}
                   </button>
                 )}
               </li>
             ))}
           </ul>
-        </div>
+        </Card>
       )}
 
-      {rec && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <h3 className="text-sm font-semibold text-gray-900 mb-3">At a glance</h3>
-          <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-4">
-            <Fact label="Contracted hours" value={hours || 'Not set'} tone={hours ? undefined : 'warn'} />
-            <Fact
-              label="Next review"
-              value={rec.next_review_scheduled ? fmtDate(rec.next_review_scheduled) : 'None booked'}
-              tone={rec.next_review_scheduled ? undefined : 'warn'}
-            />
-            <Fact
-              label="Right to work"
-              value={rec.rtw_document_type || 'Not checked'}
-              tone={rec.rtw_document_type ? undefined : 'bad'}
-            />
-            <Fact
-              label="Permission expires"
-              value={rec.rtw_expires_on ? fmtDate(rec.rtw_expires_on) : 'No limit'}
-            />
-            <Fact label="NI number" value={rec.has_ni_number ? 'Recorded' : 'Not recorded'} tone={rec.has_ni_number ? undefined : 'warn'} />
-            <div className="col-span-2 sm:col-span-3">
-              <dt className="text-[11px] uppercase tracking-wide text-gray-500">Emergency contact</dt>
-              <dd className="text-sm mt-0.5 text-gray-900">{emergency}</dd>
-            </div>
-          </dl>
-        </div>
-      )}
-
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-semibold text-gray-900 mb-2">Open actions</h3>
-        {tasks.length === 0 ? (
-          <p className="text-sm text-gray-400">Nothing outstanding.</p>
-        ) : (
-          <ul className="divide-y divide-gray-100">
-            {tasks.map(t => (
-              <li key={t.id} className="flex flex-wrap items-center gap-2 py-1.5">
-                <span className="text-sm text-gray-900">{t.title}</span>
-                {t.owner_name && <span className="text-xs text-gray-500">{t.owner_name}</span>}
-                <span className="ml-auto text-xs text-gray-500">
-                  {t.due_date ? `due ${fmtDate(t.due_date)}` : 'no date'}
-                </span>
-              </li>
-            ))}
-          </ul>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        {rec && (
+          <Card title="At a glance">
+            <dl>
+              <InfoRow label="Contracted hours">
+                {hours || <Pill tone="warn">Not set</Pill>}
+              </InfoRow>
+              <InfoRow label="Right to work">
+                {rec.rtw_document_type
+                  ? <>{rec.rtw_document_type}{rec.rtw_expires_on && <span className="text-gray-500"> · until {fmtDate(rec.rtw_expires_on)}</span>}</>
+                  : <Pill tone="bad">Not checked</Pill>}
+              </InfoRow>
+              <InfoRow label="NI number">
+                {rec.has_ni_number ? <Pill tone="ok">Recorded</Pill> : <Pill tone="warn">Not recorded</Pill>}
+              </InfoRow>
+              <InfoRow label="Emergency contact">
+                {emergency === 'Not recorded' ? <Pill tone="warn">Not recorded</Pill> : emergency}
+              </InfoRow>
+            </dl>
+          </Card>
         )}
-        <p className="text-xs text-gray-500 mt-2">
-          Anything agreed at a review sits on its owner’s own My To Do — including ours.
-        </p>
+
+        <Card title="Open actions" subtitle="Agreed at a review — each sits on its owner’s own To Do">
+          {tasks.length === 0 ? (
+            <p className="text-sm text-gray-400">Nothing outstanding.</p>
+          ) : (
+            <ul className="-mx-5 -mb-5">
+              {tasks.map(t => (
+                <li key={t.id} className="flex flex-wrap items-center gap-2 px-5 py-3 border-t border-gray-100">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[15px] text-gray-900">{t.title}</div>
+                    {t.owner_name && <div className="text-[13px] text-gray-500">{t.owner_name}</div>}
+                  </div>
+                  <Pill tone={t.due_date ? 'info' : 'muted'}>{t.due_date ? `due ${fmtDate(t.due_date)}` : 'no date'}</Pill>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
       </div>
 
       <p className="text-xs text-gray-400">
