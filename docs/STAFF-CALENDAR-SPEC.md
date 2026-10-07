@@ -1376,6 +1376,7 @@ Where things are, for troubleshooting:
 | **§19** | Working from home — one-off requests approved like holiday, regular days on the pattern, two-number headcount, on-site filter, cover counts the building | 269 |
 | **§10** | Personal read-only calendar feed — own time only | 270 |
 | **§12.1** | Payroll report emailed on the 1st; date presets on the panel | — |
+| — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
 
 ### Decisions taken during the build that CHANGE this spec
 

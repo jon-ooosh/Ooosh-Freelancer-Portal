@@ -55,6 +55,8 @@ interface AccountBreakdown {
 }
 type BhPolicy = 'use_allowance' | 'granted';
 interface MyBalances {
+  /** Whose figures these are — always sent by /me/balances. */
+  personId?: string;
   year: number;
   holiday: AccountBreakdown;
   overtime: AccountBreakdown;
@@ -62,6 +64,19 @@ interface MyBalances {
    *  an older backend does not send it, and the page then falls back to the
    *  company-wide policy from /bank-holidays. */
   bankHolidayPolicy?: BhPolicy;
+}
+/**
+ * A manual adjustment an admin posted to a balance (Oct 2026) — e.g. overtime
+ * brought across from BrightHR. Read from the ledger so the list explains a
+ * figure that no request or overtime entry accounts for.
+ */
+interface Adjustment {
+  id: string;
+  account: 'holiday' | 'overtime';
+  minutes: number;
+  effectiveDate: string;
+  note: string | null;
+  createdByName: string | null;
 }
 /** A one-off working-from-home request (spec §19) — GET /staff-calendar/wfh. */
 interface WfhRequest {
@@ -213,6 +228,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [wfh, setWfh] = useState<WfhRequest[]>([]);
+  const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
   const [wfhOpen, setWfhOpen] = useState(false);
   const [balances, setBalances] = useState<MyBalances | null>(null);
   const [hasStaffRecord, setHasStaffRecord] = useState(true);
@@ -260,6 +276,23 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
       setBhPolicy(bh.policy ?? 'use_allowance');
       setCompanyDays(cd.occurrences ?? []);
       setHasStaffRecord(bal.hasStaffRecord !== false);
+      // Manual adjustments, so the list accounts for every hour on the cards.
+      // Decoration: a failure leaves them out rather than breaking the page.
+      const pid = bal.data?.personId;
+      if (pid) {
+        type Entry = Adjustment & { entryType: string; sourceType: string | null; reversesEntryId: string | null };
+        const ledgers = await Promise.all((['holiday', 'overtime'] as const).map(a =>
+          api.get<{ data: { entries: Entry[] } }>(
+            `/staff-calendar/employees/${encodeURIComponent(pid)}/balance?account=${a}&year=${year}`)
+            .then(r => r.data.entries ?? []).catch(() => [] as Entry[])));
+        const all = ledgers.flat();
+        // A reversed adjustment and its reversal cancel out — show neither.
+        const reversed = new Set(all.map(e => e.reversesEntryId).filter(Boolean) as string[]);
+        setAdjustments(all.filter(e => e.sourceType === 'manual' && e.entryType === 'adjustment'
+          && !e.reversesEntryId && !reversed.has(e.id)));
+      } else {
+        setAdjustments([]);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load your time');
     } finally { setLoading(false); }
@@ -515,6 +548,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
           <div className="px-5 py-6 text-sm text-gray-500">Loading…</div>
         ) : view === 'list' ? (
           <TimeList year={year} requests={requests} overtime={overtime} wfh={wfh} onWithdrawWfh={withdrawWfh}
+            adjustments={adjustments}
             companyDays={companyDays}
             bankHolidaysToBook={bh.toBook} freshIds={freshIds}
             onWithdraw={withdraw} onCancelOvertime={cancelOvertime}
@@ -1748,14 +1782,31 @@ function pendingActions(kind: 'leave' | 'overtime' | 'wfh', id: string, onWithdr
     : [{ label: 'Withdraw', onClick: onWithdraw, className: 'text-red-600' }];
 }
 
-function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
+function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, adjustments = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
+  adjustments?: Adjustment[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
 }): TimeRow[] {
   const rows: TimeRow[] = [];
+
+  // Hours an admin added or took off by hand — the note says why, in words
+  // the person will recognise ("brought across from BrightHR").
+  for (const a of adjustments) {
+    const plus = a.minutes > 0;
+    rows.push({
+      key: `adj:${a.id}`, date: a.effectiveDate, until: a.effectiveDate,
+      title: a.note || 'Adjustment',
+      meta: `Adjustment to your ${a.account === 'holiday' ? 'holiday' : 'overtime bank'}`,
+      extra: a.createdByName ? `Added by ${a.createdByName}` : null,
+      amount: `${plus ? '+' : '−'}${fmtH(Math.abs(a.minutes))}`,
+      amountClass: plus ? 'text-emerald-700' : 'text-gray-900',
+      pill: 'Adjustment', pillClass: 'bg-gray-100 text-gray-700', statusClass: 'text-gray-600',
+      dot: 'bg-gray-400',
+    });
+  }
 
   for (const c of companyDays) {
     rows.push({
@@ -1852,6 +1903,7 @@ function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, companyDays, b
 function TimeList(props: {
   year: number; requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
+  adjustments?: Adjustment[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
