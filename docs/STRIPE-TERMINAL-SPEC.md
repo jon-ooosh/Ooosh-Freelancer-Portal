@@ -1,8 +1,9 @@
 # STRIPE TERMINAL SPEC — in-person card payments driven from OP
 
-**Status:** 📋 PLANNED (6 Oct 2026) — jon + Claude. Nothing built. Hardware on order (Stripe Reader
-S700). Worldpay contract ends **March 2027**, which is the crossover deadline, not the start date.
-§1 is the settled decisions; §9 the open questions that must be answered before Phase 2 starts.
+**Status:** 📋 PLANNED (6–7 Oct 2026) — jon + Claude. Nothing built. Hardware on order (Stripe Reader
+S700); the build starts in a fresh session once it has arrived. Worldpay contract ends **March 2027**,
+which is the crossover deadline, not the start date. §1 is the settled decisions (jon's 7 Oct answers
+folded in); §9 has one open question left (online extended authorisation).
 
 **Replaces:** the Worldpay card terminal and the Amex merchant account that runs through it, and
 every manual "I took £X by Worldpay/Amex, as a payment/pre-auth" entry on the Money tab, the excess
@@ -33,26 +34,33 @@ Stripe, portal redesign, Wise matcher: this module reuses all of it), `.claude/r
 2. **Same Stripe account** as the payment portal. Same payouts, same webhook receiver
    (`POST /api/webhooks/stripe`), same `stripe_events` keyspaces. Money lands on the **Stripe GBP**
    HireHop bank (267) like portal money. No new bank accounts in HireHop or Xero.
-3. **Hardware: Stripe Reader S700** (Wi-Fi / Ethernet). The S710 is the same device with 4G added,
-   for markets and vans; not needed at a desk. One at reception to start; a second for the shop
-   counter only if contention proves real (§9).
+3. **Hardware: ONE Stripe Reader S700** (Wi-Fi / Ethernet). The S710 is the same device with 4G
+   added, for markets and vans; not needed at a desk. Fifteen years on one Worldpay terminal says
+   one reader is enough; reception and the shop share it and "reader busy" is a wait, not a
+   second purchase.
 4. **No card-not-present payments over the phone any more — policy.** The portal link (already on
    every quote and proforma, and now on the Money tab) is what a remote client uses. Stripe's
    mail-order mode is deliberately NOT enabled: it brings card-typing back. A text-message link via
    `services/sms-service.ts` is a separate, later idea.
-5. **Pre-auths use Stripe's extended authorisation**, not the standard card-present hold (2 days,
-   5 for Visa — useless for a hire). Extended authorisation runs to **30 days** on Mastercard and on
-   Visa/Amex for a *vehicle rental* merchant category, **10 days** on Visa for *equipment rental*.
-   The window is a maximum: OP captures or releases on return exactly as it does for the 7-day
-   online hold today. **Which window applies depends on the account's merchant category code (§9.1)
-   and must be verified in a sandbox before Phase 2 is built.** If the Visa window turns out shorter
-   than a hire, the fallback is the existing online pre-auth link, not a workaround.
+5. **Pre-auths follow the online portal's rules exactly** — which hires get a hold rather than a
+   payment, how much, when it can be placed, how it is captured or released — and use Stripe's
+   extended authorisation rather than the standard card-present hold (2 days, 5 for Visa). The
+   Stripe account's industry is **"Car rentals"** (verified 7 Oct 2026), so the window is **30
+   days** on Visa, Mastercard and Amex. The window is a MAXIMUM, not a duration: OP releases
+   (cancels the PaymentIntent) or captures on return exactly as it does for the online hold, and
+   the client's bank clears a released hold in a few days. Nothing new is invented here.
+   **Opportunity to settle in the build, not before:** today a hire longer than the online hold
+   window is taken as a payment and reimbursed afterwards (admin time and card fees both ways). A
+   30-day in-person window means a hold could cover most hires instead. Verify the real
+   `capture_before` on a live hold in Phase 2, and check whether the ONLINE portal's pre-auth can
+   also request extended authorisation (Stripe offers it for card-not-present in some cases) —
+   if so the same rule change applies to the portal. Decide the rule once, apply it to both.
 6. **Recording goes through `services/record-payment.ts`.** Never a second chain. Terminal money is
    `payment_method = 'stripe_terminal'` (new enum value) so staff can tell in-person from online in
    the history, mapped to HireHop bank **267** and labelled "Card (terminal)". A refund is a Stripe
    refund against the payment intent, the same code the portal's refunds use.
-7. **Receipts:** no paper. Stripe emails a receipt when `receipt_email` is set on the PaymentIntent;
-   OP sets it from the job's client email where it has one. The excess **card-slip scan requirement**
+7. **Receipts:** no paper and no Stripe receipt emails (the account setting stays OFF; OP's own
+   payment and excess emails cover it). The excess **card-slip scan requirement**
    (`receipt_required`, raised for `worldpay` / `amex`) is NOT raised for terminal payments — the
    Stripe record is the audit trail.
 8. **Fees are higher than Worldpay and jon accepts that** for the accuracy and time saved. No fee
@@ -61,6 +69,13 @@ Stripe, portal redesign, Wise matcher: this module reuses all of it), `.claude/r
    removes them; §8 Phase 4 retires them once the terminal has run cleanly for a month.
 10. **Warnings, not gates.** A reader offline or busy is a message with a retry, never a blocked
     payment path; the online portal link remains the escape hatch on every screen.
+11. **"Other amount" is for any staff member**, with a mandatory reason — the same people can
+    already record any amount by any method today, so a tighter gate here would just push them
+    back to the manual path.
+12. **Admin-only while testing.** The "Take card payment" button (and the till tender) ship behind a
+    `system_settings.stripe_terminal_roles` switch defaulting to admin only; jon widens it to all
+    staff once the first live payments have run cleanly. Temporary by design — remove the switch
+    in Phase 4, don't leave a permanent gate behind.
 
 ## 2. What exists that this reuses
 
@@ -171,13 +186,14 @@ pre-auth link instead") and does not proceed unless a manager overrides.
 
 ## 9. Open questions (answer before the phase that needs them)
 
-1. **Merchant category code on the Stripe account** — unknown (jon couldn't find it, 6 Oct). Decides
-   the Visa extended-auth window (30 vs 10 days). Needed before Phase 2.
-2. **Stripe email receipts** — currently OFF on the account. Leave off and rely on OP's own emails,
-   or turn on for terminal payments only via `receipt_email`? Phase 1.
-3. **Second reader for the shop** — only if "reader busy" is a daily complaint after Phase 3.
-4. **"Other amount"** — manager-only, or any staff with a mandatory reason? Phase 1.
-5. **Text-message portal link** — out of scope here; `services/sms-service.ts` can do it later.
+1. ~~Merchant category code~~ — **answered 7 Oct 2026: "Car rentals"** (Dashboard → Settings →
+   Business details → edit → Industry; it only shows in edit mode). 30-day extended window.
+2. ~~Stripe email receipts~~ — stay OFF (jon, 7 Oct).
+3. ~~Second reader~~ — no; one reader, shared (jon, 7 Oct).
+4. ~~"Other amount"~~ — any staff, reason mandatory (jon, 7 Oct).
+5. **Can the online portal's pre-auth use extended authorisation too?** If yes, the "hold instead of
+   pay-and-reimburse" rule change in §1.5 applies to both channels. Verify in Phase 2.
+6. **Text-message portal link** — out of scope here; `services/sms-service.ts` can do it later.
 
 ## 10. Not in scope
 

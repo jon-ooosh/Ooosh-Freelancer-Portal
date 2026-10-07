@@ -1135,7 +1135,7 @@ router.get('/incoming-payments', authorize('admin', 'manager'), async (_req: Aut
       `SELECT i.id, i.status, i.received_at, i.payer_name, i.amount, i.currency, i.fee, i.amount_credited,
               i.reference, i.transfer_number, i.match_method, i.match_notes, i.candidates,
               i.matched_job_id, i.payment_type, i.hh_deposit_id, i.hh_push_error, i.resolved_at,
-              i.xero_invoice_id, i.xero_invoice_number, i.xero_payment_id,
+              i.xero_invoice_id, i.xero_invoice_number, i.xero_payment_id, i.xero_invoices,
               j.hh_job_number AS matched_hh_job_number, j.job_name AS matched_job_name,
               u.name AS resolved_by_name
          FROM incoming_bank_payments i
@@ -1198,20 +1198,21 @@ const incomingXeroSchema = z.object({ amount: z.number().min(0.01).optional() })
 router.post('/incoming-payments/:id/record-xero', authorize('admin', 'manager'), validate(incomingXeroSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const row = await query(`SELECT xero_invoice_id, xero_invoice_number FROM incoming_bank_payments WHERE id = $1`, [id]);
-    const inv = row.rows[0];
-    if (!inv?.xero_invoice_id) {
-      res.status(400).json({ error: 'No Xero invoice is linked to this payment' });
+    const row = await query(`SELECT xero_invoices FROM incoming_bank_payments WHERE id = $1`, [id]);
+    const invoices = (Array.isArray(row.rows[0]?.xero_invoices) ? row.rows[0].xero_invoices : [])
+      .filter((i: { status?: string; amount_due?: number }) => i.status === 'AUTHORISED' && (i.amount_due || 0) > 0);
+    if (invoices.length === 0) {
+      res.status(400).json({ error: 'No open Xero invoice is linked to this payment' });
       return;
     }
+    const numbers = invoices.map((i: { invoice_number: string }) => i.invoice_number).join(' + ');
     const result = await recordIncomingPaymentInXero({
       incomingId: id as string,
-      invoiceId: inv.xero_invoice_id,
-      invoiceNumber: inv.xero_invoice_number,
+      invoices,
       amount: req.body.amount,
       actorUserId: req.user!.id,
       matchMethod: 'manual_xero',
-      matchNotes: `Recorded against Xero invoice ${inv.xero_invoice_number} by ${req.user!.email || req.user!.id} from the incoming-payments queue`,
+      matchNotes: `Recorded against Xero invoice ${numbers} by ${req.user!.email || req.user!.id} from the incoming-payments queue`,
     });
     if (!result.ok) {
       res.status(400).json({ error: result.error });
