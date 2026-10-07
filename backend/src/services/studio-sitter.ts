@@ -261,6 +261,35 @@ export async function shiftLinkPath(shiftId: string): Promise<{ path: string; is
   }
 }
 
+export interface ShiftJobRef {
+  job_id: string;
+  hh_job_number: number | null;
+  label: string;
+}
+
+/** The rehearsal jobs that needed a sitter on each of these evenings. A shift
+ *  belongs to an evening, not a job (every band in that night shares it), so
+ *  this is how a shift is tied back to its job(s) — e.g. a sitter's History
+ *  rows. Includes provisional jobs, like shiftLinkPath: the night has happened. */
+export async function getSitterJobsByDate(dates: string[]): Promise<Map<string, ShiftJobRef[]>> {
+  const out = new Map<string, ShiftJobRef[]>();
+  if (dates.length === 0) return out;
+  const sorted = [...dates].sort();
+  const wanted = new Set(dates);
+  const jobs = await loadRehearsalJobs(sorted[0], sorted[sorted.length - 1], true);
+  for (const job of jobs) {
+    const label = job.job_name || job.client_name || (job.hh_job_number ? `#${job.hh_job_number}` : 'Rehearsal');
+    for (const eve of job.detail.evenings) {
+      if (!eve.sitter_needed || !wanted.has(eve.date)) continue;
+      const arr = out.get(eve.date) ?? [];
+      arr.push({ job_id: job.id, hh_job_number: job.hh_job_number, label });
+      out.set(eve.date, arr);
+    }
+  }
+  for (const arr of out.values()) arr.sort((a, b) => (a.hh_job_number ?? 0) - (b.hh_job_number ?? 0));
+  return out;
+}
+
 /** Per-job coverage for the job's sitter-needed evenings (drives the card chips). */
 export async function getJobCoverage(jobId: string): Promise<JobCoverageEvening[]> {
   const jobRes = await query(

@@ -33,6 +33,8 @@ interface FreelancerHistoryItem {
   client_name: string | null;
   vehicle_reg: string | null;
   run_combined_fee: number | null;
+  // Sitter rows: every job that needed a sitter that evening (can be several).
+  jobs?: Array<{ job_id: string; hh_job_number: number | null; label: string }>;
 }
 
 interface FreelancerHistorySummary {
@@ -288,7 +290,19 @@ function HistoryTable({ items }: { items: FreelancerHistoryItem[] }) {
                   {it.source === 'crew' && it.is_local ? ' (local)' : ''}
                 </td>
                 <td className="px-4 py-2.5">
-                  {it.job_id ? (
+                  {it.jobs && it.jobs.length > 0 ? (
+                    // A sitter evening shared by several bands — one link per job.
+                    <div className="space-y-1">
+                      {it.jobs.map((j) => (
+                        <div key={j.job_id}>
+                          <Link to={`/jobs/${j.job_id}`} className="text-sm text-ooosh-600 hover:text-ooosh-800 font-medium">
+                            {j.label}
+                          </Link>
+                          {j.hh_job_number ? <p className="text-xs text-gray-500">#{j.hh_job_number}</p> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : it.job_id ? (
                     <Link to={`/jobs/${it.job_id}`} className="text-sm text-ooosh-600 hover:text-ooosh-800 font-medium">
                       {it.title}
                     </Link>
