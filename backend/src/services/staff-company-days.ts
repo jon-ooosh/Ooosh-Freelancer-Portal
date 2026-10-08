@@ -23,6 +23,7 @@
 import { query, getClient } from '../config/database';
 import { DATE_RE } from './staff-day-status';
 import { postEntry } from './staff-balance';
+import { ukToday } from './uk-date';
 
 export interface CompanyDay {
   id: string;
@@ -228,7 +229,7 @@ export async function getCompanyReclaimCandidates(id: string): Promise<CompanyRe
 
   // Look forward from today only for a recurring day: reclaiming somebody's
   // holiday from three Christmases ago would rewrite a settled year.
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const from = day.recurs ? today : day.dayDate;
   const to = day.recurs ? `${Number(today.slice(0, 4)) + 2}-12-31` : day.dayDate;
   const dates = [...(await getCompanyDayOverlay(from, to)).values()]

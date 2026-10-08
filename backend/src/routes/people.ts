@@ -6,6 +6,7 @@ import { redactPrivateFields, redactPrivateFieldsAll } from '../services/people-
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { getSitterJobsByDate, type ShiftJobRef } from '../services/studio-sitter';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 
@@ -1071,7 +1072,7 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
     // date_start falls in the current calendar year — past AND booked-ahead
     // within this year both count (deliberately simple).
     const DEAD = new Set(['cancelled', 'declined']);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = ukToday();
     const yearPrefix = today.slice(0, 4);
 
     let totalGigs = 0;

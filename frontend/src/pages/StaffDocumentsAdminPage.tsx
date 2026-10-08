@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
 import MarkdownLite from '../components/MarkdownLite';
 import { openAuthedFile } from '../lib/openAuthedFile';
+import { ukToday } from '../lib/ukDate';
 
 export type Mode = 'read_only' | 'tick' | 'sign';
 export type Category = 'policy' | 'agreement' | 'training' | 'official_doc' | 'contract' | 'other';
@@ -641,7 +642,7 @@ export default function StaffDocumentsAdminPage() {
     return u ? ([u.first_name, u.last_name].filter(Boolean).join(' ') || u.email) : '—';
   };
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = ukToday();
   // DATE columns serialise to a full ISO timestamp in JSON — compare date parts.
   const reviewDue = (d: DocRow) => !!d.content_review_due_date && d.content_review_due_date.slice(0, 10) <= todayStr;
   const allTags = Array.from(new Set(docs.flatMap((d) => d.tags || []))).sort();

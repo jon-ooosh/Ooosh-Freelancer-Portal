@@ -21,6 +21,7 @@ import RechargeResolveModal, { RechargeStatusPill } from '../components/Recharge
 import RecordRefundModal from '../components/RecordRefundModal';
 import { PAID_NOW_METHODS } from '../lib/costOptions';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
+import { ukToday } from '../lib/ukDate';
 
 type ViewMode = 'all' | 'payable' | 'recharge' | 'reconcile';
 
@@ -1080,7 +1081,7 @@ function BatchPayModal({ count, total, supplierCount, busy, onClose, onSubmit }:
   onClose: () => void;
   onSubmit: (paidDate: string, paidMethod: string, reference: string) => void;
 }) {
-  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidDate, setPaidDate] = useState(() => ukToday());
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   const [reference, setReference] = useState('');
 
@@ -1141,7 +1142,7 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
   onSubmit: (paidDate: string, paidMethod: string, remittanceEmail?: string) => void;
   onSettleExternal: (settledDate: string, note: string) => void;
 }) {
-  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidDate, setPaidDate] = useState(() => ukToday());
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   // "It's already been paid — I'm recording that, not asking you to pay it."
   // The two jobs live in one modal because they start from the same thought;
@@ -1199,7 +1200,7 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
     return () => { cancelled = true; };
   }, [cost.id]);
 
-  const isFutureDate = paidDate > new Date().toISOString().slice(0, 10);
+  const isFutureDate = paidDate > ukToday();
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(remittanceEmail.trim());
   // Due date from the supplier's resolved terms (server-computed), falling back
   // to flat invoice + 30 for an older API response.

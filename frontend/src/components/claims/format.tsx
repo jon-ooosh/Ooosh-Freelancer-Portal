@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
+import { ukToday, ukDatePlus } from '../../lib/ukDate';
 
 export type ClaimStage = 'open' | 'form_out' | 'submitted' | 'reviewed' | 'with_broker' | 'closed';
 
@@ -87,18 +88,8 @@ export function fmtClaimDate(v: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB');
 }
 
-/** Today in UK terms as YYYY-MM-DD. */
-export function ukToday(): string {
-  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' }));
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-}
-
-/** YYYY-MM-DD `days` after today (UK). */
-export function ukDatePlus(days: number): string {
-  const [y, m, d] = ukToday().split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d + days));
-  return dt.toISOString().slice(0, 10);
-}
+/** Today / today + n, in UK terms — lib/ukDate.ts. */
+export { ukToday, ukDatePlus };
 
 /**
  * Check-date cell: red when overdue or missing on a case that needs one. A case

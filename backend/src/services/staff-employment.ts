@@ -19,6 +19,7 @@
 
 import { query, getClient } from '../config/database';
 import { addDaysYmd, shiftMinutes, DATE_RE } from './staff-day-status';
+import { ukToday } from './uk-date';
 
 /**
  * Who may manage staff records. Admin only for now (jon, Sep 2026) — but named
@@ -585,7 +586,7 @@ export async function recordReviewOutcome(
   let salaryId: string | null = null;
   if (input.newSalary != null) {
     if (!(input.newSalary >= 0)) throw new Error('A salary cannot be negative');
-    const effective = input.salaryEffectiveFrom || new Date().toISOString().slice(0, 10);
+    const effective = input.salaryEffectiveFrom || ukToday();
     if (!DATE_RE.test(effective)) throw new Error('salaryEffectiveFrom must be YYYY-MM-DD');
     const sal = await query(
       `INSERT INTO staff_salary_history (person_id, annual_amount, effective_from, reason, created_by)

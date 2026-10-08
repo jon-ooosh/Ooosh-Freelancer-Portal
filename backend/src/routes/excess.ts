@@ -22,6 +22,7 @@ import { encryptJson, tryDecryptJson, isEncryptionConfigured } from '../services
 import { createMobileUploadToken } from '../services/mobile-upload-token';
 import { attachExcessReceipt } from '../services/excess-receipt';
 import { syncSavedRowToXero, sendXeroSyncFailedAlert, type XeroSyncResult } from '../services/hh-xero-sync';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
@@ -1543,7 +1544,7 @@ router.post('/:id/record-preauth', validate(recordPreauthSchema), async (req: Au
     // receipt — so neither flags a receipt as required.
     const needsReceipt = method === 'worldpay' || method === 'amex';
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const preauthNote = `[${dateStr}] Pre-auth hold of £${amount.toFixed(2)} recorded via ${method.replace(/_/g, ' ')}${reference ? ` (ref ${reference})` : ''}${notes ? `. ${notes}` : ''}. Expires in ${holdDays} days.`;
     const newNotes = current.notes ? `${current.notes}\n${preauthNote}` : preauthNote;
 
@@ -1960,7 +1961,7 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
       // ── Step 3: Optional apply-to-invoice (atomic capture-and-claim) ──────
       if (invoice_id && hhDepositId) {
         try {
-          const currentDate = new Date().toISOString().split('T')[0];
+          const currentDate = ukToday();
           const applyDesc = `${current.hirehop_job_id} - Excess applied to invoice`;
           const applyMemo = reason
             ? `Captured & applied — ${reason} (via Ooosh OP)`
@@ -2020,7 +2021,7 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
     const newStatus = claimApplied ? 'fully_claimed' : 'taken';
     const newClaimAmount = claimApplied ? amount : (parseFloat(current.claim_amount || '0'));
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const captureNote = `[${dateStr}] Captured £${amount.toFixed(2)} from £${amountHeld.toFixed(2)} hold (£${amountReleased.toFixed(2)} released)${reason ? ` — ${reason}` : ''}${notes ? `. ${notes}` : ''}`;
     const newNotes = current.notes
       ? `${current.notes}\n${captureNote}`
@@ -2177,7 +2178,7 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
     }
 
     // ── Update OP record ──
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const releaseNote = `[${dateStr}] Released £${amountHeld.toFixed(2)} hold${reason ? ` — ${reason}` : ''}${notes ? `. ${notes}` : ''}. ${stripeOutcome}`;
     const newNotes = current.notes
       ? `${current.notes}\n${releaseNote}`
@@ -2348,7 +2349,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       // deposit's real bank (confirmable `bank` from the UI wins). Never the old
       // hardcoded Worldpay default.
       const resolvedBank = (bank as number | undefined) ?? (await resolveDepositBankId(current)) ?? 169;
-      const currentDate = new Date().toISOString().split('T')[0];
+      const currentDate = ukToday();
       const description = isCrossJob
         ? `${current.hirehop_job_id} - Excess applied to invoice (cross-job → ${target_hh_job})`
         : `${current.hirehop_job_id} - Excess applied to invoice`;
@@ -2415,7 +2416,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       ? 'fully_claimed'
       : current.excess_status;
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const crossJobNote = target_hh_job != null && Number(target_hh_job) !== Number(current.hirehop_job_id)
       ? ` → job ${target_hh_job} invoice`
       : '';
@@ -2754,7 +2755,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
 
       // ── Step 2: Push the refund payment application to HireHop ───────────
       if (hhDepositId) {
-        const currentDate = new Date().toISOString().split('T')[0];
+        const currentDate = ukToday();
         const hhBankId = HH_BANK_IDS[method] || 265;
         const description = `${current.hirehop_job_id} - Excess refund${isPartial ? ' (partial)' : ''}`;
         const memo = `Insurance excess ${isPartial ? 'partial ' : ''}reimbursement — via ${method.replace(/_/g, ' ')} (recorded via Ooosh OP)`;
@@ -2865,7 +2866,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       );
 
       if (!xeroSync.ok) {
-        const gapNote = `[${new Date().toISOString().split('T')[0]}] ⚠️ Xero sync REFUSED for the £${amount.toFixed(2)} reimbursement: ${xeroSync.error} — HireHop is correct, Xero needs a manual correction.`;
+        const gapNote = `[${ukToday()}] ⚠️ Xero sync REFUSED for the £${amount.toFixed(2)} reimbursement: ${xeroSync.error} — HireHop is correct, Xero needs a manual correction.`;
         await query(
           `UPDATE job_excess SET notes = COALESCE(notes || E'\n', '') || $2, updated_at = NOW() WHERE id = $1`,
           [id, gapNote]
@@ -2929,7 +2930,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
             at: new Date().toISOString(),
           }]),
           id,
-          ` [${new Date().toISOString().split('T')[0]} Stripe refund recorded only — done manually in Stripe dashboard, not via OP]`,
+          ` [${ukToday()} Stripe refund recorded only — done manually in Stripe dashboard, not via OP]`,
         ]
       ).catch(e => console.error('[excess] Record-only leg append failed (non-fatal):', e));
     }
@@ -2995,7 +2996,7 @@ router.post('/:id/mark-externally-resolved', validate(externallyResolvedSchema),
       return;
     }
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const noteLine = `[${dateStr} Externally Resolved] £${amount.toFixed(2)} via ${method}${reference ? ` (${reference})` : ''} — ${reason}. Record marked as collected-then-reimbursed to match external system; no HH push.`;
     const newNotes = row.notes ? `${row.notes}\n${noteLine}` : noteLine;
 

@@ -16,11 +16,16 @@
  * — used by STAGE_SQL and the dashboard card). A lost / cancelled / dismissed
  * one leaves it in To review with a quick "Dismiss — already quoted".
  * Linking never changes scoring: the job is already in the band's history once.
+ *
+ * The reverse link: each linked job gets a "Tour spotted by the Lead Finder"
+ * note on its activity timeline (`noteLinkedJobs`), and a closing note if it's
+ * later unlinked (`noteUnlinkedJob`).
  */
 import { query } from '../../config/database';
 import { JOB_OUTCOME_SQL, JOB_BOOKED_SQL } from '../job-outcomes';
 import { bandNameRegex } from './history';
 import { logLeadEvent } from './events';
+import { frontendLink } from '../../config/app-urls';
 
 export const TOUR_MARGIN_DAYS = 14;
 
@@ -108,6 +113,58 @@ async function jobLabel(jobId: string): Promise<string> {
   return `${j.hh_job_number ? `#${j.hh_job_number} ` : ''}${j.job_name ?? ''} (${j.outcome})`.trim();
 }
 
+/** '2026-07-15' → '15 Jul 2026'. */
+function fmtDay(ymd: string | null): string {
+  if (!ymd) return '?';
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+/**
+ * The reverse link: a note on each newly linked job's activity timeline —
+ * "Tour spotted by the Lead Finder" with a link back to the lead. Once per link
+ * (`job_noted_at`, migration 280); existing links are backfilled the next time
+ * the lead syncs. Stamp first, then write, so a retry can't double-post.
+ */
+export async function noteLinkedJobs(leadId: string, userId: string | null = null): Promise<number> {
+  const r = await query(
+    `UPDATE lead_tour_jobs ltj SET job_noted_at = NOW()
+       FROM leads l, jobs j
+      WHERE ltj.lead_id = $1 AND l.id = ltj.lead_id AND j.id = ltj.job_id
+        AND ltj.status = 'linked' AND ltj.job_noted_at IS NULL AND j.is_deleted = false
+      RETURNING ltj.job_id, l.artist_name, l.uk_date_count, l.relevance_score,
+                l.first_date::text AS first_date, l.last_date::text AS last_date`,
+    [leadId],
+  );
+  for (const row of r.rows) {
+    const score = row.relevance_score != null ? ` · scored ${Number(row.relevance_score)}/10` : '';
+    const content = `🔭 Tour spotted by the Lead Finder: ${row.artist_name} — ${row.uk_date_count} UK date(s), `
+      + `${fmtDay(row.first_date)} to ${fmtDay(row.last_date ?? row.first_date)}${score}. This job is linked to it. `
+      + frontendLink(`/jobs/leads?lead=${leadId}`);
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by, source) VALUES ('note', $1, $2, $3, 'system')`,
+      [content, row.job_id, userId],
+    ).catch((err) => console.error('[leads/tour-jobs] timeline note failed:', err));
+  }
+  return r.rows.length;
+}
+
+/** A noted job leaves the tour (staff unlinked it, or it no longer fits) — say so on its timeline. */
+export async function noteUnlinkedJob(leadId: string, jobId: string, why: string, userId: string | null = null): Promise<void> {
+  const r = await query(
+    `UPDATE lead_tour_jobs ltj SET job_noted_at = NULL
+       FROM leads l
+      WHERE ltj.lead_id = $1 AND ltj.job_id = $2 AND l.id = ltj.lead_id AND ltj.job_noted_at IS NOT NULL
+      RETURNING l.artist_name`,
+    [leadId, jobId],
+  );
+  if (!r.rows[0]) return;
+  await query(
+    `INSERT INTO interactions (type, content, job_id, created_by, source) VALUES ('note', $1, $2, $3, 'system')`,
+    [`🔭 Lead Finder: no longer linked to ${r.rows[0].artist_name}'s UK tour — ${why}.`, jobId, userId],
+  ).catch((err) => console.error('[leads/tour-jobs] timeline note failed:', err));
+}
+
 export interface TourJobSyncResult { linked: number; suggested: number; removed: number; }
 
 /**
@@ -157,9 +214,11 @@ export async function syncTourJobs(leadId: string): Promise<TourJobSyncResult> {
     if (row.link_type === 'manual' || row.status === 'rejected' || keep.has(jobId)) continue;
     // A 'name' link staff confirmed stays; only unconfirmed suggestions and auto links lapse.
     if (row.link_type === 'name' && row.status === 'linked') continue;
+    await noteUnlinkedJob(leadId, jobId, 'its dates or client no longer match the tour');
     await query(`DELETE FROM lead_tour_jobs WHERE lead_id = $1 AND job_id = $2`, [leadId, jobId]);
     out.removed += 1;
   }
+  await noteLinkedJobs(leadId);
   return out;
 }
 

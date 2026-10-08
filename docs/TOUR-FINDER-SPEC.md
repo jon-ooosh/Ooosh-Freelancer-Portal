@@ -443,6 +443,39 @@ adds `lead_tour_jobs`, and `services/leads/tour-jobs.ts` is the one definition.
 - **Dates:** `services/leads/dates.ts` `dateOnly()` reads DATE columns timezone-safely.
   node-postgres returns DATE as local midnight, so `toISOString()` moved summer dates back a
   day on a UK-time server.
+- **The reverse link (migration 280):** each linked job gets a system note on its Activity
+  Timeline — "🔭 Tour spotted by the Lead Finder: <band> — n UK date(s), <first> to <last> ·
+  scored s/10", with a link back to the lead (`/jobs/leads?lead=<id>`). `noteLinkedJobs()`
+  writes it once per link (`lead_tour_jobs.job_noted_at`, stamped before writing). Suggestions
+  aren't noted until confirmed. Links that already existed are backfilled the next time the
+  lead syncs. If a noted job leaves the tour (unlinked on the Leads page, or its dates or
+  client no longer match), `noteUnlinkedJob()` adds a closing note and clears the stamp, so a
+  re-link notes again. The lead's own enquiry (`converted_job_id`) isn't a tour job and
+  already says "Found by the Lead Finder" in its notes.
+
+### 19.1 Date audit (Oct 2026)
+
+jon asked whether the Leads date bug existed elsewhere. Findings:
+
+- **The production server runs in UTC** (Hetzner; noted in `scheduler.ts`, `shop-period.ts`).
+  On UTC, a DATE column read by node-postgres is UTC midnight and round-trips through
+  `toISOString()` correctly. So the platform-wide DATE parser isn't needed, and is NOT built —
+  it would turn every DATE into a string across the codebase for no live gain. The Leads
+  `dateOnly()` stays as defence. **Never set `TZ` on the server** without auditing DATE reads.
+- **The real gap was "today".** `new Date().toISOString().slice(0, 10)` is the UTC date, which
+  between 00:00 and 01:00 BST is still yesterday. That ran in ~65 backend places (late-night
+  check-ins and book-outs, deposit and payment dates on HireHop, excess receipts, storage
+  move-outs, staff calendar…) and ~45 frontend places (date pickers pre-filled with
+  yesterday). All now use ONE helper: backend `services/uk-date.ts` (`ukToday()`,
+  `ukDatePlus()`, `ukDateOf()`), frontend `lib/ukDate.ts` (the same three). The older
+  copies (`shop-period.londonDate`, `staff-tasks.todayLondon`, `incident-claims.ukDatePlus`,
+  `driver-validity.todayYmd`, claims `format.tsx`, `ForwardDateInput.ymdFromToday`) now
+  delegate to it.
+- **Not changed:** one-off scripts, and "N days ago" sums like
+  `new Date(Date.now() - 30 * 86400000).toISOString()` (an hour's drift on a 30-day range is
+  harmless). SQL `CURRENT_DATE` is also the database's UTC date. Making the DB session
+  Europe/London would fix that, but it would also change `timestamp`-without-zone writes, so
+  it needs its own look if it ever matters.
 
 ## 20. Current state and what's left (Oct 2026)
 
@@ -455,7 +488,9 @@ adds `lead_tour_jobs`, and `services/leads/tour-jobs.ts` is the one definition.
 - Add to address book (editable names, shared inboxes saved as the band's email), Start
   enquiry, and Log outreach (a chased Cold enquiry).
 - Unanswered outreach isn't counted as a loss.
-- Dismiss reasons with suppression, a dashboard card, and jobs for this tour.
+- Dismiss reasons with suppression, a dashboard card, and jobs for this tour (with a note on
+  each linked job's timeline).
+- Platform date audit: "today" is the UK day everywhere (§19.1).
 
 **Deliberately not built (decisions):**
 - **Scheduled weekly run** — jon wants searches run by hand (batches before quiet spells).
@@ -470,12 +505,7 @@ adds `lead_tour_jobs`, and `services/leads/tour-jobs.ts` is the one definition.
 **Open / next candidates:**
 - **Outreach email drafting** (§6 Phase 7) — folds into the auto-chase "voice" work on the
   Enquiries pipeline (AUTO-CHASE-SPEC) rather than being built separately.
-- **The reverse link** — a "Tour spotted by the Lead Finder" note on the job page, using
-  `lead_tour_jobs`.
 - **MusicBrainz value check** — jon expects little from it. Look at how often `external_links`
   carries MusicBrainz-only links; drop it if it adds nothing.
-- **A DATE type parser platform-wide** — any code doing `toISOString()` on a DATE column has
-  the same day-shift risk on a UK-time server. Leads is fixed (`dateOnly()`). A global
-  `pg.types.setTypeParser(1082, v => v)` would fix the rest, but it changes every DATE from a
-  Date to a string, so it needs its own audit.
+- **SQL `CURRENT_DATE` in UK terms** — only if a midnight–1am BST edge ever bites (§19.1).
 

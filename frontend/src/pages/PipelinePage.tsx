@@ -10,6 +10,7 @@ import type {
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PERSON_ORG_ROLES } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
+import { ukToday } from '../lib/ukDate';
 
 // Roles available for the "Linked organisations" picker on a job. These map
 // to `job_organisations.role` (VARCHAR(50), free-text). Keep aligned with the
@@ -669,7 +670,7 @@ function TransitionModal({
                   type="date"
                   value={revisitDate}
                   onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
-                  min={new Date().toISOString().split('T')[0]}
+                  min={ukToday()}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 />
               )}
@@ -1333,7 +1334,7 @@ function NewEnquiryModal({
   };
 
   // Today's date for min constraint (no past dates)
-  const today = new Date().toISOString().split('T')[0];
+  const today = ukToday();
 
   // Helper: add N days to a date string
   const addDays = (dateStr: string, days: number): string => {
@@ -3240,7 +3241,7 @@ export default function PipelinePage() {
     if (targetStatus === 'chasing') {
       if (job.is_chasing) return;  // already there, nothing to do
       try {
-        const today = new Date().toISOString().split('T')[0];
+        const today = ukToday();
         await api.patch(`/pipeline/${job.id}`, { next_chase_date: today });
         fetchPipeline();
       } catch (err) {

@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import { api } from '../../services/api';
 import LeadModal from './LeadModal';
+import { ukToday } from '../../lib/ukDate';
 
 export default function RunSearchModal({ defaultWindow, maxDays, tourRule, onClose, onStarted }: {
   defaultWindow: { from: string; to: string } | null;
@@ -15,7 +16,7 @@ export default function RunSearchModal({ defaultWindow, maxDays, tourRule, onClo
   /** "A tour = 3+ UK dates within 6 weeks…" — moved here from the page header. */
   tourRule?: string;
 }) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const [from, setFrom] = useState(defaultWindow?.from ?? today);
   const [to, setTo] = useState(defaultWindow?.to ?? today);
   const [starting, setStarting] = useState(false);

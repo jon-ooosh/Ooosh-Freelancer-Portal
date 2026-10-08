@@ -18,6 +18,7 @@ import { getSystemSetting } from '../routes/system-settings';
 import { logIssueEvent } from './job-issues';
 import { defaultFormData } from './claim-form-fields';
 import { estimateVehicleValue } from './vehicle-value';
+import { ukDatePlus } from './uk-date';
 
 type DbClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
@@ -72,15 +73,8 @@ export async function getDefaultClaimWatchers(): Promise<string[]> {
   }
 }
 
-/** YYYY-MM-DD for "today + n days" in UK terms. */
-export function ukDatePlus(days: number): string {
-  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' }));
-  now.setDate(now.getDate() + days);
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
+/** YYYY-MM-DD for "today + n days" in UK terms — services/uk-date.ts. */
+export { ukDatePlus };
 
 /** Next Mon–Fri after today (bank holidays not considered — a bell a day early is harmless). */
 export function nextWorkingDay(): string {

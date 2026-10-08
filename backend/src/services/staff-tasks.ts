@@ -24,6 +24,7 @@
 
 import { query } from '../config/database';
 import { STAFF_ADMIN_ROLES } from './staff-employment';
+import { ukToday } from './uk-date';
 
 export const TASK_STATUSES = ['open', 'done', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -75,7 +76,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Today in the UK, as YYYY-MM-DD — the day staff are actually living in. */
 export function todayLondon(): string {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  return ukToday();
 }
 
 /**

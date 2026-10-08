@@ -7,6 +7,7 @@ import FreelancerTasksPanel from '../components/FreelancerTasksPanel';
 import ModalShell from '../components/ModalShell';
 import SearchPicker from '../components/SearchPicker';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { ukToday } from '../lib/ukDate';
 
 /**
  * Staff calendar — the global "who's in" grid (Staff Calendar, Phase A).
@@ -129,7 +130,7 @@ function monthShort(date: string): string {
   return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
 }
 
-const TODAY = new Date().toISOString().slice(0, 10);
+const TODAY = ukToday();
 
 /** 1, 2 or 4 weeks. "Month" is not a mode the grid has — it is week-anchored —
  *  so the third option stays 4 weeks (jon, Oct 2026). */

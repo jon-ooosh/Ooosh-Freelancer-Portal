@@ -26,6 +26,7 @@ import { normaliseArtist } from './normalise';
 import { getClientHistory, describeHistory, bandNameRegex, ClientHistory } from './history';
 import { logLeadEvent } from './events';
 import { dateOnly } from './dates';
+import { ukToday } from '../uk-date';
 
 export { normaliseArtist };
 
@@ -183,7 +184,7 @@ export async function linkLeadToOrg(
      WHERE id = $1`,
     [leadId, orgId, via, via === 'created' ? 'cold' : 'warm', hist ? JSON.stringify(hist) : null, summary],
   );
-  if (opts.enrichOrg) await appendOrgSummary(orgId, summary, new Date().toISOString().slice(0, 10));
+  if (opts.enrichOrg) await appendOrgSummary(orgId, summary, ukToday());
 }
 
 export interface MatchRunSummary { processed: number; exact: number; partial: number; none: number; enriched: number; historyRefreshed: number; }
