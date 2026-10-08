@@ -118,6 +118,34 @@ immediately after `authenticate`, as in `backline.ts`, `carnets.ts`, `excess.ts`
 `hirehop.ts`, `holding.ts`, `pcns.ts`, `pipeline.ts`. Per-endpoint
 `authorize('admin', 'manager')` stacks on top for the destructive ones.
 
+## Token types — `authenticate` takes STAFF access tokens only (Oct 2026)
+
+`JWT_SECRET` signs every token the platform issues. Each family has its own
+middleware; the general `authenticate` accepts exactly one shape.
+
+| Token | Payload marker | Checked by |
+|---|---|---|
+| Staff access token | `{ id, email, role }` | `authenticate` (+ `authorize()`) |
+| Staff refresh token | `{ id, type: 'refresh' }` | `/auth/refresh` only |
+| Hire-form session (public client) | `{ email, type: 'hire_form_session' }` | `authenticateHireForm` (`driver-verification.ts`) |
+| Claim-form driver session (public) | `{ typ: 'claim_driver' }` | claim-form routes |
+| Warehouse kiosk | `{ scope: 'warehouse_session' }` | `authenticateWarehouse` |
+| Freelancer book-out / collection | `{ scope: 'freelancer_bookout' }` | `authenticateVehicleFlexible` |
+| Freelancer prep (§21.6) | `{ scope: 'freelancer_prep' }` (+ 15-min `freelancer_prep_redeem`) | `authenticateVehicleFlexible` + `FREELANCER_PREP_ALLOW` |
+| Portal session | `{ id, email, name }` (`PORTAL_SECRET`, falls back to `JWT_SECRET`) | `portalAuth` — refuses `scope` tokens |
+
+**Until Oct 2026 `authenticate` verified the signature and nothing else**, so every
+row above passed it — a public hire-form session read `GET /api/drivers` (proven on
+a test database). It now requires `{ id, email, role }` and rejects any `scope`,
+`type` or `typ`. **A new token family MUST carry one of those markers and get its
+own middleware** — never widen `authenticate`. Open follow-ups (one secret for all
+families, portal-secret fallback, freelancer-role logins on `authenticate`-only
+routers) are in `docs/SECURITY-AUDIT-BRIEF.md`.
+
+**Links taken from a URL are never rendered raw.** `returnUrl` / `startUrl` on the
+freelancer pages go through `modules/vehicles/lib/safe-url.ts` `safeReturnUrl()`
+(http/https only) — `javascript:` in an `<a href>` runs in OP's origin.
+
 ## Crew & Transport System
 
 This is the quoting/costing system for delivery, collection, and crewed jobs. It lives in the **"Crew & Transport" tab** on the Job Detail page.

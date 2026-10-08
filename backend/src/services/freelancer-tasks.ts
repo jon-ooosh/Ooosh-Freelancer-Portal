@@ -243,6 +243,15 @@ export async function createTask(owner: TaskOwner, input: TaskInput, userId: str
   const jobId = (await resolveJob(input)) ?? null;
 
   const col = ownerColumn(owner);
+  // The same van twice on one person's list is a mis-click, not two jobs.
+  if (input.taskType === 'van_prep') {
+    const dup = await query(
+      `SELECT 1 FROM freelancer_tasks
+        WHERE ${col} = $1 AND task_type = 'van_prep' AND vehicle_id = $2 AND status = 'open' LIMIT 1`,
+      [owner.id, vehicleId]
+    );
+    if (dup.rows[0]) throw new Error('That van is already on their list');
+  }
   const r = await query(
     `INSERT INTO freelancer_tasks (${col}, task_type, vehicle_id, job_id, description, sort_order, created_by)
      VALUES ($1, $2, $3, $4, $5,
@@ -419,6 +428,64 @@ export async function autoTickPrep(reg: string, personId: string | null): Promis
     console.error('[freelancer-tasks] autoTickPrep failed (non-fatal):', err);
     return 0;
   }
+}
+
+// ── Who could I give this to? (phase 3, §21.4) ──────────────────────────────
+
+export interface BookedFreelancer {
+  owner: TaskOwner;
+  date: string;
+  personName: string;
+  /** 'yard_day' (a day booking) or 'sitter' (a studio-sitter evening). */
+  kind: 'yard_day' | 'sitter';
+  /** Offered and not yet answered — they may not be coming. */
+  unconfirmed: boolean;
+  /** Vans already on their list as an open prep — so a card can say "Given to Tom". */
+  vanIds: string[];
+}
+
+/**
+ * Everybody booked in today or tomorrow who could be given a task: live day
+ * bookings (offered or accepted) and studio-sitter evenings with a live
+ * sitter. The "Give to a freelancer" button shows only when this is non-empty
+ * (jon, Oct 2026) — no booked freelancer, no button. Freelancers out on
+ * driving jobs are never here, by design.
+ */
+export async function bookedFreelancersFor(): Promise<BookedFreelancer[]> {
+  const today = todayLondon();
+  const r = await query(
+    `SELECT 'booking' AS kind, b.id, b.booking_date::text AS d, b.status,
+            NULLIF(${DISPLAY_NAME_SQL}, ' ') AS name,
+            ARRAY(SELECT t.vehicle_id::text FROM freelancer_tasks t
+                   WHERE t.day_booking_id = b.id AND t.status = 'open'
+                     AND t.task_type = 'van_prep') AS van_ids
+       FROM freelancer_day_bookings b
+       JOIN people p ON p.id = b.person_id
+      WHERE b.status IN ('offered','accepted')
+        AND b.booking_date BETWEEN $1::date AND $1::date + 1
+     UNION ALL
+     SELECT 'shift' AS kind, s.id, s.shift_date::text AS d, a.status,
+            NULLIF(${DISPLAY_NAME_SQL}, ' ') AS name,
+            ARRAY(SELECT t.vehicle_id::text FROM freelancer_tasks t
+                   WHERE t.shift_id = s.id AND t.status = 'open'
+                     AND t.task_type = 'van_prep') AS van_ids
+       FROM studio_sitter_shifts s
+       JOIN studio_sitter_shift_assignments a
+         ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
+       JOIN people p ON p.id = a.person_id
+      WHERE s.status <> 'cancelled'
+        AND s.shift_date BETWEEN $1::date AND $1::date + 1
+      ORDER BY d, name`,
+    [today]
+  );
+  return r.rows.map((row: any) => ({
+    owner: row.kind === 'booking' ? { kind: 'booking', id: row.id } : { kind: 'shift', id: row.id },
+    date: String(row.d).slice(0, 10),
+    personName: row.name ?? 'Freelancer',
+    kind: row.kind === 'booking' ? 'yard_day' : 'sitter',
+    unconfirmed: row.kind === 'booking' && row.status === 'offered',
+    vanIds: Array.isArray(row.van_ids) ? row.van_ids : [],
+  }));
 }
 
 // ── The prep link (§21.6) ───────────────────────────────────────────────────
