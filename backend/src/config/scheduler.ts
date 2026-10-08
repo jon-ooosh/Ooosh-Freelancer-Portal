@@ -13,6 +13,7 @@ import { sendOohReminderEmails } from '../services/ooh-return';
 import { runOohApproachScan } from '../services/ooh-sms-approach';
 import { cascadeJobClose } from '../services/job-close-cascade';
 import { closeJobRequirements } from '../services/requirement-close-sweep';
+import { ukToday } from '../services/uk-date';
 
 /**
  * Starts the backup and sync schedulers.
@@ -979,7 +980,7 @@ export function startScheduler() {
       // no separate sent_at column. Wrapped in its own try/catch so a
       // future schema drift here doesn't tank the whole cron run silently
       // (which is exactly what bit us on the first scheduled run).
-      const today = new Date().toISOString().slice(0, 10);
+      const today = ukToday();
       const sentJobNumbers = new Set<number>();
       try {
         const sentResult = await query(

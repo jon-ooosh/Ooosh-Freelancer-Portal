@@ -23,6 +23,7 @@
 
 import { query } from '../config/database';
 import { emailService } from './email-service';
+import { ukToday } from './uk-date';
 
 const STAFF_URL = '/staff/admin';
 const ABSENCE_URL = '/staff/absence';
@@ -1066,7 +1067,7 @@ export async function runTaskChase(): Promise<{ chased: number }> {
       [row.id, String(intervalDays)]
     );
     const when = row.due_date
-      ? (row.due_date < new Date().toISOString().slice(0, 10)
+      ? (row.due_date < ukToday()
           ? `was due ${fmtDate(row.due_date)}`
           : `is due ${fmtDate(row.due_date)}`)
       : 'has no date on it';
@@ -1121,7 +1122,7 @@ export async function runListItemChase(): Promise<{ chased: number }> {
       [row.list_id]
     );
     const when = row.due_date
-      ? (row.due_date < new Date().toISOString().slice(0, 10) ? `was due ${fmtDate(row.due_date)}` : `is due ${fmtDate(row.due_date)}`)
+      ? (row.due_date < ukToday() ? `was due ${fmtDate(row.due_date)}` : `is due ${fmtDate(row.due_date)}`)
       : 'is still on the list';
     for (const w of watchers.rows) {
       await notify(
@@ -1409,7 +1410,7 @@ export async function runRecordActionChase(): Promise<{ chased: number }> {
     const isDelete = rec.action_kind === 'delete';
     const title = isDelete ? 'A staff record is due for deletion' : 'A staff record needs looking at';
     const expiry = rec.expires_on
-      ? ` ${rec.expires_on < new Date().toISOString().slice(0, 10) ? 'It expired' : 'It expires'} ${fmtDate(rec.expires_on)}.`
+      ? ` ${rec.expires_on < ukToday() ? 'It expired' : 'It expires'} ${fmtDate(rec.expires_on)}.`
       : '';
     const content = isDelete
       ? `${who}\u2019s ${what} is due for deletion. Open it and delete it if you agree \u2014 nothing is removed automatically.`

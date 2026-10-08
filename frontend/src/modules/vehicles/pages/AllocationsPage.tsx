@@ -26,6 +26,7 @@ import type { HireHopJob, VanAllocation, VanRequirement } from '../types/hirehop
 import type { Vehicle } from '../types/vehicle'
 import { ForSalePill } from '../components/sales/ForSalePill'
 import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
+import { ukToday } from '../../../lib/ukDate'
 
 type DateFilter = 'today' | 'tomorrow' | 'this-week' | 'all'
 type ViewMode = 'going-out' | 'due-back'
@@ -70,7 +71,7 @@ export function AllocationsPage() {
   )
 
   // Date helpers for filtering
-  const today = useMemo(() => new Date().toISOString().split('T')[0]!, [])
+  const today = useMemo(() => ukToday(), [])
   const tomorrow = useMemo(() => {
     const d = new Date()
     d.setDate(d.getDate() + 1)

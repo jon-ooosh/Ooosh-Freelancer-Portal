@@ -20,6 +20,7 @@ import { getSystemSettings } from '../routes/system-settings';
 import { resolvePcnRecipient, PCN_RECIPIENT_FIELDS, PCN_RECIPIENT_JOINS, type PcnRow } from './pcn-recipient';
 import { collectNoticeAttachments } from './pcn-documents';
 import { getFrontendUrl } from '../config/app-urls';
+import { ukToday } from './uk-date';
 
 const OOOSH_EMAIL = 'info@oooshtours.co.uk';
 const OOOSH_PHONE = '+44 1273 911382';
@@ -33,7 +34,7 @@ export async function runPcnChases(): Promise<{ chased: number; escalations: num
     .split(',').map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n)).sort((a, b) => a - b);
   if (chaseDays.length === 0) return { chased: 0, escalations: 0 };
   const handlingFee = money(parseFloat(settings.pcn_handling_charge || '35')) || '£35';
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
 
   const r = await query(
     // Both driver identities — a freelancer driver lives on driver_person_id,

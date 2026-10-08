@@ -42,6 +42,7 @@ import { getFrontendUrl } from '../config/app-urls';
 import { getPaymentPortalLink } from '../services/payment-portal-link';
 import { recordPayment } from '../services/record-payment';
 import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment } from '../services/wise-incoming';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 
@@ -617,7 +618,7 @@ router.post('/:jobId/dismiss-refund', authorize('admin', 'manager'), validate(di
     }
 
     const reasonLabel = DISMISS_REASON_LABELS[reason] || reason;
-    const stamp = `[Dismissed: ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${new Date().toISOString().split('T')[0]}]`;
+    const stamp = `[Dismissed: ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${ukToday()}]`;
     const updated = await query(
       `UPDATE job_payments
          SET payment_status = 'cancelled',
@@ -669,7 +670,7 @@ router.post('/refunds/bulk-dismiss', authorize('admin'), validate(bulkDismissRef
       reason: string; notes?: string | null; refund_ids?: string[]; logged_before?: string;
     };
     const reasonLabel = DISMISS_REASON_LABELS[reason] || reason;
-    const stamp = `[Dismissed (bulk): ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${new Date().toISOString().split('T')[0]}]`;
+    const stamp = `[Dismissed (bulk): ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${ukToday()}]`;
 
     const conds: string[] = [`payment_type = 'refund'`, `payment_status = 'pending'`];
     const params: unknown[] = [stamp, req.user!.id];
@@ -2394,7 +2395,7 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
     }
 
     const resolvedBank = (bank as number | undefined) ?? 169;
-    const currentDate = new Date().toISOString().split('T')[0];
+    const currentDate = ukToday();
     const description = `${job.hh_job_number} - Credit applied to invoice (cross-job → ${target_hh_job})`;
     const memo = `Cross-job credit apply from job ${job.hh_job_number} to job ${target_hh_job} invoice${notes ? ` — ${notes}` : ''} (recorded via Ooosh OP)`;
 
@@ -2729,7 +2730,7 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
     let hhSavedData: Record<string, unknown> | null = null;
     if (job.hh_job_number) {
       try {
-        const currentDate = new Date().toISOString().split('T')[0];
+        const currentDate = ukToday();
         const hhBankId = HH_BANK_IDS[method] || 265;
         const description = `${job.hh_job_number} - Refund${originalPayment?.payment_type ? ' (' + originalPayment.payment_type + ')' : ''}`;
         const memo = `Hire payment refund — via ${method.replace(/_/g, ' ')}${reference ? ` (ref: ${reference})` : ''} (recorded via Ooosh OP)`;

@@ -273,6 +273,8 @@ existing definition:
 | Recording what happened to a lead (who, when) | `services/leads/events.ts` `logLeadEvent()` — never fails the action; read by the Leads timeline + Last activity |
 | Which existing jobs belong to a lead's tour? Is it already quoted / booked? | `services/leads/tour-jobs.ts` — `syncTourJobs()`, `liveTourJobSql()` (drives the In pipeline stage + the dashboard card), `TOUR_JOB_OUTCOME_SQL` |
 | A DATE column as `YYYY-MM-DD` in Leads code | `services/leads/dates.ts` `dateOnly()` — never `toISOString()` on a DATE (node-postgres gives local midnight; UK summer time shifts it a day) |
+| What's today's date (or today + n)? | `services/uk-date.ts` `ukToday()` / `ukDatePlus()` / `ukDateOf()` (frontend: `lib/ukDate.ts`) — **never `new Date().toISOString().slice(0, 10)`**: the server and `toISOString()` are UTC, so between 00:00 and 01:00 BST that's yesterday (TOUR-FINDER-SPEC §19.1) |
+| Telling a job's timeline it belongs to a Lead Finder tour | `services/leads/tour-jobs.ts` `noteLinkedJobs()` / `noteUnlinkedJob()` |
 | Showing a private-bucket file in the DOM | `frontend/src/hooks/useAuthedFileUrl.ts` |
 | Opening a private-bucket file in a new tab | `frontend/src/lib/openAuthedFile.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |

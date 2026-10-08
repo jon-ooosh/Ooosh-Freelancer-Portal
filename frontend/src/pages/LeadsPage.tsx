@@ -31,6 +31,7 @@ import RunStrip from '../components/leads/RunStrip';
 import LeadFilters, {
   LeadFilterState, filtersFromParams, filtersToParams, applyLeadFilters, tourStarted,
 } from '../components/leads/LeadFilters';
+import { ukToday } from '../lib/ukDate';
 
 interface Setting { key: string; value: string | null; }
 interface SettingsResponse { data: Setting[]; default_window?: { from: string; to: string }; max_window_days?: number; }
@@ -106,7 +107,7 @@ function prevTourLine(l: Lead): { text: string; flag: boolean } | null {
   return null;
 }
 
-const todayYmd = () => new Date().toISOString().slice(0, 10);
+const todayYmd = () => ukToday();
 
 export default function LeadsPage() {
   const { user } = useAuthStore();

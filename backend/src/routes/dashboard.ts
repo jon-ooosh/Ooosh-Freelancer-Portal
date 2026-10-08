@@ -4,6 +4,7 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { buildProgressStrips, StripPhase } from '../services/job-progress-strip';
 import { getRoster } from '../services/studio-sitter';
 import { HELD_ITEM_SELECT } from '../services/held-item-query';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
@@ -806,7 +807,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
     // with none assigned (Rehearsals module). Amber dashboard bucket. Non-fatal.
     let sitterGaps: { date: string; jobs: string[] }[] = [];
     try {
-      const _from = new Date().toISOString().slice(0, 10);
+      const _from = ukToday();
       const _toD = new Date(); _toD.setUTCDate(_toD.getUTCDate() + 14);
       const roster = await getRoster(_from, _toD.toISOString().slice(0, 10));
       sitterGaps = roster

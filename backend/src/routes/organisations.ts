@@ -5,6 +5,7 @@ import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { JOB_OUTCOME_SQL, JOB_LOST_OR_CANCELLED_SQL } from '../services/job-outcomes';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
@@ -948,7 +949,7 @@ router.post('/:id/merge',
       }
 
       // Append a backref note to keeper.notes so future readers can trace
-      const today = new Date().toISOString().split('T')[0];
+      const today = ukToday();
       const backrefNote = `\n[Merged from "${loser.name}" (${loserId}) on ${today} by ${req.user!.email || req.user!.id}]`;
       // If we already updated notes from null, append to that; otherwise append to existing.
       const notesIdx = updates.findIndex(u => u.startsWith('notes = '));

@@ -53,7 +53,8 @@ import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipel
 import { logLeadEvent } from '../services/leads/events';
 import { dateOnly } from '../services/leads/dates';
 import { researchLead } from '../services/leads/researcher';
-import { liveTourJobSql, syncTourJobs, TOUR_JOB_OUTCOME_SQL } from '../services/leads/tour-jobs';
+import { liveTourJobSql, syncTourJobs, TOUR_JOB_OUTCOME_SQL, noteLinkedJobs, noteUnlinkedJob } from '../services/leads/tour-jobs';
+import { ukToday, ukDatePlus } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
@@ -256,7 +257,7 @@ router.post('/run', authorize(...MANAGER_ROLES), validate(runSchema), async (req
     const body = req.body as z.infer<typeof runSchema>;
     let window: { from: string; to: string } | undefined;
     if (body.from && body.to) {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = ukToday();
       if (body.from < today) return res.status(400).json({ error: 'The search can’t start in the past' });
       if (body.to < body.from) return res.status(400).json({ error: 'The end date is before the start date' });
       const days = (new Date(body.to).getTime() - new Date(body.from).getTime()) / 86_400_000;
@@ -700,11 +701,7 @@ async function createEnquiryFromLead(
   const primary = opts.primaryId && contactIds.includes(opts.primaryId) ? opts.primaryId : (contactIds[0] ?? null);
 
   let nextChase: string | null = null;
-  if (opts.outreach) {
-    const d = new Date();
-    d.setUTCDate(d.getUTCDate() + opts.outreach.chaseInDays);
-    nextChase = d.toISOString().slice(0, 10);
-  }
+  if (opts.outreach) nextChase = ukDatePlus(opts.outreach.chaseInDays);
 
   const job = await createPipelineEnquiry({
     client_name: orgName,
@@ -956,6 +953,7 @@ router.post('/:id/tour-jobs', authorize(...STAFF_ROLES), validate(linkJobSchema)
     await logLeadEvent(lead.id, 'tour_job_linked', {
       detail: `${j.rows[0].hh_job_number ? `#${j.rows[0].hh_job_number} ` : ''}${j.rows[0].job_name ?? ''}`.trim(), userId: req.user?.id,
     });
+    await noteLinkedJobs(lead.id, req.user?.id ?? null);
     res.status(201).json({ data: await loadLead(lead.id) });
   } catch (error) {
     console.error('[leads] link tour job error:', error);
@@ -976,6 +974,7 @@ router.post('/:id/tour-jobs/:jobId/confirm', authorize(...STAFF_ROLES), async (r
     await logLeadEvent(req.params.id as string, 'tour_job_linked', {
       detail: `${j.rows[0]?.hh_job_number ? `#${j.rows[0].hh_job_number} ` : ''}${j.rows[0]?.job_name ?? ''} (confirmed)`.trim(), userId: req.user?.id,
     });
+    await noteLinkedJobs(req.params.id as string, req.user?.id ?? null);
     res.json({ data: await loadLead(req.params.id as string) });
   } catch (error) {
     console.error('[leads] confirm tour job error:', error);
@@ -993,6 +992,7 @@ router.delete('/:id/tour-jobs/:jobId', authorize(...STAFF_ROLES), async (req: Au
       [req.params.id, req.params.jobId, req.user?.id ?? null],
     );
     if (!r.rows[0]) return res.status(404).json({ error: 'Not linked to this lead' });
+    await noteUnlinkedJob(req.params.id as string, req.params.jobId as string, 'unlinked on the Leads page', req.user?.id ?? null);
     const j = await query(`SELECT hh_job_number, job_name FROM jobs WHERE id = $1`, [req.params.jobId]);
     await logLeadEvent(req.params.id as string, 'tour_job_unlinked', {
       detail: `${j.rows[0]?.hh_job_number ? `#${j.rows[0].hh_job_number} ` : ''}${j.rows[0]?.job_name ?? ''}`.trim(), userId: req.user?.id,

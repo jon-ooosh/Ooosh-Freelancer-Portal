@@ -523,8 +523,14 @@ retry), cap 40. Research again (`POST /:id/research`, background) and hand-added
 (management-company matches: only jobs named after the band), suggested when only named after
 the band, or linked by hand; unlinking is remembered. An open/booked linked job → In pipeline,
 off the dashboard card, and Start enquiry / Log outreach refuse (no duplicate enquiries); only
-lost/cancelled/dismissed → "Dismiss — already quoted". Spec §19. **§20 of the spec is the
-current state + what's left.**
+lost/cancelled/dismissed → "Dismiss — already quoted". Each linked job gets a "🔭 Tour spotted
+by the Lead Finder" note on its Activity Timeline, linking back to the lead (once per link,
+`job_noted_at`, migration 280), and a closing note if it's later unlinked. Spec §19. **§20 of the
+spec is the current state + what's left.**
+
+**Date audit** (Oct 2026, spec §19.1): the server runs in UTC, so DATE reads are fine; the gap
+was "today" computed as the UTC date (yesterday between 00:00 and 01:00 BST). Now one helper each
+side — `services/uk-date.ts` / `frontend/src/lib/ukDate.ts`.
 
 **Deferred (agreed, not built):** scheduled weekly run (jon: keep manual for now); outreach-email drafting — folds into the auto-chase "voice"
 work on the Enquiries pipeline rather than being built separately.

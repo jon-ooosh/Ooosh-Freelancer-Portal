@@ -70,6 +70,7 @@ import {
   listNeedsClosing, closeOutBooking, withdrawBooking, amendBooking,
 } from '../services/freelancer-days';
 import { sendOfferEmail, sendCancellationEmail, sendUpdatedEmail } from '../services/freelancer-day-offer';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -85,7 +86,7 @@ function isAdmin(req: AuthRequest): boolean {
 
 /** Resolve a from/to window, defaulting to the next 28 days, capped at a year. */
 function resolveRange(req: AuthRequest): { from: string; to: string } | { error: string } {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const from = DATE_RE.test(String(req.query.from)) ? String(req.query.from) : today;
   const to = DATE_RE.test(String(req.query.to)) ? String(req.query.to) : addDaysYmd(from, 27);
   if (to < from) return { error: '`to` must be on or after `from`' };
@@ -127,7 +128,7 @@ router.get('/calendar', async (req: AuthRequest, res: Response) => {
 router.get('/today', async (req: AuthRequest, res: Response) => {
   const date = DATE_RE.test(String(req.query.date))
     ? String(req.query.date)
-    : new Date().toISOString().slice(0, 10);
+    : ukToday();
   try {
     res.json({ data: await getTodaySummary(date, isAdmin(req)) });
   } catch (err) {

@@ -44,6 +44,7 @@
  */
 import { hhBroker } from './hirehop-broker';
 import { syncSavedRowToXero } from './hh-xero-sync';
+import { ukToday } from './uk-date';
 
 /** One movement of money OFF a deposit — an invoice application or a refund. */
 export interface DepositApplication {
@@ -165,7 +166,7 @@ async function setApplicationAmount(
 ): Promise<{ ok: boolean; error: string | null }> {
   const res = await hhBroker.post<Record<string, any>>('/php_functions/billing_payments_save.php', {
     id: app.applicationId,
-    date: app.date ? String(app.date).split(' ')[0] : new Date().toISOString().split('T')[0],
+    date: app.date ? String(app.date).split(' ')[0] : ukToday(),
     desc: app.description,
     paid: Number(newAmount.toFixed(2)),
     memo: app.memo,

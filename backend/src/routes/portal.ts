@@ -24,6 +24,7 @@ import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-
 import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo, shiftLinkPath } from '../services/studio-sitter';
 import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
 import { greetingName, fullDisplayName } from '../services/display-name';
+import { ukToday } from '../services/uk-date';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -891,7 +892,7 @@ function addDaysIsoP(iso: string, days: number): string {
 // GET /api/portal/studio-sitter/shifts — the sitter's upcoming/recent shifts
 router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = ukToday();
     // A short look-back so a sitter can still open a recent past shift, and a
     // full year forward so far-out assignments (e.g. a September date rota'd in
     // July) always surface — the query is bounded by the sitter's own
@@ -1910,7 +1911,7 @@ router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
   try {
     const { listForPerson } = await import('../services/freelancer-days');
     const all = await listForPerson(req.portalUser!.id, { limit: 200 });
-    const today = new Date().toISOString().slice(0, 10);
+    const today = ukToday();
 
     // Past days are kept but capped: somebody wants to see the last few they
     // did (and whether we have their invoice), not scroll a year of history.
@@ -1982,7 +1983,7 @@ router.post('/day-bookings/:id/respond', async (req: PortalRequest, res: Respons
       });
       return;
     }
-    if (booking.bookingDate < new Date().toISOString().slice(0, 10)) {
+    if (booking.bookingDate < ukToday()) {
       res.status(409).json({ success: false, error: 'That day has already passed' });
       return;
     }

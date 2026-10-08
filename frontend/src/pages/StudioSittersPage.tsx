@@ -17,6 +17,7 @@ import { hasManagerRole } from '../lib/roles';
 import StudioShiftNotes from '../components/StudioShiftNotes';
 import StudioLockupReport from '../components/StudioLockupReport';
 import FreelancerTasksPanel from '../components/FreelancerTasksPanel';
+import { ukToday } from '../lib/ukDate';
 
 interface RosterJobEntry {
   job_id: string;
@@ -84,7 +85,7 @@ function addDaysIso(iso: string, days: number): string {
   dt.setUTCDate(dt.getUTCDate() + days);
   return dt.toISOString().slice(0, 10);
 }
-function todayIso(): string { return new Date().toISOString().slice(0, 10); }
+function todayIso(): string { return ukToday(); }
 function formatDay(iso: string): string {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', {

@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { getFromR2 } from '../config/r2';
 import { resolveDocumentKey, type DocumentKey } from './driver-documents';
+import { ukToday } from './uk-date';
 
 // ── Types ──
 
@@ -251,7 +252,7 @@ export async function generateDriverSnapshot(data: DriverSnapshotData): Promise<
   const pdfBytes = await pdfDoc.save();
 
   const safeName = (data.driverName || 'Driver').replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_');
-  const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '');
+  const dateStr = ukToday().replace(/-/g, '');
   const filename = `${data.jobId}-${safeName}-${dateStr}.pdf`;
 
   return { pdfBytes, filename };

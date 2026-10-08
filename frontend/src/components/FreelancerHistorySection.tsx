@@ -12,6 +12,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { ukToday } from '../lib/ukDate';
 
 interface FreelancerHistoryItem {
   source: 'crew' | 'sitter' | 'vehicle' | 'yard';
@@ -167,7 +168,7 @@ export default function FreelancerHistorySection({ entityId }: FreelancerHistory
     );
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const isDead = (it: FreelancerHistoryItem) => DEAD_STATUSES.has(it.assignment_status);
   // Upcoming = still-live assignment whose (end || start) date is today or later.
   // Cancelled/declined rows always live in History — they're not pending work.
