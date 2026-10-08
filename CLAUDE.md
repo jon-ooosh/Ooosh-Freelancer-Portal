@@ -332,6 +332,11 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
   overrides and PII reads; bare `authorize('admin')` only for irreversible decisions.
   Hardcoding `authorize('admin','manager','staff')` silently locks out `weekend_manager`
   and `general_assistant` — that shipped as a live bug.
+- **`authenticate` accepts STAFF access tokens only** (`{ id, email, role }`, no
+  `scope`/`type`/`typ` — Oct 2026). `JWT_SECRET` also signs public, kiosk and freelancer
+  tokens; each has its own middleware. A new token type gets a marker and its own
+  middleware — never widen `authenticate`. Table in `PLATFORM-CONVENTIONS.md` "Token
+  types"; open items in `docs/SECURITY-AUDIT-BRIEF.md`.
 - **`weekend_manager` ≡ `manager`.** `authorize()` grants a weekend manager anywhere
   `manager` is allowed, so never list it separately. Frontend: use `hasManagerRole()` /
   `roleAllowed()` from `lib/roles.ts`, **never bare `role === 'manager'`**.

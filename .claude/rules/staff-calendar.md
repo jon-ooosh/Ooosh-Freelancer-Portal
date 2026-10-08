@@ -143,9 +143,10 @@ showing it as confirmed would be a lie the person planning the week then acts
 on. `BOOKING_STATUS[...].counts` in `StaffCalendarPage.tsx` is the one place
 that decides which statuses are real cover.
 
-**Nothing emails the freelancer yet** (spec §9.4, designed and not built), so
-`offered` currently means "we intend to ask", not "we asked". Do not lean on it
-meaning more than that until the email ships.
+**The offer IS emailed** (spec §9.4, live since migration 225): `offered` with
+`offer_email_sent_at` set means "we asked". `offered` with it NULL means the mail
+failed or the day was backdated (never emailed) — nobody was told. See the offer
+link and chase sections below.
 
 **Booking one is the whole team's job** (jon, Oct 2026): every freelancer-day
 route is `authorize(...STAFF_ROLES)` and the calendar's "Book a freelancer"
@@ -174,6 +175,7 @@ tasks and an amended booking moves its tasks. Never add either column.
 - **A van prep is ticked by saving the prep** (`save-event` → `autoTickPrep`),
   not by a portal button — the portal refuses it.
 - Soft-cancel only (`status = 'cancelled'`); there is no DELETE.
+- **"Who could I give this to?" is `bookedFreelancersFor()`** — today + tomorrow, day bookings + sitter evenings. The Give-to-a-freelancer button renders nothing when it is empty (jon); don't make it always-on.
 - **The prep link and its redeem step share ONE rule**, `assertPrepEligible()` — open van prep, theirs, owner live, day yesterday → tomorrow. Do not check eligibility anywhere else.
 
 ## Freelancer day times are quarter hours, from a `<select>`

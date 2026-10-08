@@ -2310,12 +2310,35 @@ saved." Deliberately NOT when a task is set (tasks change freely), not on
 un-tick, not for tasks without a job, and not for preps that were never a
 task (jon: the job does not need "who prepped the van").
 
-### 21.11 Where it stands (8 Oct 2026)
+### 21.11 Where it stands (8 Oct 2026) — ALL PHASES BUILT
 
-Built: phases 1–2 and the job note. Still to build: **phase 3, "Give to a
-freelancer" from the van side** — offered only when somebody is booked today
-or tomorrow (an offered/accepted day booking or an assigned sitter evening);
-needs `bookedFreelancersFor(dates)` in `freelancer-tasks.ts`.
+Phases 1–3 and the job note are built. The module is complete as specified.
+
+**Phase 3 — "Give to a freelancer" (8 Oct 2026).**
+- `bookedFreelancersFor()` (`freelancer-tasks.ts`): live day bookings (offered or
+  accepted) and sitter evenings with a live sitter, TODAY and TOMORROW, each with
+  the vans already on their list. `GET /api/freelancer-tasks/booked` — one call
+  serves a whole page of van cards.
+- `components/GiveToFreelancer.tsx`: renders NOTHING unless somebody is booked
+  (jon). On the van's page (header) and on each "Prep Needed" card in the staff
+  prep queue (never in freelancer mode). Pick the person, optional job and note →
+  a van-prep task on their day. Says "Given to Tom" once it is on a list. It only
+  adds the task: telling them is "Send update" or the 16:00 sitter summary, and
+  the confirmation line says which.
+- `createTask` refuses the same van twice on one list (an open prep) — a
+  mis-click, not two jobs. The same van on two different people's lists is
+  allowed.
+- Not added to the job page's vehicle strip: the van page and the prep queue are
+  where a prep is thought about.
+
+**Security, found during this work (8 Oct 2026)** — fixed alongside phase 3, and
+the open remainder handed to a full audit in `docs/SECURITY-AUDIT-BRIEF.md`:
+`authenticate` accepted every token signed with `JWT_SECRET` (a public hire-form
+session read `GET /api/drivers`); now staff access tokens only. `returnUrl` /
+`startUrl` from the URL on the freelancer book-out, collection and prep pages now
+go through `safeReturnUrl()` (a `javascript:` link would have run in OP's origin).
+A prep opened from a freelancer task marks its saved data `freelancerTaskPrep`, so
+the office bell for flags fires whichever login saved it.
 
 Settled, NOT to build: Problems from a freelancer's prep flags (jon, 8 Oct:
 keep the bell-for-review). Known, accepted: a sitter swapped in after the

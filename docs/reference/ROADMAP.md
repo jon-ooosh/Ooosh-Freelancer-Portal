@@ -39,7 +39,7 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | — | Freelancer onboarding | Phases A–C shipped; D next | `INTEGRATIONS.md` |
 | — | Staff documents & training | Live | `INTEGRATIONS.md` |
 | — | Possible insurance claims (replaces the broker's Word form) | **Closed, Oct 2026** — case file, client form, reminders, GPS trace, SMS all live; video and retention not built | `docs/INCIDENT-CLAIMS-SPEC.md` (§22 troubleshooting) |
-| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **LIVE, staff using it from Oct 2026 — expected complete.** Patterns, ledger, leave, overtime bank, payroll export (emailed on the 1st), absence, freelancer days, company days, working from home, personal calendar feed, days in lieu for company days, manual balance adjustments; Me area and every Staff page tab redesigned; 2026 backfilled from BrightHR. Only cover intelligence (Phase F) is deliberately left, see spec §16 | `docs/STAFF-CALENDAR-SPEC.md` §18 |
+| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **LIVE, staff using it from Oct 2026 — expected complete.** Patterns, ledger, leave, overtime bank, payroll export (emailed on the 1st), absence, freelancer days, company days, working from home, personal calendar feed, days in lieu for company days, manual balance adjustments, **freelancer tasks (yard days + sitter evenings, prep link, Give to a freelancer — all phases, Oct 2026, spec §21)**; Me area and every Staff page tab redesigned; 2026 backfilled from BrightHR. Only cover intelligence (Phase F) is deliberately left, see spec §16 | `docs/STAFF-CALENDAR-SPEC.md` §18 |
 
 **Monday.com is fully retired** (Jul 2026). Some fallback code and unused env vars
 remain in the portal repos and can be swept.
@@ -50,6 +50,7 @@ Roughly 100 unchecked items remain across the reference docs. The ones most like
 to come up:
 
 **Watching (Oct 2026)**
+- **Security audit (Oct 2026)** — `authenticate` was accepting public, kiosk and freelancer tokens (fixed 8 Oct, plus `javascript:` return links on the freelancer pages). A full audit is planned; the known open goals are in `docs/SECURITY-AUDIT-BRIEF.md` §B (one secret for every token family, portal-secret fallback, freelancer-role logins on `authenticate`-only routers, Socket.io token check, file-download prefixes).
 - **Wise matcher** — live since 6 Oct, no real email processed yet. First one decides: auto-recorded (check HireHop deposit + client email), queued (info@ email + Money overview panel), or nothing (`journalctl … | grep wise-incoming`). Then switch off the jon@ → info@ auto-forward.
 - **Portal: bare `?jobId=` links no longer work** — anyone still using one needs the Money-tab link.
 - Vehicles module `useAuth.tsx` still carries a dead `hubToken` exchange (Staff Hub retired) — tidy-up.
