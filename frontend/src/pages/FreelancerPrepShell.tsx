@@ -23,6 +23,7 @@ import {
   getFreelancerPrepSession,
   resolveFreelancerPrepToken,
   setFreelancerPrepSession,
+  safeReturnUrl,
   type FreelancerPrepContext,
 } from '../modules/vehicles/adapters/freelancer-prep-session'
 
@@ -43,7 +44,8 @@ export default function FreelancerPrepShell() {
     let cancelled = false
     async function init() {
       const prepToken = searchParams.get('prepToken')
-      const returnUrl = searchParams.get('returnUrl')
+      // Never trusted as-is: it becomes a link (see safeReturnUrl).
+      const returnUrl = safeReturnUrl(searchParams.get('returnUrl'))
 
       if (prepToken) {
         const result = await resolveFreelancerPrepToken(prepToken, returnUrl)

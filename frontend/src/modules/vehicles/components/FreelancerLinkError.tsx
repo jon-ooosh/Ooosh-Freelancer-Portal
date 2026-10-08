@@ -19,6 +19,8 @@
  * quote couldn't auto-close for three days.
  */
 
+import { safeReturnUrl } from '../lib/safe-url'
+
 const OFFICE_PHONE = '+44 (0) 1273 911382'
 const OFFICE_EMAIL = 'info@oooshtours.co.uk'
 
@@ -42,8 +44,9 @@ export function FreelancerLinkError({
   // reload re-attempts the exchange — useful for a transient backend blip.
   const retry = () => window.location.reload()
   const params = new URLSearchParams(window.location.search)
-  const portalUrl = returnUrl || params.get('returnUrl')
-  const wizardUrl = startUrl || params.get('startUrl')
+  // Never trusted as-is — each becomes a link (lib/safe-url.ts).
+  const portalUrl = safeReturnUrl(returnUrl || params.get('returnUrl'))
+  const wizardUrl = safeReturnUrl(startUrl || params.get('startUrl'))
   // Lead with the wizard when retrying is pointless. Older portal builds don't
   // send startUrl, so fall back to the existing buttons rather than stranding.
   const wrongLeg = !!wizardUrl && WRONG_LEG_CODES.includes(code || '')

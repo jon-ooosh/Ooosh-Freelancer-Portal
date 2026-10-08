@@ -32,6 +32,8 @@ export interface FreelancerPrepContext {
   returnUrl: string | null
 }
 
+export { safeReturnUrl } from '../lib/safe-url'
+
 export function isOnFreelancerPrepPage(): boolean {
   try {
     return window.location.pathname.startsWith(FREELANCER_PREP_PATH)

@@ -3637,10 +3637,13 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
     // A freelancer's prep cannot open Problems (they are reported by a staff
     // user, and /api/problems is staff-only). The flags are in the saved prep;
     // tell the fleet people so somebody raises what needs raising (§21.6).
+    // The marker covers a staff member who opened the freelancer link while
+    // logged in: their save carries a staff token, so the page says so instead.
     const fr = req as unknown as FlexibleVehicleRequest;
-    if (isFreelancerPrep(fr) && Array.isArray(data?.flaggedItems) && data.flaggedItems.length > 0) {
+    const fromFreelancerTask = isFreelancerPrep(fr) || data?.freelancerTaskPrep === true;
+    if (fromFreelancerTask && Array.isArray(data?.flaggedItems) && data.flaggedItems.length > 0) {
       try {
-        await notifyFreelancerPrepFlags(reg, data, fr.prepSession.personName);
+        await notifyFreelancerPrepFlags(reg, data, fr.prepSession?.personName || String(data?.preparedBy || 'A freelancer'));
       } catch (err) {
         console.warn('[vehicles/prep] Freelancer flag notify failed:', err);
       }

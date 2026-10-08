@@ -26,6 +26,7 @@ import {
   setFreelancerSession,
 } from '../modules/vehicles/adapters/freelancer-session'
 import type { FreelancerVanCandidate } from '../modules/vehicles/adapters/freelancer-session'
+import { safeReturnUrl } from '../modules/vehicles/lib/safe-url'
 
 type ShellState =
   | { kind: 'loading' }
@@ -92,9 +93,9 @@ export default function FreelancerCheckinShell() {
 
     async function init() {
       const hmacToken = searchParams.get('freelancerToken')
-      const returnUrl = searchParams.get('returnUrl')
+      const returnUrl = safeReturnUrl(searchParams.get('returnUrl'))
       // Where to send them if the van leg can't run — see FreelancerLinkError.
-      const startUrl = searchParams.get('startUrl')
+      const startUrl = safeReturnUrl(searchParams.get('startUrl'))
 
       if (hmacToken) {
         const result = await resolveFreelancerCheckinToken(OP_API_BASE, hmacToken, returnUrl)
