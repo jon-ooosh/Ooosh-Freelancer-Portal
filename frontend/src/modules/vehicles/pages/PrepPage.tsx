@@ -34,6 +34,7 @@ import { buildConsumptionTransactions } from '../lib/stock-consumption'
 import { VehicleIssuesBanner } from '../components/issues/VehicleIssuesBanner'
 import { TurnaroundSchedule } from '../components/dashboard/TurnaroundSchedule'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
+import GiveToFreelancer from '../../../components/GiveToFreelancer'
 import type { SignatureCaptureHandle } from '../components/book-out/SignatureCapture'
 import type { Vehicle } from '../types/vehicle'
 import type { CapturedPhoto } from '../types/vehicle-event'
@@ -503,7 +504,7 @@ export function PrepPage({ freelancerPrep }: {
             }),
           })
           if (!resp.ok) {
-            if (freelancerPrep && resp.status === 403) { forOfficeCount++; continue }
+            if (freelancerPrep && (resp.status === 401 || resp.status === 403)) { forOfficeCount++; continue }
             failedCount++
             console.warn(`[prep] auto-create failed for ${flagged.itemName}:`, resp.status)
             continue
@@ -557,6 +558,9 @@ export function PrepPage({ freelancerPrep }: {
           })),
           notes: sectionNotes[sec.name] || '',
         })),
+        // Opened from a freelancer task: the server bells the office about any
+        // flags, whichever login sent the save (§21.10).
+        ...(freelancerPrep ? { freelancerTaskPrep: true } : {}),
         flaggedItems: flaggedItems.map(f => ({
           checklistItem: f.itemName,
           selectedOption: f.selectedOption,
@@ -1065,7 +1069,7 @@ export function PrepPage({ freelancerPrep }: {
           <p className="text-xs font-semibold text-amber-600 uppercase tracking-wide">Prep Needed</p>
           {prepQueue.map(v => (
             <div key={v.id} id={`prep-card-${v.reg}`} className="scroll-mt-4">
-              <VehiclePrepCard vehicle={v} onStartPrep={handleStartPrep} />
+              <VehiclePrepCard vehicle={v} onStartPrep={handleStartPrep} showGive={!freelancerPrep} />
             </div>
           ))}
         </div>
@@ -1660,9 +1664,11 @@ function DetailInput({
 function VehiclePrepCard({
   vehicle,
   onStartPrep,
+  showGive = false,
 }: {
   vehicle: Vehicle
   onStartPrep: (v: Vehicle) => void
+  showGive?: boolean
 }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -1694,6 +1700,8 @@ function VehiclePrepCard({
       </div>
 
       <div className="mt-2 flex items-center justify-end gap-2">
+        {/* Staff only, and only when somebody is in today/tomorrow (§21.4). */}
+        {showGive && <GiveToFreelancer vehicleId={vehicle.id} reg={vehicle.reg} className="mr-auto" />}
         <Link
           to={vmPath(`/vehicles/${vehicle.id}?tab=preps`)}
           className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-100"

@@ -14,7 +14,7 @@ import { z } from 'zod';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import {
   TaskOwner, listTasks, createTask, updateTask, cancelTask, setDoneByStaff,
-  getOwnerContext, changesSinceNotified, sendTasksUpdate,
+  getOwnerContext, changesSinceNotified, sendTasksUpdate, bookedFreelancersFor,
 } from '../services/freelancer-tasks';
 
 const router = Router();
@@ -35,6 +35,18 @@ function readOwner(src: unknown): TaskOwner | null {
 
 const fail = (res: Response, err: unknown, fallback: string) =>
   res.status(400).json({ error: err instanceof Error ? err.message : fallback });
+
+// GET /api/freelancer-tasks/booked — who is in today or tomorrow and could be
+// given a task, with the vans already on each list (the "Give to a freelancer"
+// button, §21.4). One call serves a whole page of van cards.
+router.get('/booked', async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await bookedFreelancersFor() });
+  } catch (err) {
+    console.error('[freelancer-tasks] booked error:', err);
+    res.status(500).json({ error: 'Failed to load who is booked' });
+  }
+});
 
 // GET /api/freelancer-tasks?bookingId= | ?shiftId=
 router.get('/', async (req: AuthRequest, res: Response) => {
