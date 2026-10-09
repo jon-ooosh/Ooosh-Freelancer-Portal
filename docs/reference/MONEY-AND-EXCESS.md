@@ -833,7 +833,12 @@ greeting and personal ones carry no banner. The detector now requires that banne
 (`system_settings.wise_business_account_name`, default `Ooosh! Tours Ltd`); a banner-less email
 is skipped with a log line, never stored (jon: his personal receipts must not sit in the
 business DB). If Wise ever drops the banner, auto-matching stops silently — the log line and
-the Xero bank feed are the backstop.
+the Xero bank feed are the backstop. **Same day, found while jon looked for the Ignore button:
+the Money-overview panel had NEVER rendered in production** — its list query selected `u.name`
+from `users`, which has no name column (users point at `people`), so the route 500'd and the panel
+hid itself. Fixed to the `people` join the rest of the file uses. The overview's balance /
+deposit / excess queries also now exclude `is_deleted` jobs (the soft-deleted scratch shop job
+16749 was showing with £9 outstanding).
 
 **`services/record-payment.ts`** is the staff "Record Payment" route's 330 lines lifted into a
 service (route = validate + relay, same HTTP contract) so the matcher — and the planned
