@@ -24,6 +24,8 @@ export interface InvoicePlan {
 }
 export interface CloseOutPlan {
   hhJobNumber: number;
+  /** OP's own record of a Completed job — no HireHop read. "Check again" forces one. */
+  fromLog?: boolean;
   hhStatus: number | null;
   invoice: InvoicePlan;
   invoices: CloseOutInvoice[];
@@ -49,7 +51,7 @@ const listeners = new Map<string, Set<(plan: CloseOutPlan) => void>>();
 export function loadCloseOutPlan(jobId: string, force = false): Promise<CloseOutPlan> {
   const hit = cache.get(jobId);
   if (!force && hit && Date.now() - hit.at < TTL_MS) return hit.promise;
-  const promise = api.get<{ data: CloseOutPlan }>(`/close-out/${jobId}/plan`).then(r => {
+  const promise = api.get<{ data: CloseOutPlan }>(`/close-out/${jobId}/plan${force ? '?fresh=1' : ''}`).then(r => {
     publish(jobId, r.data);
     return r.data;
   });

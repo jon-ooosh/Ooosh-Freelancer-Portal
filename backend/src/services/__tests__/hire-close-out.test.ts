@@ -23,6 +23,11 @@ jest.mock('../hh-deposit-release', () => ({
 }));
 jest.mock('../hh-xero-sync', () => ({ syncSavedRowToXero: jest.fn(), sendXeroSyncFailedAlert: jest.fn() }));
 jest.mock('../vat-adjustment', () => ({ hasNonStandardVatItem: jest.fn() }));
+jest.mock('../../routes/webhooks', () => ({ handleJobStatusChange: jest.fn().mockResolvedValue({ success: true, message: 'ok' }) }));
+jest.mock('../hh-deposit', () => ({
+  getMethodForBankId: (id: number) => ({ 267: 'stripe_gbp', 169: 'worldpay' } as Record<number, string>)[id] || 'worldpay',
+  PAYMENT_METHODS_LABELS: { stripe_gbp: 'Stripe GBP', worldpay: 'Worldpay' },
+}));
 jest.mock('../shop-stock', () => ({ hhLocalNow: () => '2026-10-09 09:00:00' }));
 jest.mock('../../config/xero', () => ({ isXeroConfigured: () => true }));
 jest.mock('../xero-broker', () => ({
@@ -37,6 +42,8 @@ import xeroBroker from '../xero-broker';
 import { syncSavedRowToXero } from '../hh-xero-sync';
 import { hasNonStandardVatItem } from '../vat-adjustment';
 import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, planAllocations } from '../hire-close-out';
+import { handleJobStatusChange } from '../../routes/webhooks';
+const mockStatus = handleJobStatusChange as jest.Mock;
 const mockSync = syncSavedRowToXero as jest.Mock;
 const mockEu = hasNonStandardVatItem as jest.Mock;
 
@@ -237,6 +244,7 @@ describe('planHireCloseOut', () => {
     expect(plan.allocations).toEqual([expect.objectContaining({ depositId: 8661, amount: 254.17, invoiceId: 12252 })]);
     expect(plan.surplus).toEqual([{ depositId: 8661, amount: 886.8 }]);
     expect(plan.payments.map((p) => p.depositId)).toEqual([8661]);          // 9093 (excess) excluded, 9091 holds nothing
+    expect(plan.payments[0].bankName).toBe('Stripe GBP');
     expect(plan.sentences.join(' ')).toContain('Leave £886.80');
   });
 
@@ -410,12 +418,34 @@ describe('completeHireJob', () => {
     expect(r.message).toContain('held on account');
   });
 
-  it('completes once everything is settled in HireHop and Xero', async () => {
+  it('completes once everything is settled in HireHop and Xero, and mirrors it into OP at once', async () => {
     await settle();
     const r = await completeHireJob(JOB.id, 'u1');
     expect(r.done).toBe(true);
     expect(hh.jobStatus).toBe(11);
     expect(r.plan.hhStatus).toBe(11);
+    expect(mockStatus).toHaveBeenCalledWith({ STATUS: 11 }, undefined, 16015);
+  });
+
+  it('a job OP knows is Completed is answered from the log, not HireHop, unless asked fresh', async () => {
+    await settle();
+    await completeHireJob(JOB.id, 'u1');
+    mockRead.mockClear();
+    mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
+      if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...JOB, pipeline_status: 'completed' }] };
+      if (sql.includes('FROM job_closeout_log')) return { rows: logRows };
+      if (sql.includes('INSERT INTO job_closeout_log')) { logRows.unshift({ id: 'x', step: params[1], ok: params[2], detail: params[3], hh_refs: null, user_id: params[5], user_name: null, created_at: 'now' }); return { rows: [] }; }
+      if (sql.includes('FROM job_payments')) return { rows: opPayments };
+      if (sql.includes('FROM v_excess_held')) return { rows: [{ held: excessHeld }] };
+      throw new Error(`unexpected SQL: ${sql}`);
+    });
+    const light = await planHireCloseOut(JOB.id);
+    expect(light.fromLog).toBe(true);
+    expect(light.sentences[0]).toContain('Completed in HireHop');
+    expect(mockRead).not.toHaveBeenCalled();
+    const fresh = await planHireCloseOut(JOB.id, { fresh: true });
+    expect(fresh.fromLog).toBeUndefined();
+    expect(mockRead).toHaveBeenCalled();
   });
 
   it('refuses when Xero still shows money due, even though HireHop is settled', async () => {

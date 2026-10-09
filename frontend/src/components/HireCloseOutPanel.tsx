@@ -111,6 +111,32 @@ export default function HireCloseOutPanel({ jobId, onChanged }: Props) {
   const canCompleteAnyway = isManager && !completed && plan.blockers.length === 0 && open.length === 0
     && plan.surplus.length === 0 && plan.payments.length === 0 && plan.excessHeld >= 0.005;
   const log = isAdmin ? plan.log : plan.log.filter(e => e.step !== 'xero' && e.step !== 'allocate_xero');
+  if (plan.fromLog) {
+    return (
+      <div className="mt-1.5 space-y-1.5 text-xs">
+        <p className="text-green-700">{plan.sentences[0]}</p>
+        <div className="flex items-center gap-2">
+          <button onClick={() => load()} disabled={busy != null} className="rounded border border-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+            {busy === 'plan' ? 'Reading HireHop…' : 'Check HireHop again'}
+          </button>
+        </div>
+        {log.length > 0 && (
+          <details>
+            <summary className="cursor-pointer text-[11px] text-gray-500">What happened ({log.length})</summary>
+            <ul className="mt-1 space-y-0.5 text-[11px]">
+              {log.map(e => (
+                <li key={e.id} className={e.ok ? 'text-gray-600' : 'text-red-700'}>
+                  <span className="text-gray-400">{fmtWhen(e.created_at)}</span>
+                  {e.user_name ? <span className="text-gray-400"> · {e.user_name}</span> : null} · {e.step.replace(/_/g, ' ')}: {e.detail}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+    );
+  }
+
 
   return (
     <div className="mt-1.5 space-y-1.5 text-xs">

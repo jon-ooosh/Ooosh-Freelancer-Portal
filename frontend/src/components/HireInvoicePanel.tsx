@@ -30,7 +30,10 @@ export default function HireInvoicePanel({ jobId, onChanged }: Props) {
   useEffect(() => {
     let alive = true;
     const unsub = subscribeCloseOutPlan(jobId, p => { if (alive) setPlan(p); });
-    loadCloseOutPlan(jobId).catch(e => { if (alive) setError(apiError(e, 'Could not read the job\'s invoices from HireHop.')); });
+    // A cached plan resolves without publishing, so take the result directly too.
+    loadCloseOutPlan(jobId)
+      .then(p => { if (alive) setPlan(p); })
+      .catch(e => { if (alive) setError(apiError(e, 'Could not read the job\'s invoices from HireHop.')); });
     return () => { alive = false; unsub(); };
   }, [jobId]);
 
@@ -58,6 +61,8 @@ export default function HireInvoicePanel({ jobId, onChanged }: Props) {
   if (!plan) {
     return <div className="mt-1.5 text-xs text-gray-400">{error ?? 'Reading HireHop…'}</div>;
   }
+
+  if (plan.fromLog) return null;   // Completed — the Payment card says so; nothing to raise.
 
   const inv = plan.invoice;
   const nothingLeft = inv.netToInvoice < 0.005 && !inv.draft;
