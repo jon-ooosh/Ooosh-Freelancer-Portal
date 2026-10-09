@@ -23,6 +23,7 @@ import BacklineLocationModal, {
   backlineLocationLabel,
 } from './BacklineLocationModal';
 import HireCloseOutPanel from './HireCloseOutPanel';
+import HireInvoicePanel from './HireInvoicePanel';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -998,6 +999,12 @@ export default function RequirementCard({
                 card's own status still comes from the derivation engine. */}
             {req.requirement_type === 'payment_reconcile' && jobId && (
               <HireCloseOutPanel jobId={jobId} onChanged={onReload} />
+            )}
+
+            {/* Invoice — Raise invoice (HIRE-CLOSE-OUT-SPEC.md §4.1): what is left to bill,
+                and the button that drafts, penny-checks, approves and sends it to Xero. */}
+            {req.requirement_type === 'invoice' && jobId && (
+              <HireInvoicePanel jobId={jobId} onChanged={onReload} />
             )}
 
             {/* Invoice — show "Mark as Sent" button when status is in_progress (generated) */}
