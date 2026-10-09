@@ -186,7 +186,7 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
-**PHASE 1 BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
+**PHASES 1–2 BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
 finishing a hire's money from the post-hire cards (raise invoice → excess decision → allocate
 deposits in HireHop AND Xero → complete), one job at a time, on the shared recipe
 `services/hh-invoice-close.ts` (`HIREHOP-BILLING-API.md` §8). Born from job 16015: HireHop's "New
@@ -194,9 +194,12 @@ payment" dialog records a REFUND when its invoice dropdown is left at "none". Bu
 `services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|allocate|complete`,
 log in `job_closeout_log`) — plan shown first, every write read back, excess NEVER allocated, more
 than one open invoice refused for now, HireHop↔OP payment and refund mismatches refuse by name.
-The UI is `frontend/src/components/HireCloseOutPanel.tsx` inside the **Payment Reconciliation** card on the
-Post-Hire tab (plan, Allocate payments, Complete job; Xero log lines admin-only). Not yet: Raise invoice
-(Phase 2), the arrival hook and the Xero sweep (Phase 3). §1 is
+The UI is two panels on the Post-Hire tab sharing one plan read (`lib/closeOutPlan.ts`):
+`HireInvoicePanel.tsx` on the **Invoice** card (Raise invoice: draft from uninvoiced lines → penny check →
+approve dated today → Xero; **an EU hire with the "Non-standard VAT rules" item is refused until the
+invoice-line VAT split is built**) and `HireCloseOutPanel.tsx` on the **Payment Reconciliation** card
+(Allocate payments, Complete job; Xero log lines admin-only). Not yet: the VAT split (spec §10.1), the
+arrival hook and the Xero sweep (Phase 3). §1 is
 settled, §5 the allocation rule, §9 the phases. Refunds only through the existing routes.
 
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP

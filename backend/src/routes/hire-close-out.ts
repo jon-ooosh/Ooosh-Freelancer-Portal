@@ -3,6 +3,7 @@
  * post-hire cards, one job at a time.
  *
  *   GET  /close-out/:jobId/plan      what Allocate would do (read-only)
+ *   POST /close-out/:jobId/raise-invoice  draft → penny check → approve → Xero (body: allow_not_returned)
  *   POST /close-out/:jobId/allocate  allocate hire deposits in HireHop + Xero
  *   POST /close-out/:jobId/complete  HireHop status 11 (body: allow_excess_held)
  *
@@ -12,7 +13,7 @@
  */
 import { Router, Response } from 'express';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
-import { planHireCloseOut, runHireAllocation, completeHireJob, JOB_NOT_FOUND } from '../services/hire-close-out';
+import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, JOB_NOT_FOUND } from '../services/hire-close-out';
 
 const router = Router();
 router.use(authenticate);
@@ -29,6 +30,16 @@ router.get('/:jobId/plan', authorize(...STAFF_ROLES), async (req: AuthRequest, r
   } catch (err) {
     console.error('[close-out] plan failed:', err);
     fail(res, err, 'Could not read the job\'s money.');
+  }
+});
+
+router.post('/:jobId/raise-invoice', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const allowNotReturned = req.body?.allow_not_returned === true;
+    res.json({ data: await raiseHireInvoice(String(req.params.jobId), req.user?.id ?? null, { allowNotReturned }) });
+  } catch (err) {
+    console.error('[close-out] raise-invoice failed:', err);
+    fail(res, err, 'Could not raise the invoice.');
   }
 });
 
