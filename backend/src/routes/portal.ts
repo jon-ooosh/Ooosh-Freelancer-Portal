@@ -120,7 +120,19 @@ interface PortalRequest extends Request {
   portalUser?: PortalUser;
 }
 
-const PORTAL_SECRET = process.env.PORTAL_SESSION_SECRET || process.env.SESSION_SECRET || process.env.JWT_SECRET!;
+// The portal cookie is ALSO verified by the Netlify Next.js app (src/middleware.ts)
+// with SESSION_SECRET, so the two must share it. It must NOT be JWT_SECRET: that
+// signs every other token family, and a staff access token { id, email, role }
+// would then pass portalAuth with a users.id where a people.id is expected.
+// Until Oct 2026 this fell back to JWT_SECRET when neither was set
+// (SECURITY-AUDIT-BRIEF B.2). Now the server refuses to start without one.
+const PORTAL_SECRET: string = process.env.PORTAL_SESSION_SECRET || process.env.SESSION_SECRET || '';
+if (!PORTAL_SECRET) {
+  throw new Error('FATAL: PORTAL_SESSION_SECRET (or SESSION_SECRET) environment variable is required');
+}
+if (PORTAL_SECRET === process.env.JWT_SECRET) {
+  throw new Error('FATAL: the portal session secret must differ from JWT_SECRET');
+}
 
 async function portalAuth(req: PortalRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -135,9 +147,9 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
 
     const decoded = jwt.verify(token, PORTAL_SECRET) as { id: string; email: string; name: string; iat: number; exp: number };
 
-    // PORTAL_SECRET can fall back to JWT_SECRET, which also signs the narrow
-    // freelancer tokens (book-out, prep — they carry a `scope`). None of those
-    // is a portal login, and none names a person by `id`.
+    // Shape check kept as a second line even though PORTAL_SECRET is now its
+    // own secret: a portal login is { id, email, name } and never carries a
+    // `scope` (the narrow freelancer book-out / prep tokens do).
     if (!decoded.id || (decoded as { scope?: unknown }).scope) {
       res.status(401).json({ error: 'Invalid or expired session' });
       return;
