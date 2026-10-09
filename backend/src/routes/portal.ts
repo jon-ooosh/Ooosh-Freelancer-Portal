@@ -21,12 +21,89 @@ import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
-import { autoDispatchJob } from '../services/auto-dispatch';
+import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo, shiftLinkPath } from '../services/studio-sitter';
+import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
+import { greetingName, fullDisplayName } from '../services/display-name';
+import { ukToday } from '../services/uk-date';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
 // can't attribute interactions directly to them).
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
+
+// ── Freelancer "your money on this job" derivation ──────────────────────────
+// Turns a quote's three-state expense lines into plain, freelancer-facing
+// instructions so it's crystal clear what they pay, claim, and get paid — and
+// so we know what to expect when their invoice lands. Per Diem ALWAYS produces
+// a line (incl. "No Per Diems on this job"); other lines only when they apply.
+type CrewMoneyTone = 'ooosh' | 'client' | 'claim' | 'none';
+interface CrewMoneyLine { label: string; message: string; tone: CrewMoneyTone }
+interface CrewMoney { perDiem: CrewMoneyLine; expenses: CrewMoneyLine[] }
+
+const CREW_EXPENSE_LABELS: Record<string, string> = {
+  fuel: 'Fuel', parking: 'Parking', tolls: 'Tolls / crossings',
+  transport_out: 'Travel (outbound)', transport_back: 'Travel (return)',
+  hotel: 'Hotel', other: 'Other',
+};
+const CREW_FRONTED = new Set(['fuel', 'parking', 'tolls']);       // freelancer pays, claims on invoice
+const CREW_PREBOOKED = new Set(['transport_out', 'transport_back', 'hotel']); // Ooosh arranges/pays up front
+
+function crewExpenseMode(e: any): 'included' | 'not_included' | 'recharge' | 'na' {
+  if (e?.chargeMode) return e.chargeMode;
+  return e?.includedInCharge === false ? 'not_included' : 'included';
+}
+
+function deriveCrewMoney(rawExpenses: unknown): CrewMoney {
+  let arr: any[] = [];
+  try {
+    arr = Array.isArray(rawExpenses) ? rawExpenses
+      : (typeof rawExpenses === 'string' && rawExpenses ? JSON.parse(rawExpenses) : []);
+  } catch { arr = []; }
+
+  // Per Diem — always a line.
+  const pd = arr.find((e) => e?.type === 'pd');
+  const pdMode = pd ? crewExpenseMode(pd) : 'na';
+  const pdAmt = Number(pd?.amount || 0);
+  const pdAmtStr = pdAmt > 0 ? ` (£${pdAmt.toFixed(0)})` : '';
+  let perDiem: CrewMoneyLine;
+  if (!pd || pdMode === 'na') {
+    perDiem = { label: 'Per Diem', message: 'No Per Diems on this job.', tone: 'none' };
+  } else if (pdMode === 'not_included') {
+    perDiem = { label: 'Per Diem', message: `The client is paying your Per Diem${pdAmtStr} directly.`, tone: 'client' };
+  } else {
+    perDiem = { label: 'Per Diem', message: `We're paying your Per Diem${pdAmtStr} — please include it on your invoice to us.`, tone: 'ooosh' };
+  }
+
+  // Other expense lines — only when they apply (mode ≠ na and amount > 0).
+  const expenses: CrewMoneyLine[] = [];
+  for (const e of arr) {
+    const type = String(e?.type || '');
+    if (type === 'pd') continue;
+    const mode = crewExpenseMode(e);
+    if (mode === 'na') continue;
+    if (!(Number(e?.amount || 0) > 0)) continue;
+    const label = CREW_EXPENSE_LABELS[type] || (e?.description ? String(e.description) : 'Other');
+    const lower = label.toLowerCase();
+    let message: string; let tone: CrewMoneyTone;
+    if (mode === 'not_included') {
+      message = CREW_PREBOOKED.has(type)
+        ? `The client is arranging & paying the ${lower} directly.`
+        : `The client covers ${lower} directly — nothing for you to pay or claim.`;
+      tone = 'client';
+    } else if (CREW_FRONTED.has(type)) {
+      message = `Pay for the ${lower} yourself and include it on your invoice to us.`;
+      tone = 'claim';
+    } else if (CREW_PREBOOKED.has(type)) {
+      message = `${label} is booked & paid by Ooosh — nothing for you to arrange.`;
+      tone = 'ooosh';
+    } else {
+      message = `Include the ${lower} on your invoice to us.`;
+      tone = 'claim';
+    }
+    expenses.push({ label, message, tone });
+  }
+  return { perDiem, expenses };
+}
 
 const router = Router();
 
@@ -58,6 +135,14 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
     }
 
     const decoded = jwt.verify(token, PORTAL_SECRET) as { id: string; email: string; name: string; iat: number; exp: number };
+
+    // PORTAL_SECRET can fall back to JWT_SECRET, which also signs the narrow
+    // freelancer tokens (book-out, prep — they carry a `scope`). None of those
+    // is a portal login, and none names a person by `id`.
+    if (!decoded.id || (decoded as { scope?: unknown }).scope) {
+      res.status(401).json({ error: 'Invalid or expired session' });
+      return;
+    }
 
     // Look up the shared-account flag fresh on every request — the JWT was
     // minted before the flag existed for some tokens, and this lets us
@@ -112,10 +197,12 @@ router.post('/auth/login', async (req: Request, res: Response) => {
 
     // Find freelancer in people table
     const result = await query(
-      `SELECT p.id, p.first_name, p.last_name, p.email, p.portal_password_hash,
+      `SELECT p.id, p.first_name, p.last_name, p.preferred_name, p.email, p.portal_password_hash,
               p.is_freelancer, p.is_approved, p.portal_email_verified
        FROM people p
-       WHERE LOWER(p.email) = $1 AND p.is_freelancer = true`,
+       WHERE LOWER(p.email) = $1 AND p.is_freelancer = true AND p.is_deleted = false
+       ORDER BY p.is_approved DESC, p.portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [normalizedEmail]
     );
 
@@ -154,7 +241,9 @@ router.post('/auth/login', async (req: Request, res: Response) => {
       }
     }
 
-    const name = `${freelancer.first_name} ${freelancer.last_name}`.trim();
+    // Display only — the portal dashboard greets from this claim and settings
+    // prints it. The id, not the name, is what identifies the session.
+    const name = fullDisplayName(freelancer);
 
     // Create session token (compatible with portal's jose-based verification)
     const sessionToken = jwt.sign(
@@ -218,9 +307,11 @@ router.post('/auth/register/start', async (req: Request, res: Response) => {
 
     // Two-tick gate: must be an approved freelancer in the people table
     const result = await query(
-      `SELECT id, first_name, last_name, email, portal_password_hash, is_approved
+      `SELECT id, first_name, last_name, preferred_name, email, portal_password_hash, is_approved
        FROM people
-       WHERE LOWER(email) = $1 AND is_freelancer = true`,
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_deleted = false
+       ORDER BY is_approved DESC, portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [email]
     );
 
@@ -254,7 +345,7 @@ router.post('/auth/register/start', async (req: Request, res: Response) => {
       [email, code, expiresAt]
     );
 
-    const freelancerName = person.first_name || 'there';
+    const freelancerName = greetingName(person);
     await emailService.send('portal_verification_code', {
       to: email,
       variables: { freelancerName, code },
@@ -356,7 +447,7 @@ router.post('/auth/register/complete', async (req: Request, res: Response) => {
 
     // Gate again — still must be an approved freelancer
     const personResult = await query(
-      `SELECT id, first_name, last_name, email FROM people
+      `SELECT id, first_name, last_name, preferred_name, email FROM people
        WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true AND is_deleted = false`,
       [email]
     );
@@ -377,7 +468,7 @@ router.post('/auth/register/complete', async (req: Request, res: Response) => {
     );
 
     // Issue session token (same shape as login)
-    const name = `${person.first_name || ''} ${person.last_name || ''}`.trim();
+    const name = fullDisplayName(person);
     const sessionToken = jwt.sign(
       { id: person.id, email: person.email || email, name },
       PORTAL_SECRET,
@@ -426,8 +517,10 @@ router.post('/auth/forgot-password', async (req: Request, res: Response) => {
     const email = parsed.data.email.toLowerCase().trim();
 
     const result = await query(
-      `SELECT id, first_name, email FROM people
-       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true`,
+      `SELECT id, first_name, preferred_name, email FROM people
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true AND is_deleted = false
+       ORDER BY portal_last_login DESC NULLS LAST
+       LIMIT 1`,
       [email]
     );
 
@@ -454,7 +547,7 @@ router.post('/auth/forgot-password', async (req: Request, res: Response) => {
     );
 
     const resetUrl = `${PORTAL_FRONTEND_URL}/reset-password?token=${rawToken}`;
-    const freelancerName = person.first_name || 'there';
+    const freelancerName = greetingName(person);
 
     await emailService.send('portal_password_reset', {
       to: person.email || email,
@@ -490,7 +583,8 @@ router.get('/auth/verify-reset-token', async (req: Request, res: Response) => {
          AND t.used_at IS NULL
          AND t.expires_at > NOW()
          AND p.is_freelancer = true
-         AND p.is_approved = true`,
+         AND p.is_approved = true
+         AND p.is_deleted = false`,
       [tokenHash]
     );
     res.json({ valid: result.rows.length > 0 });
@@ -516,13 +610,14 @@ router.post('/auth/reset-password', async (req: Request, res: Response) => {
     const tokenHash = hashToken(token);
 
     const result = await query(
-      `SELECT t.id, t.person_id, p.first_name, p.last_name, p.email,
+      `SELECT t.id, t.person_id, p.first_name, p.last_name, p.preferred_name, p.email,
               p.is_freelancer, p.is_approved
        FROM portal_password_reset_tokens t
        JOIN people p ON p.id = t.person_id
        WHERE t.token_hash = $1
          AND t.used_at IS NULL
-         AND t.expires_at > NOW()`,
+         AND t.expires_at > NOW()
+         AND p.is_deleted = false`,
       [tokenHash]
     );
 
@@ -568,7 +663,7 @@ router.post('/auth/reset-password', async (req: Request, res: Response) => {
     }
 
     // Issue session token so they go straight into the portal
-    const name = `${row.first_name || ''} ${row.last_name || ''}`.trim();
+    const name = fullDisplayName(row);
     const sessionToken = jwt.sign(
       { id: row.person_id, email: row.email, name },
       PORTAL_SECRET,
@@ -779,6 +874,836 @@ router.get('/me', async (req: PortalRequest, res: Response) => {
   }
 });
 
+// ── Studio Sitter shifts (Rehearsals — Phase D portal surface) ───────
+//
+// A sitter (freelancer) sees the evenings they've been rostered to, and per
+// evening: who's in each room that night (derived) + the job's shared specs.
+// One sitter per night covers the whole building. Read-only in this slice;
+// handover thread + end-of-day report land in later slices.
+
+const SITTER_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function addDaysIsoP(iso: string, days: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+// GET /api/portal/studio-sitter/shifts — the sitter's upcoming/recent shifts
+router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
+  try {
+    const today = ukToday();
+    // A short look-back so a sitter can still open a recent past shift, and a
+    // full year forward so far-out assignments (e.g. a September date rota'd in
+    // July) always surface — the query is bounded by the sitter's own
+    // assignments, so a wide window stays cheap.
+    const from = addDaysIsoP(today, -14);
+    const to = addDaysIsoP(today, 365);
+    const shifts = await getSitterShifts(req.portalUser!.id, from, to);
+    res.json({ success: true, shifts });
+  } catch (error) {
+    console.error('Portal sitter shifts error:', error);
+    res.status(500).json({ error: 'Failed to load shifts' });
+  }
+});
+
+// GET /api/portal/studio-sitter/shifts/:date — one evening's detail
+router.get('/studio-sitter/shifts/:date', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    // Access: the sitter must be rostered to this night (shared staff account
+    // may view any).
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+    const detail = await getSitterShiftDetail(date, req.portalUser!.id);
+    // Tonight's tasks (STAFF-CALENDAR-SPEC §21). A failure costs the list, not the page.
+    let tasks: ReturnType<typeof presentFreelancerTask>[] = [];
+    try {
+      const shiftId = await resolveOpenShiftId(date);
+      if (shiftId) {
+        const { listTasks } = await import('../services/freelancer-tasks');
+        tasks = (await listTasks({ kind: 'shift', id: shiftId })).map(t => presentFreelancerTask(t, req.portalUser!.id));
+      }
+    } catch (err) {
+      console.error('Portal sitter shift tasks error (non-fatal):', err);
+    }
+    res.json({ success: true, ...detail, tasks });
+  } catch (error) {
+    console.error('Portal sitter shift detail error:', error);
+    res.status(500).json({ error: 'Failed to load shift' });
+  }
+});
+
+// ── Studio Sitter handover thread (Rehearsals — Phase D slice 3) ─────
+//
+// The sitter ⇄ staff handover notes for one evening. Flat chronological log
+// anchored to the shift via interactions.shift_id (scoped OUT of the person /
+// job / org / venue timelines by the shift_id IS NULL guard). Freelancer-
+// authored messages carry created_by = NULL + author_name (sitters are people,
+// not OP users). Access is gated the same way as the shift detail.
+
+async function resolveOpenShiftId(date: string): Promise<string | null> {
+  const r = await query(
+    `SELECT id FROM studio_sitter_shifts WHERE shift_date = $1 AND status <> 'cancelled' LIMIT 1`,
+    [date]
+  );
+  return r.rows[0]?.id ?? null;
+}
+
+// Handover-note attachments (images / PDFs). Stored in interactions.files under
+// the same shape as staff interaction attachments so both surfaces render them.
+const sitterNoteUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 6 }, // 8MB per file, 6 files
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only images and PDFs can be attached'));
+    }
+  },
+}).array('files', 6);
+
+function sitterNoteUploadMw(req: PortalRequest, res: Response, next: NextFunction) {
+  sitterNoteUpload(req, res, (err: unknown) => {
+    if (err) {
+      const msg = err instanceof multer.MulterError ? err.message : (err instanceof Error ? err.message : 'Upload failed');
+      res.status(400).json({ error: msg });
+      return;
+    }
+    next();
+  });
+}
+
+// Map a stored interaction-file blob to the portal display shape, presigning
+// R2 keys. Handles BOTH the staff interaction-attachment shape
+// ({ r2_key, filename, content_type }) and the legacy shared-file shape
+// ({ url, name, type }), so staff- and sitter-posted attachments render alike.
+async function mapThreadFile(x: Record<string, any>): Promise<{ name: string; url: string; fileType: string | null }> {
+  const key: string = x.r2_key || x.url || '';
+  let url = key;
+  if (key && typeof key === 'string' && key.startsWith('files/')) {
+    try { url = await getPresignedDownloadUrl(key); } catch { /* keep raw */ }
+  }
+  return {
+    name: x.filename || x.name || 'File',
+    url,
+    fileType: x.content_type || x.type || x.fileType || null,
+  };
+}
+
+// GET /api/portal/studio-sitter/shifts/:date/thread — read the handover log
+router.get('/studio-sitter/shifts/:date/thread', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const shiftId = await resolveOpenShiftId(date);
+    if (!shiftId) { res.json({ success: true, messages: [] }); return; }
+
+    const result = await query(
+      `SELECT i.id, i.content, i.created_at, i.files, i.created_by, i.author_name,
+              CONCAT(p.first_name, ' ', p.last_name) AS staff_name
+       FROM interactions i
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE i.shift_id = $1
+       ORDER BY i.created_at ASC`,
+      [shiftId]
+    );
+
+    const myName = req.portalUser!.name;
+    const messages = await Promise.all(result.rows.map(async (row: any) => {
+      const fromStaff = !!row.created_by;
+      const author = fromStaff
+        ? (String(row.staff_name || '').trim() || 'Ooosh')
+        : (row.author_name || 'Studio sitter');
+      const raw: any[] = Array.isArray(row.files) ? row.files : [];
+      const files = await Promise.all(raw.map(mapThreadFile));
+      return {
+        id: row.id,
+        content: row.content,
+        created_at: row.created_at,
+        author,
+        from_staff: fromStaff,
+        mine: !fromStaff && (row.author_name || '') === myName,
+        files,
+      };
+    }));
+
+    res.json({ success: true, messages });
+  } catch (error) {
+    console.error('Portal sitter thread read error:', error);
+    res.status(500).json({ error: 'Failed to load handover notes' });
+  }
+});
+
+// GET /api/portal/studio-sitter/shifts/:date/recent-handover — the last few
+// nights' handover notes (read-only), so a sitter arriving fresh sees the prior
+// context the per-night thread anchor doesn't carry across. Premises-wide (there
+// is one studio), most-recent-first, capped at MAX_NIGHTS within a lookback.
+router.get('/studio-sitter/shifts/:date/recent-handover', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const result = await query(
+      `SELECT i.id, i.content, i.created_at, i.files, i.created_by, i.author_name,
+              s.shift_date::text AS shift_date,
+              CONCAT(p.first_name, ' ', p.last_name) AS staff_name
+       FROM interactions i
+       JOIN studio_sitter_shifts s ON s.id = i.shift_id AND s.status <> 'cancelled'
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE s.shift_date < $1
+         AND s.shift_date >= ($1::date - INTERVAL '21 days')
+       ORDER BY s.shift_date DESC, i.created_at ASC
+       LIMIT 120`,
+      [date]
+    );
+
+    // Group by night, keeping the most recent MAX_NIGHTS that carry notes.
+    const MAX_NIGHTS = 4;
+    const byDate = new Map<string, any[]>();
+    for (const row of result.rows) {
+      const d = String(row.shift_date).slice(0, 10);
+      if (!byDate.has(d)) { if (byDate.size >= MAX_NIGHTS) continue; byDate.set(d, []); }
+      byDate.get(d)!.push(row);
+    }
+    const nights = await Promise.all([...byDate.entries()].map(async ([d, rows]) => ({
+      date: d,
+      entries: await Promise.all(rows.map(async (row: any) => {
+        const fromStaff = !!row.created_by;
+        return {
+          id: row.id,
+          content: row.content,
+          created_at: row.created_at,
+          author: fromStaff ? (String(row.staff_name || '').trim() || 'Ooosh') : (row.author_name || 'Studio sitter'),
+          from_staff: fromStaff,
+          mine: false,
+          files: await Promise.all((Array.isArray(row.files) ? row.files : []).map(mapThreadFile)),
+        };
+      })),
+    })));
+
+    res.json({ success: true, nights });
+  } catch (error) {
+    console.error('Portal sitter recent-handover error:', error);
+    res.status(500).json({ error: 'Failed to load recent handover notes' });
+  }
+});
+
+// POST /api/portal/studio-sitter/shifts/:date/thread — add a handover note
+// Accepts JSON ({ content }) or multipart/form-data (content + files[] of
+// images/PDFs). Attachments upload to R2 and store on interactions.files.
+router.post('/studio-sitter/shifts/:date/thread', sitterNoteUploadMw, async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const content = String(req.body?.content ?? '').trim().slice(0, 4000);
+    const uploaded = (req.files as Express.Multer.File[] | undefined) || [];
+    if (!content && uploaded.length === 0) {
+      res.status(400).json({ error: 'A message or attachment is required' });
+      return;
+    }
+
+    const shiftId = await resolveOpenShiftId(date);
+    if (!shiftId) { res.status(404).json({ error: 'No shift for this evening' }); return; }
+
+    // Upload attachments to R2 (same shape/prefix as staff interaction
+    // attachments so both surfaces render them identically).
+    const fileBlobs: Array<Record<string, any>> = [];
+    if (uploaded.length > 0 && isR2Configured()) {
+      for (const f of uploaded) {
+        const ext = (f.originalname.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+        const key = `files/attachments/portal-${req.portalUser!.id}/${crypto.randomUUID()}${ext}`;
+        await uploadToR2(key, f.buffer, f.mimetype);
+        fileBlobs.push({
+          r2_key: key,
+          filename: f.originalname,
+          content_type: f.mimetype,
+          size_bytes: f.size,
+          uploaded_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Content is NOT NULL on interactions; use a placeholder for attachment-only.
+    const storedContent = content || '(attachment)';
+
+    // Freelancer-authored: created_by NULL + author_name (they aren't OP users).
+    const inserted = await query(
+      `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
+       VALUES ('note', $1, $2, NULL, $3, $4::jsonb)
+       RETURNING id, created_at`,
+      [storedContent, shiftId, req.portalUser!.name, JSON.stringify(fileBlobs)]
+    );
+
+    // Let prior staff participants know a sitter replied — low-priority bell
+    // only (no email), matching the thread re-notify model. Best-effort:
+    // a notification failure must not fail the post.
+    try {
+      const priorStaff = await query(
+        `SELECT DISTINCT created_by FROM interactions
+         WHERE shift_id = $1 AND created_by IS NOT NULL`,
+        [shiftId]
+      );
+      const link = priorStaff.rows.length > 0 ? await shiftLinkPath(shiftId) : null;
+      for (const row of priorStaff.rows) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, $5, 'low')`,
+          [
+            row.created_by,
+            `${req.portalUser!.name} added a handover note`,
+            storedContent.length > 200 ? storedContent.slice(0, 200) + '...' : storedContent,
+            shiftId,
+            link!.path,
+          ]
+        );
+      }
+    } catch (notifyErr) {
+      console.error('Portal sitter thread notify error (non-fatal):', notifyErr);
+    }
+
+    const files = await Promise.all(fileBlobs.map(mapThreadFile));
+    res.json({
+      success: true,
+      message: {
+        id: inserted.rows[0].id,
+        content: storedContent,
+        created_at: inserted.rows[0].created_at,
+        author: req.portalUser!.name,
+        from_staff: false,
+        mine: true,
+        files,
+      },
+    });
+  } catch (error) {
+    console.error('Portal sitter thread post error:', error);
+    res.status(500).json({ error: 'Failed to post handover note' });
+  }
+});
+
+// ── Studio Sitter end-of-day lock-up report (Rehearsals — Phase E) ───
+//
+// GET  /api/portal/studio-sitter/shifts/:date/lockup → template + reference
+//        photos + DERIVED "continuing tomorrow?" + any prior submission
+// POST /api/portal/studio-sitter/shifts/:date/lockup → submit the report
+//        (closes the shift, posts the note into the handover thread, alerts
+//        staff). Access-gated the same way as the shift detail / thread.
+
+router.get('/studio-sitter/shifts/:date/lockup', async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+    const context = await getLockupContext(date);
+    res.json({ success: true, ...context });
+  } catch (error) {
+    console.error('Portal sitter lock-up context error:', error);
+    res.status(500).json({ error: 'Failed to load lock-up report' });
+  }
+});
+
+// Multipart: `payload` (JSON) + optional photos. Photo field names route the
+// file: `why_<itemId>` → that exception's "why?" photos; `item_<itemId>` → a
+// note_prompt item's always-on note photos; `notes_photo` → the final-notes
+// photos. Reuses the same 8MB image/PDF limits as the thread upload.
+const lockupUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 20 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') cb(null, true);
+    else cb(new Error('Only images and PDFs can be attached'));
+  },
+}).any();
+function lockupUploadMw(req: PortalRequest, res: Response, next: NextFunction) {
+  lockupUpload(req, res, (err: unknown) => {
+    if (err) {
+      const msg = err instanceof multer.MulterError ? err.message : (err instanceof Error ? err.message : 'Upload failed');
+      res.status(400).json({ error: msg }); return;
+    }
+    next();
+  });
+}
+
+/** Upload a multer file to R2 → the interaction-attachment blob shape. */
+async function uploadLockupPhoto(personId: string, f: Express.Multer.File) {
+  const ext = (f.originalname.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+  const key = `files/attachments/portal-${personId}/${crypto.randomUUID()}${ext}`;
+  await uploadToR2(key, f.buffer, f.mimetype);
+  return { r2_key: key, filename: f.originalname, content_type: f.mimetype, size_bytes: f.size };
+}
+
+router.post('/studio-sitter/shifts/:date/lockup', lockupUploadMw, async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    let parsed: any = {};
+    try { parsed = req.body?.payload ? JSON.parse(String(req.body.payload)) : {}; }
+    catch { res.status(400).json({ error: 'Invalid payload' }); return; }
+
+    const answers: Record<string, string> = {};
+    if (parsed.answers && typeof parsed.answers === 'object') {
+      for (const [k, v] of Object.entries(parsed.answers)) answers[k] = String(v ?? '');
+    }
+    const exceptionNoteText: Record<string, string> = {};
+    if (parsed.exception_notes && typeof parsed.exception_notes === 'object') {
+      for (const [k, v] of Object.entries(parsed.exception_notes)) exceptionNoteText[k] = String(v ?? '');
+    }
+    const itemNoteText: Record<string, string> = {};
+    if (parsed.item_notes && typeof parsed.item_notes === 'object') {
+      for (const [k, v] of Object.entries(parsed.item_notes)) itemNoteText[k] = String(v ?? '');
+    }
+    const notesText = typeof parsed.notes === 'string' ? parsed.notes : '';
+
+    // Upload photos, routed by field name: `why_<id>` → exception photos,
+    // `item_<id>` → note_prompt item photos, `notes_photo` → final-notes photos.
+    const exceptionPhotos: Record<string, any[]> = {};
+    const itemPhotos: Record<string, any[]> = {};
+    const notesPhotos: any[] = [];
+    const files = (req.files as Express.Multer.File[] | undefined) || [];
+    if (files.length && isR2Configured()) {
+      for (const f of files) {
+        const blob = await uploadLockupPhoto(req.portalUser!.id, f);
+        if (f.fieldname === 'notes_photo') notesPhotos.push(blob);
+        else if (f.fieldname.startsWith('why_')) {
+          const id = f.fieldname.slice(4);
+          (exceptionPhotos[id] ||= []).push(blob);
+        } else if (f.fieldname.startsWith('item_')) {
+          const id = f.fieldname.slice(5);
+          (itemPhotos[id] ||= []).push(blob);
+        }
+      }
+    }
+
+    const exception_notes: Record<string, { text: string; photos: any[] }> = {};
+    const exIds = new Set([...Object.keys(exceptionNoteText), ...Object.keys(exceptionPhotos)]);
+    for (const id of exIds) exception_notes[id] = { text: exceptionNoteText[id] ?? '', photos: exceptionPhotos[id] ?? [] };
+
+    const item_notes: Record<string, { text: string; photos: any[] }> = {};
+    const itIds = new Set([...Object.keys(itemNoteText), ...Object.keys(itemPhotos)]);
+    for (const id of itIds) item_notes[id] = { text: itemNoteText[id] ?? '', photos: itemPhotos[id] ?? [] };
+
+    const result = await submitLockupReport(date, req.portalUser!.id, req.portalUser!.name, {
+      answers,
+      exception_notes,
+      item_notes,
+      notes: { text: notesText, photos: notesPhotos },
+      continuing_tomorrow: parsed.continuing_tomorrow === true || parsed.continuing_tomorrow === 'true',
+      allow_resubmit: parsed.allow_resubmit === true || parsed.allow_resubmit === 'true',
+    });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    if (error instanceof LockupAlreadySubmittedError) {
+      res.status(409).json({ error: 'This shift has already been submitted.', already_submitted: true, submitted_at: error.submittedAt });
+      return;
+    }
+    const msg = error instanceof Error ? error.message : 'Failed to submit lock-up report';
+    if (msg === 'No shift for this evening') { res.status(404).json({ error: msg }); return; }
+    console.error('Portal sitter lock-up submit error:', error);
+    res.status(500).json({ error: 'Failed to submit lock-up report' });
+  }
+});
+
+// ── Studio-sitter SHOP TILL (docs/SHOP-SALES-SPEC.md §5) ──────────────────
+//
+// GET  .../:date/till/context        → tonight's bands, payment methods, open?
+// GET  .../:date/till/search?q=      → price lookup (the local catalogue mirror —
+//                                       zero HireHop calls, like the staff till)
+// GET  .../:date/till/sales          → tonight's sales from this till + totals
+// POST .../:date/till/sales          → take a sale
+// POST .../:date/till/sales/:id/cancel → undo one inside its push hold
+//
+// Same gate as the lock-up: rostered to this evening, or the shared staff
+// account. Selling additionally needs the night to be OPEN — its own date, or
+// until 06:00 the next morning, because lock-up runs late. Price lookup works
+// any time the sitter can see the shift.
+//
+// A sitter sale is a normal sale in every way that matters: it drains to
+// HireHop exactly like a staff one. It just carries the sitter (a person, not
+// a user), the shift, and `needs_review` for staff to tick off.
+
+/** Today and the hour, UK time. */
+function londonNow(): { date: string; hour: number } {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
+}
+
+/**
+ * Can this evening's till take sales right now? On the night — or, for a
+ * listed TEST account (`shop_till_test_emails`, migration 252), on any date
+ * it's rostered to, so the till can be tested on a free evening instead of
+ * muddling a real sitter's night.
+ */
+async function isTillOpen(date: string, email: string, shiftId: string): Promise<boolean> {
+  // Locked up = closed, for everyone (test accounts included — that's worth
+  // testing too). Stops "one more sale" after the report has gone, which the
+  // lock-up email would never show (jon, Sep 2026). Price lookup stays open.
+  if (await isLockedUp(shiftId)) return false;
+  const now = londonNow();
+  if (date === now.date || (date === addDaysIsoP(now.date, -1) && now.hour < 6)) return true;
+  try {
+    const r = await query(`SELECT value FROM system_settings WHERE key = 'shop_till_test_emails'`);
+    const list = JSON.parse(r.rows[0]?.value || '[]');
+    return Array.isArray(list)
+      && list.some((e: unknown) => String(e).trim().toLowerCase() === String(email || '').trim().toLowerCase());
+  } catch {
+    return false;   // a malformed setting opens nothing
+  }
+}
+
+/** Has the sitter submitted the lock-up report for this shift? */
+async function isLockedUp(shiftId: string): Promise<boolean> {
+  const r = await query(`SELECT report_submitted_at FROM studio_sitter_shifts WHERE id = $1`, [shiftId]);
+  return !!r.rows[0]?.report_submitted_at;
+}
+
+/** Rostered-to-this-evening gate for the till. Sends the error and returns null on failure. */
+async function tillGate(req: PortalRequest, res: Response): Promise<{ date: string; shiftId: string } | null> {
+  const date = String(req.params.date);
+  if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return null; }
+  const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+  if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return null; }
+  const shiftId = await resolveOpenShiftId(date);
+  if (!shiftId) { res.status(404).json({ error: 'No shift for this evening' }); return null; }
+  return { date, shiftId };
+}
+
+router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { SHOP_TENDERS } = await import('../services/shop-tenders');
+    const { getCacheAge } = await import('../services/shop-stock');
+    const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
+    res.json({
+      success: true,
+      date: gate.date,
+      open: await isTillOpen(gate.date, req.portalUser!.email, gate.shiftId),
+      // Why it's closed, so the page can say the right thing.
+      locked_up: await isLockedUp(gate.shiftId),
+      // Tonight's bands — the only jobs a sitter can sell onto. Two in, two buttons.
+      jobs: (detail?.jobs ?? []).map((j: any) => ({
+        job_id: j.job_id, hh_job_number: j.hh_job_number, label: j.label, rooms: j.rooms ?? [],
+      })),
+      tenders: SHOP_TENDERS,
+      stock_as_of: (await getCacheAge()).refreshedAt,
+    });
+  } catch (error) {
+    console.error('Portal till context error:', error);
+    res.status(500).json({ error: 'Failed to load the till' });
+  }
+});
+
+router.get('/studio-sitter/shifts/:date/till/search', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { searchShopStock } = await import('../services/shop-stock');
+    const items = await searchShopStock(String(req.query.q || ''), { limit: 25 });
+    // Only what a phone till needs — no cost prices leave the building.
+    res.json({
+      success: true,
+      items: items.map((i: any) => ({
+        hhStockId: i.hhStockId, title: i.title, categoryPath: i.categoryPath,
+        priceIncVat: i.priceIncVat, priceExVat: i.priceExVat, vatRatePct: i.vatRatePct, quantity: i.quantity,
+      })),
+    });
+  } catch (error) {
+    console.error('Portal till search error:', error);
+    res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+router.get('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { listShopSales } = await import('../services/shop-sales');
+    const { getShiftShopSummary } = await import('../services/shop-reconcile');
+    const rows = await listShopSales({ shiftId: gate.shiftId, limit: 100 });
+    res.json({
+      success: true,
+      summary: await getShiftShopSummary(gate.shiftId),
+      sales: rows.map((r: any) => ({
+        id: r.id, sale_ref: r.sale_ref, status: r.status, tender: r.tender,
+        gross: Number(r.gross_amount), created_at: r.created_at, push_after: r.push_after,
+        mine: r.recorded_by_person_id === req.portalUser!.id,
+        sold_to_hh_job_number: r.sold_to_hh_job_number ?? null,
+        last_receipt_to: r.last_receipt_to ?? null,
+        lines: (r.lines || []).map((l: any) => ({ name: l.name, qty: Number(l.qty) })),
+      })),
+    });
+  } catch (error) {
+    console.error('Portal till sales list error:', error);
+    res.status(500).json({ error: 'Failed to load tonight\'s sales' });
+  }
+});
+
+router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    if (!(await isTillOpen(gate.date, req.portalUser!.email, gate.shiftId))) {
+      res.status(409).json({
+        error: (await isLockedUp(gate.shiftId))
+          ? "You've locked up for the night, so the till is closed. Leave the office a note about anything else."
+          : 'The till for this evening is closed — sales can only be taken on the night.',
+      });
+      return;
+    }
+
+    const { SHOP_TENDERS } = await import('../services/shop-tenders');
+    const tender = String(req.body?.tender || '');
+    const jobId = req.body?.jobId ? String(req.body.jobId) : null;
+    if (!SHOP_TENDERS.some((t) => t.key === tender)) { res.status(400).json({ error: 'Pick how they paid.' }); return; }
+
+    // Only tonight's bands — a sitter can't put a sale on some other job.
+    if (jobId) {
+      const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
+      if (!(detail?.jobs ?? []).some((j: any) => j.job_id === jobId)) {
+        res.status(400).json({ error: "That band isn't in tonight." });
+        return;
+      }
+    }
+
+    // List price only — a sitter can't discount (the freelancer cap is 0%),
+    // and never trust a price from the phone: only the item and quantity.
+    const lines = Array.isArray(req.body?.lines)
+      ? req.body.lines.slice(0, 50).map((l: any) => ({ hhStockId: Number(l.hhStockId), qty: Number(l.qty) }))
+      : [];
+
+    const { createShopSale } = await import('../services/shop-sales');
+    const result = await createShopSale({
+      kind: 'sale',
+      lines,
+      tender,
+      soldToJobId: jobId,
+      notes: req.body?.notes ? String(req.body.notes).slice(0, 300) : null,
+      recordedIn: 'sitter_till',
+      shiftId: gate.shiftId,
+    }, { id: null, personId: req.portalUser!.id, role: 'freelancer' });
+    res.status(201).json({ success: true, ...result });
+  } catch (error) {
+    // Validation messages ("pick how they paid", "their bill needs a band")
+    // are written for the person holding the phone.
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Could not record that sale.' });
+  }
+});
+
+// Tonight's band's contacts, for the receipt box. Only for a band in THIS
+// evening's shift — the same people the sitter is already looking after
+// (jon, Sep 2026). Through THE contact pool, job-contact-candidates.ts.
+router.get('/studio-sitter/shifts/:date/till/jobs/:jobId/receipt-contacts', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const jobId = String(req.params.jobId);
+    const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
+    if (!(detail?.jobs ?? []).some((j: any) => j.job_id === jobId)) {
+      res.status(404).json({ error: "That band isn't in tonight." });
+      return;
+    }
+    const { jobReceiptContacts } = await import('../services/shop-receipts');
+    res.json({ success: true, contacts: await jobReceiptContacts(jobId) });
+  } catch (error) {
+    console.error('Portal till receipt contacts error:', error);
+    res.json({ success: true, contacts: [] });   // typing the address still works
+  }
+});
+
+// Email a receipt for one of tonight's sales. Only a sale taken on THIS
+// evening's till — a sitter can't send receipts for anything else. Works after
+// lock-up too: it's paperwork for a sale already made, not a new sale.
+router.post('/studio-sitter/shifts/:date/till/sales/:id/receipt', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const own = await query(`SELECT 1 FROM shop_sales WHERE id = $1 AND shift_id = $2`, [String(req.params.id), gate.shiftId]);
+    if (!own.rows.length) { res.status(404).json({ error: "That isn't one of tonight's sales." }); return; }
+    const { sendShopReceipt } = await import('../services/shop-receipts');
+    const result = await sendShopReceipt(String(req.params.id), String(req.body?.to ?? ''), { id: null, personId: req.portalUser!.id });
+    if (!result.sent) { res.status(502).json({ error: `The receipt didn't send — ${result.error}` }); return; }
+    res.json({ success: true, sent: true });
+  } catch (error) {
+    // "Not an email address", "their bill — their invoice is the document".
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Could not send that receipt.' });
+  }
+});
+
+router.post('/studio-sitter/shifts/:date/till/sales/:id/cancel', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { cancelShopSale } = await import('../services/shop-sales');
+    const result = await cancelShopSale(
+      String(req.params.id),
+      { id: null, personId: req.portalUser!.id },
+      'Cancelled from the sitter till',
+      // The shared staff account may undo any sale from that night's till.
+      req.portalUser!.isStaffShared ? undefined : { personId: req.portalUser!.id, shiftId: gate.shiftId },
+    );
+    if (!result.cancelled) { res.status(409).json({ error: result.message }); return; }
+    res.json({ success: true, cancelled: true });
+  } catch (error) {
+    console.error('Portal till cancel error:', error);
+    res.status(500).json({ error: 'Could not cancel that sale' });
+  }
+});
+
+// POST /api/portal/studio-sitter/shifts/:date/lost-property — log a found item
+// straight into the Holding module (multipart: description/found_location + photos).
+router.post('/studio-sitter/shifts/:date/lost-property', lockupUploadMw, async (req: PortalRequest, res: Response) => {
+  try {
+    const date = String(req.params.date);
+    if (!SITTER_DATE_RE.test(date)) { res.status(400).json({ error: 'Invalid date' }); return; }
+    const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
+    if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
+
+    const description = String(req.body?.description ?? '').trim();
+    if (!description) { res.status(400).json({ error: 'Please describe the item' }); return; }
+    const found_location = req.body?.found_location ? String(req.body.found_location).trim() : undefined;
+
+    const photos: any[] = [];
+    const files = (req.files as Express.Multer.File[] | undefined) || [];
+    if (files.length && isR2Configured()) {
+      for (const f of files) photos.push(await uploadLockupPhoto(req.portalUser!.id, f));
+    }
+
+    const id = await logShiftLostProperty(date, req.portalUser!.name, { description, found_location, photos });
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('Portal sitter lost-property error:', error);
+    res.status(500).json({ error: 'Failed to log lost property' });
+  }
+});
+
+// ── Resources (Staff Documents shared with freelancers) ──────────────
+//
+// GET /api/portal/resources      → approved, shareable staff documents
+// GET /api/portal/resources/:id  → markdown body for the in-portal reader
+//
+// Replaces the old Monday "Staff Training" board read. A staff document
+// surfaces here only when it is active + approved + flagged
+// shareable_with_freelancers (the flag is only settable for policy / training /
+// other categories — enforced on the OP staff side). File-backed docs carry a
+// short-lived presigned R2 url; markdown docs are read in-portal via the
+// detail endpoint.
+
+function fileTypeFromName(name: string | null): string | null {
+  if (!name) return null;
+  const ext = name.split('.').pop()?.toLowerCase();
+  return ext ? ext.toUpperCase() : null;
+}
+
+router.get('/resources', async (_req: PortalRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT d.id, d.title, d.category,
+              v.file_r2_key, v.file_name
+         FROM staff_documents d
+         JOIN staff_document_versions v
+           ON v.document_id = d.id AND v.is_current = true
+        WHERE d.is_active = true
+          AND d.approval_status = 'approved'
+          AND d.shareable_with_freelancers = true
+        ORDER BY d.category, d.title`,
+    );
+
+    const resources = await Promise.all(
+      result.rows.map(async (r: Record<string, any>) => {
+        const isFile = !!r.file_r2_key;
+        let url: string | null = null;
+        if (isFile) {
+          try {
+            url = await getPresignedDownloadUrl(r.file_r2_key, 3600);
+          } catch (err) {
+            console.error('[portal] resource presign failed', r.id, err);
+          }
+        }
+        return {
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          kind: isFile ? 'file' : 'markdown',
+          fileName: r.file_name || null,
+          fileType: isFile ? fileTypeFromName(r.file_name) : null,
+          url,
+        };
+      }),
+    );
+
+    res.json({ resources });
+  } catch (error) {
+    console.error('Portal resources error:', error);
+    res.status(500).json({ error: 'Failed to load resources' });
+  }
+});
+
+router.get('/resources/:id', async (req: PortalRequest, res: Response) => {
+  try {
+    if (!isUuidLike(req.params.id)) { res.status(404).json({ error: 'Not found' }); return; }
+    const result = await query(
+      `SELECT d.id, d.title, d.category,
+              v.body, v.file_r2_key, v.file_name
+         FROM staff_documents d
+         JOIN staff_document_versions v
+           ON v.document_id = d.id AND v.is_current = true
+        WHERE d.id = $1
+          AND d.is_active = true
+          AND d.approval_status = 'approved'
+          AND d.shareable_with_freelancers = true`,
+      [req.params.id],
+    );
+    const doc = result.rows[0];
+    if (!doc) { res.status(404).json({ error: 'Not found' }); return; }
+
+    if (doc.file_r2_key) {
+      // File-backed: hand back a fresh presigned url, not a body.
+      let url: string | null = null;
+      try {
+        url = await getPresignedDownloadUrl(doc.file_r2_key, 3600);
+      } catch (err) {
+        console.error('[portal] resource presign failed', doc.id, err);
+      }
+      res.json({
+        resource: {
+          id: doc.id, title: doc.title, category: doc.category, kind: 'file',
+          fileName: doc.file_name || null, fileType: fileTypeFromName(doc.file_name), url,
+        },
+      });
+      return;
+    }
+
+    res.json({
+      resource: {
+        id: doc.id, title: doc.title, category: doc.category, kind: 'markdown',
+        body: doc.body || '',
+      },
+    });
+  } catch (error) {
+    console.error('Portal resource detail error:', error);
+    res.status(500).json({ error: 'Failed to load resource' });
+  }
+});
+
 // ── Notification preferences (mirrors the old Monday-backed shape) ───
 //
 // GET  /api/portal/settings/notifications → current mute status
@@ -933,6 +1858,199 @@ router.post('/settings/notifications', async (req: PortalRequest, res: Response)
   }
 });
 
+/**
+ * What a freelancer is shown about their own day.
+ *
+ * Deliberately NOT the whole row. `expected_total`, the chase stamps, who
+ * cancelled it and the internal note are ours, not theirs — and `personName` is
+ * pointless on a list of their own days.
+ */
+/** What the portal shows of a task — the wording comes from taskTitle(). */
+function presentFreelancerTask(t: import('../services/freelancer-tasks').FreelancerTask, viewerId: string) {
+  return {
+    id: t.id,
+    taskType: t.taskType,
+    title: t.title,
+    // An 'other' task's description IS its title; a van prep's is extra detail.
+    detail: t.taskType === 'van_prep' ? t.description : null,
+    vehicleReg: t.vehicleReg,
+    status: t.status,
+    doneAt: t.doneAt,
+    // Only a tick they made on the portal is theirs to undo.
+    doneByMe: t.doneVia === 'portal' && t.doneByPersonId === viewerId,
+  };
+}
+
+function presentDayBooking(b: import('../services/freelancer-days').DayBooking) {
+  return {
+    id: b.id,
+    date: b.bookingDate,
+    startTime: b.startTime,
+    endTime: b.endTime,
+    durationType: b.durationType,
+    rateType: b.rateType,
+    agreedRate: b.agreedRate,
+    notes: b.notes,
+    status: b.status,
+    invoiceReceived: b.invoiceReceived,
+  };
+}
+
+// ── Yard days (spec §9.3) ────────────────────────────────────────────
+//
+// READ-ONLY PLUS ACCEPT / DECLINE. No counter-offer: the negotiation happens in
+// the freelance WhatsApp group and OP sends the revised offer afterwards (jon,
+// 18 Sep 2026). If that stops being true this grows a third response — which is
+// why `respond` takes a named response rather than a boolean.
+//
+// Authenticated by the portal session, NOT by the email's bearer token. Same
+// person, same two answers, different credential: somebody logged in should not
+// have to go and find the email.
+
+router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
+  try {
+    const { listForPerson } = await import('../services/freelancer-days');
+    const all = await listForPerson(req.portalUser!.id, { limit: 200 });
+    const today = ukToday();
+
+    // Past days are kept but capped: somebody wants to see the last few they
+    // did (and whether we have their invoice), not scroll a year of history.
+    //
+    // `offered` is in BOTH lists on purpose. A day that went by without them
+    // answering used to appear in neither — upcoming excluded it by date, past
+    // excluded it by status — so the honest answer to "did I ever reply to
+    // that?" was a blank screen. There is nothing for them to DO about it (the
+    // backend refuses a response to a passed day, and the card shows no
+    // buttons), but being unable to see it at all is worse than seeing it
+    // greyed out.
+    const upcoming = all.filter(b => b.bookingDate >= today
+      && ['offered', 'accepted'].includes(b.status));
+    const past = all.filter(b => b.bookingDate < today
+      && ['offered', 'accepted', 'completed'].includes(b.status)).slice(0, 10);
+
+    // Each upcoming day's tasks (STAFF-CALENDAR-SPEC §21) — a live list, so it is
+    // read on every load. A failure costs the lists, not the page.
+    const { listTasks } = await import('../services/freelancer-tasks');
+    const upcomingWithTasks = await Promise.all(upcoming.map(async (b) => {
+      let tasks: ReturnType<typeof presentFreelancerTask>[] = [];
+      try {
+        tasks = (await listTasks({ kind: 'booking', id: b.id })).map(t => presentFreelancerTask(t, req.portalUser!.id));
+      } catch (err) {
+        console.error('Portal day-booking tasks error (non-fatal):', err);
+      }
+      return { ...presentDayBooking(b), tasks };
+    }));
+
+    res.json({
+      success: true,
+      // The one they have to DO something about, so the portal can lead with it.
+      awaitingReply: upcoming.filter(b => b.status === 'offered').length,
+      upcoming: upcomingWithTasks,
+      past: past.map(presentDayBooking),
+    });
+  } catch (error) {
+    console.error('Portal day-bookings error:', error);
+    res.status(500).json({ success: false, error: 'Failed to load your days' });
+  }
+});
+
+router.post('/day-bookings/:id/respond', async (req: PortalRequest, res: Response) => {
+  const response = req.body?.response;
+  if (response !== 'accepted' && response !== 'declined') {
+    res.status(400).json({ success: false, error: 'Tell us yes or no' });
+    return;
+  }
+  const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500).trim() : '';
+
+  try {
+    const { getBooking, recordResponse } = await import('../services/freelancer-days');
+    const booking = await getBooking(String(req.params.id));
+
+    // Ownership FIRST, and the same answer either way: a booking that is not
+    // theirs and a booking that does not exist must be indistinguishable, or
+    // this endpoint becomes a way to probe whether an id is real.
+    if (!booking || booking.personId !== req.portalUser!.id) {
+      res.status(404).json({ success: false, error: 'We cannot find that day' });
+      return;
+    }
+    if (booking.status !== 'offered') {
+      res.status(409).json({
+        success: false,
+        error: booking.status === 'cancelled' ? 'That day was cancelled'
+          : booking.status === 'accepted' ? 'You have already said yes to that one'
+          : 'That day is no longer open',
+        booking: presentDayBooking(booking),
+      });
+      return;
+    }
+    if (booking.bookingDate < ukToday()) {
+      res.status(409).json({ success: false, error: 'That day has already passed' });
+      return;
+    }
+
+    const updated = await recordResponse(booking.id, response, note || null);
+    res.json({ success: true, booking: presentDayBooking(updated) });
+  } catch (error) {
+    console.error('Portal day-booking respond error:', error);
+    res.status(500).json({ success: false, error: 'That did not save' });
+  }
+});
+
+// ── Freelancer tasks: tick one off (STAFF-CALENDAR-SPEC §21) ──────────
+//
+// Only the person doing the day / on the evening can tick, and "not yours"
+// reads the same as "does not exist". A van prep is ticked by saving the prep
+// sheet, not here.
+router.post('/freelancer-tasks/:id/done', async (req: PortalRequest, res: Response) => {
+  try {
+    const { markDoneFromPortal, reopenFromPortal } = await import('../services/freelancer-tasks');
+    // { done: false } un-ticks a mis-tap (only one they ticked themselves).
+    const task = req.body?.done === false
+      ? await reopenFromPortal(String(req.params.id), req.portalUser!.id)
+      : await markDoneFromPortal(String(req.params.id), req.portalUser!.id);
+    res.json({ success: true, task: presentFreelancerTask(task, req.portalUser!.id) });
+  } catch (error) {
+    const status = (error as { status?: number })?.status;
+    if (status === 404 || status === 409) {
+      res.status(status).json({ success: false, error: (error as Error).message });
+      return;
+    }
+    console.error('Portal freelancer task done error:', error);
+    res.status(500).json({ success: false, error: 'That did not save' });
+  }
+});
+
+// ── Freelancer tasks: open the prep sheet for a van (§21.6) ───────────
+//
+// Returns a link into OP's prep page carrying a 15-minute redeem token. OP
+// already knows who this is (portal session), so there is no HMAC round trip.
+// assertPrepEligible() is the one rule, shared with the redeem step.
+router.post('/freelancer-tasks/:id/prep-link', async (req: PortalRequest, res: Response) => {
+  try {
+    const { assertPrepEligible } = await import('../services/freelancer-tasks');
+    const { mintFreelancerPrepRedeemToken } = await import('../middleware/freelancer-bookout-auth');
+    const { frontendLink } = await import('../config/app-urls');
+    const taskId = String(req.params.id);
+    const ok = await assertPrepEligible(taskId, req.portalUser!.id);
+    const token = mintFreelancerPrepRedeemToken(taskId, req.portalUser!.id);
+    // Back to where they came from: the shift page for a sitter, else the dashboard.
+    const portal = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
+    const back = ok.task.shiftId ? `${portal}/shift/${ok.date}` : `${portal}/dashboard`;
+    const url = frontendLink(
+      `/vehicles/freelancer-prep?prepToken=${encodeURIComponent(token)}&returnUrl=${encodeURIComponent(back)}`,
+    );
+    res.json({ success: true, url });
+  } catch (error) {
+    const status = (error as { status?: number })?.status;
+    if (status === 404 || status === 409) {
+      res.status(status).json({ success: false, error: (error as Error).message });
+      return;
+    }
+    console.error('Portal prep-link error:', error);
+    res.status(500).json({ success: false, error: 'Could not open the prep sheet' });
+  }
+});
+
 // ── GET /api/portal/jobs — freelancer's job list ─────────────────────
 
 router.get('/jobs', async (req: PortalRequest, res: Response) => {
@@ -971,12 +2089,33 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         qa.expected_expenses as assignment_expected_expenses,
         j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
-        v.name as linked_venue_name, v.address as venue_address, v.city as venue_city
+        v.name as linked_venue_name, v.address as venue_address, v.city as venue_city,
+        qcx.contacts as leg_contacts
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
        LEFT JOIN run_groups rg ON rg.id = q.run_group
+       -- Contacts for this leg (quote_contacts, migration 223). Resolved LIVE
+       -- from the people table on every read: nothing is snapshotted into the
+       -- junction, so a number corrected on the person record reaches the
+       -- driver immediately. Only rows with something dialable or emailable
+       -- are sent: a name alone tells a driver at a loading bay nothing.
+       LEFT JOIN LATERAL (
+         SELECT json_agg(
+                  json_build_object(
+                    'name', TRIM(CONCAT(p2.first_name, ' ', p2.last_name)),
+                    'label', qc.label,
+                    'phone', COALESCE(NULLIF(p2.mobile, ''), NULLIF(p2.phone, '')),
+                    'email', NULLIF(p2.email, '')
+                  ) ORDER BY p2.first_name
+                ) AS contacts
+         FROM quote_contacts qc
+         JOIN people p2 ON p2.id = qc.person_id AND p2.is_deleted = false
+         WHERE qc.quote_id = q.id
+           AND (COALESCE(NULLIF(p2.mobile, ''), NULLIF(p2.phone, '')) IS NOT NULL
+                OR NULLIF(p2.email, '') IS NOT NULL)
+       ) qcx ON true
        WHERE ${assignmentFilter}
          AND q.is_deleted = false
          AND q.status IN ('confirmed', 'completed')
@@ -1072,14 +2211,37 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address,
-        v.city as venue_city, v.w3w_address as venue_w3w,
+        v.city as venue_city, v.postcode as venue_postcode,
+        v.country as venue_country, v.load_in_address as venue_load_in_address,
+        v.w3w_address as venue_w3w,
         v.files as venue_files,
-        COALESCE(v.approach_notes, v.general_notes) as venue_access_notes
+        COALESCE(v.approach_notes, v.general_notes) as venue_access_notes,
+        qcx.contacts as leg_contacts
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
        LEFT JOIN run_groups rg ON rg.id = q.run_group
+       -- Contacts for this leg (quote_contacts, migration 223). Resolved LIVE
+       -- from the people table on every read: nothing is snapshotted into the
+       -- junction, so a number corrected on the person record reaches the
+       -- driver immediately. Only rows with something dialable or emailable
+       -- are sent: a name alone tells a driver at a loading bay nothing.
+       LEFT JOIN LATERAL (
+         SELECT json_agg(
+                  json_build_object(
+                    'name', TRIM(CONCAT(p2.first_name, ' ', p2.last_name)),
+                    'label', qc.label,
+                    'phone', COALESCE(NULLIF(p2.mobile, ''), NULLIF(p2.phone, '')),
+                    'email', NULLIF(p2.email, '')
+                  ) ORDER BY p2.first_name
+                ) AS contacts
+         FROM quote_contacts qc
+         JOIN people p2 ON p2.id = qc.person_id AND p2.is_deleted = false
+         WHERE qc.quote_id = q.id
+           AND (COALESCE(NULLIF(p2.mobile, ''), NULLIF(p2.phone, '')) IS NOT NULL
+                OR NULLIF(p2.email, '') IS NOT NULL)
+       ) qcx ON true
        WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
          AND q.is_deleted = false`,
       [quoteId, personId, isStaffShared]
@@ -1141,7 +2303,16 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
       venue = {
         id: row.venue_id,
         name: row.linked_venue_name || row.venue_name,
-        address: row.venue_address,
+        // The venue's address lives in four columns (street, city, postcode,
+        // country). The portal shows this string AND feeds it to its Google
+        // Maps link, so it must carry the postcode: the street line alone
+        // ("32 Tavistock Road") pinned the wrong town. Same join as the
+        // delivery note below and OP's own venue page.
+        address: [row.venue_address, row.venue_city, row.venue_postcode, row.venue_country]
+          .filter(Boolean).join(', ') || null,
+        // Load-in address (loading dock round the back etc.) is shown as a
+        // second line alongside the postal address, never instead of it.
+        loadInAddress: row.venue_load_in_address || null,
         whatThreeWords: row.venue_w3w,
         // Venue contacts not stored on venues table — placeholder until a
         // person-link-based contact lookup is added
@@ -1238,6 +2409,67 @@ router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response)
   } catch (error) {
     console.error('Portal equipment error:', error);
     res.status(500).json({ error: 'Failed to load equipment' });
+  }
+});
+
+// ── POST /api/portal/jobs/:quoteId/legs — declare which legs the job has ──
+//
+// The /start wizard ("van only / backline only / both") is the declaration of
+// which legs a D&C job involves. The portal calls this as the freelancer picks,
+// so OP can close the quote server-side the moment the last required leg lands
+// (van book-out and/or equipment /complete) — no cross-domain return hop needed.
+// Idempotent; safe to re-send.
+
+const legsSchema = z.object({
+  van: z.preprocess((v) => v === 'true' || v === true, z.boolean()),
+  equipment: z.preprocess((v) => v === 'true' || v === true, z.boolean()),
+});
+
+router.post('/jobs/:quoteId/legs', async (req: PortalRequest, res: Response) => {
+  try {
+    const personId = req.portalUser!.id;
+    const isStaffShared = req.portalUser!.isStaffShared;
+    const quoteId = req.params.quoteId;
+
+    if (!isUuidLike(quoteId)) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const parsed = legsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid legs payload', details: parsed.error.issues });
+      return;
+    }
+    const { van, equipment } = parsed.data;
+
+    // Access check — same rule as /complete (freelancer on the quote, or the
+    // shared staff account for is_ooosh_crew quotes).
+    const access = await query(
+      `SELECT q.id
+         FROM quote_assignments qa
+         JOIN quotes q ON q.id = qa.quote_id
+        WHERE qa.quote_id = $1
+          AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
+          AND q.is_deleted = false`,
+      [quoteId, personId, isStaffShared]
+    );
+    if (access.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    await query(
+      `UPDATE quotes
+          SET requires_van_leg = $1, requires_equipment_leg = $2, updated_at = NOW()
+        WHERE id = $3`,
+      [van, equipment, quoteId]
+    );
+
+    res.json({ success: true, legs: { van, equipment } });
+  } catch (error) {
+    console.error('[portal] declare legs error:', error);
+    res.status(500).json({ error: 'Failed to record job legs' });
   }
 });
 
@@ -1396,20 +2628,21 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const completionName = staffName || req.portalUser!.name;
 
     // ── Persist to DB ──────────────────────────────────────────────
-    // Also bump commercial status to 'completed' so Job Detail's Crew &
-    // Transport card stops showing "Confirmed + Complete button" once the
-    // job is actually finished. Keeps transport-ops page and job-detail
-    // in lock-step.
+    // Store the equipment-handover record + stamp the EQUIPMENT leg done. The
+    // quote's ops_status/status/completed_at are NOT flipped here — that's
+    // maybeCloseQuote's job (below), which only closes once every required leg
+    // (van and/or equipment, per the /start declaration) is in. For a
+    // backline-only or a "both" job where the van already booked out, this call
+    // closes it; for a "both" whose van is still pending it stays open (and the
+    // chaser keeps nagging, correctly).
     await query(
       `UPDATE quotes SET
-        ops_status = 'completed',
-        status = CASE WHEN status IN ('draft', 'confirmed') THEN 'completed' ELSE status END,
-        completed_at = NOW(),
         completed_by = $1,
         completion_notes = $2,
         completion_signature = $3,
         completion_photos = $4::jsonb,
         customer_present = $5,
+        equipment_leg_done_at = COALESCE(equipment_leg_done_at, NOW()),
         updated_at = NOW()
        WHERE id = $6`,
       [
@@ -1428,10 +2661,16 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       [quoteId, personId, isStaffShared]
     );
 
+    // Close the quote server-side if all required legs are done. This is the
+    // same helper the van book-out calls, so the last-mover auto-dispatch (and
+    // the chaser stopping) fires exactly once, whichever leg is last.
+    const { maybeCloseQuote } = await import('../services/quote-completion');
+    await maybeCloseQuote(quoteId as string, { triggeringLeg: 'equipment', actorLabel: completedBy });
+
     if (checklistData) {
       await query(
-        `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata)
-         VALUES ('completion', $1, 'quote', $2, $3, $4)`,
+        `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata, source)
+         VALUES ('completion', $1, 'quote', $2, $3, $4, 'system')`,
         [
           `Job completed by ${completionName}`,
           quoteId,
@@ -1633,53 +2872,11 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         }
       }
 
-      // ── Last-mover dispatch flip ───────────────────────────────────
-      // When the FINAL outstanding delivery quote on a job completes, push
-      // the job to pipeline_status='dispatched' + HH status 5. Mirrors the
-      // warehouse module's auto-dispatch but at quote-aggregate level.
-      //
-      // Carve-outs:
-      //   - Only delivery quotes count. Collections + crewed don't trigger.
-      //   - Only fires if pipeline_status is currently confirmed/prepped/prepping
-      //     — never regresses a job already past dispatch (returned, completed, etc).
-      //   - Subsequent deliveries added later (e.g. mid-tour bass amp swap) won't
-      //     un-dispatch the job; the writeback's "skip if already at target" guard
-      //     + the pipeline_status whitelist make this naturally idempotent.
-      try {
-        if (ctx.job_id && ctx.job_type === 'delivery') {
-          const remaining = await query(
-            `SELECT COUNT(*)::int AS remaining
-             FROM quotes
-             WHERE job_id = $1
-               AND id != $2
-               AND job_type = 'delivery'
-               AND is_deleted = false
-               AND COALESCE(ops_status, 'todo') NOT IN ('completed', 'cancelled')
-               AND status NOT IN ('completed', 'cancelled')`,
-            [ctx.job_id, quoteId]
-          );
-
-          if (remaining.rows[0].remaining === 0) {
-            // Auto-dispatch (shared helper): OP pipeline → 'dispatched' +
-            // HH writeback to 5 + under-dispatched sanity-check email when
-            // HH is still pre-Dispatched. The whitelist
-            // ['confirmed','prepped','prepping'] is enforced inside the helper.
-            try {
-              await autoDispatchJob({
-                jobId: ctx.job_id,
-                source: 'portal',
-                actorLabel: req.portalUser!.email,
-                actorUserId: null,
-                interactionContent: `🚚 Job dispatched — final delivery completed by ${completionName} via freelancer portal.`,
-              });
-            } catch (err) {
-              console.error('[portal completion] auto-dispatch error:', err);
-            }
-          }
-        }
-      } catch (err) {
-        console.error('[portal completion] Dispatch flip error:', err);
-      }
+      // Last-mover auto-dispatch now lives in maybeCloseQuote (services/
+      // quote-completion.ts), called above — it fires when the quote actually
+      // closes, whichever leg is last, so a van-only delivery closed by the
+      // book-out and a "both" closed by this /complete both dispatch exactly
+      // once. Nothing to do here.
     })().catch(err => console.error('[portal completion] Background task error:', err));
   } catch (error) {
     console.error('Portal completion error:', error);
@@ -1865,6 +3062,19 @@ function formatJobForPortal(row: Record<string, unknown>) {
     driverPay: Number(row.agreed_rate || row.freelancer_fee_rounded || row.freelancer_fee || 0),
     // Freelancer notes
     freelancerNotes: row.freelancer_notes as string | null,
+    // Who to call on this leg. Staff-picked from the people already on the
+    // job's organisations (quote_contacts, migration 223) — this replaces
+    // re-typing a name and number into the notes every time. `keyNotes` keeps
+    // rendering alongside: existing quotes have their contacts in there and
+    // nothing backfills them.
+    contacts: Array.isArray(row.leg_contacts)
+      ? (row.leg_contacts as Array<Record<string, unknown>>).map((c) => ({
+          name: (c.name as string) || '',
+          label: (c.label as string) || null,
+          phone: (c.phone as string) || null,
+          email: (c.email as string) || null,
+        }))
+      : [],
     // Arrangement details (so freelancer knows what's booked for them)
     tollsStatus: row.tolls_status as string | null,
     accommodationStatus: row.accommodation_status as string | null,
@@ -1900,6 +3110,8 @@ function formatJobForPortal(row: Record<string, unknown>) {
           .reduce((sum: number, e: any) => sum + (Number(e.amount) || 0), 0);
       } catch { return 0; }
     })(),
+    // Plain-English "your money on this job" for the freelancer (fee is separate).
+    crewMoney: deriveCrewMoney(row.expenses),
   };
 
   if (isCrew) {
@@ -1924,7 +3136,12 @@ function formatJobForPortal(row: Record<string, unknown>) {
   return {
     ...base,
     isGrouped: false,
-    whatIsIt: row.what_is_it === 'vehicle' ? 'A vehicle' : 'Equipment',
+    // Emit the RAW enum ('vehicle' | 'equipment' | 'people' | null), not a
+    // display label. Every portal consumer compares lowercase — the old
+    // 'A vehicle'/'Equipment' labels matched none of them, so the equipment
+    // checklist never filtered vehicles out and the job badge always read
+    // "Equipment" regardless of the actual value.
+    whatIsIt: (row.what_is_it as string | null) || null,
     clientEmail: null as string | null,
   };
 }

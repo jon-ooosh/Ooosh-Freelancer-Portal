@@ -55,6 +55,8 @@ const REVIEW_TYPE_LABELS: Record<string, string> = {
   name_conflict: 'Name Conflict',
   possible_band: 'Possible Band',
   convert_suggestion: 'Convert Suggestion',
+  person_link_ambiguous: 'Ambiguous Person Link',
+  client_mismatch: 'Client Mismatch',
 };
 
 const ORG_TYPES = ['band', 'management', 'label', 'agency', 'promoter', 'venue', 'festival', 'supplier', 'hire_company', 'booking_agent', 'client', 'unknown', 'other'];

@@ -2,7 +2,7 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, List
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || '';
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || '';
@@ -105,6 +105,13 @@ export async function uploadToPublicR2(
 
 export async function getFromPublicR2(key: string) {
   return s3.send(new GetObjectCommand({
+    Bucket: R2_PUBLIC_BUCKET_NAME,
+    Key: key,
+  }));
+}
+
+export async function deleteFromPublicR2(key: string): Promise<void> {
+  await s3.send(new DeleteObjectCommand({
     Bucket: R2_PUBLIC_BUCKET_NAME,
     Key: key,
   }));

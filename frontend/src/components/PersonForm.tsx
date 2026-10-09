@@ -5,6 +5,8 @@ import { Link } from 'react-router-dom';
 interface PersonFormData {
   first_name: string;
   last_name: string;
+  /** What they like to be known as. Optional; blank falls back to first_name. */
+  preferred_name: string;
   email: string;
   phone: string;
   mobile: string;
@@ -14,18 +16,11 @@ interface PersonFormData {
   date_of_birth: string;
   notes: string;
   tags: string[];
-  // Freelancer
-  is_freelancer: boolean;
-  freelancer_joined_date: string;
-  freelancer_next_review_date: string;
-  skills: string[];
-  is_insured_on_vehicles: boolean;
-  is_approved: boolean;
-  has_tshirt: boolean;
-  emergency_contact_name: string;
-  emergency_contact_phone: string;
-  licence_details: string;
-  freelancer_references: string;
+  // Freelancer status is NOT edited here. Everything freelancer — flagging the
+  // person, skills, dates, approval, documents, references — lives on the
+  // Person's "Freelancer" tab, reached via the header "Invite to freelance"
+  // button (which sets is_freelancer and reveals the tab). This form is plain
+  // contact details + working terms only.
   working_terms_type: string;
   working_terms_credit_days: string;
   working_terms_notes: string;
@@ -37,39 +32,10 @@ interface PersonFormProps {
   onCancel: () => void;
 }
 
-const PRESET_SKILLS = [
-  'Sound Engineer',
-  'Lighting Engineer',
-  'Stage Manager',
-  'Backline Tech',
-  'Monitor Engineer',
-  'FOH Engineer',
-  'Rigger',
-  'Tour Manager',
-  'Production Manager',
-  'Driver',
-  'Truck Driver',
-  'Van Driver',
-  'Stage Hand',
-  'Carpenter',
-  'Electrician',
-  'Video Tech',
-  'LED Tech',
-  'Follow Spot Operator',
-  'Pyro Tech',
-  'SFX Tech',
-  'Wardrobe',
-  'Runner',
-  'Caterer',
-  'Security',
-  'First Aider',
-  'Site Manager',
-  'Event Manager',
-];
-
 const emptyForm: PersonFormData = {
   first_name: '',
   last_name: '',
+  preferred_name: '',
   email: '',
   phone: '',
   mobile: '',
@@ -79,17 +45,6 @@ const emptyForm: PersonFormData = {
   date_of_birth: '',
   notes: '',
   tags: [],
-  is_freelancer: false,
-  freelancer_joined_date: '',
-  freelancer_next_review_date: '',
-  skills: [],
-  is_insured_on_vehicles: false,
-  is_approved: false,
-  has_tshirt: false,
-  emergency_contact_name: '',
-  emergency_contact_phone: '',
-  licence_details: '',
-  freelancer_references: '',
   working_terms_type: 'usual',
   working_terms_credit_days: '',
   working_terms_notes: '',
@@ -98,11 +53,9 @@ const emptyForm: PersonFormData = {
 export default function PersonForm({ personId, onSaved, onCancel }: PersonFormProps) {
   const [form, setForm] = useState<PersonFormData>(emptyForm);
   const [tagInput, setTagInput] = useState('');
-  const [skillInput, setSkillInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!personId);
-  const [showFreelancer, setShowFreelancer] = useState(false);
   const [recordVersion, setRecordVersion] = useState<number | null>(null);
   const [emailWarning, setEmailWarning] = useState<{ name: string; id: string } | null>(null);
   const emailCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -124,6 +77,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
       setForm({
         first_name: (data.first_name as string) || '',
         last_name: (data.last_name as string) || '',
+        preferred_name: (data.preferred_name as string) || '',
         email: (data.email as string) || '',
         phone: (data.phone as string) || '',
         mobile: (data.mobile as string) || '',
@@ -133,22 +87,10 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         date_of_birth: (data.date_of_birth as string) || '',
         notes: (data.notes as string) || '',
         tags: (data.tags as string[]) || [],
-        is_freelancer: (data.is_freelancer as boolean) || false,
-        freelancer_joined_date: (data.freelancer_joined_date as string)?.split('T')[0] || '',
-        freelancer_next_review_date: (data.freelancer_next_review_date as string)?.split('T')[0] || '',
-        skills: (data.skills as string[]) || [],
-        is_insured_on_vehicles: (data.is_insured_on_vehicles as boolean) || false,
-        is_approved: (data.is_approved as boolean) || false,
-        has_tshirt: (data.has_tshirt as boolean) || false,
-        emergency_contact_name: (data.emergency_contact_name as string) || '',
-        emergency_contact_phone: (data.emergency_contact_phone as string) || '',
-        licence_details: (data.licence_details as string) || '',
-        freelancer_references: (data.freelancer_references as string) || '',
         working_terms_type: (data.working_terms_type as string) || '',
         working_terms_credit_days: data.working_terms_credit_days != null ? String(data.working_terms_credit_days) : '',
         working_terms_notes: (data.working_terms_notes as string) || '',
       });
-      setShowFreelancer((data.is_freelancer as boolean) || false);
       if (data.version !== undefined) setRecordVersion(data.version as number);
 
       const first = (data.first_name as string) || '';
@@ -205,18 +147,6 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
     set('tags', form.tags.filter(t => t !== tag));
   }
 
-  function addSkill() {
-    const skill = skillInput.trim();
-    if (skill && !form.skills.includes(skill)) {
-      set('skills', [...form.skills, skill]);
-    }
-    setSkillInput('');
-  }
-
-  function removeSkill(skill: string) {
-    set('skills', form.skills.filter(s => s !== skill));
-  }
-
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.first_name.trim() || !form.last_name.trim()) {
@@ -229,6 +159,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
     try {
       const body = {
         ...form,
+        preferred_name: form.preferred_name.trim() || null,
         email: form.email || null,
         phone: form.phone || null,
         mobile: form.mobile || null,
@@ -236,12 +167,6 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         home_address: form.home_address || null,
         date_of_birth: form.date_of_birth || null,
         notes: form.notes || null,
-        emergency_contact_name: form.emergency_contact_name || null,
-        emergency_contact_phone: form.emergency_contact_phone || null,
-        licence_details: form.licence_details || null,
-        freelancer_joined_date: form.freelancer_joined_date || null,
-        freelancer_next_review_date: form.freelancer_next_review_date || null,
-        freelancer_references: form.freelancer_references || null,
         working_terms_type: form.working_terms_type || null,
         working_terms_credit_days: form.working_terms_credit_days ? parseInt(form.working_terms_credit_days) : null,
         working_terms_notes: form.working_terms_notes || null,
@@ -288,6 +213,17 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         <Field label="First Name *" value={form.first_name} onChange={v => set('first_name', v)} />
         <Field label="Last Name *" value={form.last_name} onChange={v => set('last_name', v)} />
       </div>
+      {/* The same field the staff Employment card offers, on the person record
+          so it reaches freelancers and contacts too — they had no way to set it
+          except the application form, which most never saw. One column either
+          way (people.preferred_name), so the two cannot disagree. */}
+      <Field
+        label="Likes to be known as"
+        value={form.preferred_name}
+        onChange={v => set('preferred_name', v)}
+        placeholder={form.first_name.trim() || 'Their first name'}
+        hint="Optional. Used wherever their name appears, including emails we send them. Leave blank to use their first name."
+      />
       {(() => {
         const currentName = `${form.first_name.trim()} ${form.last_name.trim()}`.trim();
         if (!isEdit || !originalName || currentName === originalName) return null;
@@ -423,110 +359,6 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         />
       </div>
 
-      {/* Freelancer toggle */}
-      <div className="border-t pt-4">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showFreelancer}
-            onChange={e => { setShowFreelancer(e.target.checked); set('is_freelancer', e.target.checked); }}
-            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-          />
-          <span className="text-sm font-medium text-gray-700">This person is a freelancer</span>
-        </label>
-      </div>
-
-      {showFreelancer && (
-        <div className="space-y-4 pl-2 border-l-2 border-ooosh-200">
-          {/* Skills */}
-          <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Skills</label>
-            <div className="flex flex-wrap gap-1 mb-2">
-              {form.skills.map(skill => (
-                <span key={skill} className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-ooosh-100 text-ooosh-700">
-                  {skill}
-                  <button type="button" onClick={() => removeSkill(skill)} className="text-ooosh-400 hover:text-ooosh-600">&times;</button>
-                </span>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <select
-                value=""
-                onChange={e => {
-                  const val = e.target.value;
-                  if (val === '__custom__') {
-                    setSkillInput('');
-                    // Focus will shift to the input that appears
-                  } else if (val && !form.skills.includes(val)) {
-                    set('skills', [...form.skills, val]);
-                  }
-                  e.target.value = '';
-                }}
-                className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              >
-                <option value="">Select a skill...</option>
-                {PRESET_SKILLS.filter(s => !form.skills.includes(s)).map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-                <option value="__custom__">+ Add custom skill</option>
-              </select>
-            </div>
-            {skillInput !== null && (
-              <div className="flex gap-2 mt-2">
-                <input
-                  value={skillInput}
-                  onChange={e => setSkillInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSkill(); } }}
-                  placeholder="Type custom skill..."
-                  autoFocus
-                  className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                />
-                <button type="button" onClick={addSkill} className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Add</button>
-              </div>
-            )}
-          </div>
-
-          {/* Dates */}
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Joined Date" type="date" value={form.freelancer_joined_date} onChange={v => set('freelancer_joined_date', v)} />
-            <Field label="Next Review Date" type="date" value={form.freelancer_next_review_date} onChange={v => set('freelancer_next_review_date', v)} />
-          </div>
-
-          <Field label="Licence Details" value={form.licence_details} onChange={v => set('licence_details', v)} />
-
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Emergency Contact Name" value={form.emergency_contact_name} onChange={v => set('emergency_contact_name', v)} />
-            <Field label="Emergency Contact Phone" value={form.emergency_contact_phone} onChange={v => set('emergency_contact_phone', v)} />
-          </div>
-
-          {/* References */}
-          <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">References</label>
-            <textarea
-              value={form.freelancer_references}
-              onChange={e => set('freelancer_references', e.target.value)}
-              rows={2}
-              placeholder="Reference details..."
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
-            />
-          </div>
-
-          <div className="flex flex-wrap gap-4">
-            <Checkbox label="Insured on vehicles" checked={form.is_insured_on_vehicles} onChange={v => set('is_insured_on_vehicles', v)} />
-            <Checkbox label="Approved freelancer" checked={form.is_approved} onChange={v => set('is_approved', v)} />
-            <Checkbox label="Has T-shirt" checked={form.has_tshirt} onChange={v => set('has_tshirt', v)} />
-          </div>
-
-          {isEdit && (
-            <div className="bg-blue-50 border border-blue-200 rounded p-3">
-              <p className="text-xs text-blue-700">
-                Upload freelancer documents (DVLA check, licence, passport) from the Details tab on the person page.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Actions */}
       <div className="flex gap-3 pt-4 border-t sticky bottom-0 bg-white pb-2">
         <button
@@ -550,9 +382,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function Field({ label, value, onChange, type = 'text', placeholder, emailValidation }: {
+function Field({ label, value, onChange, type = 'text', placeholder, emailValidation, hint }: {
   label: string; value: string; onChange: (v: string) => void;
-  type?: string; placeholder?: string; emailValidation?: boolean;
+  type?: string; placeholder?: string; emailValidation?: boolean; hint?: string;
 }) {
   const showEmailError = emailValidation && value.trim() !== '' && !EMAIL_REGEX.test(value.trim());
   return (
@@ -568,22 +400,9 @@ function Field({ label, value, onChange, type = 'text', placeholder, emailValida
       {showEmailError && (
         <p className="mt-1 text-xs text-red-500">Please enter a valid email address</p>
       )}
+      {hint && !showEmailError && (
+        <p className="mt-1 text-xs text-gray-500">{hint}</p>
+      )}
     </div>
-  );
-}
-
-function Checkbox({ label, checked, onChange }: {
-  label: string; checked: boolean; onChange: (v: boolean) => void;
-}) {
-  return (
-    <label className="flex items-center gap-2 cursor-pointer">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={e => onChange(e.target.checked)}
-        className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-      />
-      <span className="text-sm text-gray-700">{label}</span>
-    </label>
   );
 }

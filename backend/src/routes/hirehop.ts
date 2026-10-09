@@ -121,7 +121,10 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
     } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
-    let whereClause = 'WHERE is_deleted = false';
+    // jobs.is_deleted must stay QUALIFIED: the list query below joins
+    // organisations, which has an is_deleted column of its own, so a bare
+    // reference is ambiguous. Still valid in the join-free COUNT query.
+    let whereClause = 'WHERE jobs.is_deleted = false';
     const params: unknown[] = [];
 
     if (status !== undefined && status !== '') {
@@ -151,7 +154,14 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
 
     if (search && (search as string).trim()) {
       params.push(`%${(search as string).trim()}%`);
-      whereClause += ` AND (job_name ILIKE $${params.length} OR client_name ILIKE $${params.length} OR company_name ILIKE $${params.length} OR venue_name ILIKE $${params.length} OR CAST(hh_job_number AS TEXT) ILIKE $${params.length})`;
+      // Also match the org names the list actually DISPLAYS (client org via
+      // client_id, and any linked org incl. the ★ lead) — otherwise a row can
+      // show a name that search cannot find. EXISTS rather than a join so the
+      // join-free COUNT query above keeps agreeing with this one.
+      whereClause += ` AND (job_name ILIKE $${params.length} OR client_name ILIKE $${params.length} OR company_name ILIKE $${params.length} OR venue_name ILIKE $${params.length} OR CAST(hh_job_number AS TEXT) ILIKE $${params.length}
+        OR EXISTS (SELECT 1 FROM organisations co WHERE co.id = jobs.client_id AND co.is_deleted = false AND co.name ILIKE $${params.length})
+        OR EXISTS (SELECT 1 FROM job_organisations sjo JOIN organisations so ON so.id = sjo.organisation_id
+                    WHERE sjo.job_id = jobs.id AND so.is_deleted = false AND so.name ILIKE $${params.length}))`;
     }
 
     // OOH return filter — only show jobs with at least one assignment
@@ -202,6 +212,18 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
     // status=11, so the page would filter to empty).
     if (overdue === '1' || overdue === 'true') {
       whereClause += ` AND return_date::date < CURRENT_DATE AND status != 11`;
+    }
+
+    // Genuinely-returning filter — used by the Returns page. Drops jobs whose
+    // HireHop status is 6 ("Returned Incomplete") but whose hire isn't due back
+    // yet (an element returned early mid-hire). Those stay in Out Now, not
+    // Returns. Status 7/8/11 = everything physically back, always kept.
+    // See CLAUDE.md → "The status-6 no man's land".
+    const { genuinely_returning } = req.query;
+    if (genuinely_returning === '1' || genuinely_returning === 'true') {
+      whereClause += ` AND (status <> 6
+        OR COALESCE(return_date, job_end) IS NULL
+        OR COALESCE(return_date, job_end)::date <= CURRENT_DATE + INTERVAL '1 day')`;
     }
 
     // Has-retro filter — only jobs that have had a "Job retro:" interaction
@@ -268,9 +290,21 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
              AND vha.return_overnight = TRUE
              AND vha.status NOT IN ('cancelled', 'returned')
          ) AS has_ooh_return,
-         jf.hire_value_inc_vat::float8 AS hire_value_inc_vat
+         jf.hire_value_inc_vat::float8 AS hire_value_inc_vat,
+         -- Canonical client name + the org explicitly flagged to headline this
+         -- job. Without these the list rendered HireHop's raw client_name /
+         -- company_name strings, so a job whose client had been changed showed
+         -- the old name here while Job Detail (which has always joined) showed
+         -- the new one — and the lead ★ did nothing outside the pipeline card.
+         -- Both joins are by primary key / LIMIT 1, so neither multiplies rows
+         -- (the separate COUNT query above stays join-free and still agrees).
+         o.name AS client_org_name,
+         (SELECT lo.name FROM job_organisations jo
+            JOIN organisations lo ON lo.id = jo.organisation_id
+           WHERE jo.job_id = jobs.id AND jo.is_primary = true LIMIT 1) AS lead_org_name
        FROM jobs
        LEFT JOIN job_financials jf ON jf.job_id = jobs.id
+       LEFT JOIN organisations o ON o.id = jobs.client_id AND o.is_deleted = false
        ${whereClause}
        ORDER BY ${orderBy}
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -340,7 +374,10 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const result = await query(
-      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+      `SELECT j.*, o.name AS client_org_name
+       FROM jobs j
+       LEFT JOIN organisations o ON o.id = j.client_id AND o.is_deleted = false
+       WHERE j.id = $1 AND j.is_deleted = false`,
       [id]
     );
 
@@ -601,6 +638,26 @@ router.patch('/jobs/:jobId/vehicle-slot-mode', authenticate, async (req: AuthReq
       [JSON.stringify(modes), jobId]
     );
 
+    // Audit trail — a V&D toggle suspends the hire-forms/excess chain, so log
+    // who flipped which slot. Logged before the re-derivation so the timeline
+    // entry survives even if derivation hits a transient error.
+    try {
+      const isVandD = mode === 'van_and_driver';
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          isVandD
+            ? `🚐 Vehicle slot switched to Van & Driver — hire forms and excess suspended for this van`
+            : `Vehicle slot switched to Self-Drive — hire forms and excess re-enabled for this van`,
+          jobId,
+          req.user!.id,
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Vehicle slot mode: timeline log failed (non-fatal):', logErr);
+    }
+
     // Re-derive requirements after slot change
     const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
     const derivation = await deriveRequirementsForJob(jobId);
@@ -681,6 +738,25 @@ router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthReques
       [JSON.stringify(modes), !!isVanAndDriver, jobId]
     );
 
+    // Audit trail — a V&D toggle suspends the hire-forms/excess chain, so log
+    // who flipped it. Logged before the re-derivation so the timeline entry
+    // survives even if derivation hits a transient error.
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          isVanAndDriver
+            ? '🚐 Job switched to Van & Driver — hire forms and excess suspended (we supply the driver)'
+            : 'Job switched to Self-Drive — hire forms and excess re-enabled',
+          jobId,
+          req.user!.id,
+        ]
+      );
+    } catch (logErr) {
+      console.warn('Van & driver toggle: timeline log failed (non-fatal):', logErr);
+    }
+
     const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
     const derivation = await deriveRequirementsForJob(jobId);
 
@@ -718,8 +794,8 @@ router.patch('/jobs/:jobId/internal', async (req: AuthRequest, res: Response) =>
     // derivation hits a transient error.
     try {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by)
-         VALUES ('note', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
         [
           isInternal
             ? '🔧 Job marked as Internal — hire forms, excess and money tracking muted (crew & transport unaffected)'
@@ -747,6 +823,53 @@ router.patch('/jobs/:jobId/internal', async (req: AuthRequest, res: Response) =>
     res.json({ success: true, isInternal, derivation });
   } catch (error) {
     console.error('Internal job toggle error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
+// PATCH /api/hirehop/jobs/:jobId/recharge-running-costs — declare (or clear)
+// that a job recharges its running costs post-hire. The lightweight entry point
+// (the per-quote expense toggle is the rich one). Drives the cost auto-inherit +
+// the standing "Recharge running costs" card. Set TRUE is also done automatically
+// on quote save; this is the manual on/off switch (the only off switch).
+router.patch('/jobs/:jobId/recharge-running-costs', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const flag = !!req.body.rechargeRunningCosts;
+    const note = typeof req.body.note === 'string' ? req.body.note.trim().slice(0, 2000) : null;
+
+    const updated = await query(
+      `UPDATE jobs SET recharge_running_costs = $1, recharge_running_costs_note = $2, updated_at = NOW()
+       WHERE id = $3 AND is_deleted = false
+       RETURNING id, recharge_running_costs`,
+      [flag, note, jobId]
+    );
+    if (updated.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source) VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          flag
+            ? '⛽ Job marked "recharge running costs" — fuel/parking/etc. billed to the client at actual + markup post-hire'
+            : 'Job un-marked "recharge running costs"',
+          jobId, req.user!.id,
+        ]
+      );
+    } catch (logErr) { console.warn('Recharge-running-costs toggle: timeline log failed (non-fatal):', logErr); }
+
+    // Re-derive so the standing card appears/clears immediately (if in return phase).
+    let derivation = null;
+    try {
+      const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+      derivation = await deriveRequirementsForJob(jobId);
+    } catch (deriveErr) {
+      console.error('Recharge-running-costs toggle: re-derivation failed (flag saved):', deriveErr);
+    }
+
+    res.json({ success: true, rechargeRunningCosts: flag, derivation });
+  } catch (error) {
+    console.error('Recharge-running-costs toggle error:', error);
     res.status(500).json({ error: 'Failed to update' });
   }
 });

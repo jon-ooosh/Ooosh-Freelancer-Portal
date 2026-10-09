@@ -62,7 +62,10 @@ export function CollectionPage() {
   const { scope, freelancerContext } = useAuth()
   const isFreelancer = scope === 'freelancer'
   const { data: allVehicles, isLoading: vehiclesLoading } = useVehicles()
-  const { data: allAllocations } = useAllocations()
+  // Staff-only data hooks — a freelancer collection session isn't allowed to
+  // reach these endpoints (403 via the freelancer allowlist) and doesn't need
+  // them: the van + job + customer come pre-filled from the resolve context.
+  const { data: allAllocations } = useAllocations({ enabled: !isFreelancer })
   const [step, setStep] = useState(0)
   const [form, setForm] = useState<CollectionFormState>(INITIAL_FORM)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -138,15 +141,49 @@ export function CollectionPage() {
     preSelectedJobId && !form.hireHopJob ? parseInt(preSelectedJobId, 10) : null,
   )
 
-  // Driver hire forms for this job
-  const { data: hireForms } = useDriverHireForms(form.hireHopJob || null)
+  // Driver hire forms for this job (staff only — see note above)
+  const { data: hireForms } = useDriverHireForms(isFreelancer ? null : (form.hireHopJob || null))
 
-  // Known issues for selected vehicle
-  const { data: vehicleIssues } = useVehicleIssues(form.vehicleReg || undefined)
+  // Known issues for selected vehicle (staff only — see note above)
+  const { data: vehicleIssues } = useVehicleIssues(isFreelancer ? undefined : (form.vehicleReg || undefined))
   const openIssues = useMemo(
     () => (vehicleIssues || []).filter(i => i.status !== 'Resolved'),
     [vehicleIssues],
   )
+
+  // Freelancer auto-fill from context (mirrors BookOutPage). The checkin
+  // resolve endpoint already identified the van that's out on this job and
+  // put it in the session — but the allocations hook that normally drives
+  // auto-select below is staff-only (gated off for freelancers), so without
+  // this effect a freelancer sits on "Waiting for vehicle allocation"
+  // forever even though the van is right there in freelancerContext.
+  // Waits for the vehicles query so vehicleType/simpleType come through.
+  const freelancerAutoSelectedRef = useRef(false)
+
+  useEffect(() => {
+    if (!isFreelancer) return
+    if (!freelancerContext?.vehicleId || !freelancerContext?.vehicleReg) return
+    if (freelancerAutoSelectedRef.current) return
+    const ctxVehicle = vehicles.find(v => v.id === freelancerContext.vehicleId)
+    if (!ctxVehicle) return // wait for vehicles list
+    freelancerAutoSelectedRef.current = true
+    // On a collection the "driver" on the interim assessment is the CUSTOMER
+    // who had the van (from the hire form, via the resolve payload); the
+    // freelancer is just the collection agent. Fall back to the freelancer's
+    // own name if no customer hire form is linked — field stays editable.
+    const customerName = freelancerContext.customerDriverName || ''
+    const customerEmail = freelancerContext.customerDriverEmail || ''
+    setForm(f => ({
+      ...f,
+      vehicleId: ctxVehicle.id,
+      vehicleReg: ctxVehicle.reg,
+      vehicleType: ctxVehicle.vehicleType,
+      vehicleSimpleType: ctxVehicle.simpleType,
+      hireHopJob: freelancerContext.jobId || f.hireHopJob,
+      driverName: customerName || freelancerContext.driverName || f.driverName,
+      clientEmail: customerEmail || f.clientEmail,
+    }))
+  }, [isFreelancer, freelancerContext, vehicles])
 
   // Auto-select vehicle from allocation
   const autoSelectedRef = useRef(false)
@@ -443,6 +480,7 @@ export function CollectionPage() {
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg: form.vehicleReg,
               vehicleType: form.vehicleType,
               vehicleMake: selectedVehicle?.make,

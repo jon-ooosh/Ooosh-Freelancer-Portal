@@ -174,8 +174,8 @@ interface CancellationResult {
 
 Logic:
 - Calculate notice days: `hireStartDate - cancellationDate` in calendar days
-- If >7 days: `max(totalHireCost * 0.10, 30)` (£25+VAT = £30)
-- If 2-7 days: `max(totalHireCost * 0.25, 30)` (£25+VAT = £30)
+- If >7 days: `max(totalHireCost * 0.10, 25)` (minimum £25 ex-VAT = £30 inc-VAT). The minimum MUST be the **ex-VAT** figure (25) — `totalHireCost` is ex-VAT and callers add 20% VAT for display. Using 30 here applies VAT twice (£36 inc-VAT).
+- If 2-7 days: `max(totalHireCost * 0.25, 25)` (minimum £25 ex-VAT = £30 inc-VAT)
 - If <2 days: `min(totalHireCost, calculateOneWeekPlusEarlyReturn(...))`
 - Add transport charges on top
 - refund = totalHireCost - fee

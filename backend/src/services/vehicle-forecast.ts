@@ -122,7 +122,7 @@ const FLUID_DEFS = [
   { key: 'adblue', label: 'AdBlue', match: ['ad blue', 'adblue'] },
 ];
 
-interface PrepItem { name: string; value?: string; detail?: string; unit?: string }
+interface PrepItem { name: string; value?: string; detail?: string; unit?: string; flagged?: boolean }
 interface PrepSection { name: string; items?: PrepItem[]; notes?: string }
 export interface PrepSessionDoc {
   vehicleReg?: string;
@@ -291,11 +291,24 @@ function computeCorner(corner: Corner, ordered: PrepSessionDoc[], tyreEvents: Ty
   };
 }
 
-/** Is a fluid item value a "topped up" answer? */
+/** Is a fluid item value a "topped up" answer? (pre-2026 prep sessions) */
 function isToppedUp(value?: string): boolean {
   if (!value) return false;
   const v = value.toLowerCase();
   return v.includes('top') && !v.includes('not'); // "topped up" / "top up", guard "no top up"
+}
+
+/**
+ * Was a fluid topped up according to the DETAIL? Fluid items now record the
+ * level found as the answer ('¼', 'Full', …) and the action taken as the
+ * detail ('Topped up ~1L', 'No — left as is', 'Drained off ~500ml').
+ *
+ * Anchored to the start of the string on purpose. A loose "contains top" would
+ * pick up free text from other items whose names brush the fluid keywords —
+ * "Info stickers (height, AdBlue top up etc)" being the live example.
+ */
+function isToppedUpDetail(detail?: string): boolean {
+  return (detail || '').trim().startsWith('Topped up');
 }
 
 function daysUntil(dateStr: string | null): number | null {
@@ -393,7 +406,8 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
           const n = item.name.toLowerCase();
           if (def.match.some((m) => n.includes(m))) {
             present = true;
-            if (isToppedUp(item.value)) topped = true;
+            // New shape (detail) first, old shape (answer) for historic sessions.
+            if (isToppedUpDetail(item.detail) || isToppedUp(item.value)) topped = true;
           }
         }
       }
@@ -545,8 +559,11 @@ export async function buildVehicleForecast(vehicleId: string): Promise<VehicleFo
     for (const sec of s.sections || []) {
       if (sec.notes && sec.notes.trim()) notesForAi.push(`Prep ${s.date} — ${sec.name}: ${sec.notes.trim()}`);
       for (const item of sec.items || []) {
-        if (item.value?.toLowerCase().includes('problem')) {
-          notesForAi.push(`Prep ${s.date} — ${item.name}: ${item.detail || 'problem flagged'}`);
+        // `flagged` is authoritative (from the item's flagValues); the word
+        // match covers sessions saved before that field existed. A fluid found
+        // 'Empty' or 'Overfull' has no "problem" in its wording but is one.
+        if (item.flagged === true || item.value?.toLowerCase().includes('problem')) {
+          notesForAi.push(`Prep ${s.date} — ${item.name}: ${item.detail || item.value || 'problem flagged'}`);
         }
       }
     }

@@ -256,6 +256,27 @@ export async function sendConfirmationSilentSkipAlert(opts: {
         ? 'Payment Portal payment'
         : 'manual pipeline status change';
 
+    // Only show the "no client email on record" guidance when an issue actually
+    // indicates a missing recipient — otherwise it's a misleading red herring.
+    // The 8 Jul 2026 job-16251 case was a transient SMTP outage, not a missing
+    // email, but this boilerplate sent staff hunting through a fine address book.
+    const hasRecipientIssue = opts.issues.some(
+      (i) => /no client email|no contacts|address book/i.test(i.reason)
+    );
+    const looksLikeSmtp = opts.issues.some(
+      (i) => /invalid login|badcredentials|username and password|smtp/i.test(i.context || '')
+    );
+
+    const guidance = hasRecipientIssue
+      ? `Likely cause: the client organisation has no email on its OP record and no contacts with
+         emails linked to it. Fix the address book, then re-send from the Job Detail page.`
+      : looksLikeSmtp
+        ? `This looks like a transient email-sending (SMTP) failure, not a data problem — the
+           recipient is fine. It is retried automatically; if this keeps happening, email delivery
+           may be down. Re-send from the Job Detail Money tab once healthy.`
+        : `Re-send the affected email from the Job Detail page. If it keeps failing, email
+           delivery may be down.`;
+
     const html = `
       <h2 style="margin:0 0 12px;font-size:18px;color:#b91c1c;">Booking confirmed but some emails were skipped</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
@@ -270,14 +291,36 @@ export async function sendConfirmationSilentSkipAlert(opts: {
         Client: <strong>${escape(opts.clientName || '(not set)')}</strong>
       </p>
       <p style="margin:0 0 16px;font-size:13px;color:#64748b;line-height:1.5;">
-        Common cause: the job was imported from HireHop but the client organisation has no
-        email on its OP record and no contacts with emails linked to it. Fix the address book,
-        then manually re-trigger the relevant email from the Job Detail page.
+        ${guidance}
       </p>
       <p style="margin:0;font-size:14px;">
         <a href="${jobUrl}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
       </p>
     `;
+
+    // SMTP-INDEPENDENT fallback: write a bell notification to admins FIRST, so
+    // this alert survives even if email itself is the thing that's down. The
+    // email below is the nice-to-have; the bell is the guarantee. email_sent_at
+    // is stamped so the escalation scheduler doesn't try to re-email it.
+    try {
+      const admins = await query(`SELECT id FROM users WHERE role = 'admin' AND is_active = true`);
+      const issueSummary = opts.issues.map((i) => `${labelForKind(i.kind)}: ${i.reason}`).join(' · ');
+      for (const a of admins.rows) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+           VALUES ($1, 'system', $2, $3, 'jobs', $4, 'high', $5, NOW())`,
+          [
+            a.id,
+            `Emails skipped on booking ${opts.jobNumber ? `#${opts.jobNumber}` : ''}`.trim(),
+            `${opts.jobName ? opts.jobName + ' — ' : ''}${issueSummary}. Re-send from the Money tab.`,
+            opts.jobId,
+            `/jobs/${opts.jobId}`,
+          ]
+        );
+      }
+    } catch (bellErr) {
+      console.error('[confirmation-hooks] Failed to write silent-skip bell notification:', bellErr);
+    }
 
     await emailService.sendRaw({
       to: 'info@oooshtours.co.uk',
