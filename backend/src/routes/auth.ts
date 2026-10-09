@@ -8,7 +8,7 @@ import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { validate } from '../middleware/validate';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, MANAGER_ROLES } from '../middleware/auth';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 
 const router = Router();
@@ -48,7 +48,10 @@ const registerSchema = z.object({
   password: z.string().min(8),
   first_name: z.string().min(1),
   last_name: z.string().min(1),
-  role: z.enum(['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer']).default('staff'),
+  // No 'freelancer' here: freelancers log in to the PORTAL (people.portal_password_hash,
+  // routes/portal.ts), never to OP. A users row with that role would hold a real
+  // staff-shaped JWT and reach every authenticate-only route (SECURITY-AUDIT-BRIEF B.3).
+  role: z.enum(['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager']).default('staff'),
 });
 
 const changePasswordSchema = z.object({
@@ -112,7 +115,7 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
     const result = await query(
       `SELECT u.*, p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
-       WHERE u.email = $1 AND u.is_active = true`,
+       WHERE u.email = $1 AND u.is_active = true AND u.role <> 'freelancer'`,
       [email.toLowerCase()]
     );
 
@@ -158,10 +161,21 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
   }
 });
 
-// POST /api/auth/register (admin only in production)
-router.post('/register', validate(registerSchema), async (req: Request, res: Response) => {
+// POST /api/auth/register — create a STAFF login. Manager-tier (the Staff page's
+// "Add user"); only an admin may create another admin.
+//
+// Until Oct 2026 this route had NO auth at all: anyone on the internet could
+// POST { role: 'admin' } and get an admin account plus a refresh token. The
+// comment said "admin only in production" and nothing enforced it. Never
+// loosen this again.
+router.post('/register', authenticate, authorize(...MANAGER_ROLES), validate(registerSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { email, password, first_name, last_name, role } = req.body;
+
+    if (role === 'admin' && req.user?.role !== 'admin') {
+      res.status(403).json({ error: 'Only an admin can create an admin login' });
+      return;
+    }
 
     // Check if email already exists
     const existing = await query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
@@ -226,7 +240,7 @@ router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
     const result = await query(
       `SELECT u.*, p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
-       WHERE u.id = $1 AND u.refresh_token = $2 AND u.is_active = true`,
+       WHERE u.id = $1 AND u.refresh_token = $2 AND u.is_active = true AND u.role <> 'freelancer'`,
       [decoded.id, refreshToken]
     );
 

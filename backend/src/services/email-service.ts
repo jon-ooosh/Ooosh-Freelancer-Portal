@@ -15,7 +15,7 @@
  *     variables: { clientName: 'John', jobNumber: 'J-1234' },
  *   });
  */
-import nodemailer from 'nodemailer';
+import nodemailer, { type SendMailOptions, type Transporter } from 'nodemailer';
 import { query } from '../config/database';
 import { wrapInBaseLayout, testModeBanner } from './email-templates/base';
 import templates from './email-templates/index';
@@ -257,7 +257,7 @@ async function sendMailWithRetry(
  * 429 / 5xx as transient. No SDK dependency — uses global fetch (Node 18+).
  */
 async function sendViaResend(
-  mailOptions: nodemailer.SendMailOptions,
+  mailOptions: SendMailOptions,
   apiKey: string,
 ): Promise<{ messageId?: string }> {
   const toList = Array.isArray(mailOptions.to) ? mailOptions.to : mailOptions.to ? [mailOptions.to] : [];
@@ -357,13 +357,13 @@ async function raiseEmailHealthAlert(templateId: string, recipient: string, erro
 // ── Email Service Class ──────────────────────────────────────────────────
 
 class EmailService {
-  private transporter: nodemailer.Transporter | null = null;
+  private transporter: Transporter | null = null;
 
   /**
    * Get or create the nodemailer transport.
    * Lazy-initialized so it doesn't fail on import if SMTP vars aren't set.
    */
-  private getTransporter(): nodemailer.Transporter {
+  private getTransporter(): Transporter {
     if (this.transporter) return this.transporter;
 
     const config = getEmailConfig();
@@ -410,7 +410,7 @@ class EmailService {
    * cross-cutting behaviour — test-mode redirect, retry, outage canary, audit
    * logging — lives above this in send()/sendRaw(), so it's provider-agnostic.
    */
-  private async deliver(mailOptions: nodemailer.SendMailOptions): Promise<{ messageId?: string }> {
+  private async deliver(mailOptions: SendMailOptions): Promise<{ messageId?: string }> {
     const config = getEmailConfig();
     if (config.provider === 'resend') {
       if (!config.resendApiKey) {
@@ -489,7 +489,7 @@ class EmailService {
         contentType: a.contentType,
       }));
 
-      const mailOptions: nodemailer.SendMailOptions = {
+      const mailOptions: SendMailOptions = {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isRedirected ? undefined : options.cc,
@@ -578,7 +578,7 @@ class EmailService {
       : wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal' });
 
     try {
-      const mailOptions: nodemailer.SendMailOptions = {
+      const mailOptions: SendMailOptions = {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isTestMode ? undefined : options.cc,

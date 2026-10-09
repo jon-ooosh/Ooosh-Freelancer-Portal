@@ -107,7 +107,9 @@ API-key path mounted ahead of `authenticate`.
 `files.ts`, `issues.ts`, `staff-documents.ts`, `system-settings.ts`, `users.ts`,
 `auto-chase.ts`, `cancellations.ts`, `data-cleanup.ts`, `ve103b.ts`, `wise.ts`,
 plus `dashboard.ts`, `duplicates.ts`, `fill-gap.ts` and `notifications.ts` with
-no `authorize()` at all). Some are **deliberately** mixed-audience —
+no `authorize()` at all). Since Oct 2026 only STAFF hold a staff token (the
+`freelancer` role is refused at login), so this is about tiering between staff
+roles, not outsiders. Some are **deliberately** mixed-audience —
 `vehicles.ts` serves the freelancer kiosk through `FlexibleVehicleRequest` and
 must never get a blanket staff gate; `hire-forms.ts` has public token paths;
 `notifications.ts` serves whoever is logged in. Each needs its own audit. A
@@ -132,15 +134,18 @@ middleware; the general `authenticate` accepts exactly one shape.
 | Warehouse kiosk | `{ scope: 'warehouse_session' }` | `authenticateWarehouse` |
 | Freelancer book-out / collection | `{ scope: 'freelancer_bookout' }` | `authenticateVehicleFlexible` |
 | Freelancer prep (§21.6) | `{ scope: 'freelancer_prep' }` (+ 15-min `freelancer_prep_redeem`) | `authenticateVehicleFlexible` + `FREELANCER_PREP_ALLOW` |
-| Portal session | `{ id, email, name }` (`PORTAL_SECRET`, falls back to `JWT_SECRET`) | `portalAuth` — refuses `scope` tokens |
+| Portal session | `{ id, email, name }` — signed with `SESSION_SECRET` / `PORTAL_SESSION_SECRET`, which is mandatory and must differ from `JWT_SECRET` (Oct 2026) | `portalAuth` — refuses `scope` tokens |
 
 **Until Oct 2026 `authenticate` verified the signature and nothing else**, so every
 row above passed it — a public hire-form session read `GET /api/drivers` (proven on
 a test database). It now requires `{ id, email, role }` and rejects any `scope`,
-`type` or `typ`. **A new token family MUST carry one of those markers and get its
-own middleware** — never widen `authenticate`. Open follow-ups (one secret for all
-families, portal-secret fallback, freelancer-role logins on `authenticate`-only
-routers) are in `docs/SECURITY-AUDIT-BRIEF.md`.
+`type` or `typ`. The check is `verifyStaffToken()` in `middleware/auth.ts`, shared
+with the Socket.io handshake — never a second `jwt.verify` for staff. **A new token
+family MUST carry one of those markers and get its own middleware** — never widen
+`authenticate`. A `users` row can no longer hold the `freelancer` role as a login
+(refused at login and refresh; freelancers use the portal). Open follow-ups (`aud`
+claims per token family, the per-router `authorize()` pass) and the public-route
+inventory are in `docs/SECURITY-AUDIT-BRIEF.md`.
 
 **Links taken from a URL are never rendered raw.** `returnUrl` / `startUrl` on the
 freelancer pages go through `modules/vehicles/lib/safe-url.ts` `safeReturnUrl()`

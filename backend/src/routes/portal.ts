@@ -13,6 +13,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import crypto from 'crypto';
 import { query } from '../config/database';
@@ -107,6 +108,26 @@ function deriveCrewMoney(rawExpenses: unknown): CrewMoney {
 
 const router = Router();
 
+// ── Public auth endpoints: per-IP limits (Oct 2026 audit) ────────────
+// None of these had a limit, so a password could be brute-forced and the
+// code / reset senders could be used to bomb an inbox. Limits are per IP and
+// generous enough for a venue or yard where several freelancers share one.
+const portalLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: 'Too many attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+// Endpoints that SEND an email (verification code, reset link).
+const portalEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many requests — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // ── Portal auth middleware (separate from OP staff auth) ──────────────
 
 interface PortalUser {
@@ -121,7 +142,19 @@ interface PortalRequest extends Request {
   portalUser?: PortalUser;
 }
 
-const PORTAL_SECRET = process.env.PORTAL_SESSION_SECRET || process.env.SESSION_SECRET || process.env.JWT_SECRET!;
+// The portal cookie is ALSO verified by the Netlify Next.js app (src/middleware.ts)
+// with SESSION_SECRET, so the two must share it. It must NOT be JWT_SECRET: that
+// signs every other token family, and a staff access token { id, email, role }
+// would then pass portalAuth with a users.id where a people.id is expected.
+// Until Oct 2026 this fell back to JWT_SECRET when neither was set
+// (SECURITY-AUDIT-BRIEF B.2). Now the server refuses to start without one.
+const PORTAL_SECRET: string = process.env.PORTAL_SESSION_SECRET || process.env.SESSION_SECRET || '';
+if (!PORTAL_SECRET) {
+  throw new Error('FATAL: PORTAL_SESSION_SECRET (or SESSION_SECRET) environment variable is required');
+}
+if (PORTAL_SECRET === process.env.JWT_SECRET) {
+  throw new Error('FATAL: the portal session secret must differ from JWT_SECRET');
+}
 
 async function portalAuth(req: PortalRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -136,9 +169,9 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
 
     const decoded = jwt.verify(token, PORTAL_SECRET) as { id: string; email: string; name: string; iat: number; exp: number };
 
-    // PORTAL_SECRET can fall back to JWT_SECRET, which also signs the narrow
-    // freelancer tokens (book-out, prep — they carry a `scope`). None of those
-    // is a portal login, and none names a person by `id`.
+    // Shape check kept as a second line even though PORTAL_SECRET is now its
+    // own secret: a portal login is { id, email, name } and never carries a
+    // `scope` (the narrow freelancer book-out / prep tokens do).
     if (!decoded.id || (decoded as { scope?: unknown }).scope) {
       res.status(401).json({ error: 'Invalid or expired session' });
       return;
@@ -184,7 +217,7 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
-router.post('/auth/login', async (req: Request, res: Response) => {
+router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -296,7 +329,7 @@ const registerStartSchema = z.object({
   email: z.string().email(),
 });
 
-router.post('/auth/register/start', async (req: Request, res: Response) => {
+router.post('/auth/register/start', portalEmailLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = registerStartSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -363,7 +396,7 @@ const registerVerifySchema = z.object({
   code: z.string().length(6),
 });
 
-router.post('/auth/register/verify', async (req: Request, res: Response) => {
+router.post('/auth/register/verify', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = registerVerifySchema.safeParse(req.body);
     if (!parsed.success) {
@@ -422,7 +455,7 @@ const registerCompleteSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters'),
 });
 
-router.post('/auth/register/complete', async (req: Request, res: Response) => {
+router.post('/auth/register/complete', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = registerCompleteSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -507,7 +540,7 @@ const forgotSchema = z.object({
   email: z.string().email(),
 });
 
-router.post('/auth/forgot-password', async (req: Request, res: Response) => {
+router.post('/auth/forgot-password', portalEmailLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = forgotSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -599,7 +632,7 @@ const resetSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters'),
 });
 
-router.post('/auth/reset-password', async (req: Request, res: Response) => {
+router.post('/auth/reset-password', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = resetSchema.safeParse(req.body);
     if (!parsed.success) {

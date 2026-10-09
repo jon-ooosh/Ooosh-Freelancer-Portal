@@ -167,7 +167,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
 });
 
 // GET /api/files/download?key=... — stream file from R2
-router.get('/download', async (req: AuthRequest, res: Response) => {
+router.get('/download', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const { key } = req.query;
     if (!key || typeof key !== 'string') {
@@ -178,11 +178,12 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
     // Validate key starts with known prefix to prevent path traversal.
     //
     // READ THIS BEFORE ADDING A PREFIX: everything in this list is served to
-    // ANY authenticated caller — this router only calls authenticate(), not
-    // authorize(), so a freelancer with a JWT can fetch any key here that they
-    // can name. That is fine for the prefixes below (job files, avatars,
-    // completion photos) and catastrophic for a passport scan. An unguessable
-    // key is not an access control: the key is handed to whoever can list it.
+    // EVERY staff login whatever their role — the route is gated to STAFF_ROLES
+    // (Oct 2026; before that to any authenticated caller, freelancer-role
+    // included) and no further. That is fine for the prefixes below (job files,
+    // avatars, completion photos) and catastrophic for a passport scan. An
+    // unguessable key is not an access control: the key is handed to whoever
+    // can list it.
     const allowedPrefixes = [
       'files/',
       'backups/',
