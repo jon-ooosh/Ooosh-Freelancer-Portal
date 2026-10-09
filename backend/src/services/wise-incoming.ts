@@ -10,7 +10,11 @@
  *
  * Trust: an email is not money. We only accept mail from noreply@wise.com whose DKIM
  * signature Gmail reports as passing for wise.com (`Authentication-Results`), and whose
- * subject is "Money received from …". Everything else from Wise (Direct Debits,
+ * subject is "Money received from …", and whose body carries Wise's business-account
+ * banner ("This notification is for the business account of Ooosh! Tours Ltd."). jon's
+ * PERSONAL Wise account is registered to the same address and sends an otherwise
+ * identical email (same sender, subject, greeting) with no banner — those are skipped and
+ * logged, never stored (9 Oct 2026). Everything else from Wise (Direct Debits,
  * "Transfer sent", statements) is ignored.
  *
  * Amount: "Amount received" — what the client SENT. jon's rule: Xero handles the fee,
@@ -50,6 +54,8 @@ export const WISE_SENDER = 'noreply@wise.com';
 export const AMOUNT_TOLERANCE = 0.02;
 /** Default payer names to ignore (own transfers in). Staff-editable: system_settings.wise_ignore_payers (comma-separated). */
 const DEFAULT_IGNORE_PAYERS = ['J WOOD'];
+/** The account name Wise prints in its "This notification is for the business account of …" banner. Staff-editable: system_settings.wise_business_account_name. */
+const DEFAULT_BUSINESS_ACCOUNT_NAME = 'Ooosh! Tours Ltd';
 /** How many recent jobs the invoice-number tier may read billing for (one HH call each, cached). */
 const INVOICE_SEARCH_POOL = 80;
 
@@ -107,6 +113,20 @@ export function wiseDkimPasses(headers: Array<{ name: string; value: string }>):
 }
 
 // ── Parsing ────────────────────────────────────────────────────────────────
+
+/**
+ * Is this "Money received" email for the BUSINESS account, not jon's personal one?
+ * Business-account emails carry "This notification is for the business account of
+ * <name>." above the greeting; personal-account emails have no banner at all. The body
+ * here is the tag-stripped, whitespace-collapsed text from gmail-ingestion, so the name's
+ * words are matched with flexible whitespace between them ("Ooosh! Tours Ltd .").
+ */
+export function isWiseBusinessAccountEmail(body: string, accountName: string): boolean {
+  const words = accountName.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return false;
+  const name = words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*');
+  return new RegExp(`business account of\\s*${name}`, 'i').test(body);
+}
 
 function toNumber(s: string | undefined | null): number | null {
   if (!s) return null;
@@ -857,6 +877,12 @@ export async function handleWiseEmail(input: WiseEmailInput): Promise<'stored' |
     if (!wiseDkimPasses(input.headers)) {
       console.warn(`[wise-incoming] DKIM check failed for "${input.subject}" (${input.rfcMessageId}) — rejected`);
       return 'rejected';
+    }
+    const businessName = (await getSystemSetting('wise_business_account_name'))?.trim() || DEFAULT_BUSINESS_ACCOUNT_NAME;
+    if (!isWiseBusinessAccountEmail(input.body, businessName)) {
+      // No business-account banner → jon's personal Wise account. Not ours: no row, no alert.
+      console.log(`[wise-incoming] "${input.subject}" (${input.rfcMessageId}) has no "business account of ${businessName}" banner — personal account, skipped`);
+      return 'skipped';
     }
     const dupe = await query(`SELECT 1 FROM incoming_bank_payments WHERE gmail_message_id = $1`, [input.rfcMessageId]);
     if (dupe.rows.length > 0) return 'duplicate';
