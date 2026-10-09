@@ -12,14 +12,14 @@
  */
 import { Router, Response } from 'express';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
-import { planHireCloseOut, runHireAllocation, completeHireJob } from '../services/hire-close-out';
+import { planHireCloseOut, runHireAllocation, completeHireJob, JOB_NOT_FOUND } from '../services/hire-close-out';
 
 const router = Router();
 router.use(authenticate);
 
 const fail = (res: Response, err: unknown, fallback: string) => {
   const msg = err instanceof Error ? err.message : fallback;
-  const status = /does not exist/i.test(msg) ? 404 : /try again in a moment/i.test(msg) ? 409 : 400;
+  const status = msg === JOB_NOT_FOUND ? 404 : /try again in a moment/i.test(msg) ? 409 : 400;
   res.status(status).json({ error: msg });
 };
 

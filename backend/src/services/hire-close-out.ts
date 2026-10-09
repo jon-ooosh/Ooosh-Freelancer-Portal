@@ -36,10 +36,14 @@ import {
 } from './hh-invoice-close';
 import xeroBroker from './xero-broker';
 import { isXeroConfigured } from '../config/xero';
+import { DISPLAY_NAME_SQL } from './display-name';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const HH_RETURNED_INCOMPLETE = 6;
+
+/** The route maps exactly this message to 404 — never match on "does not exist" (a Postgres error says that too). */
+export const JOB_NOT_FOUND = 'That job does not exist.';
 
 export interface CloseOutInvoice {
   invoiceId: number;
@@ -138,9 +142,13 @@ async function log(jobId: string, userId: string | null, step: string, ok: boole
 }
 
 async function readLog(jobId: string): Promise<CloseOutLogEntry[]> {
+  // Who pressed it: users has no name of its own — it points at people (CLAUDE.md).
   const r = await query(
-    `SELECT l.id, l.step, l.ok, l.detail, l.hh_refs, l.user_id, u.name AS user_name, l.created_at
-       FROM job_closeout_log l LEFT JOIN users u ON u.id = l.user_id
+    `SELECT l.id, l.step, l.ok, l.detail, l.hh_refs, l.user_id,
+            NULLIF(TRIM(${DISPLAY_NAME_SQL}), '') AS user_name, l.created_at
+       FROM job_closeout_log l
+       LEFT JOIN users u ON u.id = l.user_id
+       LEFT JOIN people p ON p.id = u.person_id
       WHERE l.job_id = $1 ORDER BY l.created_at DESC LIMIT 50`,
     [jobId],
   );
@@ -166,7 +174,7 @@ async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
     [isUuid ? jobIdOrNumber : parseInt(jobIdOrNumber, 10)],
   );
   const job = r.rows[0];
-  if (!job) throw new Error('That job does not exist.');
+  if (!job) throw new Error(JOB_NOT_FOUND);
   return job;
 }
 
