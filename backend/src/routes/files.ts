@@ -186,7 +186,9 @@ router.get('/download', authorize(...STAFF_ROLES), async (req: AuthRequest, res:
     // can list it.
     const allowedPrefixes = [
       'files/',
-      'backups/',
+      // NOT 'backups/': a database dump is admin-only and has its own gated
+      // route (GET /api/backups/download). It sat here until Oct 2026, which
+      // let any staff login fetch one by its date-based name.
       'avatars/',
       'completion/',     // portal completion photos + signatures
       'delivery-notes/', // completion delivery-note PDFs
