@@ -40,6 +40,7 @@ import type { Vehicle } from '../types/vehicle'
 import type { CapturedPhoto } from '../types/vehicle-event'
 import { FUEL_LEVELS } from '../types/vehicle-event'
 import type { FuelLevel } from '../types/vehicle-event'
+import { ukToday } from '../../../lib/ukDate'
 
 // ── Types ──
 
@@ -540,7 +541,7 @@ export function PrepPage({ freelancerPrep }: {
         preparedBy,
         mileage: isNaN(parsedMileage) ? null : parsedMileage,
         fuelLevel,
-        date: new Date().toISOString().slice(0, 10),
+        date: ukToday(),
         startedAt: actualStartedAt,
         completedAt,
         durationMinutes,

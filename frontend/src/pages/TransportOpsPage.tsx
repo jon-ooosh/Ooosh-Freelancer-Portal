@@ -8,6 +8,7 @@ import { MobileListCard } from '../components/mobile/MobileListCard';
 import { MobileFilterSheet } from '../components/mobile/MobileFilterSheet';
 import { MobileAgendaList, type AgendaDay } from '../components/mobile/MobileAgendaList';
 import { MapLink } from '../components/mobile/TapTargets';
+import { ukToday } from '../lib/ukDate';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -806,7 +807,7 @@ export default function TransportOpsPage() {
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([dateKey, items]) => {
         const d = new Date(dateKey + 'T00:00:00');
-        const todayKey = new Date().toISOString().slice(0, 10);
+        const todayKey = ukToday();
         const isToday = dateKey === todayKey;
         return {
           dateKey,
@@ -2960,7 +2961,7 @@ function CalendarView({
   const [currentDate, setCurrentDate] = useState(() => new Date());
   const [selectedQuote, setSelectedQuote] = useState<OpsQuote | null>(null);
 
-  const todayKey = new Date().toISOString().split('T')[0];
+  const todayKey = ukToday();
 
   function makeDateKey(d: Date): string {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;

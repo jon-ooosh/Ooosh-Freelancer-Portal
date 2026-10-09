@@ -7,6 +7,7 @@
  */
 import { query } from '../config/database';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
+import { ukToday } from './uk-date';
 
 /**
  * Mark a held pre-auth as released in OP (no Stripe call — caller has already
@@ -21,7 +22,7 @@ export async function markExcessReleased(excessId: string, reason: string): Prom
   );
   if (cur.rows.length === 0) return false; // already actioned / not a hold
 
-  const dateStr = new Date().toISOString().split('T')[0];
+  const dateStr = ukToday();
   const held = parseFloat(cur.rows[0].amount_held || '0');
   const note = `[${dateStr}] Hold released — ${reason}.`;
   const newNotes = cur.rows[0].notes ? `${cur.rows[0].notes}\n${note}` : note;

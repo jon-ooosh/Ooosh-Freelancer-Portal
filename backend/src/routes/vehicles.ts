@@ -48,6 +48,7 @@ import {
 import { getSystemSetting } from './system-settings';
 import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError } from '../services/dvsa-mot';
 import { closeOpenSaleOnRemoval } from '../services/vehicle-sales';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 
@@ -2237,7 +2238,7 @@ const RETURN_STATUSES = [5, 6]; // Dispatched, Returned Incomplete
  */
 router.get('/jobs/going-out', async (req: AuthRequest, res: Response) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = ukToday();
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
     // The third OR clause keeps STAGGERED MULTI-VAN jobs visible: a job with
@@ -2282,7 +2283,7 @@ router.get('/jobs/going-out', async (req: AuthRequest, res: Response) => {
  */
 router.get('/jobs/due-back', async (req: AuthRequest, res: Response) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = ukToday();
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
     const result = await query(
@@ -2311,7 +2312,7 @@ router.get('/jobs/due-back', async (req: AuthRequest, res: Response) => {
 router.get('/jobs/upcoming', async (req: AuthRequest, res: Response) => {
   try {
     const days = parseInt(req.query.days as string) || 7;
-    const today = new Date().toISOString().split('T')[0];
+    const today = ukToday();
     const endDate = new Date(Date.now() + days * 86400000).toISOString().split('T')[0];
 
     // See /jobs/going-out above for the staggered multi-van rationale. Same
@@ -2358,7 +2359,7 @@ router.get('/jobs/upcoming', async (req: AuthRequest, res: Response) => {
 router.get('/jobs/upcoming-due-back', async (req: AuthRequest, res: Response) => {
   try {
     const days = parseInt(req.query.days as string) || 7;
-    const today = new Date().toISOString().split('T')[0];
+    const today = ukToday();
     const endDate = new Date(Date.now() + days * 86400000).toISOString().split('T')[0];
 
     const result = await query(
@@ -3580,7 +3581,7 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
       preparedBy: data.preparedBy || null,
       mileage: data.mileage ?? null,
       fuelLevel: data.fuelLevel || null,
-      date: data.date || new Date().toISOString().slice(0, 10),
+      date: data.date || ukToday(),
       startedAt: data.startedAt || null,
       completedAt: data.completedAt || null,
       durationMinutes: data.durationMinutes ?? null,
@@ -4672,7 +4673,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     pdf.setPage(p);
     pdf.setFontSize(7);
     pdf.setTextColor(160, 160, 160);
-    const generated = new Date().toISOString().split('T')[0];
+    const generated = ukToday();
     const footerLabel = isInterim
       ? 'Interim Vehicle Assessment'
       : isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Condition Report';
@@ -4687,7 +4688,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   const pdfBytes = new Uint8Array(pdfArrayBuffer);
 
   // Filename: REG-DDMMYY-Job12345-book-out.pdf (matches historical naming)
-  const eventDateStr = String(data.eventDate || new Date().toISOString().slice(0, 10));
+  const eventDateStr = String(data.eventDate || ukToday());
   const dateParts = eventDateStr.split('-'); // YYYY-MM-DD
   const ddmmyy = dateParts.length === 3
     ? dateParts[2] + dateParts[1] + dateParts[0].slice(2)
@@ -4953,7 +4954,7 @@ async function buildPrepReportPdf(
     pdf.setPage(p);
     pdf.setFontSize(7);
     pdf.setTextColor(160, 160, 160);
-    const generated = new Date().toISOString().split('T')[0];
+    const generated = ukToday();
     pdf.text(
       'Ooosh Tours Ltd - Vehicle Prep Report - Generated ' + generated,
       pageWidth / 2, 292, { align: 'center' },
@@ -4964,7 +4965,7 @@ async function buildPrepReportPdf(
   const pdfArrayBuffer = pdf.output('arraybuffer') as ArrayBuffer;
   const pdfBytes = new Uint8Array(pdfArrayBuffer);
 
-  const eventDateStr = String(data.date || new Date().toISOString().slice(0, 10));
+  const eventDateStr = String(data.date || ukToday());
   const dp = eventDateStr.split('-'); // YYYY-MM-DD
   const ddmmyy = dp.length === 3 ? dp[2] + dp[1] + dp[0].slice(2) : eventDateStr;
   const safeReg = String(data.vehicleReg || 'unknown').replace(/\s+/g, '-');
@@ -5567,7 +5568,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       // Frozen original — serve verbatim.
       pdfBytes = storedPdf;
       const docType = isInterimRegen ? 'interim' : isCheckInRegen ? 'check-in' : 'book-out';
-      const dateStr = (event.eventDate || new Date().toISOString().slice(0, 10)).replace(/-/g, '');
+      const dateStr = (event.eventDate || ukToday()).replace(/-/g, '');
       filename = `${reg}-${docType}-${dateStr}.pdf`;
       source = 'stored';
     } else {
@@ -5637,7 +5638,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
         hireHopJob: event.hireHopJob || undefined,
         mileage: checkInMileage,
         fuelLevel: event.fuelLevel || null,
-        eventDate: event.eventDate || new Date().toISOString().slice(0, 10),
+        eventDate: event.eventDate || ukToday(),
         eventDateTime: event.createdAt || event.eventDate || new Date().toISOString(),
         hireStartDate: event.hireStartDate || resolvedDates.start || undefined,
         hireEndDate: event.hireEndDate || resolvedDates.end || undefined,
@@ -5678,7 +5679,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     if (!skipEmail && recipient) {
       const isCheckIn = event.eventType === 'Check In' || event.eventType === 'check-in';
       const reportType = isCheckIn ? 'Check-In Report' : 'Condition Report';
-      const subject = `Vehicle ${reportType} - ${reg} - ${event.eventDate || new Date().toISOString().slice(0, 10)}`;
+      const subject = `Vehicle ${reportType} - ${reg} - ${event.eventDate || ukToday()}`;
       const html = `
         <p>Hi ${driverName || 'there'},</p>
         <p>Please find attached your vehicle ${reportType.toLowerCase()} for <strong>${reg}</strong>.</p>
@@ -6582,7 +6583,7 @@ router.get('/fleet-costs', async (req: AuthRequest, res: Response) => {
 
     const { from, to } = req.query;
     const fromDate = from ? String(from) : new Date(new Date().getFullYear(), 0, 1).toISOString().split('T')[0];
-    const toDate = to ? String(to) : new Date().toISOString().split('T')[0];
+    const toDate = to ? String(to) : ukToday();
 
     // Service costs by vehicle
     const serviceCosts = await query(

@@ -825,7 +825,20 @@ unique index, migration 275 marks the first night's copies `duplicate_copy`), th
 is `/money/overview?incoming=<id>` (it pointed at a non-route), a reference naming SEVERAL
 Xero invoices ("OT6797 OT6805") is matched against their amounts due together, and a payment
 with no number at all ("STORAGE") is matched against the payer's open Xero invoices by contact
-name. Auto-forward can now be switched off.
+name. Auto-forward can now be switched off. **9 Oct:** a £10 payment to jon's PERSONAL Wise
+account was queued and alerted — it is registered to the same email address and Wise's
+notification is identical (sender, subject, "Hello Jonathan Mark") except that business-account
+emails carry "This notification is for the business account of Ooosh! Tours Ltd." above the
+greeting and personal ones carry no banner. The detector now requires that banner
+(`system_settings.wise_business_account_name`, default `Ooosh! Tours Ltd`); a banner-less email
+is skipped with a log line, never stored (jon: his personal receipts must not sit in the
+business DB). If Wise ever drops the banner, auto-matching stops silently — the log line and
+the Xero bank feed are the backstop. **Same day, found while jon looked for the Ignore button:
+the Money-overview panel had NEVER rendered in production** — its list query selected `u.name`
+from `users`, which has no name column (users point at `people`), so the route 500'd and the panel
+hid itself. Fixed to the `people` join the rest of the file uses. The overview's balance /
+deposit / excess queries also now exclude `is_deleted` jobs (the soft-deleted scratch shop job
+16749 was showing with £9 outstanding).
 
 **`services/record-payment.ts`** is the staff "Record Payment" route's 330 lines lifted into a
 service (route = validate + relay, same HTTP contract) so the matcher — and the planned

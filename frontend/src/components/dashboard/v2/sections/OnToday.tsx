@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { DashboardSectionProps } from '../sections';
 import { Card, SectionHd } from '../primitives';
+import { ukToday } from '../../../../lib/ukDate';
 
 /**
  * "On Today / Tomorrow" — the home for ad-hoc to-dos that don't belong to a
@@ -15,7 +16,7 @@ import { Card, SectionHd } from '../primitives';
 function dueLabel(due: string | null): { text: string; tone: string } {
   if (!due) return { text: 'No date', tone: 'bg-slate-100 text-slate-600' };
   const d = new Date(due);
-  const today = new Date(new Date().toISOString().slice(0, 10));
+  const today = new Date(ukToday());
   const diff = Math.round((d.getTime() - today.getTime()) / 86400000);
   if (diff < 0) return { text: 'Overdue', tone: 'bg-red-100 text-red-700' };
   if (diff === 0) return { text: 'Today', tone: 'bg-amber-100 text-amber-700' };

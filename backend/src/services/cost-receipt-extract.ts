@@ -21,6 +21,7 @@
  */
 import { extractDocument } from './document-extract';
 import { matchSupplier } from './supplier-match';
+import { ukToday } from './uk-date';
 
 // Xero account codes the OP capture modal exposes — keep in step with
 // COST_CATEGORIES in frontend/src/components/CostCaptureModal.tsx.
@@ -390,7 +391,7 @@ export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<
     // serves it at ~10% input cost, and a date in there would bust that cache
     // every single day. Without it the model has no anchor for "recent" and
     // guesses a year — which is how fuel receipts arrived dated 2024.
-    userInstruction: `Extract the details from this receipt. Today's date is ${new Date().toISOString().slice(0, 10)}.`,
+    userInstruction: `Extract the details from this receipt. Today's date is ${ukToday()}.`,
     logTag: 'receipt-extract',
   });
 

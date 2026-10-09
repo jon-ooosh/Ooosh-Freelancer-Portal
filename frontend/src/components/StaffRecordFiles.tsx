@@ -27,6 +27,7 @@ import { api } from '../services/api';
 import { Card, Pill, btnPrimary, btnSecondary, btnQuiet } from './StaffCard';
 import { openAuthedFile } from '../lib/openAuthedFile';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { ukToday } from '../lib/ukDate';
 
 export interface StaffRecordFile {
   id: string;
@@ -146,7 +147,7 @@ function fmtDate(iso: string): string {
 }
 
 function todayYmd(): string {
-  return new Date().toISOString().slice(0, 10);
+  return ukToday();
 }
 
 export default function StaffRecordFiles({ personId, personName, onError }: {
@@ -322,7 +323,7 @@ export default function StaffRecordFiles({ personId, personName, onError }: {
                     {DOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                   </select>
                   {f.expires_on && (
-                    <Pill tone={f.expires_on < new Date().toISOString().slice(0, 10) ? 'bad' : 'warn'}>
+                    <Pill tone={f.expires_on < ukToday() ? 'bad' : 'warn'}>
                       expires {fmtDate(f.expires_on)}
                     </Pill>
                   )}

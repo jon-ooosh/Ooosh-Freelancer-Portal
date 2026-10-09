@@ -14,6 +14,7 @@ import LeaveApprovals from '../components/LeaveApprovals';
 import PayrollReportPanel from '../components/PayrollReportPanel';
 import MyTimePage from './MyTimePage';
 import { Card, InfoRow, Pill, btnPrimary, btnSecondary, btnQuiet } from '../components/StaffCard';
+import { ukToday } from '../lib/ukDate';
 
 /**
  * Staff — the single surface for everyone who works here (Staff Calendar).
@@ -1196,7 +1197,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
   onSaved: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [effectiveFrom, setEffectiveFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [effectiveFrom, setEffectiveFrom] = useState(() => ukToday());
   const [cycleWeeks, setCycleWeeks] = useState<1 | 2>(1);
   const [days, setDays] = useState<DraftDay[]>(() => blankDays(1));
   const [notes, setNotes] = useState('');
@@ -1415,7 +1416,7 @@ function AddEmployee({ existing, onAdded, onError }: {
   const [search, setSearch] = useState('');
   const [results, setResults] = useState<PersonSearchRow[]>([]);
   const [picked, setPicked] = useState<PersonSearchRow | null>(null);
-  const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [startDate, setStartDate] = useState(() => ukToday());
   const [jobTitle, setJobTitle] = useState('');
   const [department, setDepartment] = useState('');
   const [saving, setSaving] = useState(false);

@@ -52,6 +52,7 @@
  * (manjagoproduction@, 18 Aug 2026). `trusted: false` is how that shape is
  * represented here, and an untrusted licence yields a NULL window everywhere.
  */
+import { ukToday } from './uk-date';
 
 /** Ooosh acceptance windows, in days from the FROM date. */
 export const VALIDITY_WINDOW_DAYS = {
@@ -225,9 +226,9 @@ function minYmd(a: string | null, b: string | null): string | null {
   return a < b ? a : b;
 }
 
-/** Today in UTC as YYYY-MM-DD. Comparisons are plain string compares. */
+/** Today (UK) as YYYY-MM-DD — services/uk-date.ts. Comparisons are plain string compares. */
 export function todayYmd(): string {
-  return new Date().toISOString().slice(0, 10);
+  return ukToday();
 }
 
 function buildWindow(opts: {

@@ -19,6 +19,7 @@
  */
 import { query } from '../config/database';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
+import { ukToday } from './uk-date';
 
 export type RefundSource = 'stripe_webhook' | 'payment_event' | 'hh_reconcile' | 'manual';
 
@@ -150,7 +151,7 @@ export async function unwindRefundOnExcess(input: UnwindRefundInput): Promise<Un
   const isPartial = (alreadyReimbursed + cappedAmount + claimed) < amountTaken - 0.005;
   const newStatus = isPartial ? 'partially_reimbursed' : 'reimbursed';
 
-  const dateStr = new Date().toISOString().split('T')[0];
+  const dateStr = ukToday();
   const sourceLabel = SOURCE_LABEL[source] || source;
   const noteLine = `[${dateStr}] Refund auto-reconciled — ${sourceLabel}: £${cappedAmount.toFixed(2)}${sourceRef ? ` (${sourceRef})` : ''}${notes ? ` — ${notes}` : ''}.`;
   const newNotes = row.prev_notes ? `${row.prev_notes}\n${noteLine}` : noteLine;
