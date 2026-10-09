@@ -210,6 +210,17 @@ unverified), no phone card payments (policy), shop + sitter till in Phase 3. Rea
 building anything that takes a card in person. The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
+**PLANNED, Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
+(three date spans / van vs van+driver / with a Twin) as a GROUP of jobs. §1 is settled: **one
+version = one OP job + one HireHop job** (every version has to go out as a HireHop quote, so
+"Add a version" duplicates the HH job via `job_duplicate.php` and names them "(vN)"); never amend
+a job in place to become a different option; the group is a thin layer (version bar, Compare
+slide-over, one collapsed Kanban card); confirm one → a HUMAN marks the rest lost as
+`'Confirmed Alternative Quote (from us)'`, which win/loss and Fill-a-Gap must exclude; version
+numbers never auto-bump (revisions are the quote-PDF diff). Payment = choosing: the portal link
+carries the job number. Phase 4 touches the payment portal repo; festival `part_of` grouping is
+Phase 2. Approved mockups are linked at the top of the spec. Build in a fresh session.
+
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
 outreach → chased Cold enquiry, jobs-for-this-tour linking. **§20 is the current state and what's
