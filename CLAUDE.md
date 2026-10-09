@@ -186,12 +186,16 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
-**PLANNED, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module: finishing a hire's
-money from the post-hire cards (raise invoice → excess decision → allocate deposits in HireHop AND
-Xero → complete), one job at a time, generalising the shop close recipe (`HIREHOP-BILLING-API.md`
-§8). Born from job 16015: HireHop's "New payment" dialog records a REFUND when its invoice dropdown
-is left at "none". §1 is settled, §5 the allocation rule, §9 the phases and the HireHop captures
-that gate Phase 2. Excess is never allocated by it; refunds only through the existing routes.
+**PHASE 1 BACKEND BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
+finishing a hire's money from the post-hire cards (raise invoice → excess decision → allocate
+deposits in HireHop AND Xero → complete), one job at a time, on the shared recipe
+`services/hh-invoice-close.ts` (`HIREHOP-BILLING-API.md` §8). Born from job 16015: HireHop's "New
+payment" dialog records a REFUND when its invoice dropdown is left at "none". Built:
+`services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|allocate|complete`,
+log in `job_closeout_log`) — plan shown first, every write read back, excess NEVER allocated, more
+than one open invoice refused for now, HireHop↔OP payment and refund mismatches refuse by name.
+Not yet: the card UI, Raise invoice (Phase 2), the arrival hook and the Xero sweep (Phase 3). §1 is
+settled, §5 the allocation rule, §9 the phases. Refunds only through the existing routes.
 
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
@@ -308,6 +312,7 @@ existing definition:
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
 | Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
 | Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |
+| Finishing a HIRE's money (plan → allocate hire deposits in HH + Xero → complete) | `services/hire-close-out.ts` — on the recipe above; never excess, never a refund; `job_closeout_log` is its record |
 | Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
 | Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |

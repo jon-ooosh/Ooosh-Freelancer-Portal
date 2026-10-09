@@ -115,8 +115,13 @@ action and reads back after it.
 |---|---|---|
 | **Invoice** | "Generated" when any kind=1 row exists; "Mark as Sent" | **Raise invoice** (Phase 2) — draft from uninvoiced lines, penny check, approve, push to Xero. Shows the invoice(s), their status and Xero cloud |
 | **Excess Resolution** | Resolution-authoritative pill; Manage → existing modal | Unchanged. The Complete step reads its state |
-| **Payment Reconciliation** | "Reconciled" when owing ≤ 0 | **Allocate payments** (Phase 1) — the plan (§4.3) shown first, then HireHop + Xero allocation, read back. Surfaces any surplus with its three choices |
+| **Payment Reconciliation** | "Reconciled" when owing ≤ 0 | **Allocate payments** (Phase 1) — the plan (§4.3) shown first, then HireHop + Xero allocation, read back. Surfaces any surplus with its three choices. Staff-facing wording stays about HireHop ("allocated", "balance owed", "reconciled"); the Xero fact ("credit applied in Xero" / "awaiting") is one **admin-only** line, because only jon and the bookkeeper act on it and the sweep is automatic (jon, 9 Oct) |
 | *(new, bottom of the tab)* | — | **Complete job** — enabled when Invoice and Payment cards are green; amber with override when excess is still held |
+
+Two cards, not one, for now: both requirement types already exist on every returned
+job and the Returns page counts their dots, so merging them is a migration plus a
+derivation change for no proven gain. They are written to read as consecutive steps of
+one flow; revisit merging after Phase 2 (jon asked, 9 Oct).
 
 Design rule for the cards (jon: "it needs to flow and make sense"): every action shows
 **what it will do before it does it** — the plan is a list of sentences ("Allocate
@@ -364,14 +369,10 @@ then sees the new invoice as it does today.
    posts the same `OWNER: 0` shape and 16043's rows were captured earlier (§5).
 5. ✅ **Xero** — nothing is applied automatically; see §4.3 step 2.
 6. ✅ **Tax codes** — `HIREHOP-BILLING-API.md` §10.4.
-7. ❓ **A free line on an invoice** (gates §10.1 only). jon: a job line can be put on an
-   invoice ONCE — never twice — so the split is "fudge-plus" (§10.1) and needs a 0% line
-   that is NOT a job line. On the scratch job's empty draft (`all: 0`), look for any way
-   in the invoice editor to add a line that isn't picked from the job (a "new line" / free
-   text / charge button). If there is one, capture its request and response. If there
-   isn't, try `billing_save_items.php` by hand (§10.2 payload) with `item_id=0`,
-   `kind=4`, a `title`, `price`, `vat=0`, `vat_acc_id=33`, `nominal_id=240` — and capture
-   what HireHop does with it. Either answer decides between §10.1 (a) and (b).
+7. ✅ **A custom line on an invoice** — HireHop's "New custom item" is
+   `billing_save_item.php` with `id=0`, `kind=3`, a `note`, `unit`/`total`, `vat_id`,
+   `nominal_id` (`HIREHOP-BILLING-API.md` §10.3b). No job item behind it. This is the EU
+   split's zero-rated line; the charge-item fallback is dropped.
 
 ### 9.1 How to capture
 
@@ -407,8 +408,8 @@ job's lines as they are and then corrects the DRAFT, and the job's supply list, 
 prep and availability are never involved — which answers the "won't this move the job to
 prepping?" worry: nothing is added to the job.
 
-**The method — "fudge-plus", jon's name for it: today's fudge, on the invoice instead of
-the job, with nominals kept, by API:**
+**The method — the invoice-line VAT split: today's fudge, on the invoice instead of the
+job, with nominals kept, by API:**
 
 - **31+ days**: set every vehicle line to tax code 33 (`billing_save_item.php`). No split.
 - **Under 31 days**, per nominal group (vehicle group, equipment group — the same grouping
@@ -417,12 +418,11 @@ the job, with nominals kept, by API:**
   for the non-UK share — "Non-UK days (zero-rated, HMRC 741A): <n> of <m> days" — carrying
   that group's `nominal_id` and tax code 33. Pennies: the group's lines + its 0% line must
   equal the group's original net exactly (`reconcileLines` discipline); services, delivery,
-  crew, storage and rehearsal lines are untouched. Where that 0% line comes from is capture
-  7: (a) a free invoice line if HireHop's editor has one; else (b) a kind-4 charge line
-  added to the job just before drafting (not stock — no availability, scan or prep), picked
-  onto the draft and set to 0% + the group's nominal.
+  crew, storage and rehearsal lines are untouched. The 0% line is a **custom invoice
+  line** (`billing_save_item.php`, `id=0`, `kind=3` — capture 7, §10.3b): no job item
+  behind it, so nothing is added to the job.
 
-Either way: one invoice, the penny check compares its gross to
+One invoice, and the penny check compares its gross to
 `calculateVatAdjustment()`'s adjusted total (what the portal showed the client), and Xero
 receives the right tax type on every line so the VAT return is right untouched. The quote
 keeps showing full UK VAT until invoicing, which is what the portal's wording already

@@ -276,10 +276,16 @@ const xeroMoney = (v: unknown) => round2(Number(v) || 0);
  * `rows` must include the deposit rows the allocations point at. For an
  * allocation whose deposit lives on ANOTHER job (a cross-job apply), pass
  * `extraRows` with that job's billing rows so its OverpaymentID can be found.
+ * `expectedDue` is what Xero SHOULD still show afterwards — £0 for a settled
+ * invoice (the shop), the HireHop owing for a hire whose client still owes a
+ * balance. Anything else is a stop.
  */
 export async function applyCreditsInXero(
-  rep: CloseReporter, rows: Row[], invoiceId: number, number: string, extraRows: Row[] = [],
+  rep: CloseReporter, rows: Row[], invoiceId: number, number: string,
+  opts: { extraRows?: Row[]; expectedDue?: number } = {},
 ): Promise<void> {
+  const extraRows = opts.extraRows ?? [];
+  const expectedDue = round2(opts.expectedDue ?? 0);
   if (!isXeroConfigured()) {
     await rep.stop('xero', 'OP has no Xero connection on this server, so it cannot apply the payments in Xero. '
       + `Apply the credit to ${number} in Xero by hand, then ${rep.retryHint} to finish.`);
@@ -298,8 +304,10 @@ export async function applyCreditsInXero(
 
   const depositRows = [...rows, ...extraRows];
   try {
-    if ((await amountDue()) < PENNY) {
-      await rep.log('xero', true, `${number} already shows paid in Xero.`);
+    if ((await amountDue()) <= expectedDue + PENNY) {
+      await rep.log('xero', true, expectedDue < PENNY
+        ? `${number} already shows paid in Xero.`
+        : `${number} already shows ${gbp(expectedDue)} due in Xero — nothing more to apply.`);
       return;
     }
     const today = londonDate(new Date());
@@ -328,8 +336,9 @@ export async function applyCreditsInXero(
       await rep.log('xero', true, `Payment ${depositId} — ${gbp(need)} credit applied to ${number} in Xero.`);
     }
     const due = await amountDue();
-    if (due >= PENNY) {
-      await rep.stop('xero', `After applying every payment, Xero still shows ${gbp(due)} due on ${number}. `
+    if (Math.abs(due - expectedDue) >= PENNY) {
+      await rep.stop('xero', `After applying every payment, Xero still shows ${gbp(due)} due on ${number}`
+        + (expectedDue >= PENNY ? ` (HireHop says ${gbp(expectedDue)})` : '') + '. '
         + `The job has NOT been completed. Check the invoice in Xero, then ${rep.retryHint}.`);
     }
   } catch (err) {
@@ -340,7 +349,9 @@ export async function applyCreditsInXero(
     await rep.stop('xero', `Xero refused while applying the payments to ${number}: ${msg}.${scope} `
       + `Anything already applied stays applied; ${rep.retryHint} to carry on.`);
   }
-  await rep.log('xero', true, `${number} shows paid in Xero.`);
+  await rep.log('xero', true, expectedDue < PENNY
+    ? `${number} shows paid in Xero.`
+    : `${number} shows ${gbp(expectedDue)} due in Xero, matching HireHop.`);
 }
 
 // ── Completing the job ───────────────────────────────────────────────────
