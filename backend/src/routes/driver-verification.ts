@@ -15,7 +15,6 @@
  */
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import multer from 'multer';
 import rateLimit from 'express-rate-limit';
@@ -28,10 +27,10 @@ import { idenfyNeedsReview, sendIdentityReviewAlert } from '../services/identity
 import { sendDvaCheckAlert } from '../services/dva-check-alert';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
+import { signFor, verifyFor } from '../services/tokens';
 
 const router = Router();
 
-const JWT_SECRET: string = process.env.JWT_SECRET!;
 const HIRE_FORM_TOKEN_EXPIRY = '40m'; // Match existing 40-minute session timeout
 
 // ============================================================================
@@ -79,15 +78,12 @@ function authenticateHireForm(req: HireFormRequest, res: Response, next: NextFun
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET) as HireFormUser & { exp: number };
-      if (decoded.type === 'hire_form_session') {
-        req.hireFormUser = { email: decoded.email, type: 'hire_form_session' };
-        next();
-        return;
-      }
-    } catch {
-      // Token invalid or expired
+    // Only a token minted for the hire-form audience verifies here (services/tokens.ts).
+    const decoded = verifyFor<HireFormUser>('hire_form', token);
+    if (decoded && decoded.type === 'hire_form_session') {
+      req.hireFormUser = { email: decoded.email, type: 'hire_form_session' };
+      next();
+      return;
     }
   }
 
@@ -144,11 +140,7 @@ router.post('/auth/verify', sessionIssueLimiter, async (req: Request, res: Respo
     }
 
     // Issue a short-lived JWT for this driver's session
-    const token = jwt.sign(
-      { email, type: 'hire_form_session' },
-      JWT_SECRET,
-      { expiresIn: HIRE_FORM_TOKEN_EXPIRY }
-    );
+    const token = signFor('hire_form', { email, type: 'hire_form_session' }, HIRE_FORM_TOKEN_EXPIRY);
 
     res.json({
       success: true,

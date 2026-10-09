@@ -1,6 +1,5 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import path from 'path';
@@ -9,6 +8,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { validate } from '../middleware/validate';
 import { authenticate, authorize, AuthRequest, MANAGER_ROLES } from '../middleware/auth';
+import { signFor, verifyFor } from '../services/tokens';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 
 const router = Router();
@@ -31,10 +31,6 @@ const refreshLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-if (!process.env.JWT_SECRET) {
-  throw new Error('FATAL: JWT_SECRET environment variable is required');
-}
-const JWT_SECRET: string = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '15m';
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 
@@ -92,17 +88,8 @@ const avatarUpload = multer({
 });
 
 function generateTokens(user: { id: string; email: string; role: string }) {
-  const accessToken = jwt.sign(
-    { id: user.id, email: user.email, role: user.role },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions
-  );
-
-  const refreshToken = jwt.sign(
-    { id: user.id, type: 'refresh' },
-    JWT_SECRET,
-    { expiresIn: JWT_REFRESH_EXPIRES_IN } as jwt.SignOptions
-  );
+  const accessToken = signFor('staff', { id: user.id, email: user.email, role: user.role }, JWT_EXPIRES_IN);
+  const refreshToken = signFor('staff_refresh', { id: user.id, type: 'refresh' }, JWT_REFRESH_EXPIRES_IN);
 
   return { accessToken, refreshToken };
 }
@@ -230,7 +217,11 @@ router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
       return;
     }
 
-    const decoded = jwt.verify(refreshToken, JWT_SECRET) as { id: string; type: string };
+    const decoded = verifyFor<{ id: string; type: string }>('staff_refresh', refreshToken);
+    if (!decoded) {
+      res.status(401).json({ error: 'Invalid or expired refresh token' });
+      return;
+    }
 
     if (decoded.type !== 'refresh') {
       res.status(401).json({ error: 'Invalid token type' });
@@ -254,11 +245,7 @@ router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
     // Don't rotate the refresh token on refresh — rotation races between open
     // tabs. Refresh tokens still rotate on login + are cleared on logout +
     // nulled when a user is deactivated, so exposure stays bounded.
-    const accessToken = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions
-    );
+    const accessToken = signFor('staff', { id: user.id, email: user.email, role: user.role }, JWT_EXPIRES_IN);
 
     res.json({ accessToken, refreshToken });
   } catch {

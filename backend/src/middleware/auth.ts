@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
+import { verifyFor } from '../services/tokens';
 
 export interface AuthUser {
   id: string;
@@ -32,10 +32,6 @@ export const MANAGER_ROLES = [
   'weekend_manager',
 ] as const satisfies readonly AuthUser['role'][];
 
-if (!process.env.JWT_SECRET) {
-  throw new Error('FATAL: JWT_SECRET environment variable is required');
-}
-const JWT_SECRET: string = process.env.JWT_SECRET;
 
 /**
  * Is this a STAFF access token? THE one definition — `authenticate` below and
@@ -49,15 +45,14 @@ const JWT_SECRET: string = process.env.JWT_SECRET;
  * own middleware; none may pass here. Until Oct 2026 any of them did, and a
  * hire-form session read GET /api/drivers (proven on a test database).
  *
+ * Since Oct 2026 the token's `aud` is checked first (services/tokens.ts): only a
+ * token minted for the 'staff' audience gets as far as the shape check below.
+ *
  * Returns null for a bad signature, an expired token, or any other token family.
  */
 export function verifyStaffToken(token: string): AuthUser | null {
-  let decoded: Record<string, unknown>;
-  try {
-    decoded = jwt.verify(token, JWT_SECRET) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+  const decoded = verifyFor<Record<string, unknown>>('staff', token);
+  if (!decoded) return null;
   if (
     typeof decoded.id !== 'string' || typeof decoded.email !== 'string' || typeof decoded.role !== 'string'
     || decoded.scope !== undefined || decoded.type !== undefined || decoded.typ !== undefined
