@@ -22,6 +22,7 @@ import BacklineLocationModal, {
   backlineLocationIcon,
   backlineLocationLabel,
 } from './BacklineLocationModal';
+import HireCloseOutPanel from './HireCloseOutPanel';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -990,6 +991,13 @@ export default function RequirementCard({
                   Manage carnet in Operations →
                 </Link>
               </div>
+            )}
+
+            {/* Payment reconciliation — the hire close-out (HIRE-CLOSE-OUT-SPEC.md §4.3):
+                what HireHop holds, what Allocate would do, the buttons, the log. The
+                card's own status still comes from the derivation engine. */}
+            {req.requirement_type === 'payment_reconcile' && jobId && (
+              <HireCloseOutPanel jobId={jobId} onChanged={onReload} />
             )}
 
             {/* Invoice — show "Mark as Sent" button when status is in_progress (generated) */}
