@@ -4,12 +4,15 @@
  * Admin endpoints for email configuration, status, and audit log.
  */
 import { Router, Response } from 'express';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { emailService } from '../services/email-service';
 import { query } from '../config/database';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 /**
  * GET /api/email/status

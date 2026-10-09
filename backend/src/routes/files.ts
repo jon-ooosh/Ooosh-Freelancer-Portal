@@ -13,6 +13,9 @@ import { CLAIMS_PREFIX } from './incident-claims';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // 25MB limit, common file types for an operations platform
 const upload = multer({

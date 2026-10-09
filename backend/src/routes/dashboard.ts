@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { buildProgressStrips, StripPhase } from '../services/job-progress-strip';
 import { getRoster } from '../services/studio-sitter';
 import { HELD_ITEM_SELECT } from '../services/held-item-query';
@@ -8,6 +8,9 @@ import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // SQL fragment: a HireHop-status-6 ("Returned Incomplete") job is only genuinely
 // checking in once its hire is actually due back (return_date within a day, or

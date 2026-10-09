@@ -106,10 +106,11 @@ API-key path mounted ahead of `authenticate`.
 `leads.ts`, `quotes.ts`, `assignments.ts`, `hire-forms.ts`, `email.ts`,
 `files.ts`, `issues.ts`, `staff-documents.ts`, `system-settings.ts`, `users.ts`,
 `auto-chase.ts`, `cancellations.ts`, `data-cleanup.ts`, `ve103b.ts`, `wise.ts`,
-plus `dashboard.ts`, `duplicates.ts`, `fill-gap.ts` and `notifications.ts` with
-no `authorize()` at all). Since Oct 2026 only STAFF hold a staff token (the
-`freelancer` role is refused at login), so this is about tiering between staff
-roles, not outsiders. Some are **deliberately** mixed-audience —
+plus `dashboard.ts`, `duplicates.ts`, `fill-gap.ts` and `notifications.ts`). Since
+Oct 2026 every one of those carries `router.use(authorize(...STAFF_ROLES))` (a
+no-op while only staff hold a staff token) and the remaining question is tiering
+between staff roles — the audited list of ungated manager-worthy endpoints is in
+`docs/SECURITY-AUDIT-BRIEF.md` B.2. Some are **deliberately** mixed-audience —
 `vehicles.ts` serves the freelancer kiosk through `FlexibleVehicleRequest` and
 must never get a blanket staff gate; `hire-forms.ts` has public token paths;
 `notifications.ts` serves whoever is logged in. Each needs its own audit. A

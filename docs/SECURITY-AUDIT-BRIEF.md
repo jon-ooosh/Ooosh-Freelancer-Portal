@@ -98,18 +98,43 @@ everywhere. Both portal-secret guards were seen to refuse startup.
 
 ## B. Open
 
-1. **A Content-Security-Policy for the SPA.** Nginx sends the usual headers
-   (nosniff, frame DENY, HSTS, Referrer-Policy, Permissions-Policy) but no CSP,
-   and the staff login sits in `localStorage`, so an XSS anywhere in the app is
-   a token theft. Start with `Content-Security-Policy-Report-Only`, watch the
-   console for a week (Stripe, Leaflet tiles, fonts, R2 images all need
-   allowing), then enforce. Nginx change, applied by hand on the server.
-2. **Per-router `authorize()` pass.** With A.3 in place only staff hold staff
-   tokens, so this is now about tiering between staff roles, not about outsiders.
-   The routers listed in PLATFORM-CONVENTIONS "Still open" each need a read:
-   which endpoints should be manager-tier. **Do not sweep blind:** `vehicles.ts`
-   and `hire-forms.ts` are deliberately mixed-audience; `notifications.ts` serves
-   whoever is logged in.
+1. **Content-Security-Policy — report-only phase.** Nginx sends the usual
+   headers (nosniff, frame DENY, HSTS, Referrer-Policy, Permissions-Policy) but
+   no CSP, and the staff login sits in `localStorage`, so an XSS anywhere in the
+   app is a token theft. **Built (Oct 2026):** the policy as a
+   `Content-Security-Policy-Report-Only` header in
+   `deploy/nginx-ooosh-portal.conf` (the live config is applied by hand), and
+   `POST /api/csp-report` (public, rate-limited, log only) so every staff
+   browser's would-have-been-blocked loads land in `journalctl -u ooosh-portal
+   | grep csp-report`. **Next:** apply the header AFTER the route is deployed,
+   watch the log for a week, add anything legitimate, then rename the header to
+   `Content-Security-Policy`. **Known blocker before enforcing:**
+   `frontend/public/stage-view.html` has one inline `<script>`; move it to a
+   file or hash it first. The two static tools are the only pages loading from
+   cdnjs and Google Fonts.
+2. **Per-router `authorize()` pass — audited 9 Oct 2026, decisions pending.**
+   All 19 `authenticate`-only routers now carry `router.use(authorize(...STAFF_ROLES))`
+   — a no-op today (only staff hold a staff token; confirmed over HTTP that a
+   `general_assistant` still reaches every one) but it keeps them closed if a
+   non-staff login shape is ever added. The read of every ungated endpoint found
+   these with **no manager/admin gate** — jon to decide which get one:
+   - `quotes.ts` `PUT /settings` — overwrites the global calculator rates and
+     markups for every future quote.
+   - `quotes.ts` `DELETE /runs/:runId` — hard-deletes a run group (combined
+     freelancer and client fees). `DELETE /:id` soft-deletes a quote.
+   - `quotes.ts` `PATCH /:id/status` and `/:id/ops-status` with `completed`
+     reach the same end state as the manager-only `POST /:id/complete-override`,
+     with no reason captured.
+   - `ve103b.ts` `POST /:id/void` and `POST /:id/reactivate` (hard-deletes a
+     voided certificate row — BVRLA-reported), and `POST /test-generate`, a
+     "temporary" endpoint that inserts real certificate rows and emails the office.
+   - `duplicates.ts` `POST /merge` — merges two people, soft-deletes one.
+   - `files.ts` `DELETE /delete` — hard R2 delete, including driver documents
+     (normal staff work; a manager gate only when `entity_type = 'drivers'`
+     would be the narrow option).
+   Everything else ungated is reads or everyday desk work; every route that
+   moves money in `costs.ts` is already admin-only. `vehicles.ts` and
+   `hire-forms.ts` were left alone on purpose (mixed audience).
 3. **Tokens in URLs.** Reviewed and left as is. The book-out / check-in pages
    strip `freelancerToken` / `hubToken` with `replaceState` straight after
    redeeming (`modules/vehicles/hooks/useAuth.tsx`); the prep page strips its
@@ -147,6 +172,7 @@ minimal surface; a new one needs its own auth AND a limiter.
 | `enquiry-intake.ts` | 2 | API key | yes |
 | `webhooks.ts` | `hirehop` (GET/POST), `external/status-transition` | HireHop `export_key` / `x-api-key` | none (key-gated) |
 | `health.ts` | 1 | none | none |
+| `csp-report.ts` | `POST /` | none — the browser posts CSP violation reports on its own; body is logged, truncated, never stored | 60 per min |
 | `index.ts` | `/jobs…` when an API key header is present | API key | none |
 
 ## D. Deliberately not done (decisions, not gaps)
