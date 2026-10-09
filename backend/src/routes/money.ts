@@ -146,6 +146,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        WHERE jf.balance_outstanding > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
          AND COALESCE(j.is_internal, false) = false
+         AND COALESCE(j.is_deleted, false) = false
          ${speculativeFilter}`;
     const balances = await query(
       `${balanceSelect} AND o.job_id IS NULL
@@ -170,6 +171,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
          AND jf.hire_value_inc_vat > 0.01
          AND COALESCE(j.pipeline_status, '') IN ('confirmed', 'prepping', 'prepped')
          AND COALESCE(j.is_internal, false) = false
+         AND COALESCE(j.is_deleted, false) = false
        ORDER BY j.out_date ASC NULLS LAST
        LIMIT 200`
     );
@@ -190,7 +192,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        JOIN job_excess je ON je.id = h.excess_id
        LEFT JOIN jobs j ON j.id = je.job_id
        WHERE h.held_amount > 0.01
-         AND (j.id IS NULL OR COALESCE(j.is_internal, false) = false)
+         AND (j.id IS NULL OR (COALESCE(j.is_internal, false) = false AND COALESCE(j.is_deleted, false) = false))
        ORDER BY COALESCE(j.return_date, j.job_end) ASC NULLS LAST
        LIMIT 200`
     );
@@ -1138,10 +1140,11 @@ router.get('/incoming-payments', authorize('admin', 'manager'), async (_req: Aut
               i.matched_job_id, i.payment_type, i.hh_deposit_id, i.hh_push_error, i.resolved_at,
               i.xero_invoice_id, i.xero_invoice_number, i.xero_payment_id, i.xero_invoices,
               j.hh_job_number AS matched_hh_job_number, j.job_name AS matched_job_name,
-              u.name AS resolved_by_name
+              COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS resolved_by_name
          FROM incoming_bank_payments i
          LEFT JOIN jobs j ON j.id = i.matched_job_id
          LEFT JOIN users u ON u.id = i.resolved_by
+         LEFT JOIN people pu ON pu.id = u.person_id
         WHERE i.status = 'unmatched' OR i.received_at >= NOW() - INTERVAL '30 days'
         ORDER BY (i.status = 'unmatched') DESC, i.received_at DESC
         LIMIT 200`
