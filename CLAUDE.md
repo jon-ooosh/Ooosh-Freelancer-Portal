@@ -306,7 +306,8 @@ existing definition:
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
-| Closing a finished shop week (invoice, allocate, complete) | `services/shop-close.ts` |
+| Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
+| Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |
 | Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
 | Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |
