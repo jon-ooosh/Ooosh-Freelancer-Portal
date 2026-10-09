@@ -186,6 +186,13 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
+**PLANNED, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module: finishing a hire's
+money from the post-hire cards (raise invoice → excess decision → allocate deposits in HireHop AND
+Xero → complete), one job at a time, generalising the shop close recipe (`HIREHOP-BILLING-API.md`
+§8). Born from job 16015: HireHop's "New payment" dialog records a REFUND when its invoice dropdown
+is left at "none". §1 is settled, §5 the allocation rule, §9 the phases and the HireHop captures
+that gate Phase 2. Excess is never allocated by it; refunds only through the existing routes.
+
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
 Stripe account, money on HireHop bank 267, recording ONLY through `services/record-payment.ts`,
