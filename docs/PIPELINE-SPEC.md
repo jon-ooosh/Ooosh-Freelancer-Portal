@@ -413,6 +413,6 @@ The full win/loss analysis dashboard, trend reporting, and structured loss workf
 - Win/loss analysis dashboard
 - Seasonal outreach campaigns
 - Cold lead finder (Ticketmaster API)
-- Quote versioning
+- Quote versioning — now specified: `docs/QUOTE-VERSIONS-SPEC.md` (Oct 2026)
 - Payment portal integration (deposit → auto-confirm)
 - Time-to-quote tracking and SLA alerts
