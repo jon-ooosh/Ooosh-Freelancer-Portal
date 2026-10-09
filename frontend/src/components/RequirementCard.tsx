@@ -1134,7 +1134,7 @@ export default function RequirementCard({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-shrink-0">
+        <div className={`flex ${companionReq ? 'flex-col items-end gap-1' : 'items-center gap-2'} flex-shrink-0`}>
           {/* Step progress */}
           {req.type_steps && req.current_step && req.requirement_type !== 'merch' && (
             <div className="flex items-center gap-1 mr-2">
