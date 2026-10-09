@@ -592,6 +592,42 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
   return buildPlan(job);
 }
 
+// ── The one button (§3, Oct 2026): invoice if needed, then allocate ──────
+
+/**
+ * What the card's main button does: raise the invoice when there is anything
+ * left to bill (or a draft to finish), then allocate every hire deposit in
+ * HireHop and apply the credits in Xero. One press for the normal case; a
+ * run that stops says where, and the same button carries on from there.
+ * Complete stays its own button — jobs are deliberately left open while
+ * damage quotes or missing items are pending (jon, 9 Oct).
+ */
+export async function runHireCloseOut(jobIdOrNumber: string, userId: string | null,
+  opts: { allowNotReturned?: boolean } = {}): Promise<CloseOutResult> {
+  const job = await loadJob(jobIdOrNumber);
+  return withJobLock(job.id, async () => {
+    const rep = reporter(job.id, userId, 'press Carry on');
+    let done = false;
+    let message: string;
+    try {
+      const plan = await buildPlan(job);
+      const parts: string[] = [];
+      if (plan.invoice.netToInvoice >= PENNY || plan.invoice.draft) {
+        parts.push(await raiseSteps(job, rep, !!opts.allowNotReturned));
+      }
+      parts.push(await allocateSteps(job, rep));
+      message = parts.join(' ').replace('Allocate the payments next. ', '');
+      done = true;
+    } catch (err) {
+      if (!(err instanceof Stop)) {
+        await log(job.id, userId, 'error', false, err instanceof Error ? err.message : String(err)).catch(() => undefined);
+      }
+      message = err instanceof Error ? err.message : String(err);
+    }
+    return { done, message, plan: await buildPlan(job) };
+  });
+}
+
 // ── Allocate ─────────────────────────────────────────────────────────────
 
 /** One job at a time, in this process. */

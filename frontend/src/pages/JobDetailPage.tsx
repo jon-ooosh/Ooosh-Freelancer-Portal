@@ -7449,6 +7449,10 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
               // Merch renders in the dedicated Held-for-Clients block below (card
               // + nested items panel), not as a plain inline card.
               if (req.requirement_type === 'merch') continue;
+              // The payments requirement rides on the Invoice card as its second pill
+              // (one card for the hire close-out, Oct 2026). It still exists — the
+              // derivation engine and the Returns page count it — it just isn't drawn.
+              if (req.requirement_type === 'payment_reconcile' && requirements.some(r => r.requirement_type === 'invoice')) continue;
 
               cards.push(
                 <RequirementCard
@@ -7469,6 +7473,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                   selfDriveVanOverride={selfDriveVanOverride}
                   onVehicleCountOverride={req.requirement_type === 'vehicle' ? changeVehicleCountOverride : undefined}
                   onReload={loadAll}
+                  companionReq={req.requirement_type === 'invoice' ? requirements.find(r => r.requirement_type === 'payment_reconcile') : undefined}
                 />
               );
 

@@ -41,7 +41,7 @@ import { readBillingRows } from '../hh-deposit-release';
 import xeroBroker from '../xero-broker';
 import { syncSavedRowToXero } from '../hh-xero-sync';
 import { hasNonStandardVatItem } from '../vat-adjustment';
-import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, planAllocations } from '../hire-close-out';
+import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, runHireCloseOut, planAllocations } from '../hire-close-out';
 import { handleJobStatusChange } from '../../routes/webhooks';
 const mockStatus = handleJobStatusChange as jest.Mock;
 const mockSync = syncSavedRowToXero as jest.Mock;
@@ -556,5 +556,57 @@ describe('raiseHireInvoice', () => {
     const r = await raiseHireInvoice(JOB.id, 'u1');       // 16015 corrected: fully invoiced
     expect(r.done).toBe(false);
     expect(r.message).toContain('Nothing to invoice');
+  });
+});
+
+describe('runHireCloseOut (the one button)', () => {
+  function uninvoicedJob() {
+    hh.invoices = []; hh.apps = [];
+    hh.accruedNet = 510; hh.uninvoicedNet = 510;
+    hh.deposits = [
+      { id: 9329, credit: 153, bank: 267, allocated: 0, desc: '16756 - deposit', date: '2026-09-24' },
+      { id: 9360, credit: 459, bank: 267, allocated: 0, desc: '16756 - balance', date: '2026-09-29' },
+    ];
+    opPayments = [
+      { hirehop_deposit_id: 9329, payment_type: 'deposit', amount: 153, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
+      { hirehop_deposit_id: 9360, payment_type: 'balance', amount: 459, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
+    ];
+    installXero();
+  }
+
+  it('job 16756: one press raises the invoice, allocates both payments in HireHop and Xero, and is ready to complete', async () => {
+    uninvoicedJob();
+    const r = await runHireCloseOut(JOB.id, 'u1');
+    expect(r.done).toBe(true);
+    expect(hh.invoices[0]).toMatchObject({ status: 2, gross: 612, paid: 612 });
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([
+      expect.objectContaining({ deposit: 9329, paid: 153 }),
+      expect.objectContaining({ deposit: 9360, paid: 459 }),
+    ]);
+    expect(xero.invoiceDue['x-13000']).toBe(0);
+    expect(r.plan.readyToComplete).toBe(true);
+    expect(r.message).toContain('OT-INV-13000');
+    expect(r.message).toContain('Ready to complete');
+  });
+
+  it('with the invoice already raised, the same button just allocates', async () => {
+    const r = await runHireCloseOut(JOB.id, 'u1');     // 16015 corrected: invoiced, £254.17 to allocate
+    expect(r.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toEqual([]);
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([expect.objectContaining({ deposit: 8661, paid: 254.17 })]);
+  });
+
+  it('stops at the draft on a penny mismatch and carries on from there once fixed', async () => {
+    uninvoicedJob(); hh.uninvoicedNet = 500;
+    const first = await runHireCloseOut(JOB.id, 'u1');
+    expect(first.done).toBe(false);
+    expect(first.message).toContain('differ by £10.00');
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([]);
+    // Someone fixes the lines in HireHop: the draft now reads £510.
+    hh.invoices[0].gross = 612; hh.accruedNet = 510;
+    const second = await runHireCloseOut(JOB.id, 'u1');
+    expect(second.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toHaveLength(1);       // no second draft
+    expect(second.plan.readyToComplete).toBe(true);
   });
 });

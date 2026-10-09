@@ -116,17 +116,24 @@ The **Post-Hire** tab on Job Detail, on the existing cards. Status text stays as
 (derived from HireHop by `hh-requirement-derivation.ts`); each card gains one primary
 action and reads back after it.
 
-| Card | Today | Adds |
-|---|---|---|
-| **Invoice** | "Generated" when any kind=1 row exists; "Mark as Sent" | **Raise invoice** (Phase 2) — draft from uninvoiced lines, penny check, approve, push to Xero. Shows the invoice(s), their status and Xero cloud |
-| **Excess Resolution** | Resolution-authoritative pill; Manage → existing modal | Unchanged. The Complete step reads its state |
-| **Payment Reconciliation** | "Reconciled" when owing ≤ 0 | **Allocate payments** (Phase 1) — the plan (§4.3) shown first, then HireHop + Xero allocation, read back. Surfaces any surplus with its three choices. Staff-facing wording stays about HireHop ("allocated", "balance owed", "reconciled"); the Xero fact ("credit applied in Xero" / "awaiting") is one **admin-only** line, because only jon and the bookkeeper act on it and the sweep is automatic (jon, 9 Oct) |
-| *(Complete job)* | — | Lives at the foot of the **Payment Reconciliation** card's panel, not as a card of its own (built that way, Oct 2026 — it is the last step of the payments flow): enabled when every invoice is paid and nothing is unallocated; amber "Complete anyway (excess held)" for a manager when excess is still held |
+**One card (jon, 9 Oct 2026, after the first live job).** The Invoice card hosts the whole
+close-out; the Payment Reconciliation requirement still exists (the derivation engine
+creates it, the Returns page counts it) but is not drawn — its status is the second pill on
+the Invoice card ("Payments: Reconciled"), still changeable there. One main button does the
+normal case end to end: raise the invoice if there is anything left to bill, then allocate
+every hire deposit in HireHop and apply the credits in Xero (`POST /close-out/:jobId/run`).
+A run that stops says where and the same button reads "Carry on". "Mark as sent to client"
+is offered only once nothing is left to allocate, so the client's invoice already shows
+their payments. **Complete stays its own button** — jobs are deliberately left open while
+damage quotes or missing items are pending. The Excess Resolution card is unchanged.
 
-Two cards, not one, for now: both requirement types already exist on every returned
-job and the Returns page counts their dots, so merging them is a migration plus a
-derivation change for no proven gain. They are written to read as consecutive steps of
-one flow; revisit merging after Phase 2 (jon asked, 9 Oct).
+| On the Invoice card | Shows |
+|---|---|
+| State | each invoice with "paid" or "£x owing"; or "£x ex VAT not yet invoiced"; payments holding money only while there is something to do with them |
+| Blockers / warnings | red list / amber lines (§6; excess still held) |
+| Buttons | Raise invoice & allocate payments · Carry on · Complete job · Complete anyway (excess held) · Mark as sent to client · Check again |
+| Log | "What happened", behind a disclosure; Xero lines admin-only |
+| Completed job | OP's own record ("Completed in HireHop by X on date"), no HireHop read; "Check HireHop again" forces one |
 
 Design rule for the cards (jon: "it needs to flow and make sense"): every action shows
 **what it will do before it does it** — the plan is a list of sentences ("Allocate
