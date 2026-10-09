@@ -277,6 +277,7 @@ existing definition:
 | Opening a private-bucket file in a new tab | `frontend/src/lib/openAuthedFile.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
+| Is this a STAFF access token? | `middleware/auth.ts` `verifyStaffToken()` — `authenticate` and the Socket.io handshake both use it; never a second `jwt.verify` for staff |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |
 | Who can be given something to do? | `services/assignable-staff.ts` — active + staff role + a CURRENT employment record. Shared by To Do's "For" picker and `/users?assignable=true` |
@@ -337,6 +338,9 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
   tokens; each has its own middleware. A new token type gets a marker and its own
   middleware — never widen `authenticate`. Table in `PLATFORM-CONVENTIONS.md` "Token
   types"; open items in `docs/SECURITY-AUDIT-BRIEF.md`.
+- **`POST /auth/register` is manager-tier, and only an admin may create an admin.**
+  It was PUBLIC with a caller-chosen role until Oct 2026. The `freelancer` role is
+  not a login: refused at register, login and refresh — freelancers use the portal.
 - **`weekend_manager` ≡ `manager`.** `authorize()` grants a weekend manager anywhere
   `manager` is allowed, so never list it separately. Frontend: use `hasManagerRole()` /
   `roleAllowed()` from `lib/roles.ts`, **never bare `role === 'manager'`**.
@@ -441,6 +445,9 @@ sudo systemctl status ooosh-portal
 journalctl -u ooosh-portal -n 50 --no-pager
 ```
 
+- **Backend `.env` must have `SESSION_SECRET`** (the portal cookie secret, shared
+  with the Netlify portal app) **and it must differ from `JWT_SECRET`** — the service
+  refuses to start otherwise (Oct 2026). Production has it; a fresh server needs it.
 - **`npm install` before building is not optional** on the manual path — a PR that added
   a dependency fails the build with "Cannot find module …". `deploy.sh` always installs.
 - Run `npm run db:migrate` from `backend/` if there are new migrations. Re-running is
