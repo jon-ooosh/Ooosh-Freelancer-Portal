@@ -24,7 +24,7 @@ interface Job {
   id: string
   name: string
   type: 'delivery' | 'collection'
-  whatIsIt?: 'equipment' | 'vehicle'  // Equipment or A vehicle
+  whatIsIt?: 'equipment' | 'vehicle' | 'people'  // Raw quotes.what_is_it
   date?: string
   time?: string
   venueName?: string
@@ -32,6 +32,7 @@ interface Job {
   status: string
   hhRef?: string
   keyNotes?: string
+  contacts?: Array<{ name: string; label?: string | null; phone?: string | null; email?: string | null }>
   runGroup?: string
   driverPay?: number
   completedAtDate?: string
@@ -54,12 +55,18 @@ interface Job {
   pdArrangement?: string              // Per diem arrangement
   pdAmount?: number                   // Per diem daily rate
   files?: VenueFile[]                 // Shared job-level files (OP only)
+  // Plain-English pay/reimburse breakdown for the freelancer (OP only).
+  crewMoney?: {
+    perDiem: { label: string; message: string; tone: 'ooosh' | 'client' | 'claim' | 'none' }
+    expenses: { label: string; message: string; tone: 'ooosh' | 'client' | 'claim' | 'none' }[]
+  }
 }
 
 interface Venue {
   id: string
   name: string
   address?: string
+  loadInAddress?: string | null
   whatThreeWords?: string
   contact1?: string
   contact2?: string
@@ -176,7 +183,7 @@ function translateStatus(status: string): { label: string; style: string; icon: 
 /**
  * Get the filter mode for HireHop items based on job's whatIsIt value
  */
-function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehicles' | 'all' {
+function getFilterMode(whatIsIt?: 'equipment' | 'vehicle' | 'people'): 'equipment' | 'vehicles' | 'all' {
   switch (whatIsIt) {
     case 'equipment':
       return 'equipment'  // Exclude vehicles and services
@@ -224,7 +231,7 @@ function getDisplayWorkType(workType?: string, workDescription?: string): string
 
 interface EquipmentListProps {
   hhRef: string
-  whatIsIt?: 'equipment' | 'vehicle'
+  whatIsIt?: 'equipment' | 'vehicle' | 'people'
   isReference?: boolean             // If true, label as "Equipment Reference" instead of "Equipment List"
 }
 
@@ -452,41 +459,19 @@ function NotificationMuteToggle({ jobId }: { jobId: string }) {
 // =============================================================================
 
 function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; title?: string }) {
-  const [loadingFile, setLoadingFile] = useState<string | null>(null)
-
   if (!files || files.length === 0) return null
 
-  const handleFileClick = async (file: VenueFile) => {
-    // For Google Drive / external links, open directly
+  const handleFileClick = (file: VenueFile) => {
     if (file.url) {
       window.open(file.url, '_blank')
-      return
-    }
-
-    // For Monday ASSET files, fetch the temporary public URL
-    if (file.assetId) {
-      setLoadingFile(file.assetId)
-      try {
-        const res = await fetch(`/api/files/asset-url?id=${file.assetId}`)
-        const data = await res.json()
-        if (data.success && data.url) {
-          window.open(data.url, '_blank')
-        } else {
-          alert('Unable to load file. Please try again.')
-        }
-      } catch (err) {
-        console.error('Error fetching asset URL:', err)
-        alert('Unable to load file. Please try again.')
-      } finally {
-        setLoadingFile(null)
-      }
+    } else {
+      alert('Unable to load this file.')
     }
   }
 
   // Get a file icon based on file name
   const getFileIcon = (name: string, fileType?: string): string => {
     if (fileType === 'GOOGLE_DRIVE') return '📄'
-    if (fileType === 'MONDAY_DOC') return '📝'
     const lower = name.toLowerCase()
     if (lower.endsWith('.pdf')) return '📕'
     if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')) return '🖼️'
@@ -507,8 +492,7 @@ function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; titl
           <button
             key={file.assetId || index}
             onClick={() => handleFileClick(file)}
-            disabled={loadingFile === file.assetId}
-            className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors text-left disabled:opacity-50"
+            className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors text-left"
           >
             <span className="text-xl">{getFileIcon(file.name, file.fileType)}</span>
             <div className="flex-1 min-w-0">
@@ -517,133 +501,9 @@ function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; titl
                 <p className="text-xs text-gray-400">{file.fileType === 'GOOGLE_DRIVE' ? 'Google Drive' : file.fileType}</p>
               )}
             </div>
-            {loadingFile === file.assetId ? (
-              <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-            ) : (
-              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            )}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// =============================================================================
-// Q&H FILES COMPONENT (Job-specific files from Quotes & Hires board)
-// =============================================================================
-
-interface QHFile {
-  assetId: string
-  name: string
-  fileType?: string
-  url?: string
-  sourceName?: string
-}
-
-function QHFiles({ hhRef }: { hhRef: string }) {
-  const [files, setFiles] = useState<QHFile[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loadingFile, setLoadingFile] = useState<string | null>(null)
-
-  useEffect(() => {
-    async function fetchFiles() {
-      try {
-        const res = await fetch(`/api/files/qh?hhRef=${encodeURIComponent(hhRef)}`)
-        const data = await res.json()
-        if (data.success && data.files) {
-          setFiles(data.files)
-        }
-      } catch (err) {
-        console.error('Error fetching Q&H files:', err)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    if (hhRef) {
-      fetchFiles()
-    } else {
-      setLoading(false)
-    }
-  }, [hhRef])
-
-  // Don't render anything if loading or no files
-  if (loading) return null
-  if (files.length === 0) return null
-
-  const handleFileClick = async (file: QHFile) => {
-    // For Google Drive / external links, open directly
-    if (file.url) {
-      window.open(file.url, '_blank')
-      return
-    }
-
-    // For Monday ASSET files, fetch the temporary public URL
-    if (file.assetId) {
-      setLoadingFile(file.assetId)
-      try {
-        const res = await fetch(`/api/files/asset-url?id=${file.assetId}`)
-        const data = await res.json()
-        if (data.success && data.url) {
-          window.open(data.url, '_blank')
-        } else {
-          alert('Unable to load file. Please try again.')
-        }
-      } catch (err) {
-        console.error('Error fetching asset URL:', err)
-        alert('Unable to load file. Please try again.')
-      } finally {
-        setLoadingFile(null)
-      }
-    }
-  }
-
-  const getFileIcon = (name: string, fileType?: string): string => {
-    if (fileType === 'GOOGLE_DRIVE') return '📄'
-    if (fileType === 'MONDAY_DOC') return '📝'
-    const lower = name.toLowerCase()
-    if (lower.endsWith('.pdf')) return '📕'
-    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')) return '🖼️'
-    if (lower.endsWith('.doc') || lower.endsWith('.docx')) return '📄'
-    return '📎'
-  }
-
-  return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
-      <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-        <span>📂</span> Job Files
-        <span className="text-sm font-normal text-gray-500">
-          ({files.length} file{files.length !== 1 ? 's' : ''})
-        </span>
-      </h2>
-      <p className="text-xs text-gray-400 mb-3">
-        Tech riders, stage plots and other job documents
-      </p>
-      <div className="space-y-2">
-        {files.map((file, index) => (
-          <button
-            key={file.assetId || index}
-            onClick={() => handleFileClick(file)}
-            disabled={loadingFile === file.assetId}
-            className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors text-left disabled:opacity-50"
-          >
-            <span className="text-xl">{getFileIcon(file.name, file.fileType)}</span>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-gray-900 truncate">{file.name}</p>
-              {file.sourceName && (
-                <p className="text-xs text-gray-400 truncate">From: {file.sourceName}</p>
-              )}
-            </div>
-            {loadingFile === file.assetId ? (
-              <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-            ) : (
-              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            )}
+            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
           </button>
         ))}
       </div>
@@ -744,7 +604,7 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
         </div>
 
         {/* Fee & Expenses — combined section */}
-        {(fee && fee > 0) || job.expenseBreakdown ? (
+        {(fee && fee > 0) || job.expenseBreakdown || job.crewMoney ? (
           <>
             <hr className="my-4 border-gray-100" />
             <div className="space-y-3">
@@ -759,24 +619,48 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
                 </div>
               )}
 
-              {/* Expense summary amounts */}
-              {job.expensesIncluded !== undefined && job.expensesIncluded > 0 && (
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">✓</span>
-                  <div>
-                    <p className="text-sm text-gray-500">Expenses included in fee</p>
-                    <p className="font-medium text-gray-900">£{job.expensesIncluded.toFixed(0)}</p>
-                  </div>
+              {/* Your money on this job — plain-English pay/reimburse breakdown */}
+              {job.crewMoney ? (
+                <div className="mt-1 rounded-lg border border-gray-200 p-3">
+                  <p className="mb-2 text-sm font-medium text-gray-700">Expenses &amp; Per Diem — what to do</p>
+                  <ul className="space-y-1.5">
+                    {[job.crewMoney.perDiem, ...job.crewMoney.expenses].map((line, i) => {
+                      const tone = line.tone === 'claim' ? 'text-amber-700'
+                        : line.tone === 'ooosh' ? 'text-green-700'
+                        : line.tone === 'client' ? 'text-gray-600' : 'text-gray-400'
+                      const icon = line.tone === 'claim' ? '🧾' : line.tone === 'ooosh' ? '💷'
+                        : line.tone === 'client' ? '👤' : '—'
+                      return (
+                        <li key={i} className="flex items-start gap-2 text-sm">
+                          <span className="w-5 shrink-0 text-center">{icon}</span>
+                          <span><span className="font-medium text-gray-800">{line.label}:</span>{' '}
+                            <span className={tone}>{line.message}</span></span>
+                        </li>
+                      )
+                    })}
+                  </ul>
                 </div>
-              )}
-              {job.expensesNotIncluded !== undefined && job.expensesNotIncluded > 0 && (
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">+</span>
-                  <div>
-                    <p className="text-sm text-gray-500">Additional expenses (on top)</p>
-                    <p className="font-medium text-orange-600">£{job.expensesNotIncluded.toFixed(0)}</p>
-                  </div>
-                </div>
+              ) : (
+                <>
+                  {job.expensesIncluded !== undefined && job.expensesIncluded > 0 && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-400 w-6 text-center">✓</span>
+                      <div>
+                        <p className="text-sm text-gray-500">Expenses included in fee</p>
+                        <p className="font-medium text-gray-900">£{job.expensesIncluded.toFixed(0)}</p>
+                      </div>
+                    </div>
+                  )}
+                  {job.expensesNotIncluded !== undefined && job.expensesNotIncluded > 0 && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-400 w-6 text-center">+</span>
+                      <div>
+                        <p className="text-sm text-gray-500">Additional expenses (on top)</p>
+                        <p className="font-medium text-orange-600">£{job.expensesNotIncluded.toFixed(0)}</p>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
 
               {/* Expense breakdown detail */}
@@ -808,7 +692,7 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
 
 
       {/* Location */}
-      {venue && (venue.address || venue.whatThreeWords) && (
+      {venue && (venue.address || venue.loadInAddress || venue.whatThreeWords) && (
         <div className="bg-white rounded-xl shadow-sm p-6">
           <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
             <span>📍</span> Location
@@ -817,6 +701,23 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
           <div className="space-y-2">
             {venue.address && (
               <p className="text-gray-700">{venue.address}</p>
+            )}
+            
+            {/* Load-in address (loading dock, stage door…) sits alongside the postal
+                address, never instead of it: a note like "round the back via Mill
+                Lane" won't geocode on its own. */}
+            {venue.loadInAddress && (
+              <p className="text-gray-700">
+                <span className="font-medium">Load-in:</span> {venue.loadInAddress}{' '}
+                <a
+                  href={getGoogleMapsUrl(venue.loadInAddress) || '#'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-700 hover:underline text-sm whitespace-nowrap"
+                >
+                  (map)
+                </a>
+              </p>
             )}
             
             {venue.whatThreeWords && (
@@ -938,11 +839,6 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
         <VenueFiles files={job.files} title="Job Files" />
       )}
 
-      {/* Q&H Job Files — tech riders, stage plots, etc. */}
-      {job.hhRef && (
-        <QHFiles hhRef={job.hhRef} />
-      )}
-
       {/* Equipment Reference — same HireHop integration, labelled as reference */}
       {job.hhRef && (
         <EquipmentList hhRef={job.hhRef} isReference={true} />
@@ -956,6 +852,65 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
           </h2>
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
             <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
+          </div>
+        </div>
+      )}
+
+      {/* On-site contacts — staff-picked from the people already on the job's
+          organisations (quote_contacts, OP migration 223). These used to be
+          typed by hand into Key Notes below, which is why that card still
+          renders: nothing backfills older jobs.
+
+          Numbers are tel: links — this page is read on a phone at a loading
+          bay, and making someone copy a number out by hand is the reason
+          drivers ring the office instead. */}
+      {job.contacts && job.contacts.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>📞</span> Who to contact
+          </h2>
+          <div className="space-y-2">
+            {job.contacts.map((c, i) => (
+              <div
+                key={i}
+                className="border border-gray-200 rounded-lg p-3 flex items-start justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <p className="font-medium text-gray-900">{c.name}</p>
+                  {c.label && <p className="text-sm text-gray-500">{c.label}</p>}
+                  {c.email && (
+                    <a
+                      href={`mailto:${c.email}`}
+                      className="text-sm text-blue-600 break-all hover:underline"
+                    >
+                      {c.email}
+                    </a>
+                  )}
+                </div>
+                {c.phone && (
+                  <a
+                    href={`tel:${c.phone.replace(/\s+/g, '')}`}
+                    className="shrink-0 px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-medium"
+                  >
+                    Call {c.phone}
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Key Notes — the quote's freelancer_notes from OP. The D&C layout has
+          always rendered this card; the crew layout never did, so notes staff
+          wrote for crewed jobs were invisible to the freelancer (Jul 2026). */}
+      {job.keyNotes && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>📋</span> Key Notes
+          </h2>
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
           </div>
         </div>
       )}
@@ -1292,7 +1247,7 @@ export default function JobDetailsPage() {
                 )}
 
                 {/* Location */}
-                {venue && (venue.address || venue.whatThreeWords) && (
+                {venue && (venue.address || venue.loadInAddress || venue.whatThreeWords) && (
                   <div className="bg-white rounded-xl shadow-sm p-6">
                     <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
                       <span>📍</span> Location
@@ -1301,6 +1256,23 @@ export default function JobDetailsPage() {
                     <div className="space-y-2">
                       {venue.address && (
                         <p className="text-gray-700">{venue.address}</p>
+                      )}
+                      
+                      {/* Load-in address (loading dock, stage door…) sits alongside the postal
+                          address, never instead of it: a note like "round the back via Mill
+                          Lane" won't geocode on its own. */}
+                      {venue.loadInAddress && (
+                        <p className="text-gray-700">
+                          <span className="font-medium">Load-in:</span> {venue.loadInAddress}{' '}
+                          <a
+                            href={getGoogleMapsUrl(venue.loadInAddress) || '#'}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-700 hover:underline text-sm whitespace-nowrap"
+                          >
+                            (map)
+                          </a>
+                        </p>
                       )}
                       
                       {venue.whatThreeWords && (
@@ -1420,11 +1392,6 @@ export default function JobDetailsPage() {
                 {/* Job Files — tagged "share_with_freelancer" on the job in OP */}
                 {job.files && job.files.length > 0 && (
                   <VenueFiles files={job.files} title="Job Files" />
-                )}
-
-                {/* Q&H Job Files — tech riders, stage plots, etc. */}
-                {job.hhRef && (
-                  <QHFiles hhRef={job.hhRef} />
                 )}
 
                 {/* Equipment List - simple read-only with filtering */}

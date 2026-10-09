@@ -319,7 +319,7 @@ export default function CancellationModal({
                   )}
 
                   {calcResult.minimumApplied && (
-                    <p className="text-xs text-red-600 mt-1">Minimum fee of £30 (£25+VAT) applied</p>
+                    <p className="text-xs text-red-600 mt-1">Minimum fee of £25 + VAT (£30 inc-VAT) applied</p>
                   )}
 
                   {/* Source / freshness so staff know what they're acting on */}

@@ -1,0 +1,431 @@
+# VEHICLE SALES SPEC — selling a van, and DVSA MOT history
+
+**Status:** 🔨 PHASES 0–3 BUILT (1 Oct 2026) — jon + Claude. Phase 4 (PDF / copy-out) not started and may
+never be needed. §9 records jon's answers to the open questions; §11–14 are what actually shipped and
+where it differs from §5–7.
+
+**Replaces:** the "Sell / Remove from Fleet" button in the Vehicle Settings danger zone as the
+*starting point* of a sale (the existing sold modal + removal checklist stay as the *end* of it).
+
+---
+
+## 0. One-line summary
+
+> An admin presses **"Start sales process"** on a van → OP gathers what it already knows (V5, mileage,
+> key dates, service history, MOT history, damage) **live** → staff pick the best photos from recent
+> book-outs/check-ins or add new ones → **share links** go to prospective buyers, each showing as much
+> or as little as that buyer should see → staff log viewings, listings and offers, with follow-ups
+> landing in **To Do** → **"Mark sold"** hands over to the existing sold modal and removal checklist.
+> Until then **the van stays active and hireable**; it just carries a "For sale" warning.
+
+Built alongside it, first and on its own: **DVSA MOT history** for every van (§3), useful well beyond
+this module.
+
+Groundwork for later: the "vehicle info pack" (selective sharing of vehicle data to clients) will
+reuse the public page's sections (§6.3). This spec does **not** generalise the link table for it yet —
+that waits until the info pack is shaped.
+
+---
+
+## 1. Decisions (settled — don't re-litigate without jon)
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | **One sale per van.** No multi-van bundles or bundle links. | We sell a few at a time; forcing a bundle deal that may never happen is a footgun. |
+| D2 | **The van stays active and hireable** throughout. Nothing about `hire_status`, `is_active` or allocation changes until "Mark sold". | Vans can be listed for months. |
+| D3 | "For sale" is a **warning, not a gate** — shown on Vehicle Detail, the fleet board, Allocations and Book-out, with an optional "hold from hire from" date. | CLAUDE.md product policy. We're small enough to manage bookings around sale dates; the reminder is visual. |
+| D4 | **Vehicle facts are read live**, never snapshotted — mileage, dates, service and MOT history update on every page load until the sale closes. | Listings run for months and details change a lot. |
+| D5 | **Photos are the exception: chosen, not live.** They only change when a person changes them. | A buyer should see the pictures we picked, not whatever the last book-out took. |
+| D6 | **A new Problem on the van flags the photos for a re-check** (§5.4). No Problem → no nag. | Check-in damage already auto-creates a Problem (`POST /api/problems/auto-create`), so this catches a van that came back with a dent without reminding after every clean hire. |
+| D7 | **Admin starts (and withdraws) a sale. After that, all staff (`STAFF_ROLES`) can work it** — see the price and data, choose photos, log viewings/offers/listings, set follow-ups. | Staff need the price to show people round; it's published anyway. |
+| D8 | **What each buyer sees is set per share link**, not per van (§6.2). | The dealer and a client see different amounts from the same pack. |
+| D9 | Only **chosen photos** ever leave OP. Never a whole book-out event, never a condition-report PDF (they carry driver names, signatures, customers' kit). | Privacy. |
+| D10 | **Service history** shows as a summary (date, mileage, type, garage). Invoice files are **off** and not in v1. | Invoices can carry our account details. |
+| D11 | **Damage history is on by default** per link; hiding it is a deliberate switch. | Selling to a private buyer while hiding known damage is a misrepresentation risk. |
+| D12 | **Listing-site integrations are out.** "Copy listing text" and "download photos" (Phase 4) are the answer. | A handful of vans doesn't justify API work. |
+| D13 | Follow-ups are **To Do items** (`staff_tasks`, `source_type = 'vehicle_sale'`), not a new reminder system. | TASKS-SPEC §2: "everything else" lives in To Do; the `source_type` hook already exists. |
+| D14 | **Share link first, PDF last** (Phase 4, may never be needed). | A link stays current, can be revoked and shows when it was opened. |
+
+---
+
+## 2. What already exists (verified in the repo, Sep 2026)
+
+| Thing | Where | Use here |
+|---|---|---|
+| V5 fields (VIN, first reg, body type, mass, category, cc), make/model/colour/seats, gearbox, fuel | `fleet_vehicles` (mig 011, 013, 015, 096) | headline + V5 section |
+| MOT / tax / last service / service plan status | `fleet_vehicles` key dates | key dates section |
+| Service log + files | `vehicle_service_log` (mig 012/014) | service history summary |
+| Mileage log (book-out, check-in, prep, service, fuel, manual) | `vehicle_mileage_log` (mig 014) | current mileage + history |
+| Book-out / check-in photos | public bucket `ooosh-vehicle-photos`, `events/{eventId}/{REG}/*.jpg`; events via `GET /api/vehicles/get-events` | photo picker |
+| Problems per van | `job_issues`, `GET /api/problems/by-vehicle/:id` | damage history + photo re-check trigger |
+| Sold modal, `sold_date`, `sale_price`, `removal_checklist` | `VehicleSettingsPage.tsx` danger zone, mig 104, `lib/removal-checklist.ts` | the END of the sale |
+| Value estimate | `services/vehicle-value.ts` | admin-only hint next to the asking price; never on a link |
+| Tokenised public pages | `services/claim-links.ts`, `routes/claim-form.ts`, `/claim/:token` | the pattern for §6 |
+| To Do | `services/staff-tasks.ts`, `source_type`/`source_id` | follow-ups (§7) |
+| Image prep | `frontend/src/lib/imageNormalise.ts` `prepareImage()` | new photo uploads |
+
+MOT **history** is not in OP at all — DVSA was applied for in March 2026 and never wired up (§3).
+
+---
+
+## 3. Phase 0 — DVSA MOT History (build first, stands alone)
+
+### 3.1 The API (DVSA MOT History API, current version)
+
+- Auth: OAuth 2.0 **client credentials** via Microsoft Entra ID. Needs **five** values from the DVSA
+  registration email: client ID, client secret, scope URL, token URL, API key.
+- Token: POST to the token URL; valid 60 minutes → cache it in memory, refresh on expiry/401.
+- Requests carry `Authorization: Bearer <token>` **and** `X-API-Key: <key>`.
+- Lookup by registration (endpoint path to confirm against the live docs at build time).
+- **Client secrets expire every 2 years**; DVSA emails 30 and 14 days before. Renewal is via their
+  `/credentials` endpoint with the API key + registered email. OP should surface the expiry date (§3.4).
+
+**Credentials live in `.env`** (`DVSA_CLIENT_ID`, `DVSA_CLIENT_SECRET`, `DVSA_SCOPE`,
+`DVSA_TOKEN_URL`, `DVSA_API_KEY`) — they're secrets, not staff-editable config, so NOT `system_settings`.
+
+### 3.2 Storage
+
+`vehicle_mot_history` (mig 263) — one row per van, overwritten on each fetch:
+`vehicle_id` (PK, FK), `fetched_at`, `payload JSONB` (DVSA response as-is), `error TEXT`.
+The UI parses the payload; storing it raw means a DVSA field we don't show yet isn't lost.
+
+MOT odometer readings are **NOT** written to `vehicle_mileage_log` (changed at build time). Many
+tests pre-date our ownership of the van, and the log's first/last readings drive the average daily
+mileage and the Forecast tab's mileage pace — old readings would skew both. The readings are shown in
+the MOT history section instead, where they belong.
+
+### 3.3 When it fetches
+
+- **Weekly**, Monday 07:30 Europe/London, for every active van — before the 08:00 compliance
+  check, so a corrected `mot_due` is what that check sees. Paced one van every 1.5 s.
+- **On demand**: "Refresh from DVSA" on the van's MOT history section.
+- **On Start sales process.**
+
+### 3.4 What it shows / does
+
+- **Vehicle Detail → "MOT history"** section: each test — date, result, expiry, mileage, advisories /
+  failures (dangerous flagged red). All staff.
+- **`mot_due` vs DVSA expiry** (Q3): when the latest *passed* test's expiry is **later** than
+  `mot_due` (or `mot_due` is empty), OP updates `mot_due` and writes an `audit_log` row
+  (`action = 'mot_due_from_dvsa'`). When DVSA's date is **earlier**, OP only shows a warning in the
+  section — never moves a date backwards on its own.
+- **Secret expiry:** no OP reminder (dropped at build time) — DVSA already emails 30 and 14 days
+  before. If the credentials are rejected, the section says so in plain words ("DVSA rejected our
+  credentials — the client secret may have expired") rather than a generic failure.
+
+---
+
+## 4. Data model (Phases 1–3)
+
+Migration numbers are taken at build time (Phase 0 took 263; next free is 264 at time of writing). Every new file goes in
+`backend/src/migrations/run.ts`.
+
+**`vehicle_sales`**
+| Column | Notes |
+|---|---|
+| `id` UUID | |
+| `vehicle_id` UUID FK | partial unique index: one sale per van where `status IN ('preparing','listed','under_offer')` |
+| `status` | `preparing` → `listed` → `under_offer` → `sold` / `withdrawn` |
+| `asking_price` NUMERIC(12,2) | ex- or inc-VAT: see Q5 |
+| `description` TEXT | the sales blurb |
+| `hold_from_hire` DATE NULL | optional "try not to book it after" date (D3) |
+| `photos_confirmed_at` TIMESTAMPTZ | set when photos are saved or "Photos still OK" is pressed (§5.4) |
+| `started_by`, `started_at`, `closed_at`, `closed_reason` | |
+
+**`vehicle_sale_photos`** — `id`, `sale_id`, `r2_key`, `source` (`event` / `upload`), `source_event_id`,
+`label` (e.g. "Front ¾", "Interior"), `sort_order`, `added_by`, `added_at`.
+Event photos are **referenced by key** (the public bucket keeps them); new uploads go to
+`vehicle-sales/{saleId}/` in the public bucket.
+
+**`vehicle_sale_links`** — `id`, `sale_id`, `token` (claim-links pattern, stored in the clear),
+`recipient_name`, `person_id` / `organisation_id` (optional), and the switches:
+`show_price`, `show_service_history`, `show_mot_history`, `show_mileage_history`,
+`show_damage_history` (default TRUE), plus `created_by`, `created_at`, `revoked_at`,
+`view_count`, `last_viewed_at`.
+
+**`vehicle_sale_events`** — the activity log: `id`, `sale_id`, `type` (`note` / `viewing` / `listed` /
+`contact` / `offer` / `status_change` / `link_created` / `link_revoked` / `photos_changed`),
+`occurred_at`, `person_id` / `organisation_id` (optional), `text`, `amount` (offers),
+`listing_site` + `listing_url` (listings), `task_id` (follow-up, §7), `created_by`.
+
+---
+
+## 5. Phase 1 — the sales pack
+
+### 5.1 Starting it
+- The **"Sell / Remove from Fleet"** danger-zone button is replaced by **"Start sales process"**
+  (admin). It opens a small form: asking price, optional hold-from date → creates the sale in
+  `preparing`, triggers a DVSA fetch, and opens the sale page.
+- Also offered from the admin's Vehicle Detail header.
+- A van not being sold (write-off, finance hand-back, scrapped): the danger zone keeps a smaller
+  **"Remove without sale"** link that opens today's sold/remove modal (Q1).
+
+### 5.2 The sale page (`/vehicles/fleet/:id/sale`)
+- Header: reg, stage pill, asking price, days on sale, admin-only value estimate hint.
+- **Data preview** — exactly what the public page will render (§6.3), live.
+- **Photos** (§5.3), **Share links** (Phase 2), **Activity** (Phase 3).
+- Stage changes: `preparing ↔ listed ↔ under_offer` by any staff; `withdrawn` admin only;
+  `sold` only via "Mark sold" (§7.3).
+
+### 5.3 Choosing photos
+- The picker lists the **last 3 book-out and check-in events** for the van (via `get-events`),
+  each as a strip of thumbnails; tick to add, drag to order, optional label.
+- **"Load older events"** goes further back.
+- **"Add photo"** uploads new ones (camera on mobile) through `prepareImage()`.
+- Flag, not block: an odometer/dashboard photo will show an old mileage figure — the picker shows a
+  hint next to any photo whose label/angle is the dashboard.
+
+### 5.4 Photo re-check (D6)
+- **Computed, not stored:** the sale is "photos need a check" when any Problem on the van was
+  created — or re-flagged onto an existing Problem by a check-in — after `photos_confirmed_at`.
+- Shown as an amber banner on the sale page and a badge on the For-sale pill, listing the Problem(s)
+  with links.
+- A **bell** goes out when a Problem lands on a van with an open sale (hook in `createJobIssue` and the
+  auto-create dedup path) — recipients: see Q4.
+- **"Photos still OK"** (or saving a photo change) stamps `photos_confirmed_at = now()` and clears it.
+
+### 5.5 The "For sale" warning (D3)
+A pill "For sale · Listed · hold from 14 Nov" on Vehicle Detail, the fleet board, Allocations
+(van picker) and Book-out. When an allocation/hire runs past `hold_from_hire`, the pill turns amber
+with "booked beyond hold date". Never blocks.
+
+---
+
+## 6. Phase 2 — share links and the public page
+
+### 6.1 Links
+- Created from the sale page: recipient name (optionally picked from People/Organisations), the
+  switches, → a URL `staff.oooshtours.co.uk/van/:token` to copy.
+- Revocable; view count + last viewed shown on the sale page.
+- Links **stop working when the sale is sold or withdrawn** — see Q6 for what they show instead.
+
+### 6.2 Switches per link
+| Switch | Default | Shows |
+|---|---|---|
+| Price | on | asking price |
+| Service history | on | summary list |
+| MOT history | on | DVSA tests, advisories |
+| Mileage history | off | dated readings |
+| Damage history | **on** | Problems: date, area, status (repaired / outstanding) |
+
+Always shown: headline, V5 details, key dates, description, chosen photos.
+
+### 6.3 The public page
+- Read-only, no login; backend `GET /api/public/vehicle-sale/:token`, rate-limited like the other
+  public routes.
+- **Server-side filtering** — switched-off sections are never sent, not just hidden.
+- **Never sent, whatever the switches:** job names or numbers, client or driver names, costs,
+  purchase price / finance / value estimate, internal notes, the activity log, condition reports.
+- Sections built as standalone components (headline, V5, key dates, photos gallery, service, MOT,
+  mileage, damage) so the future vehicle info pack can reuse them.
+- Mobile-first; Ooosh branding; "Contact: …" footer (who — Q7).
+
+---
+
+## 7. Phase 3 — activity, follow-ups, closing
+
+### 7.1 Logging
+Any staff member adds an entry: *viewing* ("Showed Dave round, 3 Oct"), *listed* (site + URL + date),
+*contact*, *offer* (amount + who), *note*. Optional person/organisation.
+
+### 7.2 Follow-ups → To Do
+Any entry can carry **"Follow up on [date]"** (+ who, default me) → creates a `staff_tasks` row with
+`source_type = 'vehicle_sale'`, `source_id = sale id`, title e.g. "Follow up Dave re RX21ABC", due that
+date. It shows in To Do with a "Van sale" badge linking to the sale page. Ticking it is plain To Do.
+All rules via `services/staff-tasks.ts` — this module never writes task rows around it.
+
+### 7.3 Mark sold
+"Mark sold" (admin) opens the **existing** sold modal pre-filled (date today, price from the
+accepted offer if any), which sets `sold_date` / `sale_price` and seeds the removal checklist exactly
+as today. The sale closes as `sold`; open follow-up tasks from it are cancelled; links stop.
+
+---
+
+## 8. Phase 4 — maybe (only if needed)
+- PDF of the public page for a given link's switches (jsPDF, as the condition reports).
+- "Copy listing text" (headline + description + key facts, plain text).
+- "Download photos" zip of the chosen photos.
+
+---
+
+## 9. Answered questions (jon, 30 Sep 2026 — all recommendations taken)
+
+| # | Question | Answer |
+|---|---|---|
+| Q1 | Removing a van **without** a sale? | Keep a "Remove without sale" link in the danger zone opening today's modal. |
+| Q2 | DVSA credentials? | All five in hand. Phase 0 built first. |
+| Q3 | DVSA later MOT expiry than `mot_due`? | Auto-update when DVSA is later; only warn when it's earlier. |
+| Q4 | Who gets the "Problem on a van for sale" bell? | Whoever started the sale + the default vehicle-issue watchers. |
+| Q5 | Asking price inc. or ex. VAT? | One figure + a VAT flag, shown on the link as "+VAT" / "inc. VAT". |
+| Q6 | What a link shows after the sale closes? | "This vehicle is no longer available" — nothing else. |
+| Q7 | Contact details on the public page? | A fixed sales contact from `system_settings`. |
+
+---
+
+## 10. Build order
+
+1. **Phase 0** DVSA MOT history (backend service + table + weekly job + Vehicle Detail section).
+2. **Phase 1** sale record, sale page, photo picker, re-check, For-sale pill, button swap.
+3. **Phase 2** share links + public page.
+4. **Phase 3** activity log, To Do follow-ups, Mark sold.
+5. **Phase 4** only if asked.
+
+---
+
+## 11. Phase 1 — as built (30 Sep 2026)
+
+**Where things are**
+- Backend: `services/vehicle-sales.ts` (THE definition — every rule), `routes/vehicle-sales.ts`
+  (`/api/vehicle-sales`, staff-only), migration **264** (`vehicle_sales`, `vehicle_sale_photos`).
+- Frontend: `modules/vehicles/pages/VehicleSalePage.tsx` (`/vehicles/fleet/:id/sale`),
+  `lib/vehicle-sales.ts`, `components/sales/ForSalePill.tsx`.
+
+**Differences from §5**
+- **Start lives on the sale page.** The danger zone and the Vehicle Detail header link there; the
+  page shows the start form to an admin when there's no open sale.
+- **Danger zone has three states:** van gone → *Reactivate*; open sale → *Open sales page* +
+  *Mark sold*; otherwise → *Start sales process* (admin) + a small *Remove without sale…* link.
+  Both *Mark sold* and *Remove without sale* open the existing sold/remove modal.
+- **"Mark sold" arrived early (part of §7.3).** The sale page's *Mark sold…* opens Vehicle Settings
+  with `?sell=1`, which opens the modal. **Any removal (`fleet_group → 'old_sold'` through
+  `PUT /api/vehicles/fleet/:id`) closes an open sale as `sold`** (`closeOpenSaleOnRemoval`).
+  Not yet done from §7.3: pre-filling the modal from an accepted offer (needs Phase 3's offers).
+- **Admin means `admin` only** for start, withdraw, price, VAT and hold date — managers are refused
+  (D7 said admin). Stage, description and photos are any `STAFF_ROLES`.
+- **Photo re-check** is computed on every read (`loadRecheck`): Problems created, or re-flagged
+  (`job_issue_events.event_type = 'reflagged'`), after `photos_confirmed_at`. A sale with no photos
+  never shows it. Any photo change stamps `photos_confirmed_at`, as does *Photos still OK*.
+- **The bell** (`notifyVehicleSaleOfIssue`) is called at all five places a Problem is created or
+  re-flagged: `problems.ts` (manual create, check-in auto-create, its re-flag branch),
+  `job-issues.ts` `createJobIssue()`, `incident-claims.ts`. It only fires when the sale has photos.
+  A `createJobIssue()` call inside a caller's transaction may miss the bell (row not committed yet)
+  — the computed banner still catches it.
+- **The photo picker** lists Book Out / Check In events newest first, 3 at a time; only the first is
+  expanded, so thumbnails load only for events someone opens. Photos display from the public bucket
+  (`VITE_R2_PUBLIC_URL`), falling back to `/api/vehicles/photo/*`, which now also serves
+  `vehicle-sales/` keys from the public bucket.
+- **The "For sale" pill** shows on Vehicle Detail (links to the sale), the fleet board (cards + table),
+  the Allocations van picker and the Book-out van list. It turns amber when a live hire
+  (`soft`/`confirmed`/`booked_out`/`active`) ends after the hold date. **It never loads in a
+  freelancer session** — the route is staff-only and a refused call would trigger a token refresh.
+- **Key facts** on the sale page are a plain live summary; the buyer-facing sections are Phase 2.
+- **Dates** are refused outside 2000–2099 (`cleanDate`) — a mistyped `0006-08-25` otherwise stores
+  year 6.
+- DVSA: the MOT tab and a one-line note under *Details › Key Dates › MOT Due* ("✓ Matches DVSA" or the
+  earlier-date warning) share one query. DVSA errors now carry DVSA's own reason (Entra `AADSTS…`
+  code named in plain words, or the MOT API's `errorCode`).
+
+**Verified** against a real Postgres 16 with all 264 migrations applied from scratch: start / second
+start refused / hold-date warning (cancelled hires ignored) / photos (other van refused, duplicates
+ignored) / re-check on new and re-flagged Problems / *Photos still OK* / bell recipients / staff vs
+admin patches / reorder, label, remove / removal closes the sale / closed sale locked; DVSA refresh
+moving `mot_due` forward with one audit row and never backwards.
+
+---
+
+## 12. Phase 2 — as built (30 Sep 2026)
+
+**Where things are**
+- Backend: `services/vehicle-sale-links.ts` (THE definition of what a buyer sees), routes on
+  `routes/vehicle-sales.ts` (`GET /public/:token` mounted before the login check, rate-limited
+  60/min; staff `GET|POST /:id/links`, `PATCH|DELETE /:id/links/:linkId`), migration **265**
+  (`vehicle_sale_links` + the `vehicle_sales_contact` setting).
+- Frontend: the *Share links* card on the sale page; the public page `pages/VehicleForSalePage.tsx`
+  at **`/van/:token`**; the sections in `components/vehicle-sale/BuyerSections.tsx` — standalone,
+  for the vehicle info pack to reuse.
+
+**How it behaves**
+- **`shapeForBuyer()` is the only builder of what leaves OP.** It builds field by field from an
+  allow-list — nothing is spread from a DB row — and adds an optional section only when its switch is
+  on. Tests prove a switched-off section's key is absent and that extra fields on the input never
+  reach the output.
+- **Switches can be changed on a live link** (e.g. show the dealer the price later). Revoke keeps the
+  row (listed under "revoked") — never deleted.
+- **Unknown token, revoked link and closed sale all return `{ state: 'unavailable' }`** — the page says
+  only "This vehicle is no longer available" (Q6).
+- **Views:** each public load counts; `?preview=1` (the sale page's *Preview* button) doesn't.
+- **Service history** = `service` / `repair` / `mot` / `tyre` records up to today: date, mileage,
+  type, the record's name, garage. Never cost, notes, HireHop job or files. Insurance and tax
+  records are left out.
+- **MOT history** = the stored DVSA payload (null until DVSA has been fetched successfully).
+- **Mileage history** (off by default) = each month's last reading, excluding `correction` rows,
+  anything above the van's canonical `current_mileage`, and any month higher than a later one —
+  so a fat-fingered reading that was later corrected (RX73TBZ) never shows.
+- **Damage history** = Problems in `damaged` / `broken` / `breakdown` (not "wifi dongle missing"),
+  not cancelled: date, **the summary as written**, and Repaired / Closed / Outstanding. The card
+  warns staff to check the preview, since a summary is free text.
+- **Photos** are served from the public bucket via `R2_PUBLIC_URL` (backend env). Without it the
+  public page shows no photos.
+- **Contact (Q7)** is `system_settings.vehicle_sales_contact`, one line for every van, edited on the
+  sale page by admin / manager (the existing `PUT /api/system-settings`).
+- **Not built from §4:** linking a link to a person / organisation — Phase 3's activity log is where
+  people and organisations come in.
+
+**Verified** against a real Postgres 16 with all 265 migrations applied, through the real Express
+router: switches applied, price hidden then shown after a live switch change, no finance / cost /
+notes in the payload, service and damage filtering, mileage clean-up, view counting (preview not
+counted), unknown / revoked / closed → unavailable, staff routes refuse without login.
+
+---
+
+## 13. Tweaks after first use (jon, 1 Oct 2026)
+
+- **Photo picker lists book-outs only.** Check-ins mostly show new damage, and the next book-out
+  photographs the van again anyway.
+- **Main photo = the first photo.** "Make main photo" moves a photo to the front; the buyer page
+  shows it large at the top. No new column — order already existed.
+- **Boilerplate beside the description.** `system_settings.vehicle_sales_snippets` (JSON list of
+  `{ title, text }`, migration 266), shared by every van. *Insert* adds a snippet as a new paragraph,
+  *Copy* puts it on the clipboard; admin / manager edit the list. Starts empty — OP doesn't invent
+  sales copy.
+- **Default contact** `Ooosh Tours - 01273 911382 - info@oooshtours.co.uk` (migration 266) — only
+  when none was set; one line for every van.
+- **"Create link" is greyed out until a name is typed**, and says who it's for.
+- **The stage (Preparing / Listed / Under offer) is a team marker only** — it shows on the "For sale"
+  pill and buyers never see it. Said so under the stage buttons.
+
+## 14. Phase 3 — as built (1 Oct 2026)
+
+**Where things are**
+- Backend: `services/vehicle-sale-activity.ts` (staff entries, offers, follow-ups), `logSaleEvent()` /
+  `cancelSaleFollowUps()` in `services/vehicle-sales.ts`, routes `GET|POST /:id/activity` and
+  `PATCH /:id/activity/:eventId/offer`, migration **267** (`vehicle_sale_events`).
+- Frontend: `components/sales/SaleActivityCard.tsx` on the sale page; the *Van sale* badge on
+  Me › To Do links back to the sale.
+
+**How it behaves**
+- **Staff entries:** viewing, listed (site required, link must be http/https), contact, offer
+  (amount and who required), note. Dated today by default; may be back-dated, never future-dated.
+- **OP's own entries:** stage changes ("Preparing → Under offer", "… → Withdrawn — reason",
+  "Sold — van removed from the fleet") and links made / revoked.
+- **Follow-ups are To Do items** made by `staff-tasks.ts` `createTask()` with
+  `source_type = 'vehicle_sale'`, `source_id` = the sale — default owner is whoever logs it, or anyone
+  on the To Do people list (they get the usual "task given to you" bell). Title reads on its own:
+  "Follow up Dave re RX21ABC sale". `SELECT_TASKS` now returns `source_link`, so the badge links to
+  `/vehicles/fleet/:vehicleId/sale`.
+- **When a sale closes** (withdrawn, or the van removed from the fleet) its open follow-ups are
+  **cancelled** through `cancelTask()` — never deleted.
+- **Offers:** Accept / Decline / Undo. Accepting moves the sale to *Under offer* (logged). Accepting
+  never closes the sale or touches money.
+- **"Mark sold…" pre-fills the sold modal** from the most recent accepted offer: sale price, and
+  notes "Sold to <who>" (price and notes still only show to an admin, as before).
+- **"Who" is free text** — linking to a person / organisation record is deliberately not built.
+  The share links' recipient names are free text too; both could move to real records later.
+
+**Verified** against a real Postgres 16 with all 267 migrations applied: entries and follow-ups (owned
+by the logger, or given to someone else), To Do rows with titles and `source_link`, past follow-up
+refused, offer accept → *Under offer* + logged, links logged once each (revoke is idempotent),
+withdraw and removal both log and cancel open follow-ups, a closed sale refuses new activity.
+
+## 15. Second round of tweaks (jon, 1 Oct 2026)
+
+- **No "Start sales process" link on the Vehicle Detail header** — too easy to click by accident.
+  The header shows the "For sale" pill only once a sale exists; starting one is in Vehicle Settings'
+  danger zone.
+- **The stage control is a progress line, not tabs.** The grey pill bar is how other pages switch
+  sections, so it read as navigation. Now: numbered steps (✓ done, filled = current) with a
+  "Move to <next> →" button and a "← Back to <previous>" link.
+- **The page follows the stage.** Preparing: description, photos, key facts first, then links and
+  activity. Listed / Under offer: activity and links first. Nothing is hidden at any stage — you may
+  well talk to a buyer before the van is formally listed.
+

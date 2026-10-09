@@ -53,7 +53,7 @@ A single `costs` entity with optional **facets** (job, vehicle, freelancer), rat
 ### Why one model
 
 - **Vehicle costs** link 1:1 to the existing fuel/service log (which already carries `cost` + `receiptFile`) rather than duplicating — see §7a. The vehicle log stays the maintenance home; `costs` is the financial spine underneath it.
-- **Repair/damage costs** link to the existing `platform_issues` record (the Problems module) — see §7b.
+- **Repair/damage costs** link to the Problem (`job_issues`) via `costs.job_issue_id` — see §7b. *(Originally written as `platform_issues`, which was the bug tracker, not Problems; corrected by migration 250, Sep 2026.)*
 - **Recharge** and **payable** are just states/flags on the cost, so a single list view can answer "what do we owe?" and "what can we bill back?" without joins across silos.
 
 ---
@@ -199,7 +199,7 @@ The existing `vehicle_service_log` / `vehicle_fuel_log` are **not replaced**. Th
 
 ## Component 7b: Problems module — repair cost wire-up
 
-The `platform_issues` Problems module already anticipates this: its resolution panel shows Estimated/Actual cost with the note *"Cost is informational only — future wire-up to HireHop / Xero pending. Don't double-enter into the Money tab."* **This system is that wire-up.**
+The Problems module (`job_issues` — this line originally said `platform_issues`, wrongly) already anticipates this: its resolution panel shows Estimated/Actual cost with the note *"Cost is informational only — future wire-up to HireHop / Xero pending. Don't double-enter into the Money tab."* **This system is that wire-up.**
 
 - A repair invoice (TTS360, garage, parts) logged against a problem links via `costs.platform_issue_id`.
 - The cost flows to Xero, and if the damage is **client-caused**, into the recharge bucket (4a) → billed back via HireHop.
@@ -246,7 +246,7 @@ CREATE TABLE IF NOT EXISTS costs (
   job_id              UUID REFERENCES jobs(id),
   vehicle_id          UUID REFERENCES fleet_vehicles(id),
   quote_assignment_id UUID REFERENCES quote_assignments(id),
-  platform_issue_id   UUID REFERENCES platform_issues(id),       -- repair/damage costs (§7b)
+  job_issue_id        UUID REFERENCES job_issues(id),            -- repair/damage costs (§7b); was platform_issue_id until mig 250
   vehicle_service_log_id UUID REFERENCES vehicle_service_log(id), -- 1:1 maintenance link (§7a)
   vehicle_fuel_log_id    UUID REFERENCES vehicle_fuel_log(id),    -- 1:1 fuel link (§7a)
 
@@ -947,9 +947,84 @@ threshold in the T&Cs is a dispute nuance, not modelled — "overdue" in the UI 
 simply past the Friday due date.)
 
 ### Capture-time split
-The "split across jobs" allocation modal now surfaces at capture: a **"Split
-across multiple jobs"** tick in the capture modal footer (new-cost only) hands the
-saved cost straight to the allocation modal via a new `onSavedAndSplit` callback.
+The "split across jobs" allocation modal now surfaces at capture: a tick in the
+capture modal (new-cost only) hands the saved cost straight to the allocation
+modal via an `onSavedAndSplit` callback.
+
+**Moved beside the job picker (Sep 2026).** It originally sat in the modal footer,
+where it read as "do a thing after saving" and was easy to miss. It now sits
+directly under **Link to job**, worded as a statement about the invoice — *"This
+invoice covers several jobs"* — because that is the decision staff are actually
+making, at the moment they're making it. The job picker stays visible when it's
+ticked: the allocation modal seeds its first line from that job at the full
+amount, so ticking the box is additive, never a mode switch.
+
+### Due date at capture (Sep 2026, migration 198)
+The due date is derived, not stored — but staff couldn't see it until the cost
+reached the Bills-to-Pay list. The capture modal now shows it at upload time,
+with the derived default and the terms behind it, and lets staff correct it.
+
+- **`costs.due_date_override`** (DATE, nullable). NULL = follow the rules.
+- **`resolveDueDate()` in `services/supplier-terms.ts` is the single definition** —
+  override → the freelancer Friday rule → supplier/Xero terms. Every surface
+  (list, get-one, mark-paid modal, Xero bill push, Xero re-sync) reads it, so
+  what staff confirm at capture is what Xero is told. It's in `XERO_AFFECTING`,
+  so editing it on a pushed bill flags `xero_stale` for re-sync.
+- **The freelancer anchor moved from `approved_at` to the invoice date** — the
+  real rule is "their invoice date, first Friday +7 days" (due 8–14 days after
+  they submit). Anchoring on approval meant the date didn't exist until a manager
+  approved, so it couldn't be shown at capture at all.
+- **`GET /costs/due-date-preview`** gives the modal the derived default for a
+  cost that doesn't exist yet, from the same engine.
+- The field renders **only for pay-later methods** — a cost already paid on the
+  company card owes nobody anything, so a due date there is noise.
+- The AI extractor reads a printed due date (or resolves stated terms like
+  "Net 30" against the invoice date) and lands it as an override, since the
+  document's own answer beats our derived guess. Cleared back to the rule in one
+  click.
+
+### Supporting documents (Sep 2026, migration 200)
+A payable often arrives with more evidence than the one document the AI reads. A
+freelancer invoices £250 labour + £60 fuel + £15 train and encloses the fuel
+receipt — and that receipt is what makes the £10 VAT reclaimable. Previously
+there was nowhere to put it: `costs` had exactly one `receipt_r2_key`.
+
+**Model.** `costs.supporting_documents` — a JSONB array of
+`{r2_key, filename, content_type, size_bytes, uploaded_at, uploaded_by}`. The
+main receipt is unchanged. **One payable, one Xero bill, several attachments** —
+this adds evidence, not lines. Splitting a payable into differently-coded /
+differently-VAT-rated lines is a separate piece of work (`cost_lines`) — now specced in
+`docs/COST-LINES-SPEC.md`.
+
+**Filename collisions are the real hazard.** Xero keys an attachment by its
+FILENAME: a `PUT` to a name the object already has overwrites it, silently, with
+a 200. Two files both called `receipt.pdf` on one bill means the second does not
+exist. `services/cost-documents.ts` `collectDocuments()` renames duplicates in
+the **payload only** (`receipt.pdf`, `receipt-1.pdf`) — OP keeps the name staff
+uploaded. The rename is deterministic, so a re-sync overwrites the same
+attachments rather than piling up new ones. It's a pure module with unit tests
+precisely because the failure it prevents is invisible.
+
+**Limits.** Xero takes 10 attachments per object; the main receipt claims one,
+so supporting docs cap at 9 (enforced in the Zod schema and the modal, truncated
+receipt-first in `collectDocuments` so the receipt is never the one dropped).
+
+**Reaching Xero.** Attached on the original push (both the Spend Money and bill
+paths) and re-attached on `resyncCostToXero` — a doc added after the push has no
+other route. `supporting_documents` is in `XERO_AFFECTING` so adding one flags
+`xero_stale`. Attach failure stays non-fatal: the figures are the important leg.
+
+**UI.** One quiet "＋ Add supporting documents" link under the receipt pane,
+expanding only when asked for or when docs already exist — a fuel receipt
+captured in twenty seconds must not have to walk past it. The shared
+`ReceiptThumb` carries a `+N` pip so the Costs hub and the Money tab both show
+that extra paperwork is filed.
+
+**Worked example** — the £325 freelancer invoice. Labour £250, fuel £50 + £10
+VAT, train £15 (zero-rated, so no VAT to recover there). Today this is one cost
+at £325 with the invoice as the receipt and the fuel receipt filed alongside as
+evidence; the VAT split across lines is the `cost_lines` work
+(`docs/COST-LINES-SPEC.md` §5 walks this exact example through).
 
 ### Bills to Pay — sortable Due + filters
 The Due column is now click-to-sort, and the payable view gained due-date filter
@@ -1029,3 +1104,209 @@ it); otherwise keeps the date but still downgrades. Prompt also strengthened to
 "UK day-first; when ambiguous read 11/06 as 11 June not 6 November; normally today
 or in the recent past". The capture modal shows an amber "this date is in the
 future" hint for manual entry too.
+
+---
+
+## Phase D — Recharge resolution lifecycle, markup, and nagging (SPEC — Jun 2026)
+
+**Status:** scoped with jon, ready to build. No code yet.
+**Migration:** next free is **150** (149 is the last applied — `149_interactions_held_item.sql`).
+
+### The incident that drove this
+
+Weekend staff checked van RX24SZC back in on job 16209, logged a £20.95 BP fuel
+receipt (van returned underfuelled), correctly linked it to the job and flagged it
+`extra` + recharge. Everything worked as designed — and yet:
+
+1. **It never reached HireHop.** The recharge push exists (`POST /api/costs/:id/push-recharge`,
+   the "Push to HireHop" button) but it lives ONLY in the global `/money/costs`
+   **Recharges** tab. Nobody opens that mid-weekend, so the cost sat flagged-but-unpushed.
+2. **It's buried.** The only "something's pending" surface is the `Recharges pending`
+   tab count. No dashboard bucket, and on the Job View it's a quiet line at the
+   bottom of the Money tab with no action on it.
+3. **There's no "Done".** A recharge leaves the pending bucket only by being pushed
+   to HH. There's no terminal "we billed it another way" or "we deliberately absorbed
+   it" — the only way to clear those is to silently flip `recharge_mode` back to
+   `none`, which loses the audit.
+
+**Root cause:** a recharge has only two visible states (pending / pushed-and-gone)
+and one place to action it. Same shape problem the **excess** module already solved
+with real terminal states (`reimbursed` / `waived` / `rolled_over`) and the
+`excess_resolve` close-out card. This phase gives recharges the same treatment, plus
+the markup control that was missing, plus the "absorb" audit jon wants for the
+"we've eaten five £20 underfuellings — time to start charging" review.
+
+### Decisions taken with jon
+
+- **Markup at confirm time** — most recharges are marked up (fixed £ or %); there's
+  currently no way to apply it. The confirm step must offer it.
+- **Three resolution paths, not one** — push to HH · recharged by another means ·
+  absorb/write-off (with reason). Mirrors how the **PCN module** resolves (it has
+  `pay_recharge` = bill to client via HH line, `pay_direct` = Ooosh settles directly,
+  `transfer_liability` = onto the driver — several terminal paths, each stamping a
+  status). The "recharged by another means" path is the cost-side equivalent of
+  PCN's flexibility, and exists specifically for the **closed-HH-job** case (HH
+  refuses line adds on status 7/9/10/11/locked — so we bill via a direct Xero invoice
+  instead and just record that we did).
+- **One action, two homes** — the resolve flow must be reachable identically from the
+  global Recharges tab AND in-place on the Job View Money tab. Same modal, same
+  endpoint, interlinked.
+- **Primary nag = post-hire Job View to-do** (most-used surface), backed by a
+  dashboard bucket. Soft amber, never a hard gate.
+- **Audit the write-offs** — `absorbed` must be queryable so the "stop absorbing,
+  start charging" review is a report, not a memory.
+- **Client roll-up parked** — design-aware (the data shape must support it), build later.
+
+### 1. Markup on the recharge amount
+
+**Everything here is ex-VAT.** The base, the markup, and the final figure are all net.
+The final amount pushes to HH as the NET line; HH's 20%-rated recharge stock items add
+the VAT on top (unchanged from today's "net of VAT, VAT added at HH" design). So a
+£20.95 fuel net → £30.95 net pushed → HH bills £37.14 inc VAT.
+
+Today the pushed amount is `amount_net` (full) or `recharge_amount` (partial) — no
+markup. New model keeps `recharge_mode` as the **base selector** and layers markup on
+top:
+
+- **Base** = `full` (the cost's `amount_net`) or `partial` (a staff-entered net base).
+- **Markup** = one of `greater_of | percent | fixed | none`:
+  - `greater_of` (**the default**) — markup = `max(base × percent%, floor)`. The agreed
+    default is **max(20% of base, £10)** — so a £20.95 refuel gets +£10 (20% = £4.19,
+    floored to £10 → £30.95); a £200 cost gets +£40 (20% beats the £10 floor). This is
+    the "minimum £10 or 20%, whichever is greater" rule.
+  - `percent` — markup = `base × percent%` (no floor).
+  - `fixed` — markup = a flat amount (e.g. always +£15).
+  - `none` — no markup.
+- **Final recharge amount** = `base + markup`, shown broken-down and **editable** before
+  confirm (extraction-error style: suggest, let staff override the final figure directly).
+
+**Default markup** lives in `system_settings` (category `cost_recharge`):
+`cost_recharge_default_markup_type` (`greater_of`), `cost_recharge_default_markup_percent`
+(`20`), `cost_recharge_default_markup_floor` (`10`). The confirm modal pre-fills from
+these; staff can change type/value per push. **Per-category default markups** (fuel vs
+damage vs travel could differ) are a noted future refinement — ship one global default
+first, don't over-build.
+
+New columns (migration 150) for transparency/audit of how the figure was reached:
+`recharge_base_amount`, `recharge_markup_type`, `recharge_markup_value` (the percent or
+fixed value used; the floor for `greater_of` is implicit from settings/recomputable from
+base+final). `recharge_amount` stays the final (post-markup, ex-VAT) figure the push bills.
+
+### 2. Resolution lifecycle
+
+New column `recharge_status` on `costs` (migration 150) — the terminal resolution:
+
+| `recharge_status` | Meaning | Set by |
+|---|---|---|
+| `pending` | Flagged for recharge (`recharge_mode <> 'none'`), not yet resolved | flag action |
+| `recharged_hh` | Pushed to HireHop as a billable line | the existing `push-recharge` (also stamps `recharged_to_hh_at` + `recharge_hh_item_id`) |
+| `recharged_external` | Billed another way (direct Xero invoice etc. — typically because the HH job was closed). Carries a free-text reference note | new resolve action |
+| `absorbed` | Deliberately not recharged / written off. **Requires a reason** | new resolve action |
+
+`recharge_mode = 'none'` ⇒ `recharge_status` is irrelevant (never was a recharge).
+**Resolved** = `recharged_hh | recharged_external | absorbed`. The **Recharges-pending**
+bucket becomes `recharge_mode <> 'none' AND recharge_status = 'pending'` — replacing
+today's `recharged_to_hh_at IS NULL` test (which can't see the two new terminal states).
+
+Touch points to update from the old test to the new status:
+- list `view=recharge` filter + the `recharge_pending` stat (`routes/costs.ts` ~182/256)
+- `by-job` `outstanding` calc (`routes/costs.ts` ~283)
+- `push-recharge` stamps `recharge_status='recharged_hh'` on success
+- backfill in migration 150: existing rows → `recharged_hh` where `recharged_to_hh_at`
+  is set, else `pending` where `recharge_mode <> 'none'`.
+
+Every resolve writes an `audit_log` row (the existing `audit()` helper) so the absorb
+reason + who/when is permanent.
+
+### 3. One shared resolve action
+
+A `RechargeResolveModal` (frontend) used by BOTH the Recharges tab and the Job View
+Money tab "Extra costs" line. It shows the base/markup/final breakdown (§1) and the
+three terminal paths (§2). Backed by:
+
+- `POST /api/costs/:id/push-recharge` — extended to accept the final amount + markup
+  metadata (today it reads `recharge_amount` straight). Closed-job handling already
+  exists (`job_data.php` precheck → `manualActionRequired`); when it trips, the modal
+  nudges staff toward the **"recharged externally"** path instead of leaving it stuck.
+- `POST /api/costs/:id/resolve-recharge` — new. Body `{ resolution: 'recharged_external' | 'absorbed', reason, reference? }`.
+  Sets `recharge_status`, stores reason/reference, audit-logs. STAFF_ROLES.
+
+The Job View "Extra costs" rows get inline **Resolve** buttons; the panel header shows
+"N to resolve". Recharged/absorbed rows render with their terminal pill (and the
+absorb reason on hover) instead of dropping out of sight — so the job carries its
+recharge history, like excess does.
+
+### 4. Nagging surfaces
+
+**Primary — post-hire close-out card** (the one jon uses). Add a `cost_resolve`
+close-out requirement, exactly mirroring `excess_resolve`:
+- Derivation engine (`hh-requirement-derivation.ts`): `ensureCloseout('cost_resolve',
+  'Resolve all client recharges (bill, bill externally, or absorb)')` when the job
+  reaches return status AND has any `recharge_mode <> 'none'` cost.
+- New `services/cost-requirement-sync.ts` `syncCostResolveRequirementStatus(jobId)`
+  (mirrors `excess-requirement-sync.ts`): `done` only when every recharge cost on the
+  job is resolved; else amber `in_progress`. Called from the resolve + push endpoints.
+- RequirementCard renders the count + amber note. Returns-page post-hire progress bar
+  picks it up for free (it counts `status='done'`).
+- Respects the suspension/internal/lost-cancelled gates like every other requirement
+  (an internal or cancelled job shouldn't nag — follow the `[Suspended:` / `is_internal`
+  / lost-cancelled conventions).
+
+**Secondary — dashboard NeedsAttention bucket** "Recharges to resolve" (amber),
+count of `recharge_mode <> 'none' AND recharge_status = 'pending'` on returned/active
+jobs, deep-linking to `/money/costs?view=recharge`. Add to `na.*` in
+`routes/dashboard.ts` + a `NABucket` in `NeedsAttention.tsx` (amber accent). There is
+currently **no** recharge field in `dashboard.ts` — this is net-new.
+
+### 5. Audit / write-off review + client roll-up (design-aware, build later)
+
+Because `absorbed` + reason is structured, the "we keep eating £20 underfuellings"
+review is a query: `costs WHERE recharge_status='absorbed' GROUP BY job's client / category`.
+Phase D ships it as a filter on the Recharges view (status pills: Pending / Recharged
+(HH) / Recharged (external) / Absorbed). A **client-level recharge roll-up** (an
+"Outstanding/absorbed recharges per client" panel on the Org page, like the excess
+ledger) is **parked** — but the schema above already supports it with no migration, so
+keep the `costs → job → client_organisation` join clean and don't bury client linkage.
+
+### 6. Build order
+
+1. Migration 150 — `recharge_status`, `recharge_base_amount`, `recharge_markup_type`,
+   `recharge_markup_value` + backfill; `system_settings` default-markup rows.
+2. Backend — extend `push-recharge` (markup + status stamp), add `resolve-recharge`,
+   switch the pending test to `recharge_status`, update list/stats/by-job.
+3. `RechargeResolveModal` + wire into the Recharges tab and Job View Money tab in-place.
+4. `cost_resolve` close-out requirement + `syncCostResolveRequirementStatus` + derivation hook.
+5. Dashboard "Recharges to resolve" bucket.
+6. Recharges-view status filter pills (the absorb-audit slice).
+7. *(Parked)* client-level roll-up panel.
+
+### Build notes — Phase D shipped (Jun 2026)
+
+Steps 1–6 built end-to-end (PR #889). Files:
+- **Migration 150** (`150_cost_recharge_lifecycle.sql`) — the `recharge_status` +
+  markup + resolution-audit columns, backfill, `cost_recharge` markup settings,
+  and the `cost_resolve` `requirement_type_definitions` row (💸).
+- **`services/cost-recharge-markup.ts`** — markup compute + `getRechargeMarkupDefaults`;
+  exposed via `GET /api/costs/recharge-defaults`.
+- **`routes/costs.ts`** — `push-recharge` now persists the modal's final/markup
+  figures + refreshes the close-out card; new `POST /:id/resolve-recharge`
+  (`recharged_external` / `absorbed` + reason); pending bucket re-keyed on
+  `recharge_status` across list/stats/by-job; `view=recharge&recharge_status=…`
+  audit slice (`all` / terminal states); `deriveRechargeStatusForWrite` keeps the
+  status in step on create/update without ever clobbering a terminal resolution.
+- **`services/cost-requirement-sync.ts`** + derivation hook — `cost_resolve`
+  post-hire close-out card (sibling of `excess_resolve`), resolution-authoritative.
+- **`routes/dashboard.ts`** — `recharges_to_resolve_count/_total` in `needs_attention`.
+- **Frontend** — `RechargeResolveModal.tsx` (markup breakdown + 3 paths, ex-VAT with
+  inc-VAT preview, `RechargeStatusPill`) wired into the Recharges tab (replacing the
+  one-shot "Push to HireHop" button) and the Job View Money tab "Extra costs" rows;
+  status filter pills on the Recharges view; dashboard "Recharges to Resolve" amber
+  bucket. Shared `Cost` type extended with the new fields.
+
+**Live-test checklist (carry over from the original recharge push):** the HH
+hire-line add + price-edit path itself was flagged "needs one live-test pass" —
+push a real `extra` cost to a scratch job via the new modal and confirm the line,
+price, and 20% VAT land, plus that a closed-HH-job push correctly bounces the modal
+to the "Billed externally" path. Markup default is greater-of-£10-or-20% (editable
+in Settings via the `cost_recharge` system_settings rows — no dedicated Settings UI
+section yet; edit the rows directly or add a section if it churns).

@@ -33,6 +33,7 @@
  */
 
 import { getFreelancerSession, clearFreelancerSession } from './freelancer-session'
+import { getFreelancerPrepSession, clearFreelancerPrepSession, isOnFreelancerPrepPage } from './freelancer-prep-session'
 import type { FreelancerBookoutContext } from './freelancer-session'
 
 export type SessionScope = 'staff' | 'freelancer'
@@ -115,6 +116,23 @@ export function isEmbeddedMode(): boolean {
  */
 export function getOpAuthState(): AuthAdapterState | null {
   if (!opAuthStoreGetter) return null
+
+  // Freelancer PREP page: its own session, whatever else is stored (§21.6).
+  // No freelancerContext — that shape is the book-out hand-over's.
+  if (isOnFreelancerPrepPage()) {
+    const ps = getFreelancerPrepSession()
+    return {
+      isAuthenticated: !!ps,
+      isLoading: false,
+      scope: 'freelancer',
+      userName: ps?.context.personName ?? null,
+      userEmail: null,
+      userRole: null,
+      token: ps?.token ?? null,
+      freelancerContext: null,
+      logout: clearFreelancerPrepSession,
+    }
+  }
 
   // Freelancer session takes precedence when present.
   const fs = getFreelancerSession()

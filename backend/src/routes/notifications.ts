@@ -741,8 +741,8 @@ router.post('/:id/action', async (req: AuthRequest, res: Response) => {
       }
       const chaseMethod = (action.params?.chase_method as string | undefined) || null;
       const interactionResult = await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, chase_method)
-         VALUES ('chase', $1, $2, $3, $4)
+        `INSERT INTO interactions (type, content, job_id, created_by, chase_method, source)
+         VALUES ('chase', $1, $2, $3, $4, 'system')
          RETURNING id`,
         [`Chase logged from inbox: ${notif.title}`, jobId, req.user!.id, chaseMethod]
       );

@@ -20,6 +20,7 @@ import { emailService } from './email-service';
 import { renderBriefingHtml, buildSubject } from './email-templates/pre-hire-briefing';
 import { resolveHireFormContacts, ResolvedContact } from './hire-form-contacts';
 import { calculateVatAdjustment } from './vat-adjustment';
+import { getPaymentPortalLink } from './payment-portal-link';
 
 /** Match the OP-wide convention pinned in CLAUDE.md: requirements with a
  *  `[Suspended: <reason>]` marker in `notes` (Van & Driver or Internal) are
@@ -187,6 +188,10 @@ export interface JobBriefing {
    *  reference the previous send and include the link. Null on non-self-
    *  drive hires or when we don't have a HH job number. */
   hire_form_link: BriefingHireFormLink | null;
+  /** The client's payment portal link (computed live from HireHop, see
+   *  services/payment-portal-link.ts). Null when the job has no HH number or
+   *  HireHop couldn't supply the job data. */
+  payment_portal_url: string | null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -627,6 +632,19 @@ export async function buildBriefing(
   const has_backline = !!derivedFlags?.has_backline;
   const equipment_summary = summariseEquipment(derivedFlags);
 
+  // ── Payment portal link ────────────────────────────────────────────
+  // Live from HireHop so it matches the quote document's link. Best-effort:
+  // the client draft falls back to "the blue link at the bottom of the quote".
+  let payment_portal_url: string | null = null;
+  if (hhJobNumber) {
+    try {
+      const link = await getPaymentPortalLink(hhJobNumber);
+      payment_portal_url = link?.url ?? null;
+    } catch (err) {
+      console.warn(`[pre-hire-briefing] payment portal link failed for HH#${hhJobNumber}:`, err);
+    }
+  }
+
   // ── Hire form link + last-send metadata ────────────────────────────
   // Only populate for self-drive hires with a HH number — these are the
   // only jobs where the link is meaningful. Parses last-send info from the
@@ -781,6 +799,7 @@ export async function buildBriefing(
     contacts,
     holding,
     hire_form_link,
+    payment_portal_url,
   };
 }
 
@@ -811,10 +830,16 @@ async function buildHoldingSummary(jobId: string, hhJobNumber: number | null): P
     return null;
   }
 
-  const incomingThisJob = rows.filter((x) => x.kind === 'incoming' && x.this_job);
+  // `temp_storage` is folded into `incoming` (Aug 2026) — historical rows may
+  // still carry the old kind, so count them as incoming rather than dropping
+  // them. See the HeldItemKind note in shared/types.
+  const isHeldForClient = (k: string) => k === 'incoming' || k === 'temp_storage';
+  const incomingThisJob = rows.filter((x) => isHeldForClient(x.kind) && x.this_job);
   const incoming_to_give = incomingThisJob.filter((x) => ['arrived', 'stored', 'client_notified'].includes(x.status)).length;
   const incoming_awaited = incomingThisJob.filter((x) => x.status === 'expected').length;
-  const temp_storage = rows.filter((x) => x.kind === 'temp_storage').length;
+  // Retained on the payload for shape compatibility; always 0 now that the kind
+  // is folded — the items count under incoming above.
+  const temp_storage = 0;
   const lost_property = rows.filter((x) => x.kind === 'lost_property').length;
 
   if (!incoming_to_give && !incoming_awaited && !temp_storage && !lost_property) return null;
@@ -822,7 +847,6 @@ async function buildHoldingSummary(jobId: string, hhJobNumber: number | null): P
   const lines: string[] = [];
   if (incoming_to_give) lines.push(`${incoming_to_give} package${incoming_to_give === 1 ? '' : 's'} here to give to the client`);
   if (incoming_awaited) lines.push(`${incoming_awaited} ${incoming_awaited === 1 ? 'box was' : 'boxes were'} expected — nothing marked as arrived yet`);
-  if (temp_storage) lines.push(`${temp_storage} of this client's item${temp_storage === 1 ? '' : 's'} in temporary storage`);
   if (lost_property) lines.push(`${lost_property} of this client's item${lost_property === 1 ? '' : 's'} in lost property`);
 
   return { incoming_to_give, incoming_awaited, temp_storage, lost_property, lines };
@@ -888,8 +912,8 @@ export async function sendBriefingEmail(
   try {
     const trigger = triggeredBy ? 'manual' : 'scheduled';
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by)
-       VALUES ('note', $1, $2, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, source)
+       VALUES ('note', $1, $2, $3, 'system')`,
       [
         `📧 Pre-Hire Review email sent to ${actualRecipient} (${trigger}). Subject: "${subject}"`,
         jobId,

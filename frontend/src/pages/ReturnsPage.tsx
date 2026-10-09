@@ -12,6 +12,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { MobileFilterSheet } from '../components/mobile/MobileFilterSheet';
+import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
 
 const STATUS_MAP: Record<number, string> = {
   6: 'Returned Incomplete', 7: 'Returned', 8: 'Requires Attention', 11: 'Completed',
@@ -44,6 +45,10 @@ interface Job {
   status_name: string | null;
   client_name: string | null;
   company_name: string | null;
+  // Canonical org names from the API (see lib/jobOrgName.ts). Render via
+  // jobDisplayOrgNameOr(job), never the raw client_name/company_name strings.
+  client_org_name?: string | null;
+  lead_org_name?: string | null;
   venue_name: string | null;
   job_date: string | null;
   job_end: string | null;
@@ -155,6 +160,10 @@ export default function ReturnsPage() {
       params.set('page', String(page));
       params.set('limit', String(limit));
       params.set('date_field', 'return_date');
+      // Exclude mid-hire partial returns (HH status 6 but not yet due back —
+      // an element returned early while the rest stays out). Those belong in
+      // Out Now, not Returns. See CLAUDE.md → "status-6 no man's land".
+      params.set('genuinely_returning', '1');
       if (search.trim()) params.set('search', search.trim());
       if (typeFilter.length > 0) params.set('service_type', typeFilter.join(','));
       if (dateFrom) params.set('date_from', dateFrom);
@@ -279,7 +288,7 @@ export default function ReturnsPage() {
             </div>
             <h3 className="font-medium text-gray-900 truncate">{job.job_name || 'Untitled Job'}</h3>
             <div className="flex items-center gap-3 mt-1 text-sm text-gray-500 flex-wrap">
-              <span>{job.client_name || job.company_name || 'No client'}</span>
+              <span>{jobDisplayOrgNameOr(job, 'No client')}</span>
               {job.job_date && (
                 <span className="text-gray-400">{formatDateRange(job.job_date, job.job_end)}</span>
               )}

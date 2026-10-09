@@ -10,14 +10,16 @@
  * back to `not_started` and the marker is stripped from notes.
  *
  * Marker-gated by design — staff-cancelled rows (no marker) stay cancelled.
- * The two markers in current use:
- *   - `[Auto-cancelled: job marked lost]`  — set by routes/pipeline.ts
- *   - `[Cancelled]`                        — set by routes/cancellations.ts
+ * The markers in current use:
+ *   - `[Auto-cancelled: job marked lost]`      — set by routes/pipeline.ts (lost)
+ *   - `[Cancelled]`                            — set by routes/cancellations.ts
+ *   - `[Auto-cancelled: enquiry dismissed]`    — set by routes/pipeline.ts (dismiss)
  */
 import { query } from '../config/database';
 
 export const LOST_REQUIREMENT_MARKER = '[Auto-cancelled: job marked lost]';
 export const CANCELLED_REQUIREMENT_MARKER = '[Cancelled]';
+export const DISMISSED_REQUIREMENT_MARKER = '[Auto-cancelled: enquiry dismissed]';
 
 export interface ReactivationResult {
   reactivatedCount: number;
@@ -40,7 +42,10 @@ export async function reactivateAutoCancelledRequirements(
          notes = NULLIF(
            TRIM(
              REPLACE(
-               REPLACE(notes, E'\n[Auto-cancelled: job marked lost]', ''),
+               REPLACE(
+                 REPLACE(notes, E'\n[Auto-cancelled: job marked lost]', ''),
+                 E'\n[Auto-cancelled: enquiry dismissed]', ''
+               ),
                ' [Cancelled]', ''
              )
            ),
@@ -50,7 +55,8 @@ export async function reactivateAutoCancelledRequirements(
      WHERE job_id = $1
        AND status = 'cancelled'
        AND (notes LIKE '%[Auto-cancelled: job marked lost]%'
-            OR notes LIKE '%[Cancelled]%')
+            OR notes LIKE '%[Cancelled]%'
+            OR notes LIKE '%[Auto-cancelled: enquiry dismissed]%')
      RETURNING id`,
     [jobId],
   );

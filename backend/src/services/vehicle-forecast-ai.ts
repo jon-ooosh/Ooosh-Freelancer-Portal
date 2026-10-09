@@ -14,12 +14,14 @@
  * cached system prompt. Cost is pennies per van per run.
  */
 
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
+import { getAnthropicClient, isAnthropicConfigured, CLAUDE_SONNET_MODEL } from '../config/anthropic';
 import { query } from '../config/database';
 import { buildVehicleForecast, type VehicleForecast } from './vehicle-forecast';
 
-const MODEL_ID = 'claude-sonnet-4-6';
-const MAX_TOKENS = 1200;
+const MODEL_ID = CLAUDE_SONNET_MODEL;
+// Headroom for thinking as well as the JSON — thinking counts towards
+// max_tokens on Sonnet 5.5.
+const MAX_TOKENS = 8000;
 
 const SYSTEM_PROMPT = `You are a fleet maintenance analyst for Ooosh Tours, a UK music-tour vehicle hire company. You are given a single van's forward-looking health data — tyre wear projections, mileage pace, service-due, MOT/Tax/TFL compliance runway, ULEZ status, fluid top-up frequency, 12-month running costs, recurring issues, and recent free-text prep/service notes.
 
@@ -181,7 +183,7 @@ export async function generateVehicleAssessment(
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: [{ type: 'text', text: forecastToPrompt(forecast) }] }],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    output_config: { format: { type: 'json_schema', schema: SCHEMA as any } } as any,
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA as any } } as any,
   });
 
   const textBlock = resp.content.find((b) => b.type === 'text');

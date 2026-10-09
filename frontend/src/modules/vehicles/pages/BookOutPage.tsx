@@ -39,6 +39,8 @@ import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
 import type { ChecklistItem } from '../lib/settings-api'
 import type { HireHopJob } from '../types/hirehop'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 
 /** Per-operation result shown on the success/complete screen */
 interface OpResult {
@@ -554,9 +556,12 @@ export function BookOutPage() {
         return true
       }
       case 'Photos':
-        return TESTING_MODE || capturedRequiredCount >= requiredPhotoCount
+        // V&D soft book-out (Ooosh hands the van to our own/freelancer driver):
+        // photos are optional — staff add them case-by-case. Only fuel + mileage
+        // are required to proceed. Normal customer self-drive is unchanged.
+        return TESTING_MODE || isVanAndDriver || capturedRequiredCount >= requiredPhotoCount
       case 'Briefing':
-        return allBriefingChecked
+        return isVanAndDriver || allBriefingChecked
       case 'Confirm':
         return true
       default:
@@ -565,8 +570,10 @@ export function BookOutPage() {
   }
 
   async function handleSubmit() {
-    // Require signature before submitting
-    if (!signatureRef.current?.hasSignature()) {
+    // Require signature before submitting — EXCEPT on a V&D soft book-out, where
+    // fuel + mileage are the only hard requirements (signature optional, staff
+    // judge per case). Normal customer self-drive still requires the signature.
+    if (!isVanAndDriver && !signatureRef.current?.hasSignature()) {
       setSubmitError('Please provide a driver signature before completing the book-out.')
       return
     }
@@ -740,6 +747,7 @@ export function BookOutPage() {
     setUploadProgress('Generating PDF & finalising...')
 
     const pdfData = {
+      eventId,
       vehicleReg: form.vehicleReg,
       vehicleType: form.vehicleType,
       vehicleMake: selectedVehicle?.make,
@@ -1400,14 +1408,21 @@ export function BookOutPage() {
         )}
 
         {STEPS[step] === 'Photos' && (
-          <StepPhotos
-            photos={form.photos}
-            onCapture={handlePhotoCapture}
-            onRemove={handlePhotoRemove}
-            onUpdatePhoto={handlePhotoUpdate}
-            requiredCount={requiredPhotoCount}
-            capturedCount={capturedRequiredCount}
-          />
+          <>
+            {isVanAndDriver && (
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Van &amp; Driver soft book-out — photos are <strong>optional</strong>. Add any you want (recommended for a new driver or a long hire), or skip and continue.
+              </div>
+            )}
+            <StepPhotos
+              photos={form.photos}
+              onCapture={handlePhotoCapture}
+              onRemove={handlePhotoRemove}
+              onUpdatePhoto={handlePhotoUpdate}
+              requiredCount={requiredPhotoCount}
+              capturedCount={capturedRequiredCount}
+            />
+          </>
         )}
 
         {STEPS[step] === 'Briefing' && (
@@ -1427,13 +1442,20 @@ export function BookOutPage() {
         )}
 
         {STEPS[step] === 'Confirm' && (
-          <StepConfirm
-            form={form}
-            onSubmit={handleSubmit}
-            isSubmitting={isSubmitting}
-            error={submitError}
-            signatureRef={signatureRef}
-          />
+          <>
+            {isVanAndDriver && (
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Van &amp; Driver soft book-out — the driver <strong>signature is optional</strong>. Fuel &amp; mileage are the only requirements.
+              </div>
+            )}
+            <StepConfirm
+              form={form}
+              onSubmit={handleSubmit}
+              isSubmitting={isSubmitting}
+              error={submitError}
+              signatureRef={signatureRef}
+            />
+          </>
         )}
       </div>
 
@@ -1496,6 +1518,8 @@ function StepSelectVehicle({
   hireHopJob: HireHopJob | null
   onSelect: (v: Vehicle) => void
 }) {
+  // "For sale" pill — staff only; the hook stays idle in a freelancer session.
+  const openSales = useOpenSalesByVehicle()
   // Extract van requirements if a HireHop job is linked
   const requirements = useMemo(
     () => hireHopJob ? extractVanRequirements(hireHopJob) : [],
@@ -1590,6 +1614,7 @@ function StepSelectVehicle({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   <span className="font-mono text-sm font-bold text-ooosh-navy">{v.reg}</span>
+                  <ForSalePill sale={openSales.get(v.id)} />
                   <span className="text-xs text-gray-400">{v.simpleType}</span>
                   {gearbox !== 'unknown' && (
                     <span className="text-[10px] text-gray-400">({gearbox === 'auto' ? 'A' : 'M'})</span>

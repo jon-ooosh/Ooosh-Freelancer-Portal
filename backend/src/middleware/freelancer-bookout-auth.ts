@@ -25,6 +25,14 @@ export interface FreelancerBookoutSession {
   quoteId: string;
   freelancerEmail: string;
   freelancerPersonId: string;
+  /**
+   * Which side of the hire this session is for. 'bookout' (default) = a
+   * delivery hand-over; 'checkin' = a collection / soft check-in. The token
+   * format + scope are shared; the resolve ENDPOINT sets the mode, and
+   * endpoints that behave differently on collection (soft check-in, no
+   * 'returned' flip) branch on it. Absent on pre-existing sessions → 'bookout'.
+   */
+  mode?: 'bookout' | 'checkin';
 }
 
 export interface FreelancerBookoutRequest extends Request {
@@ -153,6 +161,7 @@ export function authenticateFreelancerBookout(
       quoteId: decoded.quoteId,
       freelancerEmail: decoded.freelancerEmail,
       freelancerPersonId: decoded.freelancerPersonId,
+      mode: decoded.mode ?? 'bookout',
     };
     next();
   } catch {
@@ -180,6 +189,7 @@ export interface FlexibleVehicleRequest extends Request {
     role: string;
   };
   bookoutSession?: FreelancerBookoutSession;
+  prepSession?: FreelancerPrepSession;
 }
 
 export function authenticateVehicleFlexible(
@@ -216,6 +226,26 @@ export function authenticateVehicleFlexible(
       quoteId: fb.quoteId,
       freelancerEmail: fb.freelancerEmail,
       freelancerPersonId: fb.freelancerPersonId,
+      mode: fb.mode ?? 'bookout',
+    };
+    next();
+    return;
+  }
+
+  // Freelancer PREP session — narrow scope, one van, one task (§21.6).
+  if (decoded.scope === 'freelancer_prep') {
+    const fp = decoded as unknown as FreelancerPrepSession;
+    if (!fp.taskId || !fp.vehicleReg || !fp.personId) {
+      res.status(401).json({ error: 'Invalid session scope' });
+      return;
+    }
+    req.prepSession = {
+      scope: 'freelancer_prep',
+      taskId: fp.taskId,
+      personId: fp.personId,
+      personName: fp.personName,
+      vehicleId: fp.vehicleId,
+      vehicleReg: fp.vehicleReg,
     };
     next();
     return;
@@ -292,3 +322,63 @@ export async function getBookoutScope(req: FlexibleVehicleRequest): Promise<Book
   (req as FlexibleVehicleRequest & { _bookoutScope?: unknown })._bookoutScope = scope;
   return scope;
 }
+
+
+// ── Freelancer PREP session (STAFF-CALENDAR-SPEC §21.6) ─────────────────────
+//
+// A freelancer opening the prep sheet for the ONE van a task names. A separate
+// scope from 'freelancer_bookout' on purpose: that session is built around a
+// vehicle_hire_assignment and refuses a token without one, and a prep has no
+// assignment — loosening that check to fit prep would weaken book-out.
+//
+// No portal HMAC round trip: the portal calls OP with the freelancer's own
+// session, so OP already knows who they are and mints the link itself.
+//   1. POST /api/portal/freelancer-tasks/:id/prep-link → a 15-minute REDEEM
+//      token in the URL (short, because a URL lands in history and logs).
+//   2. POST /api/vehicles/freelancer-prep/resolve → re-checks the task and
+//      swaps it for a 4h SESSION token held in the page, never in a URL.
+//
+// Neither token carries `id`/`email`/`role`, so neither can pass for a staff
+// login anywhere authorize() is used.
+
+export interface FreelancerPrepSession {
+  scope: 'freelancer_prep';
+  taskId: string;
+  personId: string;
+  personName: string;
+  vehicleId: string;
+  /** Uppercased, spaces removed — the form every check compares against. */
+  vehicleReg: string;
+}
+
+const PREP_REDEEM_TTL_SECONDS = 15 * 60;
+
+export function normaliseReg(reg: string): string {
+  return String(reg || '').toUpperCase().replace(/\s+/g, '');
+}
+
+export function mintFreelancerPrepRedeemToken(taskId: string, personId: string): string {
+  return jwt.sign({ scope: 'freelancer_prep_redeem', taskId, personId }, JWT_SECRET, {
+    expiresIn: PREP_REDEEM_TTL_SECONDS,
+  });
+}
+
+export function verifyFreelancerPrepRedeemToken(token: string): { taskId: string; personId: string } | null {
+  try {
+    const d = jwt.verify(token, JWT_SECRET) as { scope?: string; taskId?: string; personId?: string };
+    if (d.scope !== 'freelancer_prep_redeem' || !d.taskId || !d.personId) return null;
+    return { taskId: d.taskId, personId: d.personId };
+  } catch {
+    return null;
+  }
+}
+
+export function mintFreelancerPrepSession(session: Omit<FreelancerPrepSession, 'scope'>): string {
+  return jwt.sign({ scope: 'freelancer_prep', ...session }, JWT_SECRET, { expiresIn: SESSION_TTL_SECONDS });
+}
+
+export function isFreelancerPrep(req: FlexibleVehicleRequest): req is FlexibleVehicleRequest & { prepSession: FreelancerPrepSession } {
+  return !!req.prepSession && !req.user && !req.bookoutSession;
+}
+
+export const FREELANCER_PREP_SESSION_TTL_SECONDS = SESSION_TTL_SECONDS;
