@@ -1129,7 +1129,7 @@ export default function RequirementCard({
             })()}
 
             {/* Notes (for types without specific rendering) */}
-            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'damage_review', 'reminder', 'rehearsal'].includes(req.requirement_type) && req.notes && (
+            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'payment_reconcile', 'damage_review', 'reminder', 'rehearsal'].includes(req.requirement_type) && req.notes && (
               <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
             )}
 

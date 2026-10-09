@@ -148,7 +148,13 @@ router.post('/hirehop', async (req: Request, res: Response) => {
 
 // ── Job Status Change Handler ────────────────────────────────────────────
 
-async function handleJobStatusChange(
+/**
+ * Exported for the hire close-out: after it sets a job to Completed in HireHop
+ * (with `no_webhook: 1`, so HireHop won't call us), it applies the same
+ * transition here that HireHop's own webhook would — same cascades, same
+ * timeline note — so OP never lags its own write.
+ */
+export async function handleJobStatusChange(
   data: Record<string, unknown> | undefined,
   changes: Record<string, unknown> | undefined,
   topLevelJobId?: number | string,

@@ -39,10 +39,13 @@ import { isXeroConfigured } from '../config/xero';
 import { DISPLAY_NAME_SQL } from './display-name';
 import { hasNonStandardVatItem } from './vat-adjustment';
 import { hhLocalNow } from './shop-stock';
+import { getMethodForBankId, PAYMENT_METHODS_LABELS } from './hh-deposit';
+import { handleJobStatusChange } from '../routes/webhooks';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const HH_RETURNED_INCOMPLETE = 6;
+const HH_COMPLETED_STATUS = 11;
 
 /** The route maps exactly this message to 404 — never match on "does not exist" (a Postgres error says that too). */
 export const JOB_NOT_FOUND = 'That job does not exist.';
@@ -110,6 +113,8 @@ export interface InvoicePlan {
 
 export interface CloseOutPlan {
   jobId: string;
+  /** True when this came from OP's own record of the job being Completed, with no HireHop read (§4.4). */
+  fromLog?: boolean;
   invoice: InvoicePlan;
   hhJobNumber: number;
   jobName: string | null;
@@ -230,14 +235,14 @@ function hireDepositRows(rows: Row[]): Row[] {
 
 /** Hire deposits with money left, oldest first, with the display fields. */
 function hirePayments(rows: Row[]): CloseOutPayment[] {
-  const banks: Array<{ ID: number; NAME: string }> = (rows as any).banks || [];
   const byId = new Map(rows.filter((r) => kindOf(r) === 6).map((r) => [idOf(r), r]));
   return unallocatedPayments(rows, isExcessDeposit)
     .map((p) => {
       const row = byId.get(p.depositId);
       return {
         ...p,
-        bankName: banks.find((b) => Number(b.ID) === p.bankId)?.NAME ?? null,
+        // The billing rows carry only the bank id; name it the way OP names methods.
+        bankName: p.bankId != null ? (PAYMENT_METHODS_LABELS[getMethodForBankId(p.bankId)] ?? null) : null,
         date: String(row?.data?.DATE || row?.date || ''),
         credit: round2(parseFloat(row?.credit ?? row?.data?.credit ?? '0')),
       };
@@ -562,9 +567,29 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   return base;
 }
 
-/** What Allocate would do, without doing it. */
-export async function planHireCloseOut(jobIdOrNumber: string): Promise<CloseOutPlan> {
-  return buildPlan(await loadJob(jobIdOrNumber));
+/**
+ * What Allocate would do, without doing it. A job OP already knows is
+ * Completed is not re-read from HireHop on every page view (jon, 9 Oct: once
+ * it's completed it's completed) — the card shows OP's own record instead,
+ * and "Check again" (`fresh`) forces the full read.
+ */
+export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: boolean } = {}): Promise<CloseOutPlan> {
+  const job = await loadJob(jobIdOrNumber);
+  if (!opts.fresh && job.pipeline_status === 'completed') {
+    const entries = await readLog(job.id);
+    const completed = entries.find((e) => e.step === 'complete' && e.ok);
+    if (completed) {
+      return {
+        jobId: job.id, hhJobNumber: Number(job.hh_job_number), jobName: job.job_name, hhStatus: HH_COMPLETED_STATUS, fromLog: true,
+        invoice: { accruedNet: 0, invoicedNet: 0, netToInvoice: 0, draft: null, euTrigger: false, notReturned: false, blockers: [], ready: false },
+        invoices: [], payments: [], allocations: [], surplus: [], shortfall: 0, excessHeld: 0,
+        blockers: [], warnings: [],
+        sentences: [`Completed in HireHop${completed.user_name ? ` by ${completed.user_name}` : ''} on ${String(completed.created_at).slice(0, 10)}.`],
+        ready: false, readyToComplete: false, log: entries,
+      };
+    }
+  }
+  return buildPlan(job);
 }
 
 // ── Allocate ─────────────────────────────────────────────────────────────
@@ -702,6 +727,14 @@ export async function completeHireJob(jobIdOrNumber: string, userId: string | nu
       }
       if (reasons.length) await rep.stop('complete', reasons.join(' '));
       await completeJob(rep, plan.hhJobNumber);
+      // HireHop was told no_webhook, so apply the same transition OP's webhook
+      // would (pipeline_status → completed, cascades, timeline) right now.
+      try {
+        const mirrored = await handleJobStatusChange({ STATUS: HH_COMPLETED_STATUS }, undefined, plan.hhJobNumber);
+        if (!mirrored.success) await log(job.id, userId, 'complete', true, `HireHop is Completed; OP's own status was not updated (${mirrored.message}) — the next HireHop sync will.`);
+      } catch (e) {
+        await log(job.id, userId, 'complete', true, `HireHop is Completed; OP's own status was not updated (${e instanceof Error ? e.message : String(e)}) — the next HireHop sync will.`);
+      }
       if (plan.excessHeld >= PENNY) {
         await log(job.id, userId, 'complete', true, `Completed with ${gbp(plan.excessHeld)} excess still held (manager override).`);
       }

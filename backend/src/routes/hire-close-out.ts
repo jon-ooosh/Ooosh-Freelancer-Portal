@@ -26,7 +26,7 @@ const fail = (res: Response, err: unknown, fallback: string) => {
 
 router.get('/:jobId/plan', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
-    res.json({ data: await planHireCloseOut(String(req.params.jobId)) });
+    res.json({ data: await planHireCloseOut(String(req.params.jobId), { fresh: req.query.fresh === '1' }) });
   } catch (err) {
     console.error('[close-out] plan failed:', err);
     fail(res, err, 'Could not read the job\'s money.');
