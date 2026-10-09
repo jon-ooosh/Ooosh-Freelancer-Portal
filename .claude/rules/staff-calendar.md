@@ -1,18 +1,20 @@
 ---
 paths:
-  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,freelancer-days}.ts"
-  - "backend/src/routes/staff-calendar.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214}_*.sql"
+  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-ical,freelancer-days,freelancer-tasks}.ts"
+  - "backend/src/routes/{staff-calendar,staff-calendar-feed,freelancer-tasks}.ts"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
-  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals}.tsx"
+  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel,FreelancerTasksPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
 ---
 
 # Staff Calendar & Time — load-bearing rules
 
-Full design: `docs/STAFF-CALENDAR-SPEC.md`. This file is the "never do X" list.
-**Hard deadline: live 1 January 2027** (BrightHR expires; the leave year is
-calendar Jan–Dec so 1 Jan is the only cutover with no balances to migrate).
+Full design: `docs/STAFF-CALENDAR-SPEC.md` — **§18 "Where it stands" is the
+handover**. This file is the "never do X" list.
+**LIVE since October 2026** (earlier than the original 1 January 2027 plan;
+2026 history backfilled from BrightHR). Expected to be complete — what is
+deliberately not built is in spec §16.
 
 ## Minutes are the only stored unit
 
@@ -37,6 +39,8 @@ neither can be shown to be wrong.
 | Is this person off sick, and for how long? | `services/staff-absence.ts` |
 | What is the threshold / policy / bank holiday? | `services/staff-settings.ts` |
 | Is the company shut on this date? | `services/staff-company-days.ts` |
+| Is this person working from home? | `services/staff-wfh.ts` (merged into `StaffDay.location` by `staff-day-status.ts`) |
+| What goes in somebody's calendar feed? | `services/staff-ical.ts` |
 
 ## The ledger is append-only and the database enforces it
 
@@ -57,6 +61,20 @@ request — there is no separate entry type), and reclaiming holiday overtaken
 by sickness posts a **`correction`** credit per day (§7.4). A reclaimed TOIL
 day credits the **overtime** account, not holiday — sending it to holiday
 would quietly convert banked overtime into annual leave.
+
+## Manual adjustments: for what no flow owns, and the person sees them
+
+Staff page › Employment › balance panel › "+ Add an adjustment" (Oct 2026)
+posts an `adjustment` with `source_type = 'manual'` through the existing
+`POST /employees/:personId/ledger`. It is for things no flow owns — a balance
+brought across from BrightHR (2025 overtime still owed at the switchover), an
+agreed one-off. **Never** for holiday booked, overtime worked or a pay-out:
+those have their own forms and their own entry types.
+
+The note is REQUIRED and the person sees it: My Time lists every un-reversed
+manual adjustment as a row, so the figure on the card is always explained by
+the list beneath it. A mistake is undone with Reverse; the adjustment and its
+reversal then cancel and neither shows.
 
 ## Working patterns are effective-dated and never edited in place
 
@@ -125,9 +143,16 @@ showing it as confirmed would be a lie the person planning the week then acts
 on. `BOOKING_STATUS[...].counts` in `StaffCalendarPage.tsx` is the one place
 that decides which statuses are real cover.
 
-**Nothing emails the freelancer yet** (spec §9.4, designed and not built), so
-`offered` currently means "we intend to ask", not "we asked". Do not lean on it
-meaning more than that until the email ships.
+**The offer IS emailed** (spec §9.4, live since migration 225): `offered` with
+`offer_email_sent_at` set means "we asked". `offered` with it NULL means the mail
+failed or the day was backdated (never emailed) — nobody was told. See the offer
+link and chase sections below.
+
+**Booking one is the whole team's job** (jon, Oct 2026): every freelancer-day
+route is `authorize(...STAFF_ROLES)` and the calendar's "Book a freelancer"
+is ungated. That is a separate gate from `STAFF_ADMIN_ROLES` / `adminOnly`,
+which guards HR records and stays admin-only — never widen one by way of the
+other.
 
 Only YARD days — people physically in the building. A freelancer booked to
 drive a delivery lives in `quote_assignments` and does not belong here, because
@@ -136,6 +161,22 @@ the only question this answers is "have we got enough people in".
 Staff and freelancers are counted **separately** on the calendar ("4 +2"),
 collapsing to one number when there are no freelancers. Merging them would
 claim they are interchangeable.
+
+## Freelancer tasks belong to a booking or a shift — never a person (spec §21)
+
+`services/freelancer-tasks.ts` is the only place that decides whose a task is.
+A task has NO person and NO date: both come from its owner (a day booking, or a
+sitter shift's LIVE assignment), so a reassigned sitter inherits the evening's
+tasks and an amended booking moves its tasks. Never add either column.
+
+- Not To Do (staff-only) and never for freelancers on driving jobs.
+- **No email per change.** "Send update" is a deliberate staff press; the only
+  automatic email is the 16:00 sitter summary, and only when tasks changed.
+- **A van prep is ticked by saving the prep** (`save-event` → `autoTickPrep`),
+  not by a portal button — the portal refuses it.
+- Soft-cancel only (`status = 'cancelled'`); there is no DELETE.
+- **"Who could I give this to?" is `bookedFreelancersFor()`** — today + tomorrow, day bookings + sitter evenings. The Give-to-a-freelancer button renders nothing when it is empty (jon); don't make it always-on.
+- **The prep link and its redeem step share ONE rule**, `assertPrepEligible()` — open van prep, theirs, owner live, day yesterday → tomorrow. Do not check eligibility anywhere else.
 
 ## Freelancer day times are quarter hours, from a `<select>`
 
@@ -348,6 +389,25 @@ something they are now being given. The create response carries
 `correction` credit and a stamp. **Offered, never automatic.** Withdrawing a
 company day deliberately does NOT re-debit what was handed back.
 
+## A company day on your day off is a day in lieu (§20.5b, Oct 2026)
+
+`syncCompanyDayLieu()` (`staff-company-days.ts`) credits ONE nominal day to
+anyone whose RAW pattern has them off on a company day — same number of days
+for everyone, not pro-rata (jon). It runs inside `syncEntitlement()`, so the
+06:05 sync and "Update entitlement" keep it right, and adding or withdrawing a
+company day refreshes it at once. Credited in advance, dated on the company day.
+
+- **Its own `source_type`, `company_day_lieu`** (migration 278). Never `system`
+  — `syncEntitlement` sums that for its own delta and would correct the lieu
+  away — and never `manual`, or it cannot tell its own postings apart.
+- **It follows the calendar**: idempotent per date, posting the difference, so
+  a change of working days or a withdrawn company day TAKES THE DAY BACK. This
+  is deliberately unlike the reclaim (a company day over a BOOKED holiday),
+  which is offered by a human and never re-debited.
+- Read the raw contract (`includeCompanyDays: false`) — with company days
+  applied every one of those dates reads "not scheduled" for everybody.
+- Shown on My Time as a "Day in lieu" row.
+
 ## Absence wins the calendar, and both rows survive
 
 `mergeAbsenceLayer()` in `staff-day-status.ts` is the ONLY place leave and
@@ -387,6 +447,44 @@ to an admin — the approvals list depends on it. A page showing one person's
 time must pass `personId=` or `mine=1`; My Time once listed the whole team's
 leave as an admin's own. The Staff page's Time off tab is `MyTimePage
 personId={…}` — one page, two viewers, so the figures cannot drift.
+
+## Working from home is a LOCATION on a working day, not leave
+
+Spec §19 (Oct 2026, migration 269). `StaffDay.location = 'home'` comes from the
+pattern's `at_home` tick (a regular day, admin-set) or an APPROVED
+`staff_wfh_requests` row (a one-off, asked for and approved like holiday).
+`mergeWfhLayer()` is the ONE place they are applied, after the absence merge.
+
+- **Nothing here touches the ledger, a balance or an absence.** If a WFH
+  change needs `staff-balance.ts`, something has gone wrong.
+- **Only on a day actually worked.** A day off, on leave or off sick carries no
+  location — the merge strips it.
+- **Pending is not home.** A request waiting is `homePending`; until somebody
+  says yes they are expected in, and they still count as on site.
+- **Two states, whole days** (jon): in the building, or working but not here.
+  Do not add `on_site` / `travelling` / half days without asking.
+- **Cover counts the BUILDING.** `getImpact()` coverage and
+  `staff.min_headcount_by_weekday` count `status === 'working' && location !==
+  'home'`. The calendar footer shows the on-site number, plus `+n⌂` only when
+  somebody is home; the dashboard strip does the same.
+- Not special-category — every viewer sees it.
+
+## The calendar feed is the person's OWN time — nothing else, ever
+
+`services/staff-ical.ts` is the only thing that decides what is in a feed
+(spec §10, migration 270). Own approved + requested time off, own home days,
+company days. **Never** a colleague's time, never overtime, never absence: a
+calendar app syncs and shares far beyond this platform, and what has left
+cannot be recalled. The token is a credential — `/me/calendar-feed` takes no
+`personId`, admin or not, and resolves only while the person is `employed`.
+
+## The payroll report emails itself on the 1st
+
+`runPayrollReportEmail()` (08:20 daily) emails last month's figures to every
+admin from the 1st, once — jon submits to payroll before the 4th. It stamps
+`staff.payroll_report_sent_month` only after a send SUCCEEDS (a failed day
+retries tomorrow); clear that setting to resend. Figures come from
+`getPayrollReport()` — never a second SUM.
 
 ## Special-category data is masked in the service, not the browser
 

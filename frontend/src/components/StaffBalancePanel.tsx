@@ -251,6 +251,11 @@ export default function StaffBalancePanel({ personId, canManage, year }: {
         )}
       </div>
 
+      {canManage && (
+        <AdjustmentForm personId={personId} account={account} year={year}
+          onDone={async (msg) => { setError(null); setNotice(msg); await load(); }} />
+      )}
+
       {canManage && account === 'holiday' && preview && (
         <div className="mt-3 p-3 rounded border border-gray-200 bg-gray-50/60">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -304,6 +309,114 @@ export default function StaffBalancePanel({ personId, canManage, year }: {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A manual adjustment — hours added to or taken off a balance by an admin,
+ * with a reason (Oct 2026). For what no flow owns: a balance brought across
+ * from BrightHR, an agreed one-off. Bookings, overtime and pay-outs are never
+ * typed in here; they go through the flows that own them.
+ *
+ * Posts to the existing POST /employees/:personId/ledger as an 'adjustment',
+ * source 'manual'. The note is shown to the person on their own My Time, so it
+ * is required and should say why in words they will recognise. A mistake is
+ * undone with Reverse in the working above, never by editing.
+ */
+function AdjustmentForm({ personId, account, year, onDone }: {
+  personId: string; account: 'holiday' | 'overtime'; year: number;
+  onDone: (msg: string) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [direction, setDirection] = useState<1 | -1>(1);
+  const [hours, setHours] = useState('0');
+  const [mins, setMins] = useState('0');
+  // The year being looked at, so it lands on that year's balance. Today if
+  // that is this year; otherwise 1 January of it.
+  const today = new Date();
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const [date, setDate] = useState(today.getFullYear() === year ? todayIso : `${year}-01-01`);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const minutes = (Number(hours) || 0) * 60 + (Number(mins) || 0);
+  const label = account === 'holiday' ? 'holiday' : 'overtime bank';
+
+  async function save() {
+    setErr(null);
+    if (minutes <= 0) { setErr('Enter how much.'); return; }
+    if (!note.trim()) { setErr('Say why — they will see this note.'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { setErr('Pick a date.'); return; }
+    const signed = direction * minutes;
+    if (!confirm(`${direction > 0 ? 'Add' : 'Take off'} ${fmtH(minutes)} ${direction > 0 ? 'to' : 'from'} their ${date.slice(0, 4)} ${label}?`)) return;
+    setBusy(true);
+    try {
+      await api.post(`/staff-calendar/employees/${personId}/ledger`, {
+        account, leaveYear: Number(date.slice(0, 4)), entryType: 'adjustment',
+        minutes: signed, effectiveDate: date, note: note.trim(),
+      });
+      setOpen(false); setHours('0'); setMins('0'); setNote('');
+      await onDone(`Adjustment of ${signed > 0 ? '+' : ''}${fmtH(signed)} posted to their ${label}.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed to post the adjustment');
+    } finally { setBusy(false); }
+  }
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} className="mt-3 text-xs text-ooosh-600 hover:underline">
+        + Add an adjustment to their {label}
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-3 p-3 rounded border border-gray-200 bg-gray-50/60 text-sm">
+      <div className="flex items-baseline justify-between mb-2">
+        <h4 className="font-medium text-gray-900">Adjust their {label}</h4>
+        <button onClick={() => setOpen(false)} className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+      <p className="text-xs text-gray-500 mb-2">
+        For a balance brought across or an agreed one-off. Holiday booked, overtime worked and pay-outs
+        go through their own forms, not here.
+      </p>
+      <div className="flex flex-wrap items-end gap-2 mb-2">
+        <select value={direction} onChange={e => setDirection(Number(e.target.value) as 1 | -1)}
+          className="px-2 py-1.5 border border-gray-300 rounded bg-white">
+          <option value={1}>Add</option>
+          <option value={-1}>Take off</option>
+        </select>
+        <label className="text-xs text-gray-600">
+          <span className="block mb-0.5">Hours</span>
+          <input type="number" min={0} max={500} value={hours} onChange={e => setHours(e.target.value)}
+            className="w-20 px-2 py-1.5 border border-gray-300 rounded bg-white text-sm" />
+        </label>
+        <label className="text-xs text-gray-600">
+          <span className="block mb-0.5">Minutes</span>
+          <select value={mins} onChange={e => setMins(e.target.value)}
+            className="px-2 py-1.5 border border-gray-300 rounded bg-white text-sm">
+            {Array.from({ length: 12 }, (_, i) => String(i * 5)).map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </label>
+        <label className="text-xs text-gray-600">
+          <span className="block mb-0.5">Dated</span>
+          <input type="date" value={date} onChange={e => setDate(e.target.value)}
+            className="px-2 py-1.5 border border-gray-300 rounded bg-white text-sm" />
+        </label>
+      </div>
+      <label className="block text-xs text-gray-600 mb-2">
+        <span className="block mb-0.5">Why — they will see this on their My Time</span>
+        <input value={note} onChange={e => setNote(e.target.value)} maxLength={500}
+          placeholder="e.g. Overtime from April 2025, brought across from BrightHR"
+          className="w-full px-2 py-1.5 border border-gray-300 rounded bg-white text-sm" />
+      </label>
+      {err && <p className="mb-2 text-xs font-medium text-red-700" role="alert">{err}</p>}
+      <button onClick={() => void save()} disabled={busy}
+        className="px-3 py-1.5 text-xs rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
+        {busy ? 'Posting…' : `Post ${direction > 0 ? '+' : '−'}${fmtH(minutes)}`}
+      </button>
     </div>
   );
 }

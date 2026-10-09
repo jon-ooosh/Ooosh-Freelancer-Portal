@@ -48,6 +48,18 @@ const templates: Record<string, EmailTemplate> = {
     body: '<p>Requests are waiting for a decision in the Ooosh Operations Platform.</p>',
   },
 
+  // Staff Calendar: last month's payroll changes (paid overtime, unpaid leave,
+  // sickness), sent once a month from the 1st so the figures reach the payroll
+  // company before the 4th. CSV attached. Body is built by
+  // runPayrollReportEmail() in services/staff-notifications.ts and passed as
+  // bodyHtmlOverride, so the template is just the shell.
+  staff_payroll_report: {
+    variant: 'internal',
+    preheader: "Last month's payroll changes, ready to send",
+    subject: 'Payroll changes for last month',
+    body: '<p>Last month\'s payroll changes are ready in the Ooosh Operations Platform.</p>',
+  },
+
   // ── Client-facing templates ────────────────────────────────────────────
 
   // Driver hire-form email verification code (OTP). Sent by the hire form app
@@ -861,6 +873,17 @@ const templates: Record<string, EmailTemplate> = {
         </tr>
       </table>
     `,
+  },
+  // Freelancer tasks (STAFF-CALENDAR-SPEC §21): a freelancer's current list for
+  // a day booking or a sitter shift. Sent when staff press "Send update", and
+  // as the 16:00 summary to tonight's sitter when tasks changed. Body is built
+  // by services/freelancer-tasks.ts and passed as bodyHtmlOverride, so the
+  // template is just the shell.
+  freelancer_tasks_updated: {
+    variant: 'internal',
+    preheader: 'What we would like a hand with',
+    subject: 'Your list for the day',
+    body: '<p>Your list for the day is on the Ooosh freelancer portal.</p>',
   },
   /**
    * Details changed, no reply needed (spec §9.4 item 6).

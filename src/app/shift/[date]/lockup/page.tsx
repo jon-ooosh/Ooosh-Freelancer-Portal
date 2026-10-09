@@ -12,7 +12,7 @@
  * Holding. Soft — flags, never blocks.
  */
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import type { LockupItem } from '@/lib/op-api'
@@ -107,6 +107,11 @@ export default function LockupPage() {
   const [itemPhotos, setItemPhotos] = useState<Record<string, File[]>>({})
   const [notesText, setNotesText] = useState('')
   const [notesPhotos, setNotesPhotos] = useState<File[]>([])
+  // The "Anything we need to know?" text survives a refresh or a failed submit
+  // until the report goes in. Per evening, this browser only; storage can be
+  // unavailable (private mode), so every access is guarded.
+  const notesDraftKey = `ooosh_sitter_lockup_notes_draft_${date}`
+  const notesDraftReady = useRef(false)
   const [continuing, setContinuing] = useState<boolean | null>(null)
   const [openRef, setOpenRef] = useState<Set<string>>(new Set())
   const [lightbox, setLightbox] = useState<string | null>(null)
@@ -145,16 +150,29 @@ export default function LockupPage() {
       const seedItem: Record<string, string> = {}
       if (data.submitted?.item_notes) for (const [k, v] of Object.entries(data.submitted.item_notes)) seedItem[k] = String(v?.text ?? '')
       setItemNotes(seedItem)
-      setNotesText(data.submitted?.notes?.text ?? '')
+      let notesSeed = data.submitted?.notes?.text ?? ''
+      if (!notesSeed) {
+        try { notesSeed = window.localStorage.getItem(notesDraftKey) ?? '' } catch { /* storage unavailable */ }
+      }
+      setNotesText(notesSeed)
+      notesDraftReady.current = true
       setContinuing(data.continuing_tomorrow)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load the lock-up report')
     } finally {
       setLoading(false)
     }
-  }, [date, router])
+  }, [date, router, notesDraftKey])
 
   useEffect(() => { if (date) fetchCtx() }, [date, fetchCtx])
+
+  useEffect(() => {
+    if (!notesDraftReady.current) return
+    try {
+      if (notesText.trim()) window.localStorage.setItem(notesDraftKey, notesText)
+      else window.localStorage.removeItem(notesDraftKey)
+    } catch { /* storage unavailable */ }
+  }, [notesText, notesDraftKey])
 
   const setAnswer = (id: string, value: string) => {
     setAnswers((prev) => ({ ...prev, [id]: value }))
@@ -212,13 +230,14 @@ export default function LockupPage() {
       const data = await response.json()
       if (response.status === 409 && data.already_submitted) { setResubmitAt(String(data.submitted_at || '')); return }
       if (!response.ok || !data.success) throw new Error(data.error || 'Failed to submit')
+      try { window.localStorage.removeItem(notesDraftKey) } catch { /* storage unavailable */ }
       setDone({ exceptions: Array.isArray(data.exceptions) ? data.exceptions.length : 0 })
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'Failed to submit the report')
     } finally {
       setSubmitting(false)
     }
-  }, [submitting, ctx, visibleItems, answers, whyNotes, whyPhotos, itemNotes, itemPhotos, notesText, notesPhotos, continuing, confirmUnanswered, date])
+  }, [submitting, ctx, visibleItems, answers, whyNotes, whyPhotos, itemNotes, itemPhotos, notesText, notesPhotos, continuing, confirmUnanswered, date, notesDraftKey])
 
   const submitLostProperty = useCallback(async () => {
     if (lpSaving || !lpDesc.trim()) return

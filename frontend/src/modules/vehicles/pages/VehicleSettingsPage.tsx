@@ -16,6 +16,7 @@ import { getOpAuthState } from '../adapters/auth-adapter'
 import { VAN_TYPES } from '../lib/van-matching'
 import { buildDefaultRemovalChecklist } from '../lib/removal-checklist'
 import { fetchSaleForVehicle, saleStageLabel } from '../lib/vehicle-sales'
+import { ukToday } from '../../../lib/ukDate'
 
 function EditableField({
   label,
@@ -531,7 +532,7 @@ function RemovalModal({
   onClose: () => void
   onConfirm: (sale: { soldDate: string; salePrice: string; saleNotes: string }) => void
 }) {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = ukToday()
   const [soldDate, setSoldDate] = useState(today)
   const [salePrice, setSalePrice] = useState(initialPrice)
   const [saleNotes, setSaleNotes] = useState(initialNotes)

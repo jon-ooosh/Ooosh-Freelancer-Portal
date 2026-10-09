@@ -13,6 +13,7 @@ import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
 import { openR2Key } from '../lib/openAuthedFile';
+import { ukToday } from '../lib/ukDate';
 
 interface FileAttachment {
   name: string;
@@ -1195,7 +1196,7 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
   useEffect(() => {
     setReferralDate(toInputDate(driver.referral_date));
   }, [driver.referral_date]);
-  const today = new Date().toISOString().split('T')[0];
+  const today = ukToday();
   // Mirror the driver's existing dates exactly — empty stays empty.
   // Falling back to today on null fields would let staff inadvertently
   // FABRICATE a check date that never happened (e.g. DVLA date for a
@@ -1725,7 +1726,7 @@ function LicenceRecordCheckPanel({ driver, canEdit, onDriverUpdate }: {
                   the FROM date the 30-day window is derived from. */}
               <input
                 type="date" value={checkDate} onChange={e => setCheckDate(e.target.value)}
-                max={new Date().toISOString().slice(0, 10)}
+                max={ukToday()}
                 className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
               <span className="text-xs text-gray-400">

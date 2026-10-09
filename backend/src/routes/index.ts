@@ -35,6 +35,7 @@ import warehouseRouter from './warehouse';
 import shopRouter from './shop';
 import systemSettingsRouter from './system-settings';
 import freelancerDaysPublicRouter from './freelancer-days';
+import staffCalendarFeedRouter from './staff-calendar-feed';
 import oohReturnRouter from './ooh-return';
 import mobileUploadRouter from './mobile-upload';
 import preHireBriefingRouter from './pre-hire-briefing';
@@ -59,6 +60,7 @@ import staffDocumentsRouter from './staff-documents';
 import staffCalendarRouter from './staff-calendar';
 import staffRecordsRouter from './staff-records';
 import staffTasksRouter from './staff-tasks';
+import freelancerTasksRouter from './freelancer-tasks';
 import freelancersRouter from './freelancers';
 import enquiryIntakeRouter from './enquiry-intake';
 
@@ -112,12 +114,14 @@ router.use('/staff-documents', staffDocumentsRouter);  // Staff Documents & Trai
 router.use('/staff-calendar', staffCalendarRouter);  // Staff Calendar & Time — working patterns, who's-in calendar (Phase A)
 router.use('/staff-records', staffRecordsRouter);
 router.use('/staff-tasks', staffTasksRouter);  // My To Do — general task list, owned per person. NOT admin-only.  // Staff Records — private files held ABOUT staff (admin only). NOT staff-documents, which publishes TO staff.
+router.use('/freelancer-tasks', freelancerTasksRouter);  // Freelancer tasks — things to do on a day booking or a sitter evening (STAFF-CALENDAR-SPEC §21). NOT To Do.
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
 router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
 router.use('/shop', shopRouter);  // Shop till — ad-hoc sales, internal stock consumption, sale-stock lookup
 router.use('/system-settings', systemSettingsRouter);
+router.use('/staff-calendar-feed', staffCalendarFeedRouter);  // PUBLIC personal iCal feed (token auth, no JWT) — services/staff-ical.ts decides what is in it
 router.use('/freelancer-days', freelancerDaysPublicRouter);  // PUBLIC accept/decline for a yard-day offer (token auth, no JWT)
 router.use('/ooh-return', oohReturnRouter);  // Public parking-form (token auth) + staff endpoints
 router.use('/mobile-upload', mobileUploadRouter);  // Public token-auth file capture (phone QR handoff)

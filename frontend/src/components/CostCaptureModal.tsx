@@ -18,6 +18,7 @@ import { api } from '../services/api';
 import { openR2Key } from '../lib/openAuthedFile';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { Cost, CostDocument, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
+import { ukToday } from '../lib/ukDate';
 
 interface Props {
   onClose: () => void;
@@ -214,7 +215,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
   // stable id + seed from Xero. Cleared when the name is hand-edited (the id no
   // longer matches what's typed).
   const [xeroContactId, setXeroContactId] = useState<string | null>(existing?.xero_contact_id || null);
-  const [costDate, setCostDate] = useState(() => (existing?.cost_date ? existing.cost_date.slice(0, 10) : new Date().toISOString().slice(0, 10)));
+  const [costDate, setCostDate] = useState(() => (existing?.cost_date ? existing.cost_date.slice(0, 10) : ukToday()));
   const [invoiceNumber, setInvoiceNumber] = useState(existing?.invoice_number || '');
   // De-dup: warn if this supplier+invoice number was already captured.
   const [invoiceDup, setInvoiceDup] = useState<{ id: string; cost_date: string | null; amount_gross: number | null; payment_status: string } | null>(null);

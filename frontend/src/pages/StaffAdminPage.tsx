@@ -13,6 +13,8 @@ import StaffBalancePanel from '../components/StaffBalancePanel';
 import LeaveApprovals from '../components/LeaveApprovals';
 import PayrollReportPanel from '../components/PayrollReportPanel';
 import MyTimePage from './MyTimePage';
+import { Card, InfoRow, Pill, btnPrimary, btnSecondary, btnQuiet } from '../components/StaffCard';
+import { ukToday } from '../lib/ukDate';
 
 /**
  * Staff — the single surface for everyone who works here (Staff Calendar).
@@ -78,6 +80,8 @@ interface RosterRow {
 interface PatternDay {
   cycle_week: number; weekday: number; is_working: boolean;
   start_time: string | null; end_time: string | null; break_minutes: number; minutes: number;
+  /** A regular agreed home day (spec §19, mig 269). Absent from an older backend. */
+  at_home?: boolean;
 }
 interface Pattern {
   id: string; effective_from: string; effective_to: string | null;
@@ -87,6 +91,7 @@ interface PersonSearchRow { id: string; first_name: string; last_name: string; e
 interface DraftDay {
   weekday: number; cycleWeek: number; isWorking: boolean;
   startTime: string; endTime: string; breakMinutes: number;
+  atHome?: boolean;
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -489,7 +494,7 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
     <div>
       <button onClick={onBack} className="text-sm text-gray-600 hover:text-gray-900 mb-3">← Staff</button>
 
-      <div className="bg-white rounded-lg border border-gray-200 p-4 flex flex-wrap items-center gap-4 mb-4">
+      <div className="bg-white rounded-xl border border-gray-200 p-5 flex flex-wrap items-center gap-4 mb-4">
         <span className="w-12 h-12 rounded-full bg-ooosh-50 text-ooosh-700 text-base font-semibold flex items-center justify-center shrink-0">
           {initials(row)}
         </span>
@@ -582,12 +587,19 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
         isAdmin
           ? (row.employment
               ? (
-                <div className="space-y-6">
+                <div className="space-y-4">
                   <EmploymentSection row={row} onSaved={onSaved} onError={onError} />
                   {/* Salary and pension: employment TERMS, so they belong here
                       rather than with the documents on Records. */}
                   <StaffPay personId={row.personId} personName={row.name}
                     onSaved={onSaved} onError={onError} />
+                  {/* The ledger behind the Time off figures — the entitlement
+                      button and manual adjustments live here. Last, because it
+                      is the working rather than the answer. */}
+                  <Card title="Holiday and overtime — the working"
+                    subtitle="Every entry behind the figures on Time off, the yearly allowance, and adjustments">
+                    <StaffBalancePanel personId={row.personId} canManage year={new Date().getFullYear()} />
+                  </Card>
                 </div>
               )
               : <NotAnEmployee />)
@@ -595,7 +607,7 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
       )}
 
       {active === 'records' && isAdmin && (
-        <div className="space-y-6">
+        <div className="space-y-4">
           <StaffKeyData personId={row.personId} personName={row.name} onSaved={onSaved} onError={onError} />
           <StaffRecordFiles personId={row.personId} personName={row.name} onError={onError} />
         </div>
@@ -609,7 +621,7 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
       )}
 
       {active === 'access' && (
-        <div className="space-y-6">
+        <div className="space-y-4">
           <AccountSection row={row} isAdmin={isAdmin} onSaved={onSaved} onError={onError} />
           {isAdmin && <CotCardSection row={row} onSaved={onSaved} onError={onError} />}
         </div>
@@ -694,33 +706,35 @@ function AccountSection({ row, isAdmin, onSaved, onError }: {
 
   if (!editing) {
     return (
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-medium text-gray-900">Login &amp; role</h3>
-          <div className="flex items-center gap-3 text-xs">
-            <button onClick={() => setEditing(true)} className="text-ooosh-600 hover:underline">Edit</button>
-            {isAdmin && <button onClick={() => void resetPassword()} className="text-ooosh-600 hover:underline">Reset password</button>}
-            {row.account.isActive
-              ? <button onClick={() => void deactivate()} className="text-red-600 hover:underline">Deactivate</button>
-              : <button onClick={() => void reactivate()} className="text-emerald-700 hover:underline">Reactivate</button>}
-          </div>
-        </div>
-        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-sm">
-          <div><dt className="text-xs text-gray-500">Email</dt><dd className="text-gray-900 truncate">{row.email || '—'}</dd></div>
-          <div><dt className="text-xs text-gray-500">Role</dt><dd className="text-gray-900">{ROLE_LABELS[row.account.role] || row.account.role}</dd></div>
-          <div><dt className="text-xs text-gray-500">HireHop user ID</dt><dd className="text-gray-900">{row.account.hhUserId ?? '—'}</dd></div>
-          <div><dt className="text-xs text-gray-500">Status</dt><dd className="text-gray-900">{row.account.isActive ? 'Active' : 'Inactive'}</dd></div>
+      <Card title="Login and role" subtitle="How they sign in to OP, and what they can see"
+        action={<button onClick={() => setEditing(true)} className={btnSecondary}>Edit</button>}>
+        <dl>
+          <InfoRow label="Email">{row.email || <span className="text-gray-400">—</span>}</InfoRow>
+          <InfoRow label="Role">{ROLE_LABELS[row.account.role] || row.account.role}</InfoRow>
+          <InfoRow label="HireHop user ID">{row.account.hhUserId ?? <span className="text-gray-400">—</span>}</InfoRow>
+          <InfoRow label="Status">
+            {row.account.isActive ? <Pill tone="ok">Active</Pill> : <Pill tone="muted">Deactivated</Pill>}
+          </InfoRow>
         </dl>
-      </div>
+        {/* The two irreversible-feeling actions sit apart from Edit, at the
+            foot, so neither is one stray click from the button people use. */}
+        <div className="flex flex-wrap items-center gap-4 mt-4 pt-4 border-t border-gray-100">
+          {isAdmin && (
+            <button onClick={() => void resetPassword()} className="text-sm font-medium text-ooosh-700 hover:underline">
+              Reset password
+            </button>
+          )}
+          {row.account.isActive
+            ? <button onClick={() => void deactivate()} className="text-sm font-medium text-red-600 hover:underline">Deactivate login</button>
+            : <button onClick={() => void reactivate()} className="text-sm font-medium text-emerald-700 hover:underline">Reactivate login</button>}
+        </div>
+      </Card>
     );
   }
 
   return (
-    <div className="p-3 rounded border border-ooosh-200 bg-ooosh-50/40">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-900">Login &amp; role</h3>
-        <button onClick={() => setEditing(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
-      </div>
+    <Card title="Edit login and role" className="border-ooosh-200"
+      action={<button onClick={() => setEditing(false)} className={btnQuiet}>Cancel</button>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <Field label="First name" value={first} onChange={setFirst} />
         <Field label="Last name" value={last} onChange={setLast} />
@@ -739,11 +753,10 @@ function AccountSection({ row, isAdmin, onSaved, onError }: {
           <span className="block text-xs text-gray-500 mt-1">Sets the manager on HH jobs this user creates.</span>
         </label>
       </div>
-      <button onClick={() => void save()} disabled={saving}
-        className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+      <button onClick={() => void save()} disabled={saving} className={btnPrimary}>
         {saving ? 'Saving…' : 'Save account'}
       </button>
-    </div>
+    </Card>
   );
 }
 
@@ -774,40 +787,31 @@ function CotCardSection({ row, onSaved, onError }: {
   }
 
   return (
-    <div>
-      <h3 className="text-sm font-medium text-gray-900 mb-1">Company card</h3>
-      <p className="text-xs text-gray-500 mb-2">
-        The cost-capture form stamps the holder and last 4 from here — staff never type card details.
-      </p>
+    <Card title="Company card"
+      subtitle="Cost capture stamps the holder and last 4 from here — staff never type card details"
+      action={
+        row.cotCard?.agreementCompletedAt
+          ? <Pill tone="ok">Agreement signed {new Date(row.cotCard.agreementCompletedAt).toLocaleDateString('en-GB')}</Pill>
+          : row.cotCard?.agreementStatus ? <Pill tone="warn">Agreement outstanding</Pill>
+          : <Pill tone="muted">No agreement assigned</Pill>
+      }>
       <div className="flex flex-wrap items-end gap-3">
-        <div className="text-sm">
-          <span className="block text-xs text-gray-600 mb-1">Card agreement</span>
-          <span className={`inline-block px-2 py-1 rounded text-xs ${
-            row.cotCard?.agreementCompletedAt ? 'bg-emerald-100 text-emerald-800'
-              : row.cotCard?.agreementStatus ? 'bg-amber-100 text-amber-800'
-              : 'bg-gray-100 text-gray-500'}`}>
-            {row.cotCard?.agreementCompletedAt
-              ? `Signed ${new Date(row.cotCard.agreementCompletedAt).toLocaleDateString('en-GB')}`
-              : row.cotCard?.agreementStatus ? 'Outstanding' : 'Not assigned'}
-          </span>
-        </div>
         <label className="text-sm">
-          <span className="block text-xs text-gray-600 mb-1">Last 4</span>
+          <span className="block text-xs text-gray-600 mb-1">Last 4 digits</span>
           <input value={last4} onChange={e => setLast4(e.target.value.replace(/\D/g, '').slice(0, 4))}
             placeholder="1234" inputMode="numeric"
-            className="w-24 px-2 py-1.5 border border-gray-300 rounded text-sm" />
+            className="w-28 px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
         </label>
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Label</span>
           <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. COT"
-            className="w-40 px-2 py-1.5 border border-gray-300 rounded text-sm" />
+            className="w-44 px-2 py-1.5 border border-gray-300 rounded-lg text-sm" />
         </label>
-        <button onClick={() => void save()} disabled={saving || !dirty}
-          className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
+        <button onClick={() => void save()} disabled={saving || !dirty} className={btnPrimary}>
           {saving ? 'Saving…' : 'Save card'}
         </button>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -840,16 +844,20 @@ function EmploymentSection({ row, onSaved, onError }: {
   return (
     <div className="space-y-4">
       <EmploymentDetails row={row} workingDaysPerWeek={workingDaysPerWeek} onSaved={onSaved} onError={onError} />
-      <StaffBalancePanel personId={row.personId} canManage year={new Date().getFullYear()} />
-      {!loaded ? (
-        <div className="text-sm text-gray-500">Loading hours…</div>
-      ) : (
-        <>
-          <PatternHistory patterns={patterns} />
-          <PatternEditor personId={row.personId} seed={current}
-            onSaved={async (msg) => { await load(); await onSaved(msg); }} onError={onError} />
-        </>
-      )}
+      <Card title="Working hours"
+        subtitle={current
+          ? `${fmt(current.weeklyMinutes)} a week · ${fmtDays(workingDaysPerWeek ?? 0)} day${workingDaysPerWeek === 1 ? '' : 's'} · since ${fmtDate(current.effective_from)}`
+          : undefined}>
+        {!loaded ? (
+          <div className="text-sm text-gray-500">Loading hours…</div>
+        ) : (
+          <div className="space-y-4">
+            <PatternHistory patterns={patterns} />
+            <PatternEditor personId={row.personId} seed={current}
+              onSaved={async (msg) => { await load(); await onSaved(msg); }} onError={onError} />
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -905,74 +913,65 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
   const effectiveBh = emp.bankHolidayPolicy ?? COMPANY_BANK_HOLIDAY_DEFAULT;
 
   if (!editing) {
+    const probationDays = emp.probationEndDate
+      ? Math.ceil((Date.parse(emp.probationEndDate + 'T00:00:00Z') - Date.now()) / 86400000)
+      : null;
     return (
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-medium text-gray-900">Employment</h3>
-          <button onClick={() => setEditing(true)} className="text-xs text-ooosh-600 hover:underline">Edit</button>
-        </div>
-        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+      <Card title="Employment"
+        action={<button onClick={() => {
+          // Re-derive the days now: this card mounts before the working hours
+          // have loaded, so the first guess was made without a week to
+          // convert against and left the days box blank.
+          setEntitlementDays(emp.entitlementWeeks != null && workingDaysPerWeek
+            ? fmtDays(Number(emp.entitlementWeeks) * workingDaysPerWeek) : '');
+          setEditing(true);
+        }} className={btnSecondary}>Edit</button>}>
+        <dl className="grid grid-cols-1 lg:grid-cols-2 gap-x-10">
           <div>
-            <dt className="text-xs text-gray-500">Known as</dt>
-            <dd className="text-gray-900">
+            <InfoRow label="Known as">
               {row.preferredName || <span className="text-gray-400">{row.name.split(' ')[0]}</span>}
-              {row.pronouns && <span className="text-gray-500 text-xs"> ({row.pronouns})</span>}
-            </dd>
+              {row.pronouns && <span className="text-gray-500 text-sm"> ({row.pronouns})</span>}
+            </InfoRow>
+            <InfoRow label="Job title">{emp.jobTitle || <span className="text-gray-400">—</span>}</InfoRow>
+            <InfoRow label="Department">{emp.department || <span className="text-gray-400">—</span>}</InfoRow>
+            <InfoRow label="Started">{fmtDate(emp.startDate)}</InfoRow>
+            {emp.status === 'left' && (
+              <InfoRow label="Left">
+                <Pill tone="muted">{emp.endDate ? fmtDate(emp.endDate) : 'Left'}</Pill>
+              </InfoRow>
+            )}
           </div>
-          <div><dt className="text-xs text-gray-500">Started</dt><dd className="text-gray-900">{fmtDate(emp.startDate)}</dd></div>
-          <div><dt className="text-xs text-gray-500">Job title</dt><dd className="text-gray-900">{emp.jobTitle || '—'}</dd></div>
-          <div><dt className="text-xs text-gray-500">Department</dt><dd className="text-gray-900">{emp.department || '—'}</dd></div>
           <div>
-            <dt className="text-xs text-gray-500">Holiday allowance</dt>
-            <dd className="text-gray-900">
-              {emp.entitlementWeeks != null ? `${emp.entitlementWeeks} weeks` : '5.6 weeks (statutory)'}
-              {workingDaysPerWeek ? (
-                <span className="text-gray-500">
-                  {' '}= {fmtDays(Number(emp.entitlementWeeks ?? 5.6) * workingDaysPerWeek)} days
-                </span>
-              ) : null}
-            </dd>
-          </div>
-          {emp.probationEndDate && (
-            <div>
-              <dt className="text-xs text-gray-500">Probation ends</dt>
-              <dd className="text-gray-900">
-                {fmtDate(emp.probationEndDate)}
-                {(() => {
-                  const days = Math.ceil(
-                    (Date.parse(emp.probationEndDate + 'T00:00:00Z') - Date.now()) / 86400000);
-                  if (days < 0) return <span className="text-gray-500 text-xs"> (passed)</span>;
-                  return <span className={`text-xs ${days <= 30 ? 'text-amber-700 font-medium' : 'text-gray-500'}`}>
-                    {' '}({days} days)
-                  </span>;
-                })()}
-              </dd>
-            </div>
-          )}
-          {emp.noticePeriodDays != null && (
-            <div>
-              <dt className="text-xs text-gray-500">Notice period</dt>
-              <dd className="text-gray-900">{emp.noticePeriodDays} days</dd>
-            </div>
-          )}
-          <div className="col-span-2 sm:col-span-4">
-            <dt className="text-xs text-gray-500">Bank holidays</dt>
-            <dd className="text-gray-900">
-              {BH_LABEL[effectiveBh]}
-              {emp.bankHolidayPolicy === null && <span className="text-xs text-gray-500"> (company default)</span>}
-            </dd>
+            <InfoRow label="Holiday allowance">
+              {workingDaysPerWeek
+                ? <>{fmtDays(Number(emp.entitlementWeeks ?? 5.6) * workingDaysPerWeek)} days
+                    <span className="text-gray-500 text-sm"> · {emp.entitlementWeeks != null ? `${emp.entitlementWeeks} weeks` : '5.6 weeks, statutory'}</span></>
+                : (emp.entitlementWeeks != null ? `${emp.entitlementWeeks} weeks` : '5.6 weeks (statutory)')}
+            </InfoRow>
+            <InfoRow label="Bank holidays">
+              {effectiveBh === 'granted' ? 'Given on top' : 'Booked from allowance'}
+              {emp.bankHolidayPolicy === null && <span className="text-gray-500 text-sm"> · company default</span>}
+            </InfoRow>
+            <InfoRow label="Probation">
+              {emp.probationEndDate
+                ? (probationDays! < 0
+                    ? <Pill tone="ok">Passed {fmtDate(emp.probationEndDate)}</Pill>
+                    : <>Ends {fmtDate(emp.probationEndDate)}{' '}
+                        <Pill tone={probationDays! <= 30 ? 'warn' : 'muted'}>{probationDays} days</Pill></>)
+                : <span className="text-gray-400">—</span>}
+            </InfoRow>
+            <InfoRow label="Notice period">
+              {emp.noticePeriodDays != null ? `${emp.noticePeriodDays} days` : <span className="text-gray-400">—</span>}
+            </InfoRow>
           </div>
         </dl>
-      </div>
+      </Card>
     );
   }
 
   return (
-    <div className="p-3 rounded border border-ooosh-200 bg-ooosh-50/40">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-900">Employment</h3>
-        <button onClick={() => setEditing(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
-      </div>
+    <Card title="Edit employment" className="border-ooosh-200"
+      action={<button onClick={() => setEditing(false)} className={btnQuiet}>Cancel</button>}>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Likes to be known as</span>
@@ -980,9 +979,7 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
             placeholder={row.name.split(' ')[0]}
             className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
           <span className="block text-xs text-gray-500 mt-1">
-            Used everywhere their name appears. Blank falls back to their first name.
-            They can also set this themselves under Me &rsaquo; Profile — this is here
-            for anyone without a login.
+            Used wherever their name appears. Blank uses their first name.
           </span>
         </label>
         <label className="text-sm">
@@ -1009,8 +1006,7 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
             <option value="granted">{BH_LABEL.granted}</option>
           </select>
           <span className="block text-xs text-gray-500 mt-1">
-            Leave on the default unless this person&apos;s contract differs — then a future
-            policy change follows them automatically.
+            Leave on the default unless their contract differs.
           </span>
         </label>
         <div className="text-sm">
@@ -1048,21 +1044,18 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
               <span className="block text-[11px] text-gray-500 mt-0.5">weeks</span>
             </div>
           </div>
+          {/* Stored in WEEKS, deliberately: if they later change to a different
+              number of days a week, 5.6 weeks stays right while a fixed day
+              count would quietly become wrong. */}
           <span className="block text-xs text-gray-500 mt-1">
             {workingDaysPerWeek ? (
               <>
-                Type whichever is easier — they convert against this person&apos;s{' '}
-                {fmtDays(workingDaysPerWeek)}-day week. Blank uses the statutory 5.6 weeks
-                ({fmtDays(5.6 * workingDaysPerWeek)} days for them).
+                Type either — they convert on their {fmtDays(workingDaysPerWeek)}-day week.
+                Blank = statutory ({fmtDays(5.6 * workingDaysPerWeek)} days).
               </>
             ) : (
-              <>Set their working hours first — &ldquo;days&rdquo; has no meaning until we know what a week is for them.</>
+              <>Set their working hours first.</>
             )}
-          </span>
-          <span className="block text-xs text-gray-500 mt-1">
-            Stored in <strong>weeks</strong>, deliberately: if they later change to a different
-            number of days a week, 5.6 weeks stays right while a fixed day count would quietly
-            become wrong.
           </span>
         </div>
       </div>
@@ -1095,58 +1088,106 @@ function EmploymentDetails({ row, workingDaysPerWeek, onSaved, onError }: {
             className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm bg-white" />
         </label>
       </div>
-      <button onClick={() => void save()} disabled={saving}
-        className="px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+      <button onClick={() => void save()} disabled={saving} className={btnPrimary}>
         {saving ? 'Saving…' : 'Save employment details'}
       </button>
-    </div>
+    </Card>
   );
 }
 
 function PatternHistory({ patterns }: { patterns: Pattern[] }) {
   if (patterns.length === 0) {
     return (
-      <div className="text-sm text-gray-500 p-3 rounded border border-dashed border-gray-300">
+      <div className="text-sm text-gray-500 p-3 rounded-lg border border-dashed border-gray-300">
         No working hours set — they show as “not scheduled” every day on the calendar until there are.
       </div>
     );
   }
+  const current = patterns.find(p => p.effective_to === null);
+  const earlier = patterns.filter(p => p !== current);
   return (
-    <div>
-      <h3 className="text-sm font-medium text-gray-900 mb-2">Working hours history</h3>
-      <div className="space-y-2">
-        {patterns.map(p => {
-          const working = p.days.filter(d => d.is_working);
-          return (
-            <div key={p.id} className="p-3 rounded border border-gray-200 bg-gray-50/60">
-              <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1.5">
-                <span className="text-sm font-medium text-gray-900">
-                  {fmtDate(p.effective_from)} → {p.effective_to ? fmtDate(p.effective_to) : 'ongoing'}
-                  {p.effective_to === null && (
-                    <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800">Current</span>
-                  )}
-                </span>
-                <span className="text-xs text-gray-600">
-                  {fmt(p.weeklyMinutes)} / week · {working.length} day{working.length === 1 ? '' : 's'}
-                  {p.cycle_weeks === 2 && ' · 2-week cycle'}
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
-                {working.map((d, i) => (
-                  <span key={i}>
-                    {p.cycle_weeks === 2 && <span className="text-gray-400">W{d.cycle_week} </span>}
-                    <span className="text-gray-900">{WEEKDAYS[d.weekday].slice(0, 3)}</span>{' '}
-                    {d.start_time?.slice(0, 5)}–{d.end_time?.slice(0, 5)}
-                    {d.break_minutes > 0 && <span className="text-gray-400"> (−{d.break_minutes}m)</span>}
-                    {' = '}{fmt(d.minutes)}
+    <div className="space-y-3">
+      {current
+        ? <WeekStrip pattern={current} />
+        : <p className="text-sm text-amber-700">No hours in force today — the latest ended {fmtDate(patterns[0].effective_to!)}.</p>}
+      {current?.notes && <p className="text-xs text-gray-500 italic">{current.notes}</p>}
+      {earlier.length > 0 && (
+        <details className="group">
+          <summary className="cursor-pointer text-sm text-ooosh-700 hover:underline select-none">
+            Earlier working hours ({earlier.length})
+          </summary>
+          <div className="mt-3 space-y-3">
+            {earlier.map(p => (
+              <div key={p.id} className="p-3 rounded-lg border border-gray-200 bg-gray-50/60">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+                  <span className="text-sm font-medium text-gray-900">
+                    {fmtDate(p.effective_from)} → {p.effective_to ? fmtDate(p.effective_to) : 'ongoing'}
                   </span>
-                ))}
+                  <span className="text-xs text-gray-600">{fmt(p.weeklyMinutes)} / week</span>
+                </div>
+                <WeekStrip pattern={p} compact />
+                {p.notes && <div className="mt-1.5 text-xs text-gray-500 italic">{p.notes}</div>}
               </div>
-              {p.notes && <div className="mt-1.5 text-xs text-gray-500 italic">{p.notes}</div>}
-            </div>
-          );
-        })}
-      </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A pattern as seven day tiles, Monday first — a week reads at a glance where
+ * the old one-line list of "Mon 09:00–17:00 (−60m) = 7h" did not. A two-week
+ * cycle gets one row per week.
+ */
+function WeekStrip({ pattern, compact = false }: { pattern: Pattern; compact?: boolean }) {
+  const weeks = pattern.cycle_weeks === 2 ? [1, 2] : [1];
+  return (
+    <div className="space-y-2">
+      {weeks.map(w => (
+        <div key={w}>
+          {weeks.length > 1 && <div className="text-xs text-gray-500 mb-1">Week {w}</div>}
+          <div className="grid grid-cols-7 gap-1.5">
+            {WEEKDAYS.map((name, wd) => {
+              const d = pattern.days.find(x => x.weekday === wd && (weeks.length === 1 || x.cycle_week === w));
+              const on = !!d?.is_working;
+              return (
+                <div key={wd}
+                  className={`rounded-lg border text-center ${compact ? 'px-1 py-1.5' : 'px-1 py-2.5'} ${
+                    on ? (d!.at_home ? 'border-teal-200 bg-teal-50' : 'border-ooosh-200 bg-ooosh-50/60')
+                       : 'border-gray-200 bg-gray-50'}`}>
+                  <div className={`text-[11px] font-semibold uppercase tracking-wide ${on ? 'text-gray-700' : 'text-gray-400'}`}>
+                    {name.slice(0, 3)}
+                  </div>
+                  {on ? (
+                    <>
+                      <div className={`${compact ? 'text-[11px]' : 'text-xs sm:text-[13px]'} text-gray-900 tabular-nums mt-0.5 leading-tight`}>
+                        {d!.start_time?.slice(0, 5)}<span className="hidden sm:inline">–</span><br className="sm:hidden" />{d!.end_time?.slice(0, 5)}
+                      </div>
+                      {!compact && (
+                        <div className="text-[11px] text-gray-500 mt-0.5">
+                          {fmt(d!.minutes)}{d!.at_home && <span className="text-teal-700"> · ⌂</span>}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-xs text-gray-400 mt-0.5">Off</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      {!compact && pattern.days.some(d => d.is_working && d.break_minutes > 0) && (
+        <p className="text-xs text-gray-500">
+          Paid hours, after the unpaid break{
+            new Set(pattern.days.filter(d => d.is_working).map(d => d.break_minutes)).size === 1
+              ? ` (${pattern.days.find(d => d.is_working)!.break_minutes} min a day)` : ''}.
+          {pattern.days.some(d => d.at_home) && ' ⌂ = a regular day working from home.'}
+        </p>
+      )}
     </div>
   );
 }
@@ -1156,7 +1197,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
   onSaved: (msg: string) => Promise<void>; onError: (msg: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [effectiveFrom, setEffectiveFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [effectiveFrom, setEffectiveFrom] = useState(() => ukToday());
   const [cycleWeeks, setCycleWeeks] = useState<1 | 2>(1);
   const [days, setDays] = useState<DraftDay[]>(() => blankDays(1));
   const [notes, setNotes] = useState('');
@@ -1174,6 +1215,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
         startTime: src.start_time?.slice(0, 5) || '09:00',
         endTime: src.end_time?.slice(0, 5) || '17:00',
         breakMinutes: src.break_minutes,
+        atHome: !!src.at_home,
       };
     }));
   }, [seed]);
@@ -1206,6 +1248,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
           startTime: d.isWorking ? d.startTime : null,
           endTime: d.isWorking ? d.endTime : null,
           breakMinutes: d.isWorking ? d.breakMinutes : 0,
+          atHome: d.isWorking && !!d.atHome,
         })),
       });
       setOpen(false); setNotes('');
@@ -1217,18 +1260,17 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
 
   if (!open) {
     return (
-      <button onClick={() => setOpen(true)}
-        className="px-3 py-2 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
+      <button onClick={() => setOpen(true)} className={btnSecondary}>
         {seed ? 'Change working hours' : 'Set working hours'}
       </button>
     );
   }
 
   return (
-    <div className="p-4 rounded border border-ooosh-200 bg-ooosh-50/40">
+    <div className="p-4 rounded-xl border border-ooosh-200 bg-ooosh-50/40">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-900">{seed ? 'New working hours' : 'Working hours'}</h3>
-        <button onClick={() => setOpen(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+        <h3 className="text-[15px] font-semibold text-gray-900">{seed ? 'New working hours' : 'Working hours'}</h3>
+        <button onClick={() => setOpen(false)} className={btnQuiet}>Cancel</button>
       </div>
 
       <div className="flex flex-wrap gap-3 mb-4">
@@ -1268,6 +1310,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
               <th className="text-left font-medium py-1 pr-3">Start</th>
               <th className="text-left font-medium py-1 pr-3">End</th>
               <th className="text-left font-medium py-1 pr-3">Unpaid break</th>
+              <th className="text-left font-medium py-1 pr-3" title="A regular agreed day working from home — still working, just not in the building">From home</th>
               <th className="text-right font-medium py-1">Paid</th>
             </tr>
           </thead>
@@ -1301,6 +1344,11 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
                       onChange={e => update(i, { breakMinutes: Number(e.target.value) })}
                       className="w-20 px-2 py-1 border border-gray-300 rounded text-sm bg-white disabled:bg-gray-100 disabled:text-gray-400" />
                     <span className="text-xs text-gray-500 ml-1">min</span>
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    <input type="checkbox" checked={d.isWorking && !!d.atHome} disabled={!d.isWorking}
+                      onChange={e => update(i, { atHome: e.target.checked })}
+                      className="w-4 h-4 rounded border-gray-300 disabled:opacity-40" />
                   </td>
                   <td className={`py-1.5 text-right tabular-nums ${bad ? 'text-red-600 font-medium' : 'text-gray-700'}`}>
                     {d.isWorking ? (bad ? 'invalid' : fmt(mins)) : <span className="text-gray-300">—</span>}
@@ -1339,7 +1387,7 @@ function PatternEditor({ personId, seed, onSaved, onError }: {
       )}
 
       <button onClick={() => void save()} disabled={saving || invalid.length > 0 || weeklyMinutes <= 0}
-        className="mt-3 px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+        className={`mt-3 ${btnPrimary}`}>
         {saving ? 'Saving…' : 'Save working hours'}
       </button>
     </div>
@@ -1368,7 +1416,7 @@ function AddEmployee({ existing, onAdded, onError }: {
   const [search, setSearch] = useState('');
   const [results, setResults] = useState<PersonSearchRow[]>([]);
   const [picked, setPicked] = useState<PersonSearchRow | null>(null);
-  const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [startDate, setStartDate] = useState(() => ukToday());
   const [jobTitle, setJobTitle] = useState('');
   const [department, setDepartment] = useState('');
   const [saving, setSaving] = useState(false);

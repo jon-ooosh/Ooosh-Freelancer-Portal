@@ -14,6 +14,7 @@
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';
+import { ukToday } from './uk-date';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
@@ -189,7 +190,7 @@ function buildBody(cost: CostForRemittance & { uploaded_by_name: string | null }
   const amount = gbp(cost.amount_gross);
   const method = remittanceMethodLabel(cost.paid_method);
   const payIso = cost.paid_value_date ? new Date(cost.paid_value_date).toISOString().slice(0, 10) : null;
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = ukToday();
   const isFuture = payIso ? payIso > todayIso : false;
   const payDate = payIso
     ? new Date(`${payIso}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })

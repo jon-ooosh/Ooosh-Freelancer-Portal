@@ -23,6 +23,7 @@
 import { query, getClient } from '../config/database';
 import { DATE_RE, dateRange, getStaffCalendar, weekdayIndex } from './staff-day-status';
 import { getBalance, postEntry, ensureEntitlement, type LedgerAccount } from './staff-balance';
+import { ukToday } from './uk-date';
 
 export type LeaveType = 'holiday' | 'toil' | 'unpaid';
 export type LeaveStatus = 'pending' | 'approved' | 'declined' | 'cancelled' | 'withdrawn';
@@ -232,7 +233,7 @@ export async function getImpact(
     ? null
     : balanceBefore - (minutesByYear.get(perYear[0]?.year ?? 0) ?? 0);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const noticeDays = Math.max(0, dateRange(today, startDate).length - 1);
 
   // Everyone else's live leave over the same dates.
@@ -267,10 +268,17 @@ export async function getImpact(
     // earlier version did) double-counts and under-reports cover. The only
     // person still to remove is the requester, who is working that day by
     // definition or the day would not be in this list.
+    //
+    // Cover means people in the BUILDING (spec §19): somebody working from
+    // home cannot take a delivery, so they are not counted — and if the
+    // requester was going to be at home anyway, approving costs no cover.
     const team = await getStaffCalendar(dateList[0], dateList[dateList.length - 1], { isAdmin: true });
+    const onSite = (d: { status: string; location?: string } | undefined) =>
+      d?.status === 'working' && d.location !== 'home';
     for (const date of dateList) {
-      const scheduled = team.filter(t => t.days.find(x => x.date === date)?.status === 'working').length;
-      coverage.push({ date, scheduled, ifApproved: Math.max(0, scheduled - 1) });
+      const scheduled = team.filter(t => onSite(t.days.find(x => x.date === date))).length;
+      const requesterHere = onSite(team.find(t => t.personId === personId)?.days.find(x => x.date === date));
+      coverage.push({ date, scheduled, ifApproved: Math.max(0, scheduled - (requesterHere ? 1 : 0)) });
     }
   }
 
