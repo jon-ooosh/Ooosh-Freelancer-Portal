@@ -18,6 +18,7 @@ import { z } from 'zod';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import multer from 'multer';
+import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
@@ -105,7 +106,18 @@ const verifySchema = z.object({
   verification_secret: z.string(),
 });
 
-router.post('/auth/verify', async (req: Request, res: Response) => {
+// Called by the hire-form Netlify function, so every request arrives from a
+// handful of Netlify egress IPs — the limit is per IP and must leave room for
+// a busy morning of sign-ins, while still capping abuse of the shared secret.
+const sessionIssueLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  message: { error: 'Too many requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post('/auth/verify', sessionIssueLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = verifySchema.parse(req.body);
     const email = parsed.email.trim().toLowerCase();

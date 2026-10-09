@@ -12,6 +12,7 @@
  */
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
+import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
@@ -252,7 +253,20 @@ async function stampVanLegStarted(quoteId: string): Promise<void> {
 // Mounted BEFORE `router.use(authenticate)` — the HMAC token is the
 // authentication here; staff JWT is not required (and indeed not
 // available on the freelancer's browser in this flow).
-router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) => {
+//
+// Per-IP limit on the three public token redeemers (book-out, check-in,
+// prep). Each page redeems once, so 30 in 15 minutes is generous even for a
+// yard or venue where several freelancers share one public IP, and tight
+// enough that the endpoint is not a free token-guessing oracle.
+const freelancerResolveLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: 'Too many attempts — please wait a few minutes and try again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post('/freelancer-bookout/resolve', freelancerResolveLimiter, async (req: Request, res: Response) => {
   try {
     const token = (req.body?.token || req.query?.token) as string | undefined;
     if (!token) {
@@ -658,7 +672,7 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
 // handler treat the submission as a SOFT check-in — records interim state +
 // closes the collection quote, but does NOT flip the assignment to 'returned'
 // (the warehouse still owns the final check-in + damage adjudication).
-router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) => {
+router.post('/freelancer-checkin/resolve', freelancerResolveLimiter, async (req: Request, res: Response) => {
   try {
     const token = (req.body?.token || req.query?.token) as string | undefined;
     if (!token) {
@@ -850,7 +864,7 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
 // — through the SAME rule that minted the link, then hand back a 4h session
 // scoped to that one van. Mounted BEFORE authenticateVehicleFlexible: the
 // redeem token is the authentication here.
-router.post('/freelancer-prep/resolve', async (req: Request, res: Response) => {
+router.post('/freelancer-prep/resolve', freelancerResolveLimiter, async (req: Request, res: Response) => {
   const token = typeof req.body?.token === 'string' ? req.body.token : '';
   const redeem = token ? verifyFreelancerPrepRedeemToken(token) : null;
   if (!redeem) {
