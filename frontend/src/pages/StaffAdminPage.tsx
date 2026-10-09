@@ -1567,7 +1567,9 @@ function AddUser({ onAdded, onError }: {
           <span className="block text-xs text-gray-600 mb-1">Role</span>
           <select value={role} onChange={e => setRole(e.target.value)}
             className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm">
-            {Object.entries(ROLE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            {/* 'freelancer' stays in ROLE_LABELS to label the old seed row, but it is no
+                longer a login the backend will create — freelancers use the portal. */}
+            {Object.entries(ROLE_LABELS).filter(([v]) => v !== 'freelancer').map(([v, l]) => <option key={v} value={v}>{l}</option>)}
           </select>
         </label>
       </div>
