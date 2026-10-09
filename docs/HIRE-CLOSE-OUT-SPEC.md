@@ -1,6 +1,8 @@
 # Hire Close-Out (Bookkeeping) — Spec
 
-**Status (9 Oct 2026): PLANNED. Nothing built.** This is the "bookkeeping module" that
+**Status (9 Oct 2026): Phase 1 BUILT** — `services/hire-close-out.ts`, `routes/hire-close-out.ts`
+(`/api/close-out/:jobId/plan|allocate|complete`), `job_closeout_log` (mig 281), and the panel on the
+Payment Reconciliation card (`frontend/src/components/HireCloseOutPanel.tsx`). Phases 2–4 not built. This is the "bookkeeping module" that
 `docs/reference/HIREHOP-BILLING-API.md` §8 says the shop close is the base of. §1 is what
 jon settled in the design discussion; §4 is the flow; §9 is the build order and the
 captures that must happen before Phase 2. Read `HIREHOP-BILLING-API.md` §0 and §8
@@ -116,7 +118,7 @@ action and reads back after it.
 | **Invoice** | "Generated" when any kind=1 row exists; "Mark as Sent" | **Raise invoice** (Phase 2) — draft from uninvoiced lines, penny check, approve, push to Xero. Shows the invoice(s), their status and Xero cloud |
 | **Excess Resolution** | Resolution-authoritative pill; Manage → existing modal | Unchanged. The Complete step reads its state |
 | **Payment Reconciliation** | "Reconciled" when owing ≤ 0 | **Allocate payments** (Phase 1) — the plan (§4.3) shown first, then HireHop + Xero allocation, read back. Surfaces any surplus with its three choices. Staff-facing wording stays about HireHop ("allocated", "balance owed", "reconciled"); the Xero fact ("credit applied in Xero" / "awaiting") is one **admin-only** line, because only jon and the bookkeeper act on it and the sweep is automatic (jon, 9 Oct) |
-| *(new, bottom of the tab)* | — | **Complete job** — enabled when Invoice and Payment cards are green; amber with override when excess is still held |
+| *(Complete job)* | — | Lives at the foot of the **Payment Reconciliation** card's panel, not as a card of its own (built that way, Oct 2026 — it is the last step of the payments flow): enabled when every invoice is paid and nothing is unallocated; amber "Complete anyway (excess held)" for a manager when excess is still held |
 
 Two cards, not one, for now: both requirement types already exist on every returned
 job and the Returns page counts their dots, so merging them is a migration plus a
@@ -338,7 +340,7 @@ Register the migration in `backend/src/migrations/run.ts`. Hold-on-account is a 
 
 ## 9. Build order and the captures that gate it
 
-**Phase 1 — Allocate payments** (on jobs invoiced by hand). Shared service extracted from
+**Phase 1 — Allocate payments** (on jobs invoiced by hand). ✅ BUILT 9 Oct 2026 (PRs #1409, #1410 and the card PR). Shared service extracted from
 the shop close; the plan + button on the Payment Reconciliation card; §5, §6, §7; surplus
 choices wired to existing routes; Complete job step. Manager-tier to press
 (`MANAGER_ROLES`; review after a month — allocation moves no cash). Shop close keeps
