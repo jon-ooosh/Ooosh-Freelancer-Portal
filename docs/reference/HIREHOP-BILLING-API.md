@@ -234,9 +234,6 @@ Interested (10) releases it** (`SHOP-SALES-SPEC.md` §2.1).
 
 - Creating a **credit note** (approving one is documented in `MONEY-AND-EXCESS.md`).
 - What `upto`, `aggregated`, `novat` do on invoice create (`all` is now known — §3, §10).
-- Whether an invoice can carry a line that is NOT a job line (`billing_save_items.php`
-  with `item_id=0`?) — the EU split's 0% line, `HIRE-CLOSE-OUT-SPEC.md` §10.1. A job line
-  can be put on an invoice once only (jon, 9 Oct), so "the same line twice" is out.
 - Deleting a payment application (jon deleted 16015's stray refund by hand on 9 Oct
   without the network tab open — next time).
 - Voiding / deleting an approved invoice (and what it does in Xero).
@@ -388,6 +385,27 @@ POST /php_functions/billing_save_item.php
 Response: the invoice row with that line at `VAT_RATE: 0`, `ACC_TAX_RATE_ID: 33`,
 `VAT: 0`, and the invoice's `TAX` and `owing` recomputed (£1.20 → £1.00). `total` is
 the line's net; `nominal_id` can be changed in the same call.
+
+### 10.3b Add a CUSTOM line to a draft — `billing_save_item.php` with `id=0`, `kind=3` ✅
+
+HireHop's "New custom item" on a draft invoice (9 Oct 2026). Same endpoint as §10.3,
+new row, no job item behind it:
+
+```
+POST /php_functions/billing_save_item.php
+  id=0  bill=12929  kind=3  qty=1
+  note=This is a custom item for testing at 0%     ← becomes the line's DESCRIPTION
+  unit=10  total=10  memo=
+  vat_rate=0  vat_id=33  nominal_id=175
+  main_id=15745  type=1  selected=104336           ← `selected` = the line it was inserted after
+```
+
+Response: the invoice row with a new line `KIND: 3`, `MAIN_ID: 0`, `EQUIP_ID: 0`,
+`ITEM: ""`, `DESCRIPTION` = the note, `PRICE` 10, `ACC_TAX_RATE_ID` 33,
+`ACC_NOMINAL_ID` 175, and the invoice's NET/TAX/owing recomputed. **This is the EU
+split's zero-rated line** (`HIRE-CLOSE-OUT-SPEC.md` §10.1): the job's supply list is
+never touched. A job line can be put on an invoice once only (jon, 9 Oct), so this, not
+"the same line twice", is how a 0% share is expressed.
 
 ### 10.4 Tax codes (the Xero mapping, from `tax_codes[]` on every billing response)
 
