@@ -140,9 +140,13 @@ middleware; the general `authenticate` accepts exactly one shape.
 row above passed it — a public hire-form session read `GET /api/drivers` (proven on
 a test database). It now requires `{ id, email, role }` and rejects any `scope`,
 `type` or `typ`. The check is `verifyStaffToken()` in `middleware/auth.ts`, shared
-with the Socket.io handshake — never a second `jwt.verify` for staff. **A new token
-family MUST carry one of those markers and get its own middleware** — never widen
-`authenticate`. A `users` row can no longer hold the `freelancer` role as a login
+with the Socket.io handshake — never a second `jwt.verify` for staff. **Every
+family also carries an `aud`, and every verifier names the one it accepts**
+(`services/tokens.ts` `signFor()` / `verifyFor()`, Oct 2026) — a token minted for
+one family can never be verified by another; the portal session is the one
+exception (own secret, also minted by the Netlify app). **A new token family MUST
+get its own audience in `tokens.ts`, carry a marker, and get its own middleware**
+— never widen `authenticate`. A `users` row can no longer hold the `freelancer` role as a login
 (refused at login and refresh; freelancers use the portal). Open follow-ups (`aud`
 claims per token family, the per-router `authorize()` pass) and the public-route
 inventory are in `docs/SECURITY-AUDIT-BRIEF.md`.
