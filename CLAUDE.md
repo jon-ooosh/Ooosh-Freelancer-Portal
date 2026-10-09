@@ -194,11 +194,12 @@ payment" dialog records a REFUND when its invoice dropdown is left at "none". Bu
 `services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|allocate|complete`,
 log in `job_closeout_log`) — plan shown first, every write read back, excess NEVER allocated, more
 than one open invoice refused for now, HireHop↔OP payment and refund mismatches refuse by name.
-The UI is two panels on the Post-Hire tab sharing one plan read (`lib/closeOutPlan.ts`):
-`HireInvoicePanel.tsx` on the **Invoice** card (Raise invoice: draft from uninvoiced lines → penny check →
-approve dated today → Xero; **an EU hire with the "Non-standard VAT rules" item is refused until the
-invoice-line VAT split is built**) and `HireCloseOutPanel.tsx` on the **Payment Reconciliation** card
-(Allocate payments, Complete job; Xero log lines admin-only). Not yet: the VAT split (spec §10.1), the
+The UI is ONE panel, `HireCloseOutPanel.tsx` on the **Invoice** card of the Post-Hire tab (the
+Payment Reconciliation requirement still exists but is drawn as that card's second pill): one button
+raises the invoice if needed (draft from uninvoiced lines → penny check → approve dated today → Xero)
+then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); Complete is its own button; "Mark as
+sent" only once nothing is left to allocate. **An EU hire with the "Non-standard VAT rules" item is
+refused until the invoice-line VAT split is built.** Xero log lines admin-only. Not yet: the VAT split (spec §10.1), the
 arrival hook and the Xero sweep (Phase 3). §1 is
 settled, §5 the allocation rule, §9 the phases. Refunds only through the existing routes.
 
