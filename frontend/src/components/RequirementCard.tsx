@@ -23,7 +23,6 @@ import BacklineLocationModal, {
   backlineLocationLabel,
 } from './BacklineLocationModal';
 import HireCloseOutPanel from './HireCloseOutPanel';
-import HireInvoicePanel from './HireInvoicePanel';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -222,8 +221,12 @@ export default function RequirementCard({
   selfDriveVanOverride,
   onVehicleCountOverride,
   onReload,
+  companionReq,
 }: {
   req: JobRequirement;
+  /** A second requirement whose status is shown on THIS card (the payments
+   *  status on the Invoice card — one card for the close-out, Oct 2026). */
+  companionReq?: JobRequirement;
   derivedFlags?: DerivedFlags | null;
   /** Regs of vans actually allocated to THIS job — shown on the vehicle
    *  headline ("Vehicle (Self-Drive) — RO23HLU") once a van is linked. */
@@ -994,32 +997,18 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Payment reconciliation — the hire close-out (HIRE-CLOSE-OUT-SPEC.md §4.3):
-                what HireHop holds, what Allocate would do, the buttons, the log. The
-                card's own status still comes from the derivation engine. */}
-            {req.requirement_type === 'payment_reconcile' && jobId && (
-              <HireCloseOutPanel jobId={jobId} onChanged={onReload} />
-            )}
-
-            {/* Invoice — Raise invoice (HIRE-CLOSE-OUT-SPEC.md §4.1): what is left to bill,
-                and the button that drafts, penny-checks, approves and sends it to Xero. */}
+            {/* Invoice — the hire close-out (HIRE-CLOSE-OUT-SPEC.md §3): one card, one
+                panel, one button that raises the invoice if needed then allocates the
+                payments in HireHop and Xero; Complete; the log. Both this card's status
+                and the payments one (shown as the second pill) still come from the
+                derivation engine. "Mark as sent" lives in the panel so it is only
+                offered once the client's invoice already shows their payments. */}
             {req.requirement_type === 'invoice' && jobId && (
-              <HireInvoicePanel jobId={jobId} onChanged={onReload} />
-            )}
-
-            {/* Invoice — show "Mark as Sent" button when status is in_progress (generated) */}
-            {req.requirement_type === 'invoice' && req.status === 'in_progress' && (
-              <div className="mt-1.5">
-                <button
-                  onClick={() => onStatusChange(req.id, 'done')}
-                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-green-50 text-green-700 border border-green-200 rounded hover:bg-green-100 transition-colors"
-                >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                  Mark as Sent to Client
-                </button>
-              </div>
+              <HireCloseOutPanel
+                jobId={jobId}
+                onChanged={onReload}
+                onMarkSent={req.status !== 'done' ? () => onStatusChange(req.id, 'done') : undefined}
+              />
             )}
 
             {/* Reminder — show due date, assigned user, event trigger, delivery, notes */}
@@ -1160,6 +1149,24 @@ export default function RequirementCard({
               )}
             </div>
           )}
+
+          {/* Companion status — the payments requirement, as a second pill on the Invoice card */}
+          {companionReq && (() => {
+            const cl = TYPE_STATUS_LABELS[companionReq.requirement_type];
+            const cc = PREP_STATUS_CONFIG[companionReq.status] || PREP_STATUS_CONFIG.not_started;
+            return (
+              <label className={`inline-flex items-center rounded text-xs font-medium ${cc.bg} ${cc.colour}`} title="Payments">
+                <span className="pl-3 pr-1 py-1">Payments:</span>
+                <select
+                  value={companionReq.status}
+                  onChange={e => onStatusChange(companionReq.id, e.target.value as JobRequirement['status'])}
+                  className={`bg-transparent pr-2 py-1 text-xs font-medium ${cc.colour} cursor-pointer focus:outline-none`}
+                >
+                  {PREP_STATUS_ORDER.map(st => <option key={st} value={st}>{cl?.[st] || PREP_STATUS_CONFIG[st].label}</option>)}
+                </select>
+              </label>
+            );
+          })()}
 
           {/* Status dropdown — only for non-contextual cards */}
           {!isContextualStatus && (
