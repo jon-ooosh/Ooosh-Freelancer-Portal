@@ -82,7 +82,12 @@ structurally impossible rather than merely discouraged.
     needs B's invoice to exist first, so for B it is a step-4.1-then-apply sequence; for A
     it is one of the three surplus choices in §4.3. **Its Xero leg is probably a no-op**
     (§4.3 step 2) — capture 5.
-13. **Credit notes stay manual.** Creating one is not captured (`HIREHOP-BILLING-API.md`
+13. **Tax code 33 (Zero Rated Income) for the non-UK portion** (jon, 9 Oct; bookkeeper to
+    confirm). HireHop ids and Xero mappings: `HIREHOP-BILLING-API.md` §10.4.
+14. **Applying credits in Xero is automatic.** It is bookkeeping that mirrors what HireHop
+    already says, it writes nothing to HireHop, and it is idempotent, so it runs as a sweep
+    (§4.3 step 2) as well as inside the stepper. Everything else stays human-pressed.
+15. **Credit notes stay manual.** Creating one is not captured (`HIREHOP-BILLING-API.md`
     §7) and carries the Xero 2263 trap. Compensation is a discount on the job's lines before
     invoicing (preferred), a credit note by hand before payment, or a partial refund after.
 
@@ -195,9 +200,14 @@ the rule in §5. Lists each allocation, each invoice's resulting owing, and any 
    and every invoice as Awaiting payment until the bookkeeper applies the credit by hand;
    nothing OP has pushed has ever allocated in Xero except the shop close. So this step
    sweeps **all** of a job's allocations, `apply-credit` and `/:id/claim` call the same
-   shared step after their HireHop write, and the same step gets an **"Apply credits in
-   Xero"** button on the Payment card of already-Completed jobs — the backlog of
-   hand-allocated hires can be tidied one job at a time with no HireHop write at all.
+   shared step after their HireHop write, and **the same step runs on its own** for jobs
+   that already carry HireHop allocations — a nightly sweep over jobs invoiced in the last
+   N months whose Xero invoice still shows AmountDue > 0 (jon, 9 Oct: "if everything
+   matches, just do it"). It is the one automatic piece besides the arrival hook, and it
+   is safe to be: no HireHop write, idempotent by construction, Xero's AmountDue is the
+   judge, and a job whose figures don't match is skipped, logged (§7, `user_id` NULL) and
+   listed on the Money overview rather than guessed at. Gated by a `system_settings`
+   toggle like the arrival hook.
 3. **Read back**: each targeted invoice's HireHop `owing` and Xero `AmountDue` match the
    plan. The card shows the result; `payment_reconcile` re-derives to "Reconciled" when
    every invoice is at £0.00.
@@ -354,11 +364,14 @@ then sees the new invoice as it does today.
    posts the same `OWNER: 0` shape and 16043's rows were captured earlier (§5).
 5. ✅ **Xero** — nothing is applied automatically; see §4.3 step 2.
 6. ✅ **Tax codes** — `HIREHOP-BILLING-API.md` §10.4.
-7. ❓ **The EU split** (gates §10.1 only): on the scratch job, make an empty draft
-   (`all: 0`), then in the invoice editor try to put the SAME job line on it twice — once
-   at part price @ 20%, once at the rest @ 0%. If the editor won't, post it by hand with
-   the §10.2 payload. Capture the request, the response, and `billing_assign_list.php`
-   afterwards (`invoiced_so_far` on that line). Then ask the bookkeeper: tax code 33 or 31?
+7. ❓ **A free line on an invoice** (gates §10.1 only). jon: a job line can be put on an
+   invoice ONCE — never twice — so the split is "fudge-plus" (§10.1) and needs a 0% line
+   that is NOT a job line. On the scratch job's empty draft (`all: 0`), look for any way
+   in the invoice editor to add a line that isn't picked from the job (a "new line" / free
+   text / charge button). If there is one, capture its request and response. If there
+   isn't, try `billing_save_items.php` by hand (§10.2 payload) with `item_id=0`,
+   `kind=4`, a `title`, `price`, `vat=0`, `vat_acc_id=33`, `nominal_id=240` — and capture
+   what HireHop does with it. Either answer decides between §10.1 (a) and (b).
 
 ### 9.1 How to capture
 
@@ -388,28 +401,33 @@ their nominal codes), discount the real lines down to the UK-taxable amount, inv
 dummy lines at 0%. Done by hand, every time.
 
 **What the captures changed.** VAT lives on the invoice line, not the job line
-(`HIREHOP-BILLING-API.md` §10). So Raise invoice can draft from the job's lines as they
-are and then correct the draft's lines, and the job's supply list, status, prep and
-availability are never involved — which answers the "won't this move the job to
+(`HIREHOP-BILLING-API.md` §10), and a job line can be put on an invoice **once only** (jon,
+9 Oct — never twice, so no "same line at two rates"). So Raise invoice drafts from the
+job's lines as they are and then corrects the DRAFT, and the job's supply list, status,
+prep and availability are never involved — which answers the "won't this move the job to
 prepping?" worry: nothing is added to the job.
 
+**The method — "fudge-plus", jon's name for it: today's fudge, on the invoice instead of
+the job, with nominals kept, by API:**
+
 - **31+ days**: set every vehicle line to tax code 33 (`billing_save_item.php`). No split.
-- **Under 31 days**: each vehicle / equipment line must become a UK part at 20% and a
-  non-UK part at 0%, same nominal, prices pro rata, pennies reconciled to the original line.
-  Two ways, decided by capture 7:
-  (a) the same job line twice on the invoice (`billing_save_items.php`, two rows, one
-  `item_id`) — cleanest, if HireHop accepts it and `invoiced_so_far` stays sane;
-  (b) the fudge, automated and with nominals kept: the real line discounted to the UK
-  part @ 20%, plus ONE kind-4 charge line per nominal group ("Non-UK days — zero-rated,
-  HMRC 741A") at 0% carrying that group's `nominal_id` — the only path that adds a line
-  to the job, and a charge line is not stock (no availability, scan or prep).
+- **Under 31 days**, per nominal group (vehicle group, equipment group — the same grouping
+  `vat-adjustment.ts` already does): edit each real line's price down to its UK-days share
+  at 20% (`billing_save_item.php`, `total` = the new net), then add ONE 0% line per group
+  for the non-UK share — "Non-UK days (zero-rated, HMRC 741A): <n> of <m> days" — carrying
+  that group's `nominal_id` and tax code 33. Pennies: the group's lines + its 0% line must
+  equal the group's original net exactly (`reconcileLines` discipline); services, delivery,
+  crew, storage and rehearsal lines are untouched. Where that 0% line comes from is capture
+  7: (a) a free invoice line if HireHop's editor has one; else (b) a kind-4 charge line
+  added to the job just before drafting (not stock — no availability, scan or prep), picked
+  onto the draft and set to 0% + the group's nominal.
 
 Either way: one invoice, the penny check compares its gross to
 `calculateVatAdjustment()`'s adjusted total (what the portal showed the client), and Xero
 receives the right tax type on every line so the VAT return is right untouched. The quote
 keeps showing full UK VAT until invoicing, which is what the portal's wording already
 says. Done at invoice time, not quote time (the quote is edited too often before then).
-Tax code 33 vs 31 is the bookkeeper's call. The cancellation-fee invoice will use the
+Tax code 33, bookkeeper to confirm (§1.13). The cancellation-fee invoice will use the
 same line-level machinery (jon, 9 Oct).
 
 ### 10.2 Who may press "Complete anyway" with excess held — manager, or any staff?

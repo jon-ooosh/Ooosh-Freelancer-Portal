@@ -234,9 +234,9 @@ Interested (10) releases it** (`SHOP-SALES-SPEC.md` §2.1).
 
 - Creating a **credit note** (approving one is documented in `MONEY-AND-EXCESS.md`).
 - What `upto`, `aggregated`, `novat` do on invoice create (`all` is now known — §3, §10).
-- Whether `billing_save_items.php` (§10) accepts the SAME job line twice with different
-  prices and VAT codes (the EU split, `HIRE-CLOSE-OUT-SPEC.md` §10.1), and what
-  `invoiced_so_far` then reads.
+- Whether an invoice can carry a line that is NOT a job line (`billing_save_items.php`
+  with `item_id=0`?) — the EU split's 0% line, `HIRE-CLOSE-OUT-SPEC.md` §10.1. A job line
+  can be put on an invoice once only (jon, 9 Oct), so "the same line twice" is out.
 - Deleting a payment application (jon deleted 16015's stray refund by hand on 9 Oct
   without the network tab open — next time).
 - Voiding / deleting an approved invoice (and what it does in Xero).
@@ -373,7 +373,8 @@ Response = the invoice row (§3 shape) with `items[]` now holding the line as in
 line `ID` 104283, `MAIN_ID` 168520 (the job line), `ACC_NOMINAL_ID` 175,
 `ACC_TAX_RATE_ID` 20. `price`, `discount`, `vat`, `vat_acc_id`, `nominal_id` and
 `title` are all per row and all ours to set — this is the call that can build an
-invoice line by line. ❓ Untested: the same `item_id` twice in one call (§7).
+invoice line by line. **A job line goes on an invoice once only** (jon, 9 Oct) — a second
+row for the same `item_id` is not an option. ❓ Untested: a row with no job line (§7).
 
 ### 10.3 Change one invoice line — `billing_save_item.php` (POST, singular)
 
