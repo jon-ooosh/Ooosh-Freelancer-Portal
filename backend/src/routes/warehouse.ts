@@ -22,6 +22,7 @@
  */
 import { Router, Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
@@ -108,8 +109,19 @@ const router = Router();
 
 // ─── POST /api/warehouse/auth/pin ───────────────────────────────────
 // Validate the kiosk PIN and return a warehouse_session JWT.
+//
+// A static PIN with no attempt limit is a brute-force target (Oct 2026 audit).
+// The kiosk enters it once per 12h session, so 10 tries in 15 minutes per IP
+// covers a fumbled entry and nothing more.
+const pinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many PIN attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
-router.post('/auth/pin', async (req: Request, res: Response) => {
+router.post('/auth/pin', pinLimiter, async (req: Request, res: Response) => {
   try {
     const { pin } = req.body as { pin?: unknown };
     if (typeof pin !== 'string' || !pin) {
