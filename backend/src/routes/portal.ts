@@ -13,6 +13,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import crypto from 'crypto';
 import { query } from '../config/database';
@@ -106,6 +107,26 @@ function deriveCrewMoney(rawExpenses: unknown): CrewMoney {
 
 const router = Router();
 
+// ── Public auth endpoints: per-IP limits (Oct 2026 audit) ────────────
+// None of these had a limit, so a password could be brute-forced and the
+// code / reset senders could be used to bomb an inbox. Limits are per IP and
+// generous enough for a venue or yard where several freelancers share one.
+const portalLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: 'Too many attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+// Endpoints that SEND an email (verification code, reset link).
+const portalEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many requests — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // ── Portal auth middleware (separate from OP staff auth) ──────────────
 
 interface PortalUser {
@@ -195,7 +216,7 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
-router.post('/auth/login', async (req: Request, res: Response) => {
+router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -307,7 +328,7 @@ const registerStartSchema = z.object({
   email: z.string().email(),
 });
 
-router.post('/auth/register/start', async (req: Request, res: Response) => {
+router.post('/auth/register/start', portalEmailLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = registerStartSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -374,7 +395,7 @@ const registerVerifySchema = z.object({
   code: z.string().length(6),
 });
 
-router.post('/auth/register/verify', async (req: Request, res: Response) => {
+router.post('/auth/register/verify', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = registerVerifySchema.safeParse(req.body);
     if (!parsed.success) {
@@ -433,7 +454,7 @@ const registerCompleteSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters'),
 });
 
-router.post('/auth/register/complete', async (req: Request, res: Response) => {
+router.post('/auth/register/complete', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = registerCompleteSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -518,7 +539,7 @@ const forgotSchema = z.object({
   email: z.string().email(),
 });
 
-router.post('/auth/forgot-password', async (req: Request, res: Response) => {
+router.post('/auth/forgot-password', portalEmailLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = forgotSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -610,7 +631,7 @@ const resetSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters'),
 });
 
-router.post('/auth/reset-password', async (req: Request, res: Response) => {
+router.post('/auth/reset-password', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = resetSchema.safeParse(req.body);
     if (!parsed.success) {
