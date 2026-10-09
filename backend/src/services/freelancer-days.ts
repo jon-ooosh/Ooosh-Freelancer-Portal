@@ -22,6 +22,7 @@
 
 import { query } from '../config/database';
 import { DATE_RE } from './staff-day-status';
+import { ukToday } from './uk-date';
 
 export type DurationType = 'full_day' | 'half_day' | 'hours';
 export type RateType = 'day' | 'half_day' | 'hourly' | 'fixed';
@@ -370,7 +371,7 @@ export async function closeOutBooking(
   // A future offer is not stale, it is pending. Closing one out would quietly
   // remove somebody from a day that has not happened, which is the exact
   // failure §9.4 decision 1 exists to prevent.
-  if (cur.bookingDate >= new Date().toISOString().slice(0, 10)) {
+  if (cur.bookingDate >= ukToday()) {
     throw new Error('That day has not happened yet — cancel it instead if it is off');
   }
 

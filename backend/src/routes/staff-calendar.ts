@@ -20,7 +20,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import {
-  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE,
+  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE, cycleWeekFor,
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
@@ -70,6 +70,7 @@ import {
   listNeedsClosing, closeOutBooking, withdrawBooking, amendBooking,
 } from '../services/freelancer-days';
 import { sendOfferEmail, sendCancellationEmail, sendUpdatedEmail } from '../services/freelancer-day-offer';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -85,7 +86,7 @@ function isAdmin(req: AuthRequest): boolean {
 
 /** Resolve a from/to window, defaulting to the next 28 days, capped at a year. */
 function resolveRange(req: AuthRequest): { from: string; to: string } | { error: string } {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const from = DATE_RE.test(String(req.query.from)) ? String(req.query.from) : today;
   const to = DATE_RE.test(String(req.query.to)) ? String(req.query.to) : addDaysYmd(from, 27);
   if (to < from) return { error: '`to` must be on or after `from`' };
@@ -127,7 +128,7 @@ router.get('/calendar', async (req: AuthRequest, res: Response) => {
 router.get('/today', async (req: AuthRequest, res: Response) => {
   const date = DATE_RE.test(String(req.query.date))
     ? String(req.query.date)
-    : new Date().toISOString().slice(0, 10);
+    : ukToday();
   try {
     res.json({ data: await getTodaySummary(date, isAdmin(req)) });
   } catch (err) {
@@ -697,6 +698,15 @@ router.get('/company-days', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// A company day added or withdrawn changes who is owed a day in lieu (spec
+// §20.5b). The 06:05 sync would catch it tomorrow; this makes it show today.
+// Fire-and-forget — the response does not wait on everybody's ledger.
+function refreshLieuDays(): void {
+  void import('../services/staff-balance')
+    .then(m => m.runEntitlementSyncForOpenYears())
+    .catch(err => console.error('[staff-calendar] day-in-lieu refresh failed:', err));
+}
+
 // POST /api/staff-calendar/company-days
 router.post('/company-days', adminOnly, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
@@ -710,6 +720,7 @@ router.post('/company-days', adminOnly, async (req: AuthRequest, res: Response) 
 
   try {
     const day = await createCompanyDay(parsed.data, req.user!.id);
+    refreshLieuDays();
     // Offered, never applied: anyone who had already booked the day off has
     // paid for something the company has now given them, and handing it back
     // is a decision a human makes (§20.3).
@@ -749,6 +760,7 @@ router.post('/company-days/:id/cancel', adminOnly, async (req: AuthRequest, res:
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
   try {
     await cancelCompanyDay(req.params.id as string, parsed.data.reason, req.user!.id);
+    refreshLieuDays();
     res.json({ data: await getCompanyDay(req.params.id as string) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel that day' });
@@ -1683,10 +1695,56 @@ router.get('/employees/:personId/patterns', async (req: AuthRequest, res: Respon
     if (!isAdmin(req) && (await personIdForUser(req.user!.id)) !== personId) {
       res.status(403).json({ error: 'Insufficient permissions' }); return;
     }
-    res.json({ data: await listPatterns(personId) });
+    const patterns = await listPatterns(personId);
+    // Notes are written for admins (jon, Oct 2026) — never back to the person.
+    res.json({ data: isAdmin(req) ? patterns : patterns.map(p => ({ ...p, notes: null })) });
   } catch (err) {
     console.error('[staff-calendar] patterns error:', err);
     res.status(500).json({ error: 'Failed to load working patterns' });
+  }
+});
+
+// GET /api/staff-calendar/me/patterns — your own working hours, for My Time.
+// Current pattern plus any change already scheduled; no history. Days and
+// times only (jon, Oct 2026) — no notes, breaks or home days. `data` is null
+// when the login has no staff record.
+router.get('/me/patterns', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: null }); return; }
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+    // listPatterns' rows are loosely typed; name the columns used here.
+    const patterns = (await listPatterns(personId)) as unknown as {
+      effective_from: string; effective_to: string | null; cycle_weeks: number;
+      days: { cycle_week: number; weekday: number; is_working: boolean;
+        start_time: string | null; end_time: string | null }[];
+    }[];
+    const shape = (p: (typeof patterns)[number]) => ({
+      effectiveFrom: p.effective_from,
+      cycleWeeks: Number(p.cycle_weeks) || 1,
+      days: p.days
+        .filter(d => d.is_working)
+        .map(d => ({ cycleWeek: d.cycle_week, weekday: d.weekday, startTime: d.start_time, endTime: d.end_time })),
+    });
+    // effective_to is inclusive: a change closes the old pattern the day before.
+    const current = patterns.find(p => p.effective_from <= today
+      && (p.effective_to === null || p.effective_to >= today));
+    const upcoming = patterns.filter(p => p.effective_from > today)
+      .sort((a, b) => (a.effective_from < b.effective_from ? -1 : 1));
+    res.json({
+      data: {
+        current: current ? {
+          ...shape(current),
+          // Which week of a 2-week cycle today falls in, so the page can say
+          // "this week" / "next week" rather than an unexplained W1 / W2.
+          thisCycleWeek: cycleWeekFor(today, current.effective_from, Number(current.cycle_weeks) || 1),
+        } : null,
+        upcoming: upcoming.map(shape),
+      },
+    });
+  } catch (err) {
+    console.error('[staff-calendar] my patterns error:', err);
+    res.status(500).json({ error: 'Failed to load your working hours' });
   }
 });
 

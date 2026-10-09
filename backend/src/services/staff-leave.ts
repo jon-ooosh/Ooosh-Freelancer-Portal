@@ -23,6 +23,7 @@
 import { query, getClient } from '../config/database';
 import { DATE_RE, dateRange, getStaffCalendar, weekdayIndex } from './staff-day-status';
 import { getBalance, postEntry, ensureEntitlement, type LedgerAccount } from './staff-balance';
+import { ukToday } from './uk-date';
 
 export type LeaveType = 'holiday' | 'toil' | 'unpaid';
 export type LeaveStatus = 'pending' | 'approved' | 'declined' | 'cancelled' | 'withdrawn';
@@ -232,7 +233,7 @@ export async function getImpact(
     ? null
     : balanceBefore - (minutesByYear.get(perYear[0]?.year ?? 0) ?? 0);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const noticeDays = Math.max(0, dateRange(today, startDate).length - 1);
 
   // Everyone else's live leave over the same dates.

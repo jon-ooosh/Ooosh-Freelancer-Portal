@@ -1,6 +1,6 @@
 # Staff Calendar & Time Module — Spec
 
-**Status (2 Oct 2026): BUILT and LIVE — staff are using it from October 2026.**
+**Status (7 Oct 2026): BUILT and LIVE — staff are using it from October 2026.**
 Phases A–E, company days (§20), working from home (§19), the personal calendar
 feed (§10) and the monthly payroll email (§12.1) have all shipped; 2026 history
 is backfilled from BrightHR. This is expected to be the module's last chunk.
@@ -855,7 +855,8 @@ the moment you are looking at the week and seeing a thin day.
 - **One live booking per person per day** (unique index). Two stints in a day
   is one booking with the wider window and a note — the same call the leave
   design made, and for the same reason.
-- `freelancer_day_booking_tasks` (§3.8) is **not built**. Per-booking task
+- `freelancer_day_booking_tasks` (§3.8) is **not built** — superseded by
+  `freelancer_tasks`, planned in §21 (Oct 2026). Per-booking task
   breakdown does not help answer "are there enough people in", which is what
   this is for; the booking's note covers "what are they doing" for now.
 
@@ -1339,6 +1340,23 @@ cold. If something misbehaves, start with `.claude/rules/staff-calendar.md`,
 then the "Bugs found" list below; the module's facts each have ONE definition
 (the table at the top of that rules file).
 
+**Since then (7 Oct 2026).** Staff queried their figures against BrightHR. Two
+causes, both data rather than code, and worth knowing before the next query:
+
+- **A contract allowance above 5.6 weeks was never entered.** Will is on 33 days
+  (6.6 weeks); the import test assumed it, production did not have it. Set on
+  Employment › Edit; the entitlement sync posts only the difference.
+- **BrightHR's overtime totals are all-time, not per year.** The import carried
+  2026 only, so 2025 overtime still owed at the switchover was missing (Rich 3h,
+  Will 10h 30m). Added with the balance panel's manual adjustment, dated 1 Jan
+  2026, note "brought across from BrightHR". If another queries their TOIL,
+  compare BrightHR's TOIL balance with OP's bank: the known, accepted gaps are
+  Louis and Matt (+3h each in OP — whole TOIL days at 7h not 8h) and Chris
+  (+4h 40m in OP — BrightHR took his June payout partly from 2025 time).
+
+Then built: manual adjustments (shown to the person), days in lieu for company
+days (§20.5b), and every Staff page tab restyled on `components/StaffCard.tsx`.
+
 Where things are, for troubleshooting:
 
 | Area | Code |
@@ -1346,8 +1364,11 @@ Where things are, for troubleshooting:
 | Is somebody in / home / off on a date | `services/staff-day-status.ts` (`getStaffCalendar`, the merge layers) |
 | Working from home | `services/staff-wfh.ts`, routes `/staff-calendar/wfh*` |
 | Personal calendar feed | `services/staff-ical.ts`, `routes/staff-calendar-feed.ts` |
+| Your working hours (My Time card) | `GET /staff-calendar/me/patterns` — current pattern + scheduled changes, days and times only; never notes, breaks or history (jon, Oct 2026). Pattern notes are also stripped from `/employees/:id/patterns` for a non-admin reading their own |
 | Emails and bells (requests, decisions, digest, cash-out, payroll) | `services/staff-notifications.ts` |
 | Balances | `services/staff-balance.ts` — the only SUM of the ledger |
+| Manual adjustments | Staff › Employment › balance panel (`StaffBalancePanel.tsx` `AdjustmentForm`) → `POST /employees/:id/ledger`, source `manual` |
+| Days in lieu for company days | `staff-company-days.ts` `syncCompanyDayLieu()`, run from `syncEntitlement()`, source `company_day_lieu` |
 | Screens | `MyTimePage.tsx` (also the Staff page's Time off tab), `StaffCalendarPage.tsx`, `StaffAdminPage.tsx`, `LeaveApprovals.tsx`, `PayrollReportPanel.tsx` |
 
 ### Shipped
@@ -1374,6 +1395,9 @@ Where things are, for troubleshooting:
 | **§19** | Working from home — one-off requests approved like holiday, regular days on the pattern, two-number headcount, on-site filter, cover counts the building | 269 |
 | **§10** | Personal read-only calendar feed — own time only | 270 |
 | **§12.1** | Payroll report emailed on the 1st; date presets on the panel | — |
+| — | Staff page restyle: every person tab (Overview, Employment, Time off, Records, Reviews, Access) in the Time off look, on shared `components/StaffCard.tsx`; Employment's allowance-days box fixed | — |
+| **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
+| — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -2031,8 +2055,291 @@ are not normal working days. The staff calendar carries an admin link to it,
 since noticing you need one and configuring it are different moments and only
 the second wants a form.
 
+### 20.5b Company day on your day off — BUILT (jon, Oct 2026; migration 278)
+
+Raised by Will and Matt: a company day only helps whoever was rostered that
+day, so where Christmas falls decides who gets it. Christmas 2026 is Fri + Sat
+(Mon–Fri staff get 1, weekend staff 2); 2027 is Sat + Sun (Mon–Fri staff get
+NONE). Likely a Part-time Workers Regulations problem too.
+
+**Decision: a day in lieu.** A company day that falls on someone's day off
+credits ONE of their normal days (`nominalDayMinutes`) to their holiday,
+labelled with the company day, booked like any holiday. Same number of days
+for everyone, not pro-rata (jon: "not a scrooge"). Credited IN ADVANCE — when
+the year's entitlement is granted, so it can be booked any time in the year,
+not squeezed into the last week of December. Computed from the pattern, so it
+belongs in the idempotent daily entitlement sync (posting the difference),
+which also corrects it if someone's working days change. Mechanism already
+exists: the §7.4 / reclaim `correction` credit. Wants an HR-advisor sanity
+check; build before Christmas 2026, since 26 Dec 2026 is a Saturday.
+
+**As built:** `syncCompanyDayLieu()` in `staff-company-days.ts`, called from
+`syncEntitlement()` and refreshed when a company day is added or withdrawn. An
+`adjustment` with source_type `company_day_lieu` (migration 278 widened the
+CHECK), dated on the company day. It follows the calendar — idempotent per
+date, so a change of working days or a withdrawn company day takes the lieu
+day back (unlike the reclaim, which is never re-debited). My Time shows it as
+a "Day in lieu" row. Not built: anything for a part-day worker beyond one
+nominal day; leavers keep what was credited, like any booked holiday.
+
 ### 20.6 What 29 February does
 
 A recurring day on 29 February is **skipped** in a common year rather than slid
 to the 28th. Sliding would invent a day off nobody agreed to; skipping is
 visible on the calendar and a one-off covers it if that was the intent.
+
+---
+
+## 21. Freelancer tasks — PHASES 1–2 BUILT (Oct 2026, migration 276)
+
+Replaces the `freelancer_day_booking_tasks` sketch in §3.8, which was never
+built. Agreed with jon, 7 Oct 2026, before any code.
+
+### 21.1 What it is for
+
+Telling a freelancer who is **in for the day** — or a **studio sitter on
+shift** — what we want doing, most of all "prep this van", with a button on
+their phone that opens that van's prep sheet. Staff use their phones as the
+input surface and freelancers will too, so the link is the point, not a
+nicety.
+
+### 21.2 Settled decisions
+
+1. **Not the To Do module.** To Do is staff-only (`assignable-staff.ts`
+   requires a current employment record) and stays that way.
+2. **Only two kinds of owner: a day booking or a sitter shift.** A
+   freelancer out on a driving job (crew/transport quote) never sees "can you
+   prep this van" — that is deliberate, not a gap.
+3. **A live list, not a one-shot.** Tasks can be added, edited or removed at
+   any point: before the offer, after acceptance, on the day itself. The
+   portal reads the current list every time it opens.
+4. **No email per change.** Staff add what they need, then press **"Send
+   update"** if they think the freelancer needs telling. Tonight's SITTER also
+   gets ONE summary at 16:00 — only if there are open tasks and something
+   changed since they were last told; no tasks, no email; changes after 16:00
+   are not chased, they show on the portal (jon, 8 Oct 2026). *(Built
+   differently from the first draft: the offer email does NOT list tasks. The
+   offer goes the moment the day is booked, before anyone has added a task, so
+   it would almost always be empty — "Send update" covers it.)*
+5. **Van prep ticks itself.** A saved prep for that van closes the task — the
+   freelancer never ticks twice. Other tasks get a "Done" button.
+6. **The prep link uses a narrow pass, like book-out** (option B of the
+   7 Oct discussion), not an OP login and not a shared account.
+7. **"Give to a freelancer" from the van side** is offered ONLY when somebody
+   is booked today or tomorrow (an offered/accepted day booking, or an
+   assigned sitter shift). No booked freelancer, no button.
+
+### 21.3 Data model
+
+```sql
+freelancer_tasks
+  id              UUID PK
+  day_booking_id  UUID REFERENCES freelancer_day_bookings(id)
+  shift_id        UUID REFERENCES studio_sitter_shifts(id)
+  -- exactly one owner:
+  CHECK ((day_booking_id IS NULL) <> (shift_id IS NULL))
+  task_type       VARCHAR(20) NOT NULL CHECK (task_type IN ('van_prep','other'))
+  vehicle_id      UUID REFERENCES fleet_vehicles(id)   -- required for van_prep (CHECK)
+  job_id          UUID REFERENCES jobs(id)             -- optional: "prep it for #16xxx"
+  description     TEXT
+  sort_order      INT NOT NULL DEFAULT 0
+  status          VARCHAR(20) NOT NULL DEFAULT 'open'
+                    CHECK (status IN ('open','done','cancelled'))
+  done_at         TIMESTAMPTZ
+  done_by_person  UUID REFERENCES people(id)
+  done_via        VARCHAR(20) CHECK (done_via IN ('prep_saved','portal','staff'))
+  created_by      UUID REFERENCES users(id)
+  created_at, updated_at
+```
+
+Plus `last_tasks_notified_at TIMESTAMPTZ` on both owners, so the "Send
+update" button can say "3 changes since you last told them".
+
+**There is no `person_id` and no date, on purpose** (the first draft had a
+`task_date`; it was dropped at build so an amended booking date cannot leave
+its tasks behind). Both are read through the owner: the booking's `person_id`, or the shift's live assignment. So a sitter
+reassigned on the day takes the shift's tasks with them to the new sitter —
+the same reason handover notes are shift-anchored. A cancelled booking leaves
+its open tasks visible to staff as "nobody has these now" (a warning, never a
+silent drop — tasks are soft-cancelled, never deleted).
+
+**Each owner is looked up once**, in `services/freelancer-tasks.ts`:
+`getOwnerContext(owner)` (its date, whether it is live, who is doing it),
+`listTasks(owner)`, `ownerOf(task)`. Phase 3 adds `bookedFreelancersFor(dates)`
+(the "who could I give this to?" list). Nothing else re-derives who owns a task.
+
+### 21.4 Staff surfaces
+
+- **Staff calendar** — the freelancer's booking panel gains a Tasks section:
+  add (type, van picker, optional job, note), reorder, edit, cancel, and the
+  **Send update** button. Ticks show as they come in.
+- **Operations › Rehearsals** — each assigned evening gains the same Tasks
+  section, beside Notes and Lock-up. That is how a sitter gets "prep the van
+  for tomorrow's early hire" at busy times.
+- **Give to a freelancer** — a button on the van's page (and its prep status
+  wherever that is shown; exact spot settled at build). Shown only when
+  `bookedFreelancersFor([today, tomorrow])` is non-empty; the picker lists
+  them as "Charlie Stanley — sitter, tonight" / "Tom — in tomorrow".
+
+### 21.5 Freelancer surfaces (the portal, `src/`)
+
+- **Day booking** — the booking card on the dashboard lists its tasks.
+- **Sitter shift** — `src/app/shift/[date]` gains a "Tasks tonight" section
+  above the handover notes.
+- Each `van_prep` task: **"Open prep sheet"**. Each `other` task: **"Done"**.
+- Tasks show on every upcoming day, offered ones included — the freelancer
+  should see what the day involves before accepting it. *(The draft said "from
+  the day before"; a live list has no reason to hide.)*
+
+### 21.6 The prep link
+
+The book-out handoff is the pattern: the portal asks OP for a short-lived
+HMAC token, the browser opens OP with `?freelancerToken=`, OP redeems it for a
+narrow session JWT.
+
+- **A new scope, `freelancer_prep`** — NOT a third `mode` on
+  `freelancer_bookout`. That session is built around a `vehicle_hire_assignment`
+  and rejects a token without one; a prep has no assignment. Loosening that
+  check to fit prep would weaken book-out.
+- **Resolve** (`POST /api/vehicles/freelancer-prep/resolve`): the token names
+  the task; OP checks the task is open, is a `van_prep`, `task_date` is today
+  or tomorrow, and the caller is its current owner (via `ownerPerson`). The
+  session carries `taskId` + the vehicle reg and lasts 4h, like book-out.
+- **Allow-list**: only the endpoints the prep page actually calls (to be
+  listed from `PrepPage.tsx` at build — at least fleet read, checklist
+  settings, prep history, photo upload, `save-event`, `save-prep`), each
+  clamped to the session's reg.
+- **Frontend**: a `FreelancerPrepShell` (mirror of `FreelancerBookoutShell`)
+  opens `PrepPage` with the van already chosen and the picker locked.
+  `PrepPage` gains a "start on this van" input; staff can use it too.
+- **Ticking**: when a `Prep Completed` event is saved for a van, open
+  `van_prep` tasks for that van dated yesterday or today close with
+  `done_via = 'prep_saved'` — whoever did the prep, staff included, and the
+  task shows who.
+
+### 21.7 Build order
+
+1. Table + service + staff calendar Tasks section + Rehearsals Tasks section
+   + portal lists + "Done" + Send update + auto-tick from a saved prep. Useful
+   on its own: the task says "Prep RX21 ABC" even before the link exists.
+2. The prep link (§21.6) — the biggest single piece.
+3. "Give to a freelancer" from the van side.
+
+### 21.8 Settled at build (8 Oct 2026)
+
+- **One email template**, `freelancer_tasks_updated`, for both owners; body
+  built in `freelancer-tasks.ts` and passed as `bodyHtmlOverride`. Production
+  runs `EMAIL_MODE=live`, so nothing needs adding to `EMAIL_LIVE_TEMPLATES`.
+- **Sitters are told by the 16:00 summary** (decision 4), confirmed or not.
+
+### 21.9 Phase 1 — what shipped
+
+- Migration **276**: `freelancer_tasks` (CHECKs: exactly one owner; a van prep
+  names its van; an 'other' task has text) + `last_tasks_notified_at` on both
+  owners.
+- `services/freelancer-tasks.ts` — the owner lookup, CRUD (soft-cancel only),
+  `markDoneFromPortal()` (refuses a van prep: the prep sheet ticks those),
+  `autoTickPrep()`, `sendTasksUpdate()`, `runSitterTaskDigest()`.
+- `routes/freelancer-tasks.ts` (`/api/freelancer-tasks`, STAFF_ROLES): list,
+  add, edit, remove, tick/un-tick, send-update. A job is named by its HireHop
+  number and resolved to OP's job on save.
+- Auto-tick: `POST /vehicles/save-event` with a `Prep Completed` event closes
+  open van-prep tasks for that van on live owners dated yesterday → tomorrow,
+  fire-and-forget, recording the saver's person when it is staff.
+- Scheduler: sitter task summary daily at **16:00**.
+- Staff UI: `components/FreelancerTasksPanel.tsx`, on the calendar booking panel
+  (offered / accepted editable, completed read-only) and as a "📋 Tasks (N)"
+  button per evening on Operations › Rehearsals (`task_count` on the roster).
+- Portal: tasks on each upcoming yard-day card (dashboard) and a "Tasks
+  tonight" card on `shift/[date]`; `components/FreelancerTaskList.tsx`; "Done"
+  via `POST /api/portal/freelancer-tasks/:id/done`.
+- **Known gap:** a sitter swapped in after the previous sitter was told (by
+  Send update or the 16:00 summary) is not emailed unless a task then changes —
+  they see the list on the portal.
+- **Next:** phase 2, the prep link (§21.6) — done, see §21.10.
+
+### 21.10 Phase 2 + feedback round — what shipped (8 Oct 2026)
+
+**The prep link.** Built differently from the §21.6 sketch in one respect: no
+portal HMAC. The portal calls OP with the freelancer's own session, so OP
+already knows who is asking and mints the link itself — no shared secret, one
+fewer moving part.
+
+- `POST /api/portal/freelancer-tasks/:id/prep-link` → a URL into
+  `/vehicles/freelancer-prep?prepToken=…&returnUrl=…` carrying a **15-minute
+  redeem token** (scope `freelancer_prep_redeem`). Short, because a URL lands
+  in history and logs.
+- `POST /api/vehicles/freelancer-prep/resolve` (public, before the vehicle
+  auth) swaps it for a **4h session** (scope `freelancer_prep`: task, person,
+  van). Both steps call `assertPrepEligible()` — open van prep, theirs via the
+  owner, owner live, day yesterday → tomorrow — so they cannot disagree.
+- Neither token has `id`/`role`, so neither passes `authorize()`; the portal's
+  `portalAuth` now also refuses any token carrying a `scope` (its secret can
+  fall back to `JWT_SECRET`).
+- `routes/vehicles.ts`: `FREELANCER_PREP_ALLOW` + ONE checkpoint middleware
+  holding every call to the session's van — fleet (only its van), events, prep
+  history, save-event (prep events only), save-prep (plain eventId; "prepared
+  by" forced to the person), hire-status (Available / Not Ready only), stock.
+  Upload-photo checks the key inside the handler (multipart).
+- **Flags from a freelancer prep do not open Problems** — `/api/problems` is
+  staff-only and a Problem is reported by a user. The flags stay in the saved
+  prep and the fleet's notification targets get a bell listing them
+  (`notifyFreelancerPrepFlags`); the results screen says "N sent to the office
+  to review" rather than skipping silently.
+- Frontend: `FreelancerPrepShell` (public route), session kept under its own
+  keys (`adapters/freelancer-prep-session.ts`); on that page the PAGE decides
+  which session is sent, so a book-out session on the same phone never stands
+  in. `PrepPage` takes `freelancerPrep` — opens on the van, hides the
+  turnaround widget and the staff-only issues banner, finishes with "Back to
+  the freelancer portal".
+
+**Feedback round (jon, 8 Oct).**
+- Calendar: the booking panel and "Book a freelancer" are now pop-ups
+  (`components/ModalShell.tsx`) — the panel used to open at the top of a long
+  calendar, unseen. Who, the van and the job are searchable
+  (`components/SearchPicker.tsx`; jobs via `/hirehop/jobs?search=`). Tasks
+  store the picked job by id (`jobId`; the HireHop-number path is kept).
+- Portal: an 'other' task's whole row is the tick; tapping again un-ticks a
+  mis-tap, but only a tick they made on the portal (`doneByMe`).
+
+**Job timeline note (jon, 8 Oct — built).** When a task that NAMES a job is
+completed — ticked on the portal, ticked by staff, or closed by a saved prep —
+`noteJobOnDone()` writes a system note on that job: "✅ Freelancer task done:
+Prep RX21ABC (Premium) — Tom Free (freelancer in for the day). Prep sheet
+saved." Deliberately NOT when a task is set (tasks change freely), not on
+un-tick, not for tasks without a job, and not for preps that were never a
+task (jon: the job does not need "who prepped the van").
+
+### 21.11 Where it stands (8 Oct 2026) — ALL PHASES BUILT
+
+Phases 1–3 and the job note are built. The module is complete as specified.
+
+**Phase 3 — "Give to a freelancer" (8 Oct 2026).**
+- `bookedFreelancersFor()` (`freelancer-tasks.ts`): live day bookings (offered or
+  accepted) and sitter evenings with a live sitter, TODAY and TOMORROW, each with
+  the vans already on their list. `GET /api/freelancer-tasks/booked` — one call
+  serves a whole page of van cards.
+- `components/GiveToFreelancer.tsx`: renders NOTHING unless somebody is booked
+  (jon). On the van's page (header) and on each "Prep Needed" card in the staff
+  prep queue (never in freelancer mode). Pick the person, optional job and note →
+  a van-prep task on their day. Says "Given to Tom" once it is on a list. It only
+  adds the task: telling them is "Send update" or the 16:00 sitter summary, and
+  the confirmation line says which.
+- `createTask` refuses the same van twice on one list (an open prep) — a
+  mis-click, not two jobs. The same van on two different people's lists is
+  allowed.
+- Not added to the job page's vehicle strip: the van page and the prep queue are
+  where a prep is thought about.
+
+**Security, found during this work (8 Oct 2026)** — fixed alongside phase 3, and
+the open remainder handed to a full audit in `docs/SECURITY-AUDIT-BRIEF.md`:
+`authenticate` accepted every token signed with `JWT_SECRET` (a public hire-form
+session read `GET /api/drivers`); now staff access tokens only. `returnUrl` /
+`startUrl` from the URL on the freelancer book-out, collection and prep pages now
+go through `safeReturnUrl()` (a `javascript:` link would have run in OP's origin).
+A prep opened from a freelancer task marks its saved data `freelancerTaskPrep`, so
+the office bell for flags fires whichever login saved it.
+
+Settled, NOT to build: Problems from a freelancer's prep flags (jon, 8 Oct:
+keep the bell-for-review). Known, accepted: a sitter swapped in after the
+previous one was told is not emailed unless a task then changes.

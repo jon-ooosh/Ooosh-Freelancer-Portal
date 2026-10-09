@@ -310,6 +310,16 @@ async function runMigrations(direction: 'up' | 'down') {
         '268_claim_gps.sql',
         '269_staff_work_from_home.sql',
         '270_staff_calendar_feed.sql',
+        '271_leads_actions_and_history.sql',
+        '272_leads_dashboard_threshold.sql',
+        '273_incoming_bank_payments.sql',
+        '274_incoming_bank_payments_xero.sql',
+        '275_incoming_bank_payments_dedup.sql',
+        '276_freelancer_tasks.sql',
+        '277_leads_events_and_research.sql',
+        '278_ledger_company_day_lieu.sql',
+        '279_lead_tour_jobs.sql',
+        '280_lead_tour_job_notes.sql',
       ];
 
       for (const migration of migrations) {

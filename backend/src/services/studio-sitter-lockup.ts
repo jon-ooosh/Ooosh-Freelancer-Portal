@@ -505,11 +505,18 @@ export async function submitLockupReport(
       lines.push(`🛒 Shop: ${describeShiftShop(shop)}${shop.toReview ? ` (${shop.toReview} to review on the Shop Till page)` : ''}`);
     }
 
-    await client.query(
-      `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
-       VALUES ('note', $1, $2, NULL, $3, $4::jsonb)`,
-      [lines.join('\n'), shiftId, sitterName, JSON.stringify(allPhotos)]
-    );
+    // A bare "all clear" with nothing else to say is noise on the thread — the
+    // roster's Lock-up ✓ pill already says it, and it made every night read
+    // "Notes (1)". Post only when there is something to read: a flagged item,
+    // a note, a photo or shop takings. (The office bell + email still go.)
+    const worthPosting = exceptions.length > 0 || lines.length > 1 || allPhotos.length > 0;
+    if (worthPosting) {
+      await client.query(
+        `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
+         VALUES ('note', $1, $2, NULL, $3, $4::jsonb)`,
+        [lines.join('\n'), shiftId, sitterName, JSON.stringify(allPhotos)]
+      );
+    }
 
     await client.query('COMMIT');
   } catch (e) {

@@ -51,6 +51,7 @@ import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } fr
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
 import { openAuthedFile } from '../lib/openAuthedFile';
+import { ukToday } from '../lib/ukDate';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -1147,7 +1148,7 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
   const [vehicleId, setVehicleId] = useState('');
   const [vehicleSearch, setVehicleSearch] = useState('');
   const [vehicleFocus, setVehicleFocus] = useState(false);
-  const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : new Date().toISOString().substring(0, 10));
+  const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : ukToday());
   // Hire end defaults to JOB END (the real end of charge), NOT return_date
   // (the +1-day warehouse turnaround buffer). Per the CLAUDE.md "Hire Date
   // Resolution" rule — return_date is for warehouse scheduling, never for
@@ -3904,7 +3905,7 @@ function JobDetailContent() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Outgoing</label>
                     <DatePicker
                       value={editOutDate}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       onChange={(val) => handleEditOutDate(val)}
                     />
                   </div>
@@ -3912,7 +3913,7 @@ function JobDetailContent() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Job Start</label>
                     <DatePicker
                       value={editJobDate}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       onChange={(val) => handleEditJobDate(val)}
                     />
                     <button
@@ -3931,7 +3932,7 @@ function JobDetailContent() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Job End</label>
                     <DatePicker
                       value={editJobEnd}
-                      min={editJobDate || new Date().toISOString().split('T')[0]}
+                      min={editJobDate || ukToday()}
                       onChange={(val) => handleEditJobEnd(val)}
                     />
                   </div>
@@ -3939,7 +3940,7 @@ function JobDetailContent() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Returning</label>
                     <DatePicker
                       value={editReturnDate}
-                      min={editJobEnd || new Date().toISOString().split('T')[0]}
+                      min={editJobEnd || ukToday()}
                       onChange={(val) => handleEditReturnDate(val)}
                     />
                     <button
@@ -6320,7 +6321,7 @@ function JobDetailContent() {
                     <DatePicker
                       value={localFormData.jobDate}
                       onChange={(val) => setLocalFormData({ ...localFormData, jobDate: val })}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       className={dateChanged ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
                     />
                     {dateChanged && (
@@ -7976,7 +7977,7 @@ function StatusTransitionModal({
                   type="date"
                   value={revisitDate}
                   onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
-                  min={new Date().toISOString().split('T')[0]}
+                  min={ukToday()}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm"
                 />
               )}

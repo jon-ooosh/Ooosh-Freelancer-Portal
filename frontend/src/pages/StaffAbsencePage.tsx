@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { ukToday } from '../lib/ukDate';
 
 /**
  * Absence — sickness, parental leave, return-to-work (Phase D).
@@ -111,7 +112,7 @@ function fmtH(min: number | null): string {
   if (h === 0) return `${m}m`;
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }
-const TODAY = new Date().toISOString().slice(0, 10);
+const TODAY = ukToday();
 function addMonths(iso: string, months: number): string {
   const [y, m, d] = iso.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1 + months, d));

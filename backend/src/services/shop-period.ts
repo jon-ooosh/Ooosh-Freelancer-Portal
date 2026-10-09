@@ -18,6 +18,7 @@
  */
 import { query } from '../config/database';
 import hhBroker from './hirehop-broker';
+import { ukDateOf } from './uk-date';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -51,11 +52,7 @@ async function setting(key: string): Promise<string | null> {
  * Monday would put a sale on last week's job (§19 gaps, fixed for §20).
  */
 export function londonDate(d: Date): string {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
-  return `${get('year')}-${get('month')}-${get('day')}`;
+  return ukDateOf(d);
 }
 
 /** Monday of the week containing `d` (UK date), as YYYY-MM-DD. */

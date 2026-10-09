@@ -1,10 +1,10 @@
 ---
 paths:
-  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-ical,freelancer-days}.ts"
-  - "backend/src/routes/{staff-calendar,staff-calendar-feed}.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214,269,270}_*.sql"
+  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-ical,freelancer-days,freelancer-tasks}.ts"
+  - "backend/src/routes/{staff-calendar,staff-calendar-feed,freelancer-tasks}.ts"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
-  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel}.tsx"
+  - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel,FreelancerTasksPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
 ---
 
@@ -61,6 +61,20 @@ request — there is no separate entry type), and reclaiming holiday overtaken
 by sickness posts a **`correction`** credit per day (§7.4). A reclaimed TOIL
 day credits the **overtime** account, not holiday — sending it to holiday
 would quietly convert banked overtime into annual leave.
+
+## Manual adjustments: for what no flow owns, and the person sees them
+
+Staff page › Employment › balance panel › "+ Add an adjustment" (Oct 2026)
+posts an `adjustment` with `source_type = 'manual'` through the existing
+`POST /employees/:personId/ledger`. It is for things no flow owns — a balance
+brought across from BrightHR (2025 overtime still owed at the switchover), an
+agreed one-off. **Never** for holiday booked, overtime worked or a pay-out:
+those have their own forms and their own entry types.
+
+The note is REQUIRED and the person sees it: My Time lists every un-reversed
+manual adjustment as a row, so the figure on the card is always explained by
+the list beneath it. A mistake is undone with Reverse; the adjustment and its
+reversal then cancel and neither shows.
 
 ## Working patterns are effective-dated and never edited in place
 
@@ -129,9 +143,10 @@ showing it as confirmed would be a lie the person planning the week then acts
 on. `BOOKING_STATUS[...].counts` in `StaffCalendarPage.tsx` is the one place
 that decides which statuses are real cover.
 
-**Nothing emails the freelancer yet** (spec §9.4, designed and not built), so
-`offered` currently means "we intend to ask", not "we asked". Do not lean on it
-meaning more than that until the email ships.
+**The offer IS emailed** (spec §9.4, live since migration 225): `offered` with
+`offer_email_sent_at` set means "we asked". `offered` with it NULL means the mail
+failed or the day was backdated (never emailed) — nobody was told. See the offer
+link and chase sections below.
 
 **Booking one is the whole team's job** (jon, Oct 2026): every freelancer-day
 route is `authorize(...STAFF_ROLES)` and the calendar's "Book a freelancer"
@@ -146,6 +161,22 @@ the only question this answers is "have we got enough people in".
 Staff and freelancers are counted **separately** on the calendar ("4 +2"),
 collapsing to one number when there are no freelancers. Merging them would
 claim they are interchangeable.
+
+## Freelancer tasks belong to a booking or a shift — never a person (spec §21)
+
+`services/freelancer-tasks.ts` is the only place that decides whose a task is.
+A task has NO person and NO date: both come from its owner (a day booking, or a
+sitter shift's LIVE assignment), so a reassigned sitter inherits the evening's
+tasks and an amended booking moves its tasks. Never add either column.
+
+- Not To Do (staff-only) and never for freelancers on driving jobs.
+- **No email per change.** "Send update" is a deliberate staff press; the only
+  automatic email is the 16:00 sitter summary, and only when tasks changed.
+- **A van prep is ticked by saving the prep** (`save-event` → `autoTickPrep`),
+  not by a portal button — the portal refuses it.
+- Soft-cancel only (`status = 'cancelled'`); there is no DELETE.
+- **"Who could I give this to?" is `bookedFreelancersFor()`** — today + tomorrow, day bookings + sitter evenings. The Give-to-a-freelancer button renders nothing when it is empty (jon); don't make it always-on.
+- **The prep link and its redeem step share ONE rule**, `assertPrepEligible()` — open van prep, theirs, owner live, day yesterday → tomorrow. Do not check eligibility anywhere else.
 
 ## Freelancer day times are quarter hours, from a `<select>`
 
@@ -357,6 +388,25 @@ something they are now being given. The create response carries
 `reclaimCandidates` and the UI offers to hand it back — per §7.4's mechanism, a
 `correction` credit and a stamp. **Offered, never automatic.** Withdrawing a
 company day deliberately does NOT re-debit what was handed back.
+
+## A company day on your day off is a day in lieu (§20.5b, Oct 2026)
+
+`syncCompanyDayLieu()` (`staff-company-days.ts`) credits ONE nominal day to
+anyone whose RAW pattern has them off on a company day — same number of days
+for everyone, not pro-rata (jon). It runs inside `syncEntitlement()`, so the
+06:05 sync and "Update entitlement" keep it right, and adding or withdrawing a
+company day refreshes it at once. Credited in advance, dated on the company day.
+
+- **Its own `source_type`, `company_day_lieu`** (migration 278). Never `system`
+  — `syncEntitlement` sums that for its own delta and would correct the lieu
+  away — and never `manual`, or it cannot tell its own postings apart.
+- **It follows the calendar**: idempotent per date, posting the difference, so
+  a change of working days or a withdrawn company day TAKES THE DAY BACK. This
+  is deliberately unlike the reclaim (a company day over a BOOKED holiday),
+  which is offered by a human and never re-debited.
+- Read the raw contract (`includeCompanyDays: false`) — with company days
+  applied every one of those dates reads "not scheduled" for everybody.
+- Shown on My Time as a "Day in lieu" row.
 
 ## Absence wins the calendar, and both rows survive
 

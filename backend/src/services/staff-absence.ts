@@ -37,6 +37,7 @@ import {
 } from './staff-day-status';
 import { postEntry } from './staff-balance';
 import { minutesBetweenTimes } from './staff-leave';
+import { ukToday } from './uk-date';
 
 export type AbsenceType =
   | 'sickness' | 'maternity' | 'paternity' | 'shared_parental' | 'adoption'
@@ -104,7 +105,7 @@ export interface Absence {
   days: AbsenceDay[];
 }
 
-const TODAY = () => new Date().toISOString().slice(0, 10);
+const TODAY = () => ukToday();
 
 // ── Building the days ───────────────────────────────────────────────────────
 
@@ -812,7 +813,7 @@ export async function getAbsenceReport(opts: {
   const flagSpells = opts.flagSpells ?? flagDefaults.spells;
   const flagMonths = opts.flagMonths ?? flagDefaults.months;
   const types = opts.types ?? ['sickness'];
-  const flagFrom = addDaysYmd(new Date().toISOString().slice(0, 10), -Math.round(flagMonths * 30.44));
+  const flagFrom = addDaysYmd(ukToday(), -Math.round(flagMonths * 30.44));
 
   await materialiseOpenAbsences();
 

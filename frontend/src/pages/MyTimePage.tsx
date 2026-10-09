@@ -55,6 +55,8 @@ interface AccountBreakdown {
 }
 type BhPolicy = 'use_allowance' | 'granted';
 interface MyBalances {
+  /** Whose figures these are — always sent by /me/balances. */
+  personId?: string;
   year: number;
   holiday: AccountBreakdown;
   overtime: AccountBreakdown;
@@ -62,6 +64,21 @@ interface MyBalances {
    *  an older backend does not send it, and the page then falls back to the
    *  company-wide policy from /bank-holidays. */
   bankHolidayPolicy?: BhPolicy;
+}
+/**
+ * A manual adjustment an admin posted to a balance (Oct 2026) — e.g. overtime
+ * brought across from BrightHR. Read from the ledger so the list explains a
+ * figure that no request or overtime entry accounts for.
+ */
+interface Adjustment {
+  id: string;
+  /** 'company_day_lieu' for a day in lieu (spec §20.5b), else 'manual'. */
+  sourceType?: string | null;
+  account: 'holiday' | 'overtime';
+  minutes: number;
+  effectiveDate: string;
+  note: string | null;
+  createdByName: string | null;
 }
 /** A one-off working-from-home request (spec §19) — GET /staff-calendar/wfh. */
 interface WfhRequest {
@@ -213,6 +230,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [wfh, setWfh] = useState<WfhRequest[]>([]);
+  const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
   const [wfhOpen, setWfhOpen] = useState(false);
   const [balances, setBalances] = useState<MyBalances | null>(null);
   const [hasStaffRecord, setHasStaffRecord] = useState(true);
@@ -260,6 +278,24 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
       setBhPolicy(bh.policy ?? 'use_allowance');
       setCompanyDays(cd.occurrences ?? []);
       setHasStaffRecord(bal.hasStaffRecord !== false);
+      // Manual adjustments, so the list accounts for every hour on the cards.
+      // Decoration: a failure leaves them out rather than breaking the page.
+      const pid = bal.data?.personId;
+      if (pid) {
+        type Entry = Adjustment & { entryType: string; sourceType: string | null; reversesEntryId: string | null };
+        const ledgers = await Promise.all((['holiday', 'overtime'] as const).map(a =>
+          api.get<{ data: { entries: Entry[] } }>(
+            `/staff-calendar/employees/${encodeURIComponent(pid)}/balance?account=${a}&year=${year}`)
+            .then(r => r.data.entries ?? []).catch(() => [] as Entry[])));
+        const all = ledgers.flat();
+        // A reversed adjustment and its reversal cancel out — show neither.
+        const reversed = new Set(all.map(e => e.reversesEntryId).filter(Boolean) as string[]);
+        // Manual adjustments, and days in lieu for company days on a day off.
+        setAdjustments(all.filter(e => (e.sourceType === 'manual' || e.sourceType === 'company_day_lieu')
+          && e.entryType === 'adjustment' && !e.reversesEntryId && !reversed.has(e.id)));
+      } else {
+        setAdjustments([]);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load your time');
     } finally { setLoading(false); }
@@ -515,6 +551,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
           <div className="px-5 py-6 text-sm text-gray-500">Loading…</div>
         ) : view === 'list' ? (
           <TimeList year={year} requests={requests} overtime={overtime} wfh={wfh} onWithdrawWfh={withdrawWfh}
+            adjustments={adjustments}
             companyDays={companyDays}
             bankHolidaysToBook={bh.toBook} freshIds={freshIds}
             onWithdraw={withdraw} onCancelOvertime={cancelOvertime}
@@ -535,9 +572,103 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         )}
       </section>
 
+      {/* Your own hours only — an admin looking at somebody already has them,
+          with their history, on the Employment tab. */}
+      {!adminView && <WorkingHoursCard />}
+
       {/* The person's own link only — never on an admin's view of somebody
           else, since the link is a credential for THEIR calendar. */}
       {!adminView && <CalendarFeedCard />}
+    </div>
+  );
+}
+
+interface MyPatternDay { cycleWeek: number; weekday: number; startTime: string | null; endTime: string | null }
+interface MyPattern { effectiveFrom: string; cycleWeeks: number; days: MyPatternDay[]; thisCycleWeek?: number }
+
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+/**
+ * "Your working hours" — what the system THINKS you work, which is what holiday
+ * and overtime are measured against. Shown so a wrong pattern gets spotted by
+ * the one person who would know. Current pattern plus any change already
+ * scheduled; days and times only (jon, Oct 2026) — no notes, breaks or
+ * history. Patterns vary too much here to squeeze into a one-line summary, so
+ * every day is listed as it is.
+ */
+function WorkingHoursCard() {
+  const [data, setData] = useState<{ current: MyPattern | null; upcoming: MyPattern[] } | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ data: { current: MyPattern | null; upcoming: MyPattern[] } | null }>('/staff-calendar/me/patterns')
+      .then(res => { if (!cancelled) setData(res.data); })
+      // Reference information — a failure hides the card rather than the page.
+      .catch(() => { /* leave it hidden */ })
+      .finally(() => { if (!cancelled) setLoaded(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // No staff record: the page already says so at the top.
+  if (!loaded || !data) return null;
+
+  return (
+    <section className="mt-4 bg-white border border-gray-200 rounded-2xl sm:rounded-xl p-5">
+      <h2 className="text-[15px] font-semibold text-gray-900">Your working hours</h2>
+      <p className="text-[13px] text-gray-500">
+        What we have you down to work — your holiday and overtime are worked out from this.
+        If it isn&apos;t right, tell an admin.
+      </p>
+
+      {data.current ? (
+        <PatternWeeks pattern={data.current} />
+      ) : (
+        <p className="mt-3 text-sm text-gray-500">
+          {data.upcoming.length > 0 ? 'No working hours set for now.' : 'No working hours set for you yet — ask an admin.'}
+        </p>
+      )}
+
+      {data.upcoming.map(p => (
+        <div key={p.effectiveFrom} className="mt-4 pt-4 border-t border-gray-100">
+          <h3 className="text-sm font-medium text-gray-900">Changing from {fmtDate(p.effectiveFrom)}</h3>
+          <PatternWeeks pattern={p} />
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function PatternWeeks({ pattern }: { pattern: MyPattern }) {
+  const weeks = pattern.cycleWeeks === 2 ? [1, 2] : [1];
+  // A 2-week pattern alternates; for the current one, say which week is which.
+  function weekLabel(w: number): string | null {
+    if (weeks.length === 1) return null;
+    if (pattern.thisCycleWeek) return w === pattern.thisCycleWeek ? 'This week' : 'Next week';
+    return w === 1 ? 'First week' : 'Second week';
+  }
+  // This week first, then next.
+  const ordered = pattern.thisCycleWeek === 2 ? [2, 1] : weeks;
+  return (
+    <div className={`mt-3 grid gap-4 ${weeks.length === 2 ? 'sm:grid-cols-2' : ''}`}>
+      {ordered.map(w => (
+        <div key={w}>
+          {weekLabel(w) && <div className="text-xs font-medium text-gray-500 mb-1">{weekLabel(w)}</div>}
+          <dl className="text-sm divide-y divide-gray-100">
+            {WEEKDAY_NAMES.map((name, i) => {
+              const d = pattern.days.find(x => x.cycleWeek === w && x.weekday === i);
+              return (
+                <div key={i} className="flex justify-between py-1.5">
+                  <dt className={d ? 'text-gray-900' : 'text-gray-400'}>{name}</dt>
+                  <dd className={`tabular-nums ${d ? 'text-gray-900' : 'text-gray-400'}`}>
+                    {d ? `${d.startTime?.slice(0, 5) ?? '?'}–${d.endTime?.slice(0, 5) ?? '?'}` : 'Not working'}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1654,14 +1785,36 @@ function pendingActions(kind: 'leave' | 'overtime' | 'wfh', id: string, onWithdr
     : [{ label: 'Withdraw', onClick: onWithdraw, className: 'text-red-600' }];
 }
 
-function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
+function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, adjustments = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
+  adjustments?: Adjustment[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
 }): TimeRow[] {
   const rows: TimeRow[] = [];
+
+  // Hours an admin added or took off by hand — the note says why, in words
+  // the person will recognise ("brought across from BrightHR").
+  for (const a of adjustments) {
+    const plus = a.minutes > 0;
+    const lieu = a.sourceType === 'company_day_lieu';
+    rows.push({
+      key: `adj:${a.id}`, date: a.effectiveDate, until: a.effectiveDate,
+      title: a.note || 'Adjustment',
+      meta: lieu
+        ? 'Added to your holiday — book it whenever you like'
+        : `Adjustment to your ${a.account === 'holiday' ? 'holiday' : 'overtime bank'}`,
+      extra: !lieu && a.createdByName ? `Added by ${a.createdByName}` : null,
+      amount: `${plus ? '+' : '−'}${fmtH(Math.abs(a.minutes))}`,
+      amountClass: plus ? 'text-emerald-700' : 'text-gray-900',
+      pill: lieu ? 'Day in lieu' : 'Adjustment',
+      pillClass: lieu ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-700',
+      statusClass: lieu ? 'text-emerald-700' : 'text-gray-600',
+      dot: lieu ? 'bg-emerald-500' : 'bg-gray-400',
+    });
+  }
 
   for (const c of companyDays) {
     rows.push({
@@ -1758,6 +1911,7 @@ function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, companyDays, b
 function TimeList(props: {
   year: number; requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
+  adjustments?: Adjustment[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;

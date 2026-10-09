@@ -16,6 +16,7 @@
 
 import { hhBroker } from './hirehop-broker';
 import { syncSavedRowToXero, sendXeroSyncFailedAlert } from './hh-xero-sync';
+import { ukToday } from './uk-date';
 
 // HireHop bank account IDs — shared by money.ts (deposit pushes), excess.ts
 // (reimburse + refund payment applications), and any future hire-side refund
@@ -114,7 +115,7 @@ export async function pushDepositToHH(opts: PushDepositOpts): Promise<PushDeposi
       // non-fatal — HH will reject if it really needs CLIENT_ID
     }
 
-    const currentDate = new Date().toISOString().split('T')[0];
+    const currentDate = ukToday();
     const formattedDate = new Date().toLocaleDateString('en-GB', {
       day: '2-digit', month: '2-digit', year: 'numeric',
     });
@@ -271,7 +272,7 @@ export async function refundDepositOnHH(opts: RefundDepositOpts): Promise<PushDe
   const { hhJobNumber, hhDepositId, amount, bankId, description, memo, what } = opts;
 
   try {
-    const currentDate = new Date().toISOString().split('T')[0];
+    const currentDate = ukToday();
 
     const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
       id: 0,

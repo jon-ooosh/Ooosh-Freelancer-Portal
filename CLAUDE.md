@@ -186,6 +186,20 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
+**PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
+on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
+Stripe account, money on HireHop bank 267, recording ONLY through `services/record-payment.ts`,
+pre-auths via extended authorisation (window depends on the account's merchant category — §9.1,
+unverified), no phone card payments (policy), shop + sitter till in Phase 3. Read it before
+building anything that takes a card in person. The week's payments work it builds on (PayPal via
+Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
+
+**LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
+tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
+outreach → chased Cold enquiry, jobs-for-this-tour linking. **§20 is the current state and what's
+left.** Searches are run by hand on purpose (no scheduler). Contact research wants management /
+the band / tour managers — not promoters or agents.
+
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
@@ -194,7 +208,9 @@ anything waiting for an approval** (leave, overtime, WFH requests) links to the 
 because the "Waiting for you" panel there is the approvals surface; the person's Time
 off tab is not reliable for it (jon, Oct 2026 — see `staff-notifications.ts`). The page is
 manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
-added to those tabs must degrade for a manager rather than 403.
+added to those tabs must degrade for a manager rather than 403. Every tab is built
+from `components/StaffCard.tsx` (Oct 2026) — use it for anything new there so the
+tabs keep reading the same way.
 
 ---
 
@@ -250,11 +266,21 @@ existing definition:
 | What is this person called? | `frontend/src/lib/displayName.ts` |
 | …the same, on the backend | `services/display-name.ts` |
 | Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |
+| Find-or-create a person (by email) / org (by exact name) from an inbound source | `services/address-book-resolve.ts` — exact only; shared by the website enquiry intake and Leads. Also `isGenericMailbox()` (info@, bookings@… is an org email, not a person) |
+| Did this job book, get lost, get cancelled? (history views) | `services/job-outcomes.ts` `JOB_OUTCOME_SQL` — org Hire History tab + Leads client history |
+| What does OP know about a lead's band (enquiries, losses, retros)? | `services/leads/history.ts` `getClientHistory()` |
+| Which leads go on the dashboard? | `services/leads/attention.ts` `getLeadAttention()` |
+| Recording what happened to a lead (who, when) | `services/leads/events.ts` `logLeadEvent()` — never fails the action; read by the Leads timeline + Last activity |
+| Which existing jobs belong to a lead's tour? Is it already quoted / booked? | `services/leads/tour-jobs.ts` — `syncTourJobs()`, `liveTourJobSql()` (drives the In pipeline stage + the dashboard card), `TOUR_JOB_OUTCOME_SQL` |
+| A DATE column as `YYYY-MM-DD` in Leads code | `services/leads/dates.ts` `dateOnly()` — never `toISOString()` on a DATE (node-postgres gives local midnight; UK summer time shifts it a day) |
+| What's today's date (or today + n)? | `services/uk-date.ts` `ukToday()` / `ukDatePlus()` / `ukDateOf()` (frontend: `lib/ukDate.ts`) — **never `new Date().toISOString().slice(0, 10)`**: the server and `toISOString()` are UTC, so between 00:00 and 01:00 BST that's yesterday (TOUR-FINDER-SPEC §19.1) |
+| Telling a job's timeline it belongs to a Lead Finder tour | `services/leads/tour-jobs.ts` `noteLinkedJobs()` / `noteUnlinkedJob()` |
 | Showing a private-bucket file in the DOM | `frontend/src/hooks/useAuthedFileUrl.ts` |
 | Opening a private-bucket file in a new tab | `frontend/src/lib/openAuthedFile.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
+| A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |
 | Who can be given something to do? | `services/assignable-staff.ts` — active + staff role + a CURRENT employment record. Shared by To Do's "For" picker and `/users?assignable=true` |
 | May this person change this task? | `services/staff-tasks.ts` `assertCanTouch()` — owner, setter or admin |
 | When does a repeating to-do fall next? | `services/task-recurrence.ts` (pure; the form asks it via `/staff-tasks/series/preview`) |
@@ -268,6 +294,7 @@ existing definition:
 | What staff data has expired? | `services/staff-retention.ts` |
 | Is this person in the building / working from home? | `services/staff-day-status.ts` (`StaffDay.location`; requests in `services/staff-wfh.ts`) |
 | What goes in a person's calendar feed? | `services/staff-ical.ts` — own time only, never a colleague's |
+| Building or restyling a tab on the Staff page | `frontend/src/components/StaffCard.tsx` — Card, StatCard, InfoRow, Pill, button classes (the Time off look) |
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
@@ -279,6 +306,9 @@ existing definition:
 | The till's payment methods (backend / sitter till) | `services/shop-tenders.ts` — mirrors `frontend/src/lib/shopTenders.ts` |
 | A shop sale's receipt / refund receipt | `services/shop-receipts.ts` |
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
+| The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
+| Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
+| A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
@@ -304,6 +334,11 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
   overrides and PII reads; bare `authorize('admin')` only for irreversible decisions.
   Hardcoding `authorize('admin','manager','staff')` silently locks out `weekend_manager`
   and `general_assistant` — that shipped as a live bug.
+- **`authenticate` accepts STAFF access tokens only** (`{ id, email, role }`, no
+  `scope`/`type`/`typ` — Oct 2026). `JWT_SECRET` also signs public, kiosk and freelancer
+  tokens; each has its own middleware. A new token type gets a marker and its own
+  middleware — never widen `authenticate`. Table in `PLATFORM-CONVENTIONS.md` "Token
+  types"; open items in `docs/SECURITY-AUDIT-BRIEF.md`.
 - **`weekend_manager` ≡ `manager`.** `authorize()` grants a weekend manager anywhere
   `manager` is allowed, so never list it separately. Frontend: use `hasManagerRole()` /
   `roleAllowed()` from `lib/roles.ts`, **never bare `role === 'manager'`**.
@@ -368,7 +403,7 @@ chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last mont
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
-09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 ·
+09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 · sitter task summary 16:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop close reminder Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·

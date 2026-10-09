@@ -331,6 +331,34 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     viewAllHref: '/operations/backline-matcher?priority=high',
   };
 
+  // Lead Finder — new, still-sellable leads worth a look (definition:
+  // backend services/leads/attention.ts). Blue — an opportunity, not a fault.
+  // Self-hiding: no grey tile when there's nothing to look at. Each item
+  // deep-links to the Leads page with that lead opened.
+  const leadsToReview: NABucket = {
+    key: 'leads_to_review',
+    title: 'Leads to look at',
+    accent: 'blue',
+    count: na.leads_to_review_count || 0,
+    items: (na.leads_to_review || []).map((l) => {
+      const h = l.client_history;
+      const sub = l.stream === 'warm' && h
+        ? (h.enquiries ? `${h.booked} booked · ${h.lost} lost` : 'known, no hires yet')
+        : [l.relevance_score != null ? `score ${l.relevance_score}` : null, l.origin_country].filter(Boolean).join(' · ');
+      return {
+        id: l.id,
+        label: l.artist_name,
+        age: l.first_date
+          ? `starts ${new Date(`${l.first_date}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })}`
+          : undefined,
+        sub: sub || undefined,
+        tag: l.stream === 'warm' ? 'WARM' : undefined,
+        href: `/jobs/leads?lead=${l.id}`,
+      };
+    }),
+    viewAllHref: '/jobs/leads',
+  };
+
   // Transport arrangements to action — quotes in next 7 days on a
   // confirmed/pre-dispatch job where any arranging pill (client intro /
   // tolls / accommodation / flights) is still outstanding. Replaces the
@@ -546,7 +574,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const selfHiding = [holdingUnlinked].filter((b) => b.count > 0);
+  const selfHiding = [holdingUnlinked, leadsToReview].filter((b) => b.count > 0);
   const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...claimBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 

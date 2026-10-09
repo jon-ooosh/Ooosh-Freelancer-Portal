@@ -21,6 +21,11 @@ import {
   authenticateVehicleFlexible,
   isFreelancerBookout,
   getBookoutScope,
+  verifyFreelancerPrepRedeemToken,
+  mintFreelancerPrepSession,
+  isFreelancerPrep,
+  normaliseReg,
+  FREELANCER_PREP_SESSION_TTL_SECONDS,
   type FlexibleVehicleRequest,
 } from '../middleware/freelancer-bookout-auth';
 import { query, getPool } from '../config/database';
@@ -42,6 +47,7 @@ import {
 import { getSystemSetting } from './system-settings';
 import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError } from '../services/dvsa-mot';
 import { closeOpenSaleOnRemoval } from '../services/vehicle-sales';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 
@@ -837,6 +843,61 @@ router.post('/freelancer-checkin/resolve', async (req: Request, res: Response) =
   }
 });
 
+// ── Public: Freelancer PREP link redemption (STAFF-CALENDAR-SPEC §21.6) ──
+//
+// The portal's "Open prep sheet" lands here with a 15-minute redeem token that
+// OP itself minted (POST /api/portal/freelancer-tasks/:id/prep-link). We
+// re-check the task — still theirs, still open, still a van prep, its day near
+// — through the SAME rule that minted the link, then hand back a 4h session
+// scoped to that one van. Mounted BEFORE authenticateVehicleFlexible: the
+// redeem token is the authentication here.
+router.post('/freelancer-prep/resolve', async (req: Request, res: Response) => {
+  const token = typeof req.body?.token === 'string' ? req.body.token : '';
+  const redeem = token ? verifyFreelancerPrepRedeemToken(token) : null;
+  if (!redeem) {
+    res.status(401).json({ error: 'This link has expired. Open the prep sheet again from the freelancer portal.' });
+    return;
+  }
+  try {
+    const { assertPrepEligible } = await import('../services/freelancer-tasks');
+    const ok = await assertPrepEligible(redeem.taskId, redeem.personId);
+    const v = await query(
+      `SELECT id, reg, make, model, simple_type FROM fleet_vehicles WHERE id = $1`,
+      [ok.task.vehicleId]
+    );
+    const van = v.rows[0];
+    if (!van) { res.status(404).json({ error: 'That van is no longer in the fleet' }); return; }
+    const session = mintFreelancerPrepSession({
+      taskId: ok.task.id,
+      personId: redeem.personId,
+      personName: ok.personName,
+      vehicleId: van.id,
+      vehicleReg: normaliseReg(van.reg),
+    });
+    res.json({
+      token: session,
+      expiresIn: FREELANCER_PREP_SESSION_TTL_SECONDS,
+      context: {
+        taskId: ok.task.id,
+        taskTitle: ok.task.title,
+        vehicleId: van.id,
+        vehicleReg: van.reg,
+        vehicleType: van.simple_type ?? null,
+        personName: ok.personName,
+        date: ok.date,
+      },
+    });
+  } catch (err) {
+    const status = (err as { status?: number })?.status;
+    if (status === 404 || status === 409) {
+      res.status(status).json({ error: (err as Error).message });
+      return;
+    }
+    console.error('[freelancer-prep] resolve failed:', err);
+    res.status(500).json({ error: 'Could not open the prep sheet' });
+  }
+});
+
 // Vehicle routes accept EITHER a staff JWT or a freelancer book-out
 // session JWT. The flexible middleware populates req.user (staff) XOR
 // req.bookoutSession (freelancer). A follow-up gate restricts freelancer
@@ -889,6 +950,79 @@ router.use((req: FlexibleVehicleRequest, res: Response, next) => {
   next();
 });
 
+/**
+ * The freelancer PREP session's world (STAFF-CALENDAR-SPEC §21.6): exactly the
+ * calls PrepPage makes, every one held to the ONE van the session names. All
+ * the prep rules live here rather than spread across the handlers — except
+ * upload-photo, whose body only exists once multer has run inside it.
+ *
+ * Deliberately NOT here: /api/problems (staff-only, and Problems are reported
+ * by a user — a freelancer's flags are recorded in the prep and the office is
+ * told, see save-prep) and the turnaround dashboard.
+ */
+const FREELANCER_PREP_ALLOW: Array<{ method: string; pattern: RegExp }> = [
+  { method: 'GET',   pattern: /^\/fleet$/ },
+  { method: 'GET',   pattern: /^\/fleet\/[^/]+$/ },
+  { method: 'GET',   pattern: /^\/get-checklist-settings$/ },
+  { method: 'GET',   pattern: /^\/get-events$/ },
+  { method: 'GET',   pattern: /^\/get-prep-history$/ },
+  { method: 'POST',  pattern: /^\/save-event$/ },
+  { method: 'POST',  pattern: /^\/save-prep$/ },
+  { method: 'POST',  pattern: /^\/upload-photo$/ },
+  { method: 'PATCH', pattern: /^\/fleet\/by-reg\/[^/]+\/hire-status$/ },
+  // Consumables used during a prep (screenwash, AdBlue) — the same stock
+  // bookkeeping a staff prep does.
+  { method: 'GET',   pattern: /^\/get-stock$/ },
+  { method: 'POST',  pattern: /^\/record-stock-transaction$/ },
+];
+
+router.use((req: FlexibleVehicleRequest, res: Response, next) => {
+  if (!isFreelancerPrep(req)) { next(); return; }
+  const allowed = FREELANCER_PREP_ALLOW.some(
+    rule => rule.method === req.method && rule.pattern.test(req.path)
+  );
+  if (!allowed) { res.status(403).json({ error: 'Not available to a prep session' }); return; }
+
+  const mine = req.prepSession.vehicleReg;
+  const isMine = (reg: unknown) => typeof reg === 'string' && normaliseReg(reg) === mine;
+  const deny = (msg: string) => { res.status(403).json({ error: msg }); };
+
+  if (req.method === 'GET' && (req.path === '/get-events' || req.path === '/get-prep-history')) {
+    if (!isMine(req.query.vehicleReg)) return deny('That is not the van you are prepping');
+  }
+  if (req.method === 'GET' && /^\/fleet\/[^/]+$/.test(req.path)) {
+    const asked = decodeURIComponent(req.path.split('/')[2] || '');
+    if (asked.toLowerCase() !== req.prepSession.vehicleId.toLowerCase() && !isMine(asked)) {
+      return deny('That is not the van you are prepping');
+    }
+  }
+  if (req.method === 'POST' && req.path === '/save-event') {
+    const ev = req.body?.event;
+    const et = String(ev?.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
+    if (!ev || !isMine(ev.vehicleReg)) return deny('That is not the van you are prepping');
+    if (et !== 'prep-started' && et !== 'prep-completed') return deny('Only prep events from a prep session');
+  }
+  if (req.method === 'POST' && req.path === '/save-prep') {
+    if (!isMine(req.body?.vehicleReg)) return deny('That is not the van you are prepping');
+    // The eventId becomes part of an R2 key — keep it a plain id.
+    if (!/^[\w-]{1,100}$/.test(String(req.body?.eventId || ''))) return deny('Bad prep id');
+    // Who prepped it is the session's person, whatever the form said.
+    if (req.body?.data && typeof req.body.data === 'object') {
+      req.body.data.preparedBy = req.prepSession.personName;
+      req.body.data.preparedByFreelancer = true;
+    }
+  }
+  if (req.method === 'PATCH') {
+    const reg = decodeURIComponent(req.path.split('/')[3] || '');
+    if (!isMine(reg)) return deny('That is not the van you are prepping');
+    // A prep finishes as Available (or Not Ready if it failed) — nothing else.
+    if (req.body?.status !== 'Available' && req.body?.status !== 'Not Ready') {
+      return deny('A prep session can only mark the van Available or Not Ready');
+    }
+  }
+  next();
+});
+
 // `getBookoutScope` lives in middleware/freelancer-bookout-auth.ts now —
 // imported above. Shared between vehicles + hire-forms routes (the
 // freelancer write-back path at book-out needs the same scope checks).
@@ -913,6 +1047,12 @@ router.get('/fleet', async (req: FlexibleVehicleRequest, res: Response) => {
         return;
       }
       const r = await query('SELECT * FROM fleet_vehicles WHERE id = $1', [scope.vehicleId]);
+      res.json({ data: r.rows.map(row => mapDbRowToVehicle(row)) });
+      return;
+    }
+    // Prep session: only the van it names (§21.6).
+    if (isFreelancerPrep(req)) {
+      const r = await query('SELECT * FROM fleet_vehicles WHERE id = $1', [req.prepSession.vehicleId]);
       res.json({ data: r.rows.map(row => mapDbRowToVehicle(row)) });
       return;
     }
@@ -2084,7 +2224,7 @@ const RETURN_STATUSES = [5, 6]; // Dispatched, Returned Incomplete
  */
 router.get('/jobs/going-out', async (req: AuthRequest, res: Response) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = ukToday();
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
     // The third OR clause keeps STAGGERED MULTI-VAN jobs visible: a job with
@@ -2129,7 +2269,7 @@ router.get('/jobs/going-out', async (req: AuthRequest, res: Response) => {
  */
 router.get('/jobs/due-back', async (req: AuthRequest, res: Response) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = ukToday();
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
     const result = await query(
@@ -2158,7 +2298,7 @@ router.get('/jobs/due-back', async (req: AuthRequest, res: Response) => {
 router.get('/jobs/upcoming', async (req: AuthRequest, res: Response) => {
   try {
     const days = parseInt(req.query.days as string) || 7;
-    const today = new Date().toISOString().split('T')[0];
+    const today = ukToday();
     const endDate = new Date(Date.now() + days * 86400000).toISOString().split('T')[0];
 
     // See /jobs/going-out above for the staggered multi-van rationale. Same
@@ -2205,7 +2345,7 @@ router.get('/jobs/upcoming', async (req: AuthRequest, res: Response) => {
 router.get('/jobs/upcoming-due-back', async (req: AuthRequest, res: Response) => {
   try {
     const days = parseInt(req.query.days as string) || 7;
-    const today = new Date().toISOString().split('T')[0];
+    const today = ukToday();
     const endDate = new Date(Date.now() + days * 86400000).toISOString().split('T')[0];
 
     const result = await query(
@@ -2878,6 +3018,21 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
 
     await writeR2Json(indexKey, indexData);
 
+    // A finished prep ticks off any freelancer task to prep this van
+    // (STAFF-CALENDAR-SPEC §21) — whoever did it. Fire-and-forget: it never
+    // throws, and the prep save must not wait on it.
+    if (String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-') === 'prep-completed') {
+      void (async () => {
+        const { autoTickPrep } = await import('../services/freelancer-tasks');
+        let personId: string | null = req.prepSession?.personId ?? null;
+        if (!personId && req.user?.id) {
+          const u = await query('SELECT person_id FROM users WHERE id = $1', [req.user.id]).catch(() => null);
+          personId = u?.rows[0]?.person_id ?? null;
+        }
+        await autoTickPrep(reg, personId);
+      })().catch(err => console.warn('[vehicles/events] freelancer task tick failed:', err));
+    }
+
     // If hire status change included, update fleet_vehicles table
     if (event.hireStatus) {
       await query(
@@ -3412,7 +3567,7 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
       preparedBy: data.preparedBy || null,
       mileage: data.mileage ?? null,
       fuelLevel: data.fuelLevel || null,
-      date: data.date || new Date().toISOString().slice(0, 10),
+      date: data.date || ukToday(),
       startedAt: data.startedAt || null,
       completedAt: data.completedAt || null,
       durationMinutes: data.durationMinutes ?? null,
@@ -3479,12 +3634,58 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
       console.warn('[vehicles/prep] Low-tread notify failed:', err);
     }
 
+    // A freelancer's prep cannot open Problems (they are reported by a staff
+    // user, and /api/problems is staff-only). The flags are in the saved prep;
+    // tell the fleet people so somebody raises what needs raising (§21.6).
+    // The marker covers a staff member who opened the freelancer link while
+    // logged in: their save carries a staff token, so the page says so instead.
+    const fr = req as unknown as FlexibleVehicleRequest;
+    const fromFreelancerTask = isFreelancerPrep(fr) || data?.freelancerTaskPrep === true;
+    if (fromFreelancerTask && Array.isArray(data?.flaggedItems) && data.flaggedItems.length > 0) {
+      try {
+        await notifyFreelancerPrepFlags(reg, data, fr.prepSession?.personName || String(data?.preparedBy || 'A freelancer'));
+      } catch (err) {
+        console.warn('[vehicles/prep] Freelancer flag notify failed:', err);
+      }
+    }
+
     res.json({ success: true, eventId });
   } catch (error) {
     console.error('[vehicles/prep] save-prep error:', error);
     res.status(500).json({ error: 'Failed to save prep session' });
   }
 });
+
+/**
+ * A freelancer's prep flagged something. Bell the fleet people with the list;
+ * they decide what becomes a Problem. Best-effort — never throws to the caller.
+ */
+async function notifyFreelancerPrepFlags(reg: string, data: any, personName: string): Promise<void> {
+  const items: any[] = data.flaggedItems.slice(0, 20);
+  const list = items
+    .map(f => `${String(f?.checklistItem ?? 'Item')}: ${String(f?.selectedOption ?? '')}${f?.description ? ` (${String(f.description).slice(0, 120)})` : ''}`)
+    .join('; ');
+  const vehicleId = data?.vehicleId || null;
+  const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+  const targets = await getVehicleNotificationTargets();
+  for (const userId of targets.bellUserIds) {
+    try {
+      await query(
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url)
+         VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, 'high', $5)`,
+        [
+          userId,
+          `${reg} — ${personName} flagged ${items.length} item${items.length !== 1 ? 's' : ''} at prep`,
+          `Freelancer prep, so no Problems were opened. Check and raise what needs raising: ${list}`.slice(0, 2000),
+          vehicleId,
+          vehicleId ? `/vehicles/fleet/${vehicleId}` : '/vehicles',
+        ],
+      );
+    } catch (bellErr) {
+      console.warn('[vehicles/prep] Freelancer flag bell failed:', (bellErr as Error).message);
+    }
+  }
+}
 
 /**
  * Scan a saved prep session for low tyre tread and, if any corner is at/below
@@ -4458,7 +4659,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     pdf.setPage(p);
     pdf.setFontSize(7);
     pdf.setTextColor(160, 160, 160);
-    const generated = new Date().toISOString().split('T')[0];
+    const generated = ukToday();
     const footerLabel = isInterim
       ? 'Interim Vehicle Assessment'
       : isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Condition Report';
@@ -4473,7 +4674,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   const pdfBytes = new Uint8Array(pdfArrayBuffer);
 
   // Filename: REG-DDMMYY-Job12345-book-out.pdf (matches historical naming)
-  const eventDateStr = String(data.eventDate || new Date().toISOString().slice(0, 10));
+  const eventDateStr = String(data.eventDate || ukToday());
   const dateParts = eventDateStr.split('-'); // YYYY-MM-DD
   const ddmmyy = dateParts.length === 3
     ? dateParts[2] + dateParts[1] + dateParts[0].slice(2)
@@ -4739,7 +4940,7 @@ async function buildPrepReportPdf(
     pdf.setPage(p);
     pdf.setFontSize(7);
     pdf.setTextColor(160, 160, 160);
-    const generated = new Date().toISOString().split('T')[0];
+    const generated = ukToday();
     pdf.text(
       'Ooosh Tours Ltd - Vehicle Prep Report - Generated ' + generated,
       pageWidth / 2, 292, { align: 'center' },
@@ -4750,7 +4951,7 @@ async function buildPrepReportPdf(
   const pdfArrayBuffer = pdf.output('arraybuffer') as ArrayBuffer;
   const pdfBytes = new Uint8Array(pdfArrayBuffer);
 
-  const eventDateStr = String(data.date || new Date().toISOString().slice(0, 10));
+  const eventDateStr = String(data.date || ukToday());
   const dp = eventDateStr.split('-'); // YYYY-MM-DD
   const ddmmyy = dp.length === 3 ? dp[2] + dp[1] + dp[0].slice(2) : eventDateStr;
   const safeReg = String(data.vehicleReg || 'unknown').replace(/\s+/g, '-');
@@ -5353,7 +5554,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       // Frozen original — serve verbatim.
       pdfBytes = storedPdf;
       const docType = isInterimRegen ? 'interim' : isCheckInRegen ? 'check-in' : 'book-out';
-      const dateStr = (event.eventDate || new Date().toISOString().slice(0, 10)).replace(/-/g, '');
+      const dateStr = (event.eventDate || ukToday()).replace(/-/g, '');
       filename = `${reg}-${docType}-${dateStr}.pdf`;
       source = 'stored';
     } else {
@@ -5423,7 +5624,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
         hireHopJob: event.hireHopJob || undefined,
         mileage: checkInMileage,
         fuelLevel: event.fuelLevel || null,
-        eventDate: event.eventDate || new Date().toISOString().slice(0, 10),
+        eventDate: event.eventDate || ukToday(),
         eventDateTime: event.createdAt || event.eventDate || new Date().toISOString(),
         hireStartDate: event.hireStartDate || resolvedDates.start || undefined,
         hireEndDate: event.hireEndDate || resolvedDates.end || undefined,
@@ -5464,7 +5665,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     if (!skipEmail && recipient) {
       const isCheckIn = event.eventType === 'Check In' || event.eventType === 'check-in';
       const reportType = isCheckIn ? 'Check-In Report' : 'Condition Report';
-      const subject = `Vehicle ${reportType} - ${reg} - ${event.eventDate || new Date().toISOString().slice(0, 10)}`;
+      const subject = `Vehicle ${reportType} - ${reg} - ${event.eventDate || ukToday()}`;
       const html = `
         <p>Hi ${driverName || 'there'},</p>
         <p>Please find attached your vehicle ${reportType.toLowerCase()} for <strong>${reg}</strong>.</p>
@@ -5923,6 +6124,15 @@ router.post('/upload-photo', (req: FlexibleVehicleRequest, res: Response) => {
           return;
         }
       }
+      // Prep session: prep photos only, under events/{eventId}/{its-reg}/ (§21.6).
+      if (isFreelancerPrep(req)) {
+        const lower = sanitisedKey.toLowerCase();
+        const regLower = req.prepSession.vehicleReg.toLowerCase();
+        if (!(lower.startsWith('events/') && lower.includes(`/${regLower}/`))) {
+          res.status(403).json({ error: 'Upload key does not target the van you are prepping' });
+          return;
+        }
+      }
 
       // Route condition-report photos to the PUBLIC bucket
       // (`ooosh-vehicle-photos`) so they can be opened via the "View full
@@ -6359,7 +6569,7 @@ router.get('/fleet-costs', async (req: AuthRequest, res: Response) => {
 
     const { from, to } = req.query;
     const fromDate = from ? String(from) : new Date(new Date().getFullYear(), 0, 1).toISOString().split('T')[0];
-    const toDate = to ? String(to) : new Date().toISOString().split('T')[0];
+    const toDate = to ? String(to) : ukToday();
 
     // Service costs by vehicle
     const serviceCosts = await query(

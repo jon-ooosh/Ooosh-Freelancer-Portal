@@ -11,6 +11,7 @@
  * /api/mobile-upload/:token side-effect (phone QR handoff).
  */
 import { query } from '../config/database';
+import { ukToday } from './uk-date';
 
 function fileType(key: string): 'image' | 'document' | 'other' {
   const lower = key.toLowerCase();
@@ -34,7 +35,7 @@ export async function attachExcessReceipt(opts: {
   }
   const jobId: string | null = cur.rows[0].job_id;
 
-  const dateStr = new Date().toISOString().split('T')[0];
+  const dateStr = ukToday();
   const note = `[${dateStr}] Receipt scan attached${via ? ` (via ${via})` : ''}.`;
   const newNotes = cur.rows[0].notes ? `${cur.rows[0].notes}\n${note}` : note;
 

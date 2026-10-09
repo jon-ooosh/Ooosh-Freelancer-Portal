@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
@@ -217,7 +218,7 @@ router.post('/merge', async (req: AuthRequest, res: Response) => {
     // that keeps the same email is a landmine: any email->person lookup that
     // doesn't filter is_deleted (e.g. portal login) can bind to the dead row.
     // The original email is preserved in the audit note.
-    const mergedOn = new Date().toISOString().split('T')[0];
+    const mergedOn = ukToday();
     const mergedEmailNote = merge.email ? ` (was ${merge.email})` : '';
     await query(
       `UPDATE people SET is_deleted = true, email = NULL, notes = COALESCE(notes, '') || $1 WHERE id = $2`,

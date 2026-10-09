@@ -24,6 +24,7 @@ import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-
 import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo, shiftLinkPath } from '../services/studio-sitter';
 import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
 import { greetingName, fullDisplayName } from '../services/display-name';
+import { ukToday } from '../services/uk-date';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -134,6 +135,14 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
     }
 
     const decoded = jwt.verify(token, PORTAL_SECRET) as { id: string; email: string; name: string; iat: number; exp: number };
+
+    // PORTAL_SECRET can fall back to JWT_SECRET, which also signs the narrow
+    // freelancer tokens (book-out, prep — they carry a `scope`). None of those
+    // is a portal login, and none names a person by `id`.
+    if (!decoded.id || (decoded as { scope?: unknown }).scope) {
+      res.status(401).json({ error: 'Invalid or expired session' });
+      return;
+    }
 
     // Look up the shared-account flag fresh on every request — the JWT was
     // minted before the flag existed for some tokens, and this lets us
@@ -883,7 +892,7 @@ function addDaysIsoP(iso: string, days: number): string {
 // GET /api/portal/studio-sitter/shifts — the sitter's upcoming/recent shifts
 router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = ukToday();
     // A short look-back so a sitter can still open a recent past shift, and a
     // full year forward so far-out assignments (e.g. a September date rota'd in
     // July) always surface — the query is bounded by the sitter's own
@@ -908,7 +917,18 @@ router.get('/studio-sitter/shifts/:date', async (req: PortalRequest, res: Respon
     const allowed = req.portalUser!.isStaffShared || await isSitterAssignedTo(req.portalUser!.id, date);
     if (!allowed) { res.status(403).json({ error: 'Not rostered to this evening' }); return; }
     const detail = await getSitterShiftDetail(date, req.portalUser!.id);
-    res.json({ success: true, ...detail });
+    // Tonight's tasks (STAFF-CALENDAR-SPEC §21). A failure costs the list, not the page.
+    let tasks: ReturnType<typeof presentFreelancerTask>[] = [];
+    try {
+      const shiftId = await resolveOpenShiftId(date);
+      if (shiftId) {
+        const { listTasks } = await import('../services/freelancer-tasks');
+        tasks = (await listTasks({ kind: 'shift', id: shiftId })).map(t => presentFreelancerTask(t, req.portalUser!.id));
+      }
+    } catch (err) {
+      console.error('Portal sitter shift tasks error (non-fatal):', err);
+    }
+    res.json({ success: true, ...detail, tasks });
   } catch (error) {
     console.error('Portal sitter shift detail error:', error);
     res.status(500).json({ error: 'Failed to load shift' });
@@ -1845,6 +1865,22 @@ router.post('/settings/notifications', async (req: PortalRequest, res: Response)
  * cancelled it and the internal note are ours, not theirs — and `personName` is
  * pointless on a list of their own days.
  */
+/** What the portal shows of a task — the wording comes from taskTitle(). */
+function presentFreelancerTask(t: import('../services/freelancer-tasks').FreelancerTask, viewerId: string) {
+  return {
+    id: t.id,
+    taskType: t.taskType,
+    title: t.title,
+    // An 'other' task's description IS its title; a van prep's is extra detail.
+    detail: t.taskType === 'van_prep' ? t.description : null,
+    vehicleReg: t.vehicleReg,
+    status: t.status,
+    doneAt: t.doneAt,
+    // Only a tick they made on the portal is theirs to undo.
+    doneByMe: t.doneVia === 'portal' && t.doneByPersonId === viewerId,
+  };
+}
+
 function presentDayBooking(b: import('../services/freelancer-days').DayBooking) {
   return {
     id: b.id,
@@ -1875,7 +1911,7 @@ router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
   try {
     const { listForPerson } = await import('../services/freelancer-days');
     const all = await listForPerson(req.portalUser!.id, { limit: 200 });
-    const today = new Date().toISOString().slice(0, 10);
+    const today = ukToday();
 
     // Past days are kept but capped: somebody wants to see the last few they
     // did (and whether we have their invoice), not scroll a year of history.
@@ -1892,11 +1928,24 @@ router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
     const past = all.filter(b => b.bookingDate < today
       && ['offered', 'accepted', 'completed'].includes(b.status)).slice(0, 10);
 
+    // Each upcoming day's tasks (STAFF-CALENDAR-SPEC §21) — a live list, so it is
+    // read on every load. A failure costs the lists, not the page.
+    const { listTasks } = await import('../services/freelancer-tasks');
+    const upcomingWithTasks = await Promise.all(upcoming.map(async (b) => {
+      let tasks: ReturnType<typeof presentFreelancerTask>[] = [];
+      try {
+        tasks = (await listTasks({ kind: 'booking', id: b.id })).map(t => presentFreelancerTask(t, req.portalUser!.id));
+      } catch (err) {
+        console.error('Portal day-booking tasks error (non-fatal):', err);
+      }
+      return { ...presentDayBooking(b), tasks };
+    }));
+
     res.json({
       success: true,
       // The one they have to DO something about, so the portal can lead with it.
       awaitingReply: upcoming.filter(b => b.status === 'offered').length,
-      upcoming: upcoming.map(presentDayBooking),
+      upcoming: upcomingWithTasks,
       past: past.map(presentDayBooking),
     });
   } catch (error) {
@@ -1934,7 +1983,7 @@ router.post('/day-bookings/:id/respond', async (req: PortalRequest, res: Respons
       });
       return;
     }
-    if (booking.bookingDate < new Date().toISOString().slice(0, 10)) {
+    if (booking.bookingDate < ukToday()) {
       res.status(409).json({ success: false, error: 'That day has already passed' });
       return;
     }
@@ -1944,6 +1993,61 @@ router.post('/day-bookings/:id/respond', async (req: PortalRequest, res: Respons
   } catch (error) {
     console.error('Portal day-booking respond error:', error);
     res.status(500).json({ success: false, error: 'That did not save' });
+  }
+});
+
+// ── Freelancer tasks: tick one off (STAFF-CALENDAR-SPEC §21) ──────────
+//
+// Only the person doing the day / on the evening can tick, and "not yours"
+// reads the same as "does not exist". A van prep is ticked by saving the prep
+// sheet, not here.
+router.post('/freelancer-tasks/:id/done', async (req: PortalRequest, res: Response) => {
+  try {
+    const { markDoneFromPortal, reopenFromPortal } = await import('../services/freelancer-tasks');
+    // { done: false } un-ticks a mis-tap (only one they ticked themselves).
+    const task = req.body?.done === false
+      ? await reopenFromPortal(String(req.params.id), req.portalUser!.id)
+      : await markDoneFromPortal(String(req.params.id), req.portalUser!.id);
+    res.json({ success: true, task: presentFreelancerTask(task, req.portalUser!.id) });
+  } catch (error) {
+    const status = (error as { status?: number })?.status;
+    if (status === 404 || status === 409) {
+      res.status(status).json({ success: false, error: (error as Error).message });
+      return;
+    }
+    console.error('Portal freelancer task done error:', error);
+    res.status(500).json({ success: false, error: 'That did not save' });
+  }
+});
+
+// ── Freelancer tasks: open the prep sheet for a van (§21.6) ───────────
+//
+// Returns a link into OP's prep page carrying a 15-minute redeem token. OP
+// already knows who this is (portal session), so there is no HMAC round trip.
+// assertPrepEligible() is the one rule, shared with the redeem step.
+router.post('/freelancer-tasks/:id/prep-link', async (req: PortalRequest, res: Response) => {
+  try {
+    const { assertPrepEligible } = await import('../services/freelancer-tasks');
+    const { mintFreelancerPrepRedeemToken } = await import('../middleware/freelancer-bookout-auth');
+    const { frontendLink } = await import('../config/app-urls');
+    const taskId = String(req.params.id);
+    const ok = await assertPrepEligible(taskId, req.portalUser!.id);
+    const token = mintFreelancerPrepRedeemToken(taskId, req.portalUser!.id);
+    // Back to where they came from: the shift page for a sitter, else the dashboard.
+    const portal = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
+    const back = ok.task.shiftId ? `${portal}/shift/${ok.date}` : `${portal}/dashboard`;
+    const url = frontendLink(
+      `/vehicles/freelancer-prep?prepToken=${encodeURIComponent(token)}&returnUrl=${encodeURIComponent(back)}`,
+    );
+    res.json({ success: true, url });
+  } catch (error) {
+    const status = (error as { status?: number })?.status;
+    if (status === 404 || status === 409) {
+      res.status(status).json({ success: false, error: (error as Error).message });
+      return;
+    }
+    console.error('Portal prep-link error:', error);
+    res.status(500).json({ success: false, error: 'Could not open the prep sheet' });
   }
 });
 

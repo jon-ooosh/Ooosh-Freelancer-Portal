@@ -40,6 +40,7 @@ import LostCancelledPage from './pages/LostCancelledPage';
 import LeadsPage from './pages/LeadsPage';
 import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
+import FreelancerPrepShell from './pages/FreelancerPrepShell';
 import FreelancerCheckinShell from './pages/FreelancerCheckinShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
@@ -70,6 +71,7 @@ import { CheckInPage as StaffCheckInPage } from './modules/vehicles/pages/CheckI
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { sharedRefreshToken } from './services/api';
 import { getFreelancerSession, isFreelancerSessionActive } from './modules/vehicles/adapters/freelancer-session';
+import { getFreelancerPrepSession, isOnFreelancerPrepPage } from './modules/vehicles/adapters/freelancer-prep-session';
 import FreelancerDayRespondPage from './pages/FreelancerDayRespondPage';
 import MePage from './pages/MePage';
 
@@ -92,6 +94,12 @@ initVehicleModule({
   getAuthHeaders: (): Record<string, string> => {
     const staffToken = useAuthStore.getState().accessToken;
     if (staffToken) return { Authorization: `Bearer ${staffToken}` };
+    // On the freelancer prep page the PAGE decides which session is sent, so a
+    // book-out session left on the same phone never stands in for it (§21.6).
+    if (isOnFreelancerPrepPage()) {
+      const prep = getFreelancerPrepSession();
+      return prep ? { Authorization: `Bearer ${prep.token}` } : {};
+    }
     const freelancer = getFreelancerSession();
     if (freelancer) return { Authorization: `Bearer ${freelancer.token}` };
     return {};
@@ -101,7 +109,7 @@ initVehicleModule({
     // Freelancer sessions don't refresh — they're one-shot, 4h TTL.
     // If a freelancer's JWT 401s, they have to go back to the portal
     // and get a new HMAC token. Skip the staff refresh path entirely.
-    if (!useAuthStore.getState().accessToken && isFreelancerSessionActive()) {
+    if (!useAuthStore.getState().accessToken && (isFreelancerSessionActive() || isOnFreelancerPrepPage())) {
       throw new Error('Freelancer session expired');
     }
     return sharedRefreshToken();
@@ -178,6 +186,8 @@ export default function App() {
       <Route path="/vehicles/book-out" element={<BookOutEntry />} />
       {/* Public freelancer check-in / collection entry — bypasses ProtectedRoute */}
       <Route path="/vehicles/check-in" element={<CheckInEntry />} />
+      {/* Public freelancer prep (a van-prep task from the portal) — own scoped session, no Layout */}
+      <Route path="/vehicles/freelancer-prep" element={<FreelancerPrepShell />} />
       {/* Public OOH parking-confirmation form — token-authenticated, no Layout wrapper */}
       <Route path="/return-parking/:token" element={<OohReturnParkingPage />} />
       {/* Public mobile receipt capture (QR handoff) — token-authenticated, no Layout wrapper */}
