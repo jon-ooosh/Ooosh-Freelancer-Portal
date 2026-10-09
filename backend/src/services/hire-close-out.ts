@@ -157,7 +157,7 @@ interface JobRow {
 
 // ── Log ──────────────────────────────────────────────────────────────────
 
-async function log(jobId: string, userId: string | null, step: string, ok: boolean, detail: string,
+export async function log(jobId: string, userId: string | null, step: string, ok: boolean, detail: string,
   refs?: Record<string, unknown>): Promise<void> {
   // JSONB — stringify, never a bare object/array (CLAUDE.md).
   await query(
@@ -181,7 +181,7 @@ async function readLog(jobId: string): Promise<CloseOutLogEntry[]> {
   return r.rows;
 }
 
-function reporter(jobId: string, userId: string | null, retryHint: string): CloseReporter {
+export function reporter(jobId: string, userId: string | null, retryHint: string): CloseReporter {
   return {
     log: (step, ok, detail) => log(jobId, userId, step, ok, detail),
     stop: async (step, detail) => { await log(jobId, userId, step, false, detail); throw new Stop(detail); },
@@ -209,7 +209,7 @@ const depositText = (row: Row) =>
 const isExcessDeposit = (row: Row) => isExcessText(depositText(row));
 
 /** Approved, non-proforma invoices on the job, oldest first. */
-function approvedInvoices(rows: Row[]): CloseOutInvoice[] {
+export function approvedInvoices(rows: Row[]): CloseOutInvoice[] {
   return invoiceRows(rows)
     .filter((row) => invoiceStatus(row) >= 2)
     .filter((row) => !String(row.data?.DESCRIPTION || row.desc || '').toLowerCase().includes('proforma'))
@@ -640,7 +640,7 @@ async function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
 }
 
 /** For a cross-job allocation, the source job's billing rows (its deposit carries the Xero overpayment id). */
-async function sourceJobRows(rows: Row[], invoiceId: number): Promise<Row[]> {
+export async function sourceJobRows(rows: Row[], invoiceId: number): Promise<Row[]> {
   const mine = new Set(rows.filter((r) => kindOf(r) === 6).map(idOf));
   const extra: Row[] = [];
   const seen = new Set<number>();

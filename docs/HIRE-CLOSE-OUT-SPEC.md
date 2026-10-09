@@ -1,6 +1,8 @@
 # Hire Close-Out (Bookkeeping) — Spec
 
-**Status (9 Oct 2026): Phases 1 and 2 BUILT** — `services/hire-close-out.ts`, `routes/hire-close-out.ts`
+**Status (10 Oct 2026): Phases 1, 2 and 3a BUILT** (3a = the nightly Xero credit sweep,
+`services/close-out-xero-sweep.ts`, 03:30, off until `system_settings.closeout_xero_sweep_enabled`
+is `'true'`). **Phases 1 and 2 BUILT** — `services/hire-close-out.ts`, `routes/hire-close-out.ts`
 (`/api/close-out/:jobId/plan|raise-invoice|allocate|complete`), `job_closeout_log` (mig 281), the Raise
 invoice panel on the Invoice card (`HireInvoicePanel.tsx`) and the allocate/complete panel on the Payment
 Reconciliation card (`HireCloseOutPanel.tsx`), sharing one plan read (`lib/closeOutPlan.ts`). **An EU hire
@@ -124,8 +126,11 @@ normal case end to end: raise the invoice if there is anything left to bill, the
 every hire deposit in HireHop and apply the credits in Xero (`POST /close-out/:jobId/run`).
 A run that stops says where and the same button reads "Carry on". "Mark as sent to client"
 is offered only once nothing is left to allocate, so the client's invoice already shows
-their payments. **Complete stays its own button** — jobs are deliberately left open while
-damage quotes or missing items are pending. The Excess Resolution card is unchanged.
+their payments. **Completing a job is the status change at the top of the page**, not a button here (jon,
+9 Oct, second pass) — and that modal now lists open Problems in red: a non-manager cannot
+complete over them, a manager must give a reason (`routes/pipeline.ts` enforces both). The
+card itself is one line of state, one line for the first thing in the way, and the buttons;
+everything else is behind "Details…". The Excess Resolution card is unchanged.
 
 | On the Invoice card | Shows |
 |---|---|
@@ -362,8 +367,15 @@ Xero Reference matches the bank-transfer convention the Wise matcher keys on. Th
 draft net + already-invoiced net = HireHop's quoted net. Then the lockdown of HireHop payment and
 deposit permissions for non-managers — after the VAT split, or managers keep raising EU invoices by hand.
 
-**Phase 3 — Arrival hook.** Small once Phase 1 exists; gated by a `system_settings` toggle
-so it can be switched off without a deploy.
+**Phase 3a — Xero credit sweep.** ✅ BUILT 10 Oct 2026: `services/close-out-xero-sweep.ts`,
+nightly 03:30, candidates = non-internal jobs returned/completed in the last 120 days, skipping
+any swept clean in the last 7 days with no payment since; per job the shared `applyCreditsInXero`
+per approved invoice with allocations (cross-job deposits via the source job's rows), logged to
+`job_closeout_log` with `user_id` NULL (`step = 'sweep'`); a mismatch is logged and skipped.
+Off until `system_settings.closeout_xero_sweep_enabled = 'true'` (migration 282 seeds it).
+**Phase 3b — Arrival hook.** Not built. Small now: when `recordPayment()` or the Stripe
+webhook lands a hire deposit on a job with exactly one open approved invoice, run the
+allocation for that deposit; gated by its own toggle.
 
 **Phase 4 — Additional charges.** "Add a charge" on the Damage & Issues card: adds a job
 line (OP already adds lines to HireHop jobs for the shop — reuse) with a nominal picked
