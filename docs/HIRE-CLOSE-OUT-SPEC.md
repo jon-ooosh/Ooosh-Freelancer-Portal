@@ -1,8 +1,11 @@
 # Hire Close-Out (Bookkeeping) — Spec
 
-**Status (9 Oct 2026): Phase 1 BUILT** — `services/hire-close-out.ts`, `routes/hire-close-out.ts`
-(`/api/close-out/:jobId/plan|allocate|complete`), `job_closeout_log` (mig 281), and the panel on the
-Payment Reconciliation card (`frontend/src/components/HireCloseOutPanel.tsx`). Phases 2–4 not built. This is the "bookkeeping module" that
+**Status (9 Oct 2026): Phases 1 and 2 BUILT** — `services/hire-close-out.ts`, `routes/hire-close-out.ts`
+(`/api/close-out/:jobId/plan|raise-invoice|allocate|complete`), `job_closeout_log` (mig 281), the Raise
+invoice panel on the Invoice card (`HireInvoicePanel.tsx`) and the allocate/complete panel on the Payment
+Reconciliation card (`HireCloseOutPanel.tsx`), sharing one plan read (`lib/closeOutPlan.ts`). **An EU hire
+(the "Non-standard VAT rules" item) is refused by Raise invoice until the invoice-line VAT split (§10.1) is
+built — invoice those by hand for now.** Phases 3–4 and the VAT split not built. This is the "bookkeeping module" that
 `docs/reference/HIREHOP-BILLING-API.md` §8 says the shop close is the base of. §1 is what
 jon settled in the design discussion; §4 is the flow; §9 is the build order and the
 captures that must happen before Phase 2. Read `HIREHOP-BILLING-API.md` §0 and §8
@@ -346,8 +349,11 @@ choices wired to existing routes; Complete job step. Manager-tier to press
 (`MANAGER_ROLES`; review after a month — allocation moves no cash). Shop close keeps
 working unchanged (regression: close a shop week after the extraction).
 
-**Phase 2 — Raise invoice.** Needs capture 1. Then the lockdown of HireHop payment and
-deposit permissions for non-managers.
+**Phase 2 — Raise invoice.** ✅ BUILT 9 Oct 2026 (without the EU split: an EU hire is refused by
+name and invoiced by hand until §10.1 ships). Invoice date = raise date; `ref` = `Job <number>` so the
+Xero Reference matches the bank-transfer convention the Wise matcher keys on. The penny check is
+draft net + already-invoiced net = HireHop's quoted net. Then the lockdown of HireHop payment and
+deposit permissions for non-managers — after the VAT split, or managers keep raising EU invoices by hand.
 
 **Phase 3 — Arrival hook.** Small once Phase 1 exists; gated by a `system_settings` toggle
 so it can be switched off without a deploy.

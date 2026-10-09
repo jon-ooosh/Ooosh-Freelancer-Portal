@@ -31,12 +31,14 @@ import { isExcessText } from './hh-billing-deposits';
 import {
   PENNY, round2, gbp, Stop, CloseReporter, Row,
   kindOf, idOf, invoiceRows, findInvoice, invoiceStatus, invoiceGross, invoiceOwing, invoiceInXero,
-  invoiceAllocations, unallocatedPayments, readJobStatus,
-  postAllocation, applyCreditsInXero, completeJob,
+  invoiceAllocations, unallocatedPayments, readJobStatus, invoiceNet,
+  postAllocation, applyCreditsInXero, completeJob, postDraftInvoice, postApproveInvoice, pushInvoiceToXero,
 } from './hh-invoice-close';
 import xeroBroker from './xero-broker';
 import { isXeroConfigured } from '../config/xero';
 import { DISPLAY_NAME_SQL } from './display-name';
+import { hasNonStandardVatItem } from './vat-adjustment';
+import { hhLocalNow } from './shop-stock';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -88,8 +90,27 @@ export interface CloseOutLogEntry {
   created_at: string;
 }
 
+/** The Invoice card's half of the plan (§4.1). */
+export interface InvoicePlan {
+  /** HireHop's quoted net for the job (kind 0 accrued). */
+  accruedNet: number;
+  /** Net already on approved or draft invoices. */
+  invoicedNet: number;
+  /** What Raise invoice would bill, ex VAT. */
+  netToInvoice: number;
+  /** A draft already on the job — Raise invoice adopts it. */
+  draft: CloseOutInvoice | null;
+  /** The job carries the "Non-standard VAT rules" item: invoiced by hand until the VAT split is built. */
+  euTrigger: boolean;
+  /** HireHop says the job has not returned (status < 6) — a manager may override. */
+  notReturned: boolean;
+  blockers: string[];
+  ready: boolean;
+}
+
 export interface CloseOutPlan {
   jobId: string;
+  invoice: InvoicePlan;
   hhJobNumber: number;
   jobName: string | null;
   /** HireHop's job status, fresh (11 = Completed). */
@@ -264,6 +285,156 @@ export function planAllocations(invoices: CloseOutInvoice[], payments: CloseOutP
   return { allocations, surplus, shortfall };
 }
 
+// ── The invoice (§4.1) ───────────────────────────────────────────────────
+
+const accruedNetOf = (rows: Row[]) => {
+  const total = rows.find((r) => kindOf(r) === 0);
+  return round2(parseFloat(total?.accrued ?? total?.data?.TOTAL ?? '0') || 0);
+};
+const isProformaRow = (row: Row) => String(row.data?.DESCRIPTION || row.desc || '').toLowerCase().includes('proforma');
+const draftRows = (rows: Row[]) => invoiceRows(rows).filter((r) => invoiceStatus(r) === 0 && !isProformaRow(r));
+const toInvoice = (row: Row): CloseOutInvoice => ({
+  invoiceId: idOf(row),
+  number: String(row.data?.NUMBER || row.number || idOf(row)),
+  status: invoiceStatus(row),
+  date: String(row.data?.TAX_POINT || row.date || ''),
+  gross: invoiceGross(row) ?? 0,
+  owing: invoiceOwing(row) ?? 0,
+  inXero: invoiceInXero(row),
+  xeroId: String(row.data?.ACC_ID ?? '').trim() || null,
+});
+
+async function planInvoice(rows: Row[], approved: CloseOutInvoice[], hhJobNumber: number, hhStatus: number | null): Promise<InvoicePlan> {
+  const accruedNet = accruedNetOf(rows);
+  const nonProforma = invoiceRows(rows).filter((r) => !isProformaRow(r));
+  const invoicedNet = round2(nonProforma.reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
+  const drafts = draftRows(rows);
+  const draft = drafts.length === 1 ? toInvoice(drafts[0]) : null;
+  const netToInvoice = round2(Math.max(accruedNet - invoicedNet, 0));
+  const blockers: string[] = [];
+  const notReturned = hhStatus != null && hhStatus < HH_RETURNED_INCOMPLETE;
+  let euTrigger = false;
+  if (drafts.length > 1) {
+    blockers.push(`The job has ${drafts.length} draft invoices in HireHop — delete the extra draft(s) by hand first.`);
+  }
+  if (netToInvoice >= PENNY || draft) {
+    const eu = await hasNonStandardVatItem(hhJobNumber);
+    if (eu == null) blockers.push('Could not read the job\'s items from HireHop to check its VAT rules.');
+    euTrigger = eu === true;
+    if (euTrigger) {
+      blockers.push('This hire carries the "Non-standard VAT rules" item. The EU invoice split is not built yet — raise this invoice by hand in HireHop for now.');
+    }
+  }
+  if (notReturned) blockers.push(`HireHop says this job hasn't returned yet (status ${hhStatus}) — a manager can raise the invoice anyway.`);
+  void approved;
+  return {
+    accruedNet, invoicedNet, netToInvoice, draft, euTrigger, notReturned, blockers,
+    ready: blockers.length === 0 && (netToInvoice >= PENNY || draft != null),
+  };
+}
+
+/**
+ * Raise the hire's invoice from every line not yet invoiced: draft (or adopt
+ * the draft already there), penny check against HireHop's own quoted total,
+ * approve dated today, push to Xero, read each back. Stops at the draft on a
+ * mismatch — a draft never reaches Xero. `allowNotReturned` is the manager's
+ * override for a job HireHop still shows as out.
+ */
+export async function raiseHireInvoice(jobIdOrNumber: string, userId: string | null,
+  opts: { allowNotReturned?: boolean } = {}): Promise<CloseOutResult> {
+  const job = await loadJob(jobIdOrNumber);
+  return withJobLock(job.id, async () => {
+    const rep = reporter(job.id, userId, 'press Raise invoice');
+    let done = false;
+    let message: string;
+    try {
+      message = await raiseSteps(job, rep, !!opts.allowNotReturned);
+      done = true;
+    } catch (err) {
+      if (!(err instanceof Stop)) {
+        await log(job.id, userId, 'error', false, err instanceof Error ? err.message : String(err)).catch(() => undefined);
+      }
+      message = err instanceof Error ? err.message : String(err);
+    }
+    return { done, message, plan: await buildPlan(job) };
+  });
+}
+
+async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boolean): Promise<string> {
+  const plan = await buildPlan(job);
+  const inv = plan.invoice;
+  const hhJobNumber = plan.hhJobNumber;
+  const blockers = inv.blockers.filter((b) => !(allowNotReturned && b.includes("hasn't returned yet")));
+  if (plan.blockers.some((b) => b.startsWith('This job') || b.startsWith('Internal'))) blockers.unshift(...plan.blockers);
+  if (blockers.length) await rep.stop('invoice_preflight', blockers.join(' '));
+  if (inv.netToInvoice < PENNY && !inv.draft) await rep.stop('invoice_preflight', 'Nothing to invoice — every line is already on an invoice.');
+
+  // 1. Draft (or adopt).
+  let rows = await readBillingRows(hhJobNumber);
+  let draftId = inv.draft?.invoiceId ?? 0;
+  if (!draftId) {
+    const before = new Set(draftRows(rows).map(idOf));
+    const { res, newId } = await postDraftInvoice(hhJobNumber, `Job ${hhJobNumber}`);
+    rows = await readBillingRows(hhJobNumber);
+    const fresh = draftRows(rows).filter((r) => !before.has(idOf(r)));
+    if (fresh.length !== 1) {
+      await rep.stop('invoice_draft', fresh.length === 0
+        ? `HireHop did not create the draft (${res.error || 'no new draft on the job afterwards'}). Nothing was changed — ${rep.retryHint} to try again.`
+        : `HireHop now shows ${fresh.length} new drafts on the job — expected one. Delete the extra draft(s) by hand, then ${rep.retryHint}.`);
+    }
+    draftId = idOf(fresh[0]);
+    if (newId && newId !== draftId) {
+      await rep.stop('invoice_draft', `HireHop returned invoice ${newId} but the job shows draft ${draftId}. Check the job by hand.`);
+    }
+    await rep.log('invoice_draft', true, `Draft invoice ${draftId} created from the uninvoiced lines.`);
+  } else {
+    await rep.log('invoice_draft', true, `Using the draft invoice ${draftId} already on the job.`);
+  }
+
+  // 2. Penny check: the drafts' net + what was already invoiced = HireHop's quoted net.
+  const draft = findInvoice(rows, draftId);
+  if (!draft) await rep.stop('invoice_penny', `Draft ${draftId} is no longer on the job. ${capitalise(rep.retryHint)} to start again.`);
+  const draftNet = invoiceNet(draft!) ?? 0;
+  const draftGross = invoiceGross(draft!) ?? 0;
+  const othersNet = round2(invoiceRows(rows).filter((r) => !isProformaRow(r) && idOf(r) !== draftId).reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
+  const accrued = accruedNetOf(rows);
+  if (Math.abs(round2(draftNet + othersNet) - accrued) >= PENNY) {
+    await rep.stop('invoice_penny', `Draft ${draftId} is ${gbp(draftNet)} ex VAT and ${gbp(othersNet)} is already invoiced, but HireHop's quoted net is ${gbp(accrued)} — `
+      + `they differ by ${gbp(round2(accrued - draftNet - othersNet))}. Stopped at the draft; nothing has gone to Xero. Check the job's lines in HireHop, then ${rep.retryHint}.`);
+  }
+  await rep.log('invoice_penny', true, `Draft ${draftId}: ${gbp(draftNet)} ex VAT, ${gbp(draftGross)} inc VAT — matches HireHop's quoted total.`);
+
+  // 3. Approve, dated today (§1.11).
+  let number = '';
+  if (invoiceStatus(draft!) < 2) {
+    const res = await postApproveInvoice(draftId, hhLocalNow());
+    rows = await readBillingRows(hhJobNumber);
+    const after = findInvoice(rows, draftId);
+    number = String(after?.data?.NUMBER || '');
+    if (!after || invoiceStatus(after) < 2 || !number) {
+      await rep.stop('invoice_approve', `HireHop did not approve invoice ${draftId} (${res.error || 'still a draft on read-back'}). Nothing has gone to Xero — ${rep.retryHint} to try again.`);
+    }
+    await rep.log('invoice_approve', true, `Invoice ${number} (${draftId}) approved, dated today.`);
+    await pushInvoiceToXero(rep, {
+      label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross: draftGross,
+      saved: { ...(res.data || {}), hh_task: res.data?.hh_task || 'post_invoice_credit', hh_id: res.data?.hh_id || draftId },
+      alert: { jobId: job.id, what: `hire invoice ${number}` },
+    });
+  } else {
+    number = String(draft!.data?.NUMBER || draftId);
+    if (!invoiceInXero(draft!)) {
+      await pushInvoiceToXero(rep, {
+        label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross: draftGross,
+        saved: { hh_task: 'post_invoice_credit', hh_id: draftId, hh_acc_package_id: 3, hh_package_type: 1 },
+        alert: { jobId: job.id, what: `hire invoice ${number}` },
+      });
+    }
+  }
+  return `Invoice ${number} raised for ${gbp(draftGross)} and sent to Xero. Allocate the payments next.`;
+}
+
+const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
 // ── The plan (§4.3, §6) ──────────────────────────────────────────────────
 
 async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
@@ -271,6 +442,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   const warnings: string[] = [];
   const base = {
     jobId: job.id, hhJobNumber: Number(job.hh_job_number), jobName: job.job_name, hhStatus: null as number | null,
+    invoice: { accruedNet: 0, invoicedNet: 0, netToInvoice: 0, draft: null, euTrigger: false, notReturned: false, blockers: [] as string[], ready: false } as InvoicePlan,
     invoices: [] as CloseOutInvoice[], payments: [] as CloseOutPayment[], allocations: [] as PlannedAllocation[],
     surplus: [] as Array<{ depositId: number; amount: number }>, shortfall: 0, excessHeld: 0,
     blockers, warnings, sentences: [] as string[], ready: false, readyToComplete: false,
@@ -308,6 +480,9 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   for (const inv of open) {
     if (!inv.inXero) blockers.push(`${inv.number} is approved in HireHop but has not reached Xero — check it there first.`);
   }
+
+  // The Invoice card (§4.1): what is left to bill, and whether Raise invoice may run.
+  base.invoice = await planInvoice(rows, invoices, hhJobNumber, hhStatus);
 
   // Deposits — HireHop vs OP (§6).
   const hireRows = hireDepositRows(rows);

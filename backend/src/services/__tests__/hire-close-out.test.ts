@@ -22,6 +22,7 @@ jest.mock('../hh-deposit-release', () => ({
   readBillingRows: jest.fn(),
 }));
 jest.mock('../hh-xero-sync', () => ({ syncSavedRowToXero: jest.fn(), sendXeroSyncFailedAlert: jest.fn() }));
+jest.mock('../vat-adjustment', () => ({ hasNonStandardVatItem: jest.fn() }));
 jest.mock('../shop-stock', () => ({ hhLocalNow: () => '2026-10-09 09:00:00' }));
 jest.mock('../../config/xero', () => ({ isXeroConfigured: () => true }));
 jest.mock('../xero-broker', () => ({
@@ -33,7 +34,11 @@ import { query } from '../../config/database';
 import hhBroker from '../hirehop-broker';
 import { readBillingRows } from '../hh-deposit-release';
 import xeroBroker from '../xero-broker';
-import { planHireCloseOut, runHireAllocation, completeHireJob, planAllocations } from '../hire-close-out';
+import { syncSavedRowToXero } from '../hh-xero-sync';
+import { hasNonStandardVatItem } from '../vat-adjustment';
+import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, planAllocations } from '../hire-close-out';
+const mockSync = syncSavedRowToXero as jest.Mock;
+const mockEu = hasNonStandardVatItem as jest.Mock;
 
 const mockQuery = query as jest.Mock;
 const mockPost = (hhBroker as any).post as jest.Mock;
@@ -49,12 +54,17 @@ interface Dep { id: number; credit: number; bank: number; allocated: number; des
 interface Inv { id: number; status: number; number: string; gross: number; paid: number; accId: string; date: string; desc?: string }
 interface App { id: number; invoiceId: number; depositId: number; amount: number; desc?: string }
 
-let hh: { jobStatus: number; invoices: Inv[]; deposits: Dep[]; apps: App[]; nextApp: number; ignoreAllocations: boolean };
+let hh: {
+  jobStatus: number; invoices: Inv[]; deposits: Dep[]; apps: App[]; nextApp: number; ignoreAllocations: boolean;
+  /** HireHop's quoted net (kind 0) and the net of lines not yet on any invoice. */
+  accruedNet: number; uninvoicedNet: number; euTrigger: boolean; nextInvoice: number;
+};
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 function rows(): any[] {
   const out: any[] = [];
+  out.push({ kind: 0, accrued: hh.accruedNet, data: { TYPE: 0, TOTAL: hh.accruedNet } });
   for (const i of hh.invoices) {
     out.push({
       kind: 1, status: String(i.status), debit: i.gross, owing: r2(i.gross - i.paid), date: i.date,
@@ -85,6 +95,18 @@ function installHireHop() {
     throw new Error(`unexpected GET ${path}`);
   });
   mockPost.mockImplementation(async (path: string, body: any) => {
+    if (path === '/php_functions/billing_save.php') {
+      // all: 1 — a draft from every line not yet invoiced (proven 9 Oct 2026).
+      const net = hh.uninvoicedNet;
+      const inv: Inv = { id: hh.nextInvoice++, status: 0, number: '', gross: r2(net * 1.2), paid: 0, accId: '', date: '2026-10-09' };
+      hh.invoices.push(inv); hh.uninvoicedNet = 0;
+      return { success: true, data: { rows: [{ kind: 1, data: { ID: inv.id } }] } };
+    }
+    if (path === '/php_functions/billing_save_status.php') {
+      const inv = hh.invoices.find((i) => i.id === body.id)!;
+      inv.status = 2; inv.number = `OT-INV-${inv.id}`;
+      return { success: true, data: { hh_task: 'post_invoice_credit', hh_id: inv.id, hh_acc_package_id: 3, hh_package_type: 1 } };
+    }
     if (path === '/php_functions/billing_payments_save.php') {
       if (hh.ignoreAllocations) return { success: true, data: {} };   // "success" that did nothing (§0)
       const dep = hh.deposits.find((d) => d.id === body.deposit)!;
@@ -104,6 +126,14 @@ interface Op { remaining: number; allocations: Array<{ Invoice: { InvoiceID: str
 let xero: { invoiceDue: Record<string, number>; overpayments: Record<string, Op> };
 
 function installXero() {
+  mockSync.mockImplementation(async (_label: string, saved: any) => {
+    if (saved.hh_task === 'post_invoice_credit') {
+      const inv = hh.invoices.find((i) => i.id === saved.hh_id);
+      if (inv) { inv.accId = `x-${inv.id}`; xero.invoiceDue[inv.accId] = inv.gross; }
+    }
+    return { ok: true, error: null };
+  });
+  mockEu.mockImplementation(async () => hh.euTrigger);
   xero = {
     invoiceDue: Object.fromEntries(hh.invoices.filter((i) => i.accId).map((i) => [i.accId, i.gross])),
     overpayments: Object.fromEntries(hh.deposits.map((d) => [`op-${d.id}`, { remaining: d.credit, allocations: [] }])),
@@ -146,6 +176,7 @@ function installDb() {
 function job16015Corrected() {
   hh = {
     jobStatus: 7, nextApp: 900, ignoreAllocations: false,
+    accruedNet: 5069.99, uninvoicedNet: 0, euTrigger: false, nextInvoice: 13000,
     invoices: [{ id: 12252, status: 2, number: 'OT-INV-12252', gross: 6083.99, paid: 5829.82, accId: 'x-12252', date: '2026-09-25' }],
     deposits: [
       { id: 8661, credit: 1140.97, bank: 267, allocated: 0, desc: '16015 - deposit', date: '2026-06-16' },
@@ -406,5 +437,94 @@ describe('completeHireJob', () => {
     expect(second.done).toBe(true);
     expect(hh.jobStatus).toBe(11);
     expect(logRows[0].detail).toContain('manager override');
+  });
+});
+
+describe('raiseHireInvoice', () => {
+  /** A returned hire, paid in full, nothing invoiced yet (the job jon opened on 9 Oct). */
+  function uninvoicedJob() {
+    hh.invoices = []; hh.apps = [];
+    hh.accruedNet = 510; hh.uninvoicedNet = 510;          // £612 inc VAT
+    hh.deposits = [{ id: 9500, credit: 612, bank: 267, allocated: 0, desc: '16100 - deposit', date: '2026-09-20' }];
+    opPayments = [{ hirehop_deposit_id: 9500, payment_type: 'deposit', amount: 612, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null }];
+    installXero();
+  }
+
+  it('the plan says what is left to invoice and that Allocate must wait for the invoice', async () => {
+    uninvoicedJob();
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.invoice).toMatchObject({ accruedNet: 510, invoicedNet: 0, netToInvoice: 510, draft: null, euTrigger: false, ready: true });
+    expect(plan.blockers.join(' ')).toContain('Raise the invoice first');
+  });
+
+  it('drafts from the uninvoiced lines, penny-checks, approves dated today, pushes to Xero', async () => {
+    uninvoicedJob();
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toEqual([expect.objectContaining({ all: 1, job: 16015, ref: 'Job 16015' })]);
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([expect.objectContaining({ id: 13000, status: 2 })]);
+    expect(mockSync.mock.calls[0][1]).toMatchObject({ hh_task: 'post_invoice_credit', hh_id: 13000 });
+    expect(hh.invoices[0]).toMatchObject({ status: 2, number: 'OT-INV-13000', accId: 'x-13000', gross: 612 });
+    expect(r.message).toContain('OT-INV-13000');
+    // The payments half of the plan now has something to do.
+    expect(r.plan.invoice.netToInvoice).toBe(0);
+    expect(r.plan.allocations).toEqual([expect.objectContaining({ depositId: 9500, amount: 612, invoiceId: 13000 })]);
+    expect(logRows.map((l) => l.step)).toEqual(expect.arrayContaining(['invoice_draft', 'invoice_penny', 'invoice_approve', 'xero']));
+  });
+
+  it('adopts a draft already on the job instead of raising a second one', async () => {
+    uninvoicedJob();
+    hh.invoices.push({ id: 12990, status: 0, number: '', gross: 612, paid: 0, accId: '', date: '2026-10-08' }); hh.uninvoicedNet = 0;
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toEqual([]);
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([expect.objectContaining({ id: 12990 })]);
+  });
+
+  it('stops at the draft when the pennies do not agree — nothing approved, nothing to Xero', async () => {
+    uninvoicedJob();
+    hh.uninvoicedNet = 500;                                   // HireHop bills £500 of a £510 job
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('differ by £10.00');
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([]);
+    expect(mockSync).not.toHaveBeenCalled();
+    expect(hh.invoices[0].status).toBe(0);
+  });
+
+  it('refuses an EU hire until the VAT split is built', async () => {
+    uninvoicedJob(); hh.euTrigger = true;
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.invoice.euTrigger).toBe(true);
+    expect(plan.invoice.ready).toBe(false);
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('Non-standard VAT');
+    expect(posts('/php_functions/billing_save.php')).toEqual([]);
+  });
+
+  it('a job still out: refuses by default, raises with the manager override', async () => {
+    uninvoicedJob(); hh.jobStatus = 5;
+    const first = await raiseHireInvoice(JOB.id, 'u1');
+    expect(first.done).toBe(false);
+    expect(first.message).toContain("hasn't returned yet");
+    const second = await raiseHireInvoice(JOB.id, 'u1', { allowNotReturned: true });
+    expect(second.done).toBe(true);
+  });
+
+  it('a later charge: invoices only the new line, and the penny check counts what was already invoiced', async () => {
+    // 16015 corrected is fully invoiced (5069.99); a £100 damage line is added.
+    hh.accruedNet = 5169.99; hh.uninvoicedNet = 100;
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(true);
+    const second = hh.invoices.find((i) => i.id === 13000)!;
+    expect(second.gross).toBe(120);
+    expect(r.message).toContain('£120.00');
+  });
+
+  it('says so when there is nothing to invoice', async () => {
+    const r = await raiseHireInvoice(JOB.id, 'u1');       // 16015 corrected: fully invoiced
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('Nothing to invoice');
   });
 });

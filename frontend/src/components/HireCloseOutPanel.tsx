@@ -17,38 +17,11 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
-
-interface CloseOutInvoice { invoiceId: number; number: string; status: number; date: string; gross: number; owing: number; inXero: boolean }
-interface CloseOutPayment { depositId: number; bankName: string | null; description: string; date: string; credit: number; available: number }
-interface CloseOutLogEntry { id: string; step: string; ok: boolean; detail: string; user_name: string | null; created_at: string }
-interface CloseOutPlan {
-  hhJobNumber: number;
-  hhStatus: number | null;
-  invoices: CloseOutInvoice[];
-  payments: CloseOutPayment[];
-  allocations: Array<{ depositId: number; amount: number; invoiceNumber: string }>;
-  surplus: Array<{ depositId: number; amount: number }>;
-  shortfall: number;
-  excessHeld: number;
-  blockers: string[];
-  warnings: string[];
-  sentences: string[];
-  ready: boolean;
-  readyToComplete: boolean;
-  log: CloseOutLogEntry[];
-}
-interface CloseOutResult { done: boolean; message: string; plan: CloseOutPlan }
+import {
+  CloseOutPlan, CloseOutResult, loadCloseOutPlan, publishCloseOutPlan, subscribeCloseOutPlan, money, fmtDay, fmtWhen, apiError,
+} from '../lib/closeOutPlan';
 
 const HH_COMPLETED = 11;
-const money = (n: number) => `£${n.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const fmtDay = (iso: string) => {
-  const d = new Date(iso.length === 10 ? `${iso}T12:00:00Z` : iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-};
-const fmtWhen = (iso: string) => {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
-};
 
 interface Props {
   jobId: string;
@@ -66,20 +39,23 @@ export default function HireCloseOutPanel({ jobId, onChanged }: Props) {
   const [busy, setBusy] = useState<'plan' | 'allocate' | 'complete' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = true) => {
     setBusy('plan');
     setError(null);
     try {
-      const r = await api.get<{ data: CloseOutPlan }>(`/close-out/${jobId}/plan`);
-      setPlan(r.data);
-    } catch (e: any) {
-      setError(e?.body?.error || e?.message || 'Could not read the job\'s money from HireHop.');
+      setPlan(await loadCloseOutPlan(jobId, force));
+    } catch (e) {
+      setError(apiError(e, 'Could not read the job\'s money from HireHop.'));
     } finally {
       setBusy(null);
     }
   }, [jobId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const unsub = subscribeCloseOutPlan(jobId, setPlan);
+    void load(false);
+    return unsub;
+  }, [jobId, load]);
 
   const allocate = async () => {
     if (!plan) return;
@@ -90,10 +66,10 @@ export default function HireCloseOutPanel({ jobId, onChanged }: Props) {
     try {
       const r = await api.post<{ data: CloseOutResult }>(`/close-out/${jobId}/allocate`, {});
       setResult(r.data);
-      setPlan(r.data.plan);
+      publishCloseOutPlan(jobId, r.data.plan);
       onChanged?.();
-    } catch (e: any) {
-      setError(e?.body?.error || e?.message || 'The allocation failed.');
+    } catch (e) {
+      setError(apiError(e, 'The allocation failed.'));
     } finally {
       setBusy(null);
     }
@@ -109,10 +85,10 @@ export default function HireCloseOutPanel({ jobId, onChanged }: Props) {
     try {
       const r = await api.post<{ data: CloseOutResult }>(`/close-out/${jobId}/complete`, { allow_excess_held: allowExcessHeld });
       setResult(r.data);
-      setPlan(r.data.plan);
+      publishCloseOutPlan(jobId, r.data.plan);
       onChanged?.();
-    } catch (e: any) {
-      setError(e?.body?.error || e?.message || 'Could not complete the job.');
+    } catch (e) {
+      setError(apiError(e, 'Could not complete the job.'));
     } finally {
       setBusy(null);
     }
@@ -125,7 +101,7 @@ export default function HireCloseOutPanel({ jobId, onChanged }: Props) {
     return (
       <div className="mt-1.5 text-xs text-red-700">
         {error || 'Could not read the job\'s money.'}{' '}
-        <button onClick={load} className="underline hover:text-red-900">Try again</button>
+        <button onClick={() => load()} className="underline hover:text-red-900">Try again</button>
       </div>
     );
   }
@@ -192,7 +168,7 @@ export default function HireCloseOutPanel({ jobId, onChanged }: Props) {
       {/* Buttons */}
       <div className="flex flex-wrap items-center gap-2 pt-0.5">
         <button
-          onClick={load}
+          onClick={() => load()}
           disabled={busy != null}
           className="rounded border border-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
         >

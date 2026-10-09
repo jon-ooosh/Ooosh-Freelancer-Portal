@@ -57,6 +57,21 @@ export interface VatAdjustmentResult {
   explanationText: string;
 }
 
+/**
+ * Does the job carry the "Non-standard VAT rules" trigger item with a non-UK
+ * day count? The hire close-out asks before raising an invoice: until the
+ * invoice-line VAT split is built (HIRE-CLOSE-OUT-SPEC.md §10.1) such a job is
+ * invoiced by hand. Null when HireHop could not be read.
+ */
+export async function hasNonStandardVatItem(hhJobId: number): Promise<boolean | null> {
+  const itemsRes = await hhBroker.get<any>('/frames/items_to_supply_list.php',
+    { job: hhJobId }, { priority: 'high', cacheTTL: 300 });
+  if (!itemsRes.success || !itemsRes.data) return null;
+  const rawItems: any[] = Array.isArray(itemsRes.data) ? itemsRes.data : (itemsRes.data.items || itemsRes.data.rows || []);
+  const trigger = rawItems.find((item: any) => VAT_TRIGGER_NAME_PATTERN.test(item.title || item.NAME || item.name || ''));
+  return !!trigger && parseInt(trigger.qty || trigger.QTY || '0') > 0;
+}
+
 export async function calculateVatAdjustment(
   hhJobId: number,
   hireDays: number,
