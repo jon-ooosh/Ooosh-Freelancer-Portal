@@ -4,13 +4,24 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { listAssignableStaff } from '../services/assignable-staff';
 
 const router = Router();
 router.use(authenticate);
 
 // GET /api/users — list users (for @mention lookups, team management)
+//
+// `?assignable=true` returns only people who can actually be given something to
+// do, via services/assignable-staff.ts — THE definition, shared with To Do's
+// "For" picker so the two cannot disagree about who exists. It owns the rule
+// and its fallback; do not re-derive either here.
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
+    if (req.query.assignable === 'true') {
+      res.json({ data: await listAssignableStaff() });
+      return;
+    }
+
     const includeInactive = req.query.include_inactive === 'true';
     const whereClause = includeInactive ? '' : 'WHERE u.is_active = true';
     const result = await query(

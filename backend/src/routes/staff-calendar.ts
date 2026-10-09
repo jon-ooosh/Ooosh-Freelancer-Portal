@@ -20,7 +20,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import {
-  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE,
+  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE, cycleWeekFor,
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
@@ -70,6 +70,7 @@ import {
   listNeedsClosing, closeOutBooking, withdrawBooking, amendBooking,
 } from '../services/freelancer-days';
 import { sendOfferEmail, sendCancellationEmail, sendUpdatedEmail } from '../services/freelancer-day-offer';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -85,7 +86,7 @@ function isAdmin(req: AuthRequest): boolean {
 
 /** Resolve a from/to window, defaulting to the next 28 days, capped at a year. */
 function resolveRange(req: AuthRequest): { from: string; to: string } | { error: string } {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const from = DATE_RE.test(String(req.query.from)) ? String(req.query.from) : today;
   const to = DATE_RE.test(String(req.query.to)) ? String(req.query.to) : addDaysYmd(from, 27);
   if (to < from) return { error: '`to` must be on or after `from`' };
@@ -127,7 +128,7 @@ router.get('/calendar', async (req: AuthRequest, res: Response) => {
 router.get('/today', async (req: AuthRequest, res: Response) => {
   const date = DATE_RE.test(String(req.query.date))
     ? String(req.query.date)
-    : new Date().toISOString().slice(0, 10);
+    : ukToday();
   try {
     res.json({ data: await getTodaySummary(date, isAdmin(req)) });
   } catch (err) {
@@ -251,7 +252,11 @@ router.get('/leave', async (req: AuthRequest, res: Response) => {
   try {
     const own = await personIdForUser(req.user!.id);
     const requested = req.query.personId ? String(req.query.personId) : undefined;
-    const personId = isAdmin(req) ? requested : (own ?? '__none__');
+    // ?mine=1 is "my own, whoever I am". Without it an admin gets EVERYBODY's
+    // (the approvals list relies on that) — which is how an admin's own My
+    // Time came to list the whole team's leave as theirs.
+    const mine = req.query.mine === '1';
+    const personId = mine ? (own ?? '__none__') : isAdmin(req) ? requested : (own ?? '__none__');
     const status = req.query.status ? String(req.query.status) as LeaveStatus : undefined;
     res.json({
       data: await listRequests({
@@ -396,9 +401,11 @@ router.post('/leave/:id/cancel', adminOnly, async (req: AuthRequest, res: Respon
 router.get('/overtime', async (req: AuthRequest, res: Response) => {
   try {
     const own = await personIdForUser(req.user!.id);
-    const personId = isAdmin(req)
-      ? (req.query.personId ? String(req.query.personId) : undefined)
-      : (own ?? '__none__');
+    // ?mine=1 — see GET /leave above.
+    const personId = req.query.mine === '1' ? (own ?? '__none__')
+      : isAdmin(req)
+        ? (req.query.personId ? String(req.query.personId) : undefined)
+        : (own ?? '__none__');
     res.json({
       data: await listOvertime({
         personId,
@@ -691,6 +698,15 @@ router.get('/company-days', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// A company day added or withdrawn changes who is owed a day in lieu (spec
+// §20.5b). The 06:05 sync would catch it tomorrow; this makes it show today.
+// Fire-and-forget — the response does not wait on everybody's ledger.
+function refreshLieuDays(): void {
+  void import('../services/staff-balance')
+    .then(m => m.runEntitlementSyncForOpenYears())
+    .catch(err => console.error('[staff-calendar] day-in-lieu refresh failed:', err));
+}
+
 // POST /api/staff-calendar/company-days
 router.post('/company-days', adminOnly, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
@@ -704,6 +720,7 @@ router.post('/company-days', adminOnly, async (req: AuthRequest, res: Response) 
 
   try {
     const day = await createCompanyDay(parsed.data, req.user!.id);
+    refreshLieuDays();
     // Offered, never applied: anyone who had already booked the day off has
     // paid for something the company has now given them, and handing it back
     // is a decision a human makes (§20.3).
@@ -743,6 +760,7 @@ router.post('/company-days/:id/cancel', adminOnly, async (req: AuthRequest, res:
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
   try {
     await cancelCompanyDay(req.params.id as string, parsed.data.reason, req.user!.id);
+    refreshLieuDays();
     res.json({ data: await getCompanyDay(req.params.id as string) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel that day' });
@@ -752,22 +770,28 @@ router.post('/company-days/:id/cancel', adminOnly, async (req: AuthRequest, res:
 // ── Freelancer day bookings — "yard days" (Phase E, spec §9) ────────────────
 //
 // On THIS router rather than one of their own, because they exist to answer a
-// staff-calendar question: have we got enough people in. Reads are open to the
-// team for the same reason; writes are admin.
+// staff-calendar question: have we got enough people in. Reads AND writes are
+// open to the whole team (jon, Oct 2026): whoever is looking at a thin day
+// books the cover. `freelancerDays` below is deliberately NOT `adminOnly` —
+// that constant guards HR records, which stay admin-only, and the two must
+// never be widened together.
 //
 // Structurally separate from everything above — no ledger, no pattern, no
 // entitlement (§9.1). The language is offered → accepted / declined, never
 // "rostered": a decline is a response, not a penalty.
 
+const freelancerDays = authorize(...STAFF_ROLES);
+
 // GET /api/staff-calendar/freelancer-days?from=&to=
-router.get('/freelancer-days', async (req: AuthRequest, res: Response) => {
+router.get('/freelancer-days', freelancerDays, async (req: AuthRequest, res: Response) => {
   const range = resolveRange(req);
   if ('error' in range) { res.status(400).json({ error: range.error }); return; }
   try {
     res.json({
       data: await listForRange(range.from, range.to),
       range,
-      spend: isAdmin(req) ? await getSpendSummary(range.from, range.to) : undefined,
+      // Everyone who can book sees every agreed rate, so the sum is not a secret.
+      spend: await getSpendSummary(range.from, range.to),
     });
   } catch (err) {
     console.error('[staff-calendar] freelancer days error:', err);
@@ -776,7 +800,7 @@ router.get('/freelancer-days', async (req: AuthRequest, res: Response) => {
 });
 
 // GET /api/staff-calendar/freelancer-days/bookable — who can be booked, + rates
-router.get('/freelancer-days/bookable', adminOnly, async (_req: AuthRequest, res: Response) => {
+router.get('/freelancer-days/bookable', freelancerDays, async (_req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await listBookableFreelancers() });
   } catch (err) {
@@ -786,7 +810,7 @@ router.get('/freelancer-days/bookable', adminOnly, async (_req: AuthRequest, res
 });
 
 // POST /api/staff-calendar/freelancer-days
-router.post('/freelancer-days', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days', freelancerDays, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
     personId: z.string().uuid(),
     bookingDate: dateStr,
@@ -817,7 +841,7 @@ router.post('/freelancer-days', adminOnly, async (req: AuthRequest, res: Respons
 // the rate and the notes do not. This route just decides which email follows
 // from that, and never lets an email failure lose the amendment — the booking
 // is the record, the mail is a courtesy on top of it.
-router.patch('/freelancer-days/:id', adminOnly, async (req: AuthRequest, res: Response) => {
+router.patch('/freelancer-days/:id', freelancerDays, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
     bookingDate: dateStr.optional(),
     durationType: z.enum(['full_day', 'half_day', 'hours']).optional(),
@@ -846,7 +870,7 @@ router.patch('/freelancer-days/:id', adminOnly, async (req: AuthRequest, res: Re
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/withdraw — they pulled out
-router.post('/freelancer-days/:id/withdraw', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/withdraw', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({ note: z.string().max(500).nullish() }).safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: 'Invalid input' }); return; }
   try {
@@ -860,7 +884,7 @@ router.post('/freelancer-days/:id/withdraw', adminOnly, async (req: AuthRequest,
 // Passed and still unanswered — the list §9.4 decision 1 creates by refusing to
 // auto-decline, and item 5 exists to clear. Unbounded by date on purpose: an
 // offer from last March is exactly the one that should still be shouting.
-router.get('/freelancer-days/needs-closing', adminOnly, async (_req: AuthRequest, res: Response) => {
+router.get('/freelancer-days/needs-closing', freelancerDays, async (_req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await listNeedsClosing() });
   } catch (err) {
@@ -870,7 +894,7 @@ router.get('/freelancer-days/needs-closing', adminOnly, async (_req: AuthRequest
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/close
-router.post('/freelancer-days/:id/close', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/close', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({ outcome: z.enum(['completed', 'lapsed']) }).safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Say whether they came anyway or it did not happen' });
@@ -887,7 +911,7 @@ router.post('/freelancer-days/:id/close', adminOnly, async (req: AuthRequest, re
 // Without this, a bounced or mistyped address is a dead end: the booking sits
 // `offered`, nobody has been asked, and there is no way to ask again short of
 // cancelling and re-booking.
-router.post('/freelancer-days/:id/resend-offer', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/resend-offer', freelancerDays, async (req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await sendOfferEmail(req.params.id as string, { resend: true }) });
   } catch (err) {
@@ -896,7 +920,7 @@ router.post('/freelancer-days/:id/resend-offer', adminOnly, async (req: AuthRequ
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/respond — accepted or declined
-router.post('/freelancer-days/:id/respond', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/respond', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({
     response: z.enum(['accepted', 'declined']),
     note: z.string().max(500).nullish(),
@@ -910,7 +934,7 @@ router.post('/freelancer-days/:id/respond', adminOnly, async (req: AuthRequest, 
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/complete
-router.post('/freelancer-days/:id/complete', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/complete', freelancerDays, async (req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await markCompleted(req.params.id as string) });
   } catch (err) {
@@ -919,7 +943,7 @@ router.post('/freelancer-days/:id/complete', adminOnly, async (req: AuthRequest,
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/cancel
-router.post('/freelancer-days/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/cancel', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({ reason: z.string().min(1).max(500) }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required' }); return; }
   try {
@@ -938,7 +962,7 @@ router.post('/freelancer-days/:id/cancel', adminOnly, async (req: AuthRequest, r
 });
 
 // POST /api/staff-calendar/freelancer-days/:id/invoice
-router.post('/freelancer-days/:id/invoice', adminOnly, async (req: AuthRequest, res: Response) => {
+router.post('/freelancer-days/:id/invoice', freelancerDays, async (req: AuthRequest, res: Response) => {
   const parsed = z.object({
     received: z.boolean(),
     amount: z.number().nonnegative().nullish(),
@@ -1031,9 +1055,45 @@ router.get('/bank-holidays', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Personal calendar feed (spec §10) ──────────────────────────────────────
+// The caller's OWN secret iCal link. Never another person's — there is no
+// personId here on purpose, admin or not: the link is a credential.
+function feedUrl(token: string): string {
+  const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
+  return `${base}/api/staff-calendar-feed/${token}.ics`;
+}
+
+router.get('/me/calendar-feed', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    const { getOrCreateFeedToken } = await import('../services/staff-ical');
+    res.json({ data: { url: feedUrl(await getOrCreateFeedToken(own)) } });
+  } catch (err) {
+    console.error('[staff-calendar] calendar feed error:', err);
+    res.status(500).json({ error: 'Failed to get your calendar link' });
+  }
+});
+
+router.post('/me/calendar-feed/reset', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    const { resetFeedToken } = await import('../services/staff-ical');
+    res.json({ data: { url: feedUrl(await resetFeedToken(own)) } });
+  } catch (err) {
+    console.error('[staff-calendar] calendar feed reset error:', err);
+    res.status(500).json({ error: 'Failed to reset your calendar link' });
+  }
+});
+
 router.get('/me/balances', async (req: AuthRequest, res: Response) => {
   try {
-    const personId = await personIdForUser(req.user!.id);
+    // An admin may ask for anybody's — the Staff page's Time off tab mounts
+    // My Time for that person, and one shape for both keeps the two views
+    // from drifting. Everyone else always gets their own.
+    const asked = typeof req.query.personId === 'string' && req.query.personId ? req.query.personId : null;
+    const personId = asked && isAdmin(req) ? asked : await personIdForUser(req.user!.id);
     if (!personId) { res.json({ data: null, hasStaffRecord: false }); return; }
 
     // A zero balance and "you are not set up as staff" look identical if both
@@ -1522,38 +1582,107 @@ router.put('/employees/:personId', adminOnly, async (req: AuthRequest, res: Resp
   }
 });
 
-// ── 2026 backfill from BrightHR ─────────────────────────────────────────────
+// ── Working from home (spec §19) ────────────────────────────────────────────
+//
+// A one-off home day is REQUESTED and approved like holiday; a regular one
+// lives on the working pattern (`atHome`). Same "whose?" rule as /leave: an
+// admin with no personId gets everybody's, `mine=1` gets your own.
 
-// POST /api/staff-calendar/history-import — admin only. { rows, commit }.
-// commit:false is a preview that writes nothing; commit:true writes through
-// the module's own services (no notifications). See staff-history-import.ts.
-router.post('/history-import', adminOnly, async (req: AuthRequest, res: Response) => {
-  const hhmmOrHalf = z.string().regex(/^(\d{2}:\d{2}|AM|PM|am|pm|CHECK)$/).nullable();
-  const schema = z.object({
-    commit: z.boolean(),
-    rows: z.array(z.object({
-      person: z.string().min(1).max(200),
-      kind: z.enum(['holiday', 'toil_taken', 'unpaid', 'overtime_earned', 'toil_paid']),
-      status: z.enum(['approved', 'pending']),
-      date: dateStr,
-      endDate: dateStr.nullable(),
-      startTime: hhmmOrHalf,
-      endTime: hhmmOrHalf,
-      minutes: z.number().int().positive().nullable(),
-      note: z.string().max(500).nullable(),
-    })).min(1).max(1000),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) {
-    const i = parsed.error.issues[0];
-    res.status(400).json({ error: `${i?.path.join('.') ?? 'input'}: ${i?.message ?? 'Invalid input'}` }); return;
-  }
+router.get('/wfh', async (req: AuthRequest, res: Response) => {
   try {
-    const { runHistoryImport } = await import('../services/staff-history-import');
-    res.json({ data: await runHistoryImport(parsed.data.rows, req.user!.id, !parsed.data.commit) });
+    const own = await personIdForUser(req.user!.id);
+    const requested = req.query.personId ? String(req.query.personId) : undefined;
+    const personId = req.query.mine === '1' ? (own ?? '__none__') : isAdmin(req) ? requested : (own ?? '__none__');
+    const { listWfhRequests, countPendingWfh } = await import('../services/staff-wfh');
+    res.json({
+      data: await listWfhRequests({
+        personId,
+        status: req.query.status ? String(req.query.status) as never : undefined,
+        from: DATE_RE.test(String(req.query.from)) ? String(req.query.from) : undefined,
+        to: DATE_RE.test(String(req.query.to)) ? String(req.query.to) : undefined,
+      }),
+      pendingCount: isAdmin(req) ? await countPendingWfh() : undefined,
+    });
   } catch (err) {
-    console.error('[staff-calendar] history import error:', err);
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Import failed' });
+    console.error('[staff-calendar] list wfh error:', err);
+    res.status(500).json({ error: 'Failed to load working-from-home requests' });
+  }
+});
+
+router.post('/wfh', async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({
+    personId: z.string().uuid().optional(),
+    startDate: dateStr, endDate: dateStr,
+    note: z.string().max(500).nullish(),
+  }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  const target = await resolveLeaveTarget(req, parsed.data.personId);
+  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+  try {
+    const { createWfhRequest, getWfhRequest } = await import('../services/staff-wfh');
+    const id = await createWfhRequest({ personId: target.personId, startDate: parsed.data.startDate,
+      endDate: parsed.data.endDate, note: parsed.data.note ?? null }, req.user!.id);
+    const { notifyWfhRequested } = await import('../services/staff-notifications');
+    void notifyWfhRequested(id);
+    res.status(201).json({ data: await getWfhRequest(id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to request it' });
+  }
+});
+
+router.post('/wfh/:id/approve', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const { decideWfhRequest } = await import('../services/staff-wfh');
+    const w = await decideWfhRequest(req.params.id as string, 'approved',
+      typeof req.body?.note === 'string' && req.body.note.trim() ? req.body.note.trim() : null, req.user!.id);
+    void notifyDecision({ personId: w.personId, kind: 'wfh', outcome: 'approved',
+      summary: `${w.startDate}${w.endDate !== w.startDate ? ` – ${w.endDate}` : ''}`,
+      note: w.decisionNote, entityId: w.id });
+    res.json({ data: w });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to approve' });
+  }
+});
+
+router.post('/wfh/:id/decline', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ note: z.string().min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required when declining' }); return; }
+  try {
+    const { decideWfhRequest } = await import('../services/staff-wfh');
+    const w = await decideWfhRequest(req.params.id as string, 'declined', parsed.data.note, req.user!.id);
+    void notifyDecision({ personId: w.personId, kind: 'wfh', outcome: 'declined',
+      summary: `${w.startDate}${w.endDate !== w.startDate ? ` – ${w.endDate}` : ''}`,
+      note: w.decisionNote, entityId: w.id });
+    res.json({ data: w });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to decline' });
+  }
+});
+
+router.post('/wfh/:id/withdraw', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    const { withdrawWfhRequest } = await import('../services/staff-wfh');
+    await withdrawWfhRequest(req.params.id as string, own);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to withdraw' });
+  }
+});
+
+router.post('/wfh/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ reason: z.string().min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Say why it is being cancelled' }); return; }
+  try {
+    const { cancelWfhRequest } = await import('../services/staff-wfh');
+    const w = await cancelWfhRequest(req.params.id as string, parsed.data.reason, req.user!.id);
+    void notifyDecision({ personId: w.personId, kind: 'wfh', outcome: 'cancelled',
+      summary: `${w.startDate}${w.endDate !== w.startDate ? ` – ${w.endDate}` : ''}`,
+      note: w.decisionNote, entityId: w.id });
+    res.json({ data: w });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
   }
 });
 
@@ -1566,10 +1695,56 @@ router.get('/employees/:personId/patterns', async (req: AuthRequest, res: Respon
     if (!isAdmin(req) && (await personIdForUser(req.user!.id)) !== personId) {
       res.status(403).json({ error: 'Insufficient permissions' }); return;
     }
-    res.json({ data: await listPatterns(personId) });
+    const patterns = await listPatterns(personId);
+    // Notes are written for admins (jon, Oct 2026) — never back to the person.
+    res.json({ data: isAdmin(req) ? patterns : patterns.map(p => ({ ...p, notes: null })) });
   } catch (err) {
     console.error('[staff-calendar] patterns error:', err);
     res.status(500).json({ error: 'Failed to load working patterns' });
+  }
+});
+
+// GET /api/staff-calendar/me/patterns — your own working hours, for My Time.
+// Current pattern plus any change already scheduled; no history. Days and
+// times only (jon, Oct 2026) — no notes, breaks or home days. `data` is null
+// when the login has no staff record.
+router.get('/me/patterns', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: null }); return; }
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+    // listPatterns' rows are loosely typed; name the columns used here.
+    const patterns = (await listPatterns(personId)) as unknown as {
+      effective_from: string; effective_to: string | null; cycle_weeks: number;
+      days: { cycle_week: number; weekday: number; is_working: boolean;
+        start_time: string | null; end_time: string | null }[];
+    }[];
+    const shape = (p: (typeof patterns)[number]) => ({
+      effectiveFrom: p.effective_from,
+      cycleWeeks: Number(p.cycle_weeks) || 1,
+      days: p.days
+        .filter(d => d.is_working)
+        .map(d => ({ cycleWeek: d.cycle_week, weekday: d.weekday, startTime: d.start_time, endTime: d.end_time })),
+    });
+    // effective_to is inclusive: a change closes the old pattern the day before.
+    const current = patterns.find(p => p.effective_from <= today
+      && (p.effective_to === null || p.effective_to >= today));
+    const upcoming = patterns.filter(p => p.effective_from > today)
+      .sort((a, b) => (a.effective_from < b.effective_from ? -1 : 1));
+    res.json({
+      data: {
+        current: current ? {
+          ...shape(current),
+          // Which week of a 2-week cycle today falls in, so the page can say
+          // "this week" / "next week" rather than an unexplained W1 / W2.
+          thisCycleWeek: cycleWeekFor(today, current.effective_from, Number(current.cycle_weeks) || 1),
+        } : null,
+        upcoming: upcoming.map(shape),
+      },
+    });
+  } catch (err) {
+    console.error('[staff-calendar] my patterns error:', err);
+    res.status(500).json({ error: 'Failed to load your working hours' });
   }
 });
 
@@ -1584,6 +1759,7 @@ const patternSchema = z.object({
     startTime: timeStr.nullish(),
     endTime: timeStr.nullish(),
     breakMinutes: z.number().int().min(0).max(480).optional(),
+    atHome: z.boolean().optional(),
   })).min(1).max(14),
 });
 

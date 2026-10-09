@@ -14,6 +14,7 @@ and the per-module reference docs.
 - **`ErrorBoundary` is mounted TWICE** — inside `Layout` around the page `<Routes>` (a page crash keeps the nav usable), and around the whole app in `main.tsx` (backstop for `Layout` itself and the public, Layout-less routes). It resets on `location.pathname` change, deliberately **without** re-keying children so navigation keeps page state.
 - **Any new SESSION key MUST be added to `SESSION_KEYS`** in `ErrorBoundary.tsx`. The "Reset saved view settings" escape hatch clears all of `localStorage` except that allowlist — miss it and the reset logs people out. Allowlisting sessions (rather than listing prefs) means a new *preference* needs no change here.
 - **A persisted view preference can pin a page into a crashing state on reload.** Validate a stored value on read rather than trusting it — a stored `fleet-view-mode` re-crashed the SPA on every reload before anything could be clicked.
+- **"Today" is `ukToday()` / `ukDatePlus(n)` from `lib/ukDate.ts` — never `new Date().toISOString().slice(0, 10)`.** That's the UTC date: a date picker opened between 00:00 and 01:00 BST pre-filled yesterday (~45 places fixed, Oct 2026).
 - **Never call `toISOString()` on a Date you haven't range-checked** (`Number.isNaN(d.getTime())`, after parsing *and* after any shift). Return `null` and render `—`. One malformed stored date threw inside a row `.map()` and blanked the whole app.
 
 ## Detail pages

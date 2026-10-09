@@ -727,6 +727,122 @@ Job 15187 showed **£3,300 collected / £1,800 reimbursed** against a £2,100 ex
 
 **Known gap left in place:** OP treats any positive kind=6 HireHop deposit as live excess, and a refund pushed as a kind=3 **payment application** doesn't change that (only NEGATIVE kind=6 rows feed `hhExcessRefunds`). So a reversed deposit still reads as money held: unlink such a record and the Money-tab passive reconciler re-links and re-adds it on the very next page load (job 15956, Sep 2026 — an excess re-taken on a different card). Harmless while the record stays linked; the workaround for a genuine card swap is to re-point with Link HH Deposit at the *new* deposit and leave the total unchanged.
 
+##### Rollover picker flipped the wrong hop — double-held deposit (Oct 2026, Lime Garden, HH deposit 7767)
+
+**Symptom.** Job 16529's Money tab said "Client has £2,400 on account" while the
+client's other jobs said £1,200; Total Held read £2,400 for one physical £1,200;
+and Manage on 16529 offered no "Apply Rolled Over Excess" — only "Record Excess
+Payment", which would have taken the money a second time.
+
+**Cause.** Two records on one `hh_deposit_id` were both `taken`: #16415 (12 Sep)
+and #16697 (29 Sep). When #16697's rollover was applied, `POST /excess/:id/payment`
+chose the record to flip to `rolled_over` as "the client's most recently updated
+record with a deposit link", from a set that *included* already-rolled-over hops.
+The flip is the last write of a rollover, so the previous hop (#16471) carried
+the newest `updated_at`, got re-flipped (a no-op), and the live #16415 was never
+touched. The earlier hops only worked because something else had bumped the live
+record's `updated_at` in between. `v_excess_held` then counted both (£2,400),
+and `available-rollover` — which refuses a source sharing its deposit with
+another live record — found no candidate, hiding the apply button.
+
+**Fix (PR, Oct 2026).**
+- The modal sends `source_excess_id` (the record `available-rollover` showed) with
+  the rollover payment; the backend flips exactly that hop, and 409s
+  (`rollover_source_unavailable`) before writing if it is no longer holding the
+  money. Without a source (legacy callers) it prefers a live record over a
+  rolled-over one, then newest.
+- "Apply Rolled Over Excess" is badged green ("Recommended · excess on account"),
+  same treatment as the short-hire pre-auth. `recommended` on the modal's action
+  list is now the badge text.
+- `runDoubleHeldExcessScan` (sanity scanner, every 15 min) emails jon@ once per
+  record when a deposit has more than one live `taken`/`partially_paid` record,
+  with the hand-fix in the body.
+
+**Hand-fix for the live case:** flip the stale (older) record —
+`UPDATE job_excess SET excess_status = 'rolled_over', held_on_account = FALSE …`.
+HireHop needs nothing; the deposit link already flows through the chain.
+
+##### Payments, Oct 2026 — PayPal via Stripe, portal redesign, portal link, Wise matcher
+
+Five PRs across two repos in one week (jon + Claude, 5–6 Oct 2026). All live.
+
+**PayPal is now a Stripe payment method, not a manual tab.** The portal's Checkout session
+lists `['card', 'paypal']` for regular payments (pre-auth stays card-only — PayPal holds don't
+follow card hold rules). Settles into the Stripe balance, so the webhook, OP claim, HireHop
+deposit (bank 267), OP payment event and client email run unchanged. The only trace of PayPal
+is a label: the webhook expands the charge and appends `(PayPal)` to the HireHop deposit
+description / `Stripe (PayPal):` to the memo; OP's Money tab shows that description, the
+portal history shows "Stripe GBP (PayPal)". **`payment_method` stays `stripe_gbp`** — the
+refund path depends on it (verified on the £1.20 test refund). Apple/Google Pay ride on `card`
+with no tag. Fee on the test: £0.43 on £1.20 (PayPal's ~2.9%+30p plus Stripe's 0.2%+10p).
+Jotform's Stripe app revoked; the "Friends & Family to avoid fees" instruction was already
+dead (PayPal stopped business accounts receiving F&F).
+
+**Portal redesign (netlify-functions #29)** — rebuilt `payment.html` to the Claude Design
+handoff: two columns, dark balance card, details list, segmented Card-or-PayPal / Bank
+transfer, single-selection option cards, pay button with loading state, mobile sticky bar,
+success/cancelled/invalid screens. Logic untouched. Agreed departures: invalid-link copy is
+"no longer valid, nothing charged" (links also die on cancelled/lost jobs); **the bank-transfer
+reference follows the amount selector — `Job N` for hire money, `Job N excess` for the excess,
+one transfer per item** (what the Wise matcher keys on); real Wise details; status dot amber
+for Enquiry/Provisional, green Booked onwards; the mock's single-van "Part payment" NOT built
+(no such logic). One line for overseas payers (send GBP, cover fees). Stripe returns the client
+to `payments.oooshtours.co.uk` (DNS → the Netlify site).
+
+**The hash is no longer handed out.** `get-job-details-v2` used to return the generated hash
+to any caller without one, so a bare `?jobId=` link worked for everyone. Now: no hash → 403.
+The Staff Hub `hubToken` path was removed outright (the hub was retired into OP long ago).
+`create-stripe-session` takes the hash from the page. Staff get the link from OP instead:
+**`services/payment-portal-link.ts`** rebuilds it live from HireHop (`USER` +
+`DURATION_HRS` + job number, exactly the quote document's recipe — it changes with the hire
+dates, so it is never stored); Money tab row with Copy; the pre-hire briefing's client draft
+carries it wherever a balance or excess is outstanding.
+
+**Wise incoming payments (#1374, #1377).** A UK Wise Business personal API token cannot read
+statements or get incoming webhooks, so the signal is Wise's "Money received from …" email to
+jon@ (an alias of the jonwood@ mailbox, already a Gmail manager mailbox). `services/wise-
+incoming.ts` is a detector inside `ingestGmailMessage` (before the automated-mail skip; DKIM
+must pass for wise.com; never on a job timeline) plus a matcher:
+job number in the reference (5–7 digits that exist) → HireHop invoice number (`OT-INV-…` or
+bare digits, on the last 80 recent jobs' billing) → **Xero invoice number (`OT-nnnn`): a
+Xero-only invoice such as monthly storage, recorded as a Payment on it in Xero against
+`xero_bank_wise`** → payer name against client names as evidence only. Confident = one strong
+candidate and the amount equals deposit / half / remaining / excess-outstanding within 2p
+(`AMOUNT_TOLERANCE`), "excess" in the reference breaks ties; recorded through
+`services/record-payment.ts` with no email. Everything else → `incoming_bank_payments`
+(unique on the Gmail Message-ID) + ONE email to info@ with candidates and a link to
+`/money?incoming=<id>`, where the Money-overview panel records it (job number + hire/excess,
+or "Record in Xero against OT-nnnn") or marks it "Not a job payment" with a note. **Amount =
+"Amount received" (what the client sent); Xero owns the fee.** Non-GBP → queue (jon converts
+in Wise by hand, ~once a year). `J WOOD` ignored (`system_settings.wise_ignore_payers`). An
+unreadable email is queued and alerted, never dropped. Verified against the three real shapes
+in the mailbox. **First live night (6–7 Oct):** jon's own transfer correctly ignored; two
+Xero-only storage payments correctly queued — but THREE alerts each, because the same Wise
+email reached three mailboxes (jonwood@ directly, info@ via jon's auto-forward, and onward),
+each copy with its own Message-ID. Fixed the same day: only `system_settings.wise_source_mailboxes`
+(default jonwood@) is a Wise source, Wise's transfer number is a second dedup key (partial
+unique index, migration 275 marks the first night's copies `duplicate_copy`), the alert link
+is `/money/overview?incoming=<id>` (it pointed at a non-route), a reference naming SEVERAL
+Xero invoices ("OT6797 OT6805") is matched against their amounts due together, and a payment
+with no number at all ("STORAGE") is matched against the payer's open Xero invoices by contact
+name. Auto-forward can now be switched off. **9 Oct:** a £10 payment to jon's PERSONAL Wise
+account was queued and alerted — it is registered to the same email address and Wise's
+notification is identical (sender, subject, "Hello Jonathan Mark") except that business-account
+emails carry "This notification is for the business account of Ooosh! Tours Ltd." above the
+greeting and personal ones carry no banner. The detector now requires that banner
+(`system_settings.wise_business_account_name`, default `Ooosh! Tours Ltd`); a banner-less email
+is skipped with a log line, never stored (jon: his personal receipts must not sit in the
+business DB). If Wise ever drops the banner, auto-matching stops silently — the log line and
+the Xero bank feed are the backstop.
+
+**`services/record-payment.ts`** is the staff "Record Payment" route's 330 lines lifted into a
+service (route = validate + relay, same HTTP contract) so the matcher — and the planned
+Stripe Terminal module — record through one chain.
+
+**Next: Stripe Terminal** (`docs/STRIPE-TERMINAL-SPEC.md`, planned, hardware ordered;
+Worldpay contract ends March 2027). Pre-auths hinge on extended authorisation and the
+account's merchant category — open question §9.1 there.
+
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.
 

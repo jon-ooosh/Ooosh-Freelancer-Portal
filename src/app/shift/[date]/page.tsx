@@ -11,9 +11,11 @@
  * lock-up report lands in a later slice.
  */
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
+import FreelancerTaskList from '@/components/FreelancerTaskList'
+import type { PortalFreelancerTask } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES (mirror the OP portal response)
@@ -42,6 +44,7 @@ interface ShiftDetail {
   fee: number | null
   assignment_status: string | null
   jobs: ShiftJob[]
+  tasks?: PortalFreelancerTask[]
   error?: string
 }
 
@@ -162,6 +165,27 @@ export default function ShiftDetailPage() {
   const [posting, setPosting] = useState(false)
   const [postError, setPostError] = useState<string | null>(null)
 
+  // The typed note survives a refresh, a dropped connection or leaving the page
+  // (a sitter once lost a note by tapping "Finish for the night" without
+  // posting it). Per evening, in this browser only. Wrapped in try/catch —
+  // storage can be unavailable (private mode) and the page must still work.
+  const draftKey = `ooosh_sitter_handover_draft_${date}`
+  const draftLoaded = useRef(false)
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(draftKey)
+      if (saved) setDraft(saved)
+    } catch { /* storage unavailable */ }
+    draftLoaded.current = true
+  }, [draftKey])
+  useEffect(() => {
+    if (!draftLoaded.current) return
+    try {
+      if (draft.trim()) window.localStorage.setItem(draftKey, draft)
+      else window.localStorage.removeItem(draftKey)
+    } catch { /* storage unavailable */ }
+  }, [draft, draftKey])
+
   const fetchThread = useCallback(async () => {
     try {
       const response = await fetch(`/api/studio-sitter/shifts/${date}/thread`)
@@ -189,9 +213,9 @@ export default function ShiftDetailPage() {
     }
   }, [date])
 
-  const postNote = useCallback(async () => {
+  const postNote = useCallback(async (): Promise<boolean> => {
     const content = draft.trim()
-    if ((!content && pendingFiles.length === 0) || posting) return
+    if ((!content && pendingFiles.length === 0) || posting) return false
     setPosting(true)
     setPostError(null)
     try {
@@ -211,9 +235,11 @@ export default function ShiftDetailPage() {
       setDraft('')
       pendingFiles.forEach((p) => { if (p.preview) URL.revokeObjectURL(p.preview) })
       setPendingFiles([])
+      return true
     } catch (err) {
       console.error('Failed to post note:', err)
       setPostError(err instanceof Error ? err.message : 'Failed to post note')
+      return false
     } finally {
       setPosting(false)
     }
@@ -444,6 +470,13 @@ export default function ShiftDetailPage() {
               </section>
             )}
 
+            {/* Tonight's tasks (STAFF-CALENDAR-SPEC §21) — hidden when there are none */}
+            {shift.tasks && shift.tasks.some((t) => t.status !== 'cancelled') && (
+              <section className="bg-white rounded-xl border border-sky-100 p-4 shadow-sm">
+                <FreelancerTaskList tasks={shift.tasks} heading="Tasks tonight" />
+              </section>
+            )}
+
             {/* Handover notes (sitter ⇄ staff thread) */}
             <section>
               <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">
@@ -536,6 +569,9 @@ export default function ShiftDetailPage() {
                     ))}
                   </div>
                 )}
+                {(draft.trim() || pendingFiles.length > 0) && !posting && (
+                  <p className="text-xs text-amber-700 mt-1">Not posted yet - tap Post note to send it.</p>
+                )}
                 {postError && <p className="text-xs text-red-600 mt-1">{postError}</p>}
                 <div className="mt-2 flex justify-between items-center">
                   {/* Native <label> + visually-hidden (NOT display:none) input so
@@ -573,6 +609,15 @@ export default function ShiftDetailPage() {
             <section className="pt-2">
               <Link
                 href={`/shift/${date}/lockup`}
+                onClick={async (e) => {
+                  // An unposted handover note would otherwise be left behind here.
+                  if (!draft.trim() && pendingFiles.length === 0) return
+                  e.preventDefault()
+                  if (window.confirm("You've written a handover note but not posted it. Post it now?")) {
+                    if (!(await postNote())) return // error shows under the note box
+                  }
+                  router.push(`/shift/${date}/lockup`)
+                }}
                 className="flex items-center justify-center gap-2 w-full text-sm font-semibold px-4 py-3 rounded-xl bg-ooosh-600 text-white hover:bg-ooosh-500 transition-colors shadow-sm"
               >
                 🔒 Finish for the night

@@ -12,6 +12,7 @@ import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { MotHistoryTab, MotDvsaNote } from '../components/mot/MotHistoryTab'
 import { ForSalePill } from '../components/sales/ForSalePill'
+import GiveToFreelancer from '../../../components/GiveToFreelancer'
 import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
 import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
@@ -383,6 +384,8 @@ export function VehicleDetailPage() {
             {vehicle.seats && (
               <span className="text-xs text-gray-400">{vehicle.seats} seats</span>
             )}
+            {/* Only appears when a freelancer or sitter is in today/tomorrow (§21.4). */}
+            {!vehicle.isOldSold && <GiveToFreelancer vehicleId={vehicle.id} reg={vehicle.reg} />}
           </div>
         </div>
 

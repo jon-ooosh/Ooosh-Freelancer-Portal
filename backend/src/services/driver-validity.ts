@@ -52,6 +52,7 @@
  * (manjagoproduction@, 18 Aug 2026). `trusted: false` is how that shape is
  * represented here, and an untrusted licence yields a NULL window everywhere.
  */
+import { ukToday } from './uk-date';
 
 /** Ooosh acceptance windows, in days from the FROM date. */
 export const VALIDITY_WINDOW_DAYS = {
@@ -109,6 +110,16 @@ export interface DriverValidityInput {
 }
 
 /**
+ * The issuer string iDenfy returns for a Northern Ireland licence.
+ *
+ * Shared by `isUkLicence` and `isNiLicence` below ON PURPOSE. These two must
+ * agree about the same driver: a licence that is NI but not UK would be routed to the passport
+ * regime while also being offered the NI record-check panel, which is a
+ * contradiction staff would have no way to resolve. One token, two readers.
+ */
+const DVA_ISSUER = 'DVA';
+
+/**
  * THE definition of "is this a UK (DVLA) licence?".
  *
  * Lives here because it decides which DOCUMENT REGIME applies — a UK driver
@@ -131,9 +142,38 @@ export function isUkLicence(driver: {
 } | null | undefined): boolean {
   if (!driver) return false;
   const issuedBy = String(driver.licence_issued_by ?? '').trim().toUpperCase();
-  if (issuedBy.includes('DVLA') || issuedBy === 'DVA') return true;   // DVA = Northern Ireland
+  if (issuedBy.includes('DVLA') || issuedBy === DVA_ISSUER) return true;   // DVA = Northern Ireland
   const country = String(driver.licence_issue_country ?? '').trim().toUpperCase();
   return ['GB', 'UK', 'GBR', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(country);
+}
+
+/**
+ * Is this a Northern Ireland (DVA) licence?
+ *
+ * NI is the UK, so `isUkLicence` is true and the driver correctly needs a
+ * licence-record check rather than a passport. What they CANNOT do is produce
+ * one themselves through GOV.UK: `viewdrivingrecord.service.gov.uk` holds GB
+ * licences only, so the hire form's DVLA step dead-ended a DVA driver on a link
+ * that would never work for them — six router branches all leading back to
+ * `dvla-check` with no way out (Declan Haughian / 16286, Sep 2026).
+ *
+ * DVA run their own equivalent at nidirect. The driver creates a licence check
+ * code there and a member of staff runs the lookup; the code is single-use and
+ * expires 21 days after they created it. So this flag means precisely: "needs a
+ * record check, but a human has to go and get it".
+ *
+ * Deliberately NOT broadened to spellings like "DRIVER & VEHICLE AGENCY".
+ * `isUkLicence` does not recognise those either, so such a driver would be
+ * classified non-UK and sent down the passport path — widening only this side
+ * would split the two. If iDenfy ever starts returning a different string, both
+ * need changing together, and the regime change wants thinking about on its own
+ * (see the Charlie McWilliams / 15727 note above for what disturbing it costs).
+ */
+export function isNiLicence(driver: {
+  licence_issued_by?: unknown;
+} | null | undefined): boolean {
+  if (!driver) return false;
+  return String(driver.licence_issued_by ?? '').trim().toUpperCase() === DVA_ISSUER;
 }
 
 const EMPTY_WINDOW: DocWindow = {
@@ -186,9 +226,9 @@ function minYmd(a: string | null, b: string | null): string | null {
   return a < b ? a : b;
 }
 
-/** Today in UTC as YYYY-MM-DD. Comparisons are plain string compares. */
+/** Today (UK) as YYYY-MM-DD — services/uk-date.ts. Comparisons are plain string compares. */
 export function todayYmd(): string {
-  return new Date().toISOString().slice(0, 10);
+  return ukToday();
 }
 
 function buildWindow(opts: {

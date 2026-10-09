@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import type { PortalDayBooking, DayBookingsResponse } from '@/lib/op-api'
+import FreelancerTaskList from '@/components/FreelancerTaskList'
 
 // =============================================================================
 // TYPES (matching API response)
@@ -558,6 +559,10 @@ function YardDayCard({ day, busy, onAnswer }: {
       </div>
 
       {day.notes && <p className="mt-3 text-sm text-gray-600">{day.notes}</p>}
+
+      {/* The live list of what they are doing (STAFF-CALENDAR-SPEC §21) —
+          shown on an offer too, so they can see what the day involves. */}
+      {!isPast && day.tasks && day.tasks.length > 0 && <FreelancerTaskList tasks={day.tasks} />}
 
       {pending ? (
         <div className="mt-4 grid grid-cols-2 gap-3">

@@ -19,6 +19,7 @@
 
 import { query, getClient } from '../config/database';
 import { addDaysYmd, shiftMinutes, DATE_RE } from './staff-day-status';
+import { ukToday } from './uk-date';
 
 /**
  * Who may manage staff records. Admin only for now (jon, Sep 2026) — but named
@@ -34,6 +35,8 @@ export interface PatternDayInput {
   startTime?: string | null;  // 'HH:MM'
   endTime?: string | null;
   breakMinutes?: number;
+  /** A regular agreed working-from-home day (spec §19, mig 269). */
+  atHome?: boolean;
 }
 
 export interface EmploymentInput {
@@ -263,9 +266,9 @@ export async function createPattern(
     for (const d of rows) {
       await client.query(
         `INSERT INTO staff_working_pattern_days
-           (pattern_id, cycle_week, weekday, is_working, start_time, end_time, break_minutes, minutes)
-         VALUES ($1, $2, $3, $4, $5::time, $6::time, $7, $8)`,
-        [patternId, d.cycleWeek, d.weekday, d.isWorking, d.startTime, d.endTime, d.breakMinutes, d.minutes]
+           (pattern_id, cycle_week, weekday, is_working, start_time, end_time, break_minutes, minutes, at_home)
+         VALUES ($1, $2, $3, $4, $5::time, $6::time, $7, $8, $9)`,
+        [patternId, d.cycleWeek, d.weekday, d.isWorking, d.startTime, d.endTime, d.breakMinutes, d.minutes, d.atHome]
       );
     }
 
@@ -294,7 +297,7 @@ export function normalisePatternDay(d: PatternDayInput, cycleWeeks = 1) {
     throw new Error(`cycleWeek ${cycleWeek} outside a ${cycleWeeks}-week cycle`);
   }
   if (!d.isWorking) {
-    return { cycleWeek, weekday: d.weekday, isWorking: false, startTime: null, endTime: null, breakMinutes: 0, minutes: 0 };
+    return { cycleWeek, weekday: d.weekday, isWorking: false, startTime: null, endTime: null, breakMinutes: 0, minutes: 0, atHome: false };
   }
   if (!d.startTime || !d.endTime) throw new Error('A working day needs both a start and an end time');
 
@@ -310,6 +313,7 @@ export function normalisePatternDay(d: PatternDayInput, cycleWeeks = 1) {
   return {
     cycleWeek, weekday: d.weekday, isWorking: true,
     startTime: d.startTime, endTime: d.endTime, breakMinutes, minutes,
+    atHome: d.atHome === true,
   };
 }
 
@@ -327,7 +331,7 @@ export async function listPatterns(personId: string) {
   const days = await query(
     `SELECT pattern_id, cycle_week, weekday, is_working,
             start_time::text AS start_time, end_time::text AS end_time,
-            break_minutes, minutes
+            break_minutes, minutes, at_home
        FROM staff_working_pattern_days
       WHERE pattern_id = ANY($1::uuid[])
       ORDER BY cycle_week, weekday`,
@@ -582,7 +586,7 @@ export async function recordReviewOutcome(
   let salaryId: string | null = null;
   if (input.newSalary != null) {
     if (!(input.newSalary >= 0)) throw new Error('A salary cannot be negative');
-    const effective = input.salaryEffectiveFrom || new Date().toISOString().slice(0, 10);
+    const effective = input.salaryEffectiveFrom || ukToday();
     if (!DATE_RE.test(effective)) throw new Error('salaryEffectiveFrom must be YYYY-MM-DD');
     const sal = await query(
       `INSERT INTO staff_salary_history (person_id, annual_amount, effective_from, reason, created_by)

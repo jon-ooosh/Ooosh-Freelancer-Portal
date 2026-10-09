@@ -66,6 +66,7 @@ interface Venue {
   id: string
   name: string
   address?: string
+  loadInAddress?: string | null
   whatThreeWords?: string
   contact1?: string
   contact2?: string
@@ -691,7 +692,7 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
 
 
       {/* Location */}
-      {venue && (venue.address || venue.whatThreeWords) && (
+      {venue && (venue.address || venue.loadInAddress || venue.whatThreeWords) && (
         <div className="bg-white rounded-xl shadow-sm p-6">
           <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
             <span>📍</span> Location
@@ -700,6 +701,23 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
           <div className="space-y-2">
             {venue.address && (
               <p className="text-gray-700">{venue.address}</p>
+            )}
+            
+            {/* Load-in address (loading dock, stage door…) sits alongside the postal
+                address, never instead of it: a note like "round the back via Mill
+                Lane" won't geocode on its own. */}
+            {venue.loadInAddress && (
+              <p className="text-gray-700">
+                <span className="font-medium">Load-in:</span> {venue.loadInAddress}{' '}
+                <a
+                  href={getGoogleMapsUrl(venue.loadInAddress) || '#'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-700 hover:underline text-sm whitespace-nowrap"
+                >
+                  (map)
+                </a>
+              </p>
             )}
             
             {venue.whatThreeWords && (
@@ -1229,7 +1247,7 @@ export default function JobDetailsPage() {
                 )}
 
                 {/* Location */}
-                {venue && (venue.address || venue.whatThreeWords) && (
+                {venue && (venue.address || venue.loadInAddress || venue.whatThreeWords) && (
                   <div className="bg-white rounded-xl shadow-sm p-6">
                     <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
                       <span>📍</span> Location
@@ -1238,6 +1256,23 @@ export default function JobDetailsPage() {
                     <div className="space-y-2">
                       {venue.address && (
                         <p className="text-gray-700">{venue.address}</p>
+                      )}
+                      
+                      {/* Load-in address (loading dock, stage door…) sits alongside the postal
+                          address, never instead of it: a note like "round the back via Mill
+                          Lane" won't geocode on its own. */}
+                      {venue.loadInAddress && (
+                        <p className="text-gray-700">
+                          <span className="font-medium">Load-in:</span> {venue.loadInAddress}{' '}
+                          <a
+                            href={getGoogleMapsUrl(venue.loadInAddress) || '#'}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-700 hover:underline text-sm whitespace-nowrap"
+                          >
+                            (map)
+                          </a>
+                        </p>
                       )}
                       
                       {venue.whatThreeWords && (

@@ -13,6 +13,8 @@
  *   - it does not count toward coverage or `min_headcount_by_weekday`
  *     (§20.4 Q3 — nobody is contracted, so the floor must not fire)
  *   - the ledger is untouched, because a day that costs nothing has no entry
+ *     (the one exception is the day in lieu for somebody NOT rostered on it,
+ *     §20.5b — syncCompanyDayLieu() at the foot of this file)
  *
  * WHAT IT IS NOT: a leave type, an absence, or a pattern exception. See the
  * migration for why each of those was rejected.
@@ -21,6 +23,7 @@
 import { query, getClient } from '../config/database';
 import { DATE_RE } from './staff-day-status';
 import { postEntry } from './staff-balance';
+import { ukToday } from './uk-date';
 
 export interface CompanyDay {
   id: string;
@@ -226,7 +229,7 @@ export async function getCompanyReclaimCandidates(id: string): Promise<CompanyRe
 
   // Look forward from today only for a recurring day: reclaiming somebody's
   // holiday from three Christmases ago would rewrite a settled year.
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const from = day.recurs ? today : day.dayDate;
   const to = day.recurs ? `${Number(today.slice(0, 4)) + 2}-12-31` : day.dayDate;
   const dates = [...(await getCompanyDayOverlay(from, to)).values()]
@@ -321,4 +324,95 @@ export async function reclaimForCompanyDay(
   }
 
   return { reclaimed: wanted.length, minutes };
+}
+
+// ── A day in lieu when it falls on your day off (§20.5b) ───────────────────
+
+/**
+ * Credit one of someone's normal days for every company day that lands on a
+ * day they do not work — jon's decision, Oct 2026. Without it a company day
+ * only helps whoever happened to be rostered: Christmas 2027 is a Saturday
+ * and Sunday, which would give the Monday–Friday staff nothing at all.
+ *
+ *   * Same for everyone: ONE nominal day (their weekly minutes ÷ working
+ *     days, from the pattern in force on that date) — not pro-rata.
+ *   * IN ADVANCE: posted when the year's entitlement is synced, dated on the
+ *     company day, so it can be booked any time in the year.
+ *   * It FOLLOWS THE CALENDAR. Idempotent per date — it posts the difference
+ *     between what is owed now and what was posted — so a change of working
+ *     days, a new company day or a withdrawn one corrects itself on the next
+ *     sync, including taking a lieu day back.
+ *   * Only days they were genuinely not contracted to work. A day they were
+ *     rostered and had booked off is the reclaim's job (§7.4,
+ *     getCompanyReclaimCandidates), not this — the two never overlap.
+ *
+ * Posted as an `adjustment` on the holiday account with source_type
+ * 'company_day_lieu', so it is counted in the allowance, shown to the person
+ * on My Time, and never mistaken for the entitlement (source 'system') or a
+ * manual adjustment (source 'manual').
+ */
+export async function syncCompanyDayLieu(
+  personId: string, year: number, userId: string | null
+): Promise<number> {
+  const from = `${year}-01-01`;
+  const to = `${year}-12-31`;
+  const occurrences = await getCompanyDayOverlay(from, to);
+
+  const emp = await query(
+    `SELECT start_date::text AS start_date, end_date::text AS end_date
+       FROM staff_employment WHERE person_id = $1`, [personId]);
+  const e = emp.rows[0] as { start_date: string; end_date: string | null } | undefined;
+
+  // What is owed now, per date.
+  const owed = new Map<string, { minutes: number; label: string; companyDayId: string }>();
+  if (e && occurrences.size > 0) {
+    // The RAW contract: no leave, no absence and — crucially — no company
+    // days, which would otherwise make every one of these dates read as
+    // "not scheduled" for everybody.
+    const { getStaffCalendar } = await import('./staff-day-status');
+    const { getContractedWeek } = await import('./staff-balance');
+    const [cal] = await getStaffCalendar(from, to, {
+      isAdmin: true, personId, includeLeave: false, includeAbsence: false, includeCompanyDays: false,
+    });
+    for (const [date, occ] of occurrences) {
+      if (date < e.start_date || (e.end_date && date > e.end_date)) continue;
+      const day = cal?.days.find(d => d.date === date);
+      if (!day || day.status === 'working') continue;
+      // No pattern in force that day means they were not employed on hours
+      // yet (or between patterns) — nothing is owed for a day nobody set.
+      const week = await getContractedWeek(personId, date);
+      if (!week || week.nominalDayMinutes <= 0) continue;
+      owed.set(date, { minutes: week.nominalDayMinutes, label: occ.label, companyDayId: occ.companyDayId });
+    }
+  }
+
+  // What has been posted, per date (reversals included, so they net out).
+  const posted = await query(
+    `SELECT effective_date::text AS date, COALESCE(SUM(minutes), 0)::int AS minutes
+       FROM staff_ledger_entries
+      WHERE person_id = $1 AND account = 'holiday' AND leave_year = $2
+        AND source_type = 'company_day_lieu'
+      GROUP BY effective_date`,
+    [personId, year]);
+  const already = new Map<string, number>(
+    (posted.rows as { date: string; minutes: number }[]).map(r => [r.date, Number(r.minutes)]));
+
+  let total = 0;
+  for (const date of new Set([...owed.keys(), ...already.keys()])) {
+    const want = owed.get(date);
+    const delta = (want?.minutes ?? 0) - (already.get(date) ?? 0);
+    if (delta === 0) continue;
+    await postEntry({
+      personId, account: 'holiday', leaveYear: year, entryType: 'adjustment',
+      minutes: delta, effectiveDate: date,
+      sourceType: 'company_day_lieu', sourceId: want?.companyDayId ?? null,
+      note: want
+        ? (already.has(date)
+            ? `Day in lieu — ${want.label} (recalculated after an hours change)`
+            : `Day in lieu — ${want.label} falls on your day off`)
+        : 'Day in lieu taken back — the company day no longer falls on your day off',
+    }, userId);
+    total += delta;
+  }
+  return total;
 }

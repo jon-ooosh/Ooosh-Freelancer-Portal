@@ -4,6 +4,8 @@ import { query, getClient } from '../config/database';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { JOB_OUTCOME_SQL, JOB_LOST_OR_CANCELLED_SQL } from '../services/job-outcomes';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
@@ -947,7 +949,7 @@ router.post('/:id/merge',
       }
 
       // Append a backref note to keeper.notes so future readers can trace
-      const today = new Date().toISOString().split('T')[0];
+      const today = ukToday();
       const backrefNote = `\n[Merged from "${loser.name}" (${loserId}) on ${today} by ${req.user!.email || req.user!.id}]`;
       // If we already updated notes from null, append to that; otherwise append to existing.
       const notesIdx = updates.findIndex(u => u.startsWith('notes = '));
@@ -1333,14 +1335,15 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
       filterParams.push(role);
       filterClauses.push(`oj.role = $${filterParams.length + 1}`); // +1 because $1 is id
     }
+    // Bucket definitions shared with the Leads client history (services/job-outcomes.ts).
     if (outcome === 'confirmed') {
-      filterClauses.push(`(j.pipeline_status IN ('confirmed','prepped','dispatched') OR (j.pipeline_status IS NULL AND j.status IN (2,3,4,5,8)))`);
+      filterClauses.push(JOB_OUTCOME_SQL.confirmed);
     } else if (outcome === 'returned') {
-      filterClauses.push(`(j.pipeline_status IN ('returned','returned_incomplete','completed') OR (j.pipeline_status IS NULL AND j.status IN (6,7,11)))`);
+      filterClauses.push(JOB_OUTCOME_SQL.returned);
     } else if (outcome === 'open') {
-      filterClauses.push(`(j.pipeline_status IN ('new_enquiry','quoting','provisional','paused','chasing') OR (j.pipeline_status IS NULL AND j.status IN (0,1)))`);
+      filterClauses.push(JOB_OUTCOME_SQL.open);
     } else if (outcome === 'lost') {
-      filterClauses.push(`(j.pipeline_status IN ('lost','cancelled') OR (j.pipeline_status IS NULL AND j.status IN (9,10)))`);
+      filterClauses.push(JOB_LOST_OR_CANCELLED_SQL);
     }
     if (Number.isFinite(year) && year > 1900 && year < 3000) {
       filterParams.push(year);

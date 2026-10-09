@@ -3,7 +3,11 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { dayMarker } from '../lib/companyCalendar';
 import { QuarterHourSelect } from '../components/QuarterHourSelect';
+import FreelancerTasksPanel from '../components/FreelancerTasksPanel';
+import ModalShell from '../components/ModalShell';
+import SearchPicker from '../components/SearchPicker';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { ukToday } from '../lib/ukDate';
 
 /**
  * Staff calendar — the global "who's in" grid (Staff Calendar, Phase A).
@@ -28,6 +32,12 @@ interface StaffDay {
   isException: boolean;
   /** The company has granted this day to everyone — "Christmas Day". */
   companyDay?: string;
+  /** Requested, not yet approved — shown as "Requested", still counted in. */
+  pending?: boolean;
+  /** Working, but from home (spec §19) — counted as working, not as here. */
+  location?: 'home';
+  /** A working-from-home request for the day is waiting for a decision. */
+  homePending?: boolean;
   detail?: { leaveType?: string; absenceType?: string };
 }
 /**
@@ -84,12 +94,6 @@ function weekdayIndex(date: string): number {
 function mondayOf(date: string): string {
   return addDays(date, -weekdayIndex(date));
 }
-function fmtMinutes(min: number): string {
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  if (h === 0) return `${m}m`;
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
-}
 function shortDay(date: string): string {
   return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][weekdayIndex(date)];
 }
@@ -102,12 +106,45 @@ function fmtLongDate(date: string): string {
   return Number.isNaN(dt.getTime()) ? date
     : dt.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
-function monthLabel(date: string): string {
+/**
+ * What the visible range is called. The view rolls week to week, so a window
+ * that starts on 31 August is mostly September — naming it after its first
+ * day said "August" over a fortnight of September. Name the span instead —
+ * always, even inside one month: "October 2026" over a fortnight read as the
+ * whole month (design pack, Oct 2026). "5 – 18 Oct 2026", "28 Sept – 11 Oct 2026".
+ */
+function rangeLabel(from: string, to: string): string {
+  const fmt = (d: string, opts: Intl.DateTimeFormatOptions) => {
+    const [y, m, dd] = d.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, dd)).toLocaleDateString('en-GB', { ...opts, timeZone: 'UTC' });
+  };
+  const sameYear = from.slice(0, 4) === to.slice(0, 4);
+  const sameMonth = from.slice(0, 7) === to.slice(0, 7);
+  const start = sameMonth ? dayNum(from)
+    : fmt(from, { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) });
+  return `${start} – ${fmt(to, { day: 'numeric', month: 'short', year: 'numeric' })}`;
+}
+/** Three-letter month for the header, shown where a month starts. */
+function monthShort(date: string): string {
   const [y, m] = date.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
 }
 
-const TODAY = new Date().toISOString().slice(0, 10);
+const TODAY = ukToday();
+
+/** 1, 2 or 4 weeks. "Month" is not a mode the grid has — it is week-anchored —
+ *  so the third option stays 4 weeks (jon, Oct 2026). */
+type Weeks = 1 | 2 | 4;
+const WEEK_OPTIONS: [Weeks, string][] = [[1, '1 week'], [2, '2 weeks'], [4, '4 weeks']];
+/** Remembered per browser, validated on read — a stored value must never be
+ *  able to pin the page into a bad state (frontend rules). */
+const WEEKS_KEY = 'staffCalendar.weeks';
+function readWeeks(): Weeks {
+  try {
+    const n = Number(localStorage.getItem(WEEKS_KEY));
+    return n === 1 || n === 4 ? n : 2;
+  } catch { return 2; }
+}
 
 /**
  * Hours between two HH:MM times. Mirrors `hoursBetween` in
@@ -147,8 +184,8 @@ const BOOKING_STATUS: Record<
   // `counts` is whether this person can be relied on to be there. An offer
   // cannot: nobody has said yes. It still SHOWS, because the approver needs to
   // see it coming — the same call pending leave makes, for the same reason.
-  offered:   { cell: 'bg-white text-amber-700 border border-dashed border-amber-400', short: 'Pending', label: 'Offered — waiting on their reply', counts: false },
-  accepted:  { cell: 'bg-amber-100 text-amber-900', short: 'In',   label: 'Accepted',  counts: true },
+  offered:   { cell: 'bg-transparent text-amber-800 border border-dashed border-amber-400', short: 'Pending', label: 'Offered — waiting on their reply', counts: false },
+  accepted:  { cell: 'bg-amber-100 text-amber-800', short: 'In',   label: 'Accepted',  counts: true },
   completed: { cell: 'bg-amber-200 text-amber-900', short: 'Done', label: 'Done',      counts: true },
   declined:  { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Declined',  counts: false },
   cancelled: { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Cancelled', counts: false },
@@ -160,19 +197,56 @@ const BOOKING_STATUS: Record<
   withdrew:  { cell: 'bg-gray-100 text-gray-500',   short: '—',    label: 'Pulled out after accepting', counts: false },
 };
 
+/**
+ * Quiet for in, loud for off (Oct 2026). Most of the grid is people in on their
+ * usual hours, and when every one of those cells was a green box with "09:00"
+ * in it the few that mattered disappeared. Now "in" is a pale wash, and the eye
+ * goes to what is different.
+ *
+ * Leave and absence are deliberately the SAME colour and the same word, "Off"
+ * (jon): a different colour for sickness would tell everybody why somebody is
+ * not in, which is exactly what maskForViewer exists to stop. Admins get the
+ * reason on hover.
+ */
 const CELL: Record<DayStatus, { bg: string; label: string }> = {
-  working:       { bg: 'bg-emerald-100 text-emerald-900', label: 'In' },
-  partial:       { bg: 'bg-amber-100 text-amber-900',     label: 'Part' },
-  leave:         { bg: 'bg-sky-100 text-sky-900',         label: 'Leave' },
-  absent:        { bg: 'bg-rose-100 text-rose-900',       label: 'Out' },
-  not_scheduled: { bg: 'bg-gray-50 text-gray-400',        label: '' },
+  working:       { bg: 'bg-emerald-100 text-emerald-700',               label: 'In' },
+  partial:       { bg: 'bg-amber-100 text-amber-800 font-semibold',     label: 'Part' },
+  leave:         { bg: 'bg-violet-600 text-white font-semibold',        label: 'Off' },
+  absent:        { bg: 'bg-violet-600 text-white font-semibold',        label: 'Off' },
+  not_scheduled: { bg: '',                                              label: '' },
 };
+/** A requested day — dashed, like an offered freelancer: coming, not agreed. */
+const REQUESTED = { bg: 'bg-transparent text-amber-800 border border-dashed border-amber-400', label: 'Requested' };
+/** Working from home — working, but not in the building (spec §19). */
+const HOME = { bg: 'bg-transparent text-teal-800 border border-teal-300', label: '⌂ Home' };
+const HOME_ASKED = { bg: 'bg-emerald-100 text-teal-700 border border-dashed border-teal-400', label: 'Home?' };
+
+/** Somebody's usual start across the days on screen — only a DIFFERENT one is
+ *  worth printing in the cell. */
+function usualStart(days: StaffDay[]): string | null {
+  const counts = new Map<string, number>();
+  for (const d of days) {
+    if (d.status === 'working' && d.startTime) {
+      const t = d.startTime.slice(0, 5);
+      counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+  }
+  let best: string | null = null, n = 0;
+  counts.forEach((c, t) => { if (c > n) { best = t; n = c; } });
+  return best;
+}
 
 export default function StaffCalendarPage() {
   const role = useAuthStore(s => s.user?.role);
+  // Admin gates what is left of admin here: the Staff page link and settings.
+  // Booking a freelancer is the whole team's (jon, Oct 2026) — see the
+  // freelancer-days routes in routes/staff-calendar.ts.
   const isAdmin = role === 'admin';
 
-  const [weeks, setWeeks] = useState(2);
+  const [weeks, setWeeks] = useState<Weeks>(readWeeks);
+  // "Who is physically here?" as a view rather than a sum in your head
+  // (spec §19.3, jon): home days fade out and the footer counts the building.
+  const [onSiteOnly, setOnSiteOnly] = useState(false);
   const [from, setFrom] = useState(() => mondayOf(TODAY));
   const [people, setPeople] = useState<CalendarPerson[]>([]);
   const [bankHolidays, setBankHolidays] = useState<string[]>([]);
@@ -186,6 +260,31 @@ export default function StaffCalendarPage() {
   const [error, setError] = useState<string | null>(null);
 
   const to = useMemo(() => addDays(from, weeks * 7 - 1), [from, weeks]);
+
+  // The range is remembered per browser (design pack, Oct 2026). The anchor
+  // date is not: the page always opens on this week.
+  function changeWeeks(n: Weeks) {
+    setWeeks(n);
+    try { localStorage.setItem(WEEKS_KEY, String(n)); } catch { /* private mode */ }
+  }
+  const goPrev = useCallback(() => setFrom(f => addDays(f, -weeks * 7)), [weeks]);
+  const goNext = useCallback(() => setFrom(f => addDays(f, weeks * 7)), [weeks]);
+  const goToday = useCallback(() => setFrom(mondayOf(TODAY)), []);
+
+  // ← / → move a period, T is today. Ignored while typing — the booking form
+  // has text inputs, and an arrow in a date field must stay in the field.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); goPrev(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); goNext(); }
+      else if (e.key === 't' || e.key === 'T') { goToday(); }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [goPrev, goNext, goToday]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -235,6 +334,14 @@ export default function StaffCalendarPage() {
     (date: string) => dayMarker(date, bankHolidays, companyDays),
     [bankHolidays, companyDays]);
 
+  // Column shading, shared by the header and every row so a column reads as
+  // one stripe. Today wins over the weekend; the month divider replaces the
+  // old blue line, which was easy to confuse with "today".
+  const colBg = (d: string) =>
+    d === TODAY ? 'bg-ooosh-50' : weekdayIndex(d) >= 5 ? 'bg-gray-50' : '';
+  const monthEdge = (d: string) =>
+    d !== from && dayNum(d) === '1' ? 'border-l-2 border-l-ooosh-300' : '';
+
   // Headcount per day — the coverage signal, informational only.
   //
   // Staff and freelancers are counted SEPARATELY and shown as "4 +2", collapsing
@@ -247,6 +354,11 @@ export default function StaffCalendarPage() {
       staff: people.filter(p => {
         const day = p.days.find(x => x.date === d);
         return day?.status === 'working' || day?.status === 'partial';
+      }).length,
+      // In the BUILDING — working, and not from home.
+      onSite: people.filter(p => {
+        const day = p.days.find(x => x.date === d);
+        return (day?.status === 'working' || day?.status === 'partial') && day.location !== 'home';
       }).length,
       // CONFIRMED only. Counting an unanswered offer would tell you that you
       // have cover you have not actually got, which is the one thing this
@@ -272,48 +384,82 @@ export default function StaffCalendarPage() {
     return [...byPerson.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [freelancerDays]);
 
+  const divider = <span aria-hidden className="w-px h-7 bg-gray-200" />;
+
   return (
     <div className="p-4 sm:p-6 max-w-full">
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+      {/* Header row — title left, toolbar right, wrapping underneath on a
+          narrow screen. The toolbar groups read left to right as: where
+          else to go · how to look · where in time · the one action. */}
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 mb-5">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Staff calendar</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Who&apos;s in, who&apos;s not. {monthLabel(from)}
+          <h1 className="text-[26px] leading-tight font-semibold text-gray-900">Staff calendar</h1>
+          <p className="text-[15px] text-gray-500 mt-1">
+            Who&apos;s in, who&apos;s not · {rangeLabel(from, to)}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-4 whitespace-nowrap">
           {isAdmin && (
-            <button onClick={() => setAddingBooking(true)}
-              className="px-3 py-1.5 text-sm rounded border border-amber-300 text-amber-800 hover:bg-amber-50">
-              Book a freelancer
+            <>
+              <Link to="/staff/admin" className="text-sm text-ooosh-600 hover:text-ooosh-700 hover:underline">
+                Staff →
+              </Link>
+              {divider}
+            </>
+          )}
+
+          {/* Range — a segmented control, the active option lifted on white. */}
+          <div role="radiogroup" aria-label="How many weeks to show"
+            className="flex rounded-lg bg-gray-100 p-[3px]">
+            {WEEK_OPTIONS.map(([n, label]) => (
+              <button key={n} type="button" role="radio" aria-checked={weeks === n}
+                onClick={() => changeWeeks(n)}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  weeks === n
+                    ? 'bg-white font-semibold text-gray-900 shadow-[0_1px_2px_rgba(0,0,0,.08)]'
+                    : 'text-gray-500 hover:text-gray-800'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* On site only — a switch; the whole label is the target. */}
+          <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+            <button type="button" role="switch" aria-checked={onSiteOnly}
+              onClick={() => setOnSiteOnly(v => !v)}
+              className={`relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full transition-colors duration-150 ${
+                onSiteOnly ? 'bg-ooosh-600' : 'bg-gray-300'}`}>
+              <span className={`inline-block h-4 w-4 rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,.2)] transition-transform duration-150 ${
+                onSiteOnly ? 'translate-x-[16px]' : 'translate-x-[2px]'}`} />
             </button>
-          )}
-          {isAdmin && (
-            <Link to="/staff/admin"
-              className="px-3 py-1.5 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
-              Staff
-            </Link>
-          )}
-          <button onClick={() => setFrom(addDays(from, -weeks * 7))}
-            className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">← Back</button>
-          <button onClick={() => setFrom(mondayOf(TODAY))}
-            className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Today</button>
-          <button onClick={() => setFrom(addDays(from, weeks * 7))}
-            className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Forward →</button>
-          <select value={weeks} onChange={e => setWeeks(Number(e.target.value))}
-            className="px-2 py-1.5 text-sm rounded border border-gray-300">
-            <option value={1}>1 week</option>
-            <option value={2}>2 weeks</option>
-            <option value={4}>4 weeks</option>
-          </select>
+            On site only
+          </label>
+
+          {divider}
+
+          {/* Date navigator — one joined control. Also ← / → and T. */}
+          <div className="flex items-stretch rounded-lg border border-gray-300 bg-white overflow-hidden">
+            <button type="button" onClick={goPrev} aria-label="Previous period" title="Previous period (←)"
+              className="w-9 h-9 flex items-center justify-center text-gray-500 text-lg hover:bg-gray-100">‹</button>
+            <button type="button" onClick={goToday} title="Today (T)"
+              className="h-9 px-3.5 text-sm text-gray-700 border-x border-gray-200 hover:bg-gray-100">Today</button>
+            <button type="button" onClick={goNext} aria-label="Next period" title="Next period (→)"
+              className="w-9 h-9 flex items-center justify-center text-gray-500 text-lg hover:bg-gray-100">›</button>
+          </div>
+
+          {/* The only filled button on the page. */}
+          <button type="button" onClick={() => setAddingBooking(true)}
+            className="h-[38px] px-[18px] rounded-lg bg-ooosh-600 text-white text-sm font-semibold hover:bg-ooosh-700">
+            + Book a freelancer
+          </button>
         </div>
       </div>
 
       {error && (
-        <div className="mb-4 p-3 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>
+        <div className="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>
       )}
 
-      {isAdmin && <UnansweredOffers onError={setError} />}
+      <UnansweredOffers onError={setError} />
 
       {addingBooking && (
         /* Today if today is on screen, otherwise the first day in view. The
@@ -330,17 +476,17 @@ export default function StaffCalendarPage() {
       {openBooking && (
         <BookingActions booking={openBooking}
           onClose={() => setOpenBooking(null)}
-          onChanged={async () => { setOpenBooking(null); await load(); }}
-          onError={setError} />
+          onChanged={async () => { setOpenBooking(null); await load(); }} />
       )}
 
-      {isAdmin && spend && spend.bookedDays + spend.completedDays > 0 && (
-        <div className="mb-4 p-3 rounded border border-amber-200 bg-amber-50/60 text-sm text-amber-900">
-          <strong>{spend.bookedDays + spend.completedDays} freelance day
+      {/* Freelance summary — hidden when there is nothing in view. */}
+      {spend && spend.bookedDays + spend.completedDays > 0 && (
+        <div className="mb-5 px-4 py-3 rounded-[10px] border border-amber-200 bg-amber-50 text-[15px] text-gray-800">
+          <strong className="font-semibold">{spend.bookedDays + spend.completedDays} freelance day
             {spend.bookedDays + spend.completedDays === 1 ? '' : 's'}</strong> in view
-          {spend.expectedTotal > 0 && <> — £{spend.expectedTotal.toFixed(2)} expected</>}
+          {spend.expectedTotal > 0 && <> · £{spend.expectedTotal.toFixed(2)} expected</>}
           {spend.awaitingInvoice > 0 && (
-            <span className="ml-2 text-xs px-2 py-0.5 rounded bg-amber-200">
+            <span className="ml-2 text-xs px-2 py-0.5 rounded bg-amber-200 text-amber-900">
               {spend.awaitingInvoice} awaiting an invoice
             </span>
           )}
@@ -355,17 +501,24 @@ export default function StaffCalendarPage() {
       {loading ? (
         <div className="text-sm text-gray-500 py-8">Loading…</div>
       ) : people.length === 0 ? (
-        <div className="p-6 rounded border border-dashed border-gray-300 text-sm text-gray-500">
+        <div className="p-6 rounded-[10px] border border-dashed border-gray-300 text-sm text-gray-500">
           No staff have an employment record yet.
           {isAdmin && <> <Link to="/staff/admin" className="text-ooosh-600 hover:underline">Set one up</Link> to see them here.</>}
         </div>
       ) : (
         /* Wide grids scroll inside their own container — the page body must not. */
-        <div className="overflow-x-auto border border-gray-200 rounded-lg bg-white">
-          <table className="min-w-full border-collapse text-sm">
+        <div className="overflow-x-auto rounded-[10px] border border-gray-200 bg-white">
+          {/* Fixed layout: every day column the same width whatever is in
+              it — auto layout let a "Requested" cell widen its whole column. */}
+          <table className="w-full border-collapse table-fixed"
+            style={{ minWidth: 180 + dates.length * 64 }}>
+            <colgroup>
+              <col style={{ width: 180 }} />
+              {dates.map(d => <col key={d} />)}
+            </colgroup>
             <thead>
-              <tr className="bg-gray-50">
-                <th className="sticky left-0 z-10 bg-gray-50 text-left font-medium text-gray-600 px-3 py-2 border-b border-gray-200 min-w-[10rem]">
+              <tr>
+                <th className="sticky left-0 z-10 bg-white text-left align-bottom text-[13px] font-semibold text-gray-500 px-4 pb-3 border-b border-gray-200">
                   Person
                 </th>
                 {dates.map(d => (
@@ -380,19 +533,27 @@ export default function StaffCalendarPage() {
                       }
                       return undefined;
                     })()}
-                    className={`px-1 py-2 border-b border-gray-200 font-medium text-center min-w-[3rem] ${
-                      d === TODAY ? 'bg-ooosh-50 text-ooosh-700' : 'text-gray-600'
-                    } ${weekdayIndex(d) >= 5 ? 'bg-gray-100' : ''} ${
-                      marker(d)?.kind === 'company' ? 'bg-emerald-50 text-emerald-800' : ''}`}>
-                    <div className="text-[10px] uppercase tracking-wide">{shortDay(d)}</div>
-                    <div className="text-xs">{dayNum(d)}</div>
+                    className={`px-1 py-2.5 border-b border-gray-200 font-normal text-center align-bottom ${
+                      monthEdge(d)} ${
+                      marker(d)?.kind === 'company' ? 'bg-emerald-50' : colBg(d)}`}>
+                    {/* The month is named where it starts — and on the first
+                        column, so the grid never opens on an unnamed month.
+                        Its height is reserved on every cell so the rows line up. */}
+                    <div className="h-3.5 leading-[14px] text-[10px] font-bold uppercase tracking-[.06em] text-ooosh-600">
+                      {(d === from || dayNum(d) === '1') ? monthShort(d) : ''}
+                    </div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[.06em] text-gray-500">{shortDay(d)}</div>
+                    <div className={`mx-auto mt-0.5 h-7 w-7 flex items-center justify-center rounded-full text-sm font-semibold ${
+                      d === TODAY ? 'bg-ooosh-600 text-white' : 'text-gray-900'}`}>
+                      {dayNum(d)}
+                    </div>
                     {/* A dot, not a colour fill: under `use_allowance` a bank
                         holiday IS a working day, and shading it like leave
                         would say the opposite of what the ledger did. */}
                     <div className="h-1.5 leading-none">
                       {marker(d)?.kind === 'company'
                         ? <span className="text-[9px] text-emerald-600">★</span>
-                        : marker(d)?.kind === 'bank' && <span className="text-[9px] text-violet-500">●</span>}
+                        : marker(d)?.kind === 'bank' && <span className="text-[9px] text-ooosh-400">●</span>}
                     </div>
                   </th>
                 ))}
@@ -400,39 +561,65 @@ export default function StaffCalendarPage() {
             </thead>
             <tbody>
               {people.map(p => (
-                <tr key={p.personId} className="hover:bg-gray-50/60">
-                  <td className="sticky left-0 z-10 bg-white px-3 py-2 border-b border-gray-100 whitespace-nowrap">
-                    <div className="font-medium text-gray-900">{p.preferredName || p.name}</div>
-                    {p.jobTitle && <div className="text-xs text-gray-500">{p.jobTitle}</div>}
+                <tr key={p.personId} className="h-[38px]">
+                  {/* Job title on hover: a second line under every name doubled
+                      the row height for something you rarely need. */}
+                  <td className="sticky left-0 z-10 bg-white px-4 border-b border-gray-100 whitespace-nowrap"
+                    title={p.jobTitle ?? undefined}>
+                    <div className="text-[15px] font-semibold text-gray-900">{p.preferredName || p.name}</div>
                   </td>
-                  {p.days.map(day => {
-                    const cell = CELL[day.status];
-                    // A day can carry several windows now; fall back to the
-                    // single `window` so a cached bundle keeps working.
-                    const wins = day.windows ?? (day.window ? [day.window] : []);
-                    const title = day.status === 'working' && day.startTime
-                      ? `${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)} · ${fmtMinutes(day.scheduledMinutes)}`
-                      : wins.length > 0
-                        ? `Out ${wins.map(w => `${w.start}–${w.end}`).join(', ')}`
-                        : cell.label || 'Not scheduled';
-                    return (
-                      <td key={day.date}
-                        className={`px-1 py-1.5 border-b border-gray-100 text-center align-middle ${
-                          weekdayIndex(day.date) >= 5 ? 'bg-gray-50/60' : ''
-                        }`}>
-                        <div title={title}
-                          className={`rounded px-1 py-1 text-[10px] leading-tight ${cell.bg} ${
-                            day.isException ? 'ring-1 ring-inset ring-ooosh-400' : ''
-                          }`}>
-                          {day.status === 'working' && day.startTime
-                            ? day.startTime.slice(0, 5)
-                            : day.companyDay
-                              ? 'Closed'
-                              : cell.label || '·'}
-                        </div>
-                      </td>
-                    );
-                  })}
+                  {(() => {
+                    const usual = usualStart(p.days);
+                    return p.days.map(day => {
+                      const worked = day.status === 'working' || day.status === 'partial';
+                      const home = worked && day.location === 'home';
+                      const cell = day.pending ? REQUESTED
+                        : home && day.status === 'working' ? (onSiteOnly ? { bg: 'text-gray-300', label: '⌂' } : HOME)
+                        : day.homePending && day.status === 'working' ? HOME_ASKED
+                        : CELL[day.status];
+                      // A day can carry several windows now; fall back to the
+                      // single `window` so a cached bundle keeps working.
+                      const wins = day.windows ?? (day.window ? [day.window] : []);
+                      // Why somebody is off is admin-only: detail never reaches
+                      // anybody else (maskForViewer), so peers just see "Off".
+                      const why = day.detail?.absenceType ?? day.detail?.leaveType;
+                      const title = home
+                        ? `Working from home${day.startTime ? ` ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}` : ''}`
+                        : day.homePending && day.status === 'working'
+                          ? 'Asked to work from home — not approved yet, so expected in'
+                          : day.pending
+                        ? `Requested${wins.length ? ` ${wins.map(w => `${w.start}–${w.end}`).join(', ')}` : ''}, not yet approved${why ? ` — ${why}` : ''}`
+                        : day.status === 'working' && day.startTime
+                          ? `In ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}`
+                          : wins.length > 0
+                            ? `Off ${wins.map(w => `${w.start}–${w.end}`).join(', ')}${why ? ` — ${why}` : ''}`
+                            : day.status === 'leave' || day.status === 'absent'
+                              ? `Off${why ? ` — ${why}` : ''}`
+                              : cell.label || (day.companyDay ? `Closed — ${day.companyDay}` : 'Not working');
+                      // "In" on the usual hours is an empty pill — the colour
+                      // alone says it, and only a DIFFERENT start is worth printing.
+                      const text = day.pending || (home && day.status === 'working') || (day.homePending && day.status === 'working') ? cell.label
+                        : day.status === 'working'
+                          ? (day.startTime && day.startTime.slice(0, 5) !== usual ? day.startTime.slice(0, 5) : '')
+                          : day.companyDay ? 'Closed' : cell.label;
+                      const empty = day.status === 'not_scheduled' && !day.companyDay;
+                      return (
+                        <td key={day.date}
+                          className={`px-1 border-b border-gray-100 text-center align-middle ${
+                            monthEdge(day.date)} ${colBg(day.date)}`}>
+                          {!empty && (
+                            <div title={title}
+                              className={`rounded-md h-[22px] flex items-center justify-center text-[11px] leading-none ${
+                                day.companyDay && day.status === 'not_scheduled' ? 'text-gray-400' : cell.bg} ${
+                                day.isException ? 'ring-1 ring-inset ring-ooosh-400' : ''
+                              }`}>
+                              {text}
+                            </div>
+                          )}
+                        </td>
+                      );
+                    });
+                  })()}
                 </tr>
               ))}
               {/* A separate, visually distinct lane below the staff rows
@@ -443,19 +630,19 @@ export default function StaffCalendarPage() {
               {freelancerLanes.length > 0 && (
                 <tr>
                   <td colSpan={dates.length + 1}
-                    className="sticky left-0 bg-amber-50/70 px-3 py-1 text-[10px] uppercase tracking-wide text-amber-800 border-t border-amber-200">
-                    Freelance — offered and confirmed
+                    className="sticky left-0 bg-amber-50 px-4 py-2.5 text-[11px] font-bold uppercase tracking-[.07em] text-amber-800 border-b border-amber-200">
+                    Freelance · offered and confirmed
                   </td>
                 </tr>
               )}
               {freelancerLanes.map(lane => (
-                <tr key={lane.personId} className="hover:bg-amber-50/40">
-                  <td className="sticky left-0 z-10 bg-white px-3 py-2 border-b border-gray-100 whitespace-nowrap">
+                <tr key={lane.personId} className="h-[52px]">
+                  <td className="sticky left-0 z-10 bg-white px-4 border-b border-gray-100 whitespace-nowrap">
                     {/* Through to the person record — the Freelancer tab there
                         carries their whole history with us, which is the next
                         question after "who is this on my calendar". */}
                     <Link to={`/people/${lane.personId}`}
-                      className="font-medium text-gray-900 hover:text-ooosh-700 hover:underline">
+                      className="text-[15px] font-semibold text-gray-900 hover:text-ooosh-700 hover:underline">
                       {lane.name}
                     </Link>
                     <div className="text-xs text-amber-700">Freelance</div>
@@ -464,12 +651,11 @@ export default function StaffCalendarPage() {
                     const b = lane.byDate.get(d);
                     return (
                       <td key={d}
-                        className={`px-1 py-1.5 border-b border-gray-100 text-center align-middle ${
-                          weekdayIndex(d) >= 5 ? 'bg-gray-50/60' : ''}`}>
+                        className={`px-1 border-b border-gray-100 text-center align-middle ${
+                          monthEdge(d)} ${colBg(d)}`}>
                         {b && (
-                          <button
-                            onClick={() => isAdmin && setOpenBooking(b)}
-                            disabled={!isAdmin}
+                          <button type="button"
+                            onClick={() => setOpenBooking(b)}
                             title={[
                               b.personName,
                               b.durationType === 'hours' ? `${b.startTime}–${b.endTime}`
@@ -478,8 +664,8 @@ export default function StaffCalendarPage() {
                               b.expectedTotal !== null ? `£${b.expectedTotal.toFixed(2)}` : null,
                               b.notes,
                             ].filter(Boolean).join(' · ')}
-                            className={`w-full rounded px-1 py-1 text-[10px] leading-tight ${
-                              BOOKING_STATUS[b.status].cell} ${isAdmin ? 'hover:ring-1 hover:ring-amber-400' : ''}`}>
+                            className={`w-full rounded-md h-[22px] flex items-center justify-center text-[11px] leading-none hover:ring-1 hover:ring-amber-400 ${
+                              BOOKING_STATUS[b.status].cell}`}>
                             {b.durationType === 'hours' ? b.startTime
                               : b.durationType === 'half_day' ? '½'
                                 : BOOKING_STATUS[b.status].short}
@@ -491,23 +677,32 @@ export default function StaffCalendarPage() {
                 </tr>
               ))}
 
-              <tr className="bg-gray-50 font-medium">
-                <td className="sticky left-0 z-10 bg-gray-50 px-3 py-2 text-gray-600 text-xs uppercase tracking-wide">
+              <tr className="h-11">
+                <td className="sticky left-0 z-10 bg-white px-4 text-xs font-bold uppercase tracking-[.07em] text-gray-500">
                   In
                 </td>
                 {headcount.map((n, i) => (
-                  <td key={dates[i]} className="px-1 py-2 text-center text-gray-700"
+                  <td key={dates[i]}
+                    className={`px-1 text-center text-[15px] font-semibold text-gray-800 ${
+                      monthEdge(dates[i])} ${colBg(dates[i])}`}
                     title={[
-                      `${n.staff} staff`,
+                      n.onSite === n.staff ? `${n.staff} staff in`
+                        : `${n.onSite} in the building · ${n.staff - n.onSite} working from home`,
                       n.freelancers > 0 ? `${n.freelancers} freelance confirmed` : null,
                       n.pending > 0 ? `${n.pending} offered, no reply yet` : null,
                     ].filter(Boolean).join(' · ')}>
-                    {n.staff}
+                    {/* One number when everyone working is here; when somebody
+                        is at home, the building count leads and home trails
+                        (spec §19.3 — the two-number form is the exception). */}
+                    {n.onSite}
+                    {n.onSite !== n.staff && !onSiteOnly && (
+                      <span className="ml-[3px] text-xs font-normal text-teal-700">+{n.staff - n.onSite}⌂</span>
+                    )}
                     {n.freelancers > 0 && (
-                      <span className="text-amber-700"> +{n.freelancers}</span>
+                      <span className="ml-[3px] text-xs text-amber-700">+{n.freelancers}</span>
                     )}
                     {n.pending > 0 && (
-                      <span className="text-amber-500 font-normal"> +{n.pending}?</span>
+                      <span className="ml-[3px] text-xs font-normal text-amber-500">+{n.pending}?</span>
                     )}
                   </td>
                 ))}
@@ -517,20 +712,27 @@ export default function StaffCalendarPage() {
         </div>
       )}
 
-      <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-gray-500">
-        {(['working', 'partial', 'leave', 'absent', 'not_scheduled'] as DayStatus[]).map(s => (
-          <span key={s} className="inline-flex items-center gap-1.5">
-            <span className={`inline-block w-3 h-3 rounded ${CELL[s].bg}`} />
-            {s === 'not_scheduled' ? 'Not scheduled' : CELL[s].label}
+      <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-gray-500">
+        {[
+          { bg: CELL.working.bg, label: 'In (time shown if not their usual start)' },
+          { bg: CELL.partial.bg, label: 'Part day' },
+          { bg: REQUESTED.bg, label: 'Requested' },
+          { bg: HOME.bg, label: 'Working from home' },
+          { bg: CELL.leave.bg, label: 'Off' },
+          { bg: 'border border-gray-200', label: 'Not working' },
+        ].map(l => (
+          <span key={l.label} className="inline-flex items-center gap-1.5 whitespace-nowrap">
+            <span className={`inline-block w-3.5 h-2.5 rounded-[3px] ${l.bg}`} />
+            {l.label}
           </span>
         ))}
-        <span className="inline-flex items-center gap-1.5">
-          <span className="inline-block w-3 h-3 rounded ring-1 ring-inset ring-ooosh-400" />
+        <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          <span className="inline-block w-3.5 h-2.5 rounded-[3px] ring-1 ring-inset ring-ooosh-400" />
           One-off change / swap
         </span>
         {dates.some(d => marker(d)?.kind === 'bank') && (
           <span className="inline-flex items-center gap-1.5">
-            <span className="text-violet-500">●</span>
+            <span className="text-ooosh-400">●</span>
             Bank holiday{bhPolicy === 'use_allowance' && ' — a normal working day here'}
           </span>
         )}
@@ -541,19 +743,19 @@ export default function StaffCalendarPage() {
           </span>
         )}
         {freelancerLanes.length > 0 && (
-          <span className="inline-flex items-center gap-1.5">
-            <span className="inline-block w-3 h-3 rounded bg-amber-100" />
-            Freelance confirmed — counts toward the total as &ldquo;+n&rdquo;
+          <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+            <span className={`inline-block w-3.5 h-2.5 rounded-[3px] ${BOOKING_STATUS.accepted.cell}`} />
+            Freelance (counts as &ldquo;+n&rdquo;)
           </span>
         )}
         {freelancerDays.some(b => b.status === 'offered') && (
           <span className="inline-flex items-center gap-1.5">
-            <span className="inline-block w-3 h-3 rounded border border-dashed border-amber-400" />
+            <span className="inline-block w-3.5 h-2.5 rounded-[3px] border border-dashed border-amber-400" />
             Offered, no reply yet — shown as &ldquo;+n?&rdquo; and NOT counted as cover
           </span>
         )}
         {isAdmin && (
-          <Link to="/settings" className="text-ooosh-600 hover:underline">
+          <Link to="/settings" className="text-ooosh-600 hover:underline whitespace-nowrap">
             Company days &amp; bank holidays →
           </Link>
         )}
@@ -563,6 +765,11 @@ export default function StaffCalendarPage() {
 }
 
 // ── Booking a freelancer in (spec §9.2) ─────────────────────────────────────
+
+// Field styles for the freelancer pop-ups, so the two read alike.
+const LABEL = 'block text-sm font-medium text-gray-700 mb-1';
+const INPUT_BASE = 'w-full px-3 py-2 rounded-lg border bg-white text-sm focus:outline-none focus:ring-2 focus:ring-ooosh-200 focus:border-ooosh-400';
+const INPUT = `${INPUT_BASE} border-gray-300`;
 
 interface Bookable {
   personId: string; name: string; email: string | null;
@@ -597,11 +804,13 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
   const [notes, setNotes] = useState('');
   const [backdateOk, setBackdateOk] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Shown INSIDE the pop-up — the page's error bar sits behind it.
+  const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<{ data: Bookable[] }>('/staff-calendar/freelancer-days/bookable')
       .then(r => setPeople(r.data))
-      .catch(() => onError('Could not load the freelancer list.'));
+      .catch(() => setFormError('Could not load the freelancer list.'));
   }, [onError]);
 
   // Pre-fill from the person and the duration, but never overwrite a figure
@@ -642,9 +851,9 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
       : rate;
 
   async function save() {
-    if (!personId) { onError('Pick who you are booking.'); return; }
-    if (timed && endTime <= startTime) { onError('The end time needs to be after the start.'); return; }
-    if (isBackdated && !backdateOk) { onError('Tick the box to confirm the date is in the past.'); return; }
+    if (!personId) { setFormError('Pick who you are booking.'); return; }
+    if (timed && endTime <= startTime) { setFormError('The end time needs to be after the start.'); return; }
+    if (isBackdated && !backdateOk) { setFormError('Tick the box to confirm the date is in the past.'); return; }
     setSaving(true);
     try {
       await api.post('/staff-calendar/freelancer-days', {
@@ -655,63 +864,65 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
       });
       await onBooked();
     } catch (e) {
-      onError(e instanceof Error ? e.message : 'Failed to book that day');
+      setFormError(e instanceof Error ? e.message : 'Failed to book that day');
     } finally { setSaving(false); }
   }
 
   return (
-    <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-amber-50/50 space-y-3">
-      <div>
-        <h2 className="text-sm font-semibold text-gray-900">Book a freelancer in</h2>
-        <p className="text-xs text-gray-600 mt-0.5">
-          A day at the yard — prep, warehouse, an extra pair of hands. It is an{' '}
-          <strong>offer</strong> until they reply, and it has nothing to do with holiday,
-          overtime or working patterns.
-        </p>
-      </div>
+    <ModalShell
+      title="Book a freelancer in"
+      subtitle={<>A day at the yard — prep, warehouse, an extra pair of hands. It is an{' '}
+        <strong className="font-medium text-gray-700">offer</strong> until they reply, and has nothing
+        to do with holiday, overtime or working patterns.</>}
+      onClose={onClose}
+    >
+      <div className="space-y-4">
+        <label className="block text-sm">
+          <span className={LABEL}>Who</span>
+          {/* Searchable rather than a long scroll (jon, Oct 2026). */}
+          <SearchPicker
+            autoFocus
+            value={chosen ? { value: chosen.personId, label: chosen.name } : null}
+            onChange={(o) => setPersonId(o?.value ?? '')}
+            options={people.map(p => ({ value: p.personId, label: p.name, hint: p.email ?? undefined }))}
+            placeholder="Start typing a name…"
+          />
+        </label>
 
-      <div className="grid sm:grid-cols-3 gap-3">
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Who</span>
-          <select value={personId} onChange={e => setPersonId(e.target.value)}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
-            <option value="">Pick someone…</option>
-            {people.map(p => <option key={p.personId} value={p.personId}>{p.name}</option>)}
-          </select>
-        </label>
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Day</span>
-          <input type="date" value={bookingDate} onChange={e => setBookingDate(e.target.value)}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
-        </label>
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">How long</span>
-          <select value={durationType}
-            onChange={e => setDurationType(e.target.value as DayBooking['durationType'])}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
-            <option value="full_day">Full day</option>
-            <option value="half_day">Half day</option>
-            <option value="hours">Set hours</option>
-          </select>
-        </label>
-      </div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <label className="block text-sm">
+            <span className={LABEL}>Day</span>
+            <input type="date" value={bookingDate} onChange={e => setBookingDate(e.target.value)}
+              className={INPUT} />
+          </label>
+          <label className="block text-sm">
+            <span className={LABEL}>How long</span>
+            <select value={durationType}
+              onChange={e => setDurationType(e.target.value as DayBooking['durationType'])}
+              className={INPUT}>
+              <option value="full_day">Full day</option>
+              <option value="half_day">Half day</option>
+              <option value="hours">Set hours</option>
+            </select>
+          </label>
+        </div>
 
       {timed && (
         <div className="grid sm:grid-cols-3 gap-3">
           <label className="text-sm">
-            <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">From</span>
+            <span className={LABEL}>From</span>
             {/* Quarter hours, and a <select> rather than a time input because
                 Chrome's time picker ignores `step` and offered all sixty
                 minutes. Overtime deliberately stays on 5-minute steps —
                 staff_overtime_entries has a `minutes % 5 = 0` CHECK and the two
                 are answering different questions. */}
             <QuarterHourSelect value={startTime} onChange={setStartTime} aria-label="Start time"
-              className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+              className={INPUT} />
           </label>
           <label className="text-sm">
-            <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">To</span>
+            <span className={LABEL}>To</span>
             <QuarterHourSelect value={endTime} onChange={setEndTime} aria-label="End time"
-              className={`w-full px-2 py-1.5 rounded border bg-white ${
+              className={`${INPUT_BASE} ${
                 timesBackwards ? 'border-red-400' : 'border-gray-300'}`} />
           </label>
           {/* The third column of the row the two pickers sit in. Reading the
@@ -735,66 +946,70 @@ function BookFreelancer({ defaultDate, onClose, onBooked, onError }: {
         </div>
       )}
 
-      <div className="grid sm:grid-cols-3 gap-3">
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Rate basis</span>
-          <select value={rateType} onChange={e => setRateType(e.target.value as DayBooking['rateType'])}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
-            <option value="day">Day rate</option>
-            <option value="half_day">Half-day rate</option>
-            {timed && <option value="hourly">Hourly</option>}
-            <option value="fixed">Fixed for the job</option>
-          </select>
-        </label>
-        <label className="text-sm">
-          <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
-            Agreed rate (£)
+        <div className="grid sm:grid-cols-2 gap-4">
+          <label className="block text-sm">
+            <span className={LABEL}>Rate basis</span>
+            <select value={rateType} onChange={e => setRateType(e.target.value as DayBooking['rateType'])}
+              className={INPUT}>
+              <option value="day">Day rate</option>
+              <option value="half_day">Half-day rate</option>
+              {timed && <option value="hourly">Hourly</option>}
+              <option value="fixed">Fixed for the job</option>
+            </select>
+          </label>
+          <label className="block text-sm">
+            <span className={LABEL}>Agreed rate (£)</span>
+            <input type="number" min={0} step="0.01" value={agreedRate}
+              onChange={e => setAgreedRate(e.target.value)}
+              placeholder={chosen?.defaultDayRate ? String(chosen.defaultDayRate) : '—'}
+              className={INPUT} />
+          </label>
+        </div>
+
+        <label className="block text-sm">
+          <span className={LABEL}>What are they doing</span>
+          <input value={notes} onChange={e => setNotes(e.target.value)}
+            placeholder="Van prep for the Thursday get-out"
+            className={INPUT} />
+          <span className="block mt-1 text-xs text-gray-400">
+            A line for the calendar. Individual tasks (with van and job) can be added once the day is booked.
           </span>
-          <input type="number" min={0} step="0.01" value={agreedRate}
-            onChange={e => setAgreedRate(e.target.value)}
-            placeholder={chosen?.defaultDayRate ? String(chosen.defaultDayRate) : '—'}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
         </label>
-        <div className="text-sm flex items-end pb-1.5">
+
+        {isBackdated && (
+          <label className="flex items-start gap-2 p-3 rounded-lg border border-amber-300 bg-amber-50 text-sm text-amber-900">
+            <input type="checkbox" checked={backdateOk} className="mt-0.5"
+              onChange={e => setBackdateOk(e.target.checked)} />
+            <span>
+              <strong>{fmtLongDate(bookingDate)} is in the past.</strong> That is fine if you
+              are recording something that already happened — tick to confirm you meant it.
+            </span>
+          </label>
+        )}
+
+        {formError && (
+          <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2" role="alert">{formError}</p>
+        )}
+
+        <div className="flex flex-wrap items-center gap-3 pt-3 border-t border-gray-100">
           {expected !== null && (
-            <span className="text-gray-600">
+            <span className="text-sm text-gray-600">
               Expected: <strong className="text-gray-900">£{expected.toFixed(2)}</strong>
             </span>
           )}
+          <span className="ml-auto flex gap-2">
+            <button onClick={onClose}
+              className="px-4 py-2 text-sm rounded-lg border border-gray-300 bg-white hover:bg-gray-50">
+              Cancel
+            </button>
+            <button disabled={saving || timesBackwards || (isBackdated && !backdateOk)} onClick={() => void save()}
+              className="px-4 py-2 text-sm font-medium rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+              {saving ? 'Saving…' : isBackdated ? 'Record the day' : 'Offer the day'}
+            </button>
+          </span>
         </div>
       </div>
-
-      <label className="block text-sm">
-        <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">
-          What are they doing
-        </span>
-        <input value={notes} onChange={e => setNotes(e.target.value)}
-          placeholder="Van prep for the Thursday get-out"
-          className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
-      </label>
-
-      {isBackdated && (
-        <label className="flex items-start gap-2 p-2 rounded border border-amber-300 bg-amber-100/60 text-sm text-amber-900">
-          <input type="checkbox" checked={backdateOk} className="mt-0.5"
-            onChange={e => setBackdateOk(e.target.checked)} />
-          <span>
-            <strong>{fmtLongDate(bookingDate)} is in the past.</strong> That is fine if you
-            are recording something that already happened — tick to confirm you meant it.
-          </span>
-        </label>
-      )}
-
-      <div className="flex gap-2">
-        <button disabled={saving || timesBackwards || (isBackdated && !backdateOk)} onClick={() => void save()}
-          className="px-3 py-1.5 text-sm rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
-          {isBackdated ? 'Record the day' : 'Offer the day'}
-        </button>
-        <button onClick={onClose}
-          className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50">
-          Cancel
-        </button>
-      </div>
-    </div>
+    </ModalShell>
   );
 }
 
@@ -883,11 +1098,10 @@ function UnansweredOffers({ onError }: { onError: (m: string) => void }) {
  * version is spec §9.3 and is not built. A decline is recorded and nothing else
  * happens to them; that is the whole point of the wording.
  */
-function BookingActions({ booking, onClose, onChanged, onError }: {
+function BookingActions({ booking, onClose, onChanged }: {
   booking: DayBooking;
   onClose: () => void;
   onChanged: () => void | Promise<void>;
-  onError: (m: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [amending, setAmending] = useState(false);
@@ -901,21 +1115,31 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
     booking.invoiceAmount !== null ? String(booking.invoiceAmount)
       : booking.expectedTotal !== null ? String(booking.expectedTotal) : '');
 
+  // Shown INSIDE the pop-up — the page's error bar sits behind it.
+  const [actError, setActError] = useState<string | null>(null);
+
   async function act(fn: () => Promise<unknown>) {
     setBusy(true);
+    setActError(null);
     try { await fn(); await onChanged(); }
-    catch (e) { onError(e instanceof Error ? e.message : 'That did not work'); }
+    catch (e) { setActError(e instanceof Error ? e.message : 'That did not work'); }
     finally { setBusy(false); }
   }
 
   return (
-    <div className="mb-4 p-4 rounded-lg border border-amber-200 bg-white space-y-3">
+    // A pop-up rather than a panel at the top of the page: clicking a booking
+    // near the bottom of a four-week calendar opened it off-screen (jon, Oct 2026).
+    <ModalShell
+      title={<Link to={`/people/${booking.personId}`} className="hover:text-ooosh-700 hover:underline">
+        {booking.personName}</Link>}
+      subtitle={fmtLongDate(booking.bookingDate)}
+      onClose={onClose}
+    >
+    <div className="space-y-3">
+      {actError && (
+        <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2" role="alert">{actError}</p>
+      )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <Link to={`/people/${booking.personId}`}
-          className="font-medium text-gray-900 hover:text-ooosh-700 hover:underline">
-          {booking.personName}
-        </Link>
-        <span className="text-sm text-gray-600">{booking.bookingDate}</span>
         <span className="text-sm text-gray-500">
           {booking.durationType === 'hours' ? `${booking.startTime}–${booking.endTime}`
             : booking.durationType === 'half_day' ? 'Half day' : 'Full day'}
@@ -926,9 +1150,16 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
         {booking.expectedTotal !== null && (
           <span className="text-sm text-gray-600">£{booking.expectedTotal.toFixed(2)} expected</span>
         )}
-        <button onClick={onClose} className="ml-auto text-sm text-gray-500 hover:underline">Close</button>
       </div>
       {booking.notes && <p className="text-sm text-gray-600">{booking.notes}</p>}
+
+      {/* What they are doing on the day — a live list (STAFF-CALENDAR-SPEC §21).
+          Read-only once the day is no longer offered / accepted. */}
+      {['offered', 'accepted', 'completed'].includes(booking.status) && (
+        <div className="pt-3 border-t border-gray-100">
+          <FreelancerTasksPanel key={booking.id} owner={{ bookingId: booking.id }} />
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-2">
         {booking.status === 'offered' && (
@@ -1085,5 +1316,6 @@ function BookingActions({ booking, onClose, onChanged, onError }: {
         </div>
       )}
     </div>
+    </ModalShell>
   );
 }

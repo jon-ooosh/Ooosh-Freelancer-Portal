@@ -23,6 +23,7 @@ import { isR2Configured, uploadToR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { encrypt, tryDecrypt, isEncryptionConfigured } from '../services/encryption';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 
@@ -497,7 +498,7 @@ router.post('/tenancies/:id/rate', authorize(...ADMIN_MANAGER), validate(rateSch
   const cur = await query(`SELECT weekly_rate FROM storage_tenancies WHERE id = $1`, [req.params.id]);
   if (cur.rows.length === 0) { res.status(404).json({ error: 'Tenancy not found' }); return; }
   const oldRate = Number(cur.rows[0].weekly_rate);
-  const effective = b.effective_date || new Date().toISOString().slice(0, 10);
+  const effective = b.effective_date || ukToday();
   await query(
     `INSERT INTO storage_rate_history (tenancy_id, effective_date, old_rate, new_rate, changed_by, notes)
      VALUES ($1,$2,$3,$4,$5,$6)`,
@@ -536,7 +537,7 @@ router.post('/tenancies/:id/mark-invoiced', validate(invoiceSchema), async (req:
   const t = await query(`SELECT * FROM storage_tenancies WHERE id = $1`, [req.params.id]);
   if (t.rows.length === 0) { res.status(404).json({ error: 'Tenancy not found' }); return; }
   const ten = t.rows[0];
-  const dueDate = ten.next_bill_date || new Date().toISOString().slice(0, 10);
+  const dueDate = ten.next_bill_date || ukToday();
   const amount = b.amount != null ? b.amount
     : Number(ten.weekly_rate) * (ten.billing_cadence === 'monthly' ? 52 / 12 : ten.billing_cadence === 'quarterly' ? 13 : ten.billing_cadence === 'annual' ? 52 : 1);
 
@@ -576,7 +577,7 @@ router.post('/tenancies/:id/mark-invoiced', validate(invoiceSchema), async (req:
 // Move out
 const moveOutSchema = z.object({ move_out_date: z.string().optional().nullable() });
 router.post('/tenancies/:id/move-out', validate(moveOutSchema), async (req: AuthRequest, res: Response) => {
-  const moveOut = (req.body as z.infer<typeof moveOutSchema>).move_out_date || new Date().toISOString().slice(0, 10);
+  const moveOut = (req.body as z.infer<typeof moveOutSchema>).move_out_date || ukToday();
   const result = await query(
     `UPDATE storage_tenancies SET status = 'ended', move_out_date = $1, updated_at = NOW()
      WHERE id = $2 AND status != 'ended' RETURNING room_id`,
@@ -715,7 +716,7 @@ router.post('/access-events', validate(accessEventSchema), async (req: AuthReque
   // Fire the notification NOW only if it's for today or has no date. Future-dated
   // requests are picked up on the morning of by the daily scanner
   // (services/storage-reminders.ts). notifyAccessEvent stamps notified_at.
-  const dueNow = !b.requested_date || new Date(b.requested_date) <= new Date(new Date().toISOString().slice(0, 10));
+  const dueNow = !b.requested_date || new Date(b.requested_date) <= new Date(ukToday());
   if (dueNow) {
     try {
       const { notifyAccessEvent } = await import('../services/storage-reminders');

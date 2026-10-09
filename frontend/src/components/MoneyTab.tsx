@@ -367,6 +367,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The client's payment portal link - computed live from HireHop by the backend so it
+  // always matches the quote document (the hash changes when the hire dates change).
+  const [portalLink, setPortalLink] = useState<{ url: string; hash: string } | null>(null);
+  const [portalLinkCopied, setPortalLinkCopied] = useState(false);
   const role = useAuthStore((s) => s.user?.role);
   const isAdmin = role === 'admin';
   const canManage = hasManagerRole(role);
@@ -786,6 +790,25 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ data: { url: string; hash: string } | null }>(`/money/${jobId}/payment-link`)
+      .then(r => { if (!cancelled) setPortalLink(r.data || null); })
+      .catch(() => { if (!cancelled) setPortalLink(null); });
+    return () => { cancelled = true; };
+  }, [jobId]);
+
+  const copyPortalLink = async () => {
+    if (!portalLink) return;
+    try {
+      await navigator.clipboard.writeText(portalLink.url);
+      setPortalLinkCopied(true);
+      setTimeout(() => setPortalLinkCopied(false), 1600);
+    } catch {
+      window.prompt('Copy the payment portal link:', portalLink.url);
+    }
+  };
+
   // Fetch rollover chains for any record that's part of one (rolled over, or
   // came in via rollover). Lazy + best-effort; only records that need the thread.
   useEffect(() => {
@@ -1062,6 +1085,29 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             Record Payment
           </button>
         </div>
+
+        {/* Payment portal link - send this to the client (card, PayPal or bank transfer) */}
+        {portalLink && (
+          <div className="mb-4 flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+            <span className="text-gray-500 whitespace-nowrap">Payment portal link</span>
+            <a
+              href={portalLink.url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex-1 min-w-0 truncate text-ooosh-700 hover:underline"
+              title={portalLink.url}
+            >
+              {portalLink.url}
+            </a>
+            <button
+              type="button"
+              onClick={copyPortalLink}
+              className={`px-2 py-1 text-xs font-medium rounded border bg-white hover:bg-gray-100 ${portalLinkCopied ? 'border-green-300 text-green-700' : 'border-gray-300 text-gray-700'}`}
+            >
+              {portalLinkCopied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        )}
 
         {financial.hire_value_ex_vat > 0 ? (
           <>

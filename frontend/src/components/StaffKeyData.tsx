@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
+import { Card, InfoRow, Pill, btnPrimary, btnSecondary, btnQuiet } from './StaffCard';
 
 interface EmployeeRecord {
   has_ni_number: boolean;
@@ -176,14 +177,13 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
     }
   }
 
-  if (loading) return <div><h3 className="text-sm font-medium text-gray-900 mb-1">Personal &amp; key data</h3><p className="text-sm text-gray-500">Loading…</p></div>;
+  if (loading) return <Card title="Personal and key data"><p className="text-sm text-gray-500">Loading…</p></Card>;
   if (loadError) return (
-    <div>
-      <h3 className="text-sm font-medium text-gray-900 mb-1">Personal &amp; key data</h3>
+    <Card title="Personal and key data">
       <p className="text-sm text-red-700 rounded border border-red-200 bg-red-50 px-3 py-2">
         Couldn’t load key data — {loadError}
       </p>
-    </div>
+    </Card>
   );
   if (!rec) return null;
 
@@ -192,86 +192,51 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
     { name: rec.emergency_contact_2_name, phone: rec.emergency_contact_2_phone, rel: rec.emergency_contact_2_relationship },
   ].filter(c => c.name || c.phone);
 
+  const none = <span className="text-gray-400">—</span>;
   return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <h3 className="text-sm font-medium text-gray-900">Personal &amp; key data</h3>
-        {!editing && (
-          <button onClick={() => setEditing(true)} className="text-xs text-ooosh-600 hover:underline">Edit</button>
-        )}
-      </div>
-      <p className="text-xs text-gray-500 mb-3">
-        Payroll and legal record. Admin only — {personName.split(' ')[0]} cannot see this.
-      </p>
+    <Card title="Personal and key data"
+      subtitle={`Payroll and legal record. Admin only — ${personName.split(' ')[0]} cannot see this.`}
+      action={!editing && <button onClick={() => setEditing(true)} className={btnSecondary}>Edit</button>}>
 
       {!editing ? (
-        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-sm">
+        <dl className="grid grid-cols-1 lg:grid-cols-2 gap-x-10">
           <div>
-            <dt className="text-xs text-gray-500">NI number</dt>
-            <dd className="text-gray-900">
+            <InfoRow label="NI number">
               {rec.has_ni_number ? (
                 revealed ? (
                   <span className="font-mono">{revealed}</span>
                 ) : (
                   <button onClick={() => void reveal()} disabled={revealing}
-                    className="text-ooosh-600 hover:underline disabled:opacity-40">
-                    {revealing ? 'Reading…' : 'Show'}
+                    className="text-sm font-medium text-ooosh-700 hover:underline disabled:opacity-40">
+                    {revealing ? 'Reading…' : 'Recorded — show'}
                   </button>
                 )
-              ) : <span className="text-amber-700">Not recorded</span>}
-            </dd>
+              ) : <Pill tone="warn">Not recorded</Pill>}
+            </InfoRow>
+            <InfoRow label="Right to work">
+              {rec.rtw_document_type || <Pill tone="bad">Not checked</Pill>}
+            </InfoRow>
+            <InfoRow label="Checked on">{rec.rtw_checked_on ? fmtDate(rec.rtw_checked_on) : none}</InfoRow>
+            <InfoRow label="Permission expires">
+              {rec.rtw_expires_on ? fmtDate(rec.rtw_expires_on) : <span className="text-gray-500">No limit</span>}
+            </InfoRow>
           </div>
           <div>
-            <dt className="text-xs text-gray-500">Right to work</dt>
-            <dd className="text-gray-900">
-              {rec.rtw_document_type || <span className="text-amber-700">Not checked</span>}
-            </dd>
+            <InfoRow label="Phone">{[rec.mobile, rec.phone].filter(Boolean).join(' · ') || none}</InfoRow>
+            <InfoRow label="Date of birth">{rec.date_of_birth ? fmtDate(rec.date_of_birth) : none}</InfoRow>
+            <InfoRow label="Marital status">{rec.marital_status || none}</InfoRow>
+            <InfoRow label="Home address">
+              <span className="whitespace-pre-line">{rec.home_address || none}</span>
+            </InfoRow>
+            <InfoRow label="Emergency contact">
+              {emergency.length === 0 ? <Pill tone="warn">Not recorded</Pill> : emergency.map((c, i) => (
+                <span key={i} className="block">
+                  {c.name || '—'}{c.rel && <span className="text-gray-500"> ({c.rel})</span>}
+                  {c.phone && <span className="text-gray-600"> · {c.phone}</span>}
+                </span>
+              ))}
+            </InfoRow>
           </div>
-          <div>
-            <dt className="text-xs text-gray-500">Checked on</dt>
-            <dd className="text-gray-900">{fmtDate(rec.rtw_checked_on)}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-gray-500">Permission expires</dt>
-            <dd className="text-gray-900">
-              {rec.rtw_expires_on ? fmtDate(rec.rtw_expires_on) : <span className="text-gray-400">No limit</span>}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-gray-500">Phone</dt>
-            <dd className="text-gray-900">
-              {[rec.mobile, rec.phone].filter(Boolean).join(' · ') || <span className="text-gray-400">—</span>}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-gray-500">Date of birth</dt>
-            <dd className="text-gray-900">
-              {rec.date_of_birth ? fmtDate(rec.date_of_birth) : <span className="text-gray-400">—</span>}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-gray-500">Marital status</dt>
-            <dd className="text-gray-900">{rec.marital_status || <span className="text-gray-400">—</span>}</dd>
-          </div>
-          <div className="col-span-2 sm:col-span-4">
-            <dt className="text-xs text-gray-500">Home address</dt>
-            <dd className="text-gray-900 whitespace-pre-line">
-              {rec.home_address || <span className="text-gray-400">—</span>}
-            </dd>
-          </div>
-          {emergency.length > 0 && (
-            <div className="col-span-2 sm:col-span-4">
-              <dt className="text-xs text-gray-500">Emergency contact</dt>
-              <dd className="text-gray-900">
-                {emergency.map((c, i) => (
-                  <span key={i} className="mr-3">
-                    {c.name || '—'}{c.rel && <span className="text-gray-500"> ({c.rel})</span>}
-                    {c.phone && <span className="text-gray-600"> · {c.phone}</span>}
-                  </span>
-                ))}
-              </dd>
-            </div>
-          )}
         </dl>
       ) : (
         <div className="space-y-3">
@@ -355,12 +320,10 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
           </div>
 
           <div className="flex items-center gap-3">
-            <button onClick={() => void save()} disabled={saving}
-              className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
+            <button onClick={() => void save()} disabled={saving} className={btnPrimary}>
               {saving ? 'Saving…' : 'Save key data'}
             </button>
-            <button onClick={() => { setEditing(false); setNi(''); }}
-              className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+            <button onClick={() => { setEditing(false); setNi(''); }} className={btnQuiet}>Cancel</button>
             {rec.has_ni_number && (
               <button onClick={() => void clearNi()} disabled={saving}
                 className="text-xs text-red-600 hover:text-red-800 ml-auto disabled:opacity-40">
@@ -370,6 +333,6 @@ export default function StaffKeyData({ personId, personName, onSaved, onError }:
           </div>
         </div>
       )}
-    </div>
+    </Card>
   );
 }

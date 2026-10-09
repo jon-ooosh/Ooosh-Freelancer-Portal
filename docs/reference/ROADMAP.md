@@ -24,7 +24,8 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | 1 | Vehicle module integration | Mostly complete | `VEHICLES-AND-FLEET.md` |
 | 1b | Vehicle maintenance & compliance | Phases A/C/D/E complete; F (turnaround schedule) in progress; B (AI extraction) deferred | `VEHICLES-AND-FLEET.md` |
 | 2 | Driver hire forms & excess | Live since Apr 2026. Verification cockpit, document validity, identity review, referral gate all shipped. Phase 4 (document extraction) next, not built | `DRIVERS-AND-HIRE-FORMS.md` |
-| 3 | Money system | Phases A–F largely shipped — Money tab, excess lifecycle, pre-auth, top-N reconciliation, VAT adjustment, payment-portal repointing, OP-initiated refunds | `MONEY-AND-EXCESS.md` |
+| 3 | Money system | Phases A–F largely shipped — Money tab, excess lifecycle, pre-auth, top-N reconciliation, VAT adjustment, payment-portal repointing, OP-initiated refunds. **Oct 2026:** PayPal via Stripe, portal redesign + hash lockdown, portal link in OP, **Wise incoming-payment matcher (live, awaiting its first real email)** | `MONEY-AND-EXCESS.md` ("Payments, Oct 2026") |
+| 3b | Stripe Terminal — in-person card payments driven from OP, replacing Worldpay/Amex | **Planned** (6 Oct 2026). Reader on order; crossover deadline March 2027. Pre-auth viability depends on the account's merchant category | `docs/STRIPE-TERMINAL-SPEC.md` |
 | 4 | Status transition engine | Mostly complete — bidirectional HireHop sync live | `PIPELINE-AND-ORGS.md` |
 | 4b | Returns & close-out | Phases A–D mostly complete | `RETURNS-AND-CANCELLATIONS.md` |
 | 4c | Cancellation system | Foundation complete; combine-bookings shipped | `RETURNS-AND-CANCELLATIONS.md` |
@@ -37,7 +38,8 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | — | External tools (PCN, staging calculator, backline matcher, leads, auto-chase) | All integrated into OP | `INTEGRATIONS.md` |
 | — | Freelancer onboarding | Phases A–C shipped; D next | `INTEGRATIONS.md` |
 | — | Staff documents & training | Live | `INTEGRATIONS.md` |
-| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **Phases A–E live** (Sep 2026) — patterns, ledger, leave, overtime bank, payroll export, absence, freelancer days, company days; Me area redesigned. **Staff using it from Oct 2026** (earlier than the 1 Jan plan — 2026 history is being backfilled from BrightHR, see spec §14). F (coverage, iCal) and working location remain, post-go-live | `docs/STAFF-CALENDAR-SPEC.md` §18 |
+| — | Possible insurance claims (replaces the broker's Word form) | **Closed, Oct 2026** — case file, client form, reminders, GPS trace, SMS all live; video and retention not built | `docs/INCIDENT-CLAIMS-SPEC.md` (§22 troubleshooting) |
+| 11 | Staff calendar & time (holiday, TOIL, absence, freelancer day bookings) | **LIVE, staff using it from Oct 2026 — expected complete.** Patterns, ledger, leave, overtime bank, payroll export (emailed on the 1st), absence, freelancer days, company days, working from home, personal calendar feed, days in lieu for company days, manual balance adjustments, **freelancer tasks (yard days + sitter evenings, prep link, Give to a freelancer — all phases, Oct 2026, spec §21)**; Me area and every Staff page tab redesigned; 2026 backfilled from BrightHR. Only cover intelligence (Phase F) is deliberately left, see spec §16 | `docs/STAFF-CALENDAR-SPEC.md` §18 |
 
 **Monday.com is fully retired** (Jul 2026). Some fallback code and unused env vars
 remain in the portal repos and can be swept.
@@ -46,6 +48,13 @@ remain in the portal repos and can be swept.
 
 Roughly 100 unchecked items remain across the reference docs. The ones most likely
 to come up:
+
+**Watching (Oct 2026)**
+- **Security audit (Oct 2026)** — `authenticate` was accepting public, kiosk and freelancer tokens (fixed 8 Oct, plus `javascript:` return links on the freelancer pages). A full audit is planned; the known open goals are in `docs/SECURITY-AUDIT-BRIEF.md` §B (one secret for every token family, portal-secret fallback, freelancer-role logins on `authenticate`-only routers, Socket.io token check, file-download prefixes).
+- **Wise matcher** — live since 6 Oct, no real email processed yet. First one decides: auto-recorded (check HireHop deposit + client email), queued (info@ email + Money overview panel), or nothing (`journalctl … | grep wise-incoming`). Then switch off the jon@ → info@ auto-forward.
+- **Portal: bare `?jobId=` links no longer work** — anyone still using one needs the Money-tab link.
+- Vehicles module `useAuth.tsx` still carries a dead `hubToken` exchange (Staff Hub retired) — tidy-up.
+- Portal "Half now" option rounds to whole pounds (pre-existing logic, now visibly odd next to penny figures).
 
 **Known bugs / gaps**
 - Portal shared files don't reach the portal UI (flag persists, endpoint returns them, the Next.js page expects the Monday-era shape).
@@ -65,7 +74,7 @@ to come up:
 - Interim assessment PDF on the swapped-out van.
 
 **Not started**
-- Staff calendar **Phase F** (coverage intelligence, personal iCal) and **working location** (§19) — both post-go-live, and working location must NOT land before the Oct–Dec parallel run or it moves what "In" means mid-comparison. Phases A–E, D0, D0.1 and company days (§20) are all LIVE; the next thing to build is the freelancer offer email, §9.4, signed off 17 Sep 2026. See `docs/STAFF-CALENDAR-SPEC.md` §18 for the build log, the decisions that changed the spec, and the bugs worth not repeating.
+- Staff calendar — **everything planned has shipped** (Oct 2026: working from home, the personal calendar feed, the payroll email, days in lieu for company days and the Staff page restyle closed it). Open with jon, not code: an HR-advisor check on the lieu-day policy (spec §20.5b); compare Chris's and Matt's BrightHR TOIL balances for any more 2025 carry-over (add with the balance panel's adjustment form). Left on purpose, each shaped in `docs/STAFF-CALENDAR-SPEC.md` §16: **cover intelligence** (Phase F — wants a season of real data; jon to fill in `staff.min_headcount_by_weekday` first), on-site / travelling locations, half-day WFH, a team feed. §18 "Where it stands" is the handover.
 - Sub-hires module (`job_subhires`).
 - Global operations dashboard widgets (transport, crew, deliveries, carnets, lost property, rehearsals, payments).
 - Initial card collection from OP (PaymentIntent create) — staff still walk to the terminal.

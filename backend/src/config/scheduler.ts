@@ -13,6 +13,7 @@ import { sendOohReminderEmails } from '../services/ooh-return';
 import { runOohApproachScan } from '../services/ooh-sms-approach';
 import { cascadeJobClose } from '../services/job-close-cascade';
 import { closeJobRequirements } from '../services/requirement-close-sweep';
+import { ukToday } from '../services/uk-date';
 
 /**
  * Starts the backup and sync schedulers.
@@ -672,18 +673,19 @@ export function startScheduler() {
   // migration 102) guarantee at most ONE email per transition.
   cron.schedule('*/15 * * * *', async () => {
     try {
-      const { runDispatchSanityScan, runReturnedBookedOutScan, runBookedOutNoTimestampScan, runFreelancerLegStalledScan, runStuckOnHireScan, runBookedSplitScan } = await import('../services/sanity-check-scanner');
-      const [dispatch, returned, noTs, stalledLeg, stuckOnHire, bookedSplit] = await Promise.all([
+      const { runDispatchSanityScan, runReturnedBookedOutScan, runBookedOutNoTimestampScan, runFreelancerLegStalledScan, runStuckOnHireScan, runBookedSplitScan, runDoubleHeldExcessScan } = await import('../services/sanity-check-scanner');
+      const [dispatch, returned, noTs, stalledLeg, stuckOnHire, bookedSplit, doubleHeld] = await Promise.all([
         runDispatchSanityScan(),
         runReturnedBookedOutScan(),
         runBookedOutNoTimestampScan(),
         runFreelancerLegStalledScan(),
         runStuckOnHireScan(),
         runBookedSplitScan(),
+        runDoubleHeldExcessScan(),
       ]);
-      if (dispatch.warned > 0 || returned.warned > 0 || noTs.warned > 0 || stalledLeg.warned > 0 || stuckOnHire.warned > 0 || bookedSplit.warned > 0) {
+      if (dispatch.warned > 0 || returned.warned > 0 || noTs.warned > 0 || stalledLeg.warned > 0 || stuckOnHire.warned > 0 || bookedSplit.warned > 0 || doubleHeld.warned > 0) {
         console.log(
-          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}, booked_out-no-ts ${noTs.warned}/${noTs.checked}, stalled-leg ${stalledLeg.warned}/${stalledLeg.checked}, stuck-on-hire ${stuckOnHire.warned}/${stuckOnHire.checked}, booked-split ${bookedSplit.warned}/${bookedSplit.checked}`
+          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}, booked_out-no-ts ${noTs.warned}/${noTs.checked}, stalled-leg ${stalledLeg.warned}/${stalledLeg.checked}, stuck-on-hire ${stuckOnHire.warned}/${stuckOnHire.checked}, booked-split ${bookedSplit.warned}/${bookedSplit.checked}, double-held-excess ${doubleHeld.warned}/${doubleHeld.checked}`
         );
       }
     } catch (err) {
@@ -978,7 +980,7 @@ export function startScheduler() {
       // no separate sent_at column. Wrapped in its own try/catch so a
       // future schema drift here doesn't tank the whole cron run silently
       // (which is exactly what bit us on the first scheduled run).
-      const today = new Date().toISOString().slice(0, 10);
+      const today = ukToday();
       const sentJobNumbers = new Set<number>();
       try {
         const sentResult = await query(
@@ -1073,7 +1075,7 @@ export function startScheduler() {
       const { runStaffTimeDigest } = await import('../services/staff-notifications');
       const r = await runStaffTimeDigest();
       if (r.emailed) {
-        console.log(`Scheduler: Staff time digest sent — ${r.pendingLeave} leave, ${r.pendingOvertime} overtime`);
+        console.log(`Scheduler: Staff time digest sent — ${r.pendingLeave} leave, ${r.pendingOvertime} overtime, ${r.pendingWfh ?? 0} home`);
       } else {
         console.log(`Scheduler: Staff time digest not sent (${r.skippedReason})`);
       }
@@ -1113,7 +1115,7 @@ export function startScheduler() {
   console.log('Scheduler: Holiday entitlement sync scheduled daily at 06:05 Europe/London');
 
   // ── Year-end overtime cash-out REMINDER (spec §6.3, §17.2) ────────────────
-  // Daily at 09:55 Europe/London; no-ops outside December and January.
+  // Daily at 09:55 Europe/London; sends once, on 2 January (spec §17.2), no-ops otherwise.
   //
   // It REMINDS, it does not sweep. Paying out seven people's banked overtime
   // is money out the door, and the platform rule is that a recomputed figure
@@ -1132,7 +1134,28 @@ export function startScheduler() {
       console.error('Scheduler: Year-end cash-out reminder failed:', err);
     }
   }, { timezone: 'Europe/London' });
-  console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (December + January)');
+  console.log('Scheduler: Year-end cash-out reminder scheduled daily at 09:55 Europe/London (sends 2 January)');
+
+  // ── Monthly payroll report (spec §12.1) ───────────────────────────────────
+  // Daily at 08:20 Europe/London; emails LAST month's payroll changes (with the
+  // CSV) to the staff admins once, from the 1st — payroll goes in before the
+  // 4th. Daily rather than a cron on the 1st so a server down that morning
+  // still sends on the 2nd; `staff.payroll_report_sent_month` stops a repeat
+  // and is stamped only on a successful send.
+  cron.schedule('20 8 * * *', async () => {
+    try {
+      const { runPayrollReportEmail } = await import('../services/staff-notifications');
+      const r = await runPayrollReportEmail();
+      if (r.sent) {
+        console.log(`Scheduler: Payroll report for ${r.month} sent — ${r.people} people`);
+      } else if (r.skippedReason !== 'already sent for this month') {
+        console.log(`Scheduler: Payroll report for ${r.month} not sent (${r.skippedReason})`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Payroll report failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Payroll report scheduled daily at 08:20 Europe/London (sends once a month, from the 1st)');
 
   // ── Company days for next year (spec §20.4) ───────────────────────────────
   // Daily at 09:58 Europe/London; no-ops outside the configured review month
@@ -1284,6 +1307,22 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Studio lock-up chase scheduled daily at 08:45 Europe/London');
+
+  // ── Sitter task summary (STAFF-CALENDAR-SPEC §21) ─────────────────────────
+  // Daily at 16:00 Europe/London. Tonight's studio sitter gets ONE email
+  // listing their tasks — only if there are open tasks and something changed
+  // since they were last told. No tasks, no email. Changes after 16:00 are not
+  // chased; they show on the portal. See services/freelancer-tasks.ts.
+  cron.schedule('0 16 * * *', async () => {
+    try {
+      const { runSitterTaskDigest } = await import('../services/freelancer-tasks');
+      const n = await runSitterTaskDigest();
+      if (n) console.log(`Scheduler: Sitter task summary — ${n} sent`);
+    } catch (err) {
+      console.error('Scheduler: Sitter task summary failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Sitter task summary scheduled daily at 16:00 Europe/London');
 
   // ── Holding reminders (lost-property chase digest + temp hold-until) ──────
   // Daily at 09:25 Europe/London. Assembles a staff nudge for chases due (the

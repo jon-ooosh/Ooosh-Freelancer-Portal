@@ -506,6 +506,12 @@ export function VehiclesPage() {
   const [searchParams] = useSearchParams()
   const statusHighlight = searchParams.get('status') // e.g. "on-hire"
   const { vehicles, allVehicles, filters, setFilters, isLoading, isError, error, refetch } = useFilteredVehicles()
+  // "For sale" pill — vans with an open sale (docs/VEHICLE-SALES-SPEC.md). Kept
+  // out of useFilteredVehicles because the sale list is a separate query the
+  // hook doesn't know about; exclusive with the other pills, like they are
+  // with each other.
+  const openSales = useOpenSalesByVehicle()
+  const [forSaleOnly, setForSaleOnly] = useState(false)
   const { data: allocations } = useAllocations()
   const allocatedVehicleIds = useMemo(
     () => new Set((allocations || []).map(a => a.vehicleId)),
@@ -552,7 +558,7 @@ export function VehiclesPage() {
     }
   }, []) // Only on mount — don't re-run as filters change
 
-  const sortedVehicles = vehicles
+  const sortedVehicles = forSaleOnly ? vehicles.filter(v => openSales.has(v.id)) : vehicles
 
   return (
     <div className="space-y-4">
@@ -562,7 +568,7 @@ export function VehiclesPage() {
           Vehicles
           {!isLoading && (
             <span className="ml-2 text-sm font-normal text-gray-400">
-              {vehicles.length}{filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold ? ` / ${allVehicles.length}` : ''}
+              {sortedVehicles.length}{filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold || forSaleOnly ? ` / ${allVehicles.length}` : ''}
             </span>
           )}
         </h2>
@@ -635,9 +641,9 @@ export function VehiclesPage() {
       {/* Type filter pills */}
       <div className="flex flex-wrap gap-2">
         <button
-          onClick={() => setFilters(f => ({ ...f, simpleType: null, hireStatus: null, showOldSold: false }))}
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({ ...f, simpleType: null, hireStatus: null, showOldSold: false })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-            !filters.simpleType && !filters.hireStatus && !filters.showOldSold
+            !filters.simpleType && !filters.hireStatus && !filters.showOldSold && !forSaleOnly
               ? 'bg-ooosh-navy text-white'
               : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
           }`}
@@ -647,12 +653,12 @@ export function VehiclesPage() {
         {VEHICLE_TYPES.map(type => (
           <button
             key={type}
-            onClick={() => setFilters(f => ({
+            onClick={() => { setForSaleOnly(false); setFilters(f => ({
               ...f,
               simpleType: f.simpleType === type ? null : type,
               hireStatus: null,
               showOldSold: false,
-            }))}
+            })) }}
             className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
               filters.simpleType === type
                 ? 'bg-ooosh-navy text-white'
@@ -668,12 +674,12 @@ export function VehiclesPage() {
 
         {/* Status filter pills */}
         <button
-          onClick={() => setFilters(f => ({
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({
             ...f,
             hireStatus: f.hireStatus === 'On Hire' ? null : 'On Hire',
             simpleType: null,
             showOldSold: false,
-          }))}
+          })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
             filters.hireStatus === 'On Hire'
               ? 'bg-blue-600 text-white'
@@ -683,12 +689,12 @@ export function VehiclesPage() {
           On Hire
         </button>
         <button
-          onClick={() => setFilters(f => ({
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({
             ...f,
             hireStatus: f.hireStatus === 'Available' ? null : 'Available',
             simpleType: null,
             showOldSold: false,
-          }))}
+          })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
             filters.hireStatus === 'Available'
               ? 'bg-green-600 text-white'
@@ -698,12 +704,12 @@ export function VehiclesPage() {
           Ready
         </button>
         <button
-          onClick={() => setFilters(f => ({
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({
             ...f,
             hireStatus: f.hireStatus === 'Prep Needed' ? null : 'Prep Needed',
             simpleType: null,
             showOldSold: false,
-          }))}
+          })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
             filters.hireStatus === 'Prep Needed'
               ? 'bg-amber-600 text-white'
@@ -714,12 +720,12 @@ export function VehiclesPage() {
         </button>
 
         <button
-          onClick={() => setFilters(f => ({
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({
             ...f,
             simpleType: null,
             hireStatus: null,
             showOldSold: !f.showOldSold,
-          }))}
+          })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
             filters.showOldSold
               ? 'bg-ooosh-navy text-white'
@@ -727,6 +733,19 @@ export function VehiclesPage() {
           }`}
         >
           Old &amp; Sold
+        </button>
+        <button
+          onClick={() => {
+            setForSaleOnly(v => !v)
+            setFilters(f => ({ ...f, simpleType: null, hireStatus: null, showOldSold: false }))
+          }}
+          className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+            forSaleOnly
+              ? 'bg-indigo-600 text-white'
+              : 'bg-indigo-100 text-indigo-700 hover:opacity-80'
+          }`}
+        >
+          For Sale
         </button>
       </div>
 
@@ -764,7 +783,7 @@ export function VehiclesPage() {
       {!isLoading && !isError && (
         sortedVehicles.length === 0 ? (
           <div className="rounded-lg border border-gray-200 bg-white p-6 text-center text-sm text-gray-400">
-            {filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold
+            {filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold || forSaleOnly
               ? 'No vehicles match your filters'
               : 'No vehicles found'}
           </div>

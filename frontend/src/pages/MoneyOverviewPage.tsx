@@ -11,6 +11,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import IncomingPaymentsPanel from '../components/IncomingPaymentsPanel';
 
 interface BalanceRow {
   job_id: string; hh_job_number: number | null; job_name: string | null;
@@ -975,6 +976,9 @@ export default function MoneyOverviewPage() {
       <p className="text-xs text-gray-500 mb-4">
         Cached per-job figures — each job refreshes when its Money tab is opened. Excess and pending refunds are live; overpaid invoices are cached.
       </p>
+
+      {/* Wise incoming payments that need a human (see services/wise-incoming.ts) */}
+      <IncomingPaymentsPanel />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {cards.map((c) => (

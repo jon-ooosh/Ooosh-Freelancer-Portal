@@ -1,8 +1,11 @@
 # Staff Calendar & Time Module — Spec
 
-**Status (15 Sep 2026): Phases A, B1, B2 and C are BUILT, deployed and in use.**
-Phases D, E and F remain. See §18 for exactly what is done, what changed during
-the build, and what is left.
+**Status (7 Oct 2026): BUILT and LIVE — staff are using it from October 2026.**
+Phases A–E, company days (§20), working from home (§19), the personal calendar
+feed (§10) and the monthly payroll email (§12.1) have all shipped; 2026 history
+is backfilled from BrightHR. This is expected to be the module's last chunk.
+**§18 "Where it stands" is the handover**: what is built, what was deliberately
+not built, and where to start if something needs picking up.
 
 Fleshes out `docs/SPEC.md` §3.9 "Staff & HR Management", which was written in
 Phase 1, scheduled into Phase 3, and then dropped out of `ROADMAP.md` entirely.
@@ -852,7 +855,8 @@ the moment you are looking at the week and seeing a thin day.
 - **One live booking per person per day** (unique index). Two stints in a day
   is one booking with the wider window and a note — the same call the leave
   design made, and for the same reason.
-- `freelancer_day_booking_tasks` (§3.8) is **not built**. Per-booking task
+- `freelancer_day_booking_tasks` (§3.8) is **not built** — superseded by
+  `freelancer_tasks`, planned in §21 (Oct 2026). Per-booking task
   breakdown does not help answer "are there enough people in", which is what
   this is for; the booking's note covers "what are they doing" for now.
 
@@ -1038,16 +1042,43 @@ A booked freelancer with a van-prep task deep-links into the existing prep flow.
 | Dashboard strip | dashboard section `WhosIn` | All staff. Compact: today's names + status pips, plus a 7-day mini heat row. |
 | Avatar menu | `Layout.tsx` | "My Time" for everyone; "Staff Calendar" (admin) alongside it. |
 | Freelancer portal | `src/app/day/[date]` | Booked freelancers. |
-| iCal | `GET /staff/ical/:token.ics` | Personal feed only. |
+| iCal | `GET /api/staff-calendar-feed/:token.ics` | Personal feed only — BUILT Oct 2026, see below. |
 
 **The dashboard gets a strip, not a month grid.** The dashboard is already dense and has
 user-ordered sections; a full calendar belongs at its own route. Registered via
 `dashboard/v2/registry.ts` per PLATFORM-CONVENTIONS §"Dashboard extension points", with
 aggregate data added to `GET /api/dashboard/operations` in a backwards-compatible shape.
 
-**iCal:** per-user revocable token in `users.preferences.ical_token`. The feed contains
-the person's own entries in full plus the team's in/out with no types or reasons. No team
-export (§1, out of scope).
+**iCal — AS BUILT (Oct 2026, migration 270).** This replaces the paragraph that
+was here, which put the token in `users.preferences` and included the team's
+in/out. jon's decisions:
+
+- **The person's OWN time only.** Approved and requested (labelled "Requested:")
+  time off, home days (pattern and approved one-offs, plus requested ones), and
+  company days. **Nobody else's time** — a calendar app syncs and shares well
+  beyond this platform, and "who else is off" is looked up in OP behind a login.
+- **No overtime** — it is not a day off. A day taken FROM banked overtime is
+  TOIL and does appear. **No absence** either: sickness is recorded for
+  somebody, and its type is special-category.
+- **Token**: `staff_calendar_feeds (person_id PK, token UNIQUE, created_at,
+  last_fetched_at)`, 32 random characters. "Make a new link" replaces it and the
+  old URL dies at once. Only resolves while the person is `employed`.
+- **Window**: 3 months back to 12 months ahead. Whole-day leave is one event per
+  request; part days are per-day events (timed leave as a floating-local-time
+  event). Home days are grouped into runs and marked free (`TRANSPARENT`).
+- **Where**: `services/staff-ical.ts` decides the contents (THE definition);
+  `routes/staff-calendar-feed.ts` is the public route (rate-limited, no JWT);
+  `GET /staff-calendar/me/calendar-feed` and `POST …/reset` are the signed-in
+  half, always the CALLER's own — there is deliberately no `personId`, admin or
+  not, because the link is a credential. The card is at the foot of My Time.
+- **Refresh**: Apple honours the 6-hour hint; Google polls on its own clock,
+  sometimes only daily. Nothing we can do about Google.
+- Tested on Android by jon; iPhone is first tested by colleagues after go-live.
+  If an iPhone will not subscribe, check the `webcal://` button first, then the
+  Settings › Calendar › Accounts › Add Subscribed Calendar route with the
+  pasted `https://` link.
+
+No team export (§1, out of scope; §16).
 
 ---
 
@@ -1099,6 +1130,16 @@ immutable ledger.
 
 A scheduler task on the 1st of each month notifies admin that the previous month's report
 is ready.
+
+**AS BUILT (Oct 2026):** `runPayrollReportEmail()` (`staff-notifications.ts`),
+daily at 08:20 Europe/London. From the 1st it EMAILS every admin last month's
+figures — a table in the body and the CSV attached (`staff_payroll_report`
+template) — plus a bell, because jon submits to the payroll company before the
+4th. It stamps `staff.payroll_report_sent_month` (`YYYY-MM`) only after at least
+one send succeeded, so a failed day retries the next morning; clear the setting
+to make it send again. Figures come from `getPayrollReport()` in
+`staff-overtime.ts` — never a second SUM. The Payroll report panel on the Staff
+page has "This month", "Last month" and "Year so far" presets.
 
 ### 12.2 Other reports
 
@@ -1183,7 +1224,18 @@ needs a season of real data to calibrate against, so it is correctly last.
   consents, one approval, any leg unwindable. Admin creates both sides in v1. Revisit if
   it happens more than monthly.
 - **Team iCal export.** A team feed in a personal Google account exports colleagues'
-  absence data outside the company and cannot be recalled.
+  absence data outside the company and cannot be recalled. The personal feed
+  that DID ship (§10) carries the person's own time only.
+- **Cover intelligence** (Phase F). What exists: `staff.min_headcount_by_weekday`
+  (empty by default, so nothing fires until jon fills it in under Settings),
+  which the approval impact checks against people IN THE BUILDING. Not built: a
+  view across weeks of where cover is thin, operational load (jobs out, preps
+  due) weighed against who is in, or suggesting who could cover. Wants a season
+  of real data first.
+- **Working-location detail beyond home** — `on_site` / `travelling` and a
+  note ("at Brighton Dome all day"), proposed in §19.2. Cut by jon to two states:
+  in the building, or working but not here.
+- **Half-day working from home.** Whole days only (jon, Oct 2026).
 - **SSP calculation.** We flag qualifying days; the accountants compute. Building SSP
   logic means owning its correctness, which is not worth it for 7 people.
 - **Carry-over.** Entry type reserved, no UI. Policy is that nothing carries over.
@@ -1278,14 +1330,46 @@ more than the tick.
 *Written 15 Sep 2026. Phases D, D0, D0.1, §20 and E appended over the following
 two days, each after jon used the previous one in production and fed back.*
 
-**HANDING OVER — read this first.** Every phase A–E has SHIPPED and is running
-on `staff.oooshtours.co.uk`. The module is in use by jon alone, testing ahead of
-the Oct–Dec parallel run, so live data is his test data and there is no staff
-rollout yet. What is left is listed under **Still to build** below; the next
-thing to build is the freelancer OFFER EMAIL (§9.4), which jon signed off on
-17 Sep 2026 along with three items that must ship WITH it — a way to close out a
-passed unanswered offer, an amend endpoint (there is none at all today), and
-separating "pulled out after accepting" from "declined". §9.4 items 5–7.
+**WHERE IT STANDS (2 Oct 2026) — read this first.** Everything planned for go-live
+has SHIPPED and staff are using it on `staff.oooshtours.co.uk` from October
+2026, with 2026 holiday and overtime backfilled from BrightHR. The last chunk
+(working from home, the personal calendar feed, the payroll email) is expected
+to close the module. Nothing is half-built. What is deliberately NOT built is
+in §16 and under **Still to build** below — each with enough shape to pick up
+cold. If something misbehaves, start with `.claude/rules/staff-calendar.md`,
+then the "Bugs found" list below; the module's facts each have ONE definition
+(the table at the top of that rules file).
+
+**Since then (7 Oct 2026).** Staff queried their figures against BrightHR. Two
+causes, both data rather than code, and worth knowing before the next query:
+
+- **A contract allowance above 5.6 weeks was never entered.** Will is on 33 days
+  (6.6 weeks); the import test assumed it, production did not have it. Set on
+  Employment › Edit; the entitlement sync posts only the difference.
+- **BrightHR's overtime totals are all-time, not per year.** The import carried
+  2026 only, so 2025 overtime still owed at the switchover was missing (Rich 3h,
+  Will 10h 30m). Added with the balance panel's manual adjustment, dated 1 Jan
+  2026, note "brought across from BrightHR". If another queries their TOIL,
+  compare BrightHR's TOIL balance with OP's bank: the known, accepted gaps are
+  Louis and Matt (+3h each in OP — whole TOIL days at 7h not 8h) and Chris
+  (+4h 40m in OP — BrightHR took his June payout partly from 2025 time).
+
+Then built: manual adjustments (shown to the person), days in lieu for company
+days (§20.5b), and every Staff page tab restyled on `components/StaffCard.tsx`.
+
+Where things are, for troubleshooting:
+
+| Area | Code |
+|---|---|
+| Is somebody in / home / off on a date | `services/staff-day-status.ts` (`getStaffCalendar`, the merge layers) |
+| Working from home | `services/staff-wfh.ts`, routes `/staff-calendar/wfh*` |
+| Personal calendar feed | `services/staff-ical.ts`, `routes/staff-calendar-feed.ts` |
+| Your working hours (My Time card) | `GET /staff-calendar/me/patterns` — current pattern + scheduled changes, days and times only; never notes, breaks or history (jon, Oct 2026). Pattern notes are also stripped from `/employees/:id/patterns` for a non-admin reading their own |
+| Emails and bells (requests, decisions, digest, cash-out, payroll) | `services/staff-notifications.ts` |
+| Balances | `services/staff-balance.ts` — the only SUM of the ledger |
+| Manual adjustments | Staff › Employment › balance panel (`StaffBalancePanel.tsx` `AdjustmentForm`) → `POST /employees/:id/ledger`, source `manual` |
+| Days in lieu for company days | `staff-company-days.ts` `syncCompanyDayLieu()`, run from `syncEntitlement()`, source `company_day_lieu` |
+| Screens | `MyTimePage.tsx` (also the Staff page's Time off tab), `StaffCalendarPage.tsx`, `StaffAdminPage.tsx`, `LeaveApprovals.tsx`, `PayrollReportPanel.tsx` |
 
 ### Shipped
 
@@ -1306,6 +1390,14 @@ separating "pulled out after accepting" from "declined". §9.4 items 5–7.
 | **E.2** | The offer CHASE (§9.4) — one nudge to them, the day-before alert to admin, and `lapsed` so a passed unanswered offer can be closed out | 227 |
 | **E.3** | AMEND without cancel-and-rebook, and `withdrew` as distinct from `declined` (§9.4 items 6–7) | 228 |
 | **E.4** | The PORTAL view (§9.3) — yard days on the freelancer dashboard, accept / decline while logged in | — |
+| — | Me area redesign (My Time, To Do, Documents, Profile); overtime checked against contracted hours and the clock; past-midnight overtime as one entry | — |
+| — | Going live early: 2026 BrightHR backfill (151 rows; the importer then removed), the Staff page's Time off tab, decision emails, team calendar redraw ("Off" one colour, "Requested" dashed), cash-out reminder moved to 2 January | — |
+| **§19** | Working from home — one-off requests approved like holiday, regular days on the pattern, two-number headcount, on-site filter, cover counts the building | 269 |
+| **§10** | Personal read-only calendar feed — own time only | 270 |
+| **§12.1** | Payroll report emailed on the 1st; date presets on the panel | — |
+| — | Staff page restyle: every person tab (Overview, Employment, Time off, Records, Reviews, Access) in the Time off look, on shared `components/StaffCard.tsx`; Employment's allowance-days box fixed | — |
+| **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
+| — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
 
 ### Decisions taken during the build that CHANGE this spec
 
@@ -1670,13 +1762,13 @@ with 222; the offer email, the reply page, the chase, close-out, amend and
   anything already answered, so pulling out is a phone call and staff record it.
   Deliberate for now; revisit with the portal, where they will be logged in.
 
-**Phase F — coverage intelligence and personal iCal** (§10, §16). Post-go-live,
-and it wants a season of real data to calibrate against.
+**Phase F — coverage intelligence** (§16). Post-go-live, and it wants a season
+of real data to calibrate against. The personal iCal half of Phase F SHIPPED
+(§10).
 
-**Working location** (§19) — agreed in principle with jon, including that the
-headcount shows two numbers and collapses to one when they match, and that the
-calendar needs a location filter. Phase F; must NOT land before the parallel
-run, because moving what "In" means mid-run muddies the comparison.
+**Working location** (§19) — SHIPPED Oct 2026 as working from home only. The
+"not before the parallel run" caution below §19.4 was overtaken by going live
+early: there is no parallel run to muddy.
 
 **Carried over:**
 - ~~Absence retention~~ — **SHIPPED**: `runAbsenceDetailPurge()`
@@ -1703,7 +1795,10 @@ are live. Holiday and overtime-as-time-off already taken in 2026, and overtime
 earned, are backfilled as ordinary approved records (so "where did it go?" is
 answerable on My Time), without notifications, and then each person's figure is
 reconciled against what BrightHR says is left. Sickness is not imported —
-BrightHR never tracked it. Prerequisite: each person's start date and working
+BrightHR never tracked it. DONE 2 Oct 2026 (151 rows, every holiday balance
+matching BrightHR); the one-off import page and endpoint were then REMOVED —
+an admin route that writes the ledger has no business staying live unused.
+It is in git history (PR #1352) if a second backfill is ever needed. Prerequisite: each person's start date and working
 pattern must cover 1 Jan 2026, or the 2026 allowance is pro-rated from whenever
 the record was typed in and the backfilled days are refused as not contracted.
 
@@ -1746,10 +1841,49 @@ that, and it took a solo re-run to tell them from real ones.
 
 ---
 
-## 19. Proposed — working location ("boots on the ground")
+## 19. Working from home ("boots on the ground") — SHIPPED (migration 269)
 
-**Not agreed, not built.** Raised by jon after the timed markers came out (§7.5),
-as a better answer to the need that feature was reaching for.
+### 19.0 As built (Oct 2026) — this supersedes the proposal below
+
+jon's decisions, 2 Oct 2026:
+
+1. **Two routes in.** A ONE-OFF home day is requested and approved like holiday
+   (same approvers, bell + email both ways, the morning digest, Approve/Decline
+   on the approvals list and the Staff page's Time off tab; an admin can call
+   off an approved day that has not finished). A REGULAR agreed home day is a
+   tick on the working pattern ("From home" per day, admin-set,
+   effective-dated like the rest of the pattern) — never requested.
+2. **Two states only**: in the building, or working but not here. No
+   `on_site` / `travelling` / note (§16).
+3. **Whole days only.**
+4. **Everyone can see it** — location is not special-category.
+
+Shape (simpler than §19.2): `staff_working_pattern_days.at_home BOOLEAN` and
+`staff_wfh_requests (person_id, start_date, end_date, status pending /
+approved / declined / withdrawn / cancelled, notes, decided_by…)`. No per-date
+table. `mergeWfhLayer()` in `staff-day-status.ts` runs after the absence merge
+and sets `StaffDay.location = 'home'` (pattern day or APPROVED request) or
+`homePending` (a request waiting), only on a day actually worked — a day off,
+on leave or off sick carries no location. A pending request shows as asked
+for, never as home: until somebody says yes they are expected in.
+
+Refused at request time (they corrupt rather than inconvenience): no
+contracted day in the range, an overlap with another live request, more than
+31 days (that is a pattern change).
+
+**The number** (§19.3 option 3, as agreed): the team calendar footer shows
+in-the-building first and `+n⌂` for home when they differ, one number when they
+agree; an "On site only" filter hides people at home. **Cover counts the
+building**: `getImpact()`'s coverage and `staff.min_headcount_by_weekday`
+count people in the building only (`location !== 'home'`). The dashboard
+summary (`getTodaySummary`) gains `onSite` beside `in`.
+
+The proposal is kept below as the record of why.
+
+### The original proposal (Sep 2026)
+
+Raised by jon after the timed markers came out (§7.5), as a better answer to
+the need that feature was reaching for.
 
 ### Is this the marker again?
 
@@ -1921,8 +2055,291 @@ are not normal working days. The staff calendar carries an admin link to it,
 since noticing you need one and configuring it are different moments and only
 the second wants a form.
 
+### 20.5b Company day on your day off — BUILT (jon, Oct 2026; migration 278)
+
+Raised by Will and Matt: a company day only helps whoever was rostered that
+day, so where Christmas falls decides who gets it. Christmas 2026 is Fri + Sat
+(Mon–Fri staff get 1, weekend staff 2); 2027 is Sat + Sun (Mon–Fri staff get
+NONE). Likely a Part-time Workers Regulations problem too.
+
+**Decision: a day in lieu.** A company day that falls on someone's day off
+credits ONE of their normal days (`nominalDayMinutes`) to their holiday,
+labelled with the company day, booked like any holiday. Same number of days
+for everyone, not pro-rata (jon: "not a scrooge"). Credited IN ADVANCE — when
+the year's entitlement is granted, so it can be booked any time in the year,
+not squeezed into the last week of December. Computed from the pattern, so it
+belongs in the idempotent daily entitlement sync (posting the difference),
+which also corrects it if someone's working days change. Mechanism already
+exists: the §7.4 / reclaim `correction` credit. Wants an HR-advisor sanity
+check; build before Christmas 2026, since 26 Dec 2026 is a Saturday.
+
+**As built:** `syncCompanyDayLieu()` in `staff-company-days.ts`, called from
+`syncEntitlement()` and refreshed when a company day is added or withdrawn. An
+`adjustment` with source_type `company_day_lieu` (migration 278 widened the
+CHECK), dated on the company day. It follows the calendar — idempotent per
+date, so a change of working days or a withdrawn company day takes the lieu
+day back (unlike the reclaim, which is never re-debited). My Time shows it as
+a "Day in lieu" row. Not built: anything for a part-day worker beyond one
+nominal day; leavers keep what was credited, like any booked holiday.
+
 ### 20.6 What 29 February does
 
 A recurring day on 29 February is **skipped** in a common year rather than slid
 to the 28th. Sliding would invent a day off nobody agreed to; skipping is
 visible on the calendar and a one-off covers it if that was the intent.
+
+---
+
+## 21. Freelancer tasks — PHASES 1–2 BUILT (Oct 2026, migration 276)
+
+Replaces the `freelancer_day_booking_tasks` sketch in §3.8, which was never
+built. Agreed with jon, 7 Oct 2026, before any code.
+
+### 21.1 What it is for
+
+Telling a freelancer who is **in for the day** — or a **studio sitter on
+shift** — what we want doing, most of all "prep this van", with a button on
+their phone that opens that van's prep sheet. Staff use their phones as the
+input surface and freelancers will too, so the link is the point, not a
+nicety.
+
+### 21.2 Settled decisions
+
+1. **Not the To Do module.** To Do is staff-only (`assignable-staff.ts`
+   requires a current employment record) and stays that way.
+2. **Only two kinds of owner: a day booking or a sitter shift.** A
+   freelancer out on a driving job (crew/transport quote) never sees "can you
+   prep this van" — that is deliberate, not a gap.
+3. **A live list, not a one-shot.** Tasks can be added, edited or removed at
+   any point: before the offer, after acceptance, on the day itself. The
+   portal reads the current list every time it opens.
+4. **No email per change.** Staff add what they need, then press **"Send
+   update"** if they think the freelancer needs telling. Tonight's SITTER also
+   gets ONE summary at 16:00 — only if there are open tasks and something
+   changed since they were last told; no tasks, no email; changes after 16:00
+   are not chased, they show on the portal (jon, 8 Oct 2026). *(Built
+   differently from the first draft: the offer email does NOT list tasks. The
+   offer goes the moment the day is booked, before anyone has added a task, so
+   it would almost always be empty — "Send update" covers it.)*
+5. **Van prep ticks itself.** A saved prep for that van closes the task — the
+   freelancer never ticks twice. Other tasks get a "Done" button.
+6. **The prep link uses a narrow pass, like book-out** (option B of the
+   7 Oct discussion), not an OP login and not a shared account.
+7. **"Give to a freelancer" from the van side** is offered ONLY when somebody
+   is booked today or tomorrow (an offered/accepted day booking, or an
+   assigned sitter shift). No booked freelancer, no button.
+
+### 21.3 Data model
+
+```sql
+freelancer_tasks
+  id              UUID PK
+  day_booking_id  UUID REFERENCES freelancer_day_bookings(id)
+  shift_id        UUID REFERENCES studio_sitter_shifts(id)
+  -- exactly one owner:
+  CHECK ((day_booking_id IS NULL) <> (shift_id IS NULL))
+  task_type       VARCHAR(20) NOT NULL CHECK (task_type IN ('van_prep','other'))
+  vehicle_id      UUID REFERENCES fleet_vehicles(id)   -- required for van_prep (CHECK)
+  job_id          UUID REFERENCES jobs(id)             -- optional: "prep it for #16xxx"
+  description     TEXT
+  sort_order      INT NOT NULL DEFAULT 0
+  status          VARCHAR(20) NOT NULL DEFAULT 'open'
+                    CHECK (status IN ('open','done','cancelled'))
+  done_at         TIMESTAMPTZ
+  done_by_person  UUID REFERENCES people(id)
+  done_via        VARCHAR(20) CHECK (done_via IN ('prep_saved','portal','staff'))
+  created_by      UUID REFERENCES users(id)
+  created_at, updated_at
+```
+
+Plus `last_tasks_notified_at TIMESTAMPTZ` on both owners, so the "Send
+update" button can say "3 changes since you last told them".
+
+**There is no `person_id` and no date, on purpose** (the first draft had a
+`task_date`; it was dropped at build so an amended booking date cannot leave
+its tasks behind). Both are read through the owner: the booking's `person_id`, or the shift's live assignment. So a sitter
+reassigned on the day takes the shift's tasks with them to the new sitter —
+the same reason handover notes are shift-anchored. A cancelled booking leaves
+its open tasks visible to staff as "nobody has these now" (a warning, never a
+silent drop — tasks are soft-cancelled, never deleted).
+
+**Each owner is looked up once**, in `services/freelancer-tasks.ts`:
+`getOwnerContext(owner)` (its date, whether it is live, who is doing it),
+`listTasks(owner)`, `ownerOf(task)`. Phase 3 adds `bookedFreelancersFor(dates)`
+(the "who could I give this to?" list). Nothing else re-derives who owns a task.
+
+### 21.4 Staff surfaces
+
+- **Staff calendar** — the freelancer's booking panel gains a Tasks section:
+  add (type, van picker, optional job, note), reorder, edit, cancel, and the
+  **Send update** button. Ticks show as they come in.
+- **Operations › Rehearsals** — each assigned evening gains the same Tasks
+  section, beside Notes and Lock-up. That is how a sitter gets "prep the van
+  for tomorrow's early hire" at busy times.
+- **Give to a freelancer** — a button on the van's page (and its prep status
+  wherever that is shown; exact spot settled at build). Shown only when
+  `bookedFreelancersFor([today, tomorrow])` is non-empty; the picker lists
+  them as "Charlie Stanley — sitter, tonight" / "Tom — in tomorrow".
+
+### 21.5 Freelancer surfaces (the portal, `src/`)
+
+- **Day booking** — the booking card on the dashboard lists its tasks.
+- **Sitter shift** — `src/app/shift/[date]` gains a "Tasks tonight" section
+  above the handover notes.
+- Each `van_prep` task: **"Open prep sheet"**. Each `other` task: **"Done"**.
+- Tasks show on every upcoming day, offered ones included — the freelancer
+  should see what the day involves before accepting it. *(The draft said "from
+  the day before"; a live list has no reason to hide.)*
+
+### 21.6 The prep link
+
+The book-out handoff is the pattern: the portal asks OP for a short-lived
+HMAC token, the browser opens OP with `?freelancerToken=`, OP redeems it for a
+narrow session JWT.
+
+- **A new scope, `freelancer_prep`** — NOT a third `mode` on
+  `freelancer_bookout`. That session is built around a `vehicle_hire_assignment`
+  and rejects a token without one; a prep has no assignment. Loosening that
+  check to fit prep would weaken book-out.
+- **Resolve** (`POST /api/vehicles/freelancer-prep/resolve`): the token names
+  the task; OP checks the task is open, is a `van_prep`, `task_date` is today
+  or tomorrow, and the caller is its current owner (via `ownerPerson`). The
+  session carries `taskId` + the vehicle reg and lasts 4h, like book-out.
+- **Allow-list**: only the endpoints the prep page actually calls (to be
+  listed from `PrepPage.tsx` at build — at least fleet read, checklist
+  settings, prep history, photo upload, `save-event`, `save-prep`), each
+  clamped to the session's reg.
+- **Frontend**: a `FreelancerPrepShell` (mirror of `FreelancerBookoutShell`)
+  opens `PrepPage` with the van already chosen and the picker locked.
+  `PrepPage` gains a "start on this van" input; staff can use it too.
+- **Ticking**: when a `Prep Completed` event is saved for a van, open
+  `van_prep` tasks for that van dated yesterday or today close with
+  `done_via = 'prep_saved'` — whoever did the prep, staff included, and the
+  task shows who.
+
+### 21.7 Build order
+
+1. Table + service + staff calendar Tasks section + Rehearsals Tasks section
+   + portal lists + "Done" + Send update + auto-tick from a saved prep. Useful
+   on its own: the task says "Prep RX21 ABC" even before the link exists.
+2. The prep link (§21.6) — the biggest single piece.
+3. "Give to a freelancer" from the van side.
+
+### 21.8 Settled at build (8 Oct 2026)
+
+- **One email template**, `freelancer_tasks_updated`, for both owners; body
+  built in `freelancer-tasks.ts` and passed as `bodyHtmlOverride`. Production
+  runs `EMAIL_MODE=live`, so nothing needs adding to `EMAIL_LIVE_TEMPLATES`.
+- **Sitters are told by the 16:00 summary** (decision 4), confirmed or not.
+
+### 21.9 Phase 1 — what shipped
+
+- Migration **276**: `freelancer_tasks` (CHECKs: exactly one owner; a van prep
+  names its van; an 'other' task has text) + `last_tasks_notified_at` on both
+  owners.
+- `services/freelancer-tasks.ts` — the owner lookup, CRUD (soft-cancel only),
+  `markDoneFromPortal()` (refuses a van prep: the prep sheet ticks those),
+  `autoTickPrep()`, `sendTasksUpdate()`, `runSitterTaskDigest()`.
+- `routes/freelancer-tasks.ts` (`/api/freelancer-tasks`, STAFF_ROLES): list,
+  add, edit, remove, tick/un-tick, send-update. A job is named by its HireHop
+  number and resolved to OP's job on save.
+- Auto-tick: `POST /vehicles/save-event` with a `Prep Completed` event closes
+  open van-prep tasks for that van on live owners dated yesterday → tomorrow,
+  fire-and-forget, recording the saver's person when it is staff.
+- Scheduler: sitter task summary daily at **16:00**.
+- Staff UI: `components/FreelancerTasksPanel.tsx`, on the calendar booking panel
+  (offered / accepted editable, completed read-only) and as a "📋 Tasks (N)"
+  button per evening on Operations › Rehearsals (`task_count` on the roster).
+- Portal: tasks on each upcoming yard-day card (dashboard) and a "Tasks
+  tonight" card on `shift/[date]`; `components/FreelancerTaskList.tsx`; "Done"
+  via `POST /api/portal/freelancer-tasks/:id/done`.
+- **Known gap:** a sitter swapped in after the previous sitter was told (by
+  Send update or the 16:00 summary) is not emailed unless a task then changes —
+  they see the list on the portal.
+- **Next:** phase 2, the prep link (§21.6) — done, see §21.10.
+
+### 21.10 Phase 2 + feedback round — what shipped (8 Oct 2026)
+
+**The prep link.** Built differently from the §21.6 sketch in one respect: no
+portal HMAC. The portal calls OP with the freelancer's own session, so OP
+already knows who is asking and mints the link itself — no shared secret, one
+fewer moving part.
+
+- `POST /api/portal/freelancer-tasks/:id/prep-link` → a URL into
+  `/vehicles/freelancer-prep?prepToken=…&returnUrl=…` carrying a **15-minute
+  redeem token** (scope `freelancer_prep_redeem`). Short, because a URL lands
+  in history and logs.
+- `POST /api/vehicles/freelancer-prep/resolve` (public, before the vehicle
+  auth) swaps it for a **4h session** (scope `freelancer_prep`: task, person,
+  van). Both steps call `assertPrepEligible()` — open van prep, theirs via the
+  owner, owner live, day yesterday → tomorrow — so they cannot disagree.
+- Neither token has `id`/`role`, so neither passes `authorize()`; the portal's
+  `portalAuth` now also refuses any token carrying a `scope` (its secret can
+  fall back to `JWT_SECRET`).
+- `routes/vehicles.ts`: `FREELANCER_PREP_ALLOW` + ONE checkpoint middleware
+  holding every call to the session's van — fleet (only its van), events, prep
+  history, save-event (prep events only), save-prep (plain eventId; "prepared
+  by" forced to the person), hire-status (Available / Not Ready only), stock.
+  Upload-photo checks the key inside the handler (multipart).
+- **Flags from a freelancer prep do not open Problems** — `/api/problems` is
+  staff-only and a Problem is reported by a user. The flags stay in the saved
+  prep and the fleet's notification targets get a bell listing them
+  (`notifyFreelancerPrepFlags`); the results screen says "N sent to the office
+  to review" rather than skipping silently.
+- Frontend: `FreelancerPrepShell` (public route), session kept under its own
+  keys (`adapters/freelancer-prep-session.ts`); on that page the PAGE decides
+  which session is sent, so a book-out session on the same phone never stands
+  in. `PrepPage` takes `freelancerPrep` — opens on the van, hides the
+  turnaround widget and the staff-only issues banner, finishes with "Back to
+  the freelancer portal".
+
+**Feedback round (jon, 8 Oct).**
+- Calendar: the booking panel and "Book a freelancer" are now pop-ups
+  (`components/ModalShell.tsx`) — the panel used to open at the top of a long
+  calendar, unseen. Who, the van and the job are searchable
+  (`components/SearchPicker.tsx`; jobs via `/hirehop/jobs?search=`). Tasks
+  store the picked job by id (`jobId`; the HireHop-number path is kept).
+- Portal: an 'other' task's whole row is the tick; tapping again un-ticks a
+  mis-tap, but only a tick they made on the portal (`doneByMe`).
+
+**Job timeline note (jon, 8 Oct — built).** When a task that NAMES a job is
+completed — ticked on the portal, ticked by staff, or closed by a saved prep —
+`noteJobOnDone()` writes a system note on that job: "✅ Freelancer task done:
+Prep RX21ABC (Premium) — Tom Free (freelancer in for the day). Prep sheet
+saved." Deliberately NOT when a task is set (tasks change freely), not on
+un-tick, not for tasks without a job, and not for preps that were never a
+task (jon: the job does not need "who prepped the van").
+
+### 21.11 Where it stands (8 Oct 2026) — ALL PHASES BUILT
+
+Phases 1–3 and the job note are built. The module is complete as specified.
+
+**Phase 3 — "Give to a freelancer" (8 Oct 2026).**
+- `bookedFreelancersFor()` (`freelancer-tasks.ts`): live day bookings (offered or
+  accepted) and sitter evenings with a live sitter, TODAY and TOMORROW, each with
+  the vans already on their list. `GET /api/freelancer-tasks/booked` — one call
+  serves a whole page of van cards.
+- `components/GiveToFreelancer.tsx`: renders NOTHING unless somebody is booked
+  (jon). On the van's page (header) and on each "Prep Needed" card in the staff
+  prep queue (never in freelancer mode). Pick the person, optional job and note →
+  a van-prep task on their day. Says "Given to Tom" once it is on a list. It only
+  adds the task: telling them is "Send update" or the 16:00 sitter summary, and
+  the confirmation line says which.
+- `createTask` refuses the same van twice on one list (an open prep) — a
+  mis-click, not two jobs. The same van on two different people's lists is
+  allowed.
+- Not added to the job page's vehicle strip: the van page and the prep queue are
+  where a prep is thought about.
+
+**Security, found during this work (8 Oct 2026)** — fixed alongside phase 3, and
+the open remainder handed to a full audit in `docs/SECURITY-AUDIT-BRIEF.md`:
+`authenticate` accepted every token signed with `JWT_SECRET` (a public hire-form
+session read `GET /api/drivers`); now staff access tokens only. `returnUrl` /
+`startUrl` from the URL on the freelancer book-out, collection and prep pages now
+go through `safeReturnUrl()` (a `javascript:` link would have run in OP's origin).
+A prep opened from a freelancer task marks its saved data `freelancerTaskPrep`, so
+the office bell for flags fires whichever login saved it.
+
+Settled, NOT to build: Problems from a freelancer's prep flags (jon, 8 Oct:
+keep the bell-for-review). Known, accepted: a sitter swapped in after the
+previous one was told is not emailed unless a task then changes.

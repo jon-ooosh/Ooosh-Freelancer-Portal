@@ -22,6 +22,7 @@ import { encryptJson, tryDecryptJson, isEncryptionConfigured } from '../services
 import { createMobileUploadToken } from '../services/mobile-upload-token';
 import { attachExcessReceipt } from '../services/excess-receipt';
 import { syncSavedRowToXero, sendXeroSyncFailedAlert, type XeroSyncResult } from '../services/hh-xero-sync';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
@@ -69,6 +70,13 @@ const paymentSchema = z.object({
   reference: z.string().max(200).nullable().optional(),
   notes: z.string().max(1000).nullable().optional(),
   push_to_hirehop: z.boolean().default(true),
+  // Rollover-apply only (method='rolled_over'): the previous-hire record the
+  // money is coming FROM — the `source_excess_id` that GET /:id/available-rollover
+  // showed the user. Names the exact hop to flip to 'rolled_over' (Oct 2026,
+  // Lime Garden / deposit 7767: the old "most recently updated" guess re-flipped
+  // an already-rolled-over hop and left the live one 'taken', double-counting
+  // the £1,200 everywhere). Optional for legacy callers.
+  source_excess_id: z.string().uuid().nullable().optional(),
   // Soft-enforce reimburse-after-nibble: when staff tries to top up an excess
   // that already has a chain linkage (hh_deposit_id), the endpoint returns 409
   // with a chain-break warning. Setting this to true acknowledges the warning
@@ -1051,7 +1059,7 @@ router.put('/:id', validate(updateExcessSchema), async (req: AuthRequest, res: R
 router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { total_collected, amount: bodyAmount, method, reference, notes, push_to_hirehop, acknowledge_chain_break } = req.body;
+    const { total_collected, amount: bodyAmount, method, reference, notes, push_to_hirehop, acknowledge_chain_break, source_excess_id } = req.body;
 
     // Look up the existing record so we can compute the delta (new money) when
     // the caller passes total_collected (absolute set), and so we have
@@ -1133,6 +1141,32 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
       return;
     }
 
+    // Rollover-apply with a named source: check that source is still holding
+    // the money BEFORE anything is written, so a stale modal (someone applied,
+    // reimbursed or claimed it since the screen was opened) gets a clear 409
+    // rather than a linkless record. Same candidate rule as available-rollover.
+    if (method === 'rolled_over' && source_excess_id) {
+      const src = await query(
+        `SELECT 1
+           FROM job_excess je2
+           JOIN jobs j2 ON j2.id = je2.job_id
+          WHERE je2.id = $1
+            AND je2.job_id <> $2
+            AND je2.hh_deposit_id IS NOT NULL
+            AND je2.excess_status IN ('taken', 'partially_paid', 'rolled_over')
+            AND j2.client_id = (SELECT client_id FROM jobs WHERE id = $2)
+            AND j2.client_id IS NOT NULL`,
+        [source_excess_id, previous.job_id]
+      );
+      if (src.rows.length === 0) {
+        res.status(409).json({
+          error: 'rollover_source_unavailable',
+          detail: 'The previous-hire excess this rollover was going to come from is no longer available — it may have been applied, reimbursed or claimed since this screen was opened. Close Manage and reopen it to refresh.',
+        });
+        return;
+      }
+    }
+
     if (delta < 0) {
       // Lowering total_collected is a correction — allow it, but don't push HH
       // (you'd need a reverse deposit / refund flow). Typically used to fix a
@@ -1210,9 +1244,9 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
     // later has no way to find the HH deposit (which lives on the original hire's
     // job, not this one) and can't push the refund to HireHop.
     //
-    //   1. Find the most recent excess record for the same client that's still
-    //      holding cash (status taken/partially_paid/rolled_over) AND has an
-    //      hh_deposit_id we can chain to.
+    //   1. Find the record the money is coming FROM: the `source_excess_id`
+    //      the modal was shown by available-rollover, or (legacy callers) the
+    //      client's LIVE record (taken/partially_paid) with an hh_deposit_id.
     //   2. Copy that hh_deposit_id onto this new record (marked auto_match).
     //   3. Flip the previous record's status to 'rolled_over' (terminal — money's
     //      moved on to this hire).
@@ -1226,6 +1260,19 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
     let rolloverLinked = false;
     if (isRolledOver) {
       try {
+        // Which hop gets flipped. Until Oct 2026 this was "the most recently
+        // updated record on the client with a deposit link", and that set
+        // included hops ALREADY flipped to rolled_over. The flip is the last
+        // write of a rollover, so the previous hop usually carried the newest
+        // updated_at and the picker re-flipped it, leaving the live record
+        // 'taken' (Lime Garden, deposit 7767: #16415 stayed taken after its
+        // £1,200 moved to #16697 — Total Held and the "on account" banner read
+        // £2,400, and available-rollover hid the apply button on the next hire
+        // because two live records shared the deposit).
+        //
+        // Now: flip exactly the source the user was shown (source_excess_id)
+        // when the caller names one; otherwise prefer a LIVE record over an
+        // already-rolled-over one, then newest.
         const prev = await query(
           `SELECT je2.id, je2.hh_deposit_id, j2.hh_job_number
            FROM job_excess je2
@@ -1236,9 +1283,11 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
              AND je2.excess_status IN ('taken', 'partially_paid', 'rolled_over')
              AND j2.client_id = (SELECT client_id FROM jobs WHERE id = $2)
              AND j2.client_id IS NOT NULL
-           ORDER BY je2.updated_at DESC
+             AND ($3::uuid IS NULL OR je2.id = $3::uuid)
+           ORDER BY CASE WHEN je2.excess_status IN ('taken', 'partially_paid') THEN 0 ELSE 1 END,
+                    je2.updated_at DESC
            LIMIT 1`,
-          [id, excess.job_id]
+          [id, excess.job_id, source_excess_id || null]
         );
         if (prev.rows.length > 0) {
           const prevRow = prev.rows[0];
@@ -1495,7 +1544,7 @@ router.post('/:id/record-preauth', validate(recordPreauthSchema), async (req: Au
     // receipt — so neither flags a receipt as required.
     const needsReceipt = method === 'worldpay' || method === 'amex';
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const preauthNote = `[${dateStr}] Pre-auth hold of £${amount.toFixed(2)} recorded via ${method.replace(/_/g, ' ')}${reference ? ` (ref ${reference})` : ''}${notes ? `. ${notes}` : ''}. Expires in ${holdDays} days.`;
     const newNotes = current.notes ? `${current.notes}\n${preauthNote}` : preauthNote;
 
@@ -1912,7 +1961,7 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
       // ── Step 3: Optional apply-to-invoice (atomic capture-and-claim) ──────
       if (invoice_id && hhDepositId) {
         try {
-          const currentDate = new Date().toISOString().split('T')[0];
+          const currentDate = ukToday();
           const applyDesc = `${current.hirehop_job_id} - Excess applied to invoice`;
           const applyMemo = reason
             ? `Captured & applied — ${reason} (via Ooosh OP)`
@@ -1972,7 +2021,7 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
     const newStatus = claimApplied ? 'fully_claimed' : 'taken';
     const newClaimAmount = claimApplied ? amount : (parseFloat(current.claim_amount || '0'));
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const captureNote = `[${dateStr}] Captured £${amount.toFixed(2)} from £${amountHeld.toFixed(2)} hold (£${amountReleased.toFixed(2)} released)${reason ? ` — ${reason}` : ''}${notes ? `. ${notes}` : ''}`;
     const newNotes = current.notes
       ? `${current.notes}\n${captureNote}`
@@ -2129,7 +2178,7 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
     }
 
     // ── Update OP record ──
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const releaseNote = `[${dateStr}] Released £${amountHeld.toFixed(2)} hold${reason ? ` — ${reason}` : ''}${notes ? `. ${notes}` : ''}. ${stripeOutcome}`;
     const newNotes = current.notes
       ? `${current.notes}\n${releaseNote}`
@@ -2300,7 +2349,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       // deposit's real bank (confirmable `bank` from the UI wins). Never the old
       // hardcoded Worldpay default.
       const resolvedBank = (bank as number | undefined) ?? (await resolveDepositBankId(current)) ?? 169;
-      const currentDate = new Date().toISOString().split('T')[0];
+      const currentDate = ukToday();
       const description = isCrossJob
         ? `${current.hirehop_job_id} - Excess applied to invoice (cross-job → ${target_hh_job})`
         : `${current.hirehop_job_id} - Excess applied to invoice`;
@@ -2367,7 +2416,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       ? 'fully_claimed'
       : current.excess_status;
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const crossJobNote = target_hh_job != null && Number(target_hh_job) !== Number(current.hirehop_job_id)
       ? ` → job ${target_hh_job} invoice`
       : '';
@@ -2706,7 +2755,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
 
       // ── Step 2: Push the refund payment application to HireHop ───────────
       if (hhDepositId) {
-        const currentDate = new Date().toISOString().split('T')[0];
+        const currentDate = ukToday();
         const hhBankId = HH_BANK_IDS[method] || 265;
         const description = `${current.hirehop_job_id} - Excess refund${isPartial ? ' (partial)' : ''}`;
         const memo = `Insurance excess ${isPartial ? 'partial ' : ''}reimbursement — via ${method.replace(/_/g, ' ')} (recorded via Ooosh OP)`;
@@ -2817,7 +2866,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       );
 
       if (!xeroSync.ok) {
-        const gapNote = `[${new Date().toISOString().split('T')[0]}] ⚠️ Xero sync REFUSED for the £${amount.toFixed(2)} reimbursement: ${xeroSync.error} — HireHop is correct, Xero needs a manual correction.`;
+        const gapNote = `[${ukToday()}] ⚠️ Xero sync REFUSED for the £${amount.toFixed(2)} reimbursement: ${xeroSync.error} — HireHop is correct, Xero needs a manual correction.`;
         await query(
           `UPDATE job_excess SET notes = COALESCE(notes || E'\n', '') || $2, updated_at = NOW() WHERE id = $1`,
           [id, gapNote]
@@ -2881,7 +2930,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
             at: new Date().toISOString(),
           }]),
           id,
-          ` [${new Date().toISOString().split('T')[0]} Stripe refund recorded only — done manually in Stripe dashboard, not via OP]`,
+          ` [${ukToday()} Stripe refund recorded only — done manually in Stripe dashboard, not via OP]`,
         ]
       ).catch(e => console.error('[excess] Record-only leg append failed (non-fatal):', e));
     }
@@ -2947,7 +2996,7 @@ router.post('/:id/mark-externally-resolved', validate(externallyResolvedSchema),
       return;
     }
 
-    const dateStr = new Date().toISOString().split('T')[0];
+    const dateStr = ukToday();
     const noteLine = `[${dateStr} Externally Resolved] £${amount.toFixed(2)} via ${method}${reference ? ` (${reference})` : ''} — ${reason}. Record marked as collected-then-reimbursed to match external system; no HH push.`;
     const newNotes = row.notes ? `${row.notes}\n${noteLine}` : noteLine;
 

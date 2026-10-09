@@ -6,6 +6,7 @@ import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { ensureBacklineProblemIssue } from '../services/job-issues';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
 
 const router = Router();
 router.use(authenticate);
@@ -29,11 +30,18 @@ router.get('/job/:jobId', async (req: AuthRequest, res: Response) => {
               rtd.label AS type_label,
               rtd.icon AS type_icon,
               rtd.steps AS type_steps,
-              p.first_name || ' ' || p.last_name AS assigned_to_name
+              NULLIF(${DISPLAY_NAME_SQL}, ' ') AS assigned_to_name,
+              -- Same rule as DISPLAY_NAME_SQL, spelled out because that constant
+              -- hardcodes the alias p and this is the CREATOR's people row.
+              -- NULLIF because CONCAT yields a single space (not NULL) when the
+              -- LEFT JOIN misses, and that would render as an empty name.
+              NULLIF(CONCAT(COALESCE(NULLIF(cp.preferred_name, ''), cp.first_name), ' ', cp.last_name), ' ') AS created_by_name
        FROM job_requirements jr
        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
        LEFT JOIN users u ON u.id = jr.assigned_to
        LEFT JOIN people p ON p.id = u.person_id
+       LEFT JOIN users cu ON cu.id = jr.created_by
+       LEFT JOIN people cp ON cp.id = cu.person_id
        WHERE jr.job_id = $1 ${phaseFilter}
        ORDER BY jr.sort_order, rtd.sort_order, jr.created_at`,
       [jobId]

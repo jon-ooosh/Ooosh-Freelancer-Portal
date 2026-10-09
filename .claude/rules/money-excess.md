@@ -72,6 +72,14 @@ writing any new billing call).
 - **Claim the leg the moment the money moves, not after the response.** Stripe's `charge.refunded` lands ~300ms after `refunds.create`; the HH push + Xero sync take seconds. Any new refund path must write its leg BEFORE that work, or the webhook re-applies the amount.
 - **Never unwind `charge.amount_refunded`** — it's the CUMULATIVE refunded total on the charge. Use the individual refund's amount, or a second partial refund re-applies the first.
 
+## Incoming money (Wise matcher, record-payment)
+
+- **Any payment OP records itself goes through `services/record-payment.ts` `recordPayment()`** — the staff route, the Wise matcher and the planned Stripe Terminal module. It is the one chain (OP row, HH deposit, excess update, Booked push, client email, hooks). Never re-implement a step of it inline.
+- **A Wise transfer's amount is what the client SENT ("Amount received"), never the fee-netted "paid into account".** Xero owns the fee. Matching compares that figure against deposit / half / remaining / excess-outstanding within `AMOUNT_TOLERANCE` (2p).
+- **`incoming_bank_payments` is keyed on the Gmail Message-ID.** A re-ingest can never record a transfer twice; a row is `unmatched` → `recorded` or `ignored`, never deleted. A Xero-only invoice (OT-nnnn) is recorded IN XERO against `xero_bank_wise`, with no job.
+- **The Wise detector runs BEFORE the ingestion loop's automated-mail skip and accepts only DKIM-passed mail from wise.com.** Moving it after the skip silently drops every Wise email (they carry bulk headers); loosening the DKIM gate turns "send info@ an email" into "mark a job paid".
+- **Portal money is `stripe_gbp` even when the client paid with PayPal.** The money is in Stripe and the refund path keys on the method; PayPal is a `(PayPal)` tag on the HireHop deposit description, nothing more. `paypal` as a method is for money that actually arrived in the PayPal account.
+
 ## Stripe
 
 - **Only `getStripeClient()`** — never `new Stripe()` elsewhere.
