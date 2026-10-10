@@ -186,7 +186,7 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
-**PHASES 1–2 BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
+**PHASES 1–3a BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
 finishing a hire's money from the post-hire cards (raise invoice → excess decision → allocate
 deposits in HireHop AND Xero → complete), one job at a time, on the shared recipe
 `services/hh-invoice-close.ts` (`HIREHOP-BILLING-API.md` §8). Born from job 16015: HireHop's "New
@@ -197,14 +197,15 @@ than one open invoice refused for now, HireHop↔OP payment and refund mismatche
 The UI is ONE panel, `HireCloseOutPanel.tsx` on the **Invoice** card of the Post-Hire tab (the
 Payment Reconciliation requirement still exists but is drawn as that card's second pill): one button
 raises the invoice if needed (draft from uninvoiced lines → penny check → approve dated today → Xero)
-then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); Complete is its own button; "Mark as
-sent" only once nothing is left to allocate. **An EU hire with the "Non-standard VAT rules" item is
+then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); "Mark as
+sent" only once nothing is left to allocate; everything else behind "Details…". **An EU hire with the "Non-standard VAT rules" item is
 refused until the invoice-line VAT split is built.** Xero log lines admin-only. Completing a job is the status
 change at the top of the page, and that modal refuses open Problems (manager + reason to override;
 `routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
 (03:30) applies HireHop's allocations as credits in Xero, off until `system_settings.closeout_xero_sweep_enabled`
-is `'true'`. Not yet: the VAT split (spec §10.1), the arrival hook (Phase 3b). §1 is
-settled, §5 the allocation rule, §9 the phases. Refunds only through the existing routes.
+is `'true'` (switched on 10 Oct 2026). Not yet: the arrival hook (Phase 3b), the VAT split (spec §10.1). §1 is
+settled, §5 the allocation rule, §9 the phases, **§12 the current state and the ordered next steps — read it first.**
+Refunds only through the existing routes.
 
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
