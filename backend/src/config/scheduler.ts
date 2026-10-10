@@ -1614,6 +1614,25 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Bill payment pull-back sync scheduled daily at 07:50 Europe/London');
 
+  // ── Hire close-out: Xero credit sweep — nightly 03:30 Europe/London ──────
+  // HireHop never pushes a payment allocation to Xero, so every invoice sat
+  // "Awaiting payment" until the bookkeeper applied the credit by hand. This
+  // applies what HireHop's allocations already say, one job at a time, with
+  // the same idempotent step the close-out button runs. Off until the
+  // `closeout_xero_sweep_enabled` setting is 'true' (migration 282).
+  cron.schedule('30 3 * * *', async () => {
+    try {
+      const { runCloseOutXeroSweep } = await import('../services/close-out-xero-sweep');
+      const r = await runCloseOutXeroSweep();
+      if (r.enabled) {
+        console.log(`Scheduler: Close-out Xero sweep — ${r.checked} job(s) checked, ${r.applied} applied, ${r.stopped} stopped, ${r.errors} error(s)`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Close-out Xero sweep failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Close-out Xero sweep scheduled nightly at 03:30 Europe/London');
+
   // ── Gmail ingestion (Auto-Chase Phase 1) ────────────────────────────
   // Every 10 minutes — poll the info@ mailbox, log new client emails onto job
   // timelines as interactions, drop the residue into the review queue. Inert

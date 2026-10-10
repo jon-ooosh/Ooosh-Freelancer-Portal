@@ -7851,14 +7851,23 @@ function StatusTransitionModal({
       .catch(() => {});
   }, [targetStatus]);
   const [outstandingItems, setOutstandingItems] = useState<string[]>([]);
+  // Open Problems (job_issues not resolved / written off / cancelled). Firmer
+  // than the close-out items: only a manager may complete over them, with a
+  // reason — the server enforces the same (routes/pipeline.ts).
+  const [openProblems, setOpenProblems] = useState<Array<{ id: string; summary: string; severity: string; status: string }>>([]);
+  const isManagerUser = hasManagerRole(currentUser?.role);
   const [upcomingJobs, setUpcomingJobs] = useState<Array<{
     id: string; hh_job_number: number | null; job_name: string | null;
     job_date: string | null; pipeline_status: string | null;
   }>>([]);
 
-  // Fetch outstanding close-out items + upcoming client jobs when completing
+  // Fetch outstanding close-out items + open Problems + upcoming client jobs when completing
   useEffect(() => {
     if (targetStatus !== 'completed' || !jobId) return;
+
+    api.get<{ data: Array<{ id: string; summary: string; severity: string; status: string }> }>(`/problems/job/${jobId}`)
+      .then(res => setOpenProblems((res.data || []).filter(p => !['resolved', 'written_off', 'cancelled'].includes(p.status))))
+      .catch(() => {});
 
     // Close-out progress
     api.post<{ data: Record<string, { items: Array<{ label: string; status: string }> }> }>(
@@ -8043,6 +8052,26 @@ function StatusTransitionModal({
 
         {targetStatus === 'completed' && (
           <div className="space-y-3 mb-4">
+            {openProblems.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm">
+                <div className="font-medium text-red-800 mb-1">
+                  {openProblems.length === 1 ? 'A Problem is still open on this job:' : `${openProblems.length} Problems are still open on this job:`}
+                </div>
+                <ul className="text-red-700 text-xs space-y-0.5">
+                  {openProblems.map(p => (
+                    <li key={p.id} className="flex items-center gap-1.5">
+                      <span className={`w-1.5 h-1.5 rounded-full ${p.severity === 'urgent' ? 'bg-red-600' : 'bg-red-400'}`} />
+                      {p.summary} <span className="text-red-400">({p.status.replace(/_/g, ' ')})</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-red-700 mt-2">
+                  {isManagerUser
+                    ? 'A manager can complete the job anyway — say why in the note below. It goes on the timeline.'
+                    : 'Resolve them first, or ask a manager to complete the job with a reason.'}
+                </p>
+              </div>
+            )}
             {outstandingItems.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm">
                 <div className="font-medium text-amber-800 mb-1">Outstanding close-out items:</div>
@@ -8220,16 +8249,21 @@ function StatusTransitionModal({
           </div>
         )}
 
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
-          <input
-            type="text"
-            placeholder="Why are you changing the status?"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-          />
-        </div>
+        {(() => {
+          const reasonRequired = targetStatus === 'completed' && openProblems.length > 0;
+          return (
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">{reasonRequired ? 'Reason (required — Problems still open)' : 'Note (optional)'}</label>
+              <input
+                type="text"
+                placeholder={reasonRequired ? 'Why is this job being completed with Problems open?' : 'Why are you changing the status?'}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                className={`w-full border rounded px-3 py-2 text-sm ${reasonRequired && !note.trim() ? 'border-red-300' : 'border-gray-300'}`}
+              />
+            </div>
+          );
+        })()}
 
         <div className="flex gap-3 justify-end">
           <button
@@ -8240,7 +8274,8 @@ function StatusTransitionModal({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={saving}
+            disabled={saving || (targetStatus === 'completed' && openProblems.length > 0 && (!isManagerUser || !note.trim()))}
+            title={targetStatus === 'completed' && openProblems.length > 0 && !isManagerUser ? 'Only a manager can complete a job with open Problems' : undefined}
             className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
           >
             {saving ? 'Saving...' : 'Confirm'}
