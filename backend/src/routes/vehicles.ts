@@ -3111,6 +3111,47 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           let matchedIds: string[] = [];
           if (req.bookoutSession?.assignmentId) {
             matchedIds = [req.bookoutSession.assignmentId];
+            // …plus every other customer driver on THIS van. A staff book-out
+            // flips them all through its hire-form write-back; the freelancer
+            // path skips that step, so only the session's own row went out and
+            // the rest sat on "Add to Hire" (HH 16665, 10 Oct 2026). Same set
+            // the staff path uses (self-drive, live), minus referral-held
+            // drivers (Add to Hire hides those too). A NULL-van row is taken
+            // only when no OTHER van is on the job — on a multi-van job it may
+            // belong to the other van, and re-pointing scrambles the data
+            // (vehicles-bookout.md invariant 3).
+            // Its own try: a failure here must never block the session's row.
+            try {
+              const siblings = await query(
+                `SELECT vha.id
+                   FROM vehicle_hire_assignments vha
+                   LEFT JOIN drivers d ON d.id = vha.driver_id
+                  WHERE vha.hirehop_job_id = $1
+                    AND vha.id <> $2
+                    AND vha.assignment_type = 'self_drive'
+                    AND vha.driver_id IS NOT NULL
+                    AND vha.status IN ('soft', 'confirmed')
+                    AND NOT (COALESCE(d.requires_referral, false)
+                             AND COALESCE(d.referral_status, '') NOT IN ('approved', 'waived'))
+                    AND (
+                      vha.vehicle_id = (SELECT id FROM fleet_vehicles WHERE reg = $3)
+                      OR (vha.vehicle_id IS NULL AND NOT EXISTS (
+                        SELECT 1 FROM vehicle_hire_assignments o
+                         WHERE o.hirehop_job_id = $1
+                           AND o.vehicle_id IS NOT NULL
+                           AND o.vehicle_id <> (SELECT id FROM fleet_vehicles WHERE reg = $3)
+                           AND o.status NOT IN ('cancelled', 'swapped')
+                      ))
+                    )`,
+                [hhJob, req.bookoutSession.assignmentId, reg]
+              );
+              if (siblings.rows.length > 0) {
+                matchedIds.push(...siblings.rows.map(r => r.id as string));
+                console.log(`[vehicles/events] freelancer book-out: also booking out ${siblings.rows.length} other driver(s) on ${reg} / HH#${hhJob}`);
+              }
+            } catch (sibErr) {
+              console.warn(`[vehicles/events] freelancer book-out: sibling-driver lookup failed for ${reg} / HH#${hhJob}:`, sibErr);
+            }
           } else {
             // Pass 1: rows already linked to this vehicle.
             const m = await query(

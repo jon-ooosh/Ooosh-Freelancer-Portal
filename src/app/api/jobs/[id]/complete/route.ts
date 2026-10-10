@@ -71,7 +71,7 @@ export async function POST(
       )
     }
 
-    const { notes, signature, photos, customerPresent, vanOnly, staffName } = body
+    const { notes, signature, photos, customerPresent, vanOnly, staffName, clientEmails, sendClientEmail } = body
 
     // Van-only completions skip signature/photo validation
     if (!vanOnly) {
@@ -121,6 +121,11 @@ export async function POST(
       // van-only book-out (the vehicle condition report is the relevant
       // artefact and is sent separately by the OP book-out flow).
       if (vanOnly) formData.append('vanOnly', 'true')
+      // Client emails: until Oct 2026 neither was forwarded, so the addresses a
+      // freelancer typed were dropped and "Don't send" was ignored (HH 16665).
+      const typedEmails = (clientEmails || []).map(e => e.trim()).filter(Boolean)
+      if (typedEmails.length > 0) formData.append('clientEmails', typedEmails.join(','))
+      if (sendClientEmail === false) formData.append('sendClientEmail', 'false')
 
       // Convert base64 photos to blobs
       if (photos) {
