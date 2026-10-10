@@ -136,7 +136,7 @@ everything else is behind "Details…". The Excess Resolution card is unchanged.
 |---|---|
 | State | each invoice with "paid" or "£x owing"; or "£x ex VAT not yet invoiced"; payments holding money only while there is something to do with them |
 | Blockers / warnings | red list / amber lines (§6; excess still held) |
-| Buttons | Raise invoice & allocate payments · Carry on · Complete job · Complete anyway (excess held) · Mark as sent to client · Check again |
+| Buttons | Raise invoice & allocate payments · Carry on · …anyway (job still out, amber) · Mark as sent to client · Details… (modal: invoices, payments, blockers, warnings, plan, log) |
 | Log | "What happened", behind a disclosure; Xero lines admin-only |
 | Completed job | OP's own record ("Completed in HireHop by X on date"), no HireHop read; "Check HireHop again" forces one |
 
@@ -245,11 +245,18 @@ says so and the portal link is right there. Nothing else to do until money arriv
 
 ### 4.4 Complete job
 
-Enabled when every approved invoice shows £0.00 owing in HireHop **and** Xero and no
-hire deposit holds money (or a Hold-on-account decision is recorded). Amber, with
-"Complete anyway (excess still held)" for a manager, when `job_excess` has a non-terminal
-record. `status_save.php` status 11, read back. The 30-minute HireHop sync carries 11
-into `pipeline_status = completed`; do not set it locally first (`hirehop.md`).
+**Completing is the status change at the top of Job Detail, not a close-out button** (jon,
+9 Oct, after the first live job). The Move to Completed modal lists the open close-out
+items in amber (as before) and open Problems in red: a non-manager cannot confirm over
+open Problems, a manager must type a reason, which lands on the timeline with the
+transition; `routes/pipeline.ts` enforces both so the API cannot bypass the modal. The
+status change pushes 11 to HireHop through the existing sync.
+
+`POST /close-out/:jobId/complete` (`completeHireJob()`) still exists for the API: it refuses
+unless every approved invoice is settled in HireHop and no hire deposit holds money, is amber
+on excess still held (`allowExcessHeld` for a manager), writes `status_save.php` 11, reads it
+back and mirrors into OP through the webhook handler. **Nothing in the UI calls it.** Remove it
+or wire the modal to it, never grow a second completion path.
 
 ### 4.5 Arrival hook (Phase 3)
 
@@ -321,11 +328,11 @@ One table, no state columns on `jobs` (state is always re-read from HireHop):
 CREATE TABLE job_closeout_log (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   job_id      UUID NOT NULL REFERENCES jobs(id),
-  step        VARCHAR(40) NOT NULL,      -- 'preflight' | 'draft' | 'penny' | 'approve' | 'invoice_xero' | 'allocate_hh' | 'allocate_xero' | 'complete' | 'arrival'
+  step        VARCHAR(40) NOT NULL,      -- as written: 'preflight' | 'invoice_draft' | 'invoice_penny' | 'invoice_approve' | 'xero' | 'allocate_hh' | 'complete' | 'sweep' | 'error'; 'arrival' reserved for Phase 3b
   ok          BOOLEAN NOT NULL,
   detail      TEXT NOT NULL,
   hh_refs     JSONB,                     -- { invoiceId, depositId, applicationId, amount } — JSON.stringify on write
-  user_id     UUID REFERENCES users(id), -- NULL = arrival hook
+  user_id     UUID REFERENCES users(id), -- NULL = the sweep (or, later, the arrival hook)
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX ON job_closeout_log (job_id, created_at);
@@ -459,13 +466,71 @@ same line-level machinery (jon, 9 Oct).
 
 ### 10.2 Who may press "Complete anyway" with excess held — manager, or any staff?
 
+Answered by §4.4: the panel has no Complete button. Excess still held is an amber line on
+the card and in the Move to Completed modal; only open Problems gate completion.
+
 ### 10.3 Hold on account — is a To Do enough, or does the Money tab want a pill?
+
+Still open. Nothing creates the To Do yet; the surplus choices on the card are Refund
+(existing route), Apply to another job (existing route) and the Money tab link.
 
 ---
 
 ## 11. Deliberately not built
 
-Batch closes · scheduled closes · credit notes · voiding invoices · split-party
+Batch closes · scheduled closes (the nightly Xero sweep is the one exception, §9 Phase 3a:
+it writes nothing to HireHop) · credit notes · voiding invoices · split-party
 invoices · any refund path other than the existing routes · editing allocations (release
 back off an invoice stays in `hh-deposit-release.ts`, used by the excess flows) ·
 cancellation (next spec).
+
+---
+
+## 12. Current state (10 Oct 2026) and what to do next
+
+**Live.** Phases 1, 2 and 3a (PRs #1409–#1417). The first real job through the whole chain
+was 16756 (raise ≈15 s, allocation read back in HireHop and Xero). The sweep setting was
+switched on by jon on 10 Oct, so the first backfill run is the night of 11 Oct; the
+bookkeeper has been told. Check it the morning after:
+
+```bash
+journalctl -u ooosh-portal --since "03:25" --until "03:45" --no-pager | grep -i sweep
+sudo -u postgres psql -d ooosh_operations -c "SELECT j.hh_job_number, l.ok, l.detail, l.created_at FROM job_closeout_log l JOIN jobs j ON j.id = l.job_id WHERE l.step = 'sweep' ORDER BY l.created_at DESC LIMIT 40;"
+```
+
+A `stopped` count is normal on the first nights (jobs whose HireHop and OP figures
+disagree); each one is logged by job number with the sentence from `applyCreditsInXero`.
+Only `errors > 0` or the same job stopping every night needs a look.
+
+**Where the code is.** Recipe `services/hh-invoice-close.ts` (shared with the shop);
+module `services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/
+plan|run|raise-invoice|allocate|complete`); sweep `services/close-out-xero-sweep.ts`
+(scheduler 03:30); frontend `lib/closeOutPlan.ts` (one plan read per job, 30 s TTL,
+pub/sub) + `components/HireCloseOutPanel.tsx`, mounted by `RequirementCard.tsx` on the
+Invoice card with `payment_reconcile` passed in as `companionReq`; Problems gate in
+`pages/JobDetailPage.tsx` `StatusTransitionModal` + `routes/pipeline.ts`. Tests:
+`services/__tests__/hire-close-out.test.ts`, `close-out-xero-sweep.test.ts`,
+`shop-close.test.ts` (the regression guard for the extraction).
+
+**Next, in this order — each one only after jon says go:**
+
+1. **Phase 3b, the arrival hook (§4.5).** Hook point: `services/record-payment.ts`
+   `recordPayment()` and the portal's payment-event (`routes/money.ts`), after the HireHop
+   deposit exists. Condition: a non-excess deposit, exactly one approved invoice with
+   `owing > 0`, no §6 blocker → `runHireAllocation()` (it has no per-deposit filter and needs
+   none: it skips what is already allocated, so running it for the whole job is idempotent),
+   `user_id` NULL, step `'arrival'`; never complete the job. Own toggle in `system_settings`
+   (`closeout_arrival_hook_enabled`, same shape as migration 282). Must never fail the
+   payment: wrap it like the sweep, log and move on.
+2. **EU VAT split (§10.1).** Blocked on the bookkeeper confirming tax code 33. Build:
+   `raiseHireInvoice()` detects the "Non-standard VAT rules" item (already does, via
+   `vat-adjustment.ts` `hasNonStandardVatItem()`), makes the draft with `all: 1`, then edits
+   the invoice lines' `vat_id` (`billing_save_item.php`, `HIREHOP-BILLING-API.md` §10.3) to
+   split UK/non-UK days, with a custom line (§10.3b) where a line cannot be split. Penny
+   check stays on net. Until then EU hires are refused by name and raised by hand.
+3. **HireHop permission lockdown** for non-managers (add payment / add deposit / billing)
+   once 2 is live, or sooner if managers are happy raising EU invoices by hand.
+4. **Phase 4, additional charges** ("Add a charge" on Damage & Issues, §9).
+5. **Cancellation** — separate spec, reuses the invoice call, allocation and refund route.
+6. Smaller: the two-open-invoice case (§1.8) on the first real job; §10.3 hold-on-account;
+   whether `/complete` route stays (§4.4).
