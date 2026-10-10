@@ -21,6 +21,10 @@
 const KEY_SESSION = 'ooosh_freelancer_bookout_session'
 const KEY_CONTEXT = 'ooosh_freelancer_bookout_context'
 const KEY_EXPIRY = 'ooosh_freelancer_bookout_expiry'
+// The portal link (HMAC token) this session was opened from. The shells keep
+// that token in the URL, so a reload of the SAME link resumes the session and
+// a phone that threw its storage away just re-opens the link (Oct 2026).
+const KEY_LINK = 'ooosh_freelancer_bookout_link'
 
 /** Stored on resolve success — everything BookOutPage needs to pre-fill. */
 export interface FreelancerBookoutContext {
@@ -63,6 +67,7 @@ export interface FreelancerBookoutContext {
 export function setFreelancerSession(
   sessionToken: string,
   context: FreelancerBookoutContext,
+  linkToken: string | null = null,
   ttlMs = 4 * 60 * 60 * 1000,
 ): void {
   try {
@@ -70,6 +75,8 @@ export function setFreelancerSession(
     localStorage.setItem(KEY_SESSION, sessionToken)
     localStorage.setItem(KEY_CONTEXT, JSON.stringify(context))
     localStorage.setItem(KEY_EXPIRY, expiry)
+    if (linkToken) localStorage.setItem(KEY_LINK, linkToken)
+    else localStorage.removeItem(KEY_LINK)
   } catch (err) {
     console.error('[freelancer-session] Failed to persist session:', err)
   }
@@ -83,6 +90,8 @@ export function getFreelancerSession(): {
   token: string
   context: FreelancerBookoutContext
   expiry: string
+  /** The portal link it was opened from (null for sessions made before Oct 2026) */
+  linkToken: string | null
 } | null {
   try {
     const token = localStorage.getItem(KEY_SESSION)
@@ -97,7 +106,7 @@ export function getFreelancerSession(): {
     }
 
     const context = JSON.parse(contextRaw) as FreelancerBookoutContext
-    return { token, context, expiry }
+    return { token, context, expiry, linkToken: localStorage.getItem(KEY_LINK) }
   } catch {
     clearFreelancerSession()
     return null
@@ -109,6 +118,7 @@ export function clearFreelancerSession(): void {
     localStorage.removeItem(KEY_SESSION)
     localStorage.removeItem(KEY_CONTEXT)
     localStorage.removeItem(KEY_EXPIRY)
+    localStorage.removeItem(KEY_LINK)
   } catch {
     /* ignore */
   }
