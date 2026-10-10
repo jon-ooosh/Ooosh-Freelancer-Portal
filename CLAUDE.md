@@ -199,8 +199,11 @@ Payment Reconciliation requirement still exists but is drawn as that card's seco
 raises the invoice if needed (draft from uninvoiced lines → penny check → approve dated today → Xero)
 then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); Complete is its own button; "Mark as
 sent" only once nothing is left to allocate. **An EU hire with the "Non-standard VAT rules" item is
-refused until the invoice-line VAT split is built.** Xero log lines admin-only. Not yet: the VAT split (spec §10.1), the
-arrival hook and the Xero sweep (Phase 3). §1 is
+refused until the invoice-line VAT split is built.** Xero log lines admin-only. Completing a job is the status
+change at the top of the page, and that modal refuses open Problems (manager + reason to override;
+`routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
+(03:30) applies HireHop's allocations as credits in Xero, off until `system_settings.closeout_xero_sweep_enabled`
+is `'true'`. Not yet: the VAT split (spec §10.1), the arrival hook (Phase 3b). §1 is
 settled, §5 the allocation rule, §9 the phases. Refunds only through the existing routes.
 
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
@@ -430,7 +433,7 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 
 ## Scheduled tasks (`config/scheduler.ts`)
 
-Backups 02:00 · job financials 03:00 · holiday entitlement 06:05 · Xero reconcile 07:45 ·
+Backups 02:00 · job financials 03:00 · close-out Xero sweep 03:30 (off until its setting is on) · holiday entitlement 06:05 · Xero reconcile 07:45 ·
 bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
