@@ -554,7 +554,7 @@ function ClientEmailInput({
                   value={email}
                   onChange={(e) => handleEmailChange(index, e.target.value)}
                   onBlur={() => handleEmailBlur(index)}
-                  placeholder={index === 0 ? "Client email address" : "Additional email"}
+                  placeholder={index === 0 ? "Client email address (optional)" : "Additional email"}
                   className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${
                     emailErrors[index] ? 'border-red-300 bg-red-50' : 'border-gray-300'
                   }`}
@@ -595,8 +595,8 @@ function ClientEmailInput({
           {/* Info text */}
           <p className="text-xs text-gray-500">
             {jobType === 'delivery' 
-              ? 'A PDF delivery note with equipment list will be emailed to the client.'
-              : 'A collection confirmation email will be sent to the client.'
+              ? 'A PDF delivery note with equipment list will be emailed to the client. Leave blank to use the client contact we have on file.'
+              : 'A collection confirmation email will be sent to the client. Leave blank to use the client contact we have on file.'
             }
           </p>
         </div>
@@ -1191,9 +1191,11 @@ export default function CompletePage() {
           signature: customerPresent ? signature : null,
           photos: photos.length > 0 ? photos : undefined,
           customerPresent,
-          // Client email data (for next phase - API will use these)
+          // Extra client addresses typed here. Blank is fine: OP sends to the
+          // client contact on file (resolveClientEmailTarget). sendClientEmail
+          // is false ONLY when "Don't send" is ticked.
           clientEmails: validEmails,
-          sendClientEmail: !dontSendClientEmail && validEmails.length > 0,
+          sendClientEmail: !dontSendClientEmail,
           // Ooosh staff name (for @oooshtours.co.uk users)
           ...(isOooshStaff && staffName.trim() ? { staffName: staffName.trim() } : {}),
         }),

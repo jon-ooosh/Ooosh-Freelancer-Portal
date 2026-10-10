@@ -11,6 +11,12 @@
 #   3. Builds frontend and backend
 #   4. Runs database migrations
 #   5. Restarts the service
+#
+# The service is STOPPED before dependencies are installed: `npm ci` deletes
+# node_modules first, and doing that under the running app left a
+# half-deleted folder (ENOTEMPTY) and a crash-looping service (10 Oct 2026).
+# If any step fails the script stops with the service DOWN and says so —
+# loudly down beats half-built and quietly broken.
 # =============================================================
 
 set -euo pipefail
@@ -25,6 +31,14 @@ echo "============================================"
 
 cd "${APP_DIR}"
 
+on_fail() {
+  echo ""
+  echo "!!! Deploy FAILED — ooosh-portal may be STOPPED."
+  echo "!!! Fix the error above, re-run this script, or bring the old build back:"
+  echo "!!!   sudo systemctl start ooosh-portal"
+}
+trap on_fail ERR
+
 # --- Pull latest code ---
 echo ""
 echo "[1/5] Pulling latest code..."
@@ -34,7 +48,8 @@ git pull origin "${BRANCH}"
 
 # --- Install dependencies ---
 echo ""
-echo "[2/5] Installing dependencies..."
+echo "[2/5] Stopping the service, then installing dependencies..."
+sudo systemctl stop ooosh-portal
 cd "${APP_DIR}/backend"
 if [ -f package-lock.json ]; then
   npm ci --production=false
@@ -66,13 +81,14 @@ echo "[5/5] Running database migrations..."
 cd "${APP_DIR}/backend"
 npm run db:migrate
 
+# --- Start the service ---
+sudo systemctl start ooosh-portal
+trap - ERR
+
 echo ""
 echo "============================================"
-echo "  Build Complete!"
+echo "  Deploy Complete — service started"
 echo "============================================"
-echo ""
-echo "  Restart the service:"
-echo "    sudo systemctl restart ooosh-portal"
 echo ""
 echo "  Check status:"
 echo "    sudo systemctl status ooosh-portal"

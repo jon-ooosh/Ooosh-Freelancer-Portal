@@ -2524,6 +2524,8 @@ const completionSchema = z.object({
   customerPresent: z.preprocess((v) => v === 'true' || v === true, z.boolean()).default(true),
   equipmentChecklist: z.string().optional(), // JSON string of {itemId: boolean}
   clientEmails: z.string().optional(), // comma-separated
+  // false only when the freelancer ticked "Don't send … to client".
+  sendClientEmail: z.preprocess((v) => !(v === 'false' || v === false), z.boolean()).default(true),
   staffName: z.string().optional(), // For Ooosh staff completing on behalf of system account
   // Van-only deliveries are completed via the OP book-out flow (which
   // emits its own vehicle condition report). The portal completion call
@@ -2588,7 +2590,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       return;
     }
 
-    const { notes, customerPresent, equipmentChecklist, clientEmails, staffName, vanOnly } = parsed.data;
+    const { notes, customerPresent, equipmentChecklist, clientEmails, sendClientEmail, staffName, vanOnly } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
     // ── Upload photos + signature to R2 (preferred storage) ────────
@@ -2735,28 +2737,43 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
       });
 
-      // Build client email recipients list
+      // Build client email recipients list.
+      //   - "Don't send" ticked on the portal → nobody.
+      //   - Otherwise the client contact on file through resolveClientEmailTarget
+      //     (job_contacts first, then the org… THE rule), plus any extra
+      //     addresses the freelancer typed. Until Oct 2026 this read
+      //     organisations.email directly and threw a real resolver answer away,
+      //     so a job whose contact lived on job_contacts got no delivery note
+      //     at all (HH 16665).
       const recipients = new Set<string>();
-      if (clientEmails) {
-        clientEmails.split(',').map(e => e.trim()).filter(Boolean).forEach(e => recipients.add(e));
-      }
-      if (ctx.client_email) recipients.add(ctx.client_email);
-
-      // Safety net: if the freelancer didn't enter any client emails AND the
-      // client org has none on file, route the completion email to info@ with
-      // an amber banner so the team can forward to the right person and update
-      // the address book. Without this the delivery note silently disappears.
+      // Safety net: nothing on file and nothing typed → info@ with an amber
+      // banner so the team can forward to the right person and update the
+      // address book. Without this the delivery note silently disappears.
       let completionFallback: { jobId: string; clientName: string | null; jobNumber: string | null; jobName: string | null } | null = null;
-      if (recipients.size === 0 && ctx.job_id) {
-        const target = await resolveClientEmailTarget(ctx.job_id, 'delivery_note');
-        if (target.isFallback) {
-          recipients.add(target.primaryEmail);
-          completionFallback = {
-            jobId: ctx.job_id,
-            clientName: target.clientName,
-            jobNumber: target.jobNumber,
-            jobName: target.jobName,
-          };
+      const clientEmailDue = (isDelivery && !vanOnly) || isCollection;
+      if (clientEmailDue && sendClientEmail) {
+        if (clientEmails) {
+          clientEmails.split(',').map(e => e.trim()).filter(Boolean).forEach(e => recipients.add(e));
+        }
+        if (ctx.job_id) {
+          const target = await resolveClientEmailTarget(
+            ctx.job_id,
+            isCollection ? 'collection_confirmation' : 'delivery_note',
+          );
+          if (!target.isFallback) {
+            recipients.add(target.primaryEmail);
+            target.ccEmails.forEach(e => recipients.add(e));
+          } else if (recipients.size === 0) {
+            recipients.add(target.primaryEmail);
+            completionFallback = {
+              jobId: ctx.job_id,
+              clientName: target.clientName,
+              jobNumber: target.jobNumber,
+              jobName: target.jobName,
+            };
+          }
+        } else if (ctx.client_email) {
+          recipients.add(ctx.client_email);
         }
       }
 
