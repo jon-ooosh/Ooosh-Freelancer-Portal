@@ -1,13 +1,14 @@
 # Hire Close-Out (Bookkeeping) — Spec
 
-**Status (10 Oct 2026): Phases 1, 2 and 3a BUILT** (3a = the nightly Xero credit sweep,
-`services/close-out-xero-sweep.ts`, 03:30, off until `system_settings.closeout_xero_sweep_enabled`
-is `'true'`). **Phases 1 and 2 BUILT** — `services/hire-close-out.ts`, `routes/hire-close-out.ts`
-(`/api/close-out/:jobId/plan|raise-invoice|allocate|complete`), `job_closeout_log` (mig 281), the Raise
-invoice panel on the Invoice card (`HireInvoicePanel.tsx`) and the allocate/complete panel on the Payment
-Reconciliation card (`HireCloseOutPanel.tsx`), sharing one plan read (`lib/closeOutPlan.ts`). **An EU hire
-(the "Non-standard VAT rules" item) is refused by Raise invoice until the invoice-line VAT split (§10.1) is
-built — invoice those by hand for now.** Phases 3–4 and the VAT split not built. This is the "bookkeeping module" that
+**Status (10 Oct 2026): Phases 1, 2, 3a and 3b BUILT.** `services/hire-close-out.ts`,
+`routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|run|raise-invoice|allocate|complete`),
+`job_closeout_log` (mig 281), ONE panel on the Invoice card (`HireCloseOutPanel.tsx`, plan read shared via
+`lib/closeOutPlan.ts`; the Payment Reconciliation requirement is that card's second pill — §3). 3a = the
+nightly Xero credit sweep (`services/close-out-xero-sweep.ts`, 03:30, `closeout_xero_sweep_enabled`, mig
+282). 3b = the arrival hook (`services/close-out-arrival.ts`, `closeout_arrival_hook_enabled`, mig 283 —
+§4.5). **An EU hire (the "Non-standard VAT rules" item) is refused by Raise invoice until the invoice-line
+VAT split (§10.1) is built — invoice those by hand for now.** Phase 4 and the VAT split not built. §12 is
+the current state and the ordered next steps. This is the "bookkeeping module" that
 `docs/reference/HIREHOP-BILLING-API.md` §8 says the shop close is the base of. §1 is what
 jon settled in the design discussion; §4 is the flow; §9 is the build order and the
 captures that must happen before Phase 2. Read `HIREHOP-BILLING-API.md` §0 and §8
@@ -89,8 +90,8 @@ structurally impossible rather than merely discouraged.
     needs B's invoice to exist first, so for B it is a step-4.1-then-apply sequence; for A
     it is one of the three surplus choices in §4.3. **Its Xero leg is probably a no-op**
     (§4.3 step 2) — capture 5.
-13. **Tax code 33 (Zero Rated Income) for the non-UK portion** (jon, 9 Oct; bookkeeper to
-    confirm). HireHop ids and Xero mappings: `HIREHOP-BILLING-API.md` §10.4.
+13. **Tax code 33 (Zero Rated Income) for the non-UK portion** (jon, 9 Oct; confirmed
+    10 Oct). HireHop ids and Xero mappings: `HIREHOP-BILLING-API.md` §10.4.
 14. **Applying credits in Xero is automatic.** It is bookkeeping that mirrors what HireHop
     already says, it writes nothing to HireHop, and it is idempotent, so it runs as a sweep
     (§4.3 step 2) as well as inside the stepper. Everything else stays human-pressed.
@@ -173,8 +174,8 @@ nothing); a **draft** invoice already exists (adopt it: skip to the penny check)
    lines (for a first invoice, the kind=0 accrued × VAT). The shop also checks "= payments
    held"; a hire does **not** (balances owed and overpayments are normal) — it reports the
    difference instead. Stop at the draft on a mismatch; a draft never reaches Xero.
-3. **Approve** — `billing_save_status.php` status 2, dated the return date (open question
-   §10.3). Read back `STATUS >= 2` and a `NUMBER`. Never approve an invoice already ≥ 2.
+3. **Approve** — `billing_save_status.php` status 2, dated the day it is raised (§1.11 —
+   never back-dated to the return date). Read back `STATUS >= 2` and a `NUMBER`. Never approve an invoice already ≥ 2.
 4. **Invoice → Xero** — `syncSavedRowToXero` with `hh_task: post_invoice_credit`
    defaulted (the helper's default is `post_payment`, wrong for an invoice). Read back
    `ACC_ID` on the row. A Xero refusal is an amber panel + `sendXeroSyncFailedAlert`,
@@ -258,15 +259,37 @@ on excess still held (`allowExcessHeld` for a manager), writes `status_save.php`
 back and mirrors into OP through the webhook handler. **Nothing in the UI calls it.** Remove it
 or wire the modal to it, never grow a second completion path.
 
-### 4.5 Arrival hook (Phase 3)
+### 4.5 Arrival hook (Phase 3b) — ✅ BUILT 10 Oct 2026
 
-The one automatic piece. When `recordPayment()` or the Stripe webhook's payment-event
-lands a **hire** (non-excess) deposit on a job that has **exactly one approved invoice
-with owing > 0** and no §6 mismatch, run §4.3 for that deposit alone and, if that leaves
-every invoice at £0.00 and nothing unallocated, run §4.4 with no excess override (an
-excess still held means it stops at "ready to complete" and leaves the card amber). Any
-other shape does nothing and leaves the card for a human. Logged like a manual run with
-`user_id = NULL`.
+`services/close-out-arrival.ts`. When `recordPayment()` (staff Record Payment, the Wise
+matcher, later Stripe Terminal) or the portal's `payment-event` lands a **hire**
+(`deposit`/`balance`) payment with a HireHop deposit id, `fireArrivalHook()` runs
+**after the caller has answered** — it can never fail or slow the payment; any error is
+logged as an `arrival` line and swallowed.
+
+- Off unless `system_settings.closeout_arrival_hook_enabled = 'true'` (migration 283).
+- Reads a fresh plan. **Silent** (no log line) unless the job has **exactly one approved
+  invoice owing** and the new payment is a hire deposit still holding money — so the
+  usual case, money arriving before there is an invoice, writes nothing. An invoice
+  raised before the hire is allocated straight away (rare; jon, 10 Oct: fine).
+- Otherwise logs one `arrival` line and calls `runHireAllocation(job, null,
+  { onlyFromDeposit })`: the same allocate-in-HireHop + apply-in-Xero, `user_id` NULL.
+- **This payment only** (jon, 10 Oct). Inside the job lock, if the plan would allocate
+  from ANY other payment — money left unallocated on purpose, to refund or held on
+  account; the §5 rule takes the oldest first — it stops with an `arrival` line naming
+  that payment and leaves it for a person. A client who wanted their credit used would
+  not have sent more money.
+- A §6 blocker stops it at pre-flight, logged, as for a press of the button.
+- **Never completes the job** — completing is the status change at the top of Job
+  Detail (§4.4).
+
+A **duplicate payment on a settled job** (the client's accounts misread a "paid" invoice
+and pay again): there is no invoice owing, so the hook stays silent. The Wise matcher
+does not match it confidently either (the job's remaining balance is £0, so the amount
+matches no expected figure) — it lands in the unmatched queue on the Money overview and
+info@ is emailed once. Record it on the job from the queue; the Invoice card then shows it
+as an unallocated surplus with the existing choices (Refund — record-keeping for a bank
+transfer, the money goes back from Wise by hand — or Apply to another job).
 
 ---
 
@@ -328,11 +351,11 @@ One table, no state columns on `jobs` (state is always re-read from HireHop):
 CREATE TABLE job_closeout_log (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   job_id      UUID NOT NULL REFERENCES jobs(id),
-  step        VARCHAR(40) NOT NULL,      -- as written: 'preflight' | 'invoice_draft' | 'invoice_penny' | 'invoice_approve' | 'xero' | 'allocate_hh' | 'complete' | 'sweep' | 'error'; 'arrival' reserved for Phase 3b
+  step        VARCHAR(40) NOT NULL,      -- as written: 'preflight' | 'invoice_draft' | 'invoice_penny' | 'invoice_approve' | 'xero' | 'allocate_hh' | 'complete' | 'sweep' | 'arrival' | 'error'
   ok          BOOLEAN NOT NULL,
   detail      TEXT NOT NULL,
   hh_refs     JSONB,                     -- { invoiceId, depositId, applicationId, amount } — JSON.stringify on write
-  user_id     UUID REFERENCES users(id), -- NULL = the sweep (or, later, the arrival hook)
+  user_id     UUID REFERENCES users(id), -- NULL = the sweep or the arrival hook
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX ON job_closeout_log (job_id, created_at);
@@ -380,9 +403,8 @@ any swept clean in the last 7 days with no payment since; per job the shared `ap
 per approved invoice with allocations (cross-job deposits via the source job's rows), logged to
 `job_closeout_log` with `user_id` NULL (`step = 'sweep'`); a mismatch is logged and skipped.
 Off until `system_settings.closeout_xero_sweep_enabled = 'true'` (migration 282 seeds it).
-**Phase 3b — Arrival hook.** Not built. Small now: when `recordPayment()` or the Stripe
-webhook lands a hire deposit on a job with exactly one open approved invoice, run the
-allocation for that deposit; gated by its own toggle.
+**Phase 3b — Arrival hook.** ✅ BUILT 10 Oct 2026 — §4.5. Off until
+`system_settings.closeout_arrival_hook_enabled = 'true'` (migration 283).
 
 **Phase 4 — Additional charges.** "Add a charge" on the Damage & Issues card: adds a job
 line (OP already adds lines to HireHop jobs for the shop — reuse) with a nominal picked
@@ -461,7 +483,7 @@ One invoice, and the penny check compares its gross to
 receives the right tax type on every line so the VAT return is right untouched. The quote
 keeps showing full UK VAT until invoicing, which is what the portal's wording already
 says. Done at invoice time, not quote time (the quote is edited too often before then).
-Tax code 33, bookkeeper to confirm (§1.13). The cancellation-fee invoice will use the
+Tax code 33, confirmed (§1.13). The cancellation-fee invoice will use the
 same line-level machinery (jon, 9 Oct).
 
 ### 10.2 Who may press "Complete anyway" with excess held — manager, or any staff?
@@ -488,7 +510,8 @@ cancellation (next spec).
 
 ## 12. Current state (10 Oct 2026) and what to do next
 
-**Live.** Phases 1, 2 and 3a (PRs #1409–#1417). The first real job through the whole chain
+**Live.** Phases 1, 2 and 3a (PRs #1409–#1418). **3b, the arrival hook, is built and
+OFF** — switch it on once the sweep has had a clean night or two (§4.5). The first real job through the whole chain
 was 16756 (raise ≈15 s, allocation read back in HireHop and Xero). The sweep setting was
 switched on by jon on 10 Oct, so the first backfill run is the night of 11 Oct; the
 bookkeeper has been told. Check it the morning after:
@@ -514,15 +537,8 @@ Invoice card with `payment_reconcile` passed in as `companionReq`; Problems gate
 
 **Next, in this order — each one only after jon says go:**
 
-1. **Phase 3b, the arrival hook (§4.5).** Hook point: `services/record-payment.ts`
-   `recordPayment()` and the portal's payment-event (`routes/money.ts`), after the HireHop
-   deposit exists. Condition: a non-excess deposit, exactly one approved invoice with
-   `owing > 0`, no §6 blocker → `runHireAllocation()` (it has no per-deposit filter and needs
-   none: it skips what is already allocated, so running it for the whole job is idempotent),
-   `user_id` NULL, step `'arrival'`; never complete the job. Own toggle in `system_settings`
-   (`closeout_arrival_hook_enabled`, same shape as migration 282). Must never fail the
-   payment: wrap it like the sweep, log and move on.
-2. **EU VAT split (§10.1).** Blocked on the bookkeeper confirming tax code 33. Build:
+1. ~~Phase 3b, the arrival hook~~ — built (§4.5); switch `closeout_arrival_hook_enabled` on.
+2. **EU VAT split (§10.1).** Tax code 33 CONFIRMED (jon, 10 Oct). Build:
    `raiseHireInvoice()` detects the "Non-standard VAT rules" item (already does, via
    `vat-adjustment.ts` `hasNonStandardVatItem()`), makes the draft with `all: 1`, then edits
    the invoice lines' `vat_id` (`billing_save_item.php`, `HIREHOP-BILLING-API.md` §10.3) to

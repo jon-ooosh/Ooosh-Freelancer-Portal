@@ -187,7 +187,7 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
-**PHASES 1–3a BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
+**PHASES 1–3b BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
 finishing a hire's money from the post-hire cards (raise invoice → excess decision → allocate
 deposits in HireHop AND Xero → complete), one job at a time, on the shared recipe
 `services/hh-invoice-close.ts` (`HIREHOP-BILLING-API.md` §8). Born from job 16015: HireHop's "New
@@ -204,7 +204,10 @@ refused until the invoice-line VAT split is built.** Xero log lines admin-only. 
 change at the top of the page, and that modal refuses open Problems (manager + reason to override;
 `routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
 (03:30) applies HireHop's allocations as credits in Xero, off until `system_settings.closeout_xero_sweep_enabled`
-is `'true'` (switched on 10 Oct 2026). Not yet: the arrival hook (Phase 3b), the VAT split (spec §10.1). §1 is
+is `'true'` (switched on 10 Oct 2026). **Arrival hook** `services/close-out-arrival.ts` (Phase 3b): a hire payment
+landing on a job with exactly one invoice owing is allocated to it in HireHop + Xero, after the payment has
+answered — THAT payment only (never money already sitting on the job), never completes the job; off until
+`closeout_arrival_hook_enabled` is `'true'`. Not yet: the VAT split (spec §10.1, tax code 33 confirmed). §1 is
 settled, §5 the allocation rule, §9 the phases, **§12 the current state and the ordered next steps — read it first.**
 Refunds only through the existing routes.
 

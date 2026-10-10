@@ -656,15 +656,22 @@ export async function sourceJobRows(rows: Row[], invoiceId: number): Promise<Row
   return extra;
 }
 
-/** Do the plan: allocate in HireHop (read back each), then apply the credits in Xero (read back). */
-export async function runHireAllocation(jobIdOrNumber: string, userId: string | null): Promise<CloseOutResult> {
+/**
+ * Do the plan: allocate in HireHop (read back each), then apply the credits in Xero (read back).
+ *
+ * `onlyFromDeposit` is the arrival hook's guard (§4.5): refuse unless every planned
+ * allocation comes from that one payment, so money someone left unallocated on purpose
+ * (to refund, or held on account) is never picked up by a payment that just arrived.
+ */
+export async function runHireAllocation(jobIdOrNumber: string, userId: string | null,
+  opts: { onlyFromDeposit?: number; retryHint?: string } = {}): Promise<CloseOutResult> {
   const job = await loadJob(jobIdOrNumber);
   return withJobLock(job.id, async () => {
-    const rep = reporter(job.id, userId, 'press Allocate payments');
+    const rep = reporter(job.id, userId, opts.retryHint ?? 'press Allocate payments');
     let done = false;
     let message: string;
     try {
-      message = await allocateSteps(job, rep);
+      message = await allocateSteps(job, rep, opts.onlyFromDeposit);
       done = true;
     } catch (err) {
       if (!(err instanceof Stop)) {
@@ -676,9 +683,18 @@ export async function runHireAllocation(jobIdOrNumber: string, userId: string | 
   });
 }
 
-async function allocateSteps(job: JobRow, rep: CloseReporter): Promise<string> {
+async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: number): Promise<string> {
   const plan = await buildPlan(job);
   if (plan.blockers.length) await rep.stop('preflight', plan.blockers.join(' '));
+  if (onlyFromDeposit != null) {
+    const others = [...new Set(plan.allocations.filter((a) => a.depositId !== onlyFromDeposit).map((a) => a.depositId))];
+    if (others.length || !plan.allocations.length) {
+      await rep.stop('arrival', others.length
+        ? `Payment ${onlyFromDeposit} arrived, but payment${others.length > 1 ? 's' : ''} ${others.join(', ')} on this job `
+          + `still hold${others.length > 1 ? '' : 's'} money and would be used first — left for a person to allocate.`
+        : `Payment ${onlyFromDeposit} arrived, but there is nothing for it to pay — left for a person.`);
+    }
+  }
   const hhJobNumber = plan.hhJobNumber;
   await rep.log('preflight', true, `Clean. ${plan.sentences.join(' ')}`);
 
