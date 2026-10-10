@@ -483,6 +483,37 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     const currentJob = current.rows[0];
     const fromStatus = currentJob.pipeline_status;
 
+    // Completing a job with Problems still open (jon, Oct 2026: staff kept
+    // completing jobs with unresolved Problems). Close-out cards stay a warning;
+    // an open Problem is firmer: only a manager may complete over it, and only
+    // with a reason, which goes on the timeline with the transition.
+    if (pipeline_status === 'completed' && fromStatus !== 'completed') {
+      const open = await query(
+        `SELECT id, summary, severity, status FROM job_issues
+          WHERE job_id = $1 AND status NOT IN ('resolved', 'written_off', 'cancelled')
+          ORDER BY severity DESC, created_at`,
+        [jobId]
+      );
+      if (open.rows.length > 0) {
+        const n = open.rows.length;
+        const isManager = (MANAGER_ROLES as readonly string[]).includes(req.user?.role || '');
+        if (!isManager) {
+          res.status(403).json({
+            error: `This job has ${n} open Problem${n === 1 ? '' : 's'}. Resolve ${n === 1 ? 'it' : 'them'}, or ask a manager to complete the job with a reason.`,
+            code: 'open_problems', problems: open.rows,
+          });
+          return;
+        }
+        if (!String(transition_note || '').trim()) {
+          res.status(400).json({
+            error: `This job has ${n} open Problem${n === 1 ? '' : 's'} — say why it is being completed anyway.`,
+            code: 'open_problems_reason_required', problems: open.rows,
+          });
+          return;
+        }
+      }
+    }
+
     // Build update fields
     const updates: string[] = [
       `pipeline_status = $1`,

@@ -33,30 +33,27 @@
  * has no job, so never reaches here.)
  */
 import { query } from '../config/database';
-import hhBroker from './hirehop-broker';
-import { readBillingRows, readDepositAvailability } from './hh-deposit-release';
-import { syncSavedRowToXero, sendXeroSyncFailedAlert } from './hh-xero-sync';
-import xeroBroker from './xero-broker';
-import { isXeroConfigured } from '../config/xero';
+import { readBillingRows } from './hh-deposit-release';
+import {
+  PENNY, round2, gbp, HH_COMPLETED, Stop, CloseReporter, UnallocatedPayment,
+  invoiceRows, findInvoice, invoiceStatus, invoiceGross, invoiceNet, invoiceOwing, invoiceInXero,
+  unallocatedPayments, idOf,
+  postDraftInvoice, postApproveInvoice, postAllocation, pushInvoiceToXero, applyCreditsInXero, completeJob,
+} from './hh-invoice-close';
+import type { Row } from './hh-invoice-close';
 import { withShopDrainLock } from './shop-drain';
 import { checkShopPeriodLocked, SHOP_ALERT_RECIPIENT, ShopCheck } from './shop-reconcile';
 import { londonDate } from './shop-period';
-import { hhLocalNow } from './shop-stock';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-type Row = Record<string, any>;
-
-const PENNY = 0.005;
-const round2 = (n: number) => Math.round(n * 100) / 100;
 /** '2026-09-21' → '21/09/2026'. */
 const ukDay = (iso: string) => iso.split('-').reverse().join('/');
-const gbp = (n: number) => `£${n.toFixed(2)}`;
 
 /** HireHop status codes the close sets or refuses. */
-const COMPLETED = 11;
+const COMPLETED = HH_COMPLETED;
 
 export type CloseState = 'drafted' | 'approved' | 'allocated' | 'completed';
 
@@ -67,13 +64,8 @@ export interface CloseLogEntry {
   detail: string;
 }
 
-export interface ClosePayment {
-  depositId: number;
-  bankId: number | null;
-  description: string;
-  /** Unallocated — what the close will allocate to the invoice. */
-  available: number;
-}
+/** A payment on the job with money not yet allocated (hh-invoice-close.ts). */
+export type ClosePayment = UnallocatedPayment;
 
 export interface ClosePreview {
   periodId: string;
@@ -143,81 +135,6 @@ async function log(periodId: string, step: string, ok: boolean, detail: string):
     [periodId, JSON.stringify([entry])],
   );
   console.log(`[shop-close] ${periodId} ${step}: ${ok ? 'ok' : 'STOPPED'} — ${detail}`);
-}
-
-// ── Reading HireHop ──────────────────────────────────────────────────────
-
-const kindOf = (row: Row) => parseInt(row.kind ?? '0');
-const idOf = (row: Row) => parseInt(row.data?.ID || row.number || '0');
-
-function invoiceRows(rows: Row[]): Row[] {
-  return rows.filter((row) => kindOf(row) === 1);
-}
-
-function findInvoice(rows: Row[], invoiceId: number): Row | null {
-  return invoiceRows(rows).find((row) => idOf(row) === invoiceId) ?? null;
-}
-
-/** HireHop invoice STATUS: 0 draft · 2 approved · 3 paid (seen on 16762 once allocated). */
-function invoiceStatus(row: Row): number {
-  return parseInt(row.status ?? row.data?.STATUS ?? '0');
-}
-
-/** Gross (inc VAT): `debit`, else NET + TAX. */
-function invoiceGross(row: Row): number | null {
-  const debit = parseFloat(row.debit ?? row.data?.debit ?? '');
-  if (Number.isFinite(debit)) return round2(debit);
-  const net = parseFloat(row.data?.NET ?? '');
-  const tax = parseFloat(row.data?.TAX ?? '');
-  return Number.isFinite(net) && Number.isFinite(tax) ? round2(net + tax) : null;
-}
-
-function invoiceNet(row: Row): number | null {
-  const net = parseFloat(row.data?.NET ?? '');
-  return Number.isFinite(net) ? round2(net) : null;
-}
-
-function invoiceOwing(row: Row): number | null {
-  const owing = parseFloat(row.owing ?? row.data?.owing ?? '');
-  return Number.isFinite(owing) ? round2(owing) : null;
-}
-
-/**
- * Has the approved invoice reached Xero? After `accounting/tasks.php` HireHop
- * stamps it with the Xero invoice id (`ACC_ID`) and `exported: 1` (§4 capture).
- */
-function invoiceInXero(row: Row): boolean {
-  const d = row.data || {};
-  const accId = String(d.ACC_ID ?? d.acc_id ?? '').trim();
-  return (accId !== '' && accId !== '0') || Number(row.exported ?? d.exported ?? 0) === 1;
-}
-
-/** Every payment on the job with money still unallocated. */
-function unallocatedPayments(rows: Row[]): ClosePayment[] {
-  const out: ClosePayment[] = [];
-  for (const row of rows) {
-    if (kindOf(row) !== 6) continue;
-    if (!(parseFloat(row.credit ?? row.data?.credit ?? '0') > 0)) continue;   // refunds/negatives aren't payments
-    const id = idOf(row);
-    const dep = id ? readDepositAvailability(rows, id) : null;
-    if (!dep || dep.available < PENNY) continue;
-    const bank = row.data?.ACC_ACCOUNT_ID;
-    out.push({
-      depositId: id,
-      bankId: bank != null && bank !== '' ? Number(bank) : null,
-      description: String(row.data?.DESCRIPTION || row.desc || ''),
-      available: round2(dep.available),
-    });
-  }
-  return out;
-}
-
-/** HireHop's job status, fresh. Null if it couldn't be read. */
-async function readJobStatus(hhJobNumber: number): Promise<number | null> {
-  const res = await hhBroker.get<any>('/api/job_data.php', { job: hhJobNumber },
-    { priority: 'high', cacheTTL: -1, skipCache: true });
-  const s = res?.success ? parseFloat(String(res.data?.STATUS ?? '')) : NaN;
-  return Number.isFinite(s) ? s : null;
 }
 
 // ── OP's side ────────────────────────────────────────────────────────────
@@ -322,7 +239,14 @@ export async function previewShopClose(periodId: string): Promise<ClosePreview> 
 
 // ── The close ────────────────────────────────────────────────────────────
 
-class Stop extends Error {}
+/** The shared recipe talks back through this: our log, our stop, our button. */
+function reporter(periodId: string): CloseReporter {
+  return {
+    log: (step, ok, detail) => log(periodId, step, ok, detail),
+    stop: (step, detail) => stop(periodId, step, detail),
+    retryHint: 'press Close',
+  };
+}
 
 /** Run (or resume) the close for one week. Admin-only at the route. */
 export async function runShopClose(periodId: string, userId: string | null): Promise<CloseResult> {
@@ -370,7 +294,7 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
 
     if (preview.empty) {
       // Nothing to invoice — straight to Completed.
-      await completeJob(periodId, hhJobNumber);
+      await completeJob(reporter(periodId), hhJobNumber);
       await finish(periodId, userId);
       await log(periodId, 'closed', true, 'Nothing was sold (all cancelled or refunded) — job Completed, no invoice.');
       return 'Nothing was sold this week, so there was no invoice to raise. The job is now Completed.';
@@ -379,41 +303,15 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
 
   // ── 2. Draft invoice ──
   if (!p.hh_invoice_id) {
-    const res = await hhBroker.post<any>('/php_functions/billing_save.php', {
-      id: 0,
-      desc: '',
-      // The week, so the Xero invoice's Reference says what it covers
-      // (jon, Sep 2026). HireHop's line descriptions carry the job's dates.
-      ref: `Shop sales ${ukDay(p.period_start)} - ${ukDay(p.period_end)}`,
-      memo: '',
-      bank: 169,              // the invoice's default bank as captured; payments carry their own
-      tax_total: '0.00',
-      tax_rate: 0,
-      all: 1,                 // "Include all owing items" — ALWAYS; the UI default is a user setting
-      novat: 0,
-      aggregated: 0,
-      local: hhLocalNow(),
-      tz: 'Europe/London',
-      'currency[CODE]': 'GBP',
-      'currency[NAME]': 'United Kingdom Pound',
-      'currency[SYMBOL]': '£',
-      'currency[DECIMALS]': 2,
-      'currency[MULTIPLIER]': 1,
-      'currency[NEGATIVE_FORMAT]': 1,
-      'currency[SYMBOL_POSITION]': 0,
-      'currency[DECIMAL_SEPARATOR]': '.',
-      'currency[THOUSAND_SEPARATOR]': ',',
-      upto: '',
-      job: hhJobNumber,
-    }, { priority: 'high' });
+    // The ref is the week, so the Xero invoice's Reference says what it covers
+    // (jon, Sep 2026). HireHop's line descriptions carry the job's dates.
+    const { res, newId } = await postDraftInvoice(hhJobNumber, `Shop sales ${ukDay(p.period_start)} - ${ukDay(p.period_end)}`);
 
     // Read back regardless of what it said. The broker retries a POST after a
     // network blip, so "one invoice on the job, and it's a draft" is the only
     // state that is safe to carry on from.
     const rows = await readBillingRows(hhJobNumber);
     const invoices = invoiceRows(rows);
-    const fromResponse = (res.data?.rows || []).find((r: Row) => kindOf(r) === 1);
-    const newId = fromResponse ? idOf(fromResponse) : 0;
 
     if (invoices.length === 0) {
       await stop(periodId, 'draft', `HireHop did not create the invoice (${res.error || 'no invoice on the job afterwards'}). Nothing was changed — press Close to try again.`);
@@ -481,13 +379,7 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
     const alreadyApproved = invoiceStatus(inv!) >= 2;
     const res = alreadyApproved
       ? { success: true, data: null as any, error: undefined }
-      : await hhBroker.post<any>('/php_functions/billing_save_status.php', {
-        id: invoiceId,
-        status: 2,
-        date: `${p.period_end} 23:59:00`,
-        type: 1,
-        local: hhLocalNow(),
-      }, { priority: 'high' });
+      : await postApproveInvoice(invoiceId, `${p.period_end} 23:59:00`);
     const after = findInvoice(await readBillingRows(hhJobNumber), invoiceId);
     const number = after?.data?.NUMBER ? String(after.data.NUMBER) : '';
     if (!after || invoiceStatus(after) < 2 || !number) {
@@ -500,10 +392,14 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
 
     // Push to Xero. The save names its own task; if it ever doesn't, the task
     // for an invoice is post_invoice_credit — never the post_payment default.
-    await pushInvoiceToXero(periodId, hhJobNumber, invoiceId, number, gross!, {
-      ...(res.data || {}),
-      hh_task: res.data?.hh_task || 'post_invoice_credit',
-      hh_id: res.data?.hh_id || invoiceId,
+    await pushInvoiceToXero(reporter(periodId), {
+      label: `shop close — invoice ${number}`, hhJobNumber, invoiceId, number, gross: gross!,
+      saved: {
+        ...(res.data || {}),
+        hh_task: res.data?.hh_task || 'post_invoice_credit',
+        hh_id: res.data?.hh_id || invoiceId,
+      },
+      alert: { jobId: null, what: `shop week invoice ${number}` },
     });
     p = await loadPeriod(periodId);
   }
@@ -513,30 +409,21 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
     const inv = findInvoice(await readBillingRows(hhJobNumber), invoiceId);
     if (!inv) await stop(periodId, 'xero', `Invoice ${invoiceId} is no longer on the job. Check HireHop by hand.`);
     if (!invoiceInXero(inv!)) {
-      await pushInvoiceToXero(periodId, hhJobNumber, invoiceId, p.hh_invoice_number || String(invoiceId),
-        invoiceGross(inv!) ?? 0, {
-          hh_task: 'post_invoice_credit', hh_id: invoiceId, hh_acc_package_id: 3, hh_package_type: 1,
-        });
+      const number = p.hh_invoice_number || String(invoiceId);
+      await pushInvoiceToXero(reporter(periodId), {
+        label: `shop close — invoice ${number}`, hhJobNumber, invoiceId, number, gross: invoiceGross(inv!) ?? 0,
+        saved: { hh_task: 'post_invoice_credit', hh_id: invoiceId, hh_acc_package_id: 3, hh_package_type: 1 },
+        alert: { jobId: null, what: `shop week invoice ${number}` },
+      });
     }
 
     // ── 5. Allocate every payment ──
     const payments = unallocatedPayments(await readBillingRows(hhJobNumber));
-    const today = londonDate(new Date());
     for (const pay of payments) {
       if (pay.bankId == null) {
         await stop(periodId, 'allocate', `Couldn't read which bank payment ${pay.depositId} is on. Nothing more was allocated.`);
       }
-      const res = await hhBroker.post<any>('/php_functions/billing_payments_save.php', {
-        id: 0,                 // a new application
-        date: today,
-        desc: '',
-        paid: pay.available,
-        memo: '',
-        bank: pay.bankId,      // the PAYMENT's bank, not the invoice's
-        OWNER: invoiceId,
-        deposit: pay.depositId,
-        no_webhook: 1,
-      }, { priority: 'high' });
+      const res = await postAllocation({ depositId: pay.depositId, bankId: pay.bankId!, amount: pay.available, invoiceId });
       if (!res.success || !res.data) {
         await stop(periodId, 'allocate', `HireHop refused to allocate payment ${pay.depositId} (${gbp(pay.available)}): `
           + `${res.error || 'no reply'}. Press Close to carry on — payments already allocated are skipped.`);
@@ -557,7 +444,7 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
       await stop(periodId, 'allocate', `After allocating, the invoice shows ${owing == null ? '?' : gbp(owing)} owing`
         + `${left.length ? ` and ${left.length} payment(s) still hold money` : ''} — expected £0.00. Check the job in HireHop.`);
     }
-    await applyCreditsInXero(periodId, rows, invoiceId, p.hh_invoice_number || String(invoiceId));
+    await applyCreditsInXero(reporter(periodId), rows, invoiceId, p.hh_invoice_number || String(invoiceId));
     await setState(periodId, 'allocated');
     await log(periodId, 'allocate', true, 'Invoice shows £0.00 owing.');
     p = await loadPeriod(periodId);
@@ -565,134 +452,11 @@ async function closeSteps(periodId: string, userId: string | null): Promise<stri
 
   // ── 6 & 7. Complete the job, record it ──
   if (p.close_state === 'allocated') {
-    await completeJob(periodId, hhJobNumber);
+    await completeJob(reporter(periodId), hhJobNumber);
     await finish(periodId, userId);
     await log(periodId, 'closed', true, `Job Completed. Week closed — invoice ${p.hh_invoice_number}.`);
   }
   return `Closed. Invoice ${p.hh_invoice_number} is approved and paid, and the job is Completed.`;
-}
-
-async function pushInvoiceToXero(
-  periodId: string, hhJobNumber: number, invoiceId: number, number: string, gross: number, saved: Row,
-): Promise<void> {
-  const sync = await syncSavedRowToXero(`shop close — invoice ${number}`, saved);
-  if (!sync.ok) {
-    void sendXeroSyncFailedAlert({
-      jobId: null, hhJobNumber, what: `shop week invoice ${number}`, amount: gross,
-      hhRowId: invoiceId, error: sync.error || 'unknown',
-    });
-    await stop(periodId, 'xero', `Invoice ${number} is approved in HireHop but Xero refused it: ${sync.error}. `
-      + 'No payments have been allocated. Fix it in Xero (you\'ve been emailed), then press Close to carry on.');
-  }
-  // Read back: HireHop stamps the invoice once Xero has it.
-  const inv = findInvoice(await readBillingRows(hhJobNumber), invoiceId);
-  if (!inv || !invoiceInXero(inv)) {
-    const keys = inv?.data ? Object.keys(inv.data).join(',') : 'none';
-    console.warn(`[shop-close] invoice ${invoiceId} shows no Xero id after sync. data keys: ${keys}`);
-    await stop(periodId, 'xero', `HireHop says invoice ${number} was sent to Xero, but it doesn't show as exported yet. `
-      + 'Check it is in Xero, then press Close to carry on.');
-  }
-  await log(periodId, 'xero', true, `Invoice ${number} is in Xero.`);
-}
-
-/** The allocations on our invoice (the invoice-side twin of each kind 3 row). */
-function invoiceAllocations(rows: Row[], invoiceId: number): Row[] {
-  return rows.filter((row) => kindOf(row) === 3
-    && String(row.parent_is ?? row.data?.parent_is ?? '') === 'invoice'
-    && Number(row.data?.OWNER ?? 0) === invoiceId);
-}
-
-const xeroMoney = (v: unknown) => round2(Number(v) || 0);
-
-/**
- * Make Xero match HireHop: apply each payment's overpayment to the invoice —
- * Xero's "Apply credit" — then ask XERO whether the invoice is paid.
- *
- * HireHop allocates on its side but never pushes the allocation to Xero (jon,
- * Sep 2026: it never has; 16762 and 16750 proved it). The ids are already on
- * HireHop's rows: the invoice's `ACC_ID` is the Xero invoice, each deposit's
- * `ACC_DATA.OverpaymentID` is its Xero overpayment.
- *
- * Idempotent. It applies only what each overpayment has NOT already applied to
- * this invoice, so a resume — or jon pressing "Apply credit" in Xero by hand —
- * never applies anything twice. The only judge of "done" is Xero's AmountDue.
- */
-async function applyCreditsInXero(periodId: string, rows: Row[], invoiceId: number, number: string): Promise<void> {
-  if (!isXeroConfigured()) {
-    await stop(periodId, 'xero', 'OP has no Xero connection on this server, so it cannot apply the payments in Xero. '
-      + `Apply the credit to ${number} in Xero by hand, then press Close to finish.`);
-  }
-  const inv = findInvoice(rows, invoiceId);
-  const xeroInvoiceId = String(inv?.data?.ACC_ID ?? '').trim();
-  if (!xeroInvoiceId) {
-    await stop(periodId, 'xero', `${number} has no Xero id in HireHop, so OP can't find it in Xero. Check it reached Xero, then press Close.`);
-  }
-
-  const amountDue = async () => {
-    const x = await xeroBroker.getInvoice(xeroInvoiceId);
-    if (!x) throw new Error(`Xero can't find ${number} (${xeroInvoiceId}).`);
-    return xeroMoney(x.AmountDue);
-  };
-
-  try {
-    if ((await amountDue()) < PENNY) {
-      await log(periodId, 'xero', true, `${number} already shows paid in Xero.`);
-      return;
-    }
-    const today = londonDate(new Date());
-    for (const app of invoiceAllocations(rows, invoiceId)) {
-      const depositId = Number(app.data?.OWNER_DEPOSIT ?? 0);
-      const amount = xeroMoney(Math.abs(parseFloat(app.credit ?? app.data?.AMOUNT ?? '0')));
-      const dep = rows.find((r) => kindOf(r) === 6 && idOf(r) === depositId);
-      const overpaymentId = String(dep?.data?.ACC_DATA?.OverpaymentID ?? '').trim();
-      if (!overpaymentId) {
-        await stop(periodId, 'xero', `Payment ${depositId} (${gbp(amount)}) isn't in Xero as a payment, so there's no credit to apply. `
-          + 'Check it in HireHop (it should have the cloud icon), then press Close.');
-      }
-      const op = await xeroBroker.getOverpayment(overpaymentId);
-      if (!op) await stop(periodId, 'xero', `Xero can't find the overpayment for payment ${depositId}. Check it in Xero, then press Close.`);
-      const applied = xeroMoney(((op!.Allocations as any[]) || [])
-        .filter((a) => String(a?.Invoice?.InvoiceID ?? '') === xeroInvoiceId)
-        .reduce((sum, a) => sum + (Number(a?.Amount) || 0), 0));
-      const need = round2(amount - applied);
-      if (need < PENNY) continue;                 // already applied — by us earlier, or by hand
-      const remaining = xeroMoney(op!.RemainingCredit);
-      if (remaining + PENNY < need) {
-        await stop(periodId, 'xero', `Payment ${depositId} needs ${gbp(need)} applying to ${number}, but Xero says only `
-          + `${gbp(remaining)} of it is unused — it has been applied elsewhere. Check it in Xero; nothing more was applied.`);
-      }
-      await xeroBroker.allocateOverpayment({ overpaymentId, invoiceId: xeroInvoiceId, amount: need, date: today });
-      await log(periodId, 'xero', true, `Payment ${depositId} — ${gbp(need)} credit applied to ${number} in Xero.`);
-    }
-    const due = await amountDue();
-    if (due >= PENNY) {
-      await stop(periodId, 'xero', `After applying every payment, Xero still shows ${gbp(due)} due on ${number}. `
-        + 'The job has NOT been completed. Check the invoice in Xero, then press Close.');
-    }
-  } catch (err) {
-    if (err instanceof Stop) throw err;
-    const msg = err instanceof Error ? err.message : String(err);
-    const scope = /\b40[13]\b|scope|token rejected/i.test(msg)
-      ? ' This looks like OP\'s Xero connection lacking permission to apply credit (accounting.payments).' : '';
-    await stop(periodId, 'xero', `Xero refused while applying the payments to ${number}: ${msg}.${scope} `
-      + 'Anything already applied stays applied; press Close to carry on.');
-  }
-  await log(periodId, 'xero', true, `${number} shows paid in Xero.`);
-}
-
-/** Status 11, read back. Completed keeps sale stock consumed (§2.1). */
-async function completeJob(periodId: string, hhJobNumber: number): Promise<void> {
-  if ((await readJobStatus(hhJobNumber)) !== COMPLETED) {
-    const res = await hhBroker.post<any>('/frames/status_save.php', {
-      job: hhJobNumber, status: COMPLETED, no_webhook: 1,
-    }, { priority: 'high' });
-    const status = await readJobStatus(hhJobNumber);
-    if (status !== COMPLETED) {
-      await stop(periodId, 'complete', `HireHop job ${hhJobNumber} is status ${status ?? '?'}, not Completed `
-        + `(${res.error || 'no error given'}). Press Close to try again.`);
-    }
-  }
-  await log(periodId, 'complete', true, `HireHop job ${hhJobNumber} is Completed.`);
 }
 
 async function finish(periodId: string, userId: string | null): Promise<void> {

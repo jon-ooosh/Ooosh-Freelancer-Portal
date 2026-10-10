@@ -131,7 +131,7 @@ Future enhancements. Nothing here is committed work; treat as a menu, not a queu
   - Auto-create from transport on-road flags.
   - **Legacy code sweep.** Remove `useVehicleIssues`, `useAllIssues`, `IssueCard`, vehicle-module `ActivityTimeline` (the one under `modules/vehicles/components/issues/`), `AddActivityForm`, `IssueDocuments`, `issues-r2-api`, plus the four legacy `/api/vehicles/get-all-issues|get-vehicle-issues|get-issue|save-issue` endpoints. Pure cleanup after a quiet period verifies nothing surprising surfaces.
   - Cross-vehicle / cross-stock-item recurrence reporting ("RX22SXL had 3 clutch issues in 6 months").
-  - **Returns & Completed close-out gate.** When a returned job has open issues, it can't auto-complete. Stage 2 doesn't enforce this — completion modal could be extended to warn ("1 open issue, complete anyway?"). Stage 4 promotes to a hard block. Existing close-out warning pattern fits.
+  - ~~**Returns & Completed close-out gate.**~~ BUILT Oct 2026 (PR #1417): the Move to Completed modal lists open Problems in red; non-managers cannot complete over them, a manager must give a reason; `routes/pipeline.ts` enforces it.
 
 - **Data-aware suggested-next-status hint (5 May 2026)** — the bold + asterisk on the suggested next status in the Job Detail status dropdown is currently pure date-based: `confirmed`/`prepped` + on-or-past `out_date` → bold `dispatched`, etc. Could be smarter:
   - Bold `prepped` (rather than skipping straight to `dispatched`) only when the prep checklist is complete — i.e. all pre-hire `job_requirements` are `done`.

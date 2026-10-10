@@ -28,6 +28,7 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | 3b | Stripe Terminal — in-person card payments driven from OP, replacing Worldpay/Amex | **Planned** (6 Oct 2026). Reader on order; crossover deadline March 2027. Pre-auth viability depends on the account's merchant category | `docs/STRIPE-TERMINAL-SPEC.md` |
 | 4 | Status transition engine | Mostly complete — bidirectional HireHop sync live | `PIPELINE-AND-ORGS.md` |
 | 4b | Returns & close-out | Phases A–D mostly complete | `RETURNS-AND-CANCELLATIONS.md` |
+| 4d | Hire close-out / bookkeeping — raise invoice, allocate deposits in HireHop + Xero from the Invoice card; nightly Xero credit sweep; Problems gate on completion | **Phases 1–3a live, Oct 2026.** Next: arrival hook (3b), EU VAT split, HireHop permission lockdown, additional charges | `docs/HIRE-CLOSE-OUT-SPEC.md` §12 |
 | 4c | Cancellation system | Foundation complete; combine-bookings shipped | `RETURNS-AND-CANCELLATIONS.md` |
 | 5 | Payment portal repointing | Live (merged into step 3 phase E) | `MONEY-AND-EXCESS.md` |
 | 6 | Operations modules | Requirements engine, backline, transport & crew ops, carnets shipped. Rehearsals/studio sitters phases A–E shipped. Sub-hires not started | `OPERATIONS-MODULES.md` |
@@ -52,6 +53,7 @@ to come up:
 **Watching (Oct 2026)**
 - **Security audit (Oct 2026)** — `authenticate` was accepting public, kiosk and freelancer tokens (fixed 8 Oct, plus `javascript:` return links on the freelancer pages). A full audit is planned; the known open goals are in `docs/SECURITY-AUDIT-BRIEF.md` §B (one secret for every token family, portal-secret fallback, freelancer-role logins on `authenticate`-only routers, Socket.io token check, file-download prefixes).
 - **Wise matcher** — live since 6 Oct, no real email processed yet. First one decides: auto-recorded (check HireHop deposit + client email), queued (info@ email + Money overview panel), or nothing (`journalctl … | grep wise-incoming`). Then switch off the jon@ → info@ auto-forward.
+- **Close-out Xero sweep** — switched on 10 Oct 2026; first backfill run the night of 11 Oct. Read the `sweep` rows in `job_closeout_log` and the 03:30 journal line (spec §12) for the first week; a job that stops every night has a HireHop↔OP mismatch to fix by hand.
 - **Portal: bare `?jobId=` links no longer work** — anyone still using one needs the Money-tab link.
 - Vehicles module `useAuth.tsx` still carries a dead `hubToken` exchange (Staff Hub retired) — tidy-up.
 - Portal "Half now" option rounds to whole pounds (pre-existing logic, now visibly odd next to penny figures).

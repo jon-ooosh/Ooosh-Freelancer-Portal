@@ -187,6 +187,27 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
+**PHASES 1–3a BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
+finishing a hire's money from the post-hire cards (raise invoice → excess decision → allocate
+deposits in HireHop AND Xero → complete), one job at a time, on the shared recipe
+`services/hh-invoice-close.ts` (`HIREHOP-BILLING-API.md` §8). Born from job 16015: HireHop's "New
+payment" dialog records a REFUND when its invoice dropdown is left at "none". Built:
+`services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|allocate|complete`,
+log in `job_closeout_log`) — plan shown first, every write read back, excess NEVER allocated, more
+than one open invoice refused for now, HireHop↔OP payment and refund mismatches refuse by name.
+The UI is ONE panel, `HireCloseOutPanel.tsx` on the **Invoice** card of the Post-Hire tab (the
+Payment Reconciliation requirement still exists but is drawn as that card's second pill): one button
+raises the invoice if needed (draft from uninvoiced lines → penny check → approve dated today → Xero)
+then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); "Mark as
+sent" only once nothing is left to allocate; everything else behind "Details…". **An EU hire with the "Non-standard VAT rules" item is
+refused until the invoice-line VAT split is built.** Xero log lines admin-only. Completing a job is the status
+change at the top of the page, and that modal refuses open Problems (manager + reason to override;
+`routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
+(03:30) applies HireHop's allocations as credits in Xero, off until `system_settings.closeout_xero_sweep_enabled`
+is `'true'` (switched on 10 Oct 2026). Not yet: the arrival hook (Phase 3b), the VAT split (spec §10.1). §1 is
+settled, §5 the allocation rule, §9 the phases, **§12 the current state and the ordered next steps — read it first.**
+Refunds only through the existing routes.
+
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
 Stripe account, money on HireHop bank 267, recording ONLY through `services/record-payment.ts`,
@@ -194,6 +215,17 @@ pre-auths via extended authorisation (window depends on the account's merchant c
 unverified), no phone card payments (policy), shop + sitter till in Phase 3. Read it before
 building anything that takes a card in person. The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
+
+**PLANNED, Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
+(three date spans / van vs van+driver / with a Twin) as a GROUP of jobs. §1 is settled: **one
+version = one OP job + one HireHop job** (every version has to go out as a HireHop quote, so
+"Add a version" duplicates the HH job via `job_duplicate.php` and names them "(vN)"); never amend
+a job in place to become a different option; the group is a thin layer (version bar, Compare
+slide-over, one collapsed Kanban card); confirm one → a HUMAN marks the rest lost as
+`'Confirmed Alternative Quote (from us)'`, which win/loss and Fill-a-Gap must exclude; version
+numbers never auto-bump (revisions are the quote-PDF diff). Payment = choosing: the portal link
+carries the job number. Phase 4 touches the payment portal repo; festival `part_of` grouping is
+Phase 2. Approved mockups are linked at the top of the spec. Build in a fresh session.
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
@@ -301,7 +333,9 @@ existing definition:
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
-| Closing a finished shop week (invoice, allocate, complete) | `services/shop-close.ts` |
+| Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
+| Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |
+| Finishing a HIRE's money (plan → allocate hire deposits in HH + Xero → complete) | `services/hire-close-out.ts` — on the recipe above; never excess, never a refund; `job_closeout_log` is its record |
 | Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
 | Which jobs can a till sale go on / who's in today? | `services/shop-routing.ts` |
@@ -402,7 +436,7 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 
 ## Scheduled tasks (`config/scheduler.ts`)
 
-Backups 02:00 · job financials 03:00 · holiday entitlement 06:05 · Xero reconcile 07:45 ·
+Backups 02:00 · job financials 03:00 · close-out Xero sweep 03:30 (off until its setting is on) · holiday entitlement 06:05 · Xero reconcile 07:45 ·
 bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry

@@ -8,8 +8,12 @@
  *
  * Lifecycle:
  *   1. URL has `?freelancerToken=...` → exchange with OP for a scoped
- *      session JWT, persist to localStorage, drop URL params, render
- *      BookOutPage.
+ *      session JWT, persist to localStorage, render BookOutPage. The token
+ *      STAYS in the URL: a reload of the same link resumes the stored
+ *      session, and if the phone has thrown its storage away (an iPhone
+ *      reloading the page after the camera — HH 16714, 10 Oct 2026, which
+ *      used to land the freelancer on the STAFF login) the link is simply
+ *      exchanged again. The link is valid 24h and may be redeemed repeatedly.
  *   2. No token param but localStorage has a live session → resume
  *      (refresh-safe, tab-restore-safe). Session JWT is 4h; past that
  *      we clear and send them back to the portal.
@@ -56,19 +60,10 @@ const queryClient = new QueryClient({
 })
 
 export default function FreelancerBookoutShell() {
-  const [searchParams, setSearchParams] = useSearchParams()
+  const [searchParams] = useSearchParams()
   const [state, setState] = useState<ShellState>({ kind: 'loading' })
   const [pickBusyId, setPickBusyId] = useState<string | null>(null)
   const [pickError, setPickError] = useState<string | null>(null)
-
-  // Strip the one-shot token from the URL once a session exists (see below).
-  const stripTokenParams = () => {
-    const next = new URLSearchParams(searchParams)
-    next.delete('freelancerToken')
-    next.delete('returnUrl')
-    next.delete('startUrl')
-    setSearchParams(next, { replace: true })
-  }
 
   // Claim one van from the picker. Same endpoint, now with the chosen
   // assignment — the server re-checks it's genuinely a van on this job.
@@ -84,8 +79,7 @@ export default function FreelancerBookoutShell() {
       candidate.assignmentId,
     )
     if (result.kind === 'ok') {
-      setFreelancerSession(result.token, result.context)
-      stripTokenParams()
+      setFreelancerSession(result.token, result.context, state.hmacToken)
       setState({ kind: 'ready' })
       return
     }
@@ -106,8 +100,17 @@ export default function FreelancerBookoutShell() {
       // Where to send them if the van leg can't run — see FreelancerLinkError.
       const startUrl = safeReturnUrl(searchParams.get('startUrl'))
 
-      // Fresh arrival from portal — exchange the token.
       if (hmacToken) {
+        // Same link as the session on this phone → a reload, resume it
+        // (keeps the van picked on a multi-van job). A different link is a
+        // fresh "Start delivery" from the portal → exchange it.
+        const existing = getFreelancerSession()
+        if (existing && existing.linkToken === hmacToken) {
+          setState({ kind: 'ready' })
+          return
+        }
+
+        // Fresh arrival from portal (or storage lost) — exchange the token.
         const result = await resolveFreelancerToken(OP_API_BASE, hmacToken, returnUrl)
         if (cancelled) return
 
@@ -127,11 +130,7 @@ export default function FreelancerBookoutShell() {
           return
         }
 
-        setFreelancerSession(result.token, result.context)
-
-        // Strip the token/returnUrl from the URL so a refresh/back-button
-        // doesn't try to re-exchange a one-shot HMAC and fail.
-        stripTokenParams()
+        setFreelancerSession(result.token, result.context, hmacToken)
 
         setState({ kind: 'ready' })
         return
@@ -152,7 +151,7 @@ export default function FreelancerBookoutShell() {
     return () => {
       cancelled = true
     }
-  }, [searchParams, setSearchParams])
+  }, [searchParams])
 
   if (state.kind === 'loading') {
     return <LoadingScreen />
@@ -186,10 +185,11 @@ export default function FreelancerBookoutShell() {
     clearFreelancerSession()
     return (
       <FreelancerLinkError
-        message="Your book-out session has ended (sessions last 4 hours). Head back to the freelancer portal and click “Start delivery” again to resume."
+        message="Your book-out session has ended, or isn't on this phone any more. Head back to the freelancer portal and click “Start delivery” again to resume."
         returnUrl={state.returnUrl}
         startUrl={state.startUrl}
         action="book-out"
+        staffLoginHref="/login?redirect=%2Fvehicles%2Fbook-out"
       />
     )
   }
