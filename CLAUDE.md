@@ -155,8 +155,9 @@ on an employee (`services/staff-doc-cycles.ts`). Same words, different people, d
 consequence. Never merge them.
 
 **`staff_record_files` objects live under the `staff-records/` R2 prefix, and that
-prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefix it
-serves is readable by any authenticated caller, freelancers included. Never file
+prefix (with `claims/`) is the ONLY one `GET /api/files/download` role-gates.** Every
+other prefix it serves is readable by EVERY staff login whatever their role (the
+route is staff-only since Oct 2026; `backups/` is no longer on it). Never file
 anything private under `files/`.
 
 **BUILT (steps 1–10 + the sitter till), Sep 2026:** `docs/SHOP-SALES-SPEC.md` — the **Shop Till**
@@ -312,6 +313,7 @@ existing definition:
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 | Is this a STAFF access token? | `middleware/auth.ts` `verifyStaffToken()` — `authenticate` and the Socket.io handshake both use it; never a second `jwt.verify` for staff |
+| Minting or verifying ANY JWT | `services/tokens.ts` `signFor(audience, …)` / `verifyFor(audience, …)` — every family has its own `aud`; never call `jsonwebtoken` directly (the portal session, on its own secret, is the one exception) |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |
 | Who can be given something to do? | `services/assignable-staff.ts` — active + staff role + a CURRENT employment record. Shared by To Do's "For" picker and `/users?assignable=true` |

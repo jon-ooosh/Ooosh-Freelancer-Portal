@@ -64,6 +64,7 @@ import staffTasksRouter from './staff-tasks';
 import freelancerTasksRouter from './freelancer-tasks';
 import freelancersRouter from './freelancers';
 import enquiryIntakeRouter from './enquiry-intake';
+import cspReportRouter from './csp-report';
 
 const router = Router();
 
@@ -132,6 +133,7 @@ router.use('/pre-hire-briefing', preHireBriefingRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
 router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
 router.use('/enquiry-intake', enquiryIntakeRouter);  // Website enquiry form → OP enquiry (API-key auth, service='enquiry_form')
+router.use('/csp-report', cspReportRouter);  // PUBLIC — browser CSP violation reports (no auth, rate-limited, log only)
 
 // Alias: /api/jobs/:jobNumber → /api/driver-verification/validate-job/:jobNumber
 // Needed because Netlify validate-job.js calls opFetch('/jobs/{jobId}')

@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
 import { query } from '../config/database';
+import { verifyStaffToken } from './auth';
+import { signFor, verifyFor } from '../services/tokens';
 
 // Freelancer book-out authentication.
 //
@@ -39,10 +40,6 @@ export interface FreelancerBookoutRequest extends Request {
   bookoutSession?: FreelancerBookoutSession;
 }
 
-if (!process.env.JWT_SECRET) {
-  throw new Error('FATAL: JWT_SECRET environment variable is required');
-}
-const JWT_SECRET: string = process.env.JWT_SECRET;
 
 const HMAC_SECRET: string | undefined = process.env.FREELANCER_HUB_SECRET;
 const SESSION_TTL_SECONDS = 4 * 60 * 60; // 4h — book-out usually <30min, 4h buffer covers coffee breaks + photo uploads
@@ -128,9 +125,7 @@ export function verifyFreelancerBookoutToken(token: string): VerifiedHmacToken |
  * on a specific assignment. Scope is intentionally narrow.
  */
 export function mintFreelancerBookoutSession(session: Omit<FreelancerBookoutSession, 'scope'>): string {
-  return jwt.sign({ scope: 'freelancer_bookout', ...session }, JWT_SECRET, {
-    expiresIn: SESSION_TTL_SECONDS,
-  });
+  return signFor('freelancer_bookout', { scope: 'freelancer_bookout', ...session }, SESSION_TTL_SECONDS);
 }
 
 /**
@@ -149,24 +144,24 @@ export function authenticateFreelancerBookout(
   }
 
   const token = authHeader.slice(7);
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET) as FreelancerBookoutSession & { iat?: number; exp?: number };
-    if (decoded.scope !== 'freelancer_bookout' || !decoded.assignmentId) {
-      res.status(401).json({ error: 'Invalid session scope' });
-      return;
-    }
-    req.bookoutSession = {
-      scope: 'freelancer_bookout',
-      assignmentId: decoded.assignmentId,
-      quoteId: decoded.quoteId,
-      freelancerEmail: decoded.freelancerEmail,
-      freelancerPersonId: decoded.freelancerPersonId,
-      mode: decoded.mode ?? 'bookout',
-    };
-    next();
-  } catch {
+  const decoded = verifyFor<FreelancerBookoutSession>('freelancer_bookout', token);
+  if (!decoded) {
     res.status(401).json({ error: 'Invalid or expired session' });
+    return;
   }
+  if (decoded.scope !== 'freelancer_bookout' || !decoded.assignmentId) {
+    res.status(401).json({ error: 'Invalid session scope' });
+    return;
+  }
+  req.bookoutSession = {
+    scope: 'freelancer_bookout',
+    assignmentId: decoded.assignmentId,
+    quoteId: decoded.quoteId,
+    freelancerEmail: decoded.freelancerEmail,
+    freelancerPersonId: decoded.freelancerPersonId,
+    mode: decoded.mode ?? 'bookout',
+  };
+  next();
 }
 
 /**
@@ -205,17 +200,12 @@ export function authenticateVehicleFlexible(
 
   const token = authHeader.slice(7);
 
-  let decoded: { scope?: string; [k: string]: unknown };
-  try {
-    decoded = jwt.verify(token, JWT_SECRET) as { scope?: string; [k: string]: unknown };
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return;
-  }
+  // Each family verifies against its own audience (services/tokens.ts) — a
+  // token minted for one can never pass as another. Book-out, prep, then staff.
 
   // Freelancer bookout session — narrow scope, assignment-bound.
-  if (decoded.scope === 'freelancer_bookout') {
-    const fb = decoded as unknown as FreelancerBookoutSession;
+  const fb = verifyFor<FreelancerBookoutSession>('freelancer_bookout', token);
+  if (fb) {
     if (!fb.assignmentId) {
       res.status(401).json({ error: 'Invalid session scope' });
       return;
@@ -233,8 +223,8 @@ export function authenticateVehicleFlexible(
   }
 
   // Freelancer PREP session — narrow scope, one van, one task (§21.6).
-  if (decoded.scope === 'freelancer_prep') {
-    const fp = decoded as unknown as FreelancerPrepSession;
+  const fp = verifyFor<FreelancerPrepSession>('freelancer_prep', token);
+  if (fp) {
     if (!fp.taskId || !fp.vehicleReg || !fp.personId) {
       res.status(401).json({ error: 'Invalid session scope' });
       return;
@@ -251,9 +241,9 @@ export function authenticateVehicleFlexible(
     return;
   }
 
-  // Staff JWT — shape: { id, email, role }
-  const staff = decoded as { id?: string; email?: string; role?: string };
-  if (staff.id && staff.email && staff.role) {
+  // Staff access token — THE staff check, shared with `authenticate`.
+  const staff = verifyStaffToken(token);
+  if (staff) {
     req.user = { id: staff.id, email: staff.email, role: staff.role };
     next();
     return;
@@ -358,23 +348,17 @@ export function normaliseReg(reg: string): string {
 }
 
 export function mintFreelancerPrepRedeemToken(taskId: string, personId: string): string {
-  return jwt.sign({ scope: 'freelancer_prep_redeem', taskId, personId }, JWT_SECRET, {
-    expiresIn: PREP_REDEEM_TTL_SECONDS,
-  });
+  return signFor('freelancer_prep_redeem', { scope: 'freelancer_prep_redeem', taskId, personId }, PREP_REDEEM_TTL_SECONDS);
 }
 
 export function verifyFreelancerPrepRedeemToken(token: string): { taskId: string; personId: string } | null {
-  try {
-    const d = jwt.verify(token, JWT_SECRET) as { scope?: string; taskId?: string; personId?: string };
-    if (d.scope !== 'freelancer_prep_redeem' || !d.taskId || !d.personId) return null;
-    return { taskId: d.taskId, personId: d.personId };
-  } catch {
-    return null;
-  }
+  const d = verifyFor<{ scope?: string; taskId?: string; personId?: string }>('freelancer_prep_redeem', token);
+  if (!d || d.scope !== 'freelancer_prep_redeem' || !d.taskId || !d.personId) return null;
+  return { taskId: d.taskId, personId: d.personId };
 }
 
 export function mintFreelancerPrepSession(session: Omit<FreelancerPrepSession, 'scope'>): string {
-  return jwt.sign({ scope: 'freelancer_prep', ...session }, JWT_SECRET, { expiresIn: SESSION_TTL_SECONDS });
+  return signFor('freelancer_prep', { scope: 'freelancer_prep', ...session }, SESSION_TTL_SECONDS);
 }
 
 export function isFreelancerPrep(req: FlexibleVehicleRequest): req is FlexibleVehicleRequest & { prepSession: FreelancerPrepSession } {

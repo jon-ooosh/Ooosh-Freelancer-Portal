@@ -27,7 +27,7 @@
 import { query } from '../config/database';
 import { getStripeClient, isStripeConfigured } from '../config/stripe';
 import { emailService } from './email-service';
-import jwt from 'jsonwebtoken';
+import { signFor } from './tokens';
 import { frontendLink } from '../config/app-urls';
 
 const ALERT_EMAIL = 'info@oooshtours.co.uk';
@@ -238,11 +238,6 @@ export async function reconcileStripePreauths(
 
 /** Short-lived admin JWT for the localhost self-call (mirrors job-financials-backfill). */
 async function mintInternalToken(): Promise<{ token: string; base: string } | null> {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    console.warn('[preauth-reconcile] JWT_SECRET not set — cannot self-heal');
-    return null;
-  }
   const userRes = await query(
     `SELECT id, email, role FROM users
       WHERE is_active = true AND role IN ('admin','manager')
@@ -255,7 +250,7 @@ async function mintInternalToken(): Promise<{ token: string; base: string } | nu
   }
   const u = userRes.rows[0] as { id: string; email: string; role: string };
   return {
-    token: jwt.sign({ id: u.id, email: u.email, role: u.role }, secret, { expiresIn: '10m' }),
+    token: signFor('staff', { id: u.id, email: u.email, role: u.role }, '10m'),
     base: `http://127.0.0.1:${process.env.PORT || 3001}`,
   };
 }

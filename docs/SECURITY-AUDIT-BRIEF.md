@@ -66,40 +66,75 @@ the general `authenticate` middleware checked the signature and nothing else.
 8. **`returnUrl` / `startUrl` from the URL rendered as `<a href>`** on the
    freelancer book-out, collection and prep pages. `javascript:` would have run in
    OP's origin. Fixed with `modules/vehicles/lib/safe-url.ts` `safeReturnUrl()`.
+9. **Every token family carries an `aud` its verifier checks** (the design fix
+   behind A.1). Decision (jon, 9 Oct 2026): keep the one secret and add an `aud`
+   per family rather than per-purpose secrets — they would all live in the same
+   `.env` on the same server, so a leak of one is a leak of all, and
+   `jsonwebtoken` enforces `audience` natively. **All minting and verifying goes
+   through `services/tokens.ts` `signFor()` / `verifyFor()`**; the only other
+   `jsonwebtoken` importer is `routes/portal.ts`. Families: `staff`,
+   `staff_refresh`, `hire_form`, `claim_driver`, `warehouse`,
+   `freelancer_bookout`, `freelancer_prep`, `freelancer_prep_redeem`. The two
+   scripts that mint their own staff token (`stripe-preauth-reconciler.ts`,
+   `job-financials-backfill.ts`) go through it too. **The portal session is
+   deliberately outside the scheme**: its own secret is its isolation, and the
+   Netlify app mints the same cookie with `jose` — an `aud` check in OP would
+   reject those until both sides deploy together. **Cost on deploy:** every
+   existing OP-signed token stops verifying — staff log in once, anyone mid-way
+   through the hire form or claim form re-verifies, a kiosk re-enters its PIN,
+   a freelancer mid-book-out re-opens their link. Portal cookies are unaffected.
+10. **`backups/` was on the `/files/download` allow-list**, so any staff login
+    could fetch a database dump by its date-based name. Removed; backups keep
+    their own admin-only route.
+11. **Production dependency advisories.** A semver-safe `npm audit fix` cleared
+    every high/critical advisory in the backend's production tree except the
+    known `xlsx` one (no fix exists; trusted admin uploads only).
 
-All of A.1–A.7 were exercised over HTTP against a migrated + seeded scratch
-database on 9 Oct 2026 (22 checks plus the limiter counts); both portal-secret
-guards were seen to refuse startup.
+A.1–A.7 were exercised over HTTP against a migrated + seeded scratch database
+on 9 Oct 2026 (22 checks plus the limiter counts); A.9 with 18 unit checks on
+the freelancer and claim middleware and 20 HTTP checks across staff, refresh,
+kiosk, hire-form and socket paths, including that a pre-`aud` token is refused
+everywhere. Both portal-secret guards were seen to refuse startup.
 
 ## B. Open
 
-1. **One secret for every token family.** The shape checks are a guard, not a
-   design. Decision (jon, 9 Oct 2026): add an `aud` claim per family and keep
-   the one secret, rather than per-purpose secrets — they would all live in the
-   same `.env` on the same server, so a leak of one is a leak of all, and
-   `jsonwebtoken` enforces `audience` natively. Plan: one `services/tokens.ts`
-   with `signFor(audience, payload, opts)` / `verifyFor(audience, token)`; move
-   every mint and verify site through it. Mint sites: `routes/auth.ts` (access
-   ×2, refresh), `routes/portal.ts` (×3), `routes/warehouse.ts`,
-   `routes/driver-verification.ts`, `services/claim-links.ts`,
-   `middleware/freelancer-bookout-auth.ts` (×3), and the two scripts that mint
-   their own staff token — `services/stripe-preauth-reconciler.ts`,
-   `services/job-financials-backfill.ts` (miss these and they 401 silently on
-   their next run). Verify sites: `middleware/auth.ts`, `index.ts` (via
-   `verifyStaffToken`), `routes/auth.ts` refresh, `routes/portal.ts`,
-   `routes/warehouse.ts`, `routes/driver-verification.ts`,
-   `services/claim-links.ts`, `middleware/freelancer-bookout-auth.ts` (×3).
-   **Cost on the day:** every existing token stops verifying — staff log in once,
-   freelancers' 30-day portal cookies expire once, anyone mid-way through the
-   hire form re-verifies their email. The Netlify portal app verifies the cookie
-   with `jose` and does not check `aud` unless asked, so it keeps working.
-   Deploy at a quiet time (scheduled: a weekend).
-2. **Per-router `authorize()` pass.** With A.3 in place only staff hold staff
-   tokens, so this is now about tiering between staff roles, not about outsiders.
-   The routers listed in PLATFORM-CONVENTIONS "Still open" each need a read:
-   which endpoints should be manager-tier. **Do not sweep blind:** `vehicles.ts`
-   and `hire-forms.ts` are deliberately mixed-audience; `notifications.ts` serves
-   whoever is logged in.
+1. **Content-Security-Policy — report-only phase.** Nginx sends the usual
+   headers (nosniff, frame DENY, HSTS, Referrer-Policy, Permissions-Policy) but
+   no CSP, and the staff login sits in `localStorage`, so an XSS anywhere in the
+   app is a token theft. **Built (Oct 2026):** the policy as a
+   `Content-Security-Policy-Report-Only` header in
+   `deploy/nginx-ooosh-portal.conf` (the live config is applied by hand), and
+   `POST /api/csp-report` (public, rate-limited, log only) so every staff
+   browser's would-have-been-blocked loads land in `journalctl -u ooosh-portal
+   | grep csp-report`. **Next:** apply the header AFTER the route is deployed,
+   watch the log for a week, add anything legitimate, then rename the header to
+   `Content-Security-Policy`. **Known blocker before enforcing:**
+   `frontend/public/stage-view.html` has one inline `<script>`; move it to a
+   file or hash it first. The two static tools are the only pages loading from
+   cdnjs and Google Fonts.
+2. **Per-router `authorize()` pass — audited 9 Oct 2026, decisions pending.**
+   All 19 `authenticate`-only routers now carry `router.use(authorize(...STAFF_ROLES))`
+   — a no-op today (only staff hold a staff token; confirmed over HTTP that a
+   `general_assistant` still reaches every one) but it keeps them closed if a
+   non-staff login shape is ever added. The read of every ungated endpoint found
+   these with **no manager/admin gate** — jon to decide which get one:
+   - `quotes.ts` `PUT /settings` — overwrites the global calculator rates and
+     markups for every future quote.
+   - `quotes.ts` `DELETE /runs/:runId` — hard-deletes a run group (combined
+     freelancer and client fees). `DELETE /:id` soft-deletes a quote.
+   - `quotes.ts` `PATCH /:id/status` and `/:id/ops-status` with `completed`
+     reach the same end state as the manager-only `POST /:id/complete-override`,
+     with no reason captured.
+   - `ve103b.ts` `POST /:id/void` and `POST /:id/reactivate` (hard-deletes a
+     voided certificate row — BVRLA-reported), and `POST /test-generate`, a
+     "temporary" endpoint that inserts real certificate rows and emails the office.
+   - `duplicates.ts` `POST /merge` — merges two people, soft-deletes one.
+   - `files.ts` `DELETE /delete` — hard R2 delete, including driver documents
+     (normal staff work; a manager gate only when `entity_type = 'drivers'`
+     would be the narrow option).
+   Everything else ungated is reads or everyday desk work; every route that
+   moves money in `costs.ts` is already admin-only. `vehicles.ts` and
+   `hire-forms.ts` were left alone on purpose (mixed audience).
 3. **Tokens in URLs.** Reviewed and left as is. The book-out / check-in pages
    strip `freelancerToken` / `hubToken` with `replaceState` straight after
    redeeming (`modules/vehicles/hooks/useAuth.tsx`); the prep page strips its
@@ -137,6 +172,7 @@ minimal surface; a new one needs its own auth AND a limiter.
 | `enquiry-intake.ts` | 2 | API key | yes |
 | `webhooks.ts` | `hirehop` (GET/POST), `external/status-transition` | HireHop `export_key` / `x-api-key` | none (key-gated) |
 | `health.ts` | 1 | none | none |
+| `csp-report.ts` | `POST /` | none — the browser posts CSP violation reports on its own; body is logged, truncated, never stored | 60 per min |
 | `index.ts` | `/jobs…` when an API key header is present | API key | none |
 
 ## D. Deliberately not done (decisions, not gaps)

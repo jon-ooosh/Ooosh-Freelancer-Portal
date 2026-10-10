@@ -21,11 +21,12 @@
  *   • On-Hire flip: pipeline_status='dispatched' + HH writeback to status 5
  */
 import { Router, Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
+import { verifyStaffToken } from '../middleware/auth';
+import { signFor, verifyFor } from '../services/tokens';
 import { hhBroker } from '../services/hirehop-broker';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { generateDeliveryNotePdf, type DeliveryNoteItem } from '../services/delivery-note-pdf';
@@ -33,10 +34,6 @@ import { emailService } from '../services/email-service';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { getJobEmailRecipients } from '../services/money-emails';
 
-if (!process.env.JWT_SECRET) {
-  throw new Error('FATAL: JWT_SECRET environment variable is required');
-}
-const JWT_SECRET: string = process.env.JWT_SECRET;
 const SESSION_TTL_SECONDS = 12 * 60 * 60; // 12h — kiosk left running between shifts
 
 // Stable UUID seeded by migration 031 — used as created_by for PIN-only sessions
@@ -78,26 +75,21 @@ function authenticateWarehouse(req: WarehouseRequest, res: Response, next: NextF
   }
   const token = authHeader.slice(7);
 
-  let decoded: Record<string, unknown>;
-  try {
-    decoded = jwt.verify(token, JWT_SECRET) as Record<string, unknown>;
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return;
-  }
-
-  if (decoded.scope === 'warehouse_session' && typeof decoded.sessionId === 'string') {
+  // Each family verifies against its own audience (services/tokens.ts).
+  const kiosk = verifyFor<{ scope?: string; sessionId?: string }>('warehouse', token);
+  if (kiosk && kiosk.scope === 'warehouse_session' && typeof kiosk.sessionId === 'string') {
     req.warehouseSession = {
       scope: 'warehouse_session',
-      sessionId: decoded.sessionId,
+      sessionId: kiosk.sessionId,
     };
     next();
     return;
   }
 
-  // Staff JWT shape: { id, email, role }
-  if (typeof decoded.id === 'string' && typeof decoded.email === 'string' && typeof decoded.role === 'string') {
-    req.staffUser = { id: decoded.id, email: decoded.email, role: decoded.role };
+  // Staff access token — THE staff check, shared with `authenticate`.
+  const staff = verifyStaffToken(token);
+  if (staff) {
+    req.staffUser = { id: staff.id, email: staff.email, role: staff.role };
     next();
     return;
   }
@@ -138,10 +130,10 @@ router.post('/auth/pin', pinLimiter, async (req: Request, res: Response) => {
       res.status(401).json({ error: 'Incorrect PIN' });
       return;
     }
-    const token = jwt.sign(
+    const token = signFor(
+      'warehouse',
       { scope: 'warehouse_session', sessionId: uuid() } satisfies WarehouseSessionClaims,
-      JWT_SECRET,
-      { expiresIn: SESSION_TTL_SECONDS }
+      SESSION_TTL_SECONDS
     );
     res.json({ token, expiresIn: SESSION_TTL_SECONDS });
   } catch (err) {

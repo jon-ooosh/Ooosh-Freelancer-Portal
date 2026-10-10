@@ -148,6 +148,9 @@ interface PortalRequest extends Request {
 // would then pass portalAuth with a users.id where a people.id is expected.
 // Until Oct 2026 this fell back to JWT_SECRET when neither was set
 // (SECURITY-AUDIT-BRIEF B.2). Now the server refuses to start without one.
+// This family is deliberately NOT in services/tokens.ts (no `aud`): the
+// separate secret is its isolation, and the Netlify app mints the same cookie
+// with `jose` — an `aud` check here would reject those until both deploy.
 const PORTAL_SECRET: string = process.env.PORTAL_SESSION_SECRET || process.env.SESSION_SECRET || '';
 if (!PORTAL_SECRET) {
   throw new Error('FATAL: PORTAL_SESSION_SECRET (or SESSION_SECRET) environment variable is required');
