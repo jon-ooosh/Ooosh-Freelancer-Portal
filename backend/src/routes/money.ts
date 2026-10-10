@@ -43,6 +43,7 @@ import { getPaymentPortalLink } from '../services/payment-portal-link';
 import { recordPayment } from '../services/record-payment';
 import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment } from '../services/wise-incoming';
 import { ukToday } from '../services/uk-date';
+import { fireArrivalHook } from '../services/close-out-arrival';
 
 const router = Router();
 
@@ -3447,6 +3448,12 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     if (stripe_event_id) {
       markStripeEventProcessed(stripe_event_id, { hhDepositId: hh_deposit_id ?? null })
         .catch(e => console.error('[money] markStripeEventProcessed failed (payment-event):', e));
+    }
+
+    // Hire close-out arrival hook (HIRE-CLOSE-OUT-SPEC §4.5): a hire payment on a job
+    // with one invoice owing is allocated to it. Runs after this answers; never fails it.
+    if ((effectivePaymentType === 'deposit' || effectivePaymentType === 'balance') && amount > 0 && hh_deposit_id) {
+      fireArrivalHook(job.id, hh_deposit_id);
     }
 
     res.json({

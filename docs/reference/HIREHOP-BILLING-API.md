@@ -419,8 +419,8 @@ never touched. A job line can be put on an invoice once only (jon, 9 Oct), so th
 | 31 | 0 | Zero Rated EC Services | ECZROUTPUTSERVICES |
 | **33** | 0 | Zero Rated Income (the one the UI offers, `assigned: 1`) | ZERORATEDOUTPUT |
 
-Which 0% code the EU split should use (33 vs 31) is the bookkeeper's call — ask before
-building `HIRE-CLOSE-OUT-SPEC.md` §10.1.
+The EU split uses **33** (Zero Rated Income) — confirmed by jon, 10 Oct 2026
+(`HIRE-CLOSE-OUT-SPEC.md` §1.13, §10.1).
 
 ### 10.5 Job lines, for completeness — `items_batch_save.php` / `items_save.php`
 
