@@ -33,12 +33,19 @@ export function FreelancerLinkError({
   startUrl,
   code,
   action = 'book-out',
+  staffLoginHref,
 }: {
   message: string
   returnUrl?: string | null
   startUrl?: string | null
   code?: string
   action?: 'book-out' | 'check-in'
+  /**
+   * Only on the "no session" screen, which is also what a logged-out STAFF
+   * member now sees on the bare book-out / check-in URL (App.tsx) — a
+   * freelancer must never be sent to the staff login (HH 16714).
+   */
+  staffLoginHref?: string
 }) {
   // On failure the URL is kept intact (token + returnUrl still present), so a
   // reload re-attempts the exchange — useful for a transient backend blip.
@@ -120,6 +127,15 @@ export function FreelancerLinkError({
           {OFFICE_EMAIL}
         </a>
       </div>
+
+      {staffLoginHref && (
+        <p className="text-center text-xs text-gray-400">
+          Ooosh staff?{' '}
+          <a href={staffLoginHref} className="underline">
+            Log in to OP
+          </a>
+        </p>
+      )}
     </div>
   )
 }
