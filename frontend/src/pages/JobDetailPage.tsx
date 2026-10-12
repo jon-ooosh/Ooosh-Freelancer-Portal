@@ -32,6 +32,10 @@ import { VenuePicker } from '../components/VenuePicker';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
 import CombineBookingsModal from '../components/CombineBookingsModal';
+import QuoteOptionsBar from '../components/QuoteOptionsBar';
+import AddQuoteOptionModal from '../components/AddQuoteOptionModal';
+import { OPTION_COPY } from '../lib/optionCopy';
+import { isOptionOpen, stripOptionSuffix } from '../lib/quoteOptions';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { displayFullName } from '../lib/displayName';
@@ -153,6 +157,10 @@ interface JobDetail {
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
   combined_into_job_id?: string | null;
+  // Quote options (migration 286) — sibling jobs for one enquiry
+  group_id?: string | null;
+  option_no?: number | null;
+  option_label?: string | null;
   // Lost-job fields (mirror of cancellation, populated by pipeline transition)
   lost_at?: string | null;
   lost_reason?: string | null;
@@ -1611,6 +1619,9 @@ function JobDetailContent() {
   const [showRackPlanModal, setShowRackPlanModal] = useState(false);
   const [showBacklineMatcher, setShowBacklineMatcher] = useState(false);
   const [showCombineModal, setShowCombineModal] = useState(false);
+  // Quote options — "+ Add an option" modal, and a signal the bar reloads on.
+  const [showAddOptionModal, setShowAddOptionModal] = useState(false);
+  const [optionsRefresh, setOptionsRefresh] = useState(0);
   const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
   const [stagingRefreshKey, setStagingRefreshKey] = useState(0);
 
@@ -3654,7 +3665,15 @@ function JobDetailContent() {
                 onClick={startEditName}
                 title="Click to edit job name"
               >
-                {job.job_name || 'Untitled Job'}
+                {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled Job') : (job.job_name || 'Untitled Job')}
+                {job.option_no && (
+                  <span
+                    className="inline-flex items-center align-middle ml-2 px-2 py-0.5 rounded-full text-xs font-semibold bg-ooosh-100 text-ooosh-700"
+                    title={job.option_label ? `Option ${job.option_no} · ${job.option_label}` : `Option ${job.option_no}`}
+                  >
+                    Option {job.option_no}
+                  </span>
+                )}
                 <svg className="w-4 h-4 inline-block ml-2 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                 </svg>
@@ -4223,6 +4242,20 @@ function JobDetailContent() {
               <span>🔧</span>
               <span>{internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}</span>
             </button>
+            {/* Quote options — a subtle link on a lone pre-confirmation enquiry.
+                Once the job is in a group the bar below the header carries "+ Add". */}
+            {!job.group_id && isOptionOpen(job.pipeline_status) && !job.dismissed_at && !job.combined_into_job_id && (
+              <div className="col-span-2 text-right">
+                <button
+                  type="button"
+                  onClick={() => setShowAddOptionModal(true)}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-800 font-medium"
+                  title={OPTION_COPY.addLinkTitle}
+                >
+                  {OPTION_COPY.addLink}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -4545,6 +4578,17 @@ function JobDetailContent() {
           )}
         </div>
       </div>
+
+      {/* Quote options bar — only renders once the enquiry has two or more options */}
+      {job.group_id && (
+        <QuoteOptionsBar
+          jobId={job.id}
+          groupId={job.group_id}
+          refreshSignal={optionsRefresh}
+          onAdd={() => setShowAddOptionModal(true)}
+          onRemoved={() => loadJob()}
+        />
+      )}
 
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 -mx-4 px-4 sm:mx-0 sm:px-0 overflow-x-auto scrollbar-hide">
@@ -6618,6 +6662,23 @@ function JobDetailContent() {
           hireStart={job?.job_date || job?.out_date}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
+        />
+      )}
+
+      {/* Quote another option / link an existing quote */}
+      {showAddOptionModal && job && (
+        <AddQuoteOptionModal
+          job={job}
+          onClose={() => setShowAddOptionModal(false)}
+          onDone={(newJobId) => {
+            setShowAddOptionModal(false);
+            if (newJobId) {
+              navigate(`/jobs/${newJobId}`);
+            } else {
+              setOptionsRefresh((n) => n + 1);
+              loadJob();
+            }
+          }}
         />
       )}
 

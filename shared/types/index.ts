@@ -428,6 +428,13 @@ export interface Job {
   cancellation_tier: string | null;
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
+  // Quote options (migration 286, docs/QUOTE-VERSIONS-SPEC.md): alternative
+  // quotes for ONE enquiry are sibling jobs in a job_groups row. NULL on an
+  // ordinary job. option_no is the alternative's identity ("Option 2"), never a
+  // revision counter; option_label is the staff-typed differentiator.
+  group_id?: string | null;
+  option_no?: number | null;
+  option_label?: string | null;
   // Source
   enquiry_source: EnquirySource | null;
   // HireHop status (separate from pipeline_status)
@@ -440,6 +447,48 @@ export interface Job {
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+// ── Quote options (job groups) ───────────────────────────────────────────────
+// docs/QUOTE-VERSIONS-SPEC.md — "version" there is "option" in code. A group is
+// a thin layer over ordinary jobs; GET /api/pipeline/groups/:id returns it.
+export type JobGroupKind = 'alternative' | 'part_of';
+
+export interface JobGroup {
+  id: string;
+  kind: JobGroupKind;
+  label: string | null;
+  /** NULL = lead derived (most progressed option); set = pinned by staff. */
+  lead_job_id: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JobGroupMember {
+  id: string;
+  hh_job_number: number | null;
+  job_name: string | null;
+  option_no: number | null;
+  option_label: string | null;
+  pipeline_status: string | null;
+  status: number | null;
+  out_date: string | null;
+  job_date: string | null;
+  job_end: string | null;
+  return_date: string | null;
+  job_value: number | null;
+  next_chase_date: string | null;
+  is_chasing: boolean;
+  lost_reason: string | null;
+  dismissed_at: string | null;
+  is_van_and_driver: boolean | null;
+  is_lead: boolean;
+}
+
+export interface JobGroupRead {
+  group: JobGroup;
+  members: JobGroupMember[];
 }
 
 export interface Interaction {

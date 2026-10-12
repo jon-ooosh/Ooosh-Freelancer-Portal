@@ -23,6 +23,19 @@ import { closeJobRequirements, fireEventTriggeredReminders } from '../services/r
 import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../services/hh-deposit';
 import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
+import { syncSingleHireHopJob } from '../services/hirehop-job-sync';
+import {
+  OPTION_GROUP_KIND,
+  getGroupById,
+  insertOptionCopy,
+  jobRef,
+  nextOptionNo,
+  noteOnTimeline,
+  optionRefusalReason,
+  stripOptionSuffix,
+  withOptionSuffix,
+} from '../services/job-groups';
+import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 
 const router = Router();
 router.use(authenticate);
@@ -1541,6 +1554,7 @@ const editJobSchema = z.object({
   likelihood: z.enum(['hot', 'warm', 'cold']).optional().nullable(),
   next_chase_date: z.string().optional().nullable(),
   details: z.string().optional().nullable(),
+  option_label: z.string().max(120).optional().nullable(),
   notes: z.string().optional().nullable(),
 });
 
@@ -1603,7 +1617,7 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
       'job_name', 'out_date', 'job_date', 'job_end', 'return_date',
       'out_time', 'start_time', 'return_time', 'end_time',
       'client_id', 'client_name', 'hh_job_number', 'job_value',
-      'likelihood', 'next_chase_date', 'details', 'notes',
+      'likelihood', 'next_chase_date', 'details', 'notes', 'option_label',
     ];
 
     const changedFields: string[] = [];
@@ -1614,6 +1628,7 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
       client_name: 'Client',
       hh_job_number: 'HH job #', job_value: 'Job value', likelihood: 'Likelihood',
       next_chase_date: 'Next chase', details: 'Details', notes: 'Notes',
+      option_label: 'Option label',
     };
     const dateFields = new Set(['out_date', 'job_date', 'job_end', 'return_date', 'next_chase_date']);
     const timeFields = new Set(['out_time', 'start_time', 'return_time', 'end_time']);
@@ -1952,6 +1967,452 @@ router.post('/:id/push-dates-to-hh', async (req: AuthRequest, res: Response) => 
   } catch (error) {
     console.error('Push dates to HH error:', error);
     res.status(500).json({ error: 'Failed to update dates on HireHop' });
+  }
+});
+
+// ============================================================================
+// QUOTE OPTIONS — alternative quotes for one enquiry as a GROUP of jobs
+//
+// docs/QUOTE-VERSIONS-SPEC.md ("version" there = "option" here). One option =
+// one OP job + one HireHop job: "Add an option" duplicates the HireHop job
+// (job_duplicate.php — the Re-open mechanism in cancellations.ts) and names the
+// pair "(Option 1)" / "(Option 2)" so HireHop, the quote PDFs and the emails
+// agree. Pre-confirmation only. The numbering, the suffix, the lead rule and
+// the OP copy live in services/job-groups.ts; this block owns the HireHop
+// calls and the transactions.
+//
+// Ordering (jon, 12 Oct 2026): HireHop duplicate FIRST, then the OP row is
+// born with its number. The other way round leaves a window in which the
+// 30-min sync imports the new HireHop job as an unrelated enquiry and the
+// write-back then hits the hh_job_number unique index. A HireHop failure
+// never rolls the OP option back — the row is created unlinked and the
+// response says so (hh_error), like Re-open.
+// ============================================================================
+
+const addOptionSchema = z.object({
+  option_label: z.string().trim().min(1).max(120),
+  out_date: z.string().optional().nullable(),
+  job_date: z.string().optional().nullable(),
+  job_end: z.string().optional().nullable(),
+  return_date: z.string().optional().nullable(),
+  create_in_hirehop: z.boolean().optional(),
+});
+
+const groupWithSchema = z.object({
+  other_job_id: z.string().uuid(),
+});
+
+const patchGroupSchema = z.object({
+  label: z.string().trim().max(120).optional().nullable(),
+  lead_job_id: z.string().uuid().optional().nullable(),
+});
+
+/** The client's display name for a new group's default label. */
+async function clientLabelFor(job: { client_id: string | null; client_name: string | null; company_name: string | null }): Promise<string | null> {
+  if (job.client_id) {
+    const o = await query(`SELECT name FROM organisations WHERE id = $1 AND is_deleted = false`, [job.client_id]);
+    if (o.rows[0]?.name) return o.rows[0].name;
+  }
+  return job.client_name || job.company_name || null;
+}
+
+/** Push a rename to HireHop, gated on the broker's result (a 327 RESOLVES false — never throws). */
+async function pushOptionRename(jobId: string, hhJobNumber: number | null, newName: string, email: string, warnings: string[]): Promise<void> {
+  if (!hhJobNumber) return;
+  const wb = await writeBackJobNameToHireHop(jobId, newName, email);
+  if (!wb.success) warnings.push(`#${hhJobNumber}: renamed in OP, but HireHop rename failed (${wb.message}) — the next sync may undo it.`);
+}
+
+// GET /api/pipeline/groups/:groupId — the group + one row per option, lead resolved.
+router.get('/groups/:groupId', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await getGroupById(req.params.groupId as string);
+    if (!result) { res.status(404).json({ error: 'Group not found' }); return; }
+    res.json({ data: result });
+  } catch (error: any) {
+    console.error('[options] group read error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to load the group' });
+  }
+});
+
+// PATCH /api/pipeline/groups/:groupId — rename the group / pin or unpin the lead.
+router.patch('/groups/:groupId', validate(patchGroupSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const groupId = req.params.groupId as string;
+    const { label, lead_job_id } = req.body as z.infer<typeof patchGroupSchema>;
+    const existing = await getGroupById(groupId);
+    if (!existing) { res.status(404).json({ error: 'Group not found' }); return; }
+    if (lead_job_id && !existing.members.some((m) => m.id === lead_job_id)) {
+      res.status(400).json({ error: 'The lead must be one of the options in this group' });
+      return;
+    }
+    const updates: string[] = ['updated_at = NOW()'];
+    const params: unknown[] = [];
+    if (label !== undefined) { params.push(label || null); updates.push(`label = $${params.length}`); }
+    if (lead_job_id !== undefined) { params.push(lead_job_id || null); updates.push(`lead_job_id = $${params.length}`); }
+    params.push(groupId);
+    await query(`UPDATE job_groups SET ${updates.join(', ')} WHERE id = $${params.length}`, params);
+    res.json({ data: await getGroupById(groupId) });
+  } catch (error: any) {
+    console.error('[options] group patch error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to update the group' });
+  }
+});
+
+// GET /api/pipeline/:id/group-candidates?q= — open, ungrouped, pre-confirmation
+// jobs that could be linked as an option of this one. Without `q`: the same
+// client's. With `q`: any, by job number or name, flagged same_client so the
+// picker can WARN about a different client rather than refuse (warnings, not
+// gates — HireHop sync leaves duplicate client shells now and then).
+router.get('/:id/group-candidates', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+    const q = String(req.query.q ?? '').trim();
+    const cur = await query(
+      `SELECT id, client_id, client_name, company_name FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId],
+    );
+    if (cur.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const me = cur.rows[0];
+
+    const params: unknown[] = [jobId, me.client_id, PRE_CONFIRMED_STATUSES];
+    let where = `j.is_deleted = false AND j.id <> $1 AND j.group_id IS NULL
+                 AND j.dismissed_at IS NULL AND j.combined_into_job_id IS NULL
+                 AND j.pipeline_status = ANY($3::text[])`;
+    if (q) {
+      params.push(`${q}%`, `%${q}%`);
+      where += ` AND (CAST(j.hh_job_number AS TEXT) LIKE $4::text OR j.job_name ILIKE $5::text)`;
+    } else {
+      if (!me.client_id) { res.json({ data: [], client_name: me.client_name }); return; }
+      where += ` AND j.client_id = $2::uuid`;
+    }
+    const rows = await query(
+      `SELECT j.id, j.hh_job_number, j.job_name, j.pipeline_status,
+              j.out_date, j.job_date, j.job_end, j.return_date, j.job_value,
+              j.client_name, j.company_name,
+              (j.client_id IS NOT DISTINCT FROM $2::uuid) AS same_client
+         FROM jobs j
+        WHERE ${where}
+        ORDER BY same_client DESC, j.job_date ASC NULLS LAST
+        LIMIT 25`,
+      params,
+    );
+    res.json({ data: rows.rows, client_name: me.client_name });
+  } catch (error: any) {
+    console.error('[options] candidates error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to load candidates' });
+  }
+});
+
+// POST /api/pipeline/:id/add-option — duplicate this job (OP + HireHop) as the
+// next option of its group, creating the group (and making this job Option 1)
+// when it has none. Spec §5.3.
+router.post('/:id/add-option', validate(addOptionSchema), async (req: AuthRequest, res: Response) => {
+  const warnings: string[] = [];
+  try {
+    const sourceId = req.params.id as string;
+    const body = req.body as z.infer<typeof addOptionSchema>;
+    const createInHH = body.create_in_hirehop !== false;
+
+    const src = await query(`SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`, [sourceId]);
+    if (src.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const source = src.rows[0];
+    const refusal = optionRefusalReason(source);
+    if (refusal) { res.status(400).json({ error: refusal }); return; }
+
+    if (source.group_id) {
+      const g = await query(`SELECT kind FROM job_groups WHERE id = $1`, [source.group_id]);
+      if (g.rows[0]?.kind && g.rows[0].kind !== OPTION_GROUP_KIND) {
+        res.status(400).json({ error: 'This job is in a related-jobs group, not an options group' });
+        return;
+      }
+    }
+
+    // Dates: the modal's values, else the source's. Times always ride from the source.
+    const dates = {
+      out_date: body.out_date !== undefined ? body.out_date : source.out_date,
+      job_date: body.job_date !== undefined ? body.job_date : source.job_date,
+      job_end: body.job_end !== undefined ? body.job_end : source.job_end,
+      return_date: body.return_date !== undefined ? body.return_date : source.return_date,
+    };
+    const dateShape = {
+      ...dates,
+      out_time: source.out_time, start_time: source.start_time,
+      return_time: source.return_time, end_time: source.end_time,
+    };
+    const dateTimeError = validateJobDateTimes(dateShape);
+    if (dateTimeError) { res.status(400).json({ error: dateTimeError }); return; }
+
+    // Numbering is decided up front so the HireHop duplicate carries its name.
+    // A lone job becomes Option 1 and the new one Option 2.
+    let optionNo = 2;
+    if (source.group_id) {
+      const n = await query(`SELECT COALESCE(MAX(option_no), 0) + 1 AS n FROM jobs WHERE group_id = $1`, [source.group_id]);
+      optionNo = Number(n.rows[0].n);
+    }
+    const newName = withOptionSuffix(source.job_name, optionNo);
+
+    // 1. HireHop first — the Re-open call, then the chosen dates (+ the ceil'd
+    //    charge period) with no_webhook so the duplicate doesn't echo back.
+    let newHhJobNumber: number | null = null;
+    let hhError: string | undefined;
+    if (createInHH && source.hh_job_number) {
+      const dup = await hhBroker.post('/php_functions/job_duplicate.php', {
+        id: source.hh_job_number,
+        supplying: 1,       // items
+        notes: 1,
+        transport: 1,
+        reserved: 1,        // reserved items (conflicts omitted)
+        job_name: newName,
+        local: new Date().toISOString().replace('T', ' ').substring(0, 16),
+      }, { priority: 'high' });
+      const dupData = dup?.data as { job?: number } | undefined;
+      if (dup.success && dupData?.job) {
+        newHhJobNumber = Number(dupData.job);
+        console.log(`[options] HH duplicate of #${source.hh_job_number} → #${newHhJobNumber} (${newName})`);
+        const { out, start, end, to, duration } = buildHHJobDateTimes(dateShape);
+        const dateParams: Record<string, unknown> = { job: newHhJobNumber, no_webhook: 1 };
+        if (out) dateParams.out = out;
+        if (start) dateParams.start = start;
+        if (end) dateParams.end = end;
+        if (to) dateParams.to = to;
+        if (duration) {
+          dateParams.duration_days = duration.duration_days;
+          dateParams.duration_hrs = duration.duration_hrs;
+          dateParams.duration_locked = duration.duration_locked;
+        }
+        const saved = await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
+        if (!saved.success) {
+          warnings.push(`HireHop #${newHhJobNumber} was created but its dates could not be set (${saved.error || 'unknown error'}) — check them in HireHop.`);
+        }
+      } else {
+        hhError = `HireHop duplicate failed: ${dup?.error || 'no job number returned'}`;
+        console.error(`[options] ${hhError} (source #${source.hh_job_number})`, dup);
+      }
+    } else if (createInHH && !source.hh_job_number) {
+      warnings.push('This job is not linked to HireHop yet, so the option was created in OP only — use "Create in HireHop" on it.');
+    }
+
+    // 2. OP, in one transaction: the group (if new), Option 1 on the source, the copy.
+    const client = await getClient();
+    let groupId: string = source.group_id;
+    let sourceRenamedTo: string | null = null;
+    let newJob: Record<string, any>;
+    try {
+      await client.query('BEGIN');
+      if (!groupId) {
+        const label = await clientLabelFor(source);
+        const g = await client.query(
+          `INSERT INTO job_groups (kind, label, created_by) VALUES ($1, $2, $3) RETURNING id`,
+          [OPTION_GROUP_KIND, label, req.user!.id],
+        );
+        groupId = g.rows[0].id;
+        sourceRenamedTo = withOptionSuffix(source.job_name, 1);
+        await client.query(
+          `UPDATE jobs SET group_id = $1, option_no = 1, job_name = $2, updated_at = NOW() WHERE id = $3`,
+          [groupId, sourceRenamedTo, source.id],
+        );
+      } else {
+        // Re-check inside the transaction; the unique index is the backstop.
+        optionNo = Math.max(optionNo, await nextOptionNo(client, groupId));
+      }
+      newJob = await insertOptionCopy(client, source, {
+        groupId,
+        optionNo,
+        optionLabel: body.option_label,
+        hhJobNumber: newHhJobNumber,
+        dates,
+        actorId: req.user!.id,
+      });
+      await noteOnTimeline(client, source.id,
+        `Added Option ${optionNo} (${body.option_label}) → ${jobRef(newJob as any)}`,
+        req.user!.id, source.pipeline_status);
+      await noteOnTimeline(client, newJob.id,
+        `Created as Option ${optionNo} of this enquiry from ${jobRef(source)}${sourceRenamedTo ? ' (now Option 1)' : ''}`,
+        req.user!.id, 'quoting');
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (newHhJobNumber) {
+        // The HireHop job exists and nothing in OP points at it: the 30-min sync
+        // will import it as an ordinary enquiry; link it with "Link an existing quote".
+        console.error(`[options] OP insert failed AFTER HireHop duplicate #${newHhJobNumber} was created — it will arrive via the sync as an ungrouped enquiry`, err);
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // 3. After commit: the source's "(Option 1)" rename goes to HireHop too.
+    if (sourceRenamedTo) {
+      await pushOptionRename(source.id, source.hh_job_number, sourceRenamedTo, req.user!.email, warnings);
+    }
+    // 4. Pull the new HireHop job's items + derived requirements now rather than
+    //    waiting for the next sync. Best-effort: the option exists either way.
+    if (newHhJobNumber) {
+      try {
+        await syncSingleHireHopJob(newHhJobNumber, req.user!.id);
+      } catch (syncErr) {
+        console.warn(`[options] post-create sync of #${newHhJobNumber} failed (the 30-min sync will catch up):`, syncErr);
+      }
+    }
+
+    await logAudit(req.user!.id, 'jobs', newJob.id, 'create', null, newJob);
+    const refreshed = await query(`SELECT * FROM jobs WHERE id = $1`, [newJob.id]);
+    res.json({
+      data: {
+        job: refreshed.rows[0] ?? newJob,
+        group: await getGroupById(groupId),
+        ...(hhError ? { hh_error: hhError } : {}),
+        warnings,
+      },
+    });
+  } catch (error: any) {
+    console.error('[options] add-option error:', error);
+    if (error?.code === '23505') {
+      res.status(409).json({ error: 'Someone added an option to this enquiry at the same moment — refresh and try again.' });
+      return;
+    }
+    res.status(500).json({ error: error?.message || 'Failed to add the option' });
+  }
+});
+
+// POST /api/pipeline/:id/group-with — link an EXISTING job as an option of this
+// one (staff already made two enquiries by hand). Spec §5.4. The older job is
+// Option 1 when a new group is made; a different client is a warning, not a
+// refusal.
+router.post('/:id/group-with', validate(groupWithSchema), async (req: AuthRequest, res: Response) => {
+  const warnings: string[] = [];
+  try {
+    const aId = req.params.id as string;
+    const { other_job_id: bId } = req.body as z.infer<typeof groupWithSchema>;
+    if (aId === bId) { res.status(400).json({ error: 'Pick a different job' }); return; }
+
+    const rows = await query(`SELECT * FROM jobs WHERE id = ANY($1::uuid[]) AND is_deleted = false`, [[aId, bId]]);
+    const a = rows.rows.find((r) => r.id === aId);
+    const b = rows.rows.find((r) => r.id === bId);
+    if (!a || !b) { res.status(404).json({ error: 'Job not found' }); return; }
+    for (const j of [a, b]) {
+      const refusal = optionRefusalReason(j);
+      if (refusal) { res.status(400).json({ error: `${jobRef(j)}: ${refusal}` }); return; }
+    }
+    if (a.group_id && b.group_id) {
+      res.status(400).json({ error: a.group_id === b.group_id ? 'These two are already options of the same enquiry' : 'Both jobs are already in groups — remove one from its group first' });
+      return;
+    }
+    const sameClient = a.client_id && b.client_id
+      ? a.client_id === b.client_id
+      : String(a.client_name || '').trim().toLowerCase() === String(b.client_name || '').trim().toLowerCase();
+    if (!sameClient) warnings.push('These jobs have different clients in OP — linked anyway; check that is right.');
+
+    const existingGroupId: string | null = a.group_id || b.group_id || null;
+    if (existingGroupId) {
+      const g = await query(`SELECT kind FROM job_groups WHERE id = $1`, [existingGroupId]);
+      if (g.rows[0]?.kind && g.rows[0].kind !== OPTION_GROUP_KIND) {
+        res.status(400).json({ error: 'That job is in a related-jobs group, not an options group' });
+        return;
+      }
+    }
+
+    const client = await getClient();
+    const renames: Array<{ id: string; hh: number | null; name: string }> = [];
+    let groupId = existingGroupId;
+    try {
+      await client.query('BEGIN');
+      if (!groupId) {
+        const label = await clientLabelFor(a);
+        const g = await client.query(
+          `INSERT INTO job_groups (kind, label, created_by) VALUES ($1, $2, $3) RETURNING id`,
+          [OPTION_GROUP_KIND, label, req.user!.id],
+        );
+        groupId = g.rows[0].id as string;
+        const [first, second] = new Date(a.created_at) <= new Date(b.created_at) ? [a, b] : [b, a];
+        for (const [j, n] of [[first, 1], [second, 2]] as Array<[Record<string, any>, number]>) {
+          const name = withOptionSuffix(j.job_name, n);
+          await client.query(
+            `UPDATE jobs SET group_id = $1, option_no = $2, job_name = $3, updated_at = NOW() WHERE id = $4`,
+            [groupId, n, name, j.id],
+          );
+          renames.push({ id: j.id, hh: j.hh_job_number, name });
+        }
+      } else {
+        const joiner = a.group_id ? b : a;
+        const n = await nextOptionNo(client, groupId);
+        const name = withOptionSuffix(joiner.job_name, n);
+        await client.query(
+          `UPDATE jobs SET group_id = $1, option_no = $2, job_name = $3, updated_at = NOW() WHERE id = $4`,
+          [groupId, n, name, joiner.id],
+        );
+        renames.push({ id: joiner.id, hh: joiner.hh_job_number, name });
+      }
+      await noteOnTimeline(client, a.id, `Linked ${jobRef(b)} as an option of this enquiry`, req.user!.id, a.pipeline_status);
+      await noteOnTimeline(client, b.id, `Linked ${jobRef(a)} as an option of this enquiry`, req.user!.id, b.pipeline_status);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    for (const r of renames) await pushOptionRename(r.id, r.hh, r.name, req.user!.email, warnings);
+    res.json({ data: { group: await getGroupById(groupId!), warnings } });
+  } catch (error: any) {
+    console.error('[options] group-with error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to link the jobs' });
+  }
+});
+
+// DELETE /api/pipeline/:id/group — take this job out of its group. Nothing else
+// changes. A group left with one member dissolves. Spec §5.5.
+router.delete('/:id/group', async (req: AuthRequest, res: Response) => {
+  const warnings: string[] = [];
+  try {
+    const jobId = req.params.id as string;
+    const cur = await query(`SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`, [jobId]);
+    if (cur.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = cur.rows[0];
+    if (!job.group_id) { res.status(400).json({ error: 'This job is not in a group' }); return; }
+    const groupId: string = job.group_id;
+
+    const client = await getClient();
+    const renames: Array<{ id: string; hh: number | null; name: string }> = [];
+    let dissolved = false;
+    try {
+      await client.query('BEGIN');
+      const ungroup = async (j: Record<string, any>) => {
+        const name = stripOptionSuffix(j.job_name) || j.job_name;
+        await client.query(
+          `UPDATE jobs SET group_id = NULL, option_no = NULL, option_label = NULL, job_name = $1, updated_at = NOW() WHERE id = $2`,
+          [name, j.id],
+        );
+        renames.push({ id: j.id, hh: j.hh_job_number, name });
+      };
+      await ungroup(job);
+      await client.query(`UPDATE job_groups SET lead_job_id = NULL, updated_at = NOW() WHERE id = $1 AND lead_job_id = $2`, [groupId, job.id]);
+      const rest = await client.query(`SELECT * FROM jobs WHERE group_id = $1 AND is_deleted = false`, [groupId]);
+      if (rest.rows.length <= 1) {
+        for (const r of rest.rows) {
+          await ungroup(r);
+          await noteOnTimeline(client, r.id, `Group dissolved — ${jobRef(job)} was removed and this was the last other option`, req.user!.id, r.pipeline_status);
+        }
+        await client.query(`DELETE FROM job_groups WHERE id = $1`, [groupId]);
+        dissolved = true;
+      }
+      await noteOnTimeline(client, job.id, `Removed from its options group${dissolved ? ' (group dissolved)' : ''}`, req.user!.id, job.pipeline_status);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    for (const r of renames) await pushOptionRename(r.id, r.hh, r.name, req.user!.email, warnings);
+    res.json({ data: { dissolved, group: dissolved ? null : await getGroupById(groupId), warnings } });
+  } catch (error: any) {
+    console.error('[options] remove-from-group error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to remove the job from its group' });
   }
 });
 

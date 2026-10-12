@@ -225,16 +225,18 @@ unverified), no phone card payments (policy), shop + sitter till in Phase 3. Rea
 building anything that takes a card in person. The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
-**PLANNED, Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
-(three date spans / van vs van+driver / with a Twin) as a GROUP of jobs. §1 is settled: **one
-version = one OP job + one HireHop job** (every version has to go out as a HireHop quote, so
-"Add a version" duplicates the HH job via `job_duplicate.php` and names them "(vN)"); never amend
-a job in place to become a different option; the group is a thin layer (version bar, Compare
-slide-over, one collapsed Kanban card); confirm one → a HUMAN marks the rest lost as
-`'Confirmed Alternative Quote (from us)'`, which win/loss and Fill-a-Gap must exclude; version
-numbers never auto-bump (revisions are the quote-PDF diff). Payment = choosing: the portal link
-carries the job number. Phase 4 touches the payment portal repo; festival `part_of` grouping is
-Phase 2. Approved mockups are linked at the top of the spec. Build in a fresh session.
+**PR 1 BUILT, Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
+(three date spans / van vs van+driver / with a Twin) as a GROUP of jobs. **"Version" in the spec
+is "option" in code** (`jobs.option_no`, "(Option 2)" in the HireHop job name, `services/job-groups.ts`)
+— "quote versions" already means the quote-PDF diff on the Activity Timeline. §1 is settled: **one
+option = one OP job + one HireHop job** ("Quote another option" duplicates the HH job via
+`job_duplicate.php`, HireHop FIRST then the OP row); never amend a job in place to become a different
+option; **pre-confirmation only** and a group has at most one confirmed member (§1.1); the group is
+a thin layer (option bar, Compare slide-over, one collapsed Kanban card); confirm one → a HUMAN marks
+the rest lost as `'Confirmed Alternative Quote (from us)'`, which win/loss and Fill-a-Gap must
+exclude; option numbers never auto-bump. Payment = choosing: the portal link carries the job number
+and refuses a live option whose sibling confirmed (PR 4, portal repo). Built: PR 1 (§10). Next: PR 2
+Compare + Kanban, PR 3 confirm-one-lose-others, PR 4 portal. Copy strings: `frontend/src/lib/optionCopy.ts`.
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,

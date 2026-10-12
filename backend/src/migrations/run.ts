@@ -325,6 +325,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '283_closeout_arrival_hook_setting.sql',
         '284_gps_trackers.sql',
         '285_shop_auto_close_setting.sql',
+        '286_job_groups.sql',
       ];
 
       for (const migration of migrations) {
