@@ -202,3 +202,49 @@ Stored on `calculator_settings` for now (or move to `fleet_settings` if other fl
 - [ ] Future: receipt uploader integration (general receipts with "is this for a van?" routing)
 
 See **Vehicle Module Integration** section below for technical details.
+
+---
+
+## GPS trackers (Oct 2026)
+
+**The register** — `gps_trackers` + `gps_tracker_fittings` (migration 284), behind
+`services/gps-trackers.ts`, which is THE definition of which tracker is in which van.
+One row per physical unit: the numbered label stuck on it (`001`…), its IMEI (= Traccar's
+device identifier / `uniqueId`), its SIM ICCID, a status (`active` / `faulty` / `retired`)
+and notes. **Which van it is in is never a column on the tracker** — it is the open fitting
+row (`removed_on IS NULL`), which is also the history. Partial unique indexes keep it one
+tracker per van and one van per tracker. Seeded from the Monday "Trackers" board export
+(24 units, 23 fitted; 022 a spare for HK24GWE; 001–003 had no SIM number recorded). Replaces
+the R2 file `trackers/assignments.json`, which was never filled in — why every van said
+"Not fitted".
+
+**UI** — Vehicles › Fleet Map › **Trackers** tab (`?tab=trackers`, `TrackersPanel.tsx`):
+the list with Traccar online/last-seen per unit, fit / move / take out (dated, with who),
+edit details, history, and warnings — a unit Traccar doesn't know, a Traccar device not on
+the register, a unit still in a van that has left the fleet, a Traccar device name that
+doesn't match its van. The vehicle page's "GPS Tracker" row (`VehicleTrackerRow.tsx`) shows
+the unit and can fit a spare or take it out. Moving a unit into a van that already has one
+is refused — take the old one out first. Routes: `/api/vehicles/trackers…` (STAFF_ROLES).
+
+**Finding a van's Traccar device** — by the IMEI of the tracker fitted to it, else (a van not
+on the register) a device named after the reg. Frontend `findDeviceByReg()` in
+`lib/traccar-api.ts`, backend `findDeviceForReg()` in `services/traccar-server.ts`. So a
+unit moved between vans follows the register, whatever it is called in Traccar.
+
+**No-fix positions (0,0)** — a tracker with no satellite fix reports latitude 0, longitude 0
+("Null Island", Gulf of Guinea). RO23HLU (tracker 002) sent ~4% of its September points as
+0,0 — the van "in the sea". Every reader drops them: `isRealFix()` in
+`services/gps-trackers.ts` (route for claims, latest position for the OOH parking pin and
+the approach SMS) and in `types/traccar.ts` (`getPositions` / `getRoute`, so the map,
+Location tab, New Issue and check-in damage locations). Traccar itself is told to discard
+them too: `filter.enable` + `filter.zero` in `traccar.xml` on the server.
+
+**Recent Trips** on the Location tab never loaded because the window ended at "now" to the
+second — every re-render made a new query key, so each answer restarted the fetch. It is
+now whole days (`startOfDay` … `endOfDay`, sent as real UTC).
+
+**Vehicles › Settings** keeps only Checklists (the prep + briefing checklist items PrepPage
+and BookOutPage read) and Stock (prep consumables; the low-stock banner opens `?tab=stock`).
+The General and Data tabs were standalone-app leftovers — Data's import and "wipe test
+data" called endpoints that no longer exist.
+

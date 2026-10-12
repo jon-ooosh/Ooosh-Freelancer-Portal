@@ -49,6 +49,9 @@ import { getSystemSetting } from './system-settings';
 import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError } from '../services/dvsa-mot';
 import { closeOpenSaleOnRemoval } from '../services/vehicle-sales';
 import { ukToday } from '../services/uk-date';
+import {
+  TrackerError, listTrackers, createTracker, updateTracker, fitTracker, removeTracker, getTrackerHistory,
+} from '../services/gps-trackers';
 
 const router = Router();
 
@@ -4069,37 +4072,70 @@ router.get('/get-recent-events', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// ── Tracker Assignments ──
+// ── GPS Trackers ──
+// The tracker register (migration 284). services/gps-trackers.ts is THE
+// definition of which tracker is in which van; these are thin wrappers.
 
-/**
- * GET /api/vehicles/get-tracker-assignments
- * Fetch tracker-to-vehicle assignment map from R2.
- */
-router.get('/get-tracker-assignments', async (_req: AuthRequest, res: Response) => {
+function sendTrackerError(res: Response, err: unknown, what: string): void {
+  if (err instanceof TrackerError) {
+    res.status(err.status).json({ error: err.message });
+    return;
+  }
+  console.error(`[vehicles/trackers] ${what}:`, err);
+  res.status(500).json({ error: `Failed to ${what}` });
+}
+
+/** GET /api/vehicles/trackers — every tracker, with the van it is in now. */
+router.get('/trackers', authorize(...STAFF_ROLES), async (_req: AuthRequest, res: Response) => {
   try {
-    const data = await readR2Json<{ assignments: Record<string, string> }>('trackers/assignments.json');
-    res.json({ assignments: data?.assignments || {} });
-  } catch (error) {
-    console.error('[vehicles/trackers] Failed to read assignments:', error);
-    res.status(500).json({ error: 'Failed to load tracker assignments' });
+    res.json({ data: await listTrackers() });
+  } catch (err) {
+    sendTrackerError(res, err, 'load trackers');
   }
 });
 
-/**
- * POST /api/vehicles/save-tracker-assignments
- * Save the full tracker assignments map to R2 (replaces existing).
- */
-router.post('/save-tracker-assignments', async (req: AuthRequest, res: Response) => {
+/** POST /api/vehicles/trackers — add a tracker to the register. */
+router.post('/trackers', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
-    const { assignments } = req.body;
-    await writeR2Json('trackers/assignments.json', {
-      assignments: assignments || {},
-      updatedAt: new Date().toISOString(),
-    });
-    res.json({ success: true });
-  } catch (error) {
-    console.error('[vehicles/trackers] Failed to save assignments:', error);
-    res.status(500).json({ error: 'Failed to save tracker assignments' });
+    res.json({ data: await createTracker(req.body || {}) });
+  } catch (err) {
+    sendTrackerError(res, err, 'add tracker');
+  }
+});
+
+/** PATCH /api/vehicles/trackers/:id — number, IMEI, SIM, status, notes. */
+router.patch('/trackers/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await updateTracker(String(req.params.id), req.body || {}) });
+  } catch (err) {
+    sendTrackerError(res, err, 'update tracker');
+  }
+});
+
+/** POST /api/vehicles/trackers/:id/fit — { vehicleId, fittedOn? }. Moves it if it is in another van. */
+router.post('/trackers/:id/fit', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await fitTracker(String(req.params.id), req.body?.vehicleId, req.user?.id || null, req.body?.fittedOn) });
+  } catch (err) {
+    sendTrackerError(res, err, 'fit tracker');
+  }
+});
+
+/** POST /api/vehicles/trackers/:id/remove — { removedOn? }. It becomes a spare. */
+router.post('/trackers/:id/remove', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await removeTracker(String(req.params.id), req.user?.id || null, req.body?.removedOn) });
+  } catch (err) {
+    sendTrackerError(res, err, 'remove tracker');
+  }
+});
+
+/** GET /api/vehicles/trackers/:id/history — every van it has been in. */
+router.get('/trackers/:id/history', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await getTrackerHistory(String(req.params.id)) });
+  } catch (err) {
+    sendTrackerError(res, err, 'load tracker history');
   }
 });
 

@@ -323,6 +323,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '281_job_closeout_log.sql',
         '282_closeout_xero_sweep_setting.sql',
         '283_closeout_arrival_hook_setting.sql',
+        '284_gps_trackers.sql',
       ];
 
       for (const migration of migrations) {
