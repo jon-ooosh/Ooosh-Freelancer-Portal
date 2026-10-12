@@ -19,7 +19,8 @@ import crypto from 'crypto';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
 import { emailService } from '../services/email-service';
-import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
+import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline, getJobEmailRecipients } from '../services/money-emails';
+import { resolveJobEmailContacts } from '../services/job-contact-candidates';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo, shiftLinkPath } from '../services/studio-sitter';
@@ -2291,6 +2292,30 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     const row = result.rows[0];
     const job = formatJobForPortal(row);
 
+    // Client contacts for the completion page's delivery-note picker — the
+    // same list the warehouse collection page offers (jon, Oct 2026: the
+    // freelancer picks who gets it, or types a new address). Under the same
+    // 48-hour rule as the venue phone numbers below; addressable people only,
+    // and no phone numbers.
+    let clientContacts: Array<{ personId: string; name: string; email: string; role: string | null; isPrimary: boolean }> = [];
+    let clientEmail: string | null = null;
+    const contactJobDate = row.job_date ? new Date(row.job_date) : null;
+    const contactHoursUntilJob = contactJobDate ? (contactJobDate.getTime() - Date.now()) / (1000 * 60 * 60) : 999;
+    if (row.job_id && contactHoursUntilJob <= 48 && (row.job_type === 'delivery' || row.job_type === 'collection')) {
+      try {
+        const [contacts, recipients] = await Promise.all([
+          resolveJobEmailContacts(row.job_id),
+          getJobEmailRecipients(row.job_id),
+        ]);
+        clientContacts = contacts
+          .filter(c => c.email)
+          .map(({ personId, name, email, role, isPrimary }) => ({ personId, name, email, role, isPrimary }));
+        clientEmail = recipients.primaryEmail || null;
+      } catch (err) {
+        console.warn(`[portal] client contacts lookup failed for quote ${quoteId}:`, err);
+      }
+    }
+
     // Shape shared files for the portal. Files in the JSONB are shaped
     // { url (R2 key | external URL), name, type, label, share_with_freelancer, ... }.
     // Portal expects { assetId | null, name, url, fileType } with a
@@ -2368,7 +2393,7 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
 
     res.json({
       success: true,
-      job,
+      job: { ...job, clientEmail, clientContacts },
       venue,
       contactsVisible: venue ? !venue.phoneHidden : true,
       boardType: row.job_type === 'crewed' ? 'crew' : 'dc',
@@ -2739,12 +2764,13 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
 
       // Build client email recipients list.
       //   - "Don't send" ticked on the portal → nobody.
-      //   - Otherwise the client contact on file through resolveClientEmailTarget
-      //     (job_contacts first, then the org… THE rule), plus any extra
-      //     addresses the freelancer typed. Until Oct 2026 this read
-      //     organisations.email directly and threw a real resolver answer away,
-      //     so a job whose contact lived on job_contacts got no delivery note
-      //     at all (HH 16665).
+      //   - The freelancer picked contacts and/or typed addresses → exactly
+      //     those, like the warehouse collection page.
+      //   - Nothing picked or typed → the client contact on file through
+      //     resolveClientEmailTarget (job_contacts first, then the org… THE
+      //     rule). Until Oct 2026 this read organisations.email directly and
+      //     threw a real resolver answer away, so a job whose contact lived on
+      //     job_contacts got no delivery note at all (HH 16665).
       const recipients = new Set<string>();
       // Safety net: nothing on file and nothing typed → info@ with an amber
       // banner so the team can forward to the right person and update the
@@ -2755,7 +2781,8 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         if (clientEmails) {
           clientEmails.split(',').map(e => e.trim()).filter(Boolean).forEach(e => recipients.add(e));
         }
-        if (ctx.job_id) {
+        // Nothing picked or typed → fall back to the contact on file.
+        if (recipients.size === 0 && ctx.job_id) {
           const target = await resolveClientEmailTarget(
             ctx.job_id,
             isCollection ? 'collection_confirmation' : 'delivery_note',
@@ -2763,7 +2790,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
           if (!target.isFallback) {
             recipients.add(target.primaryEmail);
             target.ccEmails.forEach(e => recipients.add(e));
-          } else if (recipients.size === 0) {
+          } else {
             recipients.add(target.primaryEmail);
             completionFallback = {
               jobId: ctx.job_id,
@@ -2772,7 +2799,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
               jobName: target.jobName,
             };
           }
-        } else if (ctx.client_email) {
+        } else if (recipients.size === 0 && ctx.client_email) {
           recipients.add(ctx.client_email);
         }
       }

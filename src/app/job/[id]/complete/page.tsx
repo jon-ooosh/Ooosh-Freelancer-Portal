@@ -41,7 +41,17 @@ interface Job {
   time?: string
   venueName?: string
   hhRef?: string
-  clientEmail?: string  // Pre-filled client email from Monday
+  clientEmail?: string | null  // Client contact on file (OP's recipient rule) — used when there are no contacts to pick
+  clientContacts?: ClientContact[]  // People on this job who can receive the delivery note
+}
+
+/** A client contact the delivery note can go to (OP: resolveJobEmailContacts) */
+interface ClientContact {
+  personId: string
+  name: string
+  email: string
+  role: string | null
+  isPrimary: boolean
 }
 
 interface EquipmentItem {
@@ -474,6 +484,9 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
 // =============================================================================
 
 interface ClientEmailInputProps {
+  contacts: ClientContact[]
+  selectedContactEmails: string[]
+  onToggleContact: (email: string) => void
   emails: string[]
   onEmailsChange: (emails: string[]) => void
   dontSend: boolean
@@ -482,6 +495,9 @@ interface ClientEmailInputProps {
 }
 
 function ClientEmailInput({ 
+  contacts,
+  selectedContactEmails,
+  onToggleContact,
   emails, 
   onEmailsChange, 
   dontSend, 
@@ -543,6 +559,40 @@ function ClientEmailInput({
         <span className="text-sm text-gray-700">Don't send {typeLabel.toLowerCase()} to client</span>
       </label>
 
+      {/* Job contacts to tick (same list as the warehouse collection page) */}
+      {!dontSend && contacts.length > 0 && (
+        <div className="space-y-2">
+          {contacts.map((c) => {
+            const selected = selectedContactEmails.includes(c.email)
+            return (
+              <button
+                key={c.personId}
+                type="button"
+                onClick={() => onToggleContact(c.email)}
+                className={`w-full text-left px-3 py-2 rounded-lg border transition-colors ${
+                  selected
+                    ? 'border-purple-500 bg-purple-50 ring-2 ring-purple-200'
+                    : 'border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-gray-800 truncate">
+                      {c.isPrimary && <span className="text-amber-500 mr-1" title="Lead contact">★</span>}
+                      {c.name}
+                      {c.role && <span className="text-gray-400 font-normal"> · {c.role}</span>}
+                    </p>
+                    <p className="text-xs text-gray-500 truncate">{c.email}</p>
+                  </div>
+                  {selected && <span className="text-purple-600 text-lg">✓</span>}
+                </div>
+              </button>
+            )
+          })}
+          <p className="text-xs text-gray-500">Tap to choose who gets it — or add another address below.</p>
+        </div>
+      )}
+
       {/* Email inputs (hidden when don't send is checked) */}
       {!dontSend && (
         <div className="space-y-2">
@@ -554,7 +604,7 @@ function ClientEmailInput({
                   value={email}
                   onChange={(e) => handleEmailChange(index, e.target.value)}
                   onBlur={() => handleEmailBlur(index)}
-                  placeholder={index === 0 ? "Client email address (optional)" : "Additional email"}
+                  placeholder={index === 0 ? (contacts.length > 0 ? "Another email (optional)" : "Client email address (optional)") : "Additional email"}
                   className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${
                     emailErrors[index] ? 'border-red-300 bg-red-50' : 'border-gray-300'
                   }`}
@@ -595,8 +645,8 @@ function ClientEmailInput({
           {/* Info text */}
           <p className="text-xs text-gray-500">
             {jobType === 'delivery' 
-              ? 'A PDF delivery note with equipment list will be emailed to the client. Leave blank to use the client contact we have on file.'
-              : 'A collection confirmation email will be sent to the client. Leave blank to use the client contact we have on file.'
+              ? 'A PDF delivery note with equipment list will be emailed to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
+              : 'A collection confirmation email will be sent to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
             }
           </p>
         </div>
@@ -1112,7 +1162,10 @@ export default function CompletePage() {
 
   // Client email state
   const [clientEmails, setClientEmails] = useState<string[]>([''])
+  const [selectedContactEmails, setSelectedContactEmails] = useState<string[]>([])
   const [dontSendClientEmail, setDontSendClientEmail] = useState(false)
+  const toggleContactEmail = (email: string) =>
+    setSelectedContactEmails(prev => prev.includes(email) ? prev.filter(e => e !== email) : [...prev, email])
 
   // Ooosh staff name (shown when logged in as @oooshtours.co.uk)
   const [userEmail, setUserEmail] = useState<string | null>(null)
@@ -1142,8 +1195,12 @@ export default function CompletePage() {
           setUserEmail(data.userEmail)
         }
 
-        // Pre-fill client email if available
-        if (fetchedJob?.clientEmail) {
+        // Default recipient: the lead contact if the job has contacts to pick
+        // from (they come lead-first), else pre-fill the contact on file.
+        const contacts: ClientContact[] = fetchedJob?.clientContacts || []
+        if (contacts.length > 0) {
+          setSelectedContactEmails([contacts[0].email])
+        } else if (fetchedJob?.clientEmail) {
           setClientEmails([fetchedJob.clientEmail])
         }
       } catch (err) {
@@ -1179,9 +1236,13 @@ export default function CompletePage() {
 
     try {
       // Filter out empty/invalid emails
+      // Ticked contacts + any typed addresses, deduped
       const validEmails = dontSendClientEmail 
         ? [] 
-        : clientEmails.filter(email => email.trim() && isValidEmail(email.trim()))
+        : Array.from(new Set([
+            ...selectedContactEmails,
+            ...clientEmails.map(email => email.trim()).filter(email => email && isValidEmail(email)),
+          ]))
 
       const response = await fetch(`/api/jobs/${jobId}/complete`, {
         method: 'POST',
@@ -1441,6 +1502,9 @@ export default function CompletePage() {
               }
             </p>
             <ClientEmailInput
+              contacts={job.clientContacts || []}
+              selectedContactEmails={selectedContactEmails}
+              onToggleContact={toggleContactEmail}
               emails={clientEmails}
               onEmailsChange={setClientEmails}
               dontSend={dontSendClientEmail}

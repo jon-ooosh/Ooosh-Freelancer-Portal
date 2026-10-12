@@ -12,11 +12,11 @@
 #   4. Runs database migrations
 #   5. Restarts the service
 #
-# The service is STOPPED before dependencies are installed: `npm ci` deletes
-# node_modules first, and doing that under the running app left a
-# half-deleted folder (ENOTEMPTY) and a crash-looping service (10 Oct 2026).
-# If any step fails the script stops with the service DOWN and says so —
-# loudly down beats half-built and quietly broken.
+# The service keeps running the previous build until the final restart, so
+# deploys can happen ad hoc while staff are using OP. If `npm ci` fails
+# (10 Oct 2026: ENOTEMPTY on a half-deleted node_modules), the folder is
+# cleared and the install retried once. If any step fails, nothing is
+# restarted and the old build carries on — the script says so.
 # =============================================================
 
 set -euo pipefail
@@ -33,9 +33,19 @@ cd "${APP_DIR}"
 
 on_fail() {
   echo ""
-  echo "!!! Deploy FAILED — ooosh-portal may be STOPPED."
-  echo "!!! Fix the error above, re-run this script, or bring the old build back:"
-  echo "!!!   sudo systemctl start ooosh-portal"
+  echo "!!! Deploy FAILED — nothing was restarted; the previous build is still running."
+  echo "!!! Do NOT restart ooosh-portal until this script completes: if the install"
+  echo "!!! step failed, node_modules may be incomplete and a restart would crash."
+  echo "!!! Fix the error above and re-run this script."
+}
+
+# npm ci, and if it fails (e.g. ENOTEMPTY) clear node_modules and try once more.
+install_deps() {
+  if [ -f package-lock.json ]; then
+    npm ci "$@" || { echo "npm ci failed — clearing node_modules and retrying once..."; rm -rf node_modules; npm ci "$@"; }
+  else
+    npm install
+  fi
 }
 trap on_fail ERR
 
@@ -48,20 +58,11 @@ git pull origin "${BRANCH}"
 
 # --- Install dependencies ---
 echo ""
-echo "[2/5] Stopping the service, then installing dependencies..."
-sudo systemctl stop ooosh-portal
+echo "[2/5] Installing dependencies..."
 cd "${APP_DIR}/backend"
-if [ -f package-lock.json ]; then
-  npm ci --production=false
-else
-  npm install
-fi
+install_deps --production=false
 cd "${APP_DIR}/frontend"
-if [ -f package-lock.json ]; then
-  npm ci
-else
-  npm install
-fi
+install_deps
 
 # --- Build backend ---
 echo ""
@@ -81,13 +82,13 @@ echo "[5/5] Running database migrations..."
 cd "${APP_DIR}/backend"
 npm run db:migrate
 
-# --- Start the service ---
-sudo systemctl start ooosh-portal
+# --- Restart the service (a few seconds' blip) ---
+sudo systemctl restart ooosh-portal
 trap - ERR
 
 echo ""
 echo "============================================"
-echo "  Deploy Complete — service started"
+echo "  Deploy Complete — service restarted"
 echo "============================================"
 echo ""
 echo "  Check status:"
