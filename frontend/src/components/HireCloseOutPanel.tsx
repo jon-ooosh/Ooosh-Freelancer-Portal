@@ -150,7 +150,7 @@ export default function HireCloseOutPanel({ jobId, onChanged, onMarkSent }: Prop
       {attention && (
         <div className={attention.tone === 'red' ? 'text-red-700' : 'text-amber-700'}>{attention.text}</div>
       )}
-      {result && <div className={result.done ? 'text-green-800' : result.paused ? 'text-amber-800' : 'text-red-800'}>{result.message}</div>}
+      {result && <div className={result.done ? 'text-green-800' : 'text-red-800'}>{result.message}</div>}
       {error && <div className="text-red-700">{error}</div>}
 
       <div className="flex flex-wrap items-center gap-2 pt-0.5">
