@@ -445,7 +445,7 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 
 ## Scheduled tasks (`config/scheduler.ts`)
 
-Backups 02:00 · job financials 03:00 · close-out Xero sweep 03:30 (off until its setting is on) · holiday entitlement 06:05 · Xero reconcile 07:45 ·
+Backups 02:00 · job financials 03:00 · Traccar backup + 12-month GPS purge 03:10 UK (off until `TRACCAR_DATABASE_URL` is set — `docs/TRACCAR-POSTGRES.md`) · close-out Xero sweep 03:30 (off until its setting is on) · holiday entitlement 06:05 · Xero reconcile 07:45 ·
 bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
