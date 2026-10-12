@@ -181,6 +181,7 @@ function installDb() {
       logRows.unshift({ id: `l${logRows.length}`, step: params[1], ok: params[2], detail: params[3], hh_refs: params[4] ? JSON.parse(params[4]) : null, user_id: params[5], user_name: null, created_at: 'now' });
       return { rows: [] };
     }
+    if (sql.includes('FROM job_requirements')) return { rows: [{ invoice_req_id: null, invoice_req_status: null, open_problems: 0 }] };
     if (sql.includes('FROM job_closeout_log')) return { rows: logRows };
     throw new Error(`unexpected SQL: ${sql}`);
   });
@@ -441,6 +442,7 @@ describe('completeHireJob', () => {
     mockRead.mockClear();
     mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
       if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...JOB, pipeline_status: 'completed' }] };
+      if (sql.includes('FROM job_requirements')) return { rows: [{ invoice_req_id: null, invoice_req_status: null, open_problems: 0 }] };
       if (sql.includes('FROM job_closeout_log')) return { rows: logRows };
       if (sql.includes('INSERT INTO job_closeout_log')) { logRows.unshift({ id: 'x', step: params[1], ok: params[2], detail: params[3], hh_refs: null, user_id: params[5], user_name: null, created_at: 'now' }); return { rows: [] }; }
       if (sql.includes('FROM job_payments')) return { rows: opPayments };

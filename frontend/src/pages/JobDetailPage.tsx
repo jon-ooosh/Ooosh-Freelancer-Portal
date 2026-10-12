@@ -52,6 +52,7 @@ import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revi
 import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
 import { openAuthedFile } from '../lib/openAuthedFile';
 import { ukToday } from '../lib/ukDate';
+import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPlan } from '../lib/closeOutPlan';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -1587,6 +1588,24 @@ function JobDetailContent() {
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  // The Money tab's dot: the close-out's colour once a hire is back (amber = something
+  // to do, blue = waiting on the client, green = done, red = needs sorting). Read only
+  // for returned jobs — the plan is a live HireHop read, shared (30 s) with the panel
+  // and the Invoice card, so this costs nothing extra when either is on screen.
+  const [closeOutPlan, setCloseOutPlan] = useState<CloseOutPlan | null>(null);
+  const closeOutRelevant = !!id && !!job?.hh_job_number && !job?.is_internal
+    && (job?.pipeline_status === 'returned' || job?.pipeline_status === 'returned_incomplete');
+  useEffect(() => {
+    if (!closeOutRelevant || !id) { setCloseOutPlan(null); return; }
+    const unsub = subscribeCloseOutPlan(id, setCloseOutPlan);
+    loadCloseOutPlan(id).then(setCloseOutPlan).catch(() => undefined);
+    return unsub;
+  }, [id, closeOutRelevant]);
+  const moneyDot = (() => {
+    if (!closeOutPlan) return null;
+    const v = closeOutView(closeOutPlan, { isManager: false });
+    return v.stage === 'pre' ? null : TONE[v.tone].dot;
+  })();
   // Staging Calculator — modal launch; created plans surface as an Overview card.
   const [showStagingModal, setShowStagingModal] = useState(false);
   const [showRackPlanModal, setShowRackPlanModal] = useState(false);
@@ -4545,7 +4564,7 @@ function JobDetailContent() {
                tab === 'timeline' ? (<><span className="sm:hidden">Timeline</span><span className="hidden sm:inline">Activity Timeline</span></>) :
                tab === 'transport' ? (<><span className="sm:hidden">Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span><span className="hidden sm:inline">Crew & Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span></>) :
                tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
-               tab === 'money' ? 'Money' :
+               tab === 'money' ? (<>Money{moneyDot && <i className={`inline-block w-1.5 h-1.5 rounded-full ml-1.5 align-middle ${moneyDot}`} />}</>) :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
             );
@@ -4612,6 +4631,7 @@ function JobDetailContent() {
             onLaunchStaging={() => setShowStagingModal(true)}
             onLaunchRackPlan={() => setShowRackPlanModal(true)}
             onLaunchBacklineMatcher={() => setShowBacklineMatcher(true)}
+            onOpenMoney={() => setActiveTab('money')}
           />
 
         </div>
@@ -6093,7 +6113,7 @@ function JobDetailContent() {
 
       {/* Money Tab */}
       {activeTab === 'money' && id && (
-        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} />
+        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} onRequestComplete={() => initiateStatusChange('completed' as PipelineStatus)} />
       )}
 
       {/* Rack Planner — launched from the Job Requirements "Tools" menu (modal) */}
@@ -7024,7 +7044,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher, onOpenMoney }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
@@ -7055,6 +7075,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   onLaunchStaging?: () => void;
   onLaunchRackPlan?: () => void;
   onLaunchBacklineMatcher?: () => void;
+  /** The Invoice card's "Open in Money →" (the close-out lives on the Money tab). */
+  onOpenMoney?: () => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -7473,7 +7495,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                   selfDriveVanOverride={selfDriveVanOverride}
                   onVehicleCountOverride={req.requirement_type === 'vehicle' ? changeVehicleCountOverride : undefined}
                   onReload={loadAll}
-                  companionReq={req.requirement_type === 'invoice' ? requirements.find(r => r.requirement_type === 'payment_reconcile') : undefined}
+                  onOpenMoney={req.requirement_type === 'invoice' ? onOpenMoney : undefined}
                 />
               );
 

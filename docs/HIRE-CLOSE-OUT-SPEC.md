@@ -116,33 +116,40 @@ other than the job's client, excess decisions (existing excess flows own them).
 
 ## 3. Where it lives
 
-The **Post-Hire** tab on Job Detail, on the existing cards. Status text stays as it is
-(derived from HireHop by `hh-requirement-derivation.ts`); each card gains one primary
-action and reads back after it.
+**The Money tab (redesign, jon + staff, 12–13 Oct 2026; mockup:
+https://claude.ai/artifact/13JxwH2ECvheLiKwfJv7CL).** The close-out moved off the Overview's
+Invoice card — it was the "actions on a status card" problem flagged at the start — into
+one panel on the Money tab, `components/CloseOutMoneyPanel.tsx`, under the Financial
+Summary. It appears once the hire is back (or an invoice exists) and is hidden pre-hire.
 
-**One card (jon, 9 Oct 2026, after the first live job).** The Invoice card hosts the whole
-close-out; the Payment Reconciliation requirement still exists (the derivation engine
-creates it, the Returns page counts it) but is not drawn — its status is the second pill on
-the Invoice card ("Payments: Reconciled"), still changeable there. One main button does the
-normal case end to end: raise the invoice if there is anything left to bill, then allocate
-every hire deposit in HireHop and apply the credits in Xero (`POST /close-out/:jobId/run`).
-A run that stops says where and the same button reads "Carry on". "Mark as sent to client"
-is offered only once nothing is left to allocate, so the client's invoice already shows
-their payments. **Completing a job is the status change at the top of the page**, not a button here (jon,
-9 Oct, second pass) — and that modal now lists open Problems in red: a non-manager cannot
-complete over them, a manager must give a reason (`routes/pipeline.ts` enforces both). The
-card itself is one line of state, one line for the first thing in the way, and the buttons;
-everything else is behind "Details…". The Excess Resolution card is unchanged.
+- **One pill, five steps** — Returned · Invoiced · Payments allocated · Sent to client ·
+  Paid in full — and **one next-action line** with its reason behind "Why?". Stages and
+  pills come from `lib/closeOutPlan.ts` `closeOutView()`: Needs sorting (red, a refusal —
+  its first clause is the line, the full sentence the "Why?") · Ready to invoice · Payments
+  to allocate · Money to sort (in credit) · Not sent yet · Awaiting payment (blue) · Paid ·
+  Completed (green). Paid can come before Sent.
+- **Buttons:** Create invoice / Allocate (manager; "…anyway (job still out)" in amber) ·
+  Check again · Copy payment link · Mark as sent / Undo sent (anyone — it ticks the Invoice
+  requirement, whose id the plan now carries) · Record payment (the existing form) ·
+  **Complete the job**, which opens the page's own status modal at Completed (so the open-
+  Problems check and the manager reason still apply; no second way to complete a job).
+- Before invoicing, short chips: All back / Returned incomplete / Still out · excess held ·
+  open Problems (the plan now carries `openProblems` and `invoiceSent`).
+- Once invoiced, a short ledger: each invoice, then payments allocated (HireHop ✓ Xero ✓).
+- **The balance is shown once**, in the Financial Summary, and only when something is owed
+  or the client is in credit; the pre-hire "Deposit to secure" boxes go once the hire is back.
+- **No Xero links and no Details modal** — staff don't use Xero; jon and the bookkeeper find
+  invoices there themselves (jon, 13 Oct). The run log stays in `job_closeout_log`.
+- **Overview › Post-Hire › Invoice card** is a signpost (`CloseOutSignpost.tsx`): the same
+  pill, one line ("OT-INV-12308 · £45.00 due · 3 of 5 steps"), the five steps as a thin bar,
+  and "Open in Money →". No dropdowns. The Payment Reconciliation requirement still exists
+  (derived, counted by the Returns page) but is not drawn.
+- **The Money tab label carries a dot** in the close-out's colour on returned jobs (amber =
+  something to do, blue = waiting on the client, green = done, red = needs sorting).
 
-| On the Invoice card | Shows |
-|---|---|
-| State | each invoice with "paid" or "£x owing"; or "£x ex VAT not yet invoiced"; payments holding money only while there is something to do with them |
-| Blockers / warnings | red list / amber lines (§6; excess still held) |
-| Buttons | Raise invoice & allocate payments · Carry on · …anyway (job still out, amber) · Mark as sent to client · Details… (modal: invoices, payments, blockers, warnings, plan, log) |
-| Log | "What happened", behind a disclosure; Xero lines admin-only |
-| Completed job | OP's own record ("Completed in HireHop by X on date"), no HireHop read; "Check HireHop again" forces one |
+All three read one shared plan (30 s cache), so they never disagree.
 
-Design rule for the cards (jon: "it needs to flow and make sense"): every action shows
+Design rule (jon: "it needs to flow and make sense"): every action shows
 **what it will do before it does it** — the plan is a list of sentences ("Allocate
 £4,629.82 of payment 9091 to OT-INV-12252", "Leave £886.80 of payment 8661 unallocated —
 decide below"), then one button. After it runs, the same card shows the read-back
