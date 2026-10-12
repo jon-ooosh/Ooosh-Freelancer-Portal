@@ -33,6 +33,7 @@ import { generateDeliveryNotePdf, type DeliveryNoteItem } from '../services/deli
 import { emailService } from '../services/email-service';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { getJobEmailRecipients } from '../services/money-emails';
+import { resolveJobEmailContacts } from '../services/job-contact-candidates';
 
 const SESSION_TTL_SECONDS = 12 * 60 * 60; // 12h — kiosk left running between shifts
 
@@ -253,84 +254,6 @@ interface EquipmentItem {
   quantity: number;
 }
 
-interface CollectionContact {
-  personId: string;
-  name: string;
-  email: string;
-  phone: string | null;
-  role: string | null;
-  isPrimary: boolean;
-}
-
-/**
- * Contacts associated with a job, for the "who's collecting?" picker.
- * Mirrors the Job Detail contacts card: per-job `job_contacts` rows first
- * (lead/primary at the top), then candidate people from the client org +
- * any org linked via `job_organisations`. Deduped by person — a ticked
- * job contact wins over the same person surfacing as an org candidate.
- */
-async function getCollectionContacts(jobId: string): Promise<CollectionContact[]> {
-  const tickedResult = await query(
-    `SELECT jc.person_id, jc.is_primary, jc.role_override,
-            p.first_name, p.last_name, p.email, p.phone
-     FROM job_contacts jc
-     JOIN people p ON p.id = jc.person_id AND p.is_deleted = false
-     WHERE jc.job_id = $1
-     ORDER BY jc.is_primary DESC, p.first_name ASC`,
-    [jobId]
-  );
-
-  const candidatesResult = await query(
-    `SELECT DISTINCT ON (p.id)
-            p.id AS person_id,
-            p.first_name, p.last_name, p.email, p.phone,
-            por.role,
-            CASE WHEN o.id = j.client_id THEN 0 ELSE 1 END AS source_priority
-     FROM jobs j
-     JOIN person_organisation_roles por ON por.status = 'active'
-     JOIN organisations o ON o.id = por.organisation_id AND o.is_deleted = false
-     JOIN people p ON p.id = por.person_id AND p.is_deleted = false
-     WHERE j.id = $1
-       AND (
-         o.id = j.client_id
-         OR o.id IN (SELECT organisation_id FROM job_organisations WHERE job_id = j.id)
-       )
-     ORDER BY p.id, source_priority, por.is_primary DESC`,
-    [jobId]
-  );
-
-  const seen = new Set<string>();
-  const contacts: CollectionContact[] = [];
-
-  for (const r of tickedResult.rows as Array<Record<string, any>>) {
-    if (seen.has(r.person_id)) continue;
-    seen.add(r.person_id);
-    contacts.push({
-      personId: r.person_id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email || '',
-      phone: r.phone || null,
-      role: r.role_override || null,
-      isPrimary: !!r.is_primary,
-    });
-  }
-
-  for (const r of candidatesResult.rows as Array<Record<string, any>>) {
-    if (seen.has(r.person_id)) continue;
-    seen.add(r.person_id);
-    contacts.push({
-      personId: r.person_id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email || '',
-      phone: r.phone || null,
-      role: r.role || null,
-      isPrimary: false,
-    });
-  }
-
-  return contacts.filter((c) => c.name);
-}
-
 router.get('/collections/:jobId', async (req: WarehouseRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
@@ -357,7 +280,7 @@ router.get('/collections/:jobId', async (req: WarehouseRequest, res: Response) =
     // a person / per-job contact instead of the org row (common now after the
     // address-book restructure: per-job contacts, merges, HH shell orgs).
     const [contacts, recipients] = await Promise.all([
-      getCollectionContacts(jobId),
+      resolveJobEmailContacts(jobId),
       getJobEmailRecipients(jobId),
     ]);
 
