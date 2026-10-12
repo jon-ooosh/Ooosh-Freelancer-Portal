@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { isR2Configured, listR2Objects } from './r2';
 import { runBackup } from '../scripts/backup';
 import { runRetentionSweep } from '../scripts/backup-retention';
+import { runTraccarHousekeeping, isTraccarHousekeepingConfigured, TRACCAR_BACKUP_PREFIX } from '../scripts/traccar-backup';
 import { isHireHopConfigured } from './hirehop';
 import { syncJobsFromHireHop } from '../services/hirehop-job-sync';
 import { runComplianceCheck } from '../services/compliance-checker';
@@ -75,6 +76,35 @@ export function startScheduler() {
       }
     });
     console.log('Scheduler: Backup retention sweep scheduled daily at 02:30');
+
+    // Daily at 03:10 UK — Traccar: delete positions over 12 months old, dump
+    // the Traccar database to R2 (live, no downtime), keep 7 nightly + 4
+    // weekly (scripts/traccar-backup.ts, docs/TRACCAR-POSTGRES.md). Off until
+    // TRACCAR_DATABASE_URL is set. Same last-hour dedupe as the OP backup.
+    if (isTraccarHousekeepingConfigured()) {
+      cron.schedule('10 3 * * *', async () => {
+        try {
+          const recent = await listR2Objects(TRACCAR_BACKUP_PREFIX);
+          const oneHourAgo = Date.now() - 60 * 60 * 1000;
+          if (recent.some((o) => o.Key?.endsWith('.dump') && o.LastModified && o.LastModified.getTime() > oneHourAgo)) {
+            console.log('Scheduler: Traccar backup skipped — one was taken within the last hour');
+            return;
+          }
+        } catch (err) {
+          console.warn('Scheduler: Traccar backup dedup check failed, proceeding:', err);
+        }
+        console.log('Scheduler: Starting Traccar backup...');
+        try {
+          const r = await runTraccarHousekeeping();
+          console.log(
+            `Scheduler: Traccar backup complete — ${r.key} (${Math.round(r.bytes / 1048576)}MB), purged ${r.purged} old positions, removed ${r.deleted.length} old dump(s)`,
+          );
+        } catch (err) {
+          console.error('Scheduler: Traccar backup failed:', err);
+        }
+      }, { timezone: 'Europe/London' });
+      console.log('Scheduler: Traccar backup + 12-month purge scheduled daily at 03:10');
+    }
   }
 
   // ── Shop transaction drain ────────────────────────────────────────────
