@@ -49,6 +49,8 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const [error, setError] = useState<string | null>(null);
   const [showWhy, setShowWhy] = useState(false);
   const [copied, setCopied] = useState(false);
+  // "Add a charge" — Completed jobs only, managers only (spec §4.6).
+  const [charge, setCharge] = useState<{ description: string; amount: string; reason: string } | null>(null);
 
   const load = useCallback(async (force = true) => {
     setBusy('plan');
@@ -78,6 +80,36 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const tone = TONE[view.tone];
   const inv = plan.invoice;
   const hasInv = plan.invoices.length > 0;
+  const completed = !!plan.fromLog || plan.hhStatus === 11;
+
+  const chargeNet = Math.round((parseFloat(charge?.amount || '') || 0) * 100) / 100;
+  const raiseCharge = async () => {
+    if (!charge) return;
+    if (!charge.description.trim() || !charge.reason.trim() || !(chargeNet >= 0.01)) {
+      setError('Give the charge a description, an amount and a reason.');
+      return;
+    }
+    const gross = Math.round((chargeNet + Math.round(chargeNet * 20) / 100) * 100) / 100;
+    if (!window.confirm(`Raise a charge invoice for ${money(gross)} inc VAT ("${charge.description.trim()}"), approve it and send it to Xero?`)) return;
+    setBusy('run');
+    setError(null);
+    try {
+      const r = await api.post<{ data: CloseOutResult }>(`/close-out/${jobId}/charge`, {
+        reason: charge.reason.trim(), lines: [{ type: 'misc', description: charge.description.trim(), amount: chargeNet }],
+      });
+      setResult(r.data);
+      publishCloseOutPlan(jobId, r.data.plan);
+      if (r.data.done) setCharge(null);
+      onChanged?.();
+    } catch (e) {
+      setError(apiError(e, 'The charge was not raised.'));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const addCharge: Act | null = completed && isManager && !charge
+    ? { label: 'Add a charge', onClick: () => setCharge({ description: '', amount: '', reason: '' }), kind: 'secondary' }
+    : null;
 
   const run = async () => {
     const what = view.stage === 'to_invoice'
@@ -164,10 +196,11 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       acts = [...(copy ? [copy] : []), { label: busy === 'sent' ? 'Saving…' : '✓ Mark as sent', onClick: () => void setSent(true), kind: 'primary' }];
       break;
     case 'awaiting':
-      title = 'Waiting on the client';
+      title = completed ? `${money(view.owing)} owing` : 'Waiting on the client';
       why = 'A portal payment, a Wise transfer or Record payment is allocated to the invoice automatically, and this moves to Paid.';
       acts = [{ label: 'Undo sent', onClick: () => void setSent(false), kind: 'link' }, ...(copy ? [{ ...copy, kind: 'secondary' as const }] : [])];
       if (onRecordPayment) acts.push({ label: 'Record payment', onClick: onRecordPayment, kind: 'primary' });
+      if (completed) acts = acts.filter(a => a.label !== 'Undo sent');
       break;
     case 'paid':
       title = 'Paid and reconciled';
@@ -179,6 +212,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       acts = plan.fromLog ? [{ ...checkAgain, label: busy === 'plan' ? 'Checking…' : 'Check HireHop again' }] : [];
       break;
   }
+  if (addCharge) acts.unshift(addCharge);
 
   const btn = (a: Act) => {
     const base = 'text-sm font-semibold rounded-lg px-3.5 py-1.5 disabled:opacity-50';
@@ -259,6 +293,31 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
           </div>
         </div>
         {why && showWhy && <p className="text-sm text-gray-600">{why}</p>}
+        {charge && (
+          <div className="rounded-lg border border-gray-200 bg-white p-3 grid gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <label className="text-xs text-gray-600 grid gap-1">On the invoice (the client reads this)
+              <input id="charge-desc" value={charge.description} maxLength={200} onChange={e => setCharge({ ...charge, description: e.target.value })}
+                className="rounded border border-gray-300 px-2 py-1.5 text-sm text-gray-900" placeholder="e.g. Replacement DI box" />
+            </label>
+            <label className="text-xs text-gray-600 grid gap-1">Amount ex VAT (£)
+              <input id="charge-amount" value={charge.amount} inputMode="decimal" onChange={e => setCharge({ ...charge, amount: e.target.value })}
+                className="rounded border border-gray-300 px-2 py-1.5 text-sm text-gray-900 tabular-nums" placeholder="0.00" />
+            </label>
+            <label className="text-xs text-gray-600 grid gap-1 sm:col-span-2">Reason (for us — goes on the job's timeline)
+              <input id="charge-reason" value={charge.reason} maxLength={500} onChange={e => setCharge({ ...charge, reason: e.target.value })}
+                className="rounded border border-gray-300 px-2 py-1.5 text-sm text-gray-900" placeholder="Why is this being charged?" />
+            </label>
+            <div className="sm:col-span-2 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-gray-500">Misc income · 20% VAT{chargeNet >= 0.01 ? ` · ${money(Math.round((chargeNet + Math.round(chargeNet * 20) / 100) * 100) / 100)} inc VAT` : ''} · its own invoice, approved and sent to Xero</span>
+              <span className="flex items-center gap-3">
+                <button onClick={() => setCharge(null)} disabled={busy != null} className="text-sm font-semibold text-gray-600 hover:text-gray-800">Cancel</button>
+                <button onClick={() => void raiseCharge()} disabled={busy != null} className="text-sm font-semibold rounded-lg px-3.5 py-1.5 bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+                  {busy === 'run' ? 'Working…' : 'Raise charge invoice'}
+                </button>
+              </span>
+            </div>
+          </div>
+        )}
         {chips.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
             {chips.map(([ok, text]) => (

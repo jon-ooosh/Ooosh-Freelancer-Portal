@@ -33,7 +33,7 @@ import {
   kindOf, idOf, invoiceRows, findInvoice, invoiceStatus, invoiceGross, invoiceOwing, invoiceInXero,
   invoiceAllocations, unallocatedPayments, readJobStatus, invoiceNet,
   postAllocation, applyCreditsInXero, completeJob, postDraftInvoice, postApproveInvoice, pushInvoiceToXero,
-  adoptLostXeroInvoices,
+  adoptLostXeroInvoices, isChargeOnlyInvoice,
 } from './hh-invoice-close';
 import { splitEuDraft } from './eu-vat-split';
 import xeroBroker from './xero-broker';
@@ -154,7 +154,7 @@ export interface CloseOutResult {
   plan: CloseOutPlan;
 }
 
-interface JobRow {
+export interface JobRow {
   id: string;
   hh_job_number: number | null;
   job_name: string | null;
@@ -198,7 +198,7 @@ export function reporter(jobId: string, userId: string | null, retryHint: string
 
 // ── Reading ──────────────────────────────────────────────────────────────
 
-async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
+export async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
   const isUuid = /^[0-9a-f]{8}-/i.test(jobIdOrNumber);
   const r = await query(
     isUuid
@@ -318,7 +318,7 @@ const toInvoice = (row: Row): CloseOutInvoice => ({
 
 async function planInvoice(rows: Row[], approved: CloseOutInvoice[], hhJobNumber: number, hhStatus: number | null): Promise<InvoicePlan> {
   const accruedNet = accruedNetOf(rows);
-  const nonProforma = invoiceRows(rows).filter((r) => !isProformaRow(r));
+  const nonProforma = invoiceRows(rows).filter((r) => !isProformaRow(r) && !isChargeOnlyInvoice(r));
   const invoicedNet = round2(nonProforma.reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
   const drafts = draftRows(rows);
   const draft = drafts.length === 1 ? toInvoice(drafts[0]) : null;
@@ -405,7 +405,7 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   if (!draft) await rep.stop('invoice_penny', `Draft ${draftId} is no longer on the job. ${capitalise(rep.retryHint)} to start again.`);
   const draftNet = invoiceNet(draft!) ?? 0;
   const draftGross = invoiceGross(draft!) ?? 0;
-  const othersNet = round2(invoiceRows(rows).filter((r) => !isProformaRow(r) && idOf(r) !== draftId).reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
+  const othersNet = round2(invoiceRows(rows).filter((r) => !isProformaRow(r) && !isChargeOnlyInvoice(r) && idOf(r) !== draftId).reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
   const accrued = accruedNetOf(rows);
   if (Math.abs(round2(draftNet + othersNet) - accrued) >= PENNY) {
     await rep.stop('invoice_penny', `Draft ${draftId} is ${gbp(draftNet)} ex VAT and ${gbp(othersNet)} is already invoiced, but HireHop's quoted net is ${gbp(accrued)} — `
@@ -679,7 +679,7 @@ export async function runHireCloseOut(jobIdOrNumber: string, userId: string | nu
 /** One job at a time, in this process. */
 const running = new Set<string>();
 
-async function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+export async function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
   if (running.has(jobId)) throw new Error('Someone else is working on this job\'s money right now — try again in a moment.');
   running.add(jobId);
   try { return await fn(); } finally { running.delete(jobId); }

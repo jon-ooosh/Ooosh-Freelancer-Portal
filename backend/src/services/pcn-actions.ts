@@ -18,6 +18,8 @@ import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { collectNoticeAttachments } from './pcn-documents';
 import { addPcnFineLine } from './pcn-recharge';
+import { raiseChargeInvoice, ChargeLine } from './completed-charges';
+import { readJobStatus } from './hh-invoice-close';
 import {
   loadPcnWithDrivers,
   resolvePcnRecipient,
@@ -170,8 +172,49 @@ export async function applyPcnAction(
     fineRecharge: { attempted: false, applied: false, amount: null, message: null },
   };
 
+  // ── 0. A COMPLETED HireHop job takes no new lines, so the handling fee and the
+  // fine go on one charge invoice instead (HIRE-CLOSE-OUT-SPEC §4.6, jon 13 Oct 2026):
+  // the fee at 20%, the fine at No VAT. Same idempotency flags as the line path. ──
+  let viaChargeInvoice = false;
+  if ((opts.action === 'transfer_liability' || opts.action === 'pay_recharge') && pcn.hh_job_number
+      && (await readJobStatus(Number(pcn.hh_job_number))) === 11) {
+    viaChargeInvoice = true;
+    const label = [pcn.reference ? `PCN ${pcn.reference}` : 'PCN', pcn.vehicle_reg].filter(Boolean).join(' · ');
+    const handlingNet = parseFloat(settings.pcn_handling_charge || '35');
+    const fineAmt = Number(pcn.fine_amount ?? pcn.reduced_amount ?? 0);
+    const wantHandling = addCharge && !pcn.handling_charge_applied && handlingNet > 0;
+    const wantFine = opts.action === 'pay_recharge' && !pcn.fine_recharged_at && fineAmt > 0;
+    const lines: ChargeLine[] = [];
+    if (wantHandling) lines.push({ type: 'pcn_handling', description: `${label} — handling fee`, amount: handlingNet });
+    if (wantFine) lines.push({ type: 'pcn_fine', description: `${label} — fine`, amount: fineAmt });
+    if (addCharge) result.charge.attempted = wantHandling;
+    if (opts.action === 'pay_recharge') result.fineRecharge.attempted = wantFine;
+    if (!lines.length) {
+      if (addCharge) result.charge.message = pcn.handling_charge_applied ? 'Handling charge already applied.' : null;
+      if (opts.action === 'pay_recharge') result.fineRecharge.message = pcn.fine_recharged_at ? 'Fine already recharged.' : 'No fine amount on the PCN — nothing to recharge.';
+    } else {
+      const r = await raiseChargeInvoice(String(pcn.hh_job_number), userId, { lines, reason: `${label} (${opts.action === 'pay_recharge' ? 'pay & recharge' : 'transfer of liability'})` });
+      const msg = r.done ? `${r.message} (the job is Completed, so it went on its own invoice).` : `Charge invoice not raised: ${r.message}`;
+      if (wantHandling) {
+        result.charge.applied = r.done;
+        result.charge.message = msg;
+        if (r.done) {
+          await query(`UPDATE pcns SET handling_charge_applied = true, handling_amount = $2, hh_charge_pushed_at = NOW() WHERE id = $1`, [pcnId, handlingNet]);
+        }
+      }
+      if (wantFine) {
+        result.fineRecharge.applied = r.done;
+        result.fineRecharge.amount = r.done ? fineAmt : null;
+        result.fineRecharge.message = msg;
+        if (r.done) {
+          await query(`UPDATE pcns SET fine_recharge_amount = $2, fine_recharged_at = NOW() WHERE id = $1`, [pcnId, fineAmt]);
+        }
+      }
+    }
+  }
+
   // ── 1. HireHop handling charge (transfer / recharge, when not waived) ──
-  if (addCharge && (opts.action === 'transfer_liability' || opts.action === 'pay_recharge')) {
+  if (!viaChargeInvoice && addCharge && (opts.action === 'transfer_liability' || opts.action === 'pay_recharge')) {
     result.charge.attempted = true;
     if (!pcn.hh_job_number) {
       result.charge.message = 'No HireHop job linked — charge not added.';
@@ -191,7 +234,7 @@ export async function applyPcnAction(
   // ── 1b. Fine recharge (pay_recharge only) — bill the actual fine to the
   // client as a custom-priced HH line (auto-surfaces on the Money tab). The
   // £35 admin fee above is separate. Idempotent via fine_recharged_at. ──
-  if (opts.action === 'pay_recharge') {
+  if (!viaChargeInvoice && opts.action === 'pay_recharge') {
     const fineAmt = Number(pcn.fine_amount ?? pcn.reduced_amount ?? 0);
     if (pcn.fine_recharged_at) {
       result.fineRecharge.message = 'Fine already recharged to HireHop.';

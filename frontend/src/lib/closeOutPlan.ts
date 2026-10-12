@@ -158,7 +158,8 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
   if (first >= 0) steps = steps.map((s, i) => (i === first ? (blockers.length ? 'error' : 'current') : s));
 
   let stage: CloseOutStage;
-  if (completed) stage = 'complete';
+  // A Completed job can still owe: a charge invoice raised after completion (spec §4.6).
+  if (completed) stage = owing >= PENNY ? 'awaiting' : credit >= PENNY ? 'credit' : 'complete';
   // Before the hire is back nothing is due unless someone has already started an invoice.
   else if (!returned && !hasInv && inv.draft == null) stage = 'pre';
   else if (blockers.length) stage = 'blocked';

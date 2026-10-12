@@ -346,6 +346,7 @@ existing definition:
 | Splitting an EU hire's invoice by UK / non-UK days | `services/eu-vat-split.ts` — on the DRAFT only; which line gets which VAT rule is `vat-adjustment.ts` `classifyNominals()`, shared with the portal figure |
 | Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
 | Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |
+| Charging a client after the job is Completed (misc, PCN fee + fine) | `services/completed-charges.ts` `raiseChargeInvoice()` — its own invoice from custom lines only; never before completion (those costs go on the HireHop job); left out of the job-total sums via `isChargeOnlyInvoice()` |
 | Finishing a HIRE's money (plan → allocate hire deposits in HH + Xero → complete) | `services/hire-close-out.ts` — on the recipe above; never excess, never a refund; `job_closeout_log` is its record |
 | Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
