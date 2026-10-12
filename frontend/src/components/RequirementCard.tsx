@@ -22,7 +22,7 @@ import BacklineLocationModal, {
   backlineLocationIcon,
   backlineLocationLabel,
 } from './BacklineLocationModal';
-import HireCloseOutPanel from './HireCloseOutPanel';
+import CloseOutSignpost from './CloseOutSignpost';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -221,12 +221,11 @@ export default function RequirementCard({
   selfDriveVanOverride,
   onVehicleCountOverride,
   onReload,
-  companionReq,
+  onOpenMoney,
 }: {
   req: JobRequirement;
-  /** A second requirement whose status is shown on THIS card (the payments
-   *  status on the Invoice card — one card for the close-out, Oct 2026). */
-  companionReq?: JobRequirement;
+  /** The Invoice card is a signpost to the Money tab's close-out panel (Oct 2026). */
+  onOpenMoney?: () => void;
   derivedFlags?: DerivedFlags | null;
   /** Regs of vans actually allocated to THIS job — shown on the vehicle
    *  headline ("Vehicle (Self-Drive) — RO23HLU") once a van is linked. */
@@ -997,18 +996,12 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Invoice — the hire close-out (HIRE-CLOSE-OUT-SPEC.md §3): one card, one
-                panel, one button that raises the invoice if needed then allocates the
-                payments in HireHop and Xero; Complete; the log. Both this card's status
-                and the payments one (shown as the second pill) still come from the
-                derivation engine. "Mark as sent" lives in the panel so it is only
-                offered once the client's invoice already shows their payments. */}
+            {/* Invoice — a signpost to the close-out on the Money tab (HIRE-CLOSE-OUT-SPEC.md §3,
+                redesign Oct 2026): one pill, one line, the five steps, "Open in Money →".
+                Its status (and the Payment Reconciliation one) still come from the
+                derivation engine and "Mark as sent" on the Money panel; no dropdowns here. */}
             {req.requirement_type === 'invoice' && jobId && (
-              <HireCloseOutPanel
-                jobId={jobId}
-                onChanged={onReload}
-                onMarkSent={req.status !== 'done' ? () => onStatusChange(req.id, 'done') : undefined}
-              />
+              <CloseOutSignpost jobId={jobId} onOpenMoney={onOpenMoney} />
             )}
 
             {/* Reminder — show due date, assigned user, event trigger, delivery, notes */}
@@ -1134,7 +1127,7 @@ export default function RequirementCard({
           </div>
         </div>
 
-        <div className={`flex ${companionReq ? 'flex-col items-end gap-1' : 'items-center gap-2'} flex-shrink-0`}>
+        <div className="flex items-center gap-2 flex-shrink-0">
           {/* Step progress */}
           {req.type_steps && req.current_step && req.requirement_type !== 'merch' && (
             <div className="flex items-center gap-1 mr-2">
@@ -1150,26 +1143,8 @@ export default function RequirementCard({
             </div>
           )}
 
-          {/* Companion status — the payments requirement, as a second pill on the Invoice card */}
-          {companionReq && (() => {
-            const cl = TYPE_STATUS_LABELS[companionReq.requirement_type];
-            const cc = PREP_STATUS_CONFIG[companionReq.status] || PREP_STATUS_CONFIG.not_started;
-            return (
-              <label className={`inline-flex items-center rounded text-xs font-medium ${cc.bg} ${cc.colour}`} title="Payments">
-                <span className="pl-3 pr-1 py-1">Payments:</span>
-                <select
-                  value={companionReq.status}
-                  onChange={e => onStatusChange(companionReq.id, e.target.value as JobRequirement['status'])}
-                  className={`bg-transparent pr-2 py-1 text-xs font-medium ${cc.colour} cursor-pointer focus:outline-none`}
-                >
-                  {PREP_STATUS_ORDER.map(st => <option key={st} value={st}>{cl?.[st] || PREP_STATUS_CONFIG[st].label}</option>)}
-                </select>
-              </label>
-            );
-          })()}
-
           {/* Status dropdown — only for non-contextual cards */}
-          {!isContextualStatus && (
+          {!isContextualStatus && req.requirement_type !== 'invoice' && (
             <div className="relative" ref={statusMenuRef}>
               <button
                 onClick={() => {

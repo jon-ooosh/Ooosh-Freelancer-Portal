@@ -33,7 +33,7 @@ import {
   kindOf, idOf, invoiceRows, findInvoice, invoiceStatus, invoiceGross, invoiceOwing, invoiceInXero,
   invoiceAllocations, unallocatedPayments, readJobStatus, invoiceNet,
   postAllocation, applyCreditsInXero, completeJob, postDraftInvoice, postApproveInvoice, pushInvoiceToXero,
-  adoptLostXeroInvoices,
+  adoptLostXeroInvoices, isChargeOnlyInvoice,
 } from './hh-invoice-close';
 import { splitEuDraft } from './eu-vat-split';
 import xeroBroker from './xero-broker';
@@ -141,6 +141,11 @@ export interface CloseOutPlan {
   /** Every invoice at £0 in HireHop and no hire deposit holding money (Xero is checked at Complete). */
   readyToComplete: boolean;
   log: CloseOutLogEntry[];
+  /** OP's Invoice requirement — "Mark as sent" ticks it Done. */
+  invoiceRequirementId: string | null;
+  invoiceSent: boolean;
+  /** Problems still open on the job — a warning for the invoice, a gate for Complete. */
+  openProblems: number;
 }
 
 export interface CloseOutResult {
@@ -149,7 +154,7 @@ export interface CloseOutResult {
   plan: CloseOutPlan;
 }
 
-interface JobRow {
+export interface JobRow {
   id: string;
   hh_job_number: number | null;
   job_name: string | null;
@@ -193,7 +198,7 @@ export function reporter(jobId: string, userId: string | null, retryHint: string
 
 // ── Reading ──────────────────────────────────────────────────────────────
 
-async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
+export async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
   const isUuid = /^[0-9a-f]{8}-/i.test(jobIdOrNumber);
   const r = await query(
     isUuid
@@ -313,7 +318,7 @@ const toInvoice = (row: Row): CloseOutInvoice => ({
 
 async function planInvoice(rows: Row[], approved: CloseOutInvoice[], hhJobNumber: number, hhStatus: number | null): Promise<InvoicePlan> {
   const accruedNet = accruedNetOf(rows);
-  const nonProforma = invoiceRows(rows).filter((r) => !isProformaRow(r));
+  const nonProforma = invoiceRows(rows).filter((r) => !isProformaRow(r) && !isChargeOnlyInvoice(r));
   const invoicedNet = round2(nonProforma.reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
   const drafts = draftRows(rows);
   const draft = drafts.length === 1 ? toInvoice(drafts[0]) : null;
@@ -400,7 +405,7 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   if (!draft) await rep.stop('invoice_penny', `Draft ${draftId} is no longer on the job. ${capitalise(rep.retryHint)} to start again.`);
   const draftNet = invoiceNet(draft!) ?? 0;
   const draftGross = invoiceGross(draft!) ?? 0;
-  const othersNet = round2(invoiceRows(rows).filter((r) => !isProformaRow(r) && idOf(r) !== draftId).reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
+  const othersNet = round2(invoiceRows(rows).filter((r) => !isProformaRow(r) && !isChargeOnlyInvoice(r) && idOf(r) !== draftId).reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
   const accrued = accruedNetOf(rows);
   if (Math.abs(round2(draftNet + othersNet) - accrued) >= PENNY) {
     await rep.stop('invoice_penny', `Draft ${draftId} is ${gbp(draftNet)} ex VAT and ${gbp(othersNet)} is already invoiced, but HireHop's quoted net is ${gbp(accrued)} — `
@@ -452,6 +457,32 @@ const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // ── The plan (§4.3, §6) ──────────────────────────────────────────────────
 
+/**
+ * OP-side facts the Money panel shows beside HireHop's: the Invoice
+ * requirement (its id, so the panel can tick it Sent, and whether it is), and
+ * how many Problems are open.
+ */
+async function jobFacts(jobId: string): Promise<{ invoiceRequirementId: string | null; invoiceSent: boolean; openProblems: number }> {
+  const r = await query(
+    `SELECT req.id AS invoice_req_id, req.status AS invoice_req_status,
+            (SELECT COUNT(*) FROM job_issues
+              WHERE job_id = $1 AND status NOT IN ('resolved', 'written_off', 'cancelled'))::int AS open_problems
+       FROM (SELECT 1) one
+       LEFT JOIN LATERAL (
+         SELECT id, status FROM job_requirements
+          WHERE job_id = $1 AND requirement_type = 'invoice' AND COALESCE(notes, '') NOT LIKE '%[Suspended:%'
+          ORDER BY created_at LIMIT 1
+       ) req ON true`,
+    [jobId],
+  );
+  const row = r.rows[0] || {};
+  return {
+    invoiceRequirementId: row.invoice_req_id ?? null,
+    invoiceSent: row.invoice_req_status === 'done',
+    openProblems: Number(row.open_problems ?? 0),
+  };
+}
+
 async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -462,6 +493,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     surplus: [] as Array<{ depositId: number; amount: number }>, shortfall: 0, excessHeld: 0,
     blockers, warnings, sentences: [] as string[], ready: false, readyToComplete: false,
     log: await readLog(job.id),
+    ...await jobFacts(job.id),
   };
   if (!job.hh_job_number) { blockers.push('This job has no HireHop job number.'); return base; }
   if (job.is_internal) { blockers.push('Internal job — there is no client to invoice.'); return base; }
@@ -599,7 +631,7 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
         invoices: [], payments: [], allocations: [], surplus: [], shortfall: 0, excessHeld: 0,
         blockers: [], warnings: [],
         sentences: [`Completed in HireHop${completed.user_name ? ` by ${completed.user_name}` : ''} on ${String(completed.created_at).slice(0, 10)}.`],
-        ready: false, readyToComplete: false, log: entries,
+        ready: false, readyToComplete: false, log: entries, ...await jobFacts(job.id),
       };
     }
   }
@@ -647,7 +679,7 @@ export async function runHireCloseOut(jobIdOrNumber: string, userId: string | nu
 /** One job at a time, in this process. */
 const running = new Set<string>();
 
-async function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+export async function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
   if (running.has(jobId)) throw new Error('Someone else is working on this job\'s money right now — try again in a moment.');
   running.add(jobId);
   try { return await fn(); } finally { running.delete(jobId); }

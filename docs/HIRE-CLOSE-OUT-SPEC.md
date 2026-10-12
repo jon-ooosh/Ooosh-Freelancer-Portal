@@ -116,33 +116,40 @@ other than the job's client, excess decisions (existing excess flows own them).
 
 ## 3. Where it lives
 
-The **Post-Hire** tab on Job Detail, on the existing cards. Status text stays as it is
-(derived from HireHop by `hh-requirement-derivation.ts`); each card gains one primary
-action and reads back after it.
+**The Money tab (redesign, jon + staff, 12–13 Oct 2026; mockup:
+https://claude.ai/artifact/13JxwH2ECvheLiKwfJv7CL).** The close-out moved off the Overview's
+Invoice card — it was the "actions on a status card" problem flagged at the start — into
+one panel on the Money tab, `components/CloseOutMoneyPanel.tsx`, under the Financial
+Summary. It appears once the hire is back (or an invoice exists) and is hidden pre-hire.
 
-**One card (jon, 9 Oct 2026, after the first live job).** The Invoice card hosts the whole
-close-out; the Payment Reconciliation requirement still exists (the derivation engine
-creates it, the Returns page counts it) but is not drawn — its status is the second pill on
-the Invoice card ("Payments: Reconciled"), still changeable there. One main button does the
-normal case end to end: raise the invoice if there is anything left to bill, then allocate
-every hire deposit in HireHop and apply the credits in Xero (`POST /close-out/:jobId/run`).
-A run that stops says where and the same button reads "Carry on". "Mark as sent to client"
-is offered only once nothing is left to allocate, so the client's invoice already shows
-their payments. **Completing a job is the status change at the top of the page**, not a button here (jon,
-9 Oct, second pass) — and that modal now lists open Problems in red: a non-manager cannot
-complete over them, a manager must give a reason (`routes/pipeline.ts` enforces both). The
-card itself is one line of state, one line for the first thing in the way, and the buttons;
-everything else is behind "Details…". The Excess Resolution card is unchanged.
+- **One pill, five steps** — Returned · Invoiced · Payments allocated · Sent to client ·
+  Paid in full — and **one next-action line** with its reason behind "Why?". Stages and
+  pills come from `lib/closeOutPlan.ts` `closeOutView()`: Needs sorting (red, a refusal —
+  its first clause is the line, the full sentence the "Why?") · Ready to invoice · Payments
+  to allocate · Money to sort (in credit) · Not sent yet · Awaiting payment (blue) · Paid ·
+  Completed (green). Paid can come before Sent.
+- **Buttons:** Create invoice / Allocate (manager; "…anyway (job still out)" in amber) ·
+  Check again · Copy payment link · Mark as sent / Undo sent (anyone — it ticks the Invoice
+  requirement, whose id the plan now carries) · Record payment (the existing form) ·
+  **Complete the job**, which opens the page's own status modal at Completed (so the open-
+  Problems check and the manager reason still apply; no second way to complete a job).
+- Before invoicing, short chips: All back / Returned incomplete / Still out · excess held ·
+  open Problems (the plan now carries `openProblems` and `invoiceSent`).
+- Once invoiced, a short ledger: each invoice, then payments allocated (HireHop ✓ Xero ✓).
+- **The balance is shown once**, in the Financial Summary, and only when something is owed
+  or the client is in credit; the pre-hire "Deposit to secure" boxes go once the hire is back.
+- **No Xero links and no Details modal** — staff don't use Xero; jon and the bookkeeper find
+  invoices there themselves (jon, 13 Oct). The run log stays in `job_closeout_log`.
+- **Overview › Post-Hire › Invoice card** is a signpost (`CloseOutSignpost.tsx`): the same
+  pill, one line ("OT-INV-12308 · £45.00 due · 3 of 5 steps"), the five steps as a thin bar,
+  and "Open in Money →". No dropdowns. The Payment Reconciliation requirement still exists
+  (derived, counted by the Returns page) but is not drawn.
+- **The Money tab label carries a dot** in the close-out's colour on returned jobs (amber =
+  something to do, blue = waiting on the client, green = done, red = needs sorting).
 
-| On the Invoice card | Shows |
-|---|---|
-| State | each invoice with "paid" or "£x owing"; or "£x ex VAT not yet invoiced"; payments holding money only while there is something to do with them |
-| Blockers / warnings | red list / amber lines (§6; excess still held) |
-| Buttons | Raise invoice & allocate payments · Carry on · …anyway (job still out, amber) · Mark as sent to client · Details… (modal: invoices, payments, blockers, warnings, plan, log) |
-| Log | "What happened", behind a disclosure; Xero lines admin-only |
-| Completed job | OP's own record ("Completed in HireHop by X on date"), no HireHop read; "Check HireHop again" forces one |
+All three read one shared plan (30 s cache), so they never disagree.
 
-Design rule for the cards (jon: "it needs to flow and make sense"): every action shows
+Design rule (jon: "it needs to flow and make sense"): every action shows
 **what it will do before it does it** — the plan is a list of sentences ("Allocate
 £4,629.82 of payment 9091 to OT-INV-12252", "Leave £886.80 of payment 8661 unallocated —
 decide below"), then one button. After it runs, the same card shows the read-back
@@ -291,6 +298,52 @@ matches no expected figure) — it lands in the unmatched queue on the Money ove
 info@ is emailed once. Record it on the job from the queue; the Invoice card then shows it
 as an unallocated surplus with the existing choices (Refund — record-keeping for a bank
 transfer, the money goes back from Wise by hand — or Apply to another job).
+
+
+### 4.6 A charge after completion — ✅ BUILT 13 Oct 2026 (Phase 4, as rescoped)
+
+jon, 13 Oct: extra costs found after the hire go on the HireHop job as usual and land on
+the final invoice ("Add a charge" before invoicing was dropped). Damage is charged before
+the invoice or not at all. The gap was a cost that turns up **after the job is Completed**:
+HireHop takes no new job lines then, so `services/completed-charges.ts`
+`raiseChargeInvoice()` raises its own small invoice from custom lines only —
+
+1. Pre-flight: OP job Completed AND HireHop status 11; no draft already on the job; a
+   reason; 1–5 lines, each with a description (what the client reads) and an amount.
+2. An EMPTY draft — `billing_save.php` with `all: 0` (`HIREHOP-BILLING-API.md` §3); read
+   back: exactly one new draft, no lines on it.
+3. One custom line per charge — `billing_save_item.php` `id: 0`, `kind: 3` (§10.3b); each
+   read back (price, tax code, nominal). No job line, no stock touched.
+4. Penny check: the draft is exactly the charges, net and gross (VAT per line).
+5. Approve dated today → `pushInvoiceToXero` → log (`step 'charge'`, the reason) and a
+   job timeline note. Any stop is at the draft, which never reaches Xero.
+
+| Charge | Nominal | Tax code | Where from |
+|---|---|---|---|
+| Misc income | 190 (Xero 275) | 20 (20%) | Money panel "Add a charge" — managers, Completed jobs only, with a reason |
+| PCN handling fee | 190 | 20 (20%) | PCN module, when the HireHop job is Completed |
+| PCN fine | 190 | **27 No VAT** (Xero NONE) | PCN module, same invoice as the fee |
+
+The fine at No VAT, not zero-rated: a fine passed on is outside the scope of VAT (jon
+agreed 0% for the client; bookkeeper to confirm 27 vs 33). The older PCN path — a stock line
+on a still-open job — is unchanged and still bills the fine at the stock item's 20%.
+
+A charge invoice is **left out of every "invoices add up to the job" sum**
+(`hh-invoice-close.ts` `isChargeOnlyInvoice()`: custom lines only), because its money is
+deliberately not on the HireHop job. On a Completed job with such an invoice owing, the
+Money panel shows "£x owing" (Awaiting payment) with Record payment; the arrival hook then
+allocates the payment. The Financial Summary does NOT include it (it reads the job total).
+
+**The payment portal can't see it yet.** The portal works its balance out from the HireHop
+job, which has no charge lines, so a portal link on a Completed job with a charge invoice
+would say nothing is owed. jon's rule for the portal change (13 Oct): read what is owed
+from the INVOICES only when the job is Completed — every live hire keeps today's
+carefully-tuned path. Until then, take these payments with Record payment. To be done
+with the portal repo in one session (handover pending the first live test).
+
+**First live use = a test on a scratch job jon has completed** — OP talks to HireHop as its
+own user, and whether that user may invoice a Completed job is not yet proven (jon's own
+test was in admin mode). A refusal stops at step 2 with nothing written.
 
 ---
 
@@ -538,8 +591,10 @@ Only `errors > 0` or the same job stopping every night needs a look.
 module `services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/
 plan|run|raise-invoice|allocate|complete`); sweep `services/close-out-xero-sweep.ts`
 (scheduler 03:30); frontend `lib/closeOutPlan.ts` (one plan read per job, 30 s TTL,
-pub/sub) + `components/HireCloseOutPanel.tsx`, mounted by `RequirementCard.tsx` on the
-Invoice card with `payment_reconcile` passed in as `companionReq`; Problems gate in
+pub/sub, and `closeOutView()` — the one derived view) + `components/CloseOutMoneyPanel.tsx`
+on the Money tab (the actions) and `components/CloseOutSignpost.tsx` on the Overview's Invoice
+card (read-only, "Open in Money →"); charges after completion `services/completed-charges.ts`
+(`POST /close-out/:jobId/charge`, §4.6); Problems gate in
 `pages/JobDetailPage.tsx` `StatusTransitionModal` + `routes/pipeline.ts`. Tests:
 `services/__tests__/hire-close-out.test.ts`, `close-out-xero-sweep.test.ts`,
 `shop-close.test.ts` (the regression guard for the extraction).
@@ -551,7 +606,16 @@ Invoice card with `payment_reconcile` passed in as `companionReq`; Problems gate
    invoice in Xero after it goes through.
 3. **HireHop permission lockdown** for non-managers (add payment / add deposit / billing)
    once the first EU invoices have gone through OP cleanly.
-4. **Phase 4, additional charges** ("Add a charge" on Damage & Issues, §9).
+4. ~~Phase 4, additional charges~~ — rescoped and built as §4.6 (charges after completion only).
 5. **Cancellation** — separate spec, reuses the invoice call, allocation and refund route.
-6. Smaller: the two-open-invoice case (§1.8) on the first real job; §10.3 hold-on-account;
-   whether `/complete` route stays (§4.4).
+6. Smaller, held on purpose (jon, 13 Oct — captured here so they aren't lost):
+   - the two-open-invoice case (§1.8) — allocation refuses it for now; decide on the first real job;
+   - §10.3 hold-on-account — a To Do to keep a surplus on account instead of refunding it;
+   - whether the `/complete` route stays (§4.4) — the panel now completes through the
+     status modal, so nothing in the UI calls it;
+   - a "record as overpayment" button for a client who paid too much;
+   - "Download PDF" of the invoice from Xero on the Money panel;
+   - ticking the invoice "sent" in Xero when staff press "Mark as sent".
+7. **The payment portal reading charge invoices** (§4.6) — the portal repo, owing from the
+   invoices ONLY when the job is Completed. A handover for a session with both repos follows
+   jon's first live test of §4.6.

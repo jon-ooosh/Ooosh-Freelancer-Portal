@@ -67,6 +67,7 @@ beforeEach(() => {
     if (sql.includes('FROM system_settings')) return { rows: [{ value: enabled }] };
     if (sql.includes('FROM jobs j')) return { rows: jobs };
     if (sql.includes('INSERT INTO job_closeout_log')) { logRows.push({ step: params[1], ok: params[2], detail: params[3] }); return { rows: [] }; }
+    if (sql.includes('FROM job_requirements')) return { rows: [{ invoice_req_id: null, invoice_req_status: null, open_problems: 0 }] };
     if (sql.includes('FROM job_closeout_log')) return { rows: [] };
     throw new Error(`unexpected SQL: ${sql}`);
   });

@@ -196,14 +196,16 @@ payment" dialog records a REFUND when its invoice dropdown is left at "none". Bu
 `services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|allocate|complete`,
 log in `job_closeout_log`) — plan shown first, every write read back, excess NEVER allocated, more
 than one open invoice refused for now, HireHop↔OP payment and refund mismatches refuse by name.
-The UI is ONE panel, `HireCloseOutPanel.tsx` on the **Invoice** card of the Post-Hire tab (the
-Payment Reconciliation requirement still exists but is drawn as that card's second pill): one button
-raises the invoice if needed (draft from uninvoiced lines → penny check → approve dated today → Xero)
-then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); "Mark as
-sent" only once nothing is left to allocate; "Check again" on the card; everything else behind "Details…", ADMINS only. **An EU hire** (the "Non-standard VAT rules" item)
+The UI is ONE panel on the **Money tab**, `CloseOutMoneyPanel.tsx` (Oct 2026 redesign): one pill, five
+steps, one next-action line with its reason behind "Why?", a short ledger; stages from `lib/closeOutPlan.ts`
+`closeOutView()`, shared with the Overview's Invoice card (now a signpost, `CloseOutSignpost.tsx`, "Open in
+Money →") and the Money tab's coloured dot. One button raises the invoice if needed (draft from uninvoiced
+lines → penny check → approve dated today → Xero) then allocates in HireHop + Xero (`POST /close-out/:jobId/run`);
+"Mark as sent" ticks the Invoice requirement; "Complete the job" opens the page's own status modal. The balance
+shows once, in the Financial Summary, only when non-zero. No Xero links, no Details modal. **An EU hire** (the "Non-standard VAT rules" item)
 gets its draft split by `services/eu-vat-split.ts` (real lines to £0, each edited in place by its own id, per nominal a UK-days line at 20% and a
 non-UK-days line at code 33; 31+ day vehicles zero-rated), checked against the portal's figure, then approved in the same press.
-Xero log lines admin-only. Completing a job is the status
+Completing a job is the status
 change at the top of the page, and that modal refuses open Problems (manager + reason to override;
 `routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
 (03:30) applies HireHop's allocations as credits in Xero, off until `system_settings.closeout_xero_sweep_enabled`
@@ -344,6 +346,7 @@ existing definition:
 | Splitting an EU hire's invoice by UK / non-UK days | `services/eu-vat-split.ts` — on the DRAFT only; which line gets which VAT rule is `vat-adjustment.ts` `classifyNominals()`, shared with the portal figure |
 | Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
 | Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |
+| Charging a client after the job is Completed (misc, PCN fee + fine) | `services/completed-charges.ts` `raiseChargeInvoice()` — its own invoice from custom lines only; never before completion (those costs go on the HireHop job); left out of the job-total sums via `isChargeOnlyInvoice()` |
 | Finishing a HIRE's money (plan → allocate hire deposits in HH + Xero → complete) | `services/hire-close-out.ts` — on the recipe above; never excess, never a refund; `job_closeout_log` is its record |
 | Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |

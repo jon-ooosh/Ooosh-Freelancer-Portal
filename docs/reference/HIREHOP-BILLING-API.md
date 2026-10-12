@@ -98,6 +98,8 @@ draft 12928 held ONLY the fourth. So a second invoice for charges added after th
 invoice is just another `all: 1` call. HireHop tracks this per line as `invoiced_so_far`
 (§10). **`all: 0` creates an EMPTY draft** (`debit: 0`, `items: []`) to which lines are
 then assigned by hand — §10 is that path.
+✅ Used by `completed-charges.ts` (Oct 2026): an empty draft + custom lines (§10.3b) is how OP
+charges a client after the job is Completed, when HireHop takes no new job lines.
 
 ⚠️ **`all` defaults to ticked in the UI, but that default is a HireHop user setting**
 (jon). Never rely on it — always send `all: 1`.

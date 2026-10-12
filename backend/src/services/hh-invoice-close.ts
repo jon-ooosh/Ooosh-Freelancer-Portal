@@ -156,7 +156,8 @@ export async function readJobStatus(hhJobNumber: number): Promise<number | null>
  * the job back: the broker retries POSTs after a network blip, so the reply
  * alone proves nothing.
  */
-export async function postDraftInvoice(hhJobNumber: number, ref: string): Promise<{ res: any; newId: number }> {
+export async function postDraftInvoice(hhJobNumber: number, ref: string,
+  opts: { all?: 0 | 1 } = {}): Promise<{ res: any; newId: number }> {
   const res = await hhBroker.post<any>('/php_functions/billing_save.php', {
     id: 0,
     desc: '',
@@ -165,7 +166,9 @@ export async function postDraftInvoice(hhJobNumber: number, ref: string): Promis
     bank: 169,              // the invoice's default bank as captured; payments carry their own
     tax_total: '0.00',
     tax_rate: 0,
-    all: 1,                 // "Include all owing items" — ALWAYS; the UI default is a user setting
+    // "Include all owing items" — 1 unless the caller wants an EMPTY draft (0, §3: a charge
+    // invoice built from custom lines only). Always sent: the UI default is a user setting.
+    all: opts.all ?? 1,
     novat: 0,
     aggregated: 0,
     local: hhLocalNow(),
@@ -223,6 +226,16 @@ export async function postAllocation(input: {
 }
 
 // ── Invoice LINES on a draft (HIREHOP-BILLING-API.md §10) ────────────────
+
+/**
+ * A charge invoice raised after completion (completed-charges.ts): custom lines only,
+ * no job line behind any of them. Its money is deliberately NOT on the HireHop job, so
+ * it is left out of every "invoices add up to the job's quoted total" sum.
+ */
+export const isChargeOnlyInvoice = (row: Row) => {
+  const items = Array.isArray(row?.data?.items) ? row.data.items : [];
+  return items.length > 0 && items.every((it: Row) => Number(it.MAIN_ID || 0) === 0);
+};
 
 /** An invoice's lines as HireHop lists them (`data.items` on its kind-1 row). */
 export function invoiceItems(row: Row | null): Row[] {
