@@ -199,15 +199,18 @@ The UI is ONE panel, `HireCloseOutPanel.tsx` on the **Invoice** card of the Post
 Payment Reconciliation requirement still exists but is drawn as that card's second pill): one button
 raises the invoice if needed (draft from uninvoiced lines → penny check → approve dated today → Xero)
 then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); "Mark as
-sent" only once nothing is left to allocate; everything else behind "Details…". **An EU hire with the "Non-standard VAT rules" item is
-refused until the invoice-line VAT split is built.** Xero log lines admin-only. Completing a job is the status
+sent" only once nothing is left to allocate; everything else behind "Details…". **An EU hire** (the "Non-standard VAT rules" item)
+gets its draft split by `services/eu-vat-split.ts` (real lines at 100% discount, per nominal a UK-days line at 20% and a
+non-UK-days line at code 33; 31+ day vehicles zero-rated) and STOPS at the draft for a person to check; the next press approves.
+Xero log lines admin-only. Completing a job is the status
 change at the top of the page, and that modal refuses open Problems (manager + reason to override;
 `routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
 (03:30) applies HireHop's allocations as credits in Xero, off until `system_settings.closeout_xero_sweep_enabled`
 is `'true'` (switched on 10 Oct 2026). **Arrival hook** `services/close-out-arrival.ts` (Phase 3b): a hire payment
 landing on a job with exactly one invoice owing is allocated to it in HireHop + Xero, after the payment has
 answered — THAT payment only (never money already sitting on the job), never completes the job; off until
-`closeout_arrival_hook_enabled` is `'true'`. Not yet: the VAT split (spec §10.1, tax code 33 confirmed). §1 is
+`closeout_arrival_hook_enabled` is `'true'`. An invoice HireHop pushed to Xero but lost the link to (`ACC_ID` empty) is found
+by number + total (`hh-invoice-close.ts` `adoptLostXeroInvoices()`). §1 is
 settled, §5 the allocation rule, §9 the phases, **§12 the current state and the ordered next steps — read it first.**
 Refunds only through the existing routes.
 
@@ -336,6 +339,7 @@ existing definition:
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
+| Splitting an EU hire's invoice by UK / non-UK days | `services/eu-vat-split.ts` — on the DRAFT only; which line gets which VAT rule is `vat-adjustment.ts` `classifyNominals()`, shared with the portal figure |
 | Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
 | Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |
 | Finishing a HIRE's money (plan → allocate hire deposits in HH + Xero → complete) | `services/hire-close-out.ts` — on the recipe above; never excess, never a refund; `job_closeout_log` is its record |

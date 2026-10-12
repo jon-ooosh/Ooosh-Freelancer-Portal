@@ -33,7 +33,9 @@ import {
   kindOf, idOf, invoiceRows, findInvoice, invoiceStatus, invoiceGross, invoiceOwing, invoiceInXero,
   invoiceAllocations, unallocatedPayments, readJobStatus, invoiceNet,
   postAllocation, applyCreditsInXero, completeJob, postDraftInvoice, postApproveInvoice, pushInvoiceToXero,
+  adoptLostXeroInvoices,
 } from './hh-invoice-close';
+import { splitEuDraft } from './eu-vat-split';
 import xeroBroker from './xero-broker';
 import { isXeroConfigured } from '../config/xero';
 import { DISPLAY_NAME_SQL } from './display-name';
@@ -103,7 +105,7 @@ export interface InvoicePlan {
   netToInvoice: number;
   /** A draft already on the job — Raise invoice adopts it. */
   draft: CloseOutInvoice | null;
-  /** The job carries the "Non-standard VAT rules" item: invoiced by hand until the VAT split is built. */
+  /** The job carries the "Non-standard VAT rules" item: Raise invoice splits the VAT (eu-vat-split.ts) and stops at the draft. */
   euTrigger: boolean;
   /** HireHop says the job has not returned (status < 6) — a manager may override. */
   notReturned: boolean;
@@ -326,9 +328,6 @@ async function planInvoice(rows: Row[], approved: CloseOutInvoice[], hhJobNumber
     const eu = await hasNonStandardVatItem(hhJobNumber);
     if (eu == null) blockers.push('Could not read the job\'s items from HireHop to check its VAT rules.');
     euTrigger = eu === true;
-    if (euTrigger) {
-      blockers.push('This hire carries the "Non-standard VAT rules" item. The EU invoice split is not built yet — raise this invoice by hand in HireHop for now.');
-    }
   }
   if (notReturned) blockers.push(`HireHop says this job hasn't returned yet (status ${hhStatus}) — a manager can raise the invoice anyway.`);
   void approved;
@@ -409,6 +408,21 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   }
   await rep.log('invoice_penny', true, `Draft ${draftId}: ${gbp(draftNet)} ex VAT, ${gbp(draftGross)} inc VAT — matches HireHop's quoted total.`);
 
+  // 2b. EU hire: split the VAT on the draft (§10.1). A draft this run changed
+  // stops here so a person looks at it in HireHop before it goes to Xero; the
+  // next press finds it split, checks it again, and approves.
+  let gross = draftGross;
+  if (inv.euTrigger && invoiceStatus(draft!) < 2) {
+    const split = await splitEuDraft(rep, { jobId: job.id, hhJobNumber, draftId, firstInvoice: othersNet < PENNY });
+    if (split === 'split') {
+      const msg = `EU VAT split done on draft ${draftId}. Check it in HireHop, then press the button again to approve it and send it to Xero.`;
+      await rep.log('vat_split', true, msg);
+      throw new Stop(msg);
+    }
+    rows = await readBillingRows(hhJobNumber);
+    gross = invoiceGross(findInvoice(rows, draftId)!) ?? draftGross;
+  }
+
   // 3. Approve, dated today (§1.11).
   let number = '';
   if (invoiceStatus(draft!) < 2) {
@@ -421,7 +435,7 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
     }
     await rep.log('invoice_approve', true, `Invoice ${number} (${draftId}) approved, dated today.`);
     await pushInvoiceToXero(rep, {
-      label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross: draftGross,
+      label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross,
       saved: { ...(res.data || {}), hh_task: res.data?.hh_task || 'post_invoice_credit', hh_id: res.data?.hh_id || draftId },
       alert: { jobId: job.id, what: `hire invoice ${number}` },
     });
@@ -429,13 +443,13 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
     number = String(draft!.data?.NUMBER || draftId);
     if (!invoiceInXero(draft!)) {
       await pushInvoiceToXero(rep, {
-        label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross: draftGross,
+        label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross,
         saved: { hh_task: 'post_invoice_credit', hh_id: draftId, hh_acc_package_id: 3, hh_package_type: 1 },
         alert: { jobId: job.id, what: `hire invoice ${number}` },
       });
     }
   }
-  return `Invoice ${number} raised for ${gbp(draftGross)} and sent to Xero. Allocate the payments next.`;
+  return `Invoice ${number} raised for ${gbp(gross)} and sent to Xero. Allocate the payments next.`;
 }
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -467,6 +481,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   ]);
   base.hhStatus = hhStatus;
   base.excessHeld = round2(Number(excess.rows[0]?.held ?? 0));
+  warnings.push(...await adoptLostXeroInvoices(rows));
   if (hhStatus != null && hhStatus < HH_RETURNED_INCOMPLETE) {
     warnings.push(`HireHop says this job hasn't returned yet (status ${hhStatus}).`);
   }
@@ -488,6 +503,9 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
 
   // The Invoice card (§4.1): what is left to bill, and whether Raise invoice may run.
   base.invoice = await planInvoice(rows, invoices, hhJobNumber, hhStatus);
+  if (base.invoice.euTrigger && (base.invoice.netToInvoice >= PENNY || base.invoice.draft)) {
+    warnings.push('EU hire ("Non-standard VAT rules"): the invoice is split by UK / non-UK days and stops at the draft so you can check it in HireHop before it goes to Xero.');
+  }
 
   // Deposits — HireHop vs OP (§6).
   const hireRows = hireDepositRows(rows);
@@ -721,6 +739,7 @@ async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: 
   }
 
   // 2. Xero — every allocation on every approved invoice, not just the ones just made.
+  await adoptLostXeroInvoices(rows);
   const invoices = approvedInvoices(rows);
   for (const inv of invoices) {
     if (!invoiceAllocations(rows, inv.invoiceId).length) continue;

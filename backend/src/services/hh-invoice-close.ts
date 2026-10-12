@@ -222,7 +222,131 @@ export async function postAllocation(input: {
   }, { priority: 'high' });
 }
 
+// ── Invoice LINES on a draft (HIREHOP-BILLING-API.md §10) ────────────────
+
+/** An invoice's lines as HireHop lists them (`data.items` on its kind-1 row). */
+export function invoiceItems(row: Row | null): Row[] {
+  return Array.isArray(row?.data?.items) ? row!.data.items : [];
+}
+
+/** '2026-06-02 09:00:00.000000' → '2026-06-02 09:00:00', as the UI posts it. */
+const hhDateTime = (v: unknown) => String(v ?? '').replace(/\.\d+$/, '');
+
+/**
+ * Put a job-backed invoice line at 100% discount — exactly what HireHop's own
+ * line editor sends (captured 12 Oct 2026, scratch job 15745: the same
+ * `billing_save_items.php` that assigns lines, one row, `discount: 100`,
+ * `price: 0`). Qty, unit price and nominal are sent back unchanged, so the
+ * invoice and Xero show the item with its full discount, as staff do by hand.
+ * The caller reads back.
+ */
+export async function postZeroInvoiceLine(hhJobNumber: number, invoiceId: number, line: Row): Promise<any> {
+  return hhBroker.post<any>('/php_functions/billing_save_items.php', {
+    main_id: hhJobNumber,
+    type: 1,
+    bill: invoiceId,
+    'data[0][checked]': 1,
+    'data[0][item_id]': line.MAIN_ID,
+    'data[0][equip]': line.EQUIP_ID,
+    'data[0][qty]': line.QTY,
+    'data[0][unit_price]': line.UNIT_PRICE,
+    'data[0][discount]': 100,
+    'data[0][price]': 0,
+    'data[0][vat]': line.VAT_RATE,
+    'data[0][vat_acc_id]': line.ACC_TAX_RATE_ID,
+    'data[0][nominal_id]': line.ACC_NOMINAL_ID,
+    'data[0][title]': line.DESCRIPTION || line.ITEM || '',
+    'data[0][memo]': line.MEMO || '',
+    'data[0][kind]': line.KIND,
+    'data[0][from]': hhDateTime(line.FROM),
+    'data[0][upto]': hhDateTime(line.UPTO),
+    'data[0][base_unit_price]': line.BASE_UNIT_PRICE,
+    'data[0][multiplier]': line.MULTIPLIER,
+    selected: '',
+  }, { priority: 'high' });
+}
+
+/**
+ * Change one invoice line's tax code, keeping its net (§10.3,
+ * `billing_save_item.php`, singular). The caller reads back.
+ */
+export async function postInvoiceLineTax(hhJobNumber: number, invoiceId: number, line: Row,
+  tax: { rate: number; taxId: number }): Promise<any> {
+  return hhBroker.post<any>('/php_functions/billing_save_item.php', {
+    id: line.ID,
+    bill: invoiceId,
+    kind: line.KIND,
+    total: line.PRICE,
+    desc: line.DESCRIPTION || line.ITEM || '',
+    memo: line.MEMO || '',
+    vat_rate: tax.rate,
+    vat_id: tax.taxId,
+    nominal_id: line.ACC_NOMINAL_ID,
+    unit: 0,
+    main_id: hhJobNumber,
+    type: 1,
+    selected: line.ID,
+  }, { priority: 'high' });
+}
+
+/**
+ * Add a custom line to a draft (§10.3b — `billing_save_item.php`, `id: 0`,
+ * `kind: 3`): no job item behind it, so the job's supply list is never
+ * touched. `after` is the line it goes after. The caller reads back.
+ */
+export async function postCustomInvoiceLine(hhJobNumber: number, invoiceId: number, line: {
+  description: string; amount: number; rate: number; taxId: number; nominalId: number; after: number;
+}): Promise<any> {
+  return hhBroker.post<any>('/php_functions/billing_save_item.php', {
+    id: 0,
+    bill: invoiceId,
+    kind: 3,
+    qty: 1,
+    note: line.description,
+    unit: line.amount,
+    total: line.amount,
+    memo: '',
+    vat_rate: line.rate,
+    vat_id: line.taxId,
+    nominal_id: line.nominalId,
+    main_id: hhJobNumber,
+    type: 1,
+    selected: line.after,
+  }, { priority: 'high' });
+}
+
 // ── The Xero legs ────────────────────────────────────────────────────────
+
+/**
+ * Invoices HireHop has lost track of. Now and then HireHop's push reaches
+ * Xero but HireHop never records it: the row keeps `ACC_ID: ""`, and a
+ * re-push fails "Invoice # must be unique" (OT-INV-12000, job 15812, Jul
+ * 2026). For each approved invoice like that, look Xero up by invoice number
+ * and, when exactly one live ACCREC invoice has that number AND the same
+ * total, put its id on the row IN MEMORY so the Xero steps can work. HireHop
+ * itself is never told (no captured call for it). Returns a sentence per
+ * invoice adopted. Never throws: on any doubt the row is left as it was.
+ */
+export async function adoptLostXeroInvoices(rows: Row[]): Promise<string[]> {
+  const notes: string[] = [];
+  if (!isXeroConfigured()) return notes;
+  for (const row of invoiceRows(rows)) {
+    if (invoiceStatus(row) < 2 || invoiceInXero(row)) continue;
+    const number = String(row.data?.NUMBER || '').trim();
+    const gross = invoiceGross(row);
+    if (!/^[A-Za-z0-9-]+$/.test(number) || gross == null) continue;
+    try {
+      const found = (await xeroBroker.getInvoices(`Type=="ACCREC" AND InvoiceNumber=="${number}"`))
+        .filter((x) => !['VOIDED', 'DELETED'].includes(String(x.Status)));
+      if (found.length !== 1 || Math.abs(round2(Number(found[0].Total) || 0) - gross) >= PENNY) continue;
+      row.data = { ...(row.data || {}), ACC_ID: String(found[0].InvoiceID) };
+      notes.push(`${number} is in Xero but HireHop lost the link — matched it by number and total.`);
+    } catch (err) {
+      console.warn(`[hh-invoice-close] Xero lookup for ${number} failed:`, err);
+    }
+  }
+  return notes;
+}
 
 /**
  * Push an approved invoice to Xero and read back that HireHop has stamped it
