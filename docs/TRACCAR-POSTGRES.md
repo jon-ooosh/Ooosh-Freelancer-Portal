@@ -117,33 +117,30 @@ docker rm -f traccar-pg-test
 ```
 Send the outputs of 2b–2c. If anything doesn't match, stop — nothing live has changed.
 
-## Phase 3 — switch-over (about 04:30; Traccar offline for the copy time from 2b plus a few minutes)
+## Phase 3 — switch-over (scheduled, unattended, ~04:30 UK; Traccar offline ~8–10 min)
 
-Trackers keep their positions while the server is down and send them when it is back.
+Rehearsal on 12 Oct 2026: 7,420,242 positions, 676,066 events, 23 devices; the copy
+took 4 minutes; Traccar on the copy logged in and found RO23HLU's trips; the
+database is 3.8GB. Trackers keep their positions while the server is down and send
+them when it is back.
 
+`deploy/traccar/switch-to-postgres.sh` does the whole switch and logs every step to
+`/root/traccar-switch.log`. It checks everything before touching Traccar (and
+changes nothing if a check fails), stops the old Traccar, copies its data out, runs
+`h2-to-postgres.sh` (starting the old Traccar again if the copy fails), starts the
+new one, and — if it hasn't answered within 3 minutes — removes it and puts the old
+one back. It refuses to run twice. Tested end to end, including the roll-back.
+
+Schedule it (the evening before):
 ```bash
-cd /var/www/ooosh-portal
-docker stop traccar
-rm -rf /root/traccar-data-final && docker cp traccar:/opt/traccar/data /root/traccar-data-final
-H2_DIR=/root/traccar-data-final bash deploy/traccar/h2-to-postgres.sh
+systemd-analyze calendar '2026-10-13 04:30:00 Europe/London'   # check "Next elapse"
+systemd-run --unit traccar-switch --on-calendar='2026-10-13 04:30:00 Europe/London' \
+  /bin/bash /var/www/ooosh-portal/deploy/traccar/switch-to-postgres.sh
+systemctl list-timers traccar-switch.timer                       # shows it waiting
 ```
+Cancel before it runs: `systemctl stop traccar-switch.timer`.
 
-**Only if it ends "every row count matches":**
-```bash
-docker rename traccar traccar-h2-old
-docker update --restart=no traccar-h2-old
-docker run -d --name traccar --restart always \
-  -p 5027:5027 -p 5027:5027/udp -p 8082:8082 \
-  -v /opt/traccar/conf/traccar.xml:/opt/traccar/conf/traccar.xml:ro \
-  -v /opt/traccar/logs:/opt/traccar/logs \
-  ooosh/traccar:6.11.1
-sleep 60; docker logs --tail 20 traccar
-curl -s localhost:8082/api/server | grep -o '"version":"[^"]*"'    # 6.11.1
-```
-
-**If the script failed** (nothing has changed yet): `docker start traccar` — back as it was.
-
-**If the new Traccar misbehaves after the switch** (positions since the switch are lost from view, nothing else):
+**Undo after a completed switch** (positions since the switch are lost from view, nothing else):
 ```bash
 docker rm -f traccar
 docker rename traccar-h2-old traccar
@@ -153,6 +150,8 @@ docker start traccar
 
 ## Phase 4 — morning checks (~07:00)
 
+0. `tail -30 /root/traccar-switch.log` — ends `SWITCH COMPLETE`. (If it says `ROLLED BACK`
+   or `STOPPED`, the old Traccar is running as before — send the log.)
 1. `docker ps --filter name=traccar` — `traccar` Up; `traccar-h2-old` Exited.
 2. Traccar web (`tracking.oooshtours.co.uk`): log in; vans online; RO23HLU's route
    for yesterday shows, AND positions from after 04:30 (proves new data lands).
@@ -196,5 +195,5 @@ docker start traccar
 
 Take a fresh backup first (`node dist/scripts/traccar-backup.js`), pull the new
 version's tag explicitly (`docker pull traccar/traccar:X.Y.Z`), and recreate the
-container from it with the same `docker run` line as Phase 3. Traccar upgrades the
+container from it with the same `docker run` line as step 3 of `deploy/traccar/switch-to-postgres.sh`. Traccar upgrades the
 schema itself on start; it can't be downgraded, so the backup is the way back.
