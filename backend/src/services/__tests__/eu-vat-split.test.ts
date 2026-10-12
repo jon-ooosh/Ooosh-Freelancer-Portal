@@ -39,7 +39,7 @@ let supply: any[];
 let margins: Array<{ idx: number; revenue: number }>;
 let lines: any[];
 let nextLine: number;
-let ignoreZero: boolean;
+let zeroMode: 'edit' | 'noop' | 'duplicate';
 let order: string[];
 
 function draftRow() {
@@ -78,25 +78,23 @@ function install() {
     throw new Error(`unexpected GET ${path}`);
   });
   mockPost.mockImplementation(async (path: string, body: any) => {
-    if (path === '/php_functions/billing_save_items.php') {          // 100% discount on one job line
-      order.push('zero');
-      if (ignoreZero) return { success: true, data: {} };              // "success" that did nothing (§0)
-      const l = lines.find((x) => x.MAIN_ID === body['data[0][item_id]']);
-      expect(body['data[0][discount]']).toBe(100);
-      expect(body['data[0][nominal_id]']).toBe(l.ACC_NOMINAL_ID);    // nominal sent back unchanged
-      l.PRICE = 0; l.VAT = 0;
-      return { success: true, data: {} };
-    }
     if (path === '/php_functions/billing_save_item.php' && body.id === 0) {   // custom line
       order.push('custom');
       lines.push({ ID: nextLine++, MAIN_ID: 0, KIND: 3, DESCRIPTION: body.note, PRICE: body.total, VAT_RATE: body.vat_rate,
         VAT: vatOf(body.total, body.vat_rate), ACC_NOMINAL_ID: body.nominal_id, ACC_TAX_RATE_ID: body.vat_id });
       return { success: true, data: {} };
     }
-    if (path === '/php_functions/billing_save_item.php') {           // tax code on an existing line
-      order.push('tax');
+    if (path === '/php_functions/billing_save_item.php') {           // one line edited in place, by its id
       const l = lines.find((x) => x.ID === body.id);
-      l.ACC_TAX_RATE_ID = body.vat_id; l.VAT_RATE = body.vat_rate; l.VAT = vatOf(l.PRICE, body.vat_rate);
+      order.push(body.total === 0 ? 'zero' : 'tax');
+      expect(body.selected).toBe(body.id);
+      expect(body.nominal_id).toBe(l.ACC_NOMINAL_ID);                // nominal sent back unchanged
+      if (zeroMode === 'noop') return { success: true, data: {} };   // "success" that did nothing (§0)
+      if (zeroMode === 'duplicate') {                                // what the ASSIGN call did on 15745
+        lines.push({ ...l, ID: nextLine++, PRICE: 0, VAT: 0 });
+        return { success: true, data: {} };
+      }
+      l.PRICE = body.total; l.ACC_TAX_RATE_ID = body.vat_id; l.VAT_RATE = body.vat_rate; l.VAT = vatOf(l.PRICE, body.vat_rate);
       return { success: true, data: {} };
     }
     throw new Error(`unexpected POST ${path}`);
@@ -112,7 +110,7 @@ const run = (r = rep(), firstInvoice = true) => splitEuDraft(r, { jobId: 'j1', h
 
 beforeEach(() => {
   jest.clearAllMocks();
-  nextLine = 97000; ignoreZero = false; order = [];
+  nextLine = 97000; zeroMode = 'edit'; order = [];
   job15812();
   install();
 });
@@ -141,9 +139,20 @@ describe('splitEuDraft', () => {
   });
 
   it('stops — nothing more written — when HireHop says success but the line kept its price', async () => {
-    ignoreZero = true;
-    await expect(run()).rejects.toThrow('did not put "Item 152767" at 100% discount');
+    zeroMode = 'noop';
+    await expect(run()).rejects.toThrow('did not put "Item 152767" at £0');
     expect(order).toEqual(['custom', 'custom', 'zero']);
+  });
+
+  it('stops when HireHop adds a second copy of the line instead of editing it (15745, 12 Oct 2026)', async () => {
+    zeroMode = 'duplicate';
+    await expect(run()).rejects.toThrow('did not put "Item 152767" at £0');
+    expect(order).toEqual(['custom', 'custom', 'zero']);
+  });
+
+  it('never uses the ASSIGN call (billing_save_items.php) — it adds a line rather than editing one', async () => {
+    await run();
+    expect(mockPost.mock.calls.map((c) => c[0])).not.toContain('/php_functions/billing_save_items.php');
   });
 
   it('stops at the draft when the result does not match the payment portal', async () => {

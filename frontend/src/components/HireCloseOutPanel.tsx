@@ -1,10 +1,12 @@
 /**
  * HireCloseOutPanel — the hire close-out, on the Invoice card of the Post-Hire
  * tab (docs/HIRE-CLOSE-OUT-SPEC.md §3). The card itself stays small: one line
- * of state, one line for the first thing in the way (if any), and the buttons.
- * Everything else — the invoices, the payments, the plan in sentences, every
- * blocker and warning, the log — is behind "Details" (jon, 9 Oct 2026: the
- * card had become cluttered).
+ * of state, one line saying what is in the way and what to do (if anything),
+ * and the buttons — "Check again" among them, the next step after fixing
+ * something in HireHop. Everything else — the invoices, the payments, the
+ * plan in sentences, every blocker and warning, the log — is behind
+ * "Details", for ADMINS only (jon, 12 Oct 2026: for anyone else it was just
+ * confusing; jon, 9 Oct: the card had become cluttered).
  *
  * One main button: raise the invoice if there is anything left to bill, then
  * allocate every hire deposit in HireHop and apply the credits in Xero. A run
@@ -27,9 +29,6 @@ import {
 
 const HH_COMPLETED = 11;
 const PENNY = 0.005;
-
-/** The first clause of a long blocker / warning, for the card's one line. */
-const short = (s: string) => s.split(' — ')[0].split('. ')[0].replace(/[.:]$/, '');
 
 interface Props {
   jobId: string;
@@ -114,8 +113,8 @@ export default function HireCloseOutPanel({ jobId, onChanged, onMarkSent }: Prop
 
   // ── The card's one line for what is in the way ──
   const attention: { text: string; tone: 'red' | 'amber' } | null =
-    blockers.length ? { text: short(blockers[0]) + (blockers.length > 1 ? ` (+${blockers.length - 1} more)` : ''), tone: 'red' }
-    : plan.warnings.length ? { text: short(plan.warnings[0]) + (plan.warnings.length > 1 ? ` (+${plan.warnings.length - 1} more)` : ''), tone: 'amber' }
+    blockers.length ? { text: blockers[0] + (blockers.length > 1 ? ` (+${blockers.length - 1} more)` : ''), tone: 'red' }
+    : plan.warnings.length ? { text: plan.warnings[0] + (plan.warnings.length > 1 ? ` (+${plan.warnings.length - 1} more)` : ''), tone: 'amber' }
     : null;
 
   const post = async (path: string, body: unknown, fallback: string) => {
@@ -151,7 +150,7 @@ export default function HireCloseOutPanel({ jobId, onChanged, onMarkSent }: Prop
       {attention && (
         <div className={attention.tone === 'red' ? 'text-red-700' : 'text-amber-700'}>{attention.text}</div>
       )}
-      {result && <div className={result.done ? 'text-green-800' : 'text-red-800'}>{result.message}</div>}
+      {result && <div className={result.done ? 'text-green-800' : result.paused ? 'text-amber-800' : 'text-red-800'}>{result.message}</div>}
       {error && <div className="text-red-700">{error}</div>}
 
       <div className="flex flex-wrap items-center gap-2 pt-0.5">
@@ -166,15 +165,22 @@ export default function HireCloseOutPanel({ jobId, onChanged, onMarkSent }: Prop
             Mark as sent to client
           </button>
         )}
-        <button onClick={() => setShowDetails(true)} className="text-[11px] font-medium text-purple-600 hover:text-purple-800">
-          Details…
-        </button>
+        {!completed && (
+          <button onClick={() => load()} disabled={busy != null} className="text-[11px] font-medium text-purple-600 hover:text-purple-800 disabled:opacity-50">
+            {busy === 'plan' ? 'Checking HireHop…' : 'Check again'}
+          </button>
+        )}
+        {isAdmin && (
+          <button onClick={() => setShowDetails(true)} className="text-[11px] font-medium text-purple-600 hover:text-purple-800">
+            Details…
+          </button>
+        )}
         {!isManager && !completed && (needsInvoice || needsAlloc) && blockers.length === 0 && (
           <span className="text-gray-400">A manager can run this from here.</span>
         )}
       </div>
 
-      {showDetails && (
+      {showDetails && isAdmin && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowDetails(false)}>
           <div className="bg-white rounded-xl shadow-xl p-5 w-[560px] max-w-[95vw] max-h-[85vh] overflow-y-auto text-xs space-y-3" onClick={e => e.stopPropagation()}>
             <div className="flex items-baseline justify-between gap-3">
@@ -199,7 +205,7 @@ export default function HireCloseOutPanel({ jobId, onChanged, onMarkSent }: Prop
                   ))}
                   {inv.draft && <div className="text-gray-700">Draft {inv.draft.invoiceId} · {money(inv.draft.gross)} inc VAT · not yet approved</div>}
                   {inv.netToInvoice >= PENNY && !inv.draft && (
-                    <div className="text-gray-700">{money(inv.netToInvoice)} ex VAT not yet invoiced{inv.invoicedNet >= PENNY && <span className="text-gray-500"> ({money(inv.invoicedNet)} of a {money(inv.accruedNet)} job already invoiced)</span>}</div>
+                    <div className="text-gray-700">{money(inv.netToInvoice)} ex VAT not yet invoiced{inv.invoicedNet >= PENNY && <span className="text-gray-500"> ({money(inv.invoicedNet)} of a {money(inv.accruedNet)} job already on invoices or drafts)</span>}</div>
                   )}
                 </section>
 

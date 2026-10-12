@@ -537,7 +537,7 @@ describe('raiseHireInvoice', () => {
 
     mockSplit.mockResolvedValueOnce('split');
     const first = await raiseHireInvoice(JOB.id, 'u1');
-    expect(first.done).toBe(false);
+    expect(first).toMatchObject({ done: false, paused: true });   // a deliberate stop, shown amber, not red
     expect(first.message).toContain('EU VAT split done on draft 13000');
     expect(mockSplit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ hhJobNumber: 16015, draftId: 13000, firstInvoice: true }));
     expect(posts('/php_functions/billing_save_status.php')).toEqual([]);   // never approved, never to Xero

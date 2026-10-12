@@ -145,9 +145,14 @@ export interface CloseOutPlan {
 
 export interface CloseOutResult {
   done: boolean;
+  /** Stopped ON PURPOSE for a person to look (the EU split's draft) — not a failure. */
+  paused?: boolean;
   message: string;
   plan: CloseOutPlan;
 }
+
+/** A deliberate stop: the run did its part and waits for a person (the EU split). */
+class Pause extends Stop {}
 
 interface JobRow {
   id: string;
@@ -322,7 +327,7 @@ async function planInvoice(rows: Row[], approved: CloseOutInvoice[], hhJobNumber
   const notReturned = hhStatus != null && hhStatus < HH_RETURNED_INCOMPLETE;
   let euTrigger = false;
   if (drafts.length > 1) {
-    blockers.push(`The job has ${drafts.length} draft invoices in HireHop — delete the extra draft(s) by hand first.`);
+    blockers.push(`${drafts.length} draft invoices in HireHop. Delete the ones you don't want there, then press Check again.`);
   }
   if (netToInvoice >= PENNY || draft) {
     const eu = await hasNonStandardVatItem(hhJobNumber);
@@ -350,6 +355,7 @@ export async function raiseHireInvoice(jobIdOrNumber: string, userId: string | n
   return withJobLock(job.id, async () => {
     const rep = reporter(job.id, userId, 'press Raise invoice');
     let done = false;
+    let paused = false;
     let message: string;
     try {
       message = await raiseSteps(job, rep, !!opts.allowNotReturned);
@@ -358,9 +364,10 @@ export async function raiseHireInvoice(jobIdOrNumber: string, userId: string | n
       if (!(err instanceof Stop)) {
         await log(job.id, userId, 'error', false, err instanceof Error ? err.message : String(err)).catch(() => undefined);
       }
+      paused = err instanceof Pause;
       message = err instanceof Error ? err.message : String(err);
     }
-    return { done, message, plan: await buildPlan(job) };
+    return { done, paused, message, plan: await buildPlan(job) };
   });
 }
 
@@ -415,9 +422,9 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   if (inv.euTrigger && invoiceStatus(draft!) < 2) {
     const split = await splitEuDraft(rep, { jobId: job.id, hhJobNumber, draftId, firstInvoice: othersNet < PENNY });
     if (split === 'split') {
-      const msg = `EU VAT split done on draft ${draftId}. Check it in HireHop, then press the button again to approve it and send it to Xero.`;
+      const msg = `EU VAT split done on draft ${draftId}. Check it in HireHop, then press Carry on to approve it and send it to Xero.`;
       await rep.log('vat_split', true, msg);
-      throw new Stop(msg);
+      throw new Pause(msg);
     }
     rows = await readBillingRows(hhJobNumber);
     gross = invoiceGross(findInvoice(rows, draftId)!) ?? draftGross;
@@ -504,7 +511,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   // The Invoice card (§4.1): what is left to bill, and whether Raise invoice may run.
   base.invoice = await planInvoice(rows, invoices, hhJobNumber, hhStatus);
   if (base.invoice.euTrigger && (base.invoice.netToInvoice >= PENNY || base.invoice.draft)) {
-    warnings.push('EU hire ("Non-standard VAT rules"): the invoice is split by UK / non-UK days and stops at the draft so you can check it in HireHop before it goes to Xero.');
+    warnings.push('EU hire: the VAT is split by UK / non-UK days, and it stops at the draft for you to check in HireHop.');
   }
 
   // Deposits — HireHop vs OP (§6).
@@ -626,6 +633,7 @@ export async function runHireCloseOut(jobIdOrNumber: string, userId: string | nu
   return withJobLock(job.id, async () => {
     const rep = reporter(job.id, userId, 'press Carry on');
     let done = false;
+    let paused = false;
     let message: string;
     try {
       const plan = await buildPlan(job);
@@ -640,9 +648,10 @@ export async function runHireCloseOut(jobIdOrNumber: string, userId: string | nu
       if (!(err instanceof Stop)) {
         await log(job.id, userId, 'error', false, err instanceof Error ? err.message : String(err)).catch(() => undefined);
       }
+      paused = err instanceof Pause;
       message = err instanceof Error ? err.message : String(err);
     }
-    return { done, message, plan: await buildPlan(job) };
+    return { done, paused, message, plan: await buildPlan(job) };
   });
 }
 

@@ -8,7 +8,7 @@
  * jon's choice, 12 Oct 2026):
  *
  *   - Equipment, and vehicles on a hire under 31 days: each real line goes to
- *     100% discount, and per NOMINAL two custom lines carry its money —
+ *     £0 (edited in place by its own id), and per NOMINAL two custom lines carry its money —
  *     "<nominal>, UK days (2 of 28)" at 20% and "<nominal>, non-UK days,
  *     zero-rated (HMRC 741A) (26 of 28)" at tax code 33. The nominal is kept,
  *     so Xero's revenue accounts are unchanged; VAT is rounded once per
@@ -27,7 +27,7 @@ import { query } from '../config/database';
 import { readBillingRows } from './hh-deposit-release';
 import {
   Row, PENNY, round2, gbp, CloseReporter, findInvoice, invoiceNet, invoiceGross, invoiceItems,
-  postZeroInvoiceLine, postInvoiceLineTax, postCustomInvoiceLine,
+  postInvoiceLineEdit, postCustomInvoiceLine,
 } from './hh-invoice-close';
 import {
   VatClass, readSupplyItems, nonUkDaysOf, classifyNominals, hireDaysBetween,
@@ -51,7 +51,7 @@ export interface EuSplitPlan {
   hireDays: number;
   ukDays: number;
   nonUkDays: number;
-  /** Real lines that go to 100% discount (their money moves to the custom lines). */
+  /** Real lines that go to £0 (their money moves to the custom lines). */
   zero: Row[];
   /** Vehicle lines on a 31+ day hire: to tax code 33, price untouched. */
   zeroRate: Row[];
@@ -141,7 +141,7 @@ export function checkSplitDraft(input: {
       if (num(line.ACC_TAX_RATE_ID) !== ZERO_RATED_TAX_ID) problems.push(`"${lineName(line)}" should be zero-rated (31+ day vehicle hire) but is on tax code ${line.ACC_TAX_RATE_ID}.`);
       continue;
     }
-    problems.push(`"${lineName(line)}" still carries ${gbp(price)} — it should be at 100% discount with its money on the UK / non-UK lines.`);
+    problems.push(`"${lineName(line)}" still carries ${gbp(price)} — it should be at £0 with its money on the UK / non-UK lines.`);
   }
   for (const [nominalId, g] of byNominal) {
     const wantUk = round2((g.uk + g.nonUk) * ukDays / hireDays);
@@ -216,27 +216,29 @@ export async function splitEuDraft(rep: CloseReporter, ctx: {
       await rep.log('vat_split', true, `Added "${c.description}": ${gbp(c.amount)} on tax code ${c.taxId}.`);
     }
 
-    // 2. Then the real lines to 100% discount.
+    // 2. Then the real lines to £0, each edited in place by its own id.
     for (const line of plan.zero) {
       const before = invoiceItems(draft);
-      const res = await postZeroInvoiceLine(hhJobNumber, draftId, line);
+      const res = await postInvoiceLineEdit(hhJobNumber, draftId, line,
+        { total: 0, rate: num(line.VAT_RATE), taxId: num(line.ACC_TAX_RATE_ID) });
       rows = await readBillingRows(hhJobNumber);
       draft = findInvoice(rows, draftId);
       const after = invoiceItems(draft);
-      const mine = after.filter((l) => num(l.MAIN_ID) === num(line.MAIN_ID) && num(l.KIND) === num(line.KIND));
-      const others = after.filter((l) => !mine.includes(l));
-      const othersBefore = before.filter((l) => num(l.MAIN_ID) !== num(line.MAIN_ID) || num(l.KIND) !== num(line.KIND));
-      if (mine.length !== 1 || num(mine[0].PRICE) >= PENNY || !sameLines(othersBefore, others)) {
-        await rep.stop('vat_split', `HireHop did not put "${lineName(line)}" at 100% discount as asked`
+      // The same line (same id) now at £0, and no other line changed, added or lost.
+      const mine = after.find((l) => num(l.ID) === num(line.ID));
+      const others = after.filter((l) => l !== mine);
+      const othersBefore = before.filter((l) => num(l.ID) !== num(line.ID));
+      if (!mine || num(mine.PRICE) >= PENNY || !sameLines(othersBefore, others)) {
+        await rep.stop('vat_split', `HireHop did not put "${lineName(line)}" at £0 as asked`
           + `${res?.error ? ` (${res.error})` : ''}, or changed another line. Nothing has gone to Xero. ${deleteHint}`);
       }
     }
-    if (plan.zero.length) await rep.log('vat_split', true, `${plan.zero.length} item line${plan.zero.length === 1 ? '' : 's'} put at 100% discount (their money is on the UK / non-UK lines).`);
+    if (plan.zero.length) await rep.log('vat_split', true, `${plan.zero.length} item line${plan.zero.length === 1 ? '' : 's'} put at £0 (their money is on the UK / non-UK lines).`);
 
     // 3. Vehicles on a 31+ day hire: zero-rated, price untouched.
     for (const line of plan.zeroRate) {
       const before = invoiceItems(draft);
-      const res = await postInvoiceLineTax(hhJobNumber, draftId, line, { rate: 0, taxId: ZERO_RATED_TAX_ID });
+      const res = await postInvoiceLineEdit(hhJobNumber, draftId, line, { total: num(line.PRICE), rate: 0, taxId: ZERO_RATED_TAX_ID });
       rows = await readBillingRows(hhJobNumber);
       draft = findInvoice(rows, draftId);
       const after = invoiceItems(draft);
