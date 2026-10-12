@@ -5,8 +5,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
 import { apiFetch } from '../config/api-config'
-import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrackerAssignments'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
+import { VehicleTrackerRow } from '../components/tracking/VehicleTrackerRow'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
@@ -237,8 +237,6 @@ function CurrentMileageRow({
 export function VehicleDetailPage() {
   const { id } = useParams()
   const { data: vehicle, isLoading, isError } = useVehicle(id)
-  const { trackerNumber } = useVehicleTracker(vehicle?.reg)
-  const { assign: assignTracker, isSaving: isAssigningTracker } = useUpdateTrackerAssignment()
   const { data: complianceSettings } = useQuery({
     queryKey: ['compliance-settings'],
     queryFn: fetchComplianceSettings,
@@ -280,8 +278,6 @@ export function VehicleDetailPage() {
     setFocusPrepEventId(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
-  const [editingTracker, setEditingTracker] = useState(false)
-  const [trackerInput, setTrackerInput] = useState('')
   const [washing, setWashing] = useState(false)
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
@@ -739,58 +735,8 @@ export function VehicleDetailPage() {
       {/* Other Info */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Other Info</h3>
-        {/* Tracker number — inline editable */}
-        <div className="flex items-center justify-between py-2 border-b border-gray-100">
-          <span className="text-sm text-gray-500">GPS Tracker</span>
-          {editingTracker ? (
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={trackerInput}
-                onChange={e => setTrackerInput(e.target.value)}
-                placeholder="Tracker #"
-                className="w-20 rounded border border-gray-200 px-2 py-1 text-sm text-right focus:border-blue-300 focus:outline-none"
-                autoFocus
-              />
-              <button
-                type="button"
-                disabled={isAssigningTracker}
-                onClick={async () => {
-                  if (vehicle) {
-                    await assignTracker(vehicle.reg, trackerInput.trim() || null)
-                    setEditingTracker(false)
-                  }
-                }}
-                className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
-              >
-                {isAssigningTracker ? '...' : 'Save'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setEditingTracker(false)}
-                className="rounded px-2 py-1 text-xs text-gray-400 hover:text-gray-600"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-gray-900">
-                {trackerNumber ? `#${trackerNumber}` : 'Not fitted'}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setTrackerInput(trackerNumber || '')
-                  setEditingTracker(true)
-                }}
-                className="rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-              >
-                Edit
-              </button>
-            </div>
-          )}
-        </div>
+        {/* Tracker — from the register (Fleet Map › Trackers) */}
+        <VehicleTrackerRow vehicleId={vehicle.id} />
         <EditableRow label="Wifi Network" value={vehicle.wifiNetwork} type="text" onSave={v => saveField('wifi_network', v)} />
         {/* Finance With moved to the admin-only Finance & Lifecycle section */}
         <EditableRow label="ULEZ Compliant" value={vehicle.ulezCompliant} type="toggle" onSave={v => saveField('ulez_compliant', v)} />

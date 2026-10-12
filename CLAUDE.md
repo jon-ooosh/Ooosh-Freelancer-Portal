@@ -296,6 +296,7 @@ existing definition:
 | A claim's client links, driver code, damage marks, sketch | `services/claim-links.ts` (public routes: `routes/claim-form.ts` — every save through `sanitiseSection()`) |
 | Chasing a client for their claim form / how far it's got | `services/claim-chase.ts` (`runClaimClientChase()`, `formProgress()`) |
 | A van's GPS route between two times | `services/traccar-server.ts` `getRouteForReg()` (a claim's trace: `services/claim-gps.ts`) |
+| Which tracker is in this van? Which Traccar device is it? Is this position real? | `services/gps-trackers.ts` (register + `isRealFix()` — 0,0 is a no-fix report, never a place); frontend `findDeviceByReg()` in `modules/vehicles/lib/traccar-api.ts` finds the device by the fitted tracker's IMEI |
 | Texting someone about anything | `services/sms-service.ts` — each template goes live on its own via `SMS_LIVE_TEMPLATES` |
 | Preparing a photo for upload (EXIF time, HEIC, compress + thumb) | `frontend/src/lib/imageNormalise.ts` `prepareImage()` |
 | What is a van worth (approx.)? | `services/vehicle-value.ts` `estimateVehicleValue()` |
