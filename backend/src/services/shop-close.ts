@@ -469,14 +469,18 @@ async function finish(periodId: string, userId: string | null): Promise<void> {
   );
 }
 
-// ── The Monday email ─────────────────────────────────────────────────────
+// ── Monday: close finished weeks, then tell jon ──────────────────────────
 
-/**
- * Monday 08:55: tell jon which finished weeks are waiting to be closed, and
- * whether each one is ready or what's stopping it. Silent when there are none
- * (a week with no sales has no job, so nothing to close).
- */
-export async function sendShopCloseDigest(): Promise<number> {
+/** Switch for the Monday auto-close (migration 285). Off → the email only, as before. */
+export const SHOP_AUTO_CLOSE_SETTING = 'shop_auto_close_enabled';
+
+async function autoCloseEnabled(): Promise<boolean> {
+  const r = await query(`SELECT value FROM system_settings WHERE key = $1`, [SHOP_AUTO_CLOSE_SETTING]);
+  return String(r.rows[0]?.value ?? 'false').trim().toLowerCase() === 'true';
+}
+
+/** Finished weeks (ended before today) with a job that aren't closed yet, oldest first. */
+async function unclosedWeeks(): Promise<string[]> {
   const r = await query(
     `SELECT id FROM shop_sale_periods
       WHERE hh_job_number IS NOT NULL AND period_end < $1::date
@@ -484,32 +488,70 @@ export async function sendShopCloseDigest(): Promise<number> {
       ORDER BY period_start`,
     [londonDate(new Date())],
   );
-  if (!r.rows.length) return 0;
+  return r.rows.map((row: any) => row.id);
+}
 
+/**
+ * Monday 08:55. With `shop_auto_close_enabled` on, every finished week whose
+ * pre-flight is clean is closed exactly as the Close button would (jon, 12 Oct
+ * 2026: four Mondays closed by hand, spot on every time). Only FRESH closes:
+ * a week that stopped part-way is left for a person — the button resumes it.
+ * Then one email: what closed, what didn't and why, what is still waiting.
+ * Silent when there was nothing to do.
+ */
+export async function runMondayShopClose(): Promise<{ closed: number; stopped: number; waiting: number }> {
+  const closed: string[] = [];
+  const stopped: string[] = [];
+  if (await autoCloseEnabled()) {
+    for (const id of await unclosedWeeks()) {
+      try {
+        const pv = await previewShopClose(id);
+        if (pv.closeState || !pv.ready) continue;      // listed below as waiting, with its reason
+        const label = `Week of ${pv.periodStart} (HireHop job ${pv.hhJobNumber})`;
+        const r = await runShopClose(id, null);
+        (r.done ? closed : stopped).push(`<li>${weekLink(pv.periodStart, label)}: ${escapeHtml(r.message)}</li>`);
+      } catch (err) {
+        stopped.push(`<li>Week ${id}: ${escapeHtml(err instanceof Error ? err.message : String(err))}</li>`);
+      }
+    }
+  }
+  const waiting = await waitingWeekLines();
+  if (!closed.length && !stopped.length && !waiting.length) return { closed: 0, stopped: 0, waiting: 0 };
+
+  const parts: string[] = [];
+  if (closed.length) parts.push(`<p>Closed automatically (invoiced, allocated, job Completed):</p><ul>${closed.join('')}</ul>`);
+  if (stopped.length) parts.push(`<p><strong>Tried to close but stopped</strong> — press Close to carry on once it's sorted:</p><ul>${stopped.join('')}</ul>`);
+  if (waiting.length) parts.push(`<p>Still waiting to be closed:</p><ul>${waiting.join('')}</ul>`);
+  parts.push('<p>The Close button is on the Shop Till page, under <em>This week</em>.</p>');
+  const subject = stopped.length || waiting.length
+    ? `[Shop] ${stopped.length + waiting.length} week${stopped.length + waiting.length === 1 ? '' : 's'} need${stopped.length + waiting.length === 1 ? 's' : ''} closing`
+      + (closed.length ? ` (${closed.length} closed)` : '')
+    : `[Shop] ${closed.length === 1 ? 'Last week closed' : `${closed.length} weeks closed`}`;
+  await emailService.sendRaw({ to: SHOP_ALERT_RECIPIENT, subject, html: parts.join(''), variant: 'internal' });
+  return { closed: closed.length, stopped: stopped.length, waiting: waiting.length };
+}
+
+const weekLink = (periodStart: string, label: string) =>
+  `<a href="${getFrontendUrl()}/money/shop?tab=week&start=${periodStart}">${label}</a>`;
+
+/** One line per finished week still open: ready, part-done, or what's stopping it. */
+async function waitingWeekLines(): Promise<string[]> {
   const items: string[] = [];
-  for (const row of r.rows) {
+  for (const id of await unclosedWeeks()) {
     try {
-      const pv = await previewShopClose(row.id);
-      const link = `${getFrontendUrl()}/money/shop?tab=week&start=${pv.periodStart}`;
+      const pv = await previewShopClose(id);
       const label = `Week of ${pv.periodStart} (HireHop job ${pv.hhJobNumber})`;
       const body = pv.closeState
         ? `started but not finished (stopped after: ${pv.closeState}) — press Close to carry on.`
         : pv.ready
           ? `ready to close — ${gbp(pv.expectedGross)} from ${pv.payments.length} payment${pv.payments.length === 1 ? '' : 's'}.`
           : `can't close yet: ${pv.blockers.map(escapeHtml).join(' ')}`;
-      items.push(`<li><a href="${link}">${label}</a>: ${body}</li>`);
+      items.push(`<li>${weekLink(pv.periodStart, label)}: ${body}</li>`);
     } catch (err) {
-      items.push(`<li>Week ${row.id}: couldn't check — ${escapeHtml(err instanceof Error ? err.message : String(err))}</li>`);
+      items.push(`<li>Week ${id}: couldn't check — ${escapeHtml(err instanceof Error ? err.message : String(err))}</li>`);
     }
   }
-  await emailService.sendRaw({
-    to: SHOP_ALERT_RECIPIENT,
-    subject: `[Shop] ${r.rows.length} week${r.rows.length === 1 ? '' : 's'} to close`,
-    html: `<p>Shop weeks waiting to be closed (invoice, allocate, complete):</p><ul>${items.join('')}</ul>`
-      + '<p>The Close button is on the Shop Till page, under <em>This week</em>.</p>',
-    variant: 'internal',
-  });
-  return r.rows.length;
+  return items;
 }
 
 function escapeHtml(s: string): string {

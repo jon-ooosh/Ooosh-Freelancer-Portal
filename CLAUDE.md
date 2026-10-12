@@ -166,7 +166,8 @@ lookup, with HireHop remaining the single stock database. **§19 is the current
 state, the live settings, and what to do next — read it before touching this.**
 **§20, the weekly close** (invoice → approve → allocate payments → complete) — LIVE
 (`services/shop-close.ts`, admin-only button on *This week*; first real week closed
-28 Sep 2026). **HireHop never pushes an allocation to Xero — OP applies the credit in
+28 Sep 2026; since 12 Oct it runs itself Monday 08:55 for every clean finished week —
+`shop_auto_close_enabled`; a week that stopped part-way waits for the button). **HireHop never pushes an allocation to Xero — OP applies the credit in
 Xero itself** (`HIREHOP-BILLING-API.md` §8).
 
 Three rules from it that bite elsewhere:
@@ -201,7 +202,7 @@ raises the invoice if needed (draft from uninvoiced lines → penny check → ap
 then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); "Mark as
 sent" only once nothing is left to allocate; "Check again" on the card; everything else behind "Details…", ADMINS only. **An EU hire** (the "Non-standard VAT rules" item)
 gets its draft split by `services/eu-vat-split.ts` (real lines to £0, each edited in place by its own id, per nominal a UK-days line at 20% and a
-non-UK-days line at code 33; 31+ day vehicles zero-rated) and STOPS at the draft for a person to check; the next press approves.
+non-UK-days line at code 33; 31+ day vehicles zero-rated), checked against the portal's figure, then approved in the same press.
 Xero log lines admin-only. Completing a job is the status
 change at the top of the page, and that modal refuses open Problems (manager + reason to override;
 `routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
@@ -454,7 +455,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 · sitter task summary 16:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
-shop close reminder Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·
+shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·
 Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the

@@ -105,7 +105,7 @@ export interface InvoicePlan {
   netToInvoice: number;
   /** A draft already on the job — Raise invoice adopts it. */
   draft: CloseOutInvoice | null;
-  /** The job carries the "Non-standard VAT rules" item: Raise invoice splits the VAT (eu-vat-split.ts) and stops at the draft. */
+  /** The job carries the "Non-standard VAT rules" item: Raise invoice splits the VAT (eu-vat-split.ts). */
   euTrigger: boolean;
   /** HireHop says the job has not returned (status < 6) — a manager may override. */
   notReturned: boolean;
@@ -145,14 +145,9 @@ export interface CloseOutPlan {
 
 export interface CloseOutResult {
   done: boolean;
-  /** Stopped ON PURPOSE for a person to look (the EU split's draft) — not a failure. */
-  paused?: boolean;
   message: string;
   plan: CloseOutPlan;
 }
-
-/** A deliberate stop: the run did its part and waits for a person (the EU split). */
-class Pause extends Stop {}
 
 interface JobRow {
   id: string;
@@ -355,7 +350,6 @@ export async function raiseHireInvoice(jobIdOrNumber: string, userId: string | n
   return withJobLock(job.id, async () => {
     const rep = reporter(job.id, userId, 'press Raise invoice');
     let done = false;
-    let paused = false;
     let message: string;
     try {
       message = await raiseSteps(job, rep, !!opts.allowNotReturned);
@@ -364,10 +358,9 @@ export async function raiseHireInvoice(jobIdOrNumber: string, userId: string | n
       if (!(err instanceof Stop)) {
         await log(job.id, userId, 'error', false, err instanceof Error ? err.message : String(err)).catch(() => undefined);
       }
-      paused = err instanceof Pause;
       message = err instanceof Error ? err.message : String(err);
     }
-    return { done, paused, message, plan: await buildPlan(job) };
+    return { done, message, plan: await buildPlan(job) };
   });
 }
 
@@ -415,17 +408,13 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   }
   await rep.log('invoice_penny', true, `Draft ${draftId}: ${gbp(draftNet)} ex VAT, ${gbp(draftGross)} inc VAT — matches HireHop's quoted total.`);
 
-  // 2b. EU hire: split the VAT on the draft (§10.1). A draft this run changed
-  // stops here so a person looks at it in HireHop before it goes to Xero; the
-  // next press finds it split, checks it again, and approves.
+  // 2b. EU hire: split the VAT on the draft (§10.1). splitEuDraft reads back
+  // every write, checks the whole draft and (first invoice) matches it to the
+  // portal's figure before returning — so a split draft goes straight on to be
+  // approved like any other (jon, 12 Oct, after 15745 split cleanly).
   let gross = draftGross;
   if (inv.euTrigger && invoiceStatus(draft!) < 2) {
-    const split = await splitEuDraft(rep, { jobId: job.id, hhJobNumber, draftId, firstInvoice: othersNet < PENNY });
-    if (split === 'split') {
-      const msg = `EU VAT split done on draft ${draftId}. Check it in HireHop, then press Carry on to approve it and send it to Xero.`;
-      await rep.log('vat_split', true, msg);
-      throw new Pause(msg);
-    }
+    await splitEuDraft(rep, { jobId: job.id, hhJobNumber, draftId, firstInvoice: othersNet < PENNY });
     rows = await readBillingRows(hhJobNumber);
     gross = invoiceGross(findInvoice(rows, draftId)!) ?? draftGross;
   }
@@ -511,7 +500,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   // The Invoice card (§4.1): what is left to bill, and whether Raise invoice may run.
   base.invoice = await planInvoice(rows, invoices, hhJobNumber, hhStatus);
   if (base.invoice.euTrigger && (base.invoice.netToInvoice >= PENNY || base.invoice.draft)) {
-    warnings.push('EU hire: the VAT is split by UK / non-UK days, and it stops at the draft for you to check in HireHop.');
+    warnings.push('EU hire: the invoice\'s VAT is split by UK / non-UK days (HMRC 741A).');
   }
 
   // Deposits — HireHop vs OP (§6).
@@ -633,7 +622,6 @@ export async function runHireCloseOut(jobIdOrNumber: string, userId: string | nu
   return withJobLock(job.id, async () => {
     const rep = reporter(job.id, userId, 'press Carry on');
     let done = false;
-    let paused = false;
     let message: string;
     try {
       const plan = await buildPlan(job);
@@ -648,10 +636,9 @@ export async function runHireCloseOut(jobIdOrNumber: string, userId: string | nu
       if (!(err instanceof Stop)) {
         await log(job.id, userId, 'error', false, err instanceof Error ? err.message : String(err)).catch(() => undefined);
       }
-      paused = err instanceof Pause;
       message = err instanceof Error ? err.message : String(err);
     }
-    return { done, paused, message, plan: await buildPlan(job) };
+    return { done, message, plan: await buildPlan(job) };
   });
 }
 

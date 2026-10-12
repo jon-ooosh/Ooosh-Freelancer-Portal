@@ -43,7 +43,7 @@ import { syncSavedRowToXero } from '../hh-xero-sync';
 import { checkShopPeriodLocked } from '../shop-reconcile';
 import { emailService } from '../email-service';
 import xeroBroker from '../xero-broker';
-import { runShopClose } from '../shop-close';
+import { runShopClose, runMondayShopClose } from '../shop-close';
 
 const mockQuery = query as jest.Mock;
 const mockPost = (hhBroker as any).post as jest.Mock;
@@ -166,9 +166,12 @@ function installXero() {
 let period: any;
 let expected: { gross: number; net: number; lines: number };
 let unfinished: number;
+let autoClose: string;
 
 function installDb() {
   mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
+    if (sql.includes('FROM system_settings')) return { rows: [{ value: autoClose }] };
+    if (sql.includes('period_end < $1::date')) return { rows: period.close_state === 'completed' ? [] : [{ id: period.id }] };
     if (sql.includes('FROM shop_sale_periods WHERE id = $1')) return { rows: [{ ...period }] };
     if (sql.includes('close_log = COALESCE')) {
       period.close_log = [...period.close_log, ...JSON.parse(params[1])];
@@ -209,6 +212,7 @@ beforeEach(() => {
   };
   expected = { gross: 12.00, net: 10.00, lines: 3 };
   unfinished = 0;
+  autoClose = 'true';
   mockCheck.mockResolvedValue({ problems: [], status: 5 });
   installHireHop();
   installDb();
@@ -452,5 +456,58 @@ describe('runShopClose', () => {
     expect(posts('/php_functions/billing_save.php')).toHaveLength(0);
     expect(hh.jobStatus).toBe(11);
     expect(period.close_state).toBe('completed');
+  });
+});
+
+describe('runMondayShopClose (Monday 08:55)', () => {
+  const email = () => mockEmail.mock.calls.at(-1)?.[0];
+
+  it('closes a clean finished week by itself and says so — no user on the record', async () => {
+    const r = await runMondayShopClose();
+    expect(r).toEqual({ closed: 1, stopped: 0, waiting: 0 });
+    expect(period.close_state).toBe('completed');
+    expect(period.closed_by).toBeNull();
+    expect(hh.jobStatus).toBe(11);
+    expect(email()).toMatchObject({ subject: '[Shop] Last week closed' });
+    expect(email().html).toContain('Closed automatically');
+  });
+
+  it('a close that stops is reported with the reason, and left for the button', async () => {
+    hh.draftTax = 2.01;
+    const r = await runMondayShopClose();
+    expect(r).toMatchObject({ closed: 0, stopped: 1 });
+    expect(posts('/php_functions/billing_save_status.php')).toHaveLength(0);
+    expect(email().html).toContain('Tried to close but stopped');
+    expect(email().html).toContain('£12.01');
+  });
+
+  it('never resumes a week that stopped part-way before — it waits for a person', async () => {
+    period.close_state = 'drafted'; period.hh_invoice_id = 12900;
+    const r = await runMondayShopClose();
+    expect(r).toEqual({ closed: 0, stopped: 0, waiting: 1 });
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(email().html).toContain('started but not finished');
+  });
+
+  it('a week whose pre-flight fails is not run, and the email says why', async () => {
+    unfinished = 1;
+    const r = await runMondayShopClose();
+    expect(r).toEqual({ closed: 0, stopped: 0, waiting: 1 });
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(email().html).toContain("can't close yet");
+  });
+
+  it('with the setting off it only emails, as before', async () => {
+    autoClose = 'false';
+    const r = await runMondayShopClose();
+    expect(r).toEqual({ closed: 0, stopped: 0, waiting: 1 });
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(email().html).toContain('ready to close');
+  });
+
+  it('silent when there is nothing to close', async () => {
+    period.close_state = 'completed';
+    expect(await runMondayShopClose()).toEqual({ closed: 0, stopped: 0, waiting: 0 });
+    expect(mockEmail).not.toHaveBeenCalled();
   });
 });

@@ -480,9 +480,10 @@ back (the same line changed, nothing else did, nothing was added). The whole dra
 (`checkSplitDraft()`) and, on the job's FIRST invoice, its gross is compared with the
 portal's `adjustedTotal` within 2p — a mismatch stops at the draft (wrong dates or a wrong
 non-UK quantity). A later invoice on an EU job is split but not compared: the portal figure
-was for the whole hire. **A run that split the draft stops there** ("check it in HireHop,
-then press again"); the next press finds the split, checks it again, approves and sends it
-to Xero. Never reaches Xero unchecked; a stop says "delete draft N and press again".
+was for the whole hire. Only then is it approved and sent to Xero, in the same press as any
+other invoice — the stop-at-the-draft pause was dropped on 12 Oct 2026 (jon) once 15745 had
+split to the penny on real HireHop (£237.50) and the approved draft went to Xero cleanly. A
+stop says "delete draft N and press again"; nothing unchecked reaches Xero.
 
 Done at invoice time, not quote time (the quote is edited too often before then). The
 cancellation-fee invoice will use the same line-level machinery (jon, 9 Oct).
@@ -546,8 +547,8 @@ Invoice card with `payment_reconcile` passed in as `companionReq`; Problems gate
 **Next, in this order — each one only after jon says go:**
 
 1. ~~Phase 3b, the arrival hook~~ — built (§4.5); switch `closeout_arrival_hook_enabled` on.
-2. ~~EU VAT split~~ — built (§10.1). Watch the first real EU hire through: it stops at the
-   draft; look at it in HireHop before pressing again.
+2. ~~EU VAT split~~ — built (§10.1), proven on 15745 (12 Oct). Glance at the first real EU
+   invoice in Xero after it goes through.
 3. **HireHop permission lockdown** for non-managers (add payment / add deposit / billing)
    once the first EU invoices have gone through OP cleanly.
 4. **Phase 4, additional charges** ("Add a charge" on Damage & Issues, §9).

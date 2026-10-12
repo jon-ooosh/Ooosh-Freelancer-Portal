@@ -20,8 +20,8 @@
  * The job's own lines are never touched — only the invoice's copies.
  * Order: add the custom lines, THEN zero the real ones, so any half-done
  * draft shows the wrong net and the penny check stops it on the next press.
- * Every write is read back. A draft never reaches Xero, and the caller stops
- * at the draft after a split so a person looks at it before approving.
+ * Every write is read back. Nothing is approved unless the whole draft checks
+ * out (and, on the first invoice, matches the portal's figure).
  */
 import { query } from '../config/database';
 import { readBillingRows } from './hh-deposit-release';
