@@ -1,4 +1,4 @@
--- 282: Quote options — alternative quotes for ONE enquiry as a GROUP of jobs
+-- 286: Quote options — alternative quotes for ONE enquiry as a GROUP of jobs
 -- (docs/QUOTE-VERSIONS-SPEC.md §4; "version" in the spec is "option" in code —
 -- jon, 12 Oct 2026, so it can't be confused with the quote-PDF versions on the
 -- Activity Timeline, which are revisions of ONE job's quote).

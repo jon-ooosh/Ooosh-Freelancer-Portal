@@ -428,7 +428,7 @@ export interface Job {
   cancellation_tier: string | null;
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
-  // Quote options (migration 282, docs/QUOTE-VERSIONS-SPEC.md): alternative
+  // Quote options (migration 286, docs/QUOTE-VERSIONS-SPEC.md): alternative
   // quotes for ONE enquiry are sibling jobs in a job_groups row. NULL on an
   // ordinary job. option_no is the alternative's identity ("Option 2"), never a
   // revision counter; option_label is the staff-typed differentiator.

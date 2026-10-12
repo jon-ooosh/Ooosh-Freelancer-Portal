@@ -394,7 +394,7 @@ Portal side (the other repo):
 
 ## 10. Build order
 
-**PR 1 — model + add an option + bar. BUILT 12 Oct 2026.** Migration `282_job_groups.sql`
+**PR 1 — model + add an option + bar. BUILT 12 Oct 2026.** Migration `286_job_groups.sql`
 (`job_groups`; `jobs.group_id / option_no / option_label`); `services/job-groups.ts` (suffix
 helpers, `resolveLeadJob`, `getGroupById`, `optionRefusalReason`, `insertOptionCopy`); in
 `routes/pipeline.ts` "QUOTE OPTIONS": `GET/PATCH /groups/:groupId` (read; rename / pin),

@@ -156,7 +156,7 @@ interface JobDetail {
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
   combined_into_job_id?: string | null;
-  // Quote options (migration 282) — sibling jobs for one enquiry
+  // Quote options (migration 286) — sibling jobs for one enquiry
   group_id?: string | null;
   option_no?: number | null;
   option_label?: string | null;
