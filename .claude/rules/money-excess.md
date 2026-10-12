@@ -1,7 +1,7 @@
 ---
 paths:
-  - "backend/src/routes/{money,excess,costs,cancellations,warehouse}.ts"
-  - "backend/src/services/{excess-*,hh-deposit,hh-deposit-release,hh-xero-sync,shop-close,hh-billing-deposits,money-emails,vat-adjustment,stripe-*,cost-*,supplier-terms,job-financials-backfill,job-value-sync,cancellation-calculator,remittance}.ts"
+  - "backend/src/routes/{money,excess,costs,cancellations,warehouse,hire-close-out}.ts"
+  - "backend/src/services/{excess-*,hh-deposit,hh-deposit-release,hh-xero-sync,shop-close,hh-invoice-close,hire-close-out,close-out-xero-sweep,hh-billing-deposits,money-emails,vat-adjustment,stripe-*,cost-*,supplier-terms,job-financials-backfill,job-value-sync,cancellation-calculator,remittance}.ts"
   - "backend/src/config/{stripe,xero}.ts"
   - "frontend/src/components/{MoneyTab,ExcessPaymentModal,ExcessGateBanner,ExcessHistorySection,CostCaptureModal,CostAllocationModal,CancellationModal,CombineBookingsModal}.tsx"
   - "frontend/src/pages/{ExcessLedgerPage,MoneyOverviewPage,CostsPage}.tsx"
@@ -27,6 +27,8 @@ writing any new billing call).
 | How do we describe a pre-auth? | `frontend/src/lib/preauth.ts` `describePreauth()` |
 | Resolve a stuck pre-auth hold | `services/excess-preauth.ts` `reconcileExcessPreauth` |
 | Push a deposit to HireHop | `services/hh-deposit.ts` `pushDepositToHH` |
+| Draft/approve an invoice, allocate in HH, apply credits in Xero | `services/hh-invoice-close.ts` — THE recipe; shop close and hire close-out both sit on it |
+| Finish a hire's money from the Invoice card | `services/hire-close-out.ts` — never excess, never a refund; `job_closeout_log` is its record |
 | When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` |
 | A job's costs (allocation-aware) | `GET /costs/by-job/:jobId` |
 | A refund / credit from a supplier | `services/cost-credit.ts` |

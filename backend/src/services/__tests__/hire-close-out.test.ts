@@ -32,8 +32,9 @@ jest.mock('../shop-stock', () => ({ hhLocalNow: () => '2026-10-09 09:00:00' }));
 jest.mock('../../config/xero', () => ({ isXeroConfigured: () => true }));
 jest.mock('../xero-broker', () => ({
   __esModule: true,
-  default: { getInvoice: jest.fn(), getOverpayment: jest.fn(), allocateOverpayment: jest.fn() },
+  default: { getInvoice: jest.fn(), getInvoices: jest.fn().mockResolvedValue([]), getOverpayment: jest.fn(), allocateOverpayment: jest.fn() },
 }));
+jest.mock('../eu-vat-split', () => ({ splitEuDraft: jest.fn() }));
 
 import { query } from '../../config/database';
 import hhBroker from '../hirehop-broker';
@@ -41,8 +42,12 @@ import { readBillingRows } from '../hh-deposit-release';
 import xeroBroker from '../xero-broker';
 import { syncSavedRowToXero } from '../hh-xero-sync';
 import { hasNonStandardVatItem } from '../vat-adjustment';
-import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, planAllocations } from '../hire-close-out';
+import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, runHireCloseOut, planAllocations } from '../hire-close-out';
 import { handleJobStatusChange } from '../../routes/webhooks';
+import { allocateOnArrival, fireArrivalHook } from '../close-out-arrival';
+import { splitEuDraft } from '../eu-vat-split';
+import { Stop } from '../hh-invoice-close';
+const mockSplit = splitEuDraft as jest.Mock;
 const mockStatus = handleJobStatusChange as jest.Mock;
 const mockSync = syncSavedRowToXero as jest.Mock;
 const mockEu = hasNonStandardVatItem as jest.Mock;
@@ -164,9 +169,11 @@ const JOB = { id: '8d4ac717-705d-4378-b640-44adb766f65c', hh_job_number: 16015, 
 let opPayments: Array<{ hirehop_deposit_id: number; payment_type: string; amount: number; payment_method: string; source: string; notes: string | null }>;
 let excessHeld: number;
 let logRows: any[];
+let arrivalEnabled: string;
 
 function installDb() {
   mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
+    if (sql.includes('FROM system_settings')) return { rows: [{ value: arrivalEnabled }] };
     if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...JOB }] };
     if (sql.includes('FROM job_payments')) return { rows: opPayments };
     if (sql.includes('FROM v_excess_held')) return { rows: [{ held: excessHeld }] };
@@ -174,6 +181,7 @@ function installDb() {
       logRows.unshift({ id: `l${logRows.length}`, step: params[1], ok: params[2], detail: params[3], hh_refs: params[4] ? JSON.parse(params[4]) : null, user_id: params[5], user_name: null, created_at: 'now' });
       return { rows: [] };
     }
+    if (sql.includes('FROM job_requirements')) return { rows: [{ invoice_req_id: null, invoice_req_status: null, open_problems: 0 }] };
     if (sql.includes('FROM job_closeout_log')) return { rows: logRows };
     throw new Error(`unexpected SQL: ${sql}`);
   });
@@ -206,6 +214,7 @@ function job16015Corrected() {
 beforeEach(() => {
   jest.clearAllMocks();
   logRows = [];
+  arrivalEnabled = 'true';
   job16015Corrected();
   installHireHop();
   installXero();
@@ -433,6 +442,7 @@ describe('completeHireJob', () => {
     mockRead.mockClear();
     mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
       if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...JOB, pipeline_status: 'completed' }] };
+      if (sql.includes('FROM job_requirements')) return { rows: [{ invoice_req_id: null, invoice_req_status: null, open_problems: 0 }] };
       if (sql.includes('FROM job_closeout_log')) return { rows: logRows };
       if (sql.includes('INSERT INTO job_closeout_log')) { logRows.unshift({ id: 'x', step: params[1], ok: params[2], detail: params[3], hh_refs: null, user_id: params[5], user_name: null, created_at: 'now' }); return { rows: [] }; }
       if (sql.includes('FROM job_payments')) return { rows: opPayments };
@@ -522,15 +532,36 @@ describe('raiseHireInvoice', () => {
     expect(hh.invoices[0].status).toBe(0);
   });
 
-  it('refuses an EU hire until the VAT split is built', async () => {
+  it('an EU hire: splits the VAT on the draft, then approves it in the same press like any other invoice', async () => {
     uninvoicedJob(); hh.euTrigger = true;
     const plan = await planHireCloseOut(JOB.id);
-    expect(plan.invoice.euTrigger).toBe(true);
-    expect(plan.invoice.ready).toBe(false);
+    expect(plan.invoice).toMatchObject({ euTrigger: true, ready: true });
+    expect(plan.warnings.join(' ')).toContain('EU hire');
+
+    mockSplit.mockResolvedValueOnce('split');
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(true);
+    expect(mockSplit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ hhJobNumber: 16015, draftId: 13000, firstInvoice: true }));
+    // Split BEFORE approve, then approved and sent to Xero.
+    const approveCall = mockPost.mock.calls.findIndex((c) => c[0] === '/php_functions/billing_save_status.php');
+    expect(mockSplit.mock.invocationCallOrder[0]).toBeLessThan(mockPost.mock.invocationCallOrder[approveCall]);
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([expect.objectContaining({ id: 13000, status: 2 })]);
+  });
+
+  it('an EU hire whose split stops is never approved', async () => {
+    uninvoicedJob(); hh.euTrigger = true;
+    mockSplit.mockRejectedValueOnce(new Stop('Draft 13000 is not split correctly'));
     const r = await raiseHireInvoice(JOB.id, 'u1');
     expect(r.done).toBe(false);
-    expect(r.message).toContain('Non-standard VAT');
-    expect(posts('/php_functions/billing_save.php')).toEqual([]);
+    expect(r.message).toContain('not split correctly');
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([]);
+    expect(mockSync).not.toHaveBeenCalled();
+  });
+
+  it('a non-EU hire never calls the split', async () => {
+    uninvoicedJob();
+    await raiseHireInvoice(JOB.id, 'u1');
+    expect(mockSplit).not.toHaveBeenCalled();
   });
 
   it('a job still out: refuses by default, raises with the manager override', async () => {
@@ -556,5 +587,125 @@ describe('raiseHireInvoice', () => {
     const r = await raiseHireInvoice(JOB.id, 'u1');       // 16015 corrected: fully invoiced
     expect(r.done).toBe(false);
     expect(r.message).toContain('Nothing to invoice');
+  });
+});
+
+describe('runHireCloseOut (the one button)', () => {
+  function uninvoicedJob() {
+    hh.invoices = []; hh.apps = [];
+    hh.accruedNet = 510; hh.uninvoicedNet = 510;
+    hh.deposits = [
+      { id: 9329, credit: 153, bank: 267, allocated: 0, desc: '16756 - deposit', date: '2026-09-24' },
+      { id: 9360, credit: 459, bank: 267, allocated: 0, desc: '16756 - balance', date: '2026-09-29' },
+    ];
+    opPayments = [
+      { hirehop_deposit_id: 9329, payment_type: 'deposit', amount: 153, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
+      { hirehop_deposit_id: 9360, payment_type: 'balance', amount: 459, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
+    ];
+    installXero();
+  }
+
+  it('job 16756: one press raises the invoice, allocates both payments in HireHop and Xero, and is ready to complete', async () => {
+    uninvoicedJob();
+    const r = await runHireCloseOut(JOB.id, 'u1');
+    expect(r.done).toBe(true);
+    expect(hh.invoices[0]).toMatchObject({ status: 2, gross: 612, paid: 612 });
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([
+      expect.objectContaining({ deposit: 9329, paid: 153 }),
+      expect.objectContaining({ deposit: 9360, paid: 459 }),
+    ]);
+    expect(xero.invoiceDue['x-13000']).toBe(0);
+    expect(r.plan.readyToComplete).toBe(true);
+    expect(r.message).toContain('OT-INV-13000');
+    expect(r.message).toContain('Ready to complete');
+  });
+
+  it('with the invoice already raised, the same button just allocates', async () => {
+    const r = await runHireCloseOut(JOB.id, 'u1');     // 16015 corrected: invoiced, £254.17 to allocate
+    expect(r.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toEqual([]);
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([expect.objectContaining({ deposit: 8661, paid: 254.17 })]);
+  });
+
+  it('stops at the draft on a penny mismatch and carries on from there once fixed', async () => {
+    uninvoicedJob(); hh.uninvoicedNet = 500;
+    const first = await runHireCloseOut(JOB.id, 'u1');
+    expect(first.done).toBe(false);
+    expect(first.message).toContain('differ by £10.00');
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([]);
+    // Someone fixes the lines in HireHop: the draft now reads £510.
+    hh.invoices[0].gross = 612; hh.accruedNet = 510;
+    const second = await runHireCloseOut(JOB.id, 'u1');
+    expect(second.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toHaveLength(1);       // no second draft
+    expect(second.plan.readyToComplete).toBe(true);
+  });
+});
+
+describe('allocateOnArrival (the arrival hook, §4.5)', () => {
+  /** A fresh £254.17 portal payment, newer than everything else on the job. */
+  const newPayment = () => {
+    hh.deposits.push({ id: 9500, credit: 254.17, bank: 267, allocated: 0, desc: '16015 - balance', date: '2026-10-10' });
+    opPayments.push({ hirehop_deposit_id: 9500, payment_type: 'balance', amount: 254.17, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null });
+    xero.overpayments['op-9500'] = { remaining: 254.17, allocations: [] };
+  };
+
+  it('does nothing at all while the setting is off', async () => {
+    arrivalEnabled = 'false';
+    expect(await allocateOnArrival(JOB.id, 8661)).toBe('off');
+    expect(mockRead).not.toHaveBeenCalled();
+    expect(logRows).toEqual([]);
+  });
+
+  it('the payment that arrived pays the one invoice owing, in HireHop and Xero, logged with no user — and never completes the job', async () => {
+    hh.deposits[0].allocated = 1140.97; hh.apps.push({ id: 901, invoiceId: 99, depositId: 8661, amount: 1140.97 });  // 8661 spent elsewhere
+    newPayment();
+    expect(await allocateOnArrival(JOB.id, 9500)).toBe('allocated');
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([
+      expect.objectContaining({ deposit: 9500, OWNER: 12252, paid: 254.17, id: 0 }),
+    ]);
+    expect(xero.invoiceDue['x-12252']).toBe(0);
+    expect(posts('/frames/status_save.php')).toEqual([]);
+    expect(logRows.find((l) => l.step === 'arrival')).toMatchObject({ ok: true, user_id: null });
+    expect(logRows.every((l) => l.user_id === null)).toBe(true);
+  });
+
+  it('never uses money already sitting on the job: an older unallocated payment means a person decides', async () => {
+    newPayment();   // 8661 still holds £1,140.97 and is older, so the §5 rule would take it first
+    expect(await allocateOnArrival(JOB.id, 9500)).toBe('stopped');
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([]);
+    expect(mockXeroAllocate).not.toHaveBeenCalled();
+    expect(logRows[0]).toMatchObject({ step: 'arrival', ok: false });
+    expect(logRows[0].detail).toContain('8661');
+  });
+
+  it('is silent when there is no invoice owing (the usual case: payment before the hire)', async () => {
+    hh.invoices[0].paid = hh.invoices[0].gross;
+    newPayment();
+    expect(await allocateOnArrival(JOB.id, 9500)).toBe('skipped');
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(logRows).toEqual([]);
+  });
+
+  it('is silent for an excess payment', async () => {
+    expect(await allocateOnArrival(JOB.id, 9093)).toBe('skipped');
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(logRows).toEqual([]);
+  });
+
+  it('stops at pre-flight, writing nothing, when HireHop and OP disagree', async () => {
+    newPayment();
+    opPayments = opPayments.filter((p) => p.hirehop_deposit_id !== 9500);
+    expect(await allocateOnArrival(JOB.id, 8661)).toBe('stopped');
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([]);
+    expect(logRows[0]).toMatchObject({ step: 'preflight', ok: false });
+  });
+
+  it('fireArrivalHook never throws into the payment; a failure is logged for a person', async () => {
+    mockRead.mockRejectedValue(new Error('HireHop unreachable'));
+    expect(() => fireArrivalHook(JOB.id, 8661)).not.toThrow();
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(logRows[0]).toMatchObject({ step: 'arrival', ok: false });
+    expect(logRows[0].detail).toContain('HireHop unreachable');
   });
 });

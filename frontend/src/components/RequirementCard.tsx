@@ -22,8 +22,7 @@ import BacklineLocationModal, {
   backlineLocationIcon,
   backlineLocationLabel,
 } from './BacklineLocationModal';
-import HireCloseOutPanel from './HireCloseOutPanel';
-import HireInvoicePanel from './HireInvoicePanel';
+import CloseOutSignpost from './CloseOutSignpost';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -222,8 +221,11 @@ export default function RequirementCard({
   selfDriveVanOverride,
   onVehicleCountOverride,
   onReload,
+  onOpenMoney,
 }: {
   req: JobRequirement;
+  /** The Invoice card is a signpost to the Money tab's close-out panel (Oct 2026). */
+  onOpenMoney?: () => void;
   derivedFlags?: DerivedFlags | null;
   /** Regs of vans actually allocated to THIS job — shown on the vehicle
    *  headline ("Vehicle (Self-Drive) — RO23HLU") once a van is linked. */
@@ -994,32 +996,12 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Payment reconciliation — the hire close-out (HIRE-CLOSE-OUT-SPEC.md §4.3):
-                what HireHop holds, what Allocate would do, the buttons, the log. The
-                card's own status still comes from the derivation engine. */}
-            {req.requirement_type === 'payment_reconcile' && jobId && (
-              <HireCloseOutPanel jobId={jobId} onChanged={onReload} />
-            )}
-
-            {/* Invoice — Raise invoice (HIRE-CLOSE-OUT-SPEC.md §4.1): what is left to bill,
-                and the button that drafts, penny-checks, approves and sends it to Xero. */}
+            {/* Invoice — a signpost to the close-out on the Money tab (HIRE-CLOSE-OUT-SPEC.md §3,
+                redesign Oct 2026): one pill, one line, the five steps, "Open in Money →".
+                Its status (and the Payment Reconciliation one) still come from the
+                derivation engine and "Mark as sent" on the Money panel; no dropdowns here. */}
             {req.requirement_type === 'invoice' && jobId && (
-              <HireInvoicePanel jobId={jobId} onChanged={onReload} />
-            )}
-
-            {/* Invoice — show "Mark as Sent" button when status is in_progress (generated) */}
-            {req.requirement_type === 'invoice' && req.status === 'in_progress' && (
-              <div className="mt-1.5">
-                <button
-                  onClick={() => onStatusChange(req.id, 'done')}
-                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-green-50 text-green-700 border border-green-200 rounded hover:bg-green-100 transition-colors"
-                >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                  Mark as Sent to Client
-                </button>
-              </div>
+              <CloseOutSignpost jobId={jobId} onOpenMoney={onOpenMoney} />
             )}
 
             {/* Reminder — show due date, assigned user, event trigger, delivery, notes */}
@@ -1162,7 +1144,7 @@ export default function RequirementCard({
           )}
 
           {/* Status dropdown — only for non-contextual cards */}
-          {!isContextualStatus && (
+          {!isContextualStatus && req.requirement_type !== 'invoice' && (
             <div className="relative" ref={statusMenuRef}>
               <button
                 onClick={() => {

@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { isR2Configured, listR2Objects } from './r2';
 import { runBackup } from '../scripts/backup';
 import { runRetentionSweep } from '../scripts/backup-retention';
+import { runTraccarHousekeeping, isTraccarHousekeepingConfigured, TRACCAR_BACKUP_PREFIX } from '../scripts/traccar-backup';
 import { isHireHopConfigured } from './hirehop';
 import { syncJobsFromHireHop } from '../services/hirehop-job-sync';
 import { runComplianceCheck } from '../services/compliance-checker';
@@ -75,6 +76,35 @@ export function startScheduler() {
       }
     });
     console.log('Scheduler: Backup retention sweep scheduled daily at 02:30');
+
+    // Daily at 03:10 UK — Traccar: delete positions over 12 months old, dump
+    // the Traccar database to R2 (live, no downtime), keep 7 nightly + 4
+    // weekly (scripts/traccar-backup.ts, docs/TRACCAR-POSTGRES.md). Off until
+    // TRACCAR_DATABASE_URL is set. Same last-hour dedupe as the OP backup.
+    if (isTraccarHousekeepingConfigured()) {
+      cron.schedule('10 3 * * *', async () => {
+        try {
+          const recent = await listR2Objects(TRACCAR_BACKUP_PREFIX);
+          const oneHourAgo = Date.now() - 60 * 60 * 1000;
+          if (recent.some((o) => o.Key?.endsWith('.dump') && o.LastModified && o.LastModified.getTime() > oneHourAgo)) {
+            console.log('Scheduler: Traccar backup skipped — one was taken within the last hour');
+            return;
+          }
+        } catch (err) {
+          console.warn('Scheduler: Traccar backup dedup check failed, proceeding:', err);
+        }
+        console.log('Scheduler: Starting Traccar backup...');
+        try {
+          const r = await runTraccarHousekeeping();
+          console.log(
+            `Scheduler: Traccar backup complete — ${r.key} (${Math.round(r.bytes / 1048576)}MB), purged ${r.purged} old positions, removed ${r.deleted.length} old dump(s)`,
+          );
+        } catch (err) {
+          console.error('Scheduler: Traccar backup failed:', err);
+        }
+      }, { timezone: 'Europe/London' });
+      console.log('Scheduler: Traccar backup + 12-month purge scheduled daily at 03:10');
+    }
   }
 
   // ── Shop transaction drain ────────────────────────────────────────────
@@ -119,19 +149,23 @@ export function startScheduler() {
     });
   }
 
-  // ── Shop weekly close reminder ────────────────────────────────────────
-  // Monday 08:55 (UK): email jon which finished weeks are waiting to be closed
-  // — ready, or what's stopping them (docs/SHOP-SALES-SPEC.md §20.2). The close
-  // itself is a button until it has proven itself. Shop jobs are never in OP's
-  // `jobs` table, so the lost/cancelled + is_internal gates don't apply here.
+  // ── Shop weekly close ─────────────────────────────────────────────────
+  // Monday 08:55 (UK): close every finished week whose pre-flight is clean,
+  // exactly as the Close button does (when `shop_auto_close_enabled` is on —
+  // jon, 12 Oct 2026, after four clean hand closes), then email jon what
+  // closed, what stopped and what is still waiting (docs/SHOP-SALES-SPEC.md
+  // §20.2). Shop jobs are never in OP's `jobs` table, so the lost/cancelled +
+  // is_internal gates don't apply here.
   if (isHireHopConfigured()) {
     cron.schedule('55 8 * * 1', async () => {
       try {
-        const { sendShopCloseDigest } = await import('../services/shop-close');
-        const n = await sendShopCloseDigest();
-        if (n > 0) console.log(`Scheduler: shop close reminder — ${n} week(s) to close`);
+        const { runMondayShopClose } = await import('../services/shop-close');
+        const r = await runMondayShopClose();
+        if (r.closed + r.stopped + r.waiting > 0) {
+          console.log(`Scheduler: shop close — ${r.closed} closed, ${r.stopped} stopped, ${r.waiting} waiting`);
+        }
       } catch (err) {
-        console.error('Scheduler: shop close reminder failed:', err instanceof Error ? err.message : err);
+        console.error('Scheduler: shop close failed:', err instanceof Error ? err.message : err);
       }
     }, { timezone: 'Europe/London' });
   }
@@ -1613,6 +1647,25 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Bill payment pull-back sync scheduled daily at 07:50 Europe/London');
+
+  // ── Hire close-out: Xero credit sweep — nightly 03:30 Europe/London ──────
+  // HireHop never pushes a payment allocation to Xero, so every invoice sat
+  // "Awaiting payment" until the bookkeeper applied the credit by hand. This
+  // applies what HireHop's allocations already say, one job at a time, with
+  // the same idempotent step the close-out button runs. Off until the
+  // `closeout_xero_sweep_enabled` setting is 'true' (migration 282).
+  cron.schedule('30 3 * * *', async () => {
+    try {
+      const { runCloseOutXeroSweep } = await import('../services/close-out-xero-sweep');
+      const r = await runCloseOutXeroSweep();
+      if (r.enabled) {
+        console.log(`Scheduler: Close-out Xero sweep — ${r.checked} job(s) checked, ${r.applied} applied, ${r.stopped} stopped, ${r.errors} error(s)`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Close-out Xero sweep failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Close-out Xero sweep scheduled nightly at 03:30 Europe/London');
 
   // ── Gmail ingestion (Auto-Chase Phase 1) ────────────────────────────
   // Every 10 minutes — poll the info@ mailbox, log new client emails onto job

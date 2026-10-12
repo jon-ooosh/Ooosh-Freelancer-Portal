@@ -3,6 +3,8 @@
  * staff-auth /api/vehicles/traccar proxy (e.g. the public OOH parking form).
  */
 
+import { imeiForReg, isRealFix, normaliseReg } from './gps-trackers';
+
 const TRACCAR_URL = process.env.TRACCAR_URL || 'https://tracking.oooshtours.co.uk';
 const TRACCAR_EMAIL = process.env.TRACCAR_EMAIL || '';
 const TRACCAR_PASSWORD = process.env.TRACCAR_PASSWORD || '';
@@ -10,6 +12,8 @@ const TRACCAR_PASSWORD = process.env.TRACCAR_PASSWORD || '';
 interface TraccarDeviceRow {
   id: number;
   name: string;
+  /** The tracker's IMEI. */
+  uniqueId?: string;
   status?: string;
   lastUpdate?: string;
 }
@@ -47,16 +51,20 @@ async function traccarFetch<T>(endpoint: string, params?: Record<string, string>
   return res.json() as Promise<T>;
 }
 
-function normaliseReg(s: string): string {
-  return s.replace(/\s+/g, '').toUpperCase();
-}
-
-/** The Traccar device named after this registration (devices are named by reg). */
+/**
+ * The Traccar device for this van: the tracker fitted to it on the register
+ * (by IMEI, services/gps-trackers.ts), else a device named after the reg.
+ */
 async function findDeviceForReg(reg: string): Promise<TraccarDeviceRow | null> {
   const now = Date.now();
   if (!deviceCache || deviceCache.expiresAt < now) {
     const rows = await traccarFetch<TraccarDeviceRow[]>('/devices');
     deviceCache = { rows, expiresAt: now + DEVICE_CACHE_MS };
+  }
+  const imei = await imeiForReg(reg);
+  if (imei) {
+    const byImei = deviceCache.rows.find(d => d.uniqueId === imei);
+    if (byImei) return byImei;
   }
   const target = normaliseReg(reg);
   return deviceCache.rows.find(d => normaliseReg(d.name || '') === target) || null;
@@ -88,7 +96,8 @@ export async function getRouteForReg(reg: string, from: Date, to: Date): Promise
     to: to.toISOString(),
   });
   return rows
-    .filter((p) => Number.isFinite(p.latitude) && Number.isFinite(p.longitude))
+    // 0,0 = no satellite fix, not a place (gps-trackers.ts isRealFix).
+    .filter((p) => isRealFix(p.latitude, p.longitude))
     .map((p) => ({
       time: p.fixTime,
       lat: p.latitude,
@@ -120,7 +129,8 @@ export async function getLatestPositionForReg(reg: string): Promise<{
       deviceId: String(device.id),
     });
     const pos = positions[0];
-    if (!pos) return null;
+    // A latest position with no satellite fix (0,0) is no position at all.
+    if (!pos || !isRealFix(pos.latitude, pos.longitude)) return null;
 
     const fixTimeMs = new Date(pos.fixTime).getTime();
     const ageSeconds = Math.max(0, Math.round((Date.now() - fixTimeMs) / 1000));

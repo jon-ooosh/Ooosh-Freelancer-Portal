@@ -47,20 +47,14 @@ const queryClient = new QueryClient({
 })
 
 export default function FreelancerCheckinShell() {
-  const [searchParams, setSearchParams] = useSearchParams()
+  const [searchParams] = useSearchParams()
   const [state, setState] = useState<ShellState>({ kind: 'loading' })
   const [pickBusyId, setPickBusyId] = useState<string | null>(null)
   const [pickError, setPickError] = useState<string | null>(null)
 
-  // Drop the one-shot token from the URL once a session exists, so a refresh
-  // resumes the session instead of re-exchanging a spent token.
-  const stripTokenParams = () => {
-    const next = new URLSearchParams(searchParams)
-    next.delete('freelancerToken')
-    next.delete('returnUrl')
-    next.delete('startUrl')
-    setSearchParams(next, { replace: true })
-  }
+  // The token STAYS in the URL once a session exists: a reload of the same
+  // link resumes the session, and a phone that lost its storage just
+  // re-exchanges the link (valid 24h, reusable) — see FreelancerBookoutShell.
 
   // Claim one van from the picker. Same endpoint, now with the chosen
   // assignment — the server re-checks it's genuinely a van on this job.
@@ -75,8 +69,7 @@ export default function FreelancerCheckinShell() {
       candidate.assignmentId,
     )
     if (result.kind === 'ok') {
-      setFreelancerSession(result.token, result.context)
-      stripTokenParams()
+      setFreelancerSession(result.token, result.context, state.hmacToken)
       setState({ kind: 'ready' })
       return
     }
@@ -98,6 +91,13 @@ export default function FreelancerCheckinShell() {
       const startUrl = safeReturnUrl(searchParams.get('startUrl'))
 
       if (hmacToken) {
+        // Same link as the session on this phone → a reload, resume it.
+        const existing = getFreelancerSession()
+        if (existing && existing.linkToken === hmacToken) {
+          setState({ kind: 'ready' })
+          return
+        }
+
         const result = await resolveFreelancerCheckinToken(OP_API_BASE, hmacToken, returnUrl)
         if (cancelled) return
 
@@ -117,8 +117,7 @@ export default function FreelancerCheckinShell() {
           return
         }
 
-        setFreelancerSession(result.token, result.context)
-        stripTokenParams()
+        setFreelancerSession(result.token, result.context, hmacToken)
 
         setState({ kind: 'ready' })
         return
@@ -137,7 +136,7 @@ export default function FreelancerCheckinShell() {
     return () => {
       cancelled = true
     }
-  }, [searchParams, setSearchParams])
+  }, [searchParams])
 
   if (state.kind === 'loading') {
     return (
@@ -178,10 +177,11 @@ export default function FreelancerCheckinShell() {
     clearFreelancerSession()
     return (
       <FreelancerLinkError
-        message="Your session has ended (sessions last 4 hours). Head back to the freelancer portal and start the collection again."
+        message="Your session has ended, or isn't on this phone any more. Head back to the freelancer portal and start the collection again."
         returnUrl={state.returnUrl}
         startUrl={state.startUrl}
         action="check-in"
+        staffLoginHref="/login?redirect=%2Fvehicles%2Fcheck-in"
       />
     )
   }

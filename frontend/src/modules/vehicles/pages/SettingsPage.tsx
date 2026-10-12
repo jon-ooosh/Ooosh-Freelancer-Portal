@@ -1,16 +1,21 @@
 import { useState } from 'react'
-import { useOnlineStatus } from '../hooks/useOnlineStatus'
-import { useAuth } from '../hooks/useAuth'
+import { useSearchParams } from 'react-router-dom'
 import { StockManagement } from '../components/stock/StockManagement'
 import { ChecklistSettings } from '../components/settings/ChecklistSettings'
-import { DataManagement } from '../components/admin/DataManagement'
 
-type SettingsTab = 'general' | 'checklists' | 'stock' | 'data'
+// Checklists = the prep + driver-briefing checklist items PrepPage and
+// BookOutPage read; Stock = the prep consumables behind the low-stock banner.
+// The General (standalone-app leftovers) and Data (Monday prep import + a
+// "wipe test data" button whose endpoints no longer exist) tabs were removed
+// Oct 2026.
+type SettingsTab = 'checklists' | 'stock'
 
 export function SettingsPage() {
-  const isOnline = useOnlineStatus()
-  const { logout } = useAuth()
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general')
+  // ?tab=stock — the low-stock banner's "View Stock" lands on the Stock tab.
+  const [searchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState<SettingsTab>(
+    searchParams.get('tab') === 'stock' ? 'stock' : 'checklists',
+  )
 
   return (
     <div className="space-y-4">
@@ -18,11 +23,6 @@ export function SettingsPage() {
 
       {/* Tab bar */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
-        <TabButton
-          label="General"
-          active={activeTab === 'general'}
-          onClick={() => setActiveTab('general')}
-        />
         <TabButton
           label="Checklists"
           active={activeTab === 'checklists'}
@@ -33,52 +33,13 @@ export function SettingsPage() {
           active={activeTab === 'stock'}
           onClick={() => setActiveTab('stock')}
         />
-        <TabButton
-          label="Data"
-          active={activeTab === 'data'}
-          onClick={() => setActiveTab('data')}
-        />
       </div>
-
-      {/* General tab */}
-      {activeTab === 'general' && (
-        <div className="space-y-4">
-          <div className="rounded-lg border border-gray-200 bg-white p-4">
-            <h3 className="mb-2 font-medium">Connection Status</h3>
-            <div className="flex items-center gap-2">
-              <span
-                className={`h-3 w-3 rounded-full ${
-                  isOnline ? 'bg-green-500' : 'bg-red-500'
-                }`}
-              />
-              <span className="text-sm">
-                {isOnline ? 'Online' : 'Offline'}
-              </span>
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-gray-200 bg-white p-4">
-            <h3 className="mb-2 font-medium">Sync Status</h3>
-            <p className="text-sm text-gray-500">No pending items</p>
-          </div>
-
-          <button
-            onClick={logout}
-            className="w-full rounded-lg border border-red-200 bg-white px-4 py-3 text-sm font-medium text-red-600 transition-colors hover:bg-red-50"
-          >
-            Log Out
-          </button>
-        </div>
-      )}
 
       {/* Checklists tab */}
       {activeTab === 'checklists' && <ChecklistSettings />}
 
       {/* Stock tab */}
       {activeTab === 'stock' && <StockManagement />}
-
-      {/* Data tab */}
-      {activeTab === 'data' && <DataManagement />}
     </div>
   )
 }

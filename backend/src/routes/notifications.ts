@@ -1,10 +1,13 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { z } from 'zod';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── GET /api/notifications — bell dropdown (legacy, kept for backward compat) ──
 router.get('/', async (req: AuthRequest, res: Response) => {

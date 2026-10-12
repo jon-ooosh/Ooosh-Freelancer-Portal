@@ -899,8 +899,12 @@ export function BookOutPage() {
 
     // Track: VE103B certificate generation (independent, only if cert number entered)
     // V&D soft book-out: skipped — no VE103B for non-customer hires.
+    // Freelancer book-out: skipped — the VE103B is an office job done at the
+    // desk BEFORE the van goes out, and /api/ve103b is staff-only, so it 401'd
+    // and blocked the hand-back to the portal (Oct 2026).
     const ve103bTrack = (async () => {
       if (isVanAndDriver) return []
+      if (isFreelancer) return []
       // Already generated at the desk (Phase A) — don't re-generate (would 409
       // on the unique cert number anyway). Report it as done for the summary.
       if (form.ve103bGeneratedAtDesk) {

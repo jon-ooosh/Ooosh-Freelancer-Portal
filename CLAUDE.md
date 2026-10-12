@@ -155,8 +155,9 @@ on an employee (`services/staff-doc-cycles.ts`). Same words, different people, d
 consequence. Never merge them.
 
 **`staff_record_files` objects live under the `staff-records/` R2 prefix, and that
-prefix is the ONLY one `GET /api/files/download` role-gates.** Every other prefix it
-serves is readable by any authenticated caller, freelancers included. Never file
+prefix (with `claims/`) is the ONLY one `GET /api/files/download` role-gates.** Every
+other prefix it serves is readable by EVERY staff login whatever their role (the
+route is staff-only since Oct 2026; `backups/` is no longer on it). Never file
 anything private under `files/`.
 
 **BUILT (steps 1–10 + the sitter till), Sep 2026:** `docs/SHOP-SALES-SPEC.md` — the **Shop Till**
@@ -165,7 +166,8 @@ lookup, with HireHop remaining the single stock database. **§19 is the current
 state, the live settings, and what to do next — read it before touching this.**
 **§20, the weekly close** (invoice → approve → allocate payments → complete) — LIVE
 (`services/shop-close.ts`, admin-only button on *This week*; first real week closed
-28 Sep 2026). **HireHop never pushes an allocation to Xero — OP applies the credit in
+28 Sep 2026; since 12 Oct it runs itself Monday 08:55 for every clean finished week —
+`shop_auto_close_enabled`; a week that stopped part-way waits for the button). **HireHop never pushes an allocation to Xero — OP applies the credit in
 Xero itself** (`HIREHOP-BILLING-API.md` §8).
 
 Three rules from it that bite elsewhere:
@@ -186,7 +188,7 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
-**PHASES 1–2 BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
+**PHASES 1–3b BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
 finishing a hire's money from the post-hire cards (raise invoice → excess decision → allocate
 deposits in HireHop AND Xero → complete), one job at a time, on the shared recipe
 `services/hh-invoice-close.ts` (`HIREHOP-BILLING-API.md` §8). Born from job 16015: HireHop's "New
@@ -194,13 +196,26 @@ payment" dialog records a REFUND when its invoice dropdown is left at "none". Bu
 `services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|allocate|complete`,
 log in `job_closeout_log`) — plan shown first, every write read back, excess NEVER allocated, more
 than one open invoice refused for now, HireHop↔OP payment and refund mismatches refuse by name.
-The UI is two panels on the Post-Hire tab sharing one plan read (`lib/closeOutPlan.ts`):
-`HireInvoicePanel.tsx` on the **Invoice** card (Raise invoice: draft from uninvoiced lines → penny check →
-approve dated today → Xero; **an EU hire with the "Non-standard VAT rules" item is refused until the
-invoice-line VAT split is built**) and `HireCloseOutPanel.tsx` on the **Payment Reconciliation** card
-(Allocate payments, Complete job; Xero log lines admin-only). Not yet: the VAT split (spec §10.1), the
-arrival hook and the Xero sweep (Phase 3). §1 is
-settled, §5 the allocation rule, §9 the phases. Refunds only through the existing routes.
+The UI is ONE panel on the **Money tab**, `CloseOutMoneyPanel.tsx` (Oct 2026 redesign): one pill, five
+steps, one next-action line with its reason behind "Why?", a short ledger; stages from `lib/closeOutPlan.ts`
+`closeOutView()`, shared with the Overview's Invoice card (now a signpost, `CloseOutSignpost.tsx`, "Open in
+Money →") and the Money tab's coloured dot. One button raises the invoice if needed (draft from uninvoiced
+lines → penny check → approve dated today → Xero) then allocates in HireHop + Xero (`POST /close-out/:jobId/run`);
+"Mark as sent" ticks the Invoice requirement; "Complete the job" opens the page's own status modal. The balance
+shows once, in the Financial Summary, only when non-zero. No Xero links, no Details modal. **An EU hire** (the "Non-standard VAT rules" item)
+gets its draft split by `services/eu-vat-split.ts` (real lines to £0, each edited in place by its own id, per nominal a UK-days line at 20% and a
+non-UK-days line at code 33; 31+ day vehicles zero-rated), checked against the portal's figure, then approved in the same press.
+Completing a job is the status
+change at the top of the page, and that modal refuses open Problems (manager + reason to override;
+`routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
+(03:30) applies HireHop's allocations as credits in Xero, off until `system_settings.closeout_xero_sweep_enabled`
+is `'true'` (switched on 10 Oct 2026). **Arrival hook** `services/close-out-arrival.ts` (Phase 3b): a hire payment
+landing on a job with exactly one invoice owing is allocated to it in HireHop + Xero, after the payment has
+answered — THAT payment only (never money already sitting on the job), never completes the job; off until
+`closeout_arrival_hook_enabled` is `'true'`. An invoice HireHop pushed to Xero but lost the link to (`ACC_ID` empty) is found
+by number + total (`hh-invoice-close.ts` `adoptLostXeroInvoices()`). §1 is
+settled, §5 the allocation rule, §9 the phases, **§12 the current state and the ordered next steps — read it first.**
+Refunds only through the existing routes.
 
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
@@ -286,6 +301,7 @@ existing definition:
 | A claim's client links, driver code, damage marks, sketch | `services/claim-links.ts` (public routes: `routes/claim-form.ts` — every save through `sanitiseSection()`) |
 | Chasing a client for their claim form / how far it's got | `services/claim-chase.ts` (`runClaimClientChase()`, `formProgress()`) |
 | A van's GPS route between two times | `services/traccar-server.ts` `getRouteForReg()` (a claim's trace: `services/claim-gps.ts`) |
+| Which tracker is in this van? Which Traccar device is it? Is this position real? | `services/gps-trackers.ts` (register + `isRealFix()` — 0,0 is a no-fix report, never a place); frontend `findDeviceByReg()` in `modules/vehicles/lib/traccar-api.ts` finds the device by the fitted tracker's IMEI |
 | Texting someone about anything | `services/sms-service.ts` — each template goes live on its own via `SMS_LIVE_TEMPLATES` |
 | Preparing a photo for upload (EXIF time, HEIC, compress + thumb) | `frontend/src/lib/imageNormalise.ts` `prepareImage()` |
 | What is a van worth (approx.)? | `services/vehicle-value.ts` `estimateVehicleValue()` |
@@ -309,6 +325,7 @@ existing definition:
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 | Is this a STAFF access token? | `middleware/auth.ts` `verifyStaffToken()` — `authenticate` and the Socket.io handshake both use it; never a second `jwt.verify` for staff |
+| Minting or verifying ANY JWT | `services/tokens.ts` `signFor(audience, …)` / `verifyFor(audience, …)` — every family has its own `aud`; never call `jsonwebtoken` directly (the portal session, on its own secret, is the one exception) |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |
 | Who can be given something to do? | `services/assignable-staff.ts` — active + staff role + a CURRENT employment record. Shared by To Do's "For" picker and `/users?assignable=true` |
@@ -328,8 +345,10 @@ existing definition:
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
+| Splitting an EU hire's invoice by UK / non-UK days | `services/eu-vat-split.ts` — on the DRAFT only; which line gets which VAT rule is `vat-adjustment.ts` `classifyNominals()`, shared with the portal figure |
 | Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
 | Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |
+| Charging a client after the job is Completed (misc, PCN fee + fine) | `services/completed-charges.ts` `raiseChargeInvoice()` — its own invoice from custom lines only; never before completion (those costs go on the HireHop job); left out of the job-total sums via `isChargeOnlyInvoice()` |
 | Finishing a HIRE's money (plan → allocate hire deposits in HH + Xero → complete) | `services/hire-close-out.ts` — on the recipe above; never excess, never a refund; `job_closeout_log` is its record |
 | Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |
 | What is this shop sale called (`OT-SHOP-00100`)? | `services/shop-sale-ref.ts` `saleRef()` |
@@ -431,7 +450,7 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 
 ## Scheduled tasks (`config/scheduler.ts`)
 
-Backups 02:00 · job financials 03:00 · holiday entitlement 06:05 · Xero reconcile 07:45 ·
+Backups 02:00 · job financials 03:00 · Traccar backup + 12-month GPS purge 03:10 UK (off until `TRACCAR_DATABASE_URL` is set — `docs/TRACCAR-POSTGRES.md`) · close-out Xero sweep 03:30 (off until its setting is on) · holiday entitlement 06:05 · Xero reconcile 07:45 ·
 bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
@@ -441,7 +460,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 · sitter task summary 16:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
-shop close reminder Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·
+shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·
 Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the

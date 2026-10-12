@@ -14,12 +14,15 @@
  */
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { deriveFlags } from '../services/hh-requirement-derivation';
 import type { HHLineItem } from '../services/hirehop-job-sync';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // Candidate pipeline statuses we'll consider scanning. Provisional is
 // excluded — provisional is "basically confirmed, waiting on £" per jon,

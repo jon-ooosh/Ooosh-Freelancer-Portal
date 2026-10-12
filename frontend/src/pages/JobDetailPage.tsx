@@ -56,6 +56,7 @@ import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revi
 import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
 import { openAuthedFile } from '../lib/openAuthedFile';
 import { ukToday } from '../lib/ukDate';
+import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPlan } from '../lib/closeOutPlan';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -1595,6 +1596,24 @@ function JobDetailContent() {
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  // The Money tab's dot: the close-out's colour once a hire is back (amber = something
+  // to do, blue = waiting on the client, green = done, red = needs sorting). Read only
+  // for returned jobs — the plan is a live HireHop read, shared (30 s) with the panel
+  // and the Invoice card, so this costs nothing extra when either is on screen.
+  const [closeOutPlan, setCloseOutPlan] = useState<CloseOutPlan | null>(null);
+  const closeOutRelevant = !!id && !!job?.hh_job_number && !job?.is_internal
+    && (job?.pipeline_status === 'returned' || job?.pipeline_status === 'returned_incomplete');
+  useEffect(() => {
+    if (!closeOutRelevant || !id) { setCloseOutPlan(null); return; }
+    const unsub = subscribeCloseOutPlan(id, setCloseOutPlan);
+    loadCloseOutPlan(id).then(setCloseOutPlan).catch(() => undefined);
+    return unsub;
+  }, [id, closeOutRelevant]);
+  const moneyDot = (() => {
+    if (!closeOutPlan) return null;
+    const v = closeOutView(closeOutPlan, { isManager: false });
+    return v.stage === 'pre' ? null : TONE[v.tone].dot;
+  })();
   // Staging Calculator — modal launch; created plans surface as an Overview card.
   const [showStagingModal, setShowStagingModal] = useState(false);
   const [showRackPlanModal, setShowRackPlanModal] = useState(false);
@@ -4589,7 +4608,7 @@ function JobDetailContent() {
                tab === 'timeline' ? (<><span className="sm:hidden">Timeline</span><span className="hidden sm:inline">Activity Timeline</span></>) :
                tab === 'transport' ? (<><span className="sm:hidden">Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span><span className="hidden sm:inline">Crew & Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span></>) :
                tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
-               tab === 'money' ? 'Money' :
+               tab === 'money' ? (<>Money{moneyDot && <i className={`inline-block w-1.5 h-1.5 rounded-full ml-1.5 align-middle ${moneyDot}`} />}</>) :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
             );
@@ -4656,6 +4675,7 @@ function JobDetailContent() {
             onLaunchStaging={() => setShowStagingModal(true)}
             onLaunchRackPlan={() => setShowRackPlanModal(true)}
             onLaunchBacklineMatcher={() => setShowBacklineMatcher(true)}
+            onOpenMoney={() => setActiveTab('money')}
           />
 
         </div>
@@ -6137,7 +6157,7 @@ function JobDetailContent() {
 
       {/* Money Tab */}
       {activeTab === 'money' && id && (
-        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} />
+        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} onRequestComplete={() => initiateStatusChange('completed' as PipelineStatus)} />
       )}
 
       {/* Rack Planner — launched from the Job Requirements "Tools" menu (modal) */}
@@ -7085,7 +7105,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher, onOpenMoney }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
@@ -7116,6 +7136,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   onLaunchStaging?: () => void;
   onLaunchRackPlan?: () => void;
   onLaunchBacklineMatcher?: () => void;
+  /** The Invoice card's "Open in Money →" (the close-out lives on the Money tab). */
+  onOpenMoney?: () => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -7510,6 +7532,10 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
               // Merch renders in the dedicated Held-for-Clients block below (card
               // + nested items panel), not as a plain inline card.
               if (req.requirement_type === 'merch') continue;
+              // The payments requirement rides on the Invoice card as its second pill
+              // (one card for the hire close-out, Oct 2026). It still exists — the
+              // derivation engine and the Returns page count it — it just isn't drawn.
+              if (req.requirement_type === 'payment_reconcile' && requirements.some(r => r.requirement_type === 'invoice')) continue;
 
               cards.push(
                 <RequirementCard
@@ -7530,6 +7556,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                   selfDriveVanOverride={selfDriveVanOverride}
                   onVehicleCountOverride={req.requirement_type === 'vehicle' ? changeVehicleCountOverride : undefined}
                   onReload={loadAll}
+                  onOpenMoney={req.requirement_type === 'invoice' ? onOpenMoney : undefined}
                 />
               );
 
@@ -7907,14 +7934,23 @@ function StatusTransitionModal({
       .catch(() => {});
   }, [targetStatus]);
   const [outstandingItems, setOutstandingItems] = useState<string[]>([]);
+  // Open Problems (job_issues not resolved / written off / cancelled). Firmer
+  // than the close-out items: only a manager may complete over them, with a
+  // reason — the server enforces the same (routes/pipeline.ts).
+  const [openProblems, setOpenProblems] = useState<Array<{ id: string; summary: string; severity: string; status: string }>>([]);
+  const isManagerUser = hasManagerRole(currentUser?.role);
   const [upcomingJobs, setUpcomingJobs] = useState<Array<{
     id: string; hh_job_number: number | null; job_name: string | null;
     job_date: string | null; pipeline_status: string | null;
   }>>([]);
 
-  // Fetch outstanding close-out items + upcoming client jobs when completing
+  // Fetch outstanding close-out items + open Problems + upcoming client jobs when completing
   useEffect(() => {
     if (targetStatus !== 'completed' || !jobId) return;
+
+    api.get<{ data: Array<{ id: string; summary: string; severity: string; status: string }> }>(`/problems/job/${jobId}`)
+      .then(res => setOpenProblems((res.data || []).filter(p => !['resolved', 'written_off', 'cancelled'].includes(p.status))))
+      .catch(() => {});
 
     // Close-out progress
     api.post<{ data: Record<string, { items: Array<{ label: string; status: string }> }> }>(
@@ -8099,6 +8135,26 @@ function StatusTransitionModal({
 
         {targetStatus === 'completed' && (
           <div className="space-y-3 mb-4">
+            {openProblems.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm">
+                <div className="font-medium text-red-800 mb-1">
+                  {openProblems.length === 1 ? 'A Problem is still open on this job:' : `${openProblems.length} Problems are still open on this job:`}
+                </div>
+                <ul className="text-red-700 text-xs space-y-0.5">
+                  {openProblems.map(p => (
+                    <li key={p.id} className="flex items-center gap-1.5">
+                      <span className={`w-1.5 h-1.5 rounded-full ${p.severity === 'urgent' ? 'bg-red-600' : 'bg-red-400'}`} />
+                      {p.summary} <span className="text-red-400">({p.status.replace(/_/g, ' ')})</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-red-700 mt-2">
+                  {isManagerUser
+                    ? 'A manager can complete the job anyway — say why in the note below. It goes on the timeline.'
+                    : 'Resolve them first, or ask a manager to complete the job with a reason.'}
+                </p>
+              </div>
+            )}
             {outstandingItems.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm">
                 <div className="font-medium text-amber-800 mb-1">Outstanding close-out items:</div>
@@ -8276,16 +8332,21 @@ function StatusTransitionModal({
           </div>
         )}
 
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
-          <input
-            type="text"
-            placeholder="Why are you changing the status?"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-          />
-        </div>
+        {(() => {
+          const reasonRequired = targetStatus === 'completed' && openProblems.length > 0;
+          return (
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">{reasonRequired ? 'Reason (required — Problems still open)' : 'Note (optional)'}</label>
+              <input
+                type="text"
+                placeholder={reasonRequired ? 'Why is this job being completed with Problems open?' : 'Why are you changing the status?'}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                className={`w-full border rounded px-3 py-2 text-sm ${reasonRequired && !note.trim() ? 'border-red-300' : 'border-gray-300'}`}
+              />
+            </div>
+          );
+        })()}
 
         <div className="flex gap-3 justify-end">
           <button
@@ -8296,7 +8357,8 @@ function StatusTransitionModal({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={saving}
+            disabled={saving || (targetStatus === 'completed' && openProblems.length > 0 && (!isManagerUser || !note.trim()))}
+            title={targetStatus === 'completed' && openProblems.length > 0 && !isManagerUser ? 'Only a manager can complete a job with open Problems' : undefined}
             className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
           >
             {saving ? 'Saving...' : 'Confirm'}

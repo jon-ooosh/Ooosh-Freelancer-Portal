@@ -98,6 +98,8 @@ draft 12928 held ONLY the fourth. So a second invoice for charges added after th
 invoice is just another `all: 1` call. HireHop tracks this per line as `invoiced_so_far`
 (§10). **`all: 0` creates an EMPTY draft** (`debit: 0`, `items: []`) to which lines are
 then assigned by hand — §10 is that path.
+✅ Used by `completed-charges.ts` (Oct 2026): an empty draft + custom lines (§10.3b) is how OP
+charges a client after the job is Completed, when HireHop takes no new job lines.
 
 ⚠️ **`all` defaults to ticked in the UI, but that default is a HireHop user setting**
 (jon). Never rely on it — always send `all: 1`.
@@ -237,6 +239,11 @@ Interested (10) releases it** (`SHOP-SALES-SPEC.md` §2.1).
 - Deleting a payment application (jon deleted 16015's stray refund by hand on 9 Oct
   without the network tab open — next time).
 - Voiding / deleting an approved invoice (and what it does in Xero).
+- Telling HireHop an invoice IS in Xero. When HireHop's push reached Xero but HireHop never
+  recorded it (`ACC_ID: ""`, `exported: 0` — OT-INV-12000, job 15812, Jul 2026), a re-push
+  (`billing_save.php` then `tasks.php post_invoice_credit`) fails "Can't create invoice number
+  OT-INV-12000 — Xero error: Invoice # must be unique", even in administrator mode. OP works
+  round it by finding the Xero invoice by number and total (`adoptLostXeroInvoices()`).
 - VAT rounding across several odd-pence lines (§3).
 
 ---
@@ -373,7 +380,16 @@ line `ID` 104283, `MAIN_ID` 168520 (the job line), `ACC_NOMINAL_ID` 175,
 invoice line by line. **A job line goes on an invoice once only** (jon, 9 Oct) — a second
 row for the same `item_id` is not an option. ❓ Untested: a row with no job line (§7).
 
-### 10.3 Change one invoice line — `billing_save_item.php` (POST, singular)
+### 10.2b ⚠️ `billing_save_items.php` ADDS a line — it never edits one
+
+The capture of 12 Oct 2026 (scratch job 15745, draft 12946: one row, `discount=100`,
+`price=0`, no invoice-line id, `selected=` empty) was the line being ADDED to an empty
+draft. Sent for a line already on a draft it puts a **second copy** of the job line on the
+invoice — so "a job line goes on an invoice once only" is a rule for PEOPLE, not one HireHop
+enforces (live on 15745, 12 Oct: the PCX100 clamp twice, once at £3 and once at £0; OP's
+read-back stopped the run at the draft). **Edit a line already on an invoice with §10.3.**
+
+### 10.3 Change one invoice line IN PLACE — `billing_save_item.php` (POST, singular) ✅
 
 ```
 POST /php_functions/billing_save_item.php
@@ -385,6 +401,12 @@ POST /php_functions/billing_save_item.php
 Response: the invoice row with that line at `VAT_RATE: 0`, `ACC_TAX_RATE_ID: 33`,
 `VAT: 0`, and the invoice's `TAX` and `owing` recomputed (£1.20 → £1.00). `total` is
 the line's net; `nominal_id` can be changed in the same call.
+
+Captured again 12 Oct 2026 (15745, draft 12948) taking a line to **£0**: `id=104557 bill=12948
+kind=2 total=0 desc=… memo= vat_rate=20 vat_id=20 nominal_id=175 unit=0 main_id=15745 type=1
+selected=104557` → the SAME line id at `PRICE: 0`, `VAT: 0`, `UNIT_PRICE` 3 kept; no other line
+touched. The UI sends no discount field for this. This is how the EU split zeroes a line and
+zero-rates a 31+ day vehicle line (`hh-invoice-close.ts` `postInvoiceLineEdit()`).
 
 ### 10.3b Add a CUSTOM line to a draft — `billing_save_item.php` with `id=0`, `kind=3` ✅
 
@@ -419,8 +441,8 @@ never touched. A job line can be put on an invoice once only (jon, 9 Oct), so th
 | 31 | 0 | Zero Rated EC Services | ECZROUTPUTSERVICES |
 | **33** | 0 | Zero Rated Income (the one the UI offers, `assigned: 1`) | ZERORATEDOUTPUT |
 
-Which 0% code the EU split should use (33 vs 31) is the bookkeeper's call — ask before
-building `HIRE-CLOSE-OUT-SPEC.md` §10.1.
+The EU split uses **33** (Zero Rated Income) — confirmed by jon, 10 Oct 2026
+(`HIRE-CLOSE-OUT-SPEC.md` §1.13, §10.1).
 
 ### 10.5 Job lines, for completeness — `items_batch_save.php` / `items_save.php`
 

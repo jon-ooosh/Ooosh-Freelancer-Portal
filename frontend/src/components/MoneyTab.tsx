@@ -17,6 +17,7 @@ import CostCaptureModal from './CostCaptureModal';
 import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
+import CloseOutMoneyPanel from './CloseOutMoneyPanel';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
 import type { JobExcess, Cost } from '../../../shared/types';
 
@@ -35,6 +36,8 @@ interface MoneyTabProps {
   jobId: string;
   job: any; // Job object from parent
   onJobChanged?: () => void; // Notify parent to refresh job data (e.g. after status change)
+  /** The close-out panel's "Complete the job": opens the page's status modal at Completed. */
+  onRequestComplete?: () => void;
 }
 
 interface FinancialData {
@@ -363,7 +366,7 @@ function RefundNotifyControl({ viaStripe, checked, onChange }: {
 }
 
 
-export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
+export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -373,6 +376,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [portalLinkCopied, setPortalLinkCopied] = useState(false);
   const role = useAuthStore((s) => s.user?.role);
   const isAdmin = role === 'admin';
+  // Once the hire is back the close-out panel takes over; the pre-hire deposit prompts go.
+  const hireIsBack = ['returned', 'returned_incomplete', 'completed'].includes(job?.pipeline_status);
   const canManage = hasManagerRole(role);
   const [showResolveBalance, setShowResolveBalance] = useState(false);
   const [balReason, setBalReason] = useState('xero_settled');
@@ -1168,9 +1173,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               </div>
             </div>
 
+            {/* The balance, once — the close-out panel below doesn't repeat it (Oct 2026).
+                Shown only when something is owed (or the client is in credit, or a
+                business override needs explaining); a settled £0.00 is just noise. */}
+            {(financial.balance_override || isNonZero(financial.balance_outstanding)) && (
             <div className="flex items-center justify-between">
-              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : hasOutstanding(financial.balance_outstanding) ? 'text-red-600' : 'text-green-600'}`}>
-                Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}
+              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : hasOutstanding(financial.balance_outstanding) ? 'text-red-600' : 'text-amber-700'}`}>
+                {!financial.balance_override && !hasOutstanding(financial.balance_outstanding)
+                  ? <>In credit: £{Math.abs(financial.balance_outstanding).toFixed(2)}</>
+                  : <>Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}</>}
               </p>
               {/* Admin: resolve a stray HH balance the business considers settled
                   (Xero source of truth). Only when there's a balance + not already
@@ -1182,6 +1193,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 >Resolve balance…</button>
               )}
             </div>
+            )}
 
             {/* Credit notes, ALWAYS shown when there are any. Previously this
                 line was keyed on `credit_note_write_off`, which clamps to zero
@@ -1236,8 +1248,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             )}
             {balError && <p className="text-xs text-red-600 mt-1">{balError}</p>}
 
-            {/* Deposit to Secure info */}
-            {financial.hire_value_inc_vat > 0 && !financial.deposit_paid && (
+            {/* Deposit to Secure info — a pre-hire prompt; noise once the hire is back. */}
+            {!hireIsBack && financial.hire_value_inc_vat > 0 && !financial.deposit_paid && (
               <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                 <p className="text-xs font-semibold text-blue-800 uppercase tracking-wider mb-1">Deposit to Secure</p>
                 <p className="text-sm text-blue-700">
@@ -1252,7 +1264,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 </p>
               </div>
             )}
-            {financial.deposit_paid && hasOutstanding(financial.balance_outstanding) && (
+            {!hireIsBack && financial.deposit_paid && hasOutstanding(financial.balance_outstanding) && (
               <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
                 <p className="text-xs text-green-700">
                   Deposit secured. Remaining balance: <span className="font-semibold">£{financial.balance_outstanding.toFixed(2)}</span>
@@ -1268,6 +1280,18 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           </p>
         )}
       </div>
+
+      {/* The hire close-out — invoice, allocate, send, paid (HIRE-CLOSE-OUT-SPEC.md §3).
+          Shows itself only once the hire is back (or an invoice exists). */}
+      {!job?.is_internal && job?.hh_job_number && (
+        <CloseOutMoneyPanel
+          jobId={jobId}
+          portalUrl={portalLink?.url ?? null}
+          onRecordPayment={() => setShowPaymentForm(true)}
+          onRequestComplete={onRequestComplete}
+          onChanged={loadData}
+        />
+      )}
 
       {/* VAT Adjustment (international hires) */}
       {data.vat_adjustment && (

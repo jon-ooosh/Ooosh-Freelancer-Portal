@@ -11,7 +11,7 @@
  * own hire-form declaration answers.
  */
 import crypto from 'crypto';
-import jwt from 'jsonwebtoken';
+import { signFor, verifyFor } from './tokens';
 import { query } from '../config/database';
 import { uploadToR2 } from '../config/r2';
 import { frontendLink } from '../config/app-urls';
@@ -288,10 +288,10 @@ export async function verifyDriverCode(link: LinkRow, driverId: string, code: st
     return { ok: false, status: 400, error: "That code doesn't match — check the email and try again." };
   }
   await query(`UPDATE incident_claim_codes SET consumed_at = NOW() WHERE id = $1`, [row.id]);
-  const session = jwt.sign(
+  const session = signFor(
+    'claim_driver',
     { typ: 'claim_driver', link: link.id, claim: link.claim_id, driver: driverId },
-    process.env.JWT_SECRET!,
-    { expiresIn: `${DRIVER_SESSION_HOURS}h` },
+    `${DRIVER_SESSION_HOURS}h`,
   );
   return { ok: true, status: 200, session };
 }
@@ -299,13 +299,9 @@ export async function verifyDriverCode(link: LinkRow, driverId: string, code: st
 /** The driver id a session proves for THIS link, or null. */
 export function readDriverSession(link: LinkRow, header: string | undefined): string | null {
   if (!header) return null;
-  try {
-    const p = jwt.verify(header, process.env.JWT_SECRET!) as { typ?: string; link?: string; claim?: string; driver?: string };
-    if (p.typ !== 'claim_driver' || p.link !== link.id || p.claim !== link.claim_id || !p.driver) return null;
-    return p.driver;
-  } catch {
-    return null;
-  }
+  const p = verifyFor<{ typ?: string; link?: string; claim?: string; driver?: string }>('claim_driver', header);
+  if (!p || p.typ !== 'claim_driver' || p.link !== link.id || p.claim !== link.claim_id || !p.driver) return null;
+  return p.driver;
 }
 
 // ── Damage marks + sketch (shared by the client form and the staff page) ────

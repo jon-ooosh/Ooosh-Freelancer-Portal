@@ -28,6 +28,9 @@ import { getFrontendUrl } from '../config/app-urls';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // Bell + immediate email (the approval flow wants both). email_sent_at is
 // stamped so the Step-7 escalation scheduler doesn't re-email.

@@ -58,6 +58,9 @@ import { ukToday, ukDatePlus } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 const LEAD_COLUMNS = `
   id, artist_name, tm_artist_id, uk_date_count, first_date, last_date, venues, all_dates,

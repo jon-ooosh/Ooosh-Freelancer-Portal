@@ -19,6 +19,9 @@ import { fetchCostLines, validateCostLines, replaceCostLines, headerVatFromLines
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // Multer for the AI-extract endpoint — same 10MB limit as the generic file
 // uploader; accepts images + PDF (the receipts staff actually capture).

@@ -85,3 +85,68 @@ export async function resolveJobContactCandidates(
     source_org_name: (r.source_org_name as string) || null,
   }));
 }
+
+/** One person a delivery note / collection confirmation could be emailed to. */
+export interface JobEmailContact {
+  personId: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  role: string | null;
+  /** The job's lead contact (`job_contacts.is_primary`) */
+  isPrimary: boolean;
+}
+
+/**
+ * "Who should this delivery note go to?" — the picker list shared by the
+ * warehouse collection page and the freelancer portal's completion page.
+ * The people ticked onto THIS hire (`job_contacts`, lead first) come first,
+ * then the wider org pool from resolveJobContactCandidates() — mirroring the
+ * Job Detail contacts card. Deduped per person (a ticked job contact wins
+ * over the same person surfacing as an org candidate); nameless rows dropped. Rows without an email are kept (the
+ * warehouse picks the collector's NAME from this list too) — callers that
+ * only want addressable people filter on `email`.
+ *
+ * Lifted out of routes/warehouse.ts (Oct 2026) when the portal needed the
+ * same list, so the two pickers cannot drift.
+ */
+export async function resolveJobEmailContacts(jobId: string): Promise<JobEmailContact[]> {
+  const ticked = await query(
+    `SELECT jc.person_id, jc.is_primary, jc.role_override,
+            p.first_name, p.last_name, p.email, p.phone
+     FROM job_contacts jc
+     JOIN people p ON p.id = jc.person_id AND p.is_deleted = false
+     WHERE jc.job_id = $1
+     ORDER BY jc.is_primary DESC, p.first_name ASC`,
+    [jobId],
+  );
+  const candidates = await resolveJobContactCandidates(jobId);
+
+  const seen = new Set<string>();
+  const contacts: JobEmailContact[] = [];
+  for (const r of ticked.rows as Array<Record<string, any>>) {
+    if (seen.has(r.person_id)) continue;
+    seen.add(r.person_id);
+    contacts.push({
+      personId: r.person_id,
+      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+      email: r.email || '',
+      phone: r.phone || null,
+      role: r.role_override || null,
+      isPrimary: !!r.is_primary,
+    });
+  }
+  for (const c of candidates) {
+    if (seen.has(c.person_id)) continue;
+    seen.add(c.person_id);
+    contacts.push({
+      personId: c.person_id,
+      name: c.name,
+      email: c.email || '',
+      phone: c.phone,
+      role: c.role,
+      isPrimary: false,
+    });
+  }
+  return contacts.filter((c) => c.name);
+}

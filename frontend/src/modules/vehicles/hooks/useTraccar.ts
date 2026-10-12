@@ -5,6 +5,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getDevices, getPositions, findDeviceByReg, getTrips } from '../lib/traccar-api'
 import type { TraccarDevice, TraccarPosition, TraccarTrip } from '../types/traccar'
+import { useGpsTrackers } from './useGpsTrackers'
 
 /** Fetch all Traccar devices — cached for 5 minutes */
 export function useTraccarDevices() {
@@ -16,16 +17,22 @@ export function useTraccarDevices() {
 }
 
 /**
- * Get a Traccar device matching a vehicle registration.
+ * Get the Traccar device for a vehicle — via the tracker fitted to it on the
+ * register (by IMEI), else by a device named after the reg.
  * Returns undefined while loading, null if no tracker fitted.
  */
 export function useTraccarDevice(reg: string | undefined) {
   const { data: devices } = useTraccarDevices()
+  // A failed register load falls back to the name match rather than hanging.
+  const { data: trackers, isError: trackersFailed } = useGpsTrackers()
+  const register = trackers ?? (trackersFailed ? [] : undefined)
+  const imei = register?.find(t => t.vehicleReg && reg
+    && t.vehicleReg.replace(/\s+/g, '').toUpperCase() === reg.replace(/\s+/g, '').toUpperCase())?.imei ?? null
 
   return useQuery<TraccarDevice | null>({
-    queryKey: ['traccar', 'device', reg],
-    queryFn: () => findDeviceByReg(reg!, devices),
-    enabled: !!reg && !!devices,
+    queryKey: ['traccar', 'device', reg, imei],
+    queryFn: () => findDeviceByReg(reg!, devices, register),
+    enabled: !!reg && !!devices && !!register,
     staleTime: 5 * 60 * 1000,
   })
 }

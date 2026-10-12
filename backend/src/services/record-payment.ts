@@ -23,6 +23,7 @@ import {
 } from './confirmation-hooks';
 import { fireEventTriggeredReminders } from './requirement-close-sweep';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
+import { fireArrivalHook } from './close-out-arrival';
 
 export type RecordPaymentType = 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'other';
 export type RecordPaymentMethod =
@@ -401,6 +402,12 @@ export async function recordPayment(
       }
     } catch (emailErr) {
       console.error('[money] Email trigger error (non-fatal):', emailErr);
+    }
+
+    // Hire close-out arrival hook (HIRE-CLOSE-OUT-SPEC §4.5): a hire payment on a job
+    // with one invoice owing is allocated to it. Runs after this returns; never fails it.
+    if ((payment_type === 'deposit' || payment_type === 'balance') && hhDepositId) {
+      fireArrivalHook(job.id, hhDepositId);
     }
 
     return {

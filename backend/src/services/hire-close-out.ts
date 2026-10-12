@@ -33,7 +33,9 @@ import {
   kindOf, idOf, invoiceRows, findInvoice, invoiceStatus, invoiceGross, invoiceOwing, invoiceInXero,
   invoiceAllocations, unallocatedPayments, readJobStatus, invoiceNet,
   postAllocation, applyCreditsInXero, completeJob, postDraftInvoice, postApproveInvoice, pushInvoiceToXero,
+  adoptLostXeroInvoices, isChargeOnlyInvoice,
 } from './hh-invoice-close';
+import { splitEuDraft } from './eu-vat-split';
 import xeroBroker from './xero-broker';
 import { isXeroConfigured } from '../config/xero';
 import { DISPLAY_NAME_SQL } from './display-name';
@@ -103,7 +105,7 @@ export interface InvoicePlan {
   netToInvoice: number;
   /** A draft already on the job — Raise invoice adopts it. */
   draft: CloseOutInvoice | null;
-  /** The job carries the "Non-standard VAT rules" item: invoiced by hand until the VAT split is built. */
+  /** The job carries the "Non-standard VAT rules" item: Raise invoice splits the VAT (eu-vat-split.ts). */
   euTrigger: boolean;
   /** HireHop says the job has not returned (status < 6) — a manager may override. */
   notReturned: boolean;
@@ -139,6 +141,11 @@ export interface CloseOutPlan {
   /** Every invoice at £0 in HireHop and no hire deposit holding money (Xero is checked at Complete). */
   readyToComplete: boolean;
   log: CloseOutLogEntry[];
+  /** OP's Invoice requirement — "Mark as sent" ticks it Done. */
+  invoiceRequirementId: string | null;
+  invoiceSent: boolean;
+  /** Problems still open on the job — a warning for the invoice, a gate for Complete. */
+  openProblems: number;
 }
 
 export interface CloseOutResult {
@@ -147,7 +154,7 @@ export interface CloseOutResult {
   plan: CloseOutPlan;
 }
 
-interface JobRow {
+export interface JobRow {
   id: string;
   hh_job_number: number | null;
   job_name: string | null;
@@ -157,7 +164,7 @@ interface JobRow {
 
 // ── Log ──────────────────────────────────────────────────────────────────
 
-async function log(jobId: string, userId: string | null, step: string, ok: boolean, detail: string,
+export async function log(jobId: string, userId: string | null, step: string, ok: boolean, detail: string,
   refs?: Record<string, unknown>): Promise<void> {
   // JSONB — stringify, never a bare object/array (CLAUDE.md).
   await query(
@@ -181,7 +188,7 @@ async function readLog(jobId: string): Promise<CloseOutLogEntry[]> {
   return r.rows;
 }
 
-function reporter(jobId: string, userId: string | null, retryHint: string): CloseReporter {
+export function reporter(jobId: string, userId: string | null, retryHint: string): CloseReporter {
   return {
     log: (step, ok, detail) => log(jobId, userId, step, ok, detail),
     stop: async (step, detail) => { await log(jobId, userId, step, false, detail); throw new Stop(detail); },
@@ -191,7 +198,7 @@ function reporter(jobId: string, userId: string | null, retryHint: string): Clos
 
 // ── Reading ──────────────────────────────────────────────────────────────
 
-async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
+export async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
   const isUuid = /^[0-9a-f]{8}-/i.test(jobIdOrNumber);
   const r = await query(
     isUuid
@@ -209,7 +216,7 @@ const depositText = (row: Row) =>
 const isExcessDeposit = (row: Row) => isExcessText(depositText(row));
 
 /** Approved, non-proforma invoices on the job, oldest first. */
-function approvedInvoices(rows: Row[]): CloseOutInvoice[] {
+export function approvedInvoices(rows: Row[]): CloseOutInvoice[] {
   return invoiceRows(rows)
     .filter((row) => invoiceStatus(row) >= 2)
     .filter((row) => !String(row.data?.DESCRIPTION || row.desc || '').toLowerCase().includes('proforma'))
@@ -311,7 +318,7 @@ const toInvoice = (row: Row): CloseOutInvoice => ({
 
 async function planInvoice(rows: Row[], approved: CloseOutInvoice[], hhJobNumber: number, hhStatus: number | null): Promise<InvoicePlan> {
   const accruedNet = accruedNetOf(rows);
-  const nonProforma = invoiceRows(rows).filter((r) => !isProformaRow(r));
+  const nonProforma = invoiceRows(rows).filter((r) => !isProformaRow(r) && !isChargeOnlyInvoice(r));
   const invoicedNet = round2(nonProforma.reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
   const drafts = draftRows(rows);
   const draft = drafts.length === 1 ? toInvoice(drafts[0]) : null;
@@ -320,15 +327,12 @@ async function planInvoice(rows: Row[], approved: CloseOutInvoice[], hhJobNumber
   const notReturned = hhStatus != null && hhStatus < HH_RETURNED_INCOMPLETE;
   let euTrigger = false;
   if (drafts.length > 1) {
-    blockers.push(`The job has ${drafts.length} draft invoices in HireHop — delete the extra draft(s) by hand first.`);
+    blockers.push(`${drafts.length} draft invoices in HireHop. Delete the ones you don't want there, then press Check again.`);
   }
   if (netToInvoice >= PENNY || draft) {
     const eu = await hasNonStandardVatItem(hhJobNumber);
     if (eu == null) blockers.push('Could not read the job\'s items from HireHop to check its VAT rules.');
     euTrigger = eu === true;
-    if (euTrigger) {
-      blockers.push('This hire carries the "Non-standard VAT rules" item. The EU invoice split is not built yet — raise this invoice by hand in HireHop for now.');
-    }
   }
   if (notReturned) blockers.push(`HireHop says this job hasn't returned yet (status ${hhStatus}) — a manager can raise the invoice anyway.`);
   void approved;
@@ -401,13 +405,24 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   if (!draft) await rep.stop('invoice_penny', `Draft ${draftId} is no longer on the job. ${capitalise(rep.retryHint)} to start again.`);
   const draftNet = invoiceNet(draft!) ?? 0;
   const draftGross = invoiceGross(draft!) ?? 0;
-  const othersNet = round2(invoiceRows(rows).filter((r) => !isProformaRow(r) && idOf(r) !== draftId).reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
+  const othersNet = round2(invoiceRows(rows).filter((r) => !isProformaRow(r) && !isChargeOnlyInvoice(r) && idOf(r) !== draftId).reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
   const accrued = accruedNetOf(rows);
   if (Math.abs(round2(draftNet + othersNet) - accrued) >= PENNY) {
     await rep.stop('invoice_penny', `Draft ${draftId} is ${gbp(draftNet)} ex VAT and ${gbp(othersNet)} is already invoiced, but HireHop's quoted net is ${gbp(accrued)} — `
       + `they differ by ${gbp(round2(accrued - draftNet - othersNet))}. Stopped at the draft; nothing has gone to Xero. Check the job's lines in HireHop, then ${rep.retryHint}.`);
   }
   await rep.log('invoice_penny', true, `Draft ${draftId}: ${gbp(draftNet)} ex VAT, ${gbp(draftGross)} inc VAT — matches HireHop's quoted total.`);
+
+  // 2b. EU hire: split the VAT on the draft (§10.1). splitEuDraft reads back
+  // every write, checks the whole draft and (first invoice) matches it to the
+  // portal's figure before returning — so a split draft goes straight on to be
+  // approved like any other (jon, 12 Oct, after 15745 split cleanly).
+  let gross = draftGross;
+  if (inv.euTrigger && invoiceStatus(draft!) < 2) {
+    await splitEuDraft(rep, { jobId: job.id, hhJobNumber, draftId, firstInvoice: othersNet < PENNY });
+    rows = await readBillingRows(hhJobNumber);
+    gross = invoiceGross(findInvoice(rows, draftId)!) ?? draftGross;
+  }
 
   // 3. Approve, dated today (§1.11).
   let number = '';
@@ -421,7 +436,7 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
     }
     await rep.log('invoice_approve', true, `Invoice ${number} (${draftId}) approved, dated today.`);
     await pushInvoiceToXero(rep, {
-      label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross: draftGross,
+      label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross,
       saved: { ...(res.data || {}), hh_task: res.data?.hh_task || 'post_invoice_credit', hh_id: res.data?.hh_id || draftId },
       alert: { jobId: job.id, what: `hire invoice ${number}` },
     });
@@ -429,18 +444,44 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
     number = String(draft!.data?.NUMBER || draftId);
     if (!invoiceInXero(draft!)) {
       await pushInvoiceToXero(rep, {
-        label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross: draftGross,
+        label: `hire close-out — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross,
         saved: { hh_task: 'post_invoice_credit', hh_id: draftId, hh_acc_package_id: 3, hh_package_type: 1 },
         alert: { jobId: job.id, what: `hire invoice ${number}` },
       });
     }
   }
-  return `Invoice ${number} raised for ${gbp(draftGross)} and sent to Xero. Allocate the payments next.`;
+  return `Invoice ${number} raised for ${gbp(gross)} and sent to Xero. Allocate the payments next.`;
 }
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // ── The plan (§4.3, §6) ──────────────────────────────────────────────────
+
+/**
+ * OP-side facts the Money panel shows beside HireHop's: the Invoice
+ * requirement (its id, so the panel can tick it Sent, and whether it is), and
+ * how many Problems are open.
+ */
+async function jobFacts(jobId: string): Promise<{ invoiceRequirementId: string | null; invoiceSent: boolean; openProblems: number }> {
+  const r = await query(
+    `SELECT req.id AS invoice_req_id, req.status AS invoice_req_status,
+            (SELECT COUNT(*) FROM job_issues
+              WHERE job_id = $1 AND status NOT IN ('resolved', 'written_off', 'cancelled'))::int AS open_problems
+       FROM (SELECT 1) one
+       LEFT JOIN LATERAL (
+         SELECT id, status FROM job_requirements
+          WHERE job_id = $1 AND requirement_type = 'invoice' AND COALESCE(notes, '') NOT LIKE '%[Suspended:%'
+          ORDER BY created_at LIMIT 1
+       ) req ON true`,
+    [jobId],
+  );
+  const row = r.rows[0] || {};
+  return {
+    invoiceRequirementId: row.invoice_req_id ?? null,
+    invoiceSent: row.invoice_req_status === 'done',
+    openProblems: Number(row.open_problems ?? 0),
+  };
+}
 
 async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   const blockers: string[] = [];
@@ -452,6 +493,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     surplus: [] as Array<{ depositId: number; amount: number }>, shortfall: 0, excessHeld: 0,
     blockers, warnings, sentences: [] as string[], ready: false, readyToComplete: false,
     log: await readLog(job.id),
+    ...await jobFacts(job.id),
   };
   if (!job.hh_job_number) { blockers.push('This job has no HireHop job number.'); return base; }
   if (job.is_internal) { blockers.push('Internal job — there is no client to invoice.'); return base; }
@@ -467,6 +509,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   ]);
   base.hhStatus = hhStatus;
   base.excessHeld = round2(Number(excess.rows[0]?.held ?? 0));
+  warnings.push(...await adoptLostXeroInvoices(rows));
   if (hhStatus != null && hhStatus < HH_RETURNED_INCOMPLETE) {
     warnings.push(`HireHop says this job hasn't returned yet (status ${hhStatus}).`);
   }
@@ -488,6 +531,9 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
 
   // The Invoice card (§4.1): what is left to bill, and whether Raise invoice may run.
   base.invoice = await planInvoice(rows, invoices, hhJobNumber, hhStatus);
+  if (base.invoice.euTrigger && (base.invoice.netToInvoice >= PENNY || base.invoice.draft)) {
+    warnings.push('EU hire: the invoice\'s VAT is split by UK / non-UK days (HMRC 741A).');
+  }
 
   // Deposits — HireHop vs OP (§6).
   const hireRows = hireDepositRows(rows);
@@ -585,11 +631,47 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
         invoices: [], payments: [], allocations: [], surplus: [], shortfall: 0, excessHeld: 0,
         blockers: [], warnings: [],
         sentences: [`Completed in HireHop${completed.user_name ? ` by ${completed.user_name}` : ''} on ${String(completed.created_at).slice(0, 10)}.`],
-        ready: false, readyToComplete: false, log: entries,
+        ready: false, readyToComplete: false, log: entries, ...await jobFacts(job.id),
       };
     }
   }
   return buildPlan(job);
+}
+
+// ── The one button (§3, Oct 2026): invoice if needed, then allocate ──────
+
+/**
+ * What the card's main button does: raise the invoice when there is anything
+ * left to bill (or a draft to finish), then allocate every hire deposit in
+ * HireHop and apply the credits in Xero. One press for the normal case; a
+ * run that stops says where, and the same button carries on from there.
+ * Complete stays its own button — jobs are deliberately left open while
+ * damage quotes or missing items are pending (jon, 9 Oct).
+ */
+export async function runHireCloseOut(jobIdOrNumber: string, userId: string | null,
+  opts: { allowNotReturned?: boolean } = {}): Promise<CloseOutResult> {
+  const job = await loadJob(jobIdOrNumber);
+  return withJobLock(job.id, async () => {
+    const rep = reporter(job.id, userId, 'press Carry on');
+    let done = false;
+    let message: string;
+    try {
+      const plan = await buildPlan(job);
+      const parts: string[] = [];
+      if (plan.invoice.netToInvoice >= PENNY || plan.invoice.draft) {
+        parts.push(await raiseSteps(job, rep, !!opts.allowNotReturned));
+      }
+      parts.push(await allocateSteps(job, rep));
+      message = parts.join(' ').replace('Allocate the payments next. ', '');
+      done = true;
+    } catch (err) {
+      if (!(err instanceof Stop)) {
+        await log(job.id, userId, 'error', false, err instanceof Error ? err.message : String(err)).catch(() => undefined);
+      }
+      message = err instanceof Error ? err.message : String(err);
+    }
+    return { done, message, plan: await buildPlan(job) };
+  });
 }
 
 // ── Allocate ─────────────────────────────────────────────────────────────
@@ -597,14 +679,14 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
 /** One job at a time, in this process. */
 const running = new Set<string>();
 
-async function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+export async function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
   if (running.has(jobId)) throw new Error('Someone else is working on this job\'s money right now — try again in a moment.');
   running.add(jobId);
   try { return await fn(); } finally { running.delete(jobId); }
 }
 
 /** For a cross-job allocation, the source job's billing rows (its deposit carries the Xero overpayment id). */
-async function sourceJobRows(rows: Row[], invoiceId: number): Promise<Row[]> {
+export async function sourceJobRows(rows: Row[], invoiceId: number): Promise<Row[]> {
   const mine = new Set(rows.filter((r) => kindOf(r) === 6).map(idOf));
   const extra: Row[] = [];
   const seen = new Set<number>();
@@ -620,15 +702,22 @@ async function sourceJobRows(rows: Row[], invoiceId: number): Promise<Row[]> {
   return extra;
 }
 
-/** Do the plan: allocate in HireHop (read back each), then apply the credits in Xero (read back). */
-export async function runHireAllocation(jobIdOrNumber: string, userId: string | null): Promise<CloseOutResult> {
+/**
+ * Do the plan: allocate in HireHop (read back each), then apply the credits in Xero (read back).
+ *
+ * `onlyFromDeposit` is the arrival hook's guard (§4.5): refuse unless every planned
+ * allocation comes from that one payment, so money someone left unallocated on purpose
+ * (to refund, or held on account) is never picked up by a payment that just arrived.
+ */
+export async function runHireAllocation(jobIdOrNumber: string, userId: string | null,
+  opts: { onlyFromDeposit?: number; retryHint?: string } = {}): Promise<CloseOutResult> {
   const job = await loadJob(jobIdOrNumber);
   return withJobLock(job.id, async () => {
-    const rep = reporter(job.id, userId, 'press Allocate payments');
+    const rep = reporter(job.id, userId, opts.retryHint ?? 'press Allocate payments');
     let done = false;
     let message: string;
     try {
-      message = await allocateSteps(job, rep);
+      message = await allocateSteps(job, rep, opts.onlyFromDeposit);
       done = true;
     } catch (err) {
       if (!(err instanceof Stop)) {
@@ -640,9 +729,18 @@ export async function runHireAllocation(jobIdOrNumber: string, userId: string | 
   });
 }
 
-async function allocateSteps(job: JobRow, rep: CloseReporter): Promise<string> {
+async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: number): Promise<string> {
   const plan = await buildPlan(job);
   if (plan.blockers.length) await rep.stop('preflight', plan.blockers.join(' '));
+  if (onlyFromDeposit != null) {
+    const others = [...new Set(plan.allocations.filter((a) => a.depositId !== onlyFromDeposit).map((a) => a.depositId))];
+    if (others.length || !plan.allocations.length) {
+      await rep.stop('arrival', others.length
+        ? `Payment ${onlyFromDeposit} arrived, but payment${others.length > 1 ? 's' : ''} ${others.join(', ')} on this job `
+          + `still hold${others.length > 1 ? '' : 's'} money and would be used first — left for a person to allocate.`
+        : `Payment ${onlyFromDeposit} arrived, but there is nothing for it to pay — left for a person.`);
+    }
+  }
   const hhJobNumber = plan.hhJobNumber;
   await rep.log('preflight', true, `Clean. ${plan.sentences.join(' ')}`);
 
@@ -669,6 +767,7 @@ async function allocateSteps(job: JobRow, rep: CloseReporter): Promise<string> {
   }
 
   // 2. Xero — every allocation on every approved invoice, not just the ones just made.
+  await adoptLostXeroInvoices(rows);
   const invoices = approvedInvoices(rows);
   for (const inv of invoices) {
     if (!invoiceAllocations(rows, inv.invoiceId).length) continue;

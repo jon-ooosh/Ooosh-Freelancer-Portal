@@ -139,8 +139,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
  */
 function BookOutEntry() {
   const [params] = useSearchParams();
+  const isStaff = useAuthStore((s) => s.isAuthenticated);
   const hasFreelancerToken = params.has('freelancerToken') || isFreelancerSessionActive();
-  if (hasFreelancerToken) {
+  // Not logged in to OP → the freelancer shell (its "no session" screen has a
+  // small staff-login link), never the staff login: a freelancer whose phone
+  // lost its session typed his portal password into it (HH 16714, Oct 2026).
+  if (hasFreelancerToken || !isStaff) {
     return <FreelancerBookoutShell />;
   }
   return (
@@ -163,8 +167,10 @@ function BookOutEntry() {
  */
 function CheckInEntry() {
   const [params] = useSearchParams();
+  const isStaff = useAuthStore((s) => s.isAuthenticated);
   const hasFreelancerToken = params.has('freelancerToken') || isFreelancerSessionActive();
-  if (hasFreelancerToken) {
+  // Not logged in to OP → freelancer shell, never the staff login (see BookOutEntry).
+  if (hasFreelancerToken || !isStaff) {
     return <FreelancerCheckinShell />;
   }
   return (

@@ -38,6 +38,12 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
       - run: npm run build
+      # The backend has a real jest suite (~680 tests). Running it here is what
+      # makes the Dependabot auto-merge gate mean something beyond "it compiles".
+      # The modules under test demand JWT_SECRET at import; the value is dummy.
+      - run: npm test
+        env:
+          JWT_SECRET: ci-only-dummy-secret-never-used-for-anything-real
 
   frontend:
     name: Frontend build

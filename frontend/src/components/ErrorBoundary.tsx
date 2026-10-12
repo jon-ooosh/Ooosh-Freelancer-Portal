@@ -17,6 +17,11 @@ const SESSION_KEYS = new Set([
   'vehicleAppSessionExpiry',
   'vehicleAppSessionScope',
   'vehicleAppFreelancerContext',
+  // Freelancer book-out / collection session (adapters/freelancer-session.ts)
+  'ooosh_freelancer_bookout_session',
+  'ooosh_freelancer_bookout_context',
+  'ooosh_freelancer_bookout_expiry',
+  'ooosh_freelancer_bookout_link',
 ])
 
 /**

@@ -156,7 +156,8 @@ export async function readJobStatus(hhJobNumber: number): Promise<number | null>
  * the job back: the broker retries POSTs after a network blip, so the reply
  * alone proves nothing.
  */
-export async function postDraftInvoice(hhJobNumber: number, ref: string): Promise<{ res: any; newId: number }> {
+export async function postDraftInvoice(hhJobNumber: number, ref: string,
+  opts: { all?: 0 | 1 } = {}): Promise<{ res: any; newId: number }> {
   const res = await hhBroker.post<any>('/php_functions/billing_save.php', {
     id: 0,
     desc: '',
@@ -165,7 +166,9 @@ export async function postDraftInvoice(hhJobNumber: number, ref: string): Promis
     bank: 169,              // the invoice's default bank as captured; payments carry their own
     tax_total: '0.00',
     tax_rate: 0,
-    all: 1,                 // "Include all owing items" — ALWAYS; the UI default is a user setting
+    // "Include all owing items" — 1 unless the caller wants an EMPTY draft (0, §3: a charge
+    // invoice built from custom lines only). Always sent: the UI default is a user setting.
+    all: opts.all ?? 1,
     novat: 0,
     aggregated: 0,
     local: hhLocalNow(),
@@ -222,7 +225,111 @@ export async function postAllocation(input: {
   }, { priority: 'high' });
 }
 
+// ── Invoice LINES on a draft (HIREHOP-BILLING-API.md §10) ────────────────
+
+/**
+ * A charge invoice raised after completion (completed-charges.ts): custom lines only,
+ * no job line behind any of them. Its money is deliberately NOT on the HireHop job, so
+ * it is left out of every "invoices add up to the job's quoted total" sum.
+ */
+export const isChargeOnlyInvoice = (row: Row) => {
+  const items = Array.isArray(row?.data?.items) ? row.data.items : [];
+  return items.length > 0 && items.every((it: Row) => Number(it.MAIN_ID || 0) === 0);
+};
+
+/** An invoice's lines as HireHop lists them (`data.items` on its kind-1 row). */
+export function invoiceItems(row: Row | null): Row[] {
+  return Array.isArray(row?.data?.items) ? row!.data.items : [];
+}
+
+/**
+ * Edit one invoice line IN PLACE, by its own id — `billing_save_item.php`
+ * (singular), exactly as HireHop's line editor sends it (§10.3, and captured
+ * again 12 Oct 2026 setting a line to £0: same id, `PRICE: 0`, unit price
+ * kept). `total` is the line's new net; `rate` / `taxId` its VAT. The nominal
+ * is sent back unchanged.
+ *
+ * NOT `billing_save_items.php` (plural): that ASSIGNS a job line to the
+ * invoice and, for a line already on it, adds a second copy (15745, 12 Oct).
+ * The caller reads back.
+ */
+export async function postInvoiceLineEdit(hhJobNumber: number, invoiceId: number, line: Row,
+  edit: { total: number; rate: number; taxId: number }): Promise<any> {
+  return hhBroker.post<any>('/php_functions/billing_save_item.php', {
+    id: line.ID,
+    bill: invoiceId,
+    kind: line.KIND,
+    total: edit.total,
+    desc: line.DESCRIPTION || line.ITEM || '',
+    memo: line.MEMO || '',
+    vat_rate: edit.rate,
+    vat_id: edit.taxId,
+    nominal_id: line.ACC_NOMINAL_ID,
+    unit: 0,
+    main_id: hhJobNumber,
+    type: 1,
+    selected: line.ID,
+  }, { priority: 'high' });
+}
+
+/**
+ * Add a custom line to a draft (§10.3b — `billing_save_item.php`, `id: 0`,
+ * `kind: 3`): no job item behind it, so the job's supply list is never
+ * touched. `after` is the line it goes after. The caller reads back.
+ */
+export async function postCustomInvoiceLine(hhJobNumber: number, invoiceId: number, line: {
+  description: string; amount: number; rate: number; taxId: number; nominalId: number; after: number;
+}): Promise<any> {
+  return hhBroker.post<any>('/php_functions/billing_save_item.php', {
+    id: 0,
+    bill: invoiceId,
+    kind: 3,
+    qty: 1,
+    note: line.description,
+    unit: line.amount,
+    total: line.amount,
+    memo: '',
+    vat_rate: line.rate,
+    vat_id: line.taxId,
+    nominal_id: line.nominalId,
+    main_id: hhJobNumber,
+    type: 1,
+    selected: line.after,
+  }, { priority: 'high' });
+}
+
 // ── The Xero legs ────────────────────────────────────────────────────────
+
+/**
+ * Invoices HireHop has lost track of. Now and then HireHop's push reaches
+ * Xero but HireHop never records it: the row keeps `ACC_ID: ""`, and a
+ * re-push fails "Invoice # must be unique" (OT-INV-12000, job 15812, Jul
+ * 2026). For each approved invoice like that, look Xero up by invoice number
+ * and, when exactly one live ACCREC invoice has that number AND the same
+ * total, put its id on the row IN MEMORY so the Xero steps can work. HireHop
+ * itself is never told (no captured call for it). Returns a sentence per
+ * invoice adopted. Never throws: on any doubt the row is left as it was.
+ */
+export async function adoptLostXeroInvoices(rows: Row[]): Promise<string[]> {
+  const notes: string[] = [];
+  if (!isXeroConfigured()) return notes;
+  for (const row of invoiceRows(rows)) {
+    if (invoiceStatus(row) < 2 || invoiceInXero(row)) continue;
+    const number = String(row.data?.NUMBER || '').trim();
+    const gross = invoiceGross(row);
+    if (!/^[A-Za-z0-9-]+$/.test(number) || gross == null) continue;
+    try {
+      const found = (await xeroBroker.getInvoices(`Type=="ACCREC" AND InvoiceNumber=="${number}"`))
+        .filter((x) => !['VOIDED', 'DELETED'].includes(String(x.Status)));
+      if (found.length !== 1 || Math.abs(round2(Number(found[0].Total) || 0) - gross) >= PENNY) continue;
+      row.data = { ...(row.data || {}), ACC_ID: String(found[0].InvoiceID) };
+      notes.push(`${number} is in Xero but HireHop lost the link — matched it by number and total.`);
+    } catch (err) {
+      console.warn(`[hh-invoice-close] Xero lookup for ${number} failed:`, err);
+    }
+  }
+  return notes;
+}
 
 /**
  * Push an approved invoice to Xero and read back that HireHop has stamped it

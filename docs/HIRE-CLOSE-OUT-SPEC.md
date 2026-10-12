@@ -1,11 +1,15 @@
 # Hire Close-Out (Bookkeeping) — Spec
 
-**Status (9 Oct 2026): Phases 1 and 2 BUILT** — `services/hire-close-out.ts`, `routes/hire-close-out.ts`
-(`/api/close-out/:jobId/plan|raise-invoice|allocate|complete`), `job_closeout_log` (mig 281), the Raise
-invoice panel on the Invoice card (`HireInvoicePanel.tsx`) and the allocate/complete panel on the Payment
-Reconciliation card (`HireCloseOutPanel.tsx`), sharing one plan read (`lib/closeOutPlan.ts`). **An EU hire
-(the "Non-standard VAT rules" item) is refused by Raise invoice until the invoice-line VAT split (§10.1) is
-built — invoice those by hand for now.** Phases 3–4 and the VAT split not built. This is the "bookkeeping module" that
+**Status (10 Oct 2026): Phases 1, 2, 3a and 3b BUILT.** `services/hire-close-out.ts`,
+`routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|run|raise-invoice|allocate|complete`),
+`job_closeout_log` (mig 281), ONE panel on the Invoice card (`HireCloseOutPanel.tsx`, plan read shared via
+`lib/closeOutPlan.ts`; the Payment Reconciliation requirement is that card's second pill — §3). 3a = the
+nightly Xero credit sweep (`services/close-out-xero-sweep.ts`, 03:30, `closeout_xero_sweep_enabled`, mig
+282). 3b = the arrival hook (`services/close-out-arrival.ts`, `closeout_arrival_hook_enabled`, mig 283 —
+§4.5). **EU VAT split BUILT 12 Oct 2026** (§10.1, `services/eu-vat-split.ts`): an EU hire's draft is split by
+UK / non-UK days and STOPS at the draft for a person to check before the next press approves it. Phase 4
+not built. §12 is
+the current state and the ordered next steps. This is the "bookkeeping module" that
 `docs/reference/HIREHOP-BILLING-API.md` §8 says the shop close is the base of. §1 is what
 jon settled in the design discussion; §4 is the flow; §9 is the build order and the
 captures that must happen before Phase 2. Read `HIREHOP-BILLING-API.md` §0 and §8
@@ -87,8 +91,8 @@ structurally impossible rather than merely discouraged.
     needs B's invoice to exist first, so for B it is a step-4.1-then-apply sequence; for A
     it is one of the three surplus choices in §4.3. **Its Xero leg is probably a no-op**
     (§4.3 step 2) — capture 5.
-13. **Tax code 33 (Zero Rated Income) for the non-UK portion** (jon, 9 Oct; bookkeeper to
-    confirm). HireHop ids and Xero mappings: `HIREHOP-BILLING-API.md` §10.4.
+13. **Tax code 33 (Zero Rated Income) for the non-UK portion** (jon, 9 Oct; confirmed
+    10 Oct). HireHop ids and Xero mappings: `HIREHOP-BILLING-API.md` §10.4.
 14. **Applying credits in Xero is automatic.** It is bookkeeping that mirrors what HireHop
     already says, it writes nothing to HireHop, and it is idempotent, so it runs as a sweep
     (§4.3 step 2) as well as inside the stepper. Everything else stays human-pressed.
@@ -112,23 +116,40 @@ other than the job's client, excess decisions (existing excess flows own them).
 
 ## 3. Where it lives
 
-The **Post-Hire** tab on Job Detail, on the existing cards. Status text stays as it is
-(derived from HireHop by `hh-requirement-derivation.ts`); each card gains one primary
-action and reads back after it.
+**The Money tab (redesign, jon + staff, 12–13 Oct 2026; mockup:
+https://claude.ai/artifact/13JxwH2ECvheLiKwfJv7CL).** The close-out moved off the Overview's
+Invoice card — it was the "actions on a status card" problem flagged at the start — into
+one panel on the Money tab, `components/CloseOutMoneyPanel.tsx`, under the Financial
+Summary. It appears once the hire is back (or an invoice exists) and is hidden pre-hire.
 
-| Card | Today | Adds |
-|---|---|---|
-| **Invoice** | "Generated" when any kind=1 row exists; "Mark as Sent" | **Raise invoice** (Phase 2) — draft from uninvoiced lines, penny check, approve, push to Xero. Shows the invoice(s), their status and Xero cloud |
-| **Excess Resolution** | Resolution-authoritative pill; Manage → existing modal | Unchanged. The Complete step reads its state |
-| **Payment Reconciliation** | "Reconciled" when owing ≤ 0 | **Allocate payments** (Phase 1) — the plan (§4.3) shown first, then HireHop + Xero allocation, read back. Surfaces any surplus with its three choices. Staff-facing wording stays about HireHop ("allocated", "balance owed", "reconciled"); the Xero fact ("credit applied in Xero" / "awaiting") is one **admin-only** line, because only jon and the bookkeeper act on it and the sweep is automatic (jon, 9 Oct) |
-| *(Complete job)* | — | Lives at the foot of the **Payment Reconciliation** card's panel, not as a card of its own (built that way, Oct 2026 — it is the last step of the payments flow): enabled when every invoice is paid and nothing is unallocated; amber "Complete anyway (excess held)" for a manager when excess is still held |
+- **One pill, five steps** — Returned · Invoiced · Payments allocated · Sent to client ·
+  Paid in full — and **one next-action line** with its reason behind "Why?". Stages and
+  pills come from `lib/closeOutPlan.ts` `closeOutView()`: Needs sorting (red, a refusal —
+  its first clause is the line, the full sentence the "Why?") · Ready to invoice · Payments
+  to allocate · Money to sort (in credit) · Not sent yet · Awaiting payment (blue) · Paid ·
+  Completed (green). Paid can come before Sent.
+- **Buttons:** Create invoice / Allocate (manager; "…anyway (job still out)" in amber) ·
+  Check again · Copy payment link · Mark as sent / Undo sent (anyone — it ticks the Invoice
+  requirement, whose id the plan now carries) · Record payment (the existing form) ·
+  **Complete the job**, which opens the page's own status modal at Completed (so the open-
+  Problems check and the manager reason still apply; no second way to complete a job).
+- Before invoicing, short chips: All back / Returned incomplete / Still out · excess held ·
+  open Problems (the plan now carries `openProblems` and `invoiceSent`).
+- Once invoiced, a short ledger: each invoice, then payments allocated (HireHop ✓ Xero ✓).
+- **The balance is shown once**, in the Financial Summary, and only when something is owed
+  or the client is in credit; the pre-hire "Deposit to secure" boxes go once the hire is back.
+- **No Xero links and no Details modal** — staff don't use Xero; jon and the bookkeeper find
+  invoices there themselves (jon, 13 Oct). The run log stays in `job_closeout_log`.
+- **Overview › Post-Hire › Invoice card** is a signpost (`CloseOutSignpost.tsx`): the same
+  pill, one line ("OT-INV-12308 · £45.00 due · 3 of 5 steps"), the five steps as a thin bar,
+  and "Open in Money →". No dropdowns. The Payment Reconciliation requirement still exists
+  (derived, counted by the Returns page) but is not drawn.
+- **The Money tab label carries a dot** in the close-out's colour on returned jobs (amber =
+  something to do, blue = waiting on the client, green = done, red = needs sorting).
 
-Two cards, not one, for now: both requirement types already exist on every returned
-job and the Returns page counts their dots, so merging them is a migration plus a
-derivation change for no proven gain. They are written to read as consecutive steps of
-one flow; revisit merging after Phase 2 (jon asked, 9 Oct).
+All three read one shared plan (30 s cache), so they never disagree.
 
-Design rule for the cards (jon: "it needs to flow and make sense"): every action shows
+Design rule (jon: "it needs to flow and make sense"): every action shows
 **what it will do before it does it** — the plan is a list of sentences ("Allocate
 £4,629.82 of payment 9091 to OT-INV-12252", "Leave £886.80 of payment 8661 unallocated —
 decide below"), then one button. After it runs, the same card shows the read-back
@@ -161,8 +182,8 @@ nothing); a **draft** invoice already exists (adopt it: skip to the penny check)
    lines (for a first invoice, the kind=0 accrued × VAT). The shop also checks "= payments
    held"; a hire does **not** (balances owed and overpayments are normal) — it reports the
    difference instead. Stop at the draft on a mismatch; a draft never reaches Xero.
-3. **Approve** — `billing_save_status.php` status 2, dated the return date (open question
-   §10.3). Read back `STATUS >= 2` and a `NUMBER`. Never approve an invoice already ≥ 2.
+3. **Approve** — `billing_save_status.php` status 2, dated the day it is raised (§1.11 —
+   never back-dated to the return date). Read back `STATUS >= 2` and a `NUMBER`. Never approve an invoice already ≥ 2.
 4. **Invoice → Xero** — `syncSavedRowToXero` with `hh_task: post_invoice_credit`
    defaulted (the helper's default is `post_payment`, wrong for an invoice). Read back
    `ACC_ID` on the row. A Xero refusal is an amber panel + `sendXeroSyncFailedAlert`,
@@ -233,21 +254,96 @@ says so and the portal link is right there. Nothing else to do until money arriv
 
 ### 4.4 Complete job
 
-Enabled when every approved invoice shows £0.00 owing in HireHop **and** Xero and no
-hire deposit holds money (or a Hold-on-account decision is recorded). Amber, with
-"Complete anyway (excess still held)" for a manager, when `job_excess` has a non-terminal
-record. `status_save.php` status 11, read back. The 30-minute HireHop sync carries 11
-into `pipeline_status = completed`; do not set it locally first (`hirehop.md`).
+**Completing is the status change at the top of Job Detail, not a close-out button** (jon,
+9 Oct, after the first live job). The Move to Completed modal lists the open close-out
+items in amber (as before) and open Problems in red: a non-manager cannot confirm over
+open Problems, a manager must type a reason, which lands on the timeline with the
+transition; `routes/pipeline.ts` enforces both so the API cannot bypass the modal. The
+status change pushes 11 to HireHop through the existing sync.
 
-### 4.5 Arrival hook (Phase 3)
+`POST /close-out/:jobId/complete` (`completeHireJob()`) still exists for the API: it refuses
+unless every approved invoice is settled in HireHop and no hire deposit holds money, is amber
+on excess still held (`allowExcessHeld` for a manager), writes `status_save.php` 11, reads it
+back and mirrors into OP through the webhook handler. **Nothing in the UI calls it.** Remove it
+or wire the modal to it, never grow a second completion path.
 
-The one automatic piece. When `recordPayment()` or the Stripe webhook's payment-event
-lands a **hire** (non-excess) deposit on a job that has **exactly one approved invoice
-with owing > 0** and no §6 mismatch, run §4.3 for that deposit alone and, if that leaves
-every invoice at £0.00 and nothing unallocated, run §4.4 with no excess override (an
-excess still held means it stops at "ready to complete" and leaves the card amber). Any
-other shape does nothing and leaves the card for a human. Logged like a manual run with
-`user_id = NULL`.
+### 4.5 Arrival hook (Phase 3b) — ✅ BUILT 10 Oct 2026
+
+`services/close-out-arrival.ts`. When `recordPayment()` (staff Record Payment, the Wise
+matcher, later Stripe Terminal) or the portal's `payment-event` lands a **hire**
+(`deposit`/`balance`) payment with a HireHop deposit id, `fireArrivalHook()` runs
+**after the caller has answered** — it can never fail or slow the payment; any error is
+logged as an `arrival` line and swallowed.
+
+- Off unless `system_settings.closeout_arrival_hook_enabled = 'true'` (migration 283).
+- Reads a fresh plan. **Silent** (no log line) unless the job has **exactly one approved
+  invoice owing** and the new payment is a hire deposit still holding money — so the
+  usual case, money arriving before there is an invoice, writes nothing. An invoice
+  raised before the hire is allocated straight away (rare; jon, 10 Oct: fine).
+- Otherwise logs one `arrival` line and calls `runHireAllocation(job, null,
+  { onlyFromDeposit })`: the same allocate-in-HireHop + apply-in-Xero, `user_id` NULL.
+- **This payment only** (jon, 10 Oct). Inside the job lock, if the plan would allocate
+  from ANY other payment — money left unallocated on purpose, to refund or held on
+  account; the §5 rule takes the oldest first — it stops with an `arrival` line naming
+  that payment and leaves it for a person. A client who wanted their credit used would
+  not have sent more money.
+- A §6 blocker stops it at pre-flight, logged, as for a press of the button.
+- **Never completes the job** — completing is the status change at the top of Job
+  Detail (§4.4).
+
+A **duplicate payment on a settled job** (the client's accounts misread a "paid" invoice
+and pay again): there is no invoice owing, so the hook stays silent. The Wise matcher
+does not match it confidently either (the job's remaining balance is £0, so the amount
+matches no expected figure) — it lands in the unmatched queue on the Money overview and
+info@ is emailed once. Record it on the job from the queue; the Invoice card then shows it
+as an unallocated surplus with the existing choices (Refund — record-keeping for a bank
+transfer, the money goes back from Wise by hand — or Apply to another job).
+
+
+### 4.6 A charge after completion — ✅ BUILT 13 Oct 2026 (Phase 4, as rescoped)
+
+jon, 13 Oct: extra costs found after the hire go on the HireHop job as usual and land on
+the final invoice ("Add a charge" before invoicing was dropped). Damage is charged before
+the invoice or not at all. The gap was a cost that turns up **after the job is Completed**:
+HireHop takes no new job lines then, so `services/completed-charges.ts`
+`raiseChargeInvoice()` raises its own small invoice from custom lines only —
+
+1. Pre-flight: OP job Completed AND HireHop status 11; no draft already on the job; a
+   reason; 1–5 lines, each with a description (what the client reads) and an amount.
+2. An EMPTY draft — `billing_save.php` with `all: 0` (`HIREHOP-BILLING-API.md` §3); read
+   back: exactly one new draft, no lines on it.
+3. One custom line per charge — `billing_save_item.php` `id: 0`, `kind: 3` (§10.3b); each
+   read back (price, tax code, nominal). No job line, no stock touched.
+4. Penny check: the draft is exactly the charges, net and gross (VAT per line).
+5. Approve dated today → `pushInvoiceToXero` → log (`step 'charge'`, the reason) and a
+   job timeline note. Any stop is at the draft, which never reaches Xero.
+
+| Charge | Nominal | Tax code | Where from |
+|---|---|---|---|
+| Misc income | 190 (Xero 275) | 20 (20%) | Money panel "Add a charge" — managers, Completed jobs only, with a reason |
+| PCN handling fee | 190 | 20 (20%) | PCN module, when the HireHop job is Completed |
+| PCN fine | 190 | **27 No VAT** (Xero NONE) | PCN module, same invoice as the fee |
+
+The fine at No VAT, not zero-rated: a fine passed on is outside the scope of VAT (jon
+agreed 0% for the client; bookkeeper to confirm 27 vs 33). The older PCN path — a stock line
+on a still-open job — is unchanged and still bills the fine at the stock item's 20%.
+
+A charge invoice is **left out of every "invoices add up to the job" sum**
+(`hh-invoice-close.ts` `isChargeOnlyInvoice()`: custom lines only), because its money is
+deliberately not on the HireHop job. On a Completed job with such an invoice owing, the
+Money panel shows "£x owing" (Awaiting payment) with Record payment; the arrival hook then
+allocates the payment. The Financial Summary does NOT include it (it reads the job total).
+
+**The payment portal can't see it yet.** The portal works its balance out from the HireHop
+job, which has no charge lines, so a portal link on a Completed job with a charge invoice
+would say nothing is owed. jon's rule for the portal change (13 Oct): read what is owed
+from the INVOICES only when the job is Completed — every live hire keeps today's
+carefully-tuned path. Until then, take these payments with Record payment. To be done
+with the portal repo in one session (handover pending the first live test).
+
+**First live use = a test on a scratch job jon has completed** — OP talks to HireHop as its
+own user, and whether that user may invoice a Completed job is not yet proven (jon's own
+test was in admin mode). A refusal stops at step 2 with nothing written.
 
 ---
 
@@ -309,11 +405,11 @@ One table, no state columns on `jobs` (state is always re-read from HireHop):
 CREATE TABLE job_closeout_log (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   job_id      UUID NOT NULL REFERENCES jobs(id),
-  step        VARCHAR(40) NOT NULL,      -- 'preflight' | 'draft' | 'penny' | 'approve' | 'invoice_xero' | 'allocate_hh' | 'allocate_xero' | 'complete' | 'arrival'
+  step        VARCHAR(40) NOT NULL,      -- as written: 'preflight' | 'invoice_draft' | 'invoice_penny' | 'invoice_approve' | 'xero' | 'allocate_hh' | 'complete' | 'sweep' | 'arrival' | 'error'
   ok          BOOLEAN NOT NULL,
   detail      TEXT NOT NULL,
   hh_refs     JSONB,                     -- { invoiceId, depositId, applicationId, amount } — JSON.stringify on write
-  user_id     UUID REFERENCES users(id), -- NULL = arrival hook
+  user_id     UUID REFERENCES users(id), -- NULL = the sweep or the arrival hook
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX ON job_closeout_log (job_id, created_at);
@@ -349,14 +445,19 @@ choices wired to existing routes; Complete job step. Manager-tier to press
 (`MANAGER_ROLES`; review after a month — allocation moves no cash). Shop close keeps
 working unchanged (regression: close a shop week after the extraction).
 
-**Phase 2 — Raise invoice.** ✅ BUILT 9 Oct 2026 (without the EU split: an EU hire is refused by
-name and invoiced by hand until §10.1 ships). Invoice date = raise date; `ref` = `Job <number>` so the
+**Phase 2 — Raise invoice.** ✅ BUILT 9 Oct 2026; the EU split (§10.1) ✅ BUILT 12 Oct 2026. Invoice date = raise date; `ref` = `Job <number>` so the
 Xero Reference matches the bank-transfer convention the Wise matcher keys on. The penny check is
 draft net + already-invoiced net = HireHop's quoted net. Then the lockdown of HireHop payment and
 deposit permissions for non-managers — after the VAT split, or managers keep raising EU invoices by hand.
 
-**Phase 3 — Arrival hook.** Small once Phase 1 exists; gated by a `system_settings` toggle
-so it can be switched off without a deploy.
+**Phase 3a — Xero credit sweep.** ✅ BUILT 10 Oct 2026: `services/close-out-xero-sweep.ts`,
+nightly 03:30, candidates = non-internal jobs returned/completed in the last 120 days, skipping
+any swept clean in the last 7 days with no payment since; per job the shared `applyCreditsInXero`
+per approved invoice with allocations (cross-job deposits via the source job's rows), logged to
+`job_closeout_log` with `user_id` NULL (`step = 'sweep'`); a mismatch is logged and skipped.
+Off until `system_settings.closeout_xero_sweep_enabled = 'true'` (migration 282 seeds it).
+**Phase 3b — Arrival hook.** ✅ BUILT 10 Oct 2026 — §4.5. Off until
+`system_settings.closeout_arrival_hook_enabled = 'true'` (migration 283).
 
 **Phase 4 — Additional charges.** "Add a charge" on the Damage & Issues card: adds a job
 line (OP already adds lines to HireHop jobs for the shop — reuse) with a nominal picked
@@ -397,56 +498,124 @@ deposit on the scratch job (a deposit creates a real Xero overpayment).
 
 ## 10. Open questions
 
-### 10.1 EU hires — proposed: fix the VAT on the INVOICE lines; the job is never touched
+### 10.1 EU hires — the invoice-line VAT split ✅ BUILT 12 Oct 2026
 
 The rule already exists and is already what the client has been told (`vat-adjustment.ts`,
 ported from the portal; HMRC 741A): vehicle and equipment revenue is 0% for the non-UK
-days (proportional, by nominal group), 0% on the whole vehicle hire at 31+ days, and
-services / delivery / crew / storage / rehearsals stay at 20%. The trigger is the
-"Non-standard VAT rules" item whose quantity is the non-UK days.
+days (proportional), 0% on the whole vehicle hire at 31+ days, and services / delivery /
+crew / storage / rehearsals stay at 20%. The trigger is the "Non-standard VAT rules" item
+at the bottom of the supply list; its quantity is the non-UK days. Hire days are the job's
+dates, counted as the Money tab's VAT endpoint counts them (`hireDaysBetween()`).
 
-**Today's fudge** (jon): add dummy "EU van" / "EU backline" items to the job (which lose
-their nominal codes), discount the real lines down to the UK-taxable amount, invoice the
-dummy lines at 0%. Done by hand, every time.
+**The method (jon, 12 Oct — "B": today's fudge, done by OP).** Job 15812 (Jul 2026) is the
+model: the real lines at 100% discount and the money on two custom lines — £20.06 at 20%
+and £260.74 at 0%, £284.81, exactly what the portal charged. VAT lives on the invoice line,
+never the job line (`HIREHOP-BILLING-API.md` §10), so only the DRAFT is changed; the job's
+supply list, status, prep and availability are never involved. `services/eu-vat-split.ts`:
 
-**What the captures changed.** VAT lives on the invoice line, not the job line
-(`HIREHOP-BILLING-API.md` §10), and a job line can be put on an invoice **once only** (jon,
-9 Oct — never twice, so no "same line at two rates"). So Raise invoice drafts from the
-job's lines as they are and then corrects the DRAFT, and the job's supply list, status,
-prep and availability are never involved — which answers the "won't this move the job to
-prepping?" worry: nothing is added to the job.
+- **Equipment, and vehicles on a hire under 31 days:** each real line → £0, edited in place by
+  its own id (`billing_save_item.php`, `total=0`, `HIREHOP-BILLING-API.md` §10.3 — NOT the assign
+  call, which adds a second copy: §10.2b, found live on 15745, 12 Oct); per invoice NOMINAL two custom lines (§10.3b) on that nominal:
+  "Backline hire, UK days (2 of 28)" at 20% and "Backline hire, non-UK days, zero-rated
+  (HMRC 741A) (26 of 28)" at tax code 33 (the nominal's name comes from HireHop). The UK
+  share is `round2(net × UK days ÷ hire days)`, the 0% line the rest, so each nominal's net is
+  exact and its VAT is rounded once, as the portal works it out.
+- **Vehicles on a hire of 31+ days:** tax code 33 (`billing_save_item.php`, §10.3), price untouched.
+- **"Always 20%"** (delivery, crew, storage, rehearsals): untouched.
+- Which treatment a line gets: its job line (`MAIN_ID`) → the supply item's `ACC_NOMINAL` →
+  `classifyNominals()` — THE classification, lifted out of `calculateVatAdjustment()` so the
+  portal figure and the invoice cannot drift. A line OP can't match, or a custom line already
+  on the draft, refuses by name.
 
-**The method — the invoice-line VAT split: today's fudge, on the invoice instead of the
-job, with nominals kept, by API:**
+**Safety.** Custom lines are written BEFORE the real lines are zeroed, so any half-done draft
+shows the wrong net and the penny check stops it on the next press. Every write is read
+back (the same line changed, nothing else did, nothing was added). The whole draft is then checked
+(`checkSplitDraft()`) and, on the job's FIRST invoice, its gross is compared with the
+portal's `adjustedTotal` within 2p — a mismatch stops at the draft (wrong dates or a wrong
+non-UK quantity). A later invoice on an EU job is split but not compared: the portal figure
+was for the whole hire. Only then is it approved and sent to Xero, in the same press as any
+other invoice — the stop-at-the-draft pause was dropped on 12 Oct 2026 (jon) once 15745 had
+split to the penny on real HireHop (£237.50) and the approved draft went to Xero cleanly. A
+stop says "delete draft N and press again"; nothing unchecked reaches Xero.
 
-- **31+ days**: set every vehicle line to tax code 33 (`billing_save_item.php`). No split.
-- **Under 31 days**, per nominal group (vehicle group, equipment group — the same grouping
-  `vat-adjustment.ts` already does): edit each real line's price down to its UK-days share
-  at 20% (`billing_save_item.php`, `total` = the new net), then add ONE 0% line per group
-  for the non-UK share — "Non-UK days (zero-rated, HMRC 741A): <n> of <m> days" — carrying
-  that group's `nominal_id` and tax code 33. Pennies: the group's lines + its 0% line must
-  equal the group's original net exactly (`reconcileLines` discipline); services, delivery,
-  crew, storage and rehearsal lines are untouched. The 0% line is a **custom invoice
-  line** (`billing_save_item.php`, `id=0`, `kind=3` — capture 7, §10.3b): no job item
-  behind it, so nothing is added to the job.
-
-One invoice, and the penny check compares its gross to
-`calculateVatAdjustment()`'s adjusted total (what the portal showed the client), and Xero
-receives the right tax type on every line so the VAT return is right untouched. The quote
-keeps showing full UK VAT until invoicing, which is what the portal's wording already
-says. Done at invoice time, not quote time (the quote is edited too often before then).
-Tax code 33, bookkeeper to confirm (§1.13). The cancellation-fee invoice will use the
-same line-level machinery (jon, 9 Oct).
+Done at invoice time, not quote time (the quote is edited too often before then). The
+cancellation-fee invoice will use the same line-level machinery (jon, 9 Oct).
 
 ### 10.2 Who may press "Complete anyway" with excess held — manager, or any staff?
 
+Answered by §4.4: the panel has no Complete button. Excess still held is an amber line on
+the card and in the Move to Completed modal; only open Problems gate completion.
+
 ### 10.3 Hold on account — is a To Do enough, or does the Money tab want a pill?
+
+Still open. Nothing creates the To Do yet; the surplus choices on the card are Refund
+(existing route), Apply to another job (existing route) and the Money tab link.
 
 ---
 
 ## 11. Deliberately not built
 
-Batch closes · scheduled closes · credit notes · voiding invoices · split-party
+Batch closes · scheduled closes (the nightly Xero sweep is the one exception, §9 Phase 3a:
+it writes nothing to HireHop) · credit notes · voiding invoices · split-party
 invoices · any refund path other than the existing routes · editing allocations (release
 back off an invoice stays in `hh-deposit-release.ts`, used by the excess flows) ·
 cancellation (next spec).
+
+---
+
+## 12. Current state (10 Oct 2026) and what to do next
+
+**Lost Xero links (12 Oct).** HireHop now and then pushes an invoice to Xero but never records
+it (`ACC_ID` stays empty; a re-push fails "Invoice # must be unique" — OT-INV-12000, job
+15812). `hh-invoice-close.ts` `adoptLostXeroInvoices()` looks such an invoice up in Xero by
+number and accepts it only when exactly one live invoice has that number AND the same total,
+in memory (HireHop is never told). The plan, the allocation's Xero step and the sweep use it;
+an invoice with payments that still can't be found is a sweep STOP line, never "clean".
+
+**Live.** Phases 1, 2 and 3a (PRs #1409–#1418). **3b, the arrival hook, is built and
+OFF** — switch it on once the sweep has had a clean night or two (§4.5). The first real job through the whole chain
+was 16756 (raise ≈15 s, allocation read back in HireHop and Xero). The sweep setting was
+switched on by jon on 10 Oct, so the first backfill run is the night of 11 Oct; the
+bookkeeper has been told. Check it the morning after:
+
+```bash
+journalctl -u ooosh-portal --since "03:25" --until "03:45" --no-pager | grep -i sweep
+sudo -u postgres psql -d ooosh_operations -c "SELECT j.hh_job_number, l.ok, l.detail, l.created_at FROM job_closeout_log l JOIN jobs j ON j.id = l.job_id WHERE l.step = 'sweep' ORDER BY l.created_at DESC LIMIT 40;"
+```
+
+A `stopped` count is normal on the first nights (jobs whose HireHop and OP figures
+disagree); each one is logged by job number with the sentence from `applyCreditsInXero`.
+Only `errors > 0` or the same job stopping every night needs a look.
+
+**Where the code is.** Recipe `services/hh-invoice-close.ts` (shared with the shop);
+module `services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/
+plan|run|raise-invoice|allocate|complete`); sweep `services/close-out-xero-sweep.ts`
+(scheduler 03:30); frontend `lib/closeOutPlan.ts` (one plan read per job, 30 s TTL,
+pub/sub, and `closeOutView()` — the one derived view) + `components/CloseOutMoneyPanel.tsx`
+on the Money tab (the actions) and `components/CloseOutSignpost.tsx` on the Overview's Invoice
+card (read-only, "Open in Money →"); charges after completion `services/completed-charges.ts`
+(`POST /close-out/:jobId/charge`, §4.6); Problems gate in
+`pages/JobDetailPage.tsx` `StatusTransitionModal` + `routes/pipeline.ts`. Tests:
+`services/__tests__/hire-close-out.test.ts`, `close-out-xero-sweep.test.ts`,
+`shop-close.test.ts` (the regression guard for the extraction).
+
+**Next, in this order — each one only after jon says go:**
+
+1. ~~Phase 3b, the arrival hook~~ — built (§4.5); switch `closeout_arrival_hook_enabled` on.
+2. ~~EU VAT split~~ — built (§10.1), proven on 15745 (12 Oct). Glance at the first real EU
+   invoice in Xero after it goes through.
+3. **HireHop permission lockdown** for non-managers (add payment / add deposit / billing)
+   once the first EU invoices have gone through OP cleanly.
+4. ~~Phase 4, additional charges~~ — rescoped and built as §4.6 (charges after completion only).
+5. **Cancellation** — separate spec, reuses the invoice call, allocation and refund route.
+6. Smaller, held on purpose (jon, 13 Oct — captured here so they aren't lost):
+   - the two-open-invoice case (§1.8) — allocation refuses it for now; decide on the first real job;
+   - §10.3 hold-on-account — a To Do to keep a surplus on account instead of refunding it;
+   - whether the `/complete` route stays (§4.4) — the panel now completes through the
+     status modal, so nothing in the UI calls it;
+   - a "record as overpayment" button for a client who paid too much;
+   - "Download PDF" of the invoice from Xero on the Money panel;
+   - ticking the invoice "sent" in Xero when staff press "Mark as sent".
+7. **The payment portal reading charge invoices** (§4.6) — the portal repo, owing from the
+   invoices ONLY when the job is Completed. A handover for a session with both repos follows
+   jon's first live test of §4.6.
