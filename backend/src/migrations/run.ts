@@ -321,6 +321,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '279_lead_tour_jobs.sql',
         '280_lead_tour_job_notes.sql',
         '281_job_closeout_log.sql',
+        '282_job_groups.sql',
       ];
 
       for (const migration of migrations) {

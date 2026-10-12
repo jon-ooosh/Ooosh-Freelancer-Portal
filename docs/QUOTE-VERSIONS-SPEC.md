@@ -1,8 +1,17 @@
 # QUOTE VERSIONS SPEC — alternative quotes for one enquiry, as a group of jobs
 
-**Status:** 📋 PLANNED (9 Oct 2026) — jon + Claude, designed over mockups. Nothing built. The
-build happens in a fresh session that ALSO has the **payment portal repo** in context (Phase 4
-touches both sides). §1 is the settled decisions; §13 is the handover note for that session.
+**Status:** 🔨 PR 1 BUILT (12 Oct 2026) — model, "Quote another option", link an existing
+quote, remove from group, the option bar. PRs 2–4 (§10) still to build; Phase 4 needs the
+**payment portal repo** in context. §1 is the settled decisions; §1.1 the build-session
+decisions; §13 is the handover note.
+
+**Naming (jon, 12 Oct 2026): "version" in this spec is "option" in code and in the UI.** OP
+already has "quote versions" — the quote-PDF revisions of ONE job on the Activity Timeline
+(`services/quote-versions.ts`, `job_quote_versions`) — and two features called "versions" would
+drift. So: `jobs.option_no` / `option_label`, "(Option 2)" as the HireHop job-name suffix,
+"Quote another option" as the modal, `services/job-groups.ts` for the group. A client reading a
+quote headed "Option 2" knows what it is; "v2" reads as a revision. The spec text below keeps
+"version" — read it as "option". `job_groups` and `group_id` are as written.
 
 **Mockups (approved by jon, "wording to tighten, otherwise great"):**
 https://claude.ai/artifact/RaKVKF9jE4vnUVfgxRUeQB — boards: Main (single version, the subtle
@@ -75,6 +84,29 @@ Combine Bookings section — the closest existing sibling of this feature),
 12. **Festival-style grouping ("Main stage" + "Band A" + "Band B" are one thing) is Phase 2**
     (`kind = 'part_of'`), designed on the same table so it costs a flag, not a model. Roll-ups
     are the stretch goal there; "see that these belong together" is the core.
+
+### 1.1 Build-session decisions (jon, 12 Oct 2026)
+
+- **Pre-confirmation only.** "Add an option" is refused on anything past `provisional`
+  (`optionRefusalReason()` in `job-groups.ts` — also dismissed and combined jobs). The module is
+  for a client choosing between quotes for ONE hire; once something confirms there is one
+  version and the group is history. §5.1's "not lost/cancelled/completed" is superseded.
+- **A group has at most one confirmed member.** §7's "a second confirmation is legitimate"
+  is reversed: if the client "wants both vans", a human loses one option and adds the kit to
+  the other. The portal (§9) refuses a live option whose sibling is confirmed.
+- **HireHop duplicate FIRST, then the OP row with its number** (the Re-open order), not
+  §5.3's OP-then-HH. Otherwise the 30-min sync can import the new HireHop job as an unrelated
+  enquiry in the gap and the write-back trips the `hh_job_number` unique index. A HireHop
+  failure still never rolls the OP option back (`hh_error` in the response). If the OP
+  transaction fails AFTER the duplicate, the HireHop job arrives via the sync as an ungrouped
+  enquiry — link it with "Link an existing quote".
+- **Four confirmation entry points, not three:** `services/record-payment.ts` (staff click,
+  Wise matcher) also moves a job to confirmed. PR 3's hook goes there too, on the unattended path.
+- **"Link an existing quote" warns on a different client rather than refusing** (§5.4) —
+  the sync leaves duplicate client shells now and then; warnings, not gates.
+- **No right-click / long-press pin** (§6.1) — undiscoverable. The pin lives in Compare (PR 2).
+- **Copy lives in `frontend/src/lib/optionCopy.ts`** (§12's `versionCopy.ts`) — every
+  user-facing string, for jon to tune.
 
 ## 2. The problem, in jon's words
 
@@ -362,12 +394,20 @@ Portal side (the other repo):
 
 ## 10. Build order
 
-**PR 1 — model + add a version + bar.** Migration; `services/job-groups.ts` (create, add
-member, numbering, `resolveLeadJob`, suffix helpers); `POST /:id/add-version`,
-`POST /:id/group-with`, `DELETE /:id/group`; HireHop duplicate + rename push; version bar on
-Job Detail; "+ Add a version" link + modal; shared types. **Live check:** add a version to a
-real enquiry → two OP jobs, two HH jobs named "(v1)"/"(v2)", items copied, dates as entered,
-bar shows both, portal links differ.
+**PR 1 — model + add an option + bar. BUILT 12 Oct 2026.** Migration `282_job_groups.sql`
+(`job_groups`; `jobs.group_id / option_no / option_label`); `services/job-groups.ts` (suffix
+helpers, `resolveLeadJob`, `getGroupById`, `optionRefusalReason`, `insertOptionCopy`); in
+`routes/pipeline.ts` "QUOTE OPTIONS": `GET/PATCH /groups/:groupId` (read; rename / pin),
+`GET /:id/group-candidates`, `POST /:id/add-option`, `POST /:id/group-with`,
+`DELETE /:id/group`; `option_label` is editable through `PATCH /:id/edit`. After a HireHop
+duplicate the route calls `syncSingleHireHopJob()` so the new option has its items and
+derived requirements straight away. Frontend: `components/QuoteOptionsBar.tsx` (pills, group
+name inline-edit, "+ Add", "Remove from group"), `components/AddQuoteOptionModal.tsx` (label +
+chips, four dates, HireHop checkbox, "Link an existing quote" mode), `lib/quoteOptions.ts`
+(`stripOptionSuffix`, pill helpers), `lib/optionCopy.ts`; Job Detail header renders the
+"(Option N)" suffix as a pill and shows "+ Add an option" on a lone open enquiry.
+**Live check:** add an option to a real enquiry → two OP jobs, two HH jobs named
+"(Option 1)"/"(Option 2)", items copied, dates as entered, bar shows both, portal links differ.
 
 **PR 2 — Compare + Kanban + lead.** `GET /groups/:id`; Compare slide-over; pin/unpin; Kanban
 collapse + "N versions" badge + headline dedup; search/hire-history tags. **Live check:** four
