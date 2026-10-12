@@ -41,7 +41,7 @@ export interface CloseOutPlan {
   readyToComplete: boolean;
   log: CloseOutLogEntry[];
 }
-export interface CloseOutResult { done: boolean; message: string; plan: CloseOutPlan }
+export interface CloseOutResult { done: boolean; paused?: boolean; message: string; plan: CloseOutPlan }
 
 const TTL_MS = 30_000;
 const cache = new Map<string, { at: number; promise: Promise<CloseOutPlan> }>();

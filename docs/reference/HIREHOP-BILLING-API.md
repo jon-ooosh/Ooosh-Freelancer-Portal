@@ -378,18 +378,16 @@ line `ID` 104283, `MAIN_ID` 168520 (the job line), `ACC_NOMINAL_ID` 175,
 invoice line by line. **A job line goes on an invoice once only** (jon, 9 Oct) — a second
 row for the same `item_id` is not an option. ❓ Untested: a row with no job line (§7).
 
-### 10.2b Edit a job-backed line on a draft (e.g. 100% discount) — the same `billing_save_items.php` ✅
+### 10.2b ⚠️ `billing_save_items.php` ADDS a line — it never edits one
 
-HireHop's own line editor (captured 12 Oct 2026, scratch job 15745, draft 12946) posts the
-assign call above with ONE row: `checked=1`, `item_id` (the job line), `equip`, `qty`,
-`unit_price=4`, **`discount=100`, `price=0`**, `vat`, `vat_acc_id`, `nominal_id`, `title`,
-`memo`, `kind`, `from`, `upto`, `base_unit_price`, `multiplier`, `selected=`. Response: the
-invoice with that line at `PRICE: 0`, `VAT: 0`, `UNIT_PRICE` unchanged. Xero then receives
-the line as `UnitAmount` + a `DiscountAmount` of the whole line (job 15812's invoice shows
-"Includes discount 468.00"). Used by the EU split (`eu-vat-split.ts`), which sends the line's
-own `ACC_NOMINAL_ID` back and reads back that ONLY that line changed.
+The capture of 12 Oct 2026 (scratch job 15745, draft 12946: one row, `discount=100`,
+`price=0`, no invoice-line id, `selected=` empty) was the line being ADDED to an empty
+draft. Sent for a line already on a draft it puts a **second copy** of the job line on the
+invoice — so "a job line goes on an invoice once only" is a rule for PEOPLE, not one HireHop
+enforces (live on 15745, 12 Oct: the PCX100 clamp twice, once at £3 and once at £0; OP's
+read-back stopped the run at the draft). **Edit a line already on an invoice with §10.3.**
 
-### 10.3 Change one invoice line — `billing_save_item.php` (POST, singular)
+### 10.3 Change one invoice line IN PLACE — `billing_save_item.php` (POST, singular) ✅
 
 ```
 POST /php_functions/billing_save_item.php
@@ -401,6 +399,12 @@ POST /php_functions/billing_save_item.php
 Response: the invoice row with that line at `VAT_RATE: 0`, `ACC_TAX_RATE_ID: 33`,
 `VAT: 0`, and the invoice's `TAX` and `owing` recomputed (£1.20 → £1.00). `total` is
 the line's net; `nominal_id` can be changed in the same call.
+
+Captured again 12 Oct 2026 (15745, draft 12948) taking a line to **£0**: `id=104557 bill=12948
+kind=2 total=0 desc=… memo= vat_rate=20 vat_id=20 nominal_id=175 unit=0 main_id=15745 type=1
+selected=104557` → the SAME line id at `PRICE: 0`, `VAT: 0`, `UNIT_PRICE` 3 kept; no other line
+touched. The UI sends no discount field for this. This is how the EU split zeroes a line and
+zero-rates a 31+ day vehicle line (`hh-invoice-close.ts` `postInvoiceLineEdit()`).
 
 ### 10.3b Add a CUSTOM line to a draft — `billing_save_item.php` with `id=0`, `kind=3` ✅
 

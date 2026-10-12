@@ -460,9 +460,9 @@ and £260.74 at 0%, £284.81, exactly what the portal charged. VAT lives on the 
 never the job line (`HIREHOP-BILLING-API.md` §10), so only the DRAFT is changed; the job's
 supply list, status, prep and availability are never involved. `services/eu-vat-split.ts`:
 
-- **Equipment, and vehicles on a hire under 31 days:** each real line → 100% discount
-  (`billing_save_items.php`, exactly the UI's own edit — captured 12 Oct, `HIREHOP-BILLING-API.md`
-  §10.2b); per invoice NOMINAL two custom lines (§10.3b) on that nominal:
+- **Equipment, and vehicles on a hire under 31 days:** each real line → £0, edited in place by
+  its own id (`billing_save_item.php`, `total=0`, `HIREHOP-BILLING-API.md` §10.3 — NOT the assign
+  call, which adds a second copy: §10.2b, found live on 15745, 12 Oct); per invoice NOMINAL two custom lines (§10.3b) on that nominal:
   "Backline hire, UK days (2 of 28)" at 20% and "Backline hire, non-UK days, zero-rated
   (HMRC 741A) (26 of 28)" at tax code 33 (the nominal's name comes from HireHop). The UK
   share is `round2(net × UK days ÷ hire days)`, the 0% line the rest, so each nominal's net is
@@ -476,7 +476,7 @@ supply list, status, prep and availability are never involved. `services/eu-vat-
 
 **Safety.** Custom lines are written BEFORE the real lines are zeroed, so any half-done draft
 shows the wrong net and the penny check stops it on the next press. Every write is read
-back (the line changed, nothing else did). The whole draft is then checked
+back (the same line changed, nothing else did, nothing was added). The whole draft is then checked
 (`checkSplitDraft()`) and, on the job's FIRST invoice, its gross is compared with the
 portal's `adjustedTotal` within 2p — a mismatch stops at the draft (wrong dates or a wrong
 non-UK quantity). A later invoice on an EU job is split but not compared: the portal figure

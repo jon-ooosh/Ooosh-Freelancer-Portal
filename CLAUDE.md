@@ -199,8 +199,8 @@ The UI is ONE panel, `HireCloseOutPanel.tsx` on the **Invoice** card of the Post
 Payment Reconciliation requirement still exists but is drawn as that card's second pill): one button
 raises the invoice if needed (draft from uninvoiced lines → penny check → approve dated today → Xero)
 then allocates in HireHop + Xero (`POST /close-out/:jobId/run`); "Mark as
-sent" only once nothing is left to allocate; everything else behind "Details…". **An EU hire** (the "Non-standard VAT rules" item)
-gets its draft split by `services/eu-vat-split.ts` (real lines at 100% discount, per nominal a UK-days line at 20% and a
+sent" only once nothing is left to allocate; "Check again" on the card; everything else behind "Details…", ADMINS only. **An EU hire** (the "Non-standard VAT rules" item)
+gets its draft split by `services/eu-vat-split.ts` (real lines to £0, each edited in place by its own id, per nominal a UK-days line at 20% and a
 non-UK-days line at code 33; 31+ day vehicles zero-rated) and STOPS at the draft for a person to check; the next press approves.
 Xero log lines admin-only. Completing a job is the status
 change at the top of the page, and that modal refuses open Problems (manager + reason to override;

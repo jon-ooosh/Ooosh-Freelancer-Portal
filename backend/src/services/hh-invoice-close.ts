@@ -229,58 +229,28 @@ export function invoiceItems(row: Row | null): Row[] {
   return Array.isArray(row?.data?.items) ? row!.data.items : [];
 }
 
-/** '2026-06-02 09:00:00.000000' → '2026-06-02 09:00:00', as the UI posts it. */
-const hhDateTime = (v: unknown) => String(v ?? '').replace(/\.\d+$/, '');
-
 /**
- * Put a job-backed invoice line at 100% discount — exactly what HireHop's own
- * line editor sends (captured 12 Oct 2026, scratch job 15745: the same
- * `billing_save_items.php` that assigns lines, one row, `discount: 100`,
- * `price: 0`). Qty, unit price and nominal are sent back unchanged, so the
- * invoice and Xero show the item with its full discount, as staff do by hand.
+ * Edit one invoice line IN PLACE, by its own id — `billing_save_item.php`
+ * (singular), exactly as HireHop's line editor sends it (§10.3, and captured
+ * again 12 Oct 2026 setting a line to £0: same id, `PRICE: 0`, unit price
+ * kept). `total` is the line's new net; `rate` / `taxId` its VAT. The nominal
+ * is sent back unchanged.
+ *
+ * NOT `billing_save_items.php` (plural): that ASSIGNS a job line to the
+ * invoice and, for a line already on it, adds a second copy (15745, 12 Oct).
  * The caller reads back.
  */
-export async function postZeroInvoiceLine(hhJobNumber: number, invoiceId: number, line: Row): Promise<any> {
-  return hhBroker.post<any>('/php_functions/billing_save_items.php', {
-    main_id: hhJobNumber,
-    type: 1,
-    bill: invoiceId,
-    'data[0][checked]': 1,
-    'data[0][item_id]': line.MAIN_ID,
-    'data[0][equip]': line.EQUIP_ID,
-    'data[0][qty]': line.QTY,
-    'data[0][unit_price]': line.UNIT_PRICE,
-    'data[0][discount]': 100,
-    'data[0][price]': 0,
-    'data[0][vat]': line.VAT_RATE,
-    'data[0][vat_acc_id]': line.ACC_TAX_RATE_ID,
-    'data[0][nominal_id]': line.ACC_NOMINAL_ID,
-    'data[0][title]': line.DESCRIPTION || line.ITEM || '',
-    'data[0][memo]': line.MEMO || '',
-    'data[0][kind]': line.KIND,
-    'data[0][from]': hhDateTime(line.FROM),
-    'data[0][upto]': hhDateTime(line.UPTO),
-    'data[0][base_unit_price]': line.BASE_UNIT_PRICE,
-    'data[0][multiplier]': line.MULTIPLIER,
-    selected: '',
-  }, { priority: 'high' });
-}
-
-/**
- * Change one invoice line's tax code, keeping its net (§10.3,
- * `billing_save_item.php`, singular). The caller reads back.
- */
-export async function postInvoiceLineTax(hhJobNumber: number, invoiceId: number, line: Row,
-  tax: { rate: number; taxId: number }): Promise<any> {
+export async function postInvoiceLineEdit(hhJobNumber: number, invoiceId: number, line: Row,
+  edit: { total: number; rate: number; taxId: number }): Promise<any> {
   return hhBroker.post<any>('/php_functions/billing_save_item.php', {
     id: line.ID,
     bill: invoiceId,
     kind: line.KIND,
-    total: line.PRICE,
+    total: edit.total,
     desc: line.DESCRIPTION || line.ITEM || '',
     memo: line.MEMO || '',
-    vat_rate: tax.rate,
-    vat_id: tax.taxId,
+    vat_rate: edit.rate,
+    vat_id: edit.taxId,
     nominal_id: line.ACC_NOMINAL_ID,
     unit: 0,
     main_id: hhJobNumber,
