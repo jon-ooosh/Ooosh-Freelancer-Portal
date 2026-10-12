@@ -46,6 +46,7 @@ import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice,
 import { handleJobStatusChange } from '../../routes/webhooks';
 import { allocateOnArrival, fireArrivalHook } from '../close-out-arrival';
 import { splitEuDraft } from '../eu-vat-split';
+import { Stop } from '../hh-invoice-close';
 const mockSplit = splitEuDraft as jest.Mock;
 const mockStatus = handleJobStatusChange as jest.Mock;
 const mockSync = syncSavedRowToXero as jest.Mock;
@@ -529,26 +530,30 @@ describe('raiseHireInvoice', () => {
     expect(hh.invoices[0].status).toBe(0);
   });
 
-  it('an EU hire: splits the VAT on the draft and stops there for a look; the next press approves it', async () => {
+  it('an EU hire: splits the VAT on the draft, then approves it in the same press like any other invoice', async () => {
     uninvoicedJob(); hh.euTrigger = true;
     const plan = await planHireCloseOut(JOB.id);
     expect(plan.invoice).toMatchObject({ euTrigger: true, ready: true });
-    expect(plan.warnings.join(' ')).toContain('stops at the draft');
+    expect(plan.warnings.join(' ')).toContain('EU hire');
 
     mockSplit.mockResolvedValueOnce('split');
-    const first = await raiseHireInvoice(JOB.id, 'u1');
-    expect(first).toMatchObject({ done: false, paused: true });   // a deliberate stop, shown amber, not red
-    expect(first.message).toContain('EU VAT split done on draft 13000');
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(true);
     expect(mockSplit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ hhJobNumber: 16015, draftId: 13000, firstInvoice: true }));
-    expect(posts('/php_functions/billing_save_status.php')).toEqual([]);   // never approved, never to Xero
-    expect(mockSync).not.toHaveBeenCalled();
-    expect(logRows[0]).toMatchObject({ step: 'vat_split', ok: true });
-
-    mockSplit.mockResolvedValueOnce('checked');
-    const second = await raiseHireInvoice(JOB.id, 'u1');
-    expect(second.done).toBe(true);
-    expect(posts('/php_functions/billing_save.php')).toHaveLength(1);      // adopted, not a second draft
+    // Split BEFORE approve, then approved and sent to Xero.
+    const approveCall = mockPost.mock.calls.findIndex((c) => c[0] === '/php_functions/billing_save_status.php');
+    expect(mockSplit.mock.invocationCallOrder[0]).toBeLessThan(mockPost.mock.invocationCallOrder[approveCall]);
     expect(posts('/php_functions/billing_save_status.php')).toEqual([expect.objectContaining({ id: 13000, status: 2 })]);
+  });
+
+  it('an EU hire whose split stops is never approved', async () => {
+    uninvoicedJob(); hh.euTrigger = true;
+    mockSplit.mockRejectedValueOnce(new Stop('Draft 13000 is not split correctly'));
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('not split correctly');
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([]);
+    expect(mockSync).not.toHaveBeenCalled();
   });
 
   it('a non-EU hire never calls the split', async () => {

@@ -1223,7 +1223,7 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | **Lock-up report (step 10)** | Sitter's lock-up page shows "Shop till tonight: N sales · £x taken" by tender; the submitted summary in the handover thread gets a 🛒 line; the staff report view shows it with the review link. The night's takings net off any later refunds of that night's sales ("£18.00 taken (after £9.00 refunded)"). Template item "Have the clients paid?" became **"Any money outstanding?"** (new id `money_outstanding`, expected "no" — migration 251 swaps it only if the seeded item was untouched). |
 | **Drain lock** | `withShopDrainLock` — the scheduler and `POST /shop/drain` used to be able to push the same sale twice at once. Now serialised. |
 | **Weekly job** | Created on demand by the week's first sale (or the till's button), Mon 00:01→Sun 23:59, DISPATCHED. **Not** opened in advance (jon, Sep 2026): a week with no sales has no job and nothing to close. A walk-in sale goes on the week it was RUNG UP in, if that week's job exists and its close hasn't started, else the current week (`shop-period.ts getShopPeriodForSale`) — so a Sunday 23:59 sale that reaches HireHop on Monday still lands on Sunday's week. Weeks are UK dates (`weekStart()` uses the London date). First live one was **16750**. |
-| **Weekly close (§20)** | `services/shop-close.ts`, admin only. *This week* → pick a finished week → **Check it's ready** (reads HireHop, changes nothing) → **Close week**: draft invoice (`all: 1`) → penny check against OP's total AND the payments held (stops at the draft if either differs, emails jon) → approve dated the week's Sunday → Xero → allocate every payment from its own bank → £0 owing → job Completed → `close_state = completed`. Resumable: a stop says why, and the same button carries on (`close_state` / `hh_invoice_id`, migration 256). Monday 08:55 email to jon lists every finished week not yet closed. **Built, not yet run live** — first run on scratch job 16757 (§20.6). |
+| **Weekly close (§20)** | `services/shop-close.ts`, admin only. *This week* → pick a finished week → **Check it's ready** (reads HireHop, changes nothing) → **Close week**: draft invoice (`all: 1`) → penny check against OP's total AND the payments held (stops at the draft if either differs, emails jon) → approve dated the week's Sunday → Xero → allocate every payment from its own bank → £0 owing → job Completed → `close_state = completed`. Resumable: a stop says why, and the same button carries on (`close_state` / `hh_invoice_id`, migration 256). Monday 08:55 the scheduler closes every clean finished week itself and emails jon what closed / stopped / still waits (§20.2, `shop_auto_close_enabled`). **Built, not yet run live** — first run on scratch job 16757 (§20.6). |
 | **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
 | **Availability** | Free-vs-reserved on basket items, via `picklist_get_availability.php`. |
 | **Stock usage** | `GET /shop/consumption` + a panel on the till. |
@@ -1269,11 +1269,8 @@ writes those descriptions; there is no setting).
 
 **Next, in order (jon, 28 Sep 2026):**
 
-1. **Close the next two or three weeks by the button** (Monday 08:55 email → *This
-   week* → Close). On the first, check the Xero invoice's Reference and that its
-   lines land on 270.
-2. **Then v2 — close automatically** early Monday, still approving only when the
-   penny check passes, emailing jon the result. Small: the button does all the work.
+1. ~~Close the next two or three weeks by the button~~ — done, four clean weeks.
+2. ~~Then v2 — close automatically~~ — BUILT 12 Oct 2026 (§20.2).
 3. **Then decide on line-by-line refunds** (gaps below) — if still worthwhile.
 4. Gate manual payment entry in HireHop (§0) — jon, manual.
 
@@ -1406,8 +1403,12 @@ Each step reads HireHop back before the next; each is resumable (§20.4).
   **"Close last week"** button on the till's *This week* tab, showing each step's result.
 - **Signposted:** a Monday-morning email to jon — "last week is ready to close" (or
   "can't close yet: <why>") — linking straight to the button.
-- **v2, after a few clean weeks:** run it automatically early Monday, still approving
-  only when step 3 balances.
+- **v2 — BUILT 12 Oct 2026** (jon, after four clean hand closes): Monday 08:55 the
+  scheduler closes every finished week whose pre-flight is clean, exactly as the button
+  does (`runMondayShopClose()`), still approving only when step 3 balances. Only FRESH
+  closes: a week that stopped part-way is left for the button. Then one email: closed /
+  stopped (with the reason) / still waiting. `system_settings.shop_auto_close_enabled`
+  (migration 285, seeded `'true'`) — `'false'` goes back to the email alone.
 
 ### 20.3 Also in this build
 

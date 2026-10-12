@@ -243,6 +243,12 @@ them too: `filter.enable` + `filter.zero` in `traccar.xml` on the server.
 second — every re-render made a new query key, so each answer restarted the fetch. It is
 now whole days (`startOfDay` … `endOfDay`, sent as real UTC).
 
+**Traccar's own database** — moving from H2 (inside the container) to OP's PostgreSQL
+(database `traccar`), pinned image `ooosh/traccar:6.11.1`, config on the server's disk,
+nightly live backup to R2 + 12-month position purge from OP's scheduler at 03:10. The
+runbook, rehearsal results and restore steps are `docs/TRACCAR-POSTGRES.md`; the copy is
+`deploy/traccar/h2-to-postgres.sh`.
+
 **Vehicles › Settings** keeps only Checklists (the prep + briefing checklist items PrepPage
 and BookOutPage read) and Stock (prep consumables; the low-stock banner opens `?tab=stock`).
 The General and Data tabs were standalone-app leftovers — Data's import and "wipe test
