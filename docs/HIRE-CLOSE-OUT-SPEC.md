@@ -6,8 +6,9 @@
 `lib/closeOutPlan.ts`; the Payment Reconciliation requirement is that card's second pill — §3). 3a = the
 nightly Xero credit sweep (`services/close-out-xero-sweep.ts`, 03:30, `closeout_xero_sweep_enabled`, mig
 282). 3b = the arrival hook (`services/close-out-arrival.ts`, `closeout_arrival_hook_enabled`, mig 283 —
-§4.5). **An EU hire (the "Non-standard VAT rules" item) is refused by Raise invoice until the invoice-line
-VAT split (§10.1) is built — invoice those by hand for now.** Phase 4 and the VAT split not built. §12 is
+§4.5). **EU VAT split BUILT 12 Oct 2026** (§10.1, `services/eu-vat-split.ts`): an EU hire's draft is split by
+UK / non-UK days and STOPS at the draft for a person to check before the next press approves it. Phase 4
+not built. §12 is
 the current state and the ordered next steps. This is the "bookkeeping module" that
 `docs/reference/HIREHOP-BILLING-API.md` §8 says the shop close is the base of. §1 is what
 jon settled in the design discussion; §4 is the flow; §9 is the build order and the
@@ -391,8 +392,7 @@ choices wired to existing routes; Complete job step. Manager-tier to press
 (`MANAGER_ROLES`; review after a month — allocation moves no cash). Shop close keeps
 working unchanged (regression: close a shop week after the extraction).
 
-**Phase 2 — Raise invoice.** ✅ BUILT 9 Oct 2026 (without the EU split: an EU hire is refused by
-name and invoiced by hand until §10.1 ships). Invoice date = raise date; `ref` = `Job <number>` so the
+**Phase 2 — Raise invoice.** ✅ BUILT 9 Oct 2026; the EU split (§10.1) ✅ BUILT 12 Oct 2026. Invoice date = raise date; `ref` = `Job <number>` so the
 Xero Reference matches the bank-transfer convention the Wise matcher keys on. The penny check is
 draft net + already-invoiced net = HireHop's quoted net. Then the lockdown of HireHop payment and
 deposit permissions for non-managers — after the VAT split, or managers keep raising EU invoices by hand.
@@ -445,46 +445,47 @@ deposit on the scratch job (a deposit creates a real Xero overpayment).
 
 ## 10. Open questions
 
-### 10.1 EU hires — proposed: fix the VAT on the INVOICE lines; the job is never touched
+### 10.1 EU hires — the invoice-line VAT split ✅ BUILT 12 Oct 2026
 
 The rule already exists and is already what the client has been told (`vat-adjustment.ts`,
 ported from the portal; HMRC 741A): vehicle and equipment revenue is 0% for the non-UK
-days (proportional, by nominal group), 0% on the whole vehicle hire at 31+ days, and
-services / delivery / crew / storage / rehearsals stay at 20%. The trigger is the
-"Non-standard VAT rules" item whose quantity is the non-UK days.
+days (proportional), 0% on the whole vehicle hire at 31+ days, and services / delivery /
+crew / storage / rehearsals stay at 20%. The trigger is the "Non-standard VAT rules" item
+at the bottom of the supply list; its quantity is the non-UK days. Hire days are the job's
+dates, counted as the Money tab's VAT endpoint counts them (`hireDaysBetween()`).
 
-**Today's fudge** (jon): add dummy "EU van" / "EU backline" items to the job (which lose
-their nominal codes), discount the real lines down to the UK-taxable amount, invoice the
-dummy lines at 0%. Done by hand, every time.
+**The method (jon, 12 Oct — "B": today's fudge, done by OP).** Job 15812 (Jul 2026) is the
+model: the real lines at 100% discount and the money on two custom lines — £20.06 at 20%
+and £260.74 at 0%, £284.81, exactly what the portal charged. VAT lives on the invoice line,
+never the job line (`HIREHOP-BILLING-API.md` §10), so only the DRAFT is changed; the job's
+supply list, status, prep and availability are never involved. `services/eu-vat-split.ts`:
 
-**What the captures changed.** VAT lives on the invoice line, not the job line
-(`HIREHOP-BILLING-API.md` §10), and a job line can be put on an invoice **once only** (jon,
-9 Oct — never twice, so no "same line at two rates"). So Raise invoice drafts from the
-job's lines as they are and then corrects the DRAFT, and the job's supply list, status,
-prep and availability are never involved — which answers the "won't this move the job to
-prepping?" worry: nothing is added to the job.
+- **Equipment, and vehicles on a hire under 31 days:** each real line → 100% discount
+  (`billing_save_items.php`, exactly the UI's own edit — captured 12 Oct, `HIREHOP-BILLING-API.md`
+  §10.2b); per invoice NOMINAL two custom lines (§10.3b) on that nominal:
+  "Backline hire, UK days (2 of 28)" at 20% and "Backline hire, non-UK days, zero-rated
+  (HMRC 741A) (26 of 28)" at tax code 33 (the nominal's name comes from HireHop). The UK
+  share is `round2(net × UK days ÷ hire days)`, the 0% line the rest, so each nominal's net is
+  exact and its VAT is rounded once, as the portal works it out.
+- **Vehicles on a hire of 31+ days:** tax code 33 (`billing_save_item.php`, §10.3), price untouched.
+- **"Always 20%"** (delivery, crew, storage, rehearsals): untouched.
+- Which treatment a line gets: its job line (`MAIN_ID`) → the supply item's `ACC_NOMINAL` →
+  `classifyNominals()` — THE classification, lifted out of `calculateVatAdjustment()` so the
+  portal figure and the invoice cannot drift. A line OP can't match, or a custom line already
+  on the draft, refuses by name.
 
-**The method — the invoice-line VAT split: today's fudge, on the invoice instead of the
-job, with nominals kept, by API:**
+**Safety.** Custom lines are written BEFORE the real lines are zeroed, so any half-done draft
+shows the wrong net and the penny check stops it on the next press. Every write is read
+back (the line changed, nothing else did). The whole draft is then checked
+(`checkSplitDraft()`) and, on the job's FIRST invoice, its gross is compared with the
+portal's `adjustedTotal` within 2p — a mismatch stops at the draft (wrong dates or a wrong
+non-UK quantity). A later invoice on an EU job is split but not compared: the portal figure
+was for the whole hire. **A run that split the draft stops there** ("check it in HireHop,
+then press again"); the next press finds the split, checks it again, approves and sends it
+to Xero. Never reaches Xero unchecked; a stop says "delete draft N and press again".
 
-- **31+ days**: set every vehicle line to tax code 33 (`billing_save_item.php`). No split.
-- **Under 31 days**, per nominal group (vehicle group, equipment group — the same grouping
-  `vat-adjustment.ts` already does): edit each real line's price down to its UK-days share
-  at 20% (`billing_save_item.php`, `total` = the new net), then add ONE 0% line per group
-  for the non-UK share — "Non-UK days (zero-rated, HMRC 741A): <n> of <m> days" — carrying
-  that group's `nominal_id` and tax code 33. Pennies: the group's lines + its 0% line must
-  equal the group's original net exactly (`reconcileLines` discipline); services, delivery,
-  crew, storage and rehearsal lines are untouched. The 0% line is a **custom invoice
-  line** (`billing_save_item.php`, `id=0`, `kind=3` — capture 7, §10.3b): no job item
-  behind it, so nothing is added to the job.
-
-One invoice, and the penny check compares its gross to
-`calculateVatAdjustment()`'s adjusted total (what the portal showed the client), and Xero
-receives the right tax type on every line so the VAT return is right untouched. The quote
-keeps showing full UK VAT until invoicing, which is what the portal's wording already
-says. Done at invoice time, not quote time (the quote is edited too often before then).
-Tax code 33, confirmed (§1.13). The cancellation-fee invoice will use the
-same line-level machinery (jon, 9 Oct).
+Done at invoice time, not quote time (the quote is edited too often before then). The
+cancellation-fee invoice will use the same line-level machinery (jon, 9 Oct).
 
 ### 10.2 Who may press "Complete anyway" with excess held — manager, or any staff?
 
@@ -509,6 +510,13 @@ cancellation (next spec).
 ---
 
 ## 12. Current state (10 Oct 2026) and what to do next
+
+**Lost Xero links (12 Oct).** HireHop now and then pushes an invoice to Xero but never records
+it (`ACC_ID` stays empty; a re-push fails "Invoice # must be unique" — OT-INV-12000, job
+15812). `hh-invoice-close.ts` `adoptLostXeroInvoices()` looks such an invoice up in Xero by
+number and accepts it only when exactly one live invoice has that number AND the same total,
+in memory (HireHop is never told). The plan, the allocation's Xero step and the sweep use it;
+an invoice with payments that still can't be found is a sweep STOP line, never "clean".
 
 **Live.** Phases 1, 2 and 3a (PRs #1409–#1418). **3b, the arrival hook, is built and
 OFF** — switch it on once the sweep has had a clean night or two (§4.5). The first real job through the whole chain
@@ -538,14 +546,10 @@ Invoice card with `payment_reconcile` passed in as `companionReq`; Problems gate
 **Next, in this order — each one only after jon says go:**
 
 1. ~~Phase 3b, the arrival hook~~ — built (§4.5); switch `closeout_arrival_hook_enabled` on.
-2. **EU VAT split (§10.1).** Tax code 33 CONFIRMED (jon, 10 Oct). Build:
-   `raiseHireInvoice()` detects the "Non-standard VAT rules" item (already does, via
-   `vat-adjustment.ts` `hasNonStandardVatItem()`), makes the draft with `all: 1`, then edits
-   the invoice lines' `vat_id` (`billing_save_item.php`, `HIREHOP-BILLING-API.md` §10.3) to
-   split UK/non-UK days, with a custom line (§10.3b) where a line cannot be split. Penny
-   check stays on net. Until then EU hires are refused by name and raised by hand.
+2. ~~EU VAT split~~ — built (§10.1). Watch the first real EU hire through: it stops at the
+   draft; look at it in HireHop before pressing again.
 3. **HireHop permission lockdown** for non-managers (add payment / add deposit / billing)
-   once 2 is live, or sooner if managers are happy raising EU invoices by hand.
+   once the first EU invoices have gone through OP cleanly.
 4. **Phase 4, additional charges** ("Add a charge" on Damage & Issues, §9).
 5. **Cancellation** — separate spec, reuses the invoice call, allocation and refund route.
 6. Smaller: the two-open-invoice case (§1.8) on the first real job; §10.3 hold-on-account;

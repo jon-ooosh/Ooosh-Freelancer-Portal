@@ -32,8 +32,9 @@ jest.mock('../shop-stock', () => ({ hhLocalNow: () => '2026-10-09 09:00:00' }));
 jest.mock('../../config/xero', () => ({ isXeroConfigured: () => true }));
 jest.mock('../xero-broker', () => ({
   __esModule: true,
-  default: { getInvoice: jest.fn(), getOverpayment: jest.fn(), allocateOverpayment: jest.fn() },
+  default: { getInvoice: jest.fn(), getInvoices: jest.fn().mockResolvedValue([]), getOverpayment: jest.fn(), allocateOverpayment: jest.fn() },
 }));
+jest.mock('../eu-vat-split', () => ({ splitEuDraft: jest.fn() }));
 
 import { query } from '../../config/database';
 import hhBroker from '../hirehop-broker';
@@ -44,6 +45,8 @@ import { hasNonStandardVatItem } from '../vat-adjustment';
 import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, runHireCloseOut, planAllocations } from '../hire-close-out';
 import { handleJobStatusChange } from '../../routes/webhooks';
 import { allocateOnArrival, fireArrivalHook } from '../close-out-arrival';
+import { splitEuDraft } from '../eu-vat-split';
+const mockSplit = splitEuDraft as jest.Mock;
 const mockStatus = handleJobStatusChange as jest.Mock;
 const mockSync = syncSavedRowToXero as jest.Mock;
 const mockEu = hasNonStandardVatItem as jest.Mock;
@@ -526,15 +529,32 @@ describe('raiseHireInvoice', () => {
     expect(hh.invoices[0].status).toBe(0);
   });
 
-  it('refuses an EU hire until the VAT split is built', async () => {
+  it('an EU hire: splits the VAT on the draft and stops there for a look; the next press approves it', async () => {
     uninvoicedJob(); hh.euTrigger = true;
     const plan = await planHireCloseOut(JOB.id);
-    expect(plan.invoice.euTrigger).toBe(true);
-    expect(plan.invoice.ready).toBe(false);
-    const r = await raiseHireInvoice(JOB.id, 'u1');
-    expect(r.done).toBe(false);
-    expect(r.message).toContain('Non-standard VAT');
-    expect(posts('/php_functions/billing_save.php')).toEqual([]);
+    expect(plan.invoice).toMatchObject({ euTrigger: true, ready: true });
+    expect(plan.warnings.join(' ')).toContain('stops at the draft');
+
+    mockSplit.mockResolvedValueOnce('split');
+    const first = await raiseHireInvoice(JOB.id, 'u1');
+    expect(first.done).toBe(false);
+    expect(first.message).toContain('EU VAT split done on draft 13000');
+    expect(mockSplit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ hhJobNumber: 16015, draftId: 13000, firstInvoice: true }));
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([]);   // never approved, never to Xero
+    expect(mockSync).not.toHaveBeenCalled();
+    expect(logRows[0]).toMatchObject({ step: 'vat_split', ok: true });
+
+    mockSplit.mockResolvedValueOnce('checked');
+    const second = await raiseHireInvoice(JOB.id, 'u1');
+    expect(second.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toHaveLength(1);      // adopted, not a second draft
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([expect.objectContaining({ id: 13000, status: 2 })]);
+  });
+
+  it('a non-EU hire never calls the split', async () => {
+    uninvoicedJob();
+    await raiseHireInvoice(JOB.id, 'u1');
+    expect(mockSplit).not.toHaveBeenCalled();
   });
 
   it('a job still out: refuses by default, raises with the manager override', async () => {

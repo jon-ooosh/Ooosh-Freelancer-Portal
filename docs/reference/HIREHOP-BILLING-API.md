@@ -237,6 +237,11 @@ Interested (10) releases it** (`SHOP-SALES-SPEC.md` §2.1).
 - Deleting a payment application (jon deleted 16015's stray refund by hand on 9 Oct
   without the network tab open — next time).
 - Voiding / deleting an approved invoice (and what it does in Xero).
+- Telling HireHop an invoice IS in Xero. When HireHop's push reached Xero but HireHop never
+  recorded it (`ACC_ID: ""`, `exported: 0` — OT-INV-12000, job 15812, Jul 2026), a re-push
+  (`billing_save.php` then `tasks.php post_invoice_credit`) fails "Can't create invoice number
+  OT-INV-12000 — Xero error: Invoice # must be unique", even in administrator mode. OP works
+  round it by finding the Xero invoice by number and total (`adoptLostXeroInvoices()`).
 - VAT rounding across several odd-pence lines (§3).
 
 ---
@@ -372,6 +377,17 @@ line `ID` 104283, `MAIN_ID` 168520 (the job line), `ACC_NOMINAL_ID` 175,
 `title` are all per row and all ours to set — this is the call that can build an
 invoice line by line. **A job line goes on an invoice once only** (jon, 9 Oct) — a second
 row for the same `item_id` is not an option. ❓ Untested: a row with no job line (§7).
+
+### 10.2b Edit a job-backed line on a draft (e.g. 100% discount) — the same `billing_save_items.php` ✅
+
+HireHop's own line editor (captured 12 Oct 2026, scratch job 15745, draft 12946) posts the
+assign call above with ONE row: `checked=1`, `item_id` (the job line), `equip`, `qty`,
+`unit_price=4`, **`discount=100`, `price=0`**, `vat`, `vat_acc_id`, `nominal_id`, `title`,
+`memo`, `kind`, `from`, `upto`, `base_unit_price`, `multiplier`, `selected=`. Response: the
+invoice with that line at `PRICE: 0`, `VAT: 0`, `UNIT_PRICE` unchanged. Xero then receives
+the line as `UnitAmount` + a `DiscountAmount` of the whole line (job 15812's invoice shows
+"Includes discount 468.00"). Used by the EU split (`eu-vat-split.ts`), which sends the line's
+own `ACC_NOMINAL_ID` back and reads back that ONLY that line changed.
 
 ### 10.3 Change one invoice line — `billing_save_item.php` (POST, singular)
 

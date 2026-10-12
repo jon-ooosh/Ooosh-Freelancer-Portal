@@ -12,7 +12,7 @@ jest.mock('../hh-deposit-release', () => ({ ...jest.requireActual('../hh-deposit
 jest.mock('../hh-xero-sync', () => ({ syncSavedRowToXero: jest.fn(), sendXeroSyncFailedAlert: jest.fn() }));
 jest.mock('../shop-stock', () => ({ hhLocalNow: () => '2026-10-10 03:30:00' }));
 jest.mock('../../config/xero', () => ({ isXeroConfigured: () => true }));
-jest.mock('../xero-broker', () => ({ __esModule: true, default: { getInvoice: jest.fn(), getOverpayment: jest.fn(), allocateOverpayment: jest.fn() } }));
+jest.mock('../xero-broker', () => ({ __esModule: true, default: { getInvoice: jest.fn(), getInvoices: jest.fn(), getOverpayment: jest.fn(), allocateOverpayment: jest.fn() } }));
 jest.mock('../vat-adjustment', () => ({ hasNonStandardVatItem: jest.fn() }));
 jest.mock('../../routes/webhooks', () => ({ handleJobStatusChange: jest.fn() }));
 jest.mock('../hh-deposit', () => ({ getMethodForBankId: () => 'stripe_gbp', PAYMENT_METHODS_LABELS: { stripe_gbp: 'Stripe GBP' } }));
@@ -29,6 +29,7 @@ const mockRead = readBillingRows as jest.Mock;
 const mockXeroInvoice = (xeroBroker as any).getInvoice as jest.Mock;
 const mockXeroOverpayment = (xeroBroker as any).getOverpayment as jest.Mock;
 const mockXeroAllocate = (xeroBroker as any).allocateOverpayment as jest.Mock;
+const mockXeroFind = (xeroBroker as any).getInvoices as jest.Mock;
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -112,5 +113,30 @@ describe('runCloseOutXeroSweep', () => {
     const r = await runCloseOutXeroSweep();
     expect(r).toMatchObject({ checked: 2, stopped: 1, applied: 1, errors: 0 });
     expect(logRows.some((l) => l.ok === false && /isn't in Xero as a payment/.test(l.detail))).toBe(true);
+  });
+
+  describe('an invoice HireHop lost the Xero link for (OT-INV-12000, job 15812)', () => {
+    const lostLink = () => mockRead.mockImplementation(async () => job16015Rows().map((r: any) =>
+      (r.kind === 1 ? { ...r, data: { ...r.data, ACC_ID: '' } } : r)));
+
+    it('finds it in Xero by number and total, and sweeps it as usual', async () => {
+      lostLink();
+      mockXeroFind.mockResolvedValue([{ InvoiceID: 'x-12252', InvoiceNumber: 'OT-INV-12252', Total: 6083.99, Status: 'AUTHORISED' }]);
+      const r = await runCloseOutXeroSweep();
+      expect(mockXeroFind).toHaveBeenCalledWith('Type=="ACCREC" AND InvoiceNumber=="OT-INV-12252"');
+      expect(r).toMatchObject({ checked: 1, applied: 1, stopped: 0 });
+      expect(xero.due['x-12252']).toBe(0);
+      expect(logRows.some((l) => /HireHop lost the link/.test(l.detail))).toBe(true);
+    });
+
+    it('a Xero invoice with that number but a different total is not trusted: logged as a stop, never "clean"', async () => {
+      lostLink();
+      mockXeroFind.mockResolvedValue([{ InvoiceID: 'x-other', InvoiceNumber: 'OT-INV-12252', Total: 100, Status: 'AUTHORISED' }]);
+      const r = await runCloseOutXeroSweep();
+      expect(r).toMatchObject({ checked: 1, applied: 0, stopped: 1 });
+      expect(mockXeroAllocate).not.toHaveBeenCalled();
+      expect(logRows.at(-1)).toMatchObject({ step: 'sweep', ok: false });
+      expect(logRows.at(-1).detail).toContain("OP can't find it in Xero");
+    });
   });
 });

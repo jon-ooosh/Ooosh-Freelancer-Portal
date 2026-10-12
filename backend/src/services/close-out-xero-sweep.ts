@@ -19,7 +19,7 @@
  */
 import { query } from '../config/database';
 import { readBillingRows } from './hh-deposit-release';
-import { Stop, PENNY, invoiceAllocations, applyCreditsInXero } from './hh-invoice-close';
+import { Stop, PENNY, invoiceAllocations, applyCreditsInXero, adoptLostXeroInvoices } from './hh-invoice-close';
 import { approvedInvoices, sourceJobRows, reporter, log } from './hire-close-out';
 import { isXeroConfigured } from '../config/xero';
 
@@ -67,9 +67,16 @@ async function candidates(): Promise<Array<{ id: string; hh_job_number: number }
 export async function sweepJob(jobId: string, hhJobNumber: number): Promise<'applied' | 'clean' | 'stopped'> {
   const rep = reporter(jobId, null, 'open the job and press the button');
   const rows = await readBillingRows(hhJobNumber);
+  for (const note of await adoptLostXeroInvoices(rows)) await log(jobId, null, 'sweep', true, `Nightly sweep: ${note}`);
   let touched = false;
   for (const inv of approvedInvoices(rows)) {
-    if (!inv.inXero || !invoiceAllocations(rows, inv.invoiceId).length) continue;
+    if (!invoiceAllocations(rows, inv.invoiceId).length) continue;
+    if (!inv.inXero) {
+      // Never "clean": HireHop has payments on an invoice OP can't find in Xero.
+      await log(jobId, null, 'sweep', false, `Nightly sweep: ${inv.number} has payments allocated in HireHop but OP can't find it in Xero `
+        + '(no Xero id in HireHop, and no Xero invoice with that number and total). Check it in Xero by hand.');
+      return 'stopped';
+    }
     const extraRows = await sourceJobRows(rows, inv.invoiceId);
     const before = rep.log;
     let appliedHere = false;
