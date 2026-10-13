@@ -616,6 +616,15 @@ second press while the first is still running.
 look (money still owed on a Completed job) · red only when OP refuses to go on · green done.
 "Paid in full" shows "Nothing paid yet" / "£x paid · £y owing" while money is owed.
 
+**The first invoice reads like the quote (13 Oct 2026).** jon: "include all owing items" (`all: 1`)
+gives a flat list in no sensible order. A job's FIRST invoice is now an empty draft with the
+supply list pasted onto it (`billing_paste.php`, `HIREHOP-BILLING-API.md` §10.7) — headers,
+nesting and the £0 accessory lines come through as on the quote. `pasteSupplyList()` reads back
+that every priced job line landed (counted by job line id), then the usual penny check. A top-up
+invoice ("Invoice the £x added since") stays `all: 1`. **An EU hire** keeps the quote layout with
+every priced line at £0 and the per-category UK / non-UK lines at the bottom (jon accepted that
+look, 13 Oct). Kill-switch without a deploy: `system_settings.closeout_invoice_layout` = `'flat'`.
+
 **Next, in this order — each one only after jon says go:**
 
 1. ~~Phase 3b, the arrival hook~~ — built (§4.5); switch `closeout_arrival_hook_enabled` on.

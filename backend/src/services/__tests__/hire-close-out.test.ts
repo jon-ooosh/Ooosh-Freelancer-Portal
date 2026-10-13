@@ -63,7 +63,7 @@ const mockXeroAllocate = (xeroBroker as any).allocateOverpayment as jest.Mock;
 // ── A tiny HireHop ──────────────────────────────────────────────────────
 
 interface Dep { id: number; credit: number; bank: number; allocated: number; desc: string; date: string; noXero?: boolean }
-interface Inv { id: number; status: number; number: string; gross: number; paid: number; accId: string; date: string; desc?: string }
+interface Inv { id: number; status: number; number: string; gross: number; paid: number; accId: string; date: string; desc?: string; items?: any[] }
 interface App { id: number; invoiceId: number; depositId: number; amount: number; desc?: string }
 
 let hh: {
@@ -80,7 +80,7 @@ function rows(): any[] {
   for (const i of hh.invoices) {
     out.push({
       kind: 1, status: String(i.status), debit: i.gross, owing: r2(i.gross - i.paid), date: i.date,
-      data: { ID: i.id, NUMBER: i.number, STATUS: i.status, NET: r2(i.gross / 1.2), TAX: r2(i.gross - i.gross / 1.2), ACC_ID: i.accId, TAX_POINT: i.date, DESCRIPTION: i.desc || '' },
+      data: { ID: i.id, NUMBER: i.number, STATUS: i.status, NET: r2(i.gross / 1.2), TAX: r2(i.gross - i.gross / 1.2), ACC_ID: i.accId, TAX_POINT: i.date, DESCRIPTION: i.desc || '', ...(i.items ? { items: i.items } : {}) },
     });
   }
   for (const d of hh.deposits) {
@@ -104,9 +104,28 @@ function installHireHop() {
   mockRead.mockImplementation(async () => rows());
   mockGet.mockImplementation(async (path: string) => {
     if (path === '/api/job_data.php') return { success: true, data: { STATUS: hh.jobStatus } };
+    if (path === '/frames/items_to_supply_list.php') return { success: true, data: supply };
     throw new Error(`unexpected GET ${path}`);
   });
   mockPost.mockImplementation(async (path: string, body: any) => {
+    if (path === '/php_functions/billing_save.php' && body.all === 0) {
+      // all: 0 — an EMPTY draft, for the supply list to be pasted onto (§10.7).
+      const inv: Inv = { id: hh.nextInvoice++, status: 0, number: '', gross: 0, paid: 0, accId: '', date: '2026-10-13', items: [] };
+      hh.invoices.push(inv);
+      return { success: true, data: { rows: [{ kind: 1, data: { ID: inv.id } }] } };
+    }
+    if (path === '/php_functions/billing_paste.php') {
+      // HireHop puts each grid row on the invoice as a line pointing at the job line (MAIN_ID).
+      const inv = hh.invoices.find((i) => i.id === body.bill)!;
+      for (let i = 0; body[`data[${i}][ID]`] !== undefined; i++) {
+        if (pasteDrops === body[`data[${i}][ID]`]) continue;
+        const kind = body[`data[${i}][kind]`];
+        inv.items!.push({ ID: 105000 + i, KIND: kind, MAIN_ID: kind === 0 ? 0 : body[`data[${i}][ID]`], PRICE: body[`data[${i}][inv_PRICE]`], LFT: body[`data[${i}][LFT]`] });
+      }
+      const net = r2(inv.items!.reduce((t, l) => t + l.PRICE, 0));
+      inv.gross = r2(net * 1.2); hh.uninvoicedNet = r2(hh.uninvoicedNet - net);
+      return { success: true, data: {} };
+    }
     if (path === '/php_functions/billing_save.php') {
       // all: 1 — a draft from every line not yet invoiced (proven 9 Oct 2026).
       const net = hh.uninvoicedNet;
@@ -170,10 +189,16 @@ let opPayments: Array<{ hirehop_deposit_id: number; payment_type: string; amount
 let excessHeld: number;
 let logRows: any[];
 let arrivalEnabled: string;
+/** `closeout_invoice_layout` — 'flat' unless a test is about the quote layout. */
+let layout: string;
+/** The job's supply list, for the paste (headers, £0 lines and a prompt, like 16598). */
+let supply: any[];
+/** A job line HireHop "forgets" to paste. */
+let pasteDrops: number | null;
 
 function installDb() {
   mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
-    if (sql.includes('FROM system_settings')) return { rows: [{ value: arrivalEnabled }] };
+    if (sql.includes('FROM system_settings')) return { rows: [{ value: params[0] === 'closeout_invoice_layout' ? layout : arrivalEnabled }] };
     if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...JOB }] };
     if (sql.includes('FROM job_payments')) return { rows: opPayments };
     if (sql.includes('FROM v_excess_held')) return { rows: [{ held: excessHeld }] };
@@ -215,6 +240,14 @@ beforeEach(() => {
   jest.clearAllMocks();
   logRows = [];
   arrivalEnabled = 'true';
+  layout = 'flat';
+  pasteDrops = null;
+  supply = [
+    { ID: 8818, kind: 0, title: 'Vehicle', LFT: 1, RGT: 8, PRICE: 0, UNIT_PRICE: 0 },
+    { ID: 164980, kind: 2, qty: 1, title: 'Premium LWB Splitter Van', LFT: 2, RGT: 5, PRICE: 500, UNIT_PRICE: 500, TYPE_CUSTOM_FIELDS: { preptimemins: 60 } },
+    { ID: 18340, kind: 3, qty: 1, title: '↑ Rear seats arranged around a table', LFT: 3, RGT: 4, PRICE: 0, UNIT_PRICE: 0 },
+    { ID: 169041, kind: 2, qty: 1, title: '▶ Cost / fee / recharge', LFT: 6, RGT: 7, PRICE: 10, UNIT_PRICE: 10 },
+  ];
   job16015Corrected();
   installHireHop();
   installXero();
@@ -510,6 +543,44 @@ describe('raiseHireInvoice', () => {
     expect(r.plan.invoice.netToInvoice).toBe(0);
     expect(r.plan.allocations).toEqual([expect.objectContaining({ depositId: 9500, amount: 612, invoiceId: 13000 })]);
     expect(logRows.map((l) => l.step)).toEqual(expect.arrayContaining(['invoice_draft', 'invoice_penny', 'invoice_approve', 'xero']));
+  });
+
+  it('the first invoice is laid out like the quote: an empty draft, the supply list pasted in its own order', async () => {
+    uninvoicedJob();
+    layout = '';                                            // the default: no setting row
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toEqual([expect.objectContaining({ all: 0, job: 16015 })]);
+    const [paste] = posts('/php_functions/billing_paste.php');
+    expect(paste).toMatchObject({
+      bill: 13000, selected: '', origin_type: 1, origin_id: 16015,
+      'data[0][ID]': 8818, 'data[0][kind]': 0, 'data[1][ID]': 164980, 'data[1][inv_PRICE]': 500, 'data[1][inv_UNIT_PRICE]': 500,
+      'data[2][kind]': 3, 'data[3][ID]': 169041,
+    });
+    expect(Object.keys(paste).some((k) => k.includes('TYPE_CUSTOM_FIELDS'))).toBe(false);   // objects are not sent
+    expect(hh.invoices[0]).toMatchObject({ status: 2, number: 'OT-INV-13000', gross: 612 });
+    expect(logRows.find((l) => l.step === 'invoice_draft')?.detail).toContain('laid out like the quote');
+  });
+
+  it('stops at the draft when the paste leaves a priced line off — never approved', async () => {
+    uninvoicedJob();
+    layout = '';
+    pasteDrops = 169041;
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('doesn\'t match the supply list');
+    expect(r.message).toContain('Cost / fee / recharge');
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([]);
+    expect(mockSync).not.toHaveBeenCalled();
+  });
+
+  it('a top-up invoice stays "all owing items" — pasting the whole list again would invoice lines twice', async () => {
+    layout = '';
+    hh.accruedNet = 5169.99; hh.uninvoicedNet = 100;        // £100 added after OT-INV-12252
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(posts('/php_functions/billing_save.php')).toEqual([expect.objectContaining({ all: 1 })]);
+    expect(posts('/php_functions/billing_paste.php')).toEqual([]);
+    expect(r.message).not.toContain('supply list');
   });
 
   it('adopts a draft already on the job instead of raising a second one', async () => {
