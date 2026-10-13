@@ -224,7 +224,7 @@ beforeEach(() => {
 const posts = (path: string) => mockPost.mock.calls.filter((c) => c[0] === path).map((c) => c[1]);
 
 describe('planAllocations (the §5 rule)', () => {
-  const inv = (invoiceId: number, owing: number, date: string) => ({ invoiceId, number: `INV-${invoiceId}`, status: 2, date, gross: owing, owing, inXero: true, xeroId: 'x' });
+  const inv = (invoiceId: number, owing: number, date: string) => ({ invoiceId, number: `INV-${invoiceId}`, status: 2, date, gross: owing, owing, inXero: true, xeroId: 'x', chargeOnly: false });
   const pay = (depositId: number, available: number, date: string) => ({ depositId, bankId: 267, bankName: null, description: '', date, credit: available, available });
 
   it('spreads deposits across invoices oldest first and reports surplus and shortfall', () => {

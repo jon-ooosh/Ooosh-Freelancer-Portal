@@ -39,7 +39,7 @@ export default function CloseOutSignpost({ jobId, onOpenMoney }: { jobId: string
         </div>
         <div className="mt-1.5 grid grid-cols-5 gap-1 w-40">
           {view.steps.map((st, i) => (
-            <i key={i} className={`h-1 rounded ${st === 'done' ? 'bg-green-500' : st === 'error' ? 'bg-red-500' : st === 'current' ? 'bg-ooosh-300' : 'bg-gray-200'}`} />
+            <i key={i} className={`h-1 rounded ${st === 'done' ? 'bg-green-500' : st === 'error' ? 'bg-red-500' : st === 'warn' ? 'bg-amber-400' : st === 'current' ? 'bg-ooosh-300' : 'bg-gray-200'}`} />
           ))}
         </div>
       </div>

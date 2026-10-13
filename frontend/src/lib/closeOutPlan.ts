@@ -13,7 +13,11 @@
  */
 import { api } from '../services/api';
 
-export interface CloseOutInvoice { invoiceId: number; number: string; status: number; date: string; gross: number; owing: number; inXero: boolean }
+export interface CloseOutInvoice {
+  invoiceId: number; number: string; status: number; date: string; gross: number; owing: number; inXero: boolean;
+  /** Raised after completion from custom lines (spec §4.6) — not in the hire total. */
+  chargeOnly?: boolean;
+}
 export interface CloseOutPayment { depositId: number; bankName: string | null; description: string; date: string; credit: number; available: number }
 export interface CloseOutLogEntry { id: string; step: string; ok: boolean; detail: string; user_name: string | null; created_at: string }
 export interface InvoicePlan {
@@ -102,7 +106,12 @@ const PENNY = 0.005;
 const HH_RETURNED_INCOMPLETE = 6;
 const HH_COMPLETED = 11;
 
-export type StepState = 'done' | 'current' | 'todo' | 'error';
+/**
+ * One colour scale for the steps: grey still to come · blue the one in hand ·
+ * amber in hand but worth a look (money still owed on a Completed job) · red only
+ * when OP refuses to go on · green done.
+ */
+export type StepState = 'done' | 'current' | 'warn' | 'todo' | 'error';
 export type CloseOutStage =
   | 'pre'          // not back yet, nothing invoiced — the panel is not shown
   | 'blocked'      // OP refuses until something is sorted
@@ -122,6 +131,10 @@ export interface CloseOutView {
   owing: number;
   /** Hire money held beyond what the invoices need. */
   credit: number;
+  /** Paid so far across the approved invoices. */
+  paid: number;
+  /** Of `owing`, what sits on charge invoices raised after completion (not in the Financial Summary). */
+  chargeOwing: number;
   /** HireHop still shows the job out — a manager may invoice anyway. */
   stillOut: boolean;
 }
@@ -154,9 +167,6 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
         plan.invoiceSent ? 'done' : 'todo',
         hasInv && !needsInvoice && owing < PENNY ? 'done' : 'todo',
       ];
-  const first = steps.findIndex(s => s !== 'done');
-  if (first >= 0) steps = steps.map((s, i) => (i === first ? (blockers.length ? 'error' : 'current') : s));
-
   let stage: CloseOutStage;
   // A Completed job can still owe: a charge invoice raised after completion (spec §4.6).
   if (completed) stage = owing >= PENNY ? 'awaiting' : credit >= PENNY ? 'credit' : 'complete';
@@ -170,6 +180,14 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
   else if (owing >= PENNY) stage = 'awaiting';
   else stage = 'paid';
 
+  // The first step not done is the one in hand. Red only when OP refuses to go on —
+  // money still owed on a Completed job is worth a look, not an error.
+  const first = steps.findIndex(s => s !== 'done');
+  const hand: StepState = stage === 'blocked' ? 'error' : completed && owing >= PENNY ? 'warn' : 'current';
+  if (first >= 0) steps = steps.map((s, i) => (i === first ? hand : s));
+  const paid = plan.invoices.reduce((s, i) => s + (i.gross - i.owing), 0);
+  const chargeOwing = plan.invoices.filter(i => i.chargeOnly).reduce((s, i) => s + i.owing, 0);
+
   const look: Record<CloseOutStage, [CloseOutTone, string]> = {
     pre: ['grey', 'Not back yet'],
     blocked: ['red', 'Needs sorting'],
@@ -177,14 +195,14 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
     to_allocate: ['amber', 'Payments to allocate'],
     credit: ['amber', 'Money to sort'],
     to_send: ['amber', 'Not sent yet'],
-    awaiting: ['blue', 'Awaiting payment'],
+    awaiting: [completed ? 'amber' : 'blue', 'Awaiting payment'],
     paid: ['green', 'Paid'],
     complete: ['green', 'Completed'],
   };
   return {
     stage, tone: look[stage][0], pill: look[stage][1], steps,
     stepsDone: steps.filter(s => s === 'done').length,
-    blockers, owing, credit, stillOut,
+    blockers, owing, credit, paid, chargeOwing, stillOut,
   };
 }
 
