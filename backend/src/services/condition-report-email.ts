@@ -21,7 +21,7 @@ export interface ConditionReportEmailParams {
   driverPresent?: boolean;
   hireHopJob?: string | null;
   damageCount?: number;
-  fuelDifference?: string | null; // e.g. "Full -> 3/8"
+  fuelDifference?: string | null; // e.g. "Full at book-out -> 3/8 at check-in"
   milesDriven?: number | null;
 }
 
@@ -75,7 +75,7 @@ export function buildConditionReportEmailHtml(params: ConditionReportEmailParams
         </div>` : ''}${params.fuelDifference ? `
         <div style="margin: 0 0 16px; padding: 12px; background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 6px;">
           <p style="margin: 0; font-size: 14px; color: #92400e;">
-            <strong>Fuel Difference:</strong> The vehicle was returned with a different fuel level than at book-out (${params.fuelDifference}).
+            <strong>Fuel Difference:</strong> The fuel level when the vehicle was handed back differs from book-out (${params.fuelDifference}).
           </p>
         </div>` : ''}${params.driverPresent === false ? `
         <p style="margin: 0 0 16px; padding: 12px; background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; font-size: 13px; color: #92400e;">

@@ -43,6 +43,11 @@ interface PdfData {
   bookOutMileage?: number | null
   bookOutFuelLevel?: string | null
   bookOutDate?: string | null
+  // Freelancer collection reading (check-in only) — set when the van was
+  // collected from the client before it came back to base
+  collectionMileage?: number | null
+  collectionFuelLevel?: string | null
+  collectionDateTime?: string | null
   driverPresent?: boolean
   damageItems?: Array<{
     location: string

@@ -113,22 +113,27 @@ export function QuoteEditModal({
     setExpensesDirty(true);
     setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, amount: v } : e) : prev);
   };
-  const setExpType = (i: number, t: string) => {
-    setExpensesDirty(true);
-    // A fixed type takes its own name; "Other" keeps whatever note it carries.
-    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i
-      ? { ...e, type: t, description: t === 'other' ? e.description : (EXP_TYPE_LABELS[t] || '') }
-      : e) : prev);
-  };
-  // "Other" lines carry a note, stored the way the calculator saves it:
-  // description = "Other: <note>". The box edits just the note part.
-  const expNote = (e: ExpenseLine): string => {
+  // Every line can carry a note, stored the way the calculator saves it:
+  // description = "<label>: <note>" (e.g. "Tolls / Crossings: Mont Blanc",
+  // "Other: Flight"). The box edits just the note part; the label is kept.
+  const expNameFor = (type: string): string => EXP_TYPE_LABELS[type] || (type ? 'Other' : '');
+  const splitDesc = (e: ExpenseLine): { label: string; note: string } => {
     const d = e.description || '';
-    return d.startsWith('Other: ') ? d.slice(7) : (d === 'Other' ? '' : d);
+    const at = d.indexOf(': ');
+    return at >= 0 ? { label: d.slice(0, at), note: d.slice(at + 2) } : { label: d || expNameFor(e.type), note: '' };
   };
+  const joinDesc = (label: string, note: string): string => (label && note ? `${label}: ${note}` : label || note);
+  const expNote = (e: ExpenseLine): string => splitDesc(e).note;
   const setExpNote = (i: number, note: string) => {
     setExpensesDirty(true);
-    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, description: note ? `Other: ${note}` : 'Other' } : e) : prev);
+    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, description: joinDesc(splitDesc(e).label, note) } : e) : prev);
+  };
+  const setExpType = (i: number, t: string) => {
+    setExpensesDirty(true);
+    // The line takes the new type's name; its note comes with it.
+    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i
+      ? { ...e, type: t, description: joinDesc(expNameFor(t), splitDesc(e).note) }
+      : e) : prev);
   };
   const addExpense = () => {
     setExpensesDirty(true);
@@ -431,7 +436,12 @@ export function QuoteEditModal({
                       <div key={i} className="flex items-center gap-1 py-1.5 border-b border-gray-100 last:border-0">
                         <div className="flex-1 min-w-0">
                           {known ? (
-                            <span className={`truncate ${m === 'recharge' ? 'text-amber-700' : m === 'included' ? 'text-gray-800' : 'text-gray-400'}`}>{known}</span>
+                            <div className="flex items-center gap-1">
+                              <span className={`w-[4.5rem] shrink-0 truncate ${m === 'recharge' ? 'text-amber-700' : m === 'included' ? 'text-gray-800' : 'text-gray-400'}`}>{known}</span>
+                              <input type="text" value={expNote(e)} onChange={(ev) => setExpNote(i, ev.target.value)}
+                                placeholder="Note" title={expNote(e)}
+                                className="flex-1 min-w-0 border border-gray-200 rounded px-1 py-0.5 text-xs" />
+                            </div>
                           ) : (
                             <div className="flex items-center gap-1">
                               <select value={e.type} onChange={(ev) => setExpType(i, ev.target.value)}
