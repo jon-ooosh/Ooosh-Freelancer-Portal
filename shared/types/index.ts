@@ -435,6 +435,9 @@ export interface Job {
   group_id?: string | null;
   option_no?: number | null;
   option_label?: string | null;
+  // GET /api/pipeline only: the group this job belongs to, with its lead
+  // resolved, so the board can collapse the options onto one card.
+  group_summary?: JobGroupSummary | null;
   // Source
   enquiry_source: EnquirySource | null;
   // HireHop status (separate from pipeline_status)
@@ -483,7 +486,29 @@ export interface JobGroupMember {
   lost_reason: string | null;
   dismissed_at: string | null;
   is_van_and_driver: boolean | null;
+  start_time: string | null;
+  end_time: string | null;
+  config: string | null;
+  items_count: number;
+  item_names: string[];
   is_lead: boolean;
+}
+
+export interface JobGroupSummaryMember {
+  id: string;
+  option_no: number | null;
+  option_label: string | null;
+  pipeline_status: string | null;
+  hh_job_number: number | null;
+  is_chasing: boolean;
+}
+
+export interface JobGroupSummary {
+  label: string | null;
+  pinned_lead_id: string | null;
+  lead_job_id: string | null;
+  member_count: number;
+  members: JobGroupSummaryMember[];
 }
 
 export interface JobGroupRead {

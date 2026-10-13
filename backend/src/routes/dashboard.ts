@@ -5,6 +5,7 @@ import { buildProgressStrips, StripPhase } from '../services/job-progress-strip'
 import { getRoster } from '../services/studio-sitter';
 import { HELD_ITEM_SELECT } from '../services/held-item-query';
 import { ukToday } from '../services/uk-date';
+import { nonLeadMemberIds } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
@@ -60,6 +61,8 @@ router.post('/job-progress', async (req: AuthRequest, res: Response) => {
 // ── GET /api/dashboard/operations — aggregated operational data for Command Centre ──
 router.get('/operations', async (req: AuthRequest, res: Response) => {
   try {
+    // Quote options: alternative quotes for one enquiry count once (their lead).
+    const nonLeadOptionIds = await nonLeadMemberIds();
     const results = await Promise.all([
       // 1. Today's schedule — going out
       // Jobs with out_date or job_date = today, NOT yet actually on hire.
@@ -436,8 +439,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           -- every operational + historical job (prepping / prepped / dispatched /
           -- returned / completed / cancelled) and reported ~1100+ on a fleet
           -- with ~40 actual open enquiries.
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')) as open_enquiries_count
-      `),
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+             AND NOT (id = ANY($1::uuid[]))) as open_enquiries_count
+      `, [nonLeadOptionIds]),
 
       // 16. Today's transport quotes (departures with crew/vehicle info)
       query(`

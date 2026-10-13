@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import CompareOptionsPanel from './CompareOptionsPanel';
 import { api } from '../services/api';
 import { OPTION_COPY } from '../lib/optionCopy';
 import { isOptionDead, isOptionOpen, optionDateSpan, optionStatusStyle } from '../lib/quoteOptions';
@@ -27,6 +28,7 @@ interface Props {
 export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, onRemoved }: Props) {
   const [data, setData] = useState<JobGroupRead | null>(null);
   const [editingLabel, setEditingLabel] = useState(false);
+  const [comparing, setComparing] = useState(false);
   const [labelDraft, setLabelDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -119,6 +121,13 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
         <span className="ml-auto flex items-center gap-3">
           <button
             type="button"
+            onClick={() => setComparing(true)}
+            className="inline-flex items-center px-2.5 py-1 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50"
+          >
+            {OPTION_COPY.barCompare}
+          </button>
+          <button
+            type="button"
             onClick={removeFromGroup}
             disabled={busy}
             className="text-gray-400 hover:text-red-600 disabled:opacity-50"
@@ -193,6 +202,16 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
         })}
       </div>
       {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
+
+      {comparing && (
+        <CompareOptionsPanel
+          group={data}
+          currentJobId={jobId}
+          onClose={() => setComparing(false)}
+          onAdd={onAdd}
+          onChanged={(next) => setData(next)}
+        />
+      )}
     </div>
   );
 }
