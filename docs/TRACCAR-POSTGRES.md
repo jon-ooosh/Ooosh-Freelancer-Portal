@@ -152,7 +152,7 @@ docker start traccar
 
 0. `tail -30 /root/traccar-switch.log` — ends `SWITCH COMPLETE`. (If it says `ROLLED BACK`
    or `STOPPED`, the old Traccar is running as before — send the log.)
-1. `docker ps --filter name=traccar` — `traccar` Up; `traccar-h2-old` Exited.
+1. `docker ps -a --filter name=traccar` — `traccar` Up; `traccar-h2-old` Exited (`-a` lists stopped containers too).
 2. Traccar web (`tracking.oooshtours.co.uk`): log in; vans online; RO23HLU's route
    for yesterday shows, AND positions from after 04:30 (proves new data lands).
 3. OP › Vehicles › Fleet Map: vans on the map; a van's Location tab shows Recent Trips.
