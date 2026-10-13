@@ -515,3 +515,43 @@ portal banner. Keep them short; the build session should put the final strings i
 - Migration number: next free at build time; add to `run.ts`. Never edit 191.
 - The mockups artifact is private to jon — ask him to open it or paste screenshots.
 - Each PR: jon merges and deploys by hand; give deploy commands + the live checks in §10.
+
+## 14. State at close of the build session (13 Oct 2026) — read this first in a fresh session
+
+**Everything in §10 PRs 1–4 is live** (OP PRs #1433, #1438, #1441, #1443, #1445; portal PRs
+netlify-functions #34 and the note-position follow-up). Test group on the live system: #16842
+(Option 1, lost), **#16843 (Option 2, confirmed)**, #16844 (Option 3, lost), client "TESTING 123 Ltd".
+
+**What is left, and where it is specified:**
+
+1. **Phase 2 — `part_of` groups (festival-style "these belong together").** §10 "Phase 2 (not in
+   this build)" is the brief: same `job_groups` table with `kind = 'part_of'`; no
+   confirm-one-lose-others, no headline dedup; Compare becomes a Group view with roll-ups; the
+   Kanban shows a "part of <label>" chip instead of collapsing; "Add a related job" (duplicate OR
+   link existing). Everything in `job-groups.ts` that assumes `kind = 'alternative'` is gated by
+   `OPTION_GROUP_KIND` — grep for it. Also parked there: swapping a confirmation from one option
+   to another after payment (deposit moves via the Combine deposit mechanics).
+2. **§6.5 tags** — global search "Option 2 of 4" after a grouped job's name; org Hire History
+   nests options under the lead and the lost-as-alternative ones stay out of the stats cards
+   (the stats part IS done — `notAltQuoteLossSql`; the nesting and the search tag are not).
+3. **"Mark lost" from a Compare row** (§6.2 row actions) — not built; the Confirm panel covers the
+   real case, so this is a nicety.
+4. **The bell path has not been exercised live.** `services/option-confirm.ts` bells the job's
+   managers when an option confirms with nobody on the page (portal payment → payment-event,
+   HireHop status → webhook, Wise matcher → record-payment). To test: on a fresh test group set an
+   option to Booked IN HIREHOP and watch the bell; the link opens the job with `?group_prompt=1`.
+
+**Known artefacts of the build, not bugs to chase:**
+- #16843's HireHop dates/times are 13–14 Oct 11:20 — the HireHop duplicate was created by the
+  FIRST live attempt, before `readDuplicatedJobNumber()` existed, so our date push never ran and
+  the duplicate kept HireHop's "now". Every option created since (e.g. #16844) got its dates
+  from the same push path the Job Detail editor uses (`buildHHJobDateTimes` → `save_job.php`,
+  `no_webhook: 1`, `calcHHDuration`). Fix #16843 by editing its dates on Job Detail and pushing.
+- The payment portal already refused Lost jobs (HireHop status 10) before PR 4; PR 4's
+  `payable` flag adds the sibling-confirmed case and a belt-and-braces refusal when the HH
+  write-back of the lost status failed.
+
+**Conventions a fresh session must keep:** "option" not "version" in code and UI; the four
+confirmation paths all call `afterOptionConfirmed()`; every user-facing string in
+`frontend/src/lib/optionCopy.ts`; the date rules in `frontend/src/lib/jobDates.ts` are shared
+with the Job Detail editor — never a second copy.
