@@ -1039,7 +1039,10 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
     }
   }
 
-  if (loading) {
+  // Spinner on the FIRST load only. A refresh (e.g. the close-out panel's onChanged)
+  // keeps the tab mounted — swapping it for a spinner threw the panel away and, with it,
+  // the message saying what had just happened (16849, 13 Oct 2026).
+  if (loading && !data) {
     return (
       <div className="flex justify-center py-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
