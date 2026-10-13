@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../services/api';
 import { OPTION_COPY } from '../lib/optionCopy';
 import { stripOptionSuffix } from '../lib/quoteOptions';
+import { cascadeJobDate, initialDateLinks, validateDateTimeOrdering, type JobDateSet } from '../lib/jobDates';
 import type { JobGroupRead } from '../../../shared/types';
 
 /**
@@ -23,6 +24,10 @@ interface SourceJob {
   job_date: string | null;
   job_end: string | null;
   return_date: string | null;
+  out_time?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  return_time?: string | null;
   group_id?: string | null;
 }
 
@@ -61,11 +66,44 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
   const [mode, setMode] = useState<'create' | 'link'>('create');
 
   const [label, setLabel] = useState('');
-  const [outDate, setOutDate] = useState(toDateInput(job.out_date));
-  const [jobDate, setJobDate] = useState(toDateInput(job.job_date));
-  const [jobEnd, setJobEnd] = useState(toDateInput(job.job_end));
-  const [returnDate, setReturnDate] = useState(toDateInput(job.return_date));
+  // The four dates follow the Job Detail editor's rules (lib/jobDates.ts):
+  // Out follows Start and Return follows End while they're equal, Start past
+  // End pushes End along, and a crossing value is refused. Times ride from
+  // the source job and are not edited here.
+  const [dates, setDates] = useState<JobDateSet>(() => ({
+    out_date: toDateInput(job.out_date),
+    job_date: toDateInput(job.job_date),
+    job_end: toDateInput(job.job_end),
+    return_date: toDateInput(job.return_date),
+  }));
+  const [links, setLinks] = useState(() => initialDateLinks({
+    out_date: toDateInput(job.out_date),
+    job_date: toDateInput(job.job_date),
+    job_end: toDateInput(job.job_end),
+    return_date: toDateInput(job.return_date),
+  }));
   const [createInHH, setCreateInHH] = useState(!!job.hh_job_number);
+
+  const setDate = (field: keyof JobDateSet, val: string) => {
+    setDates((prev) => cascadeJobDate(prev, field, val, links) ?? prev);
+  };
+  const toggleLink = (which: 'outLinked' | 'returnLinked') => {
+    setLinks((prev) => {
+      const next = { ...prev, [which]: !prev[which] };
+      // Re-linking snaps the follower back onto its leader.
+      if (next[which]) {
+        setDates((d) => which === 'outLinked' ? { ...d, out_date: d.job_date } : { ...d, return_date: d.job_end });
+      }
+      return next;
+    });
+  };
+  const dateError = validateDateTimeOrdering({
+    ...dates,
+    out_time: (job.out_time || '09:00').slice(0, 5),
+    start_time: (job.start_time || job.out_time || '09:00').slice(0, 5),
+    end_time: (job.end_time || '09:00').slice(0, 5),
+    return_time: (job.return_time || job.end_time || '09:00').slice(0, 5),
+  });
 
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [search, setSearch] = useState('');
@@ -120,6 +158,7 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
 
   async function submitCreate() {
     if (!label.trim()) { setError('Say what is different about this option.'); return; }
+    if (dateError) { setError(dateError); return; }
     setSubmitting(true);
     setError('');
     try {
@@ -127,10 +166,10 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
         `/pipeline/${job.id}/add-option`,
         {
           option_label: label.trim(),
-          out_date: outDate || null,
-          job_date: jobDate || null,
-          job_end: jobEnd || null,
-          return_date: returnDate || null,
+          out_date: dates.out_date || null,
+          job_date: dates.job_date || null,
+          job_end: dates.job_end || null,
+          return_date: dates.return_date || null,
           create_in_hirehop: createInHH,
         },
       );
@@ -162,17 +201,35 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
     }
   }
 
-  const dateField = (lbl: string, value: string, set: (v: string) => void) => (
-    <label className="block">
-      <span className="block text-[11px] font-semibold text-gray-500 mb-0.5">{lbl}</span>
-      <input
-        type="date"
-        value={value}
-        onChange={(e) => set(e.target.value)}
-        className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
-      />
-    </label>
-  );
+  // One date input; a follower (Out, Return) carries the chain toggle that the
+  // Job Detail editor uses — linked = greyed and follows its leader.
+  const dateField = (lbl: string, field: keyof JobDateSet, link?: 'outLinked' | 'returnLinked') => {
+    const linked = link ? links[link] : false;
+    return (
+      <label className="block relative">
+        <span className="block text-[11px] font-semibold text-gray-500 mb-0.5">{lbl}</span>
+        <input
+          type="date"
+          value={dates[field]}
+          disabled={linked}
+          onChange={(e) => setDate(field, e.target.value)}
+          className={`w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm ${linked ? 'bg-gray-50 text-gray-400' : ''}`}
+        />
+        {link && (
+          <button
+            type="button"
+            onClick={() => toggleLink(link)}
+            className={`absolute right-1 top-0 text-[11px] ${linked ? 'text-ooosh-600' : 'text-gray-300 hover:text-gray-500'}`}
+            title={linked
+              ? `Follows ${link === 'outLinked' ? 'Start' : 'End'} (click to unlink)`
+              : `Click to follow ${link === 'outLinked' ? 'Start' : 'End'}`}
+          >
+            {linked ? '🔗' : '⛓'}
+          </button>
+        )}
+      </label>
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => { if (!submitting) onClose(); }}>
@@ -233,11 +290,12 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
                 <span className="text-[11px] text-gray-400">{OPTION_COPY.datesHint}</span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {dateField(OPTION_COPY.dateOut, outDate, setOutDate)}
-                {dateField(OPTION_COPY.dateStart, jobDate, setJobDate)}
-                {dateField(OPTION_COPY.dateEnd, jobEnd, setJobEnd)}
-                {dateField(OPTION_COPY.dateReturn, returnDate, setReturnDate)}
+                {dateField(OPTION_COPY.dateOut, 'out_date', 'outLinked')}
+                {dateField(OPTION_COPY.dateStart, 'job_date')}
+                {dateField(OPTION_COPY.dateEnd, 'job_end')}
+                {dateField(OPTION_COPY.dateReturn, 'return_date', 'returnLinked')}
               </div>
+              {dateError && <p className="mt-1 text-xs text-red-600">{dateError}</p>}
             </div>
 
             {job.hh_job_number ? (
@@ -334,7 +392,7 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
             <button
               type="button"
               onClick={submitCreate}
-              disabled={submitting || !label.trim()}
+              disabled={submitting || !label.trim() || !!dateError}
               className="px-3 py-1.5 text-sm rounded-lg bg-ooosh-600 text-white font-medium hover:bg-ooosh-700 disabled:opacity-50"
             >
               {submitting ? OPTION_COPY.submitting : OPTION_COPY.submit(nextOptionNo)}

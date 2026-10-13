@@ -2016,6 +2016,24 @@ async function clientLabelFor(job: { client_id: string | null; client_name: stri
   return job.client_name || job.company_name || null;
 }
 
+/** The new job number out of a job_duplicate.php reply, whatever key it is under. */
+function readDuplicatedJobNumber(data: unknown): number | null {
+  if (data == null) return null;
+  if (typeof data === 'number' || typeof data === 'string') {
+    const n = parseInt(String(data), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  if (typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  for (const key of ['job', 'JOB', 'ID', 'id', 'NUMBER', 'number', 'job_id', 'JOB_ID', 'new_job', 'new_id']) {
+    const v = d[key];
+    if (v == null || v === '') continue;
+    const n = parseInt(String(v), 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
 /** Push a rename to HireHop, gated on the broker's result (a 327 RESOLVES false — never throws). */
 async function pushOptionRename(jobId: string, hhJobNumber: number | null, newName: string, email: string, warnings: string[]): Promise<void> {
   if (!hhJobNumber) return;
@@ -2166,9 +2184,14 @@ router.post('/:id/add-option', validate(addOptionSchema), async (req: AuthReques
         job_name: newName,
         local: new Date().toISOString().replace('T', ' ').substring(0, 16),
       }, { priority: 'high' });
-      const dupData = dup?.data as { job?: number } | undefined;
-      if (dup.success && dupData?.job) {
-        newHhJobNumber = Number(dupData.job);
+      // What job_duplicate.php answers with is not documented: Re-open assumed
+      // `{ job: N }`, and the first live run here got a reply with no `job` key
+      // (13 Oct 2026). Accept the shapes it could plausibly use and ALWAYS log
+      // the raw reply so the next failure says what came back.
+      console.log(`[options] job_duplicate.php reply for #${source.hh_job_number}:`, JSON.stringify(dup).slice(0, 600));
+      const newHhFromReply = readDuplicatedJobNumber(dup?.data);
+      if (dup.success && newHhFromReply) {
+        newHhJobNumber = newHhFromReply;
         console.log(`[options] HH duplicate of #${source.hh_job_number} → #${newHhJobNumber} (${newName})`);
         const { out, start, end, to, duration } = buildHHJobDateTimes(dateShape);
         const dateParams: Record<string, unknown> = { job: newHhJobNumber, no_webhook: 1 };
