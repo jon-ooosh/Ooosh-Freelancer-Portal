@@ -26,6 +26,8 @@ export interface ConditionReportEmailParams {
   damageCount?: number;
   fuelDifference?: string | null; // e.g. "Full at book-out -> 3/8 at check-in"
   milesDriven?: number | null;
+  // Check-in of a van swapped out mid-hire — figures are from the swap
+  swappedOut?: boolean;
 }
 
 function formatDateShort(dateStr: string): string {
@@ -67,7 +69,12 @@ export function buildConditionReportEmailHtml(params: ConditionReportEmailParams
         <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
           This report documents the condition of the vehicle at the end of the hire,
           including any changes from the original book-out condition.
-        </p>${params.milesDriven != null ? `
+        </p>${params.swappedOut ? `
+        <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
+          This vehicle was swapped for a replacement during your hire. Any mileage and fuel
+          figures below are from the time of the swap, and this report confirms the vehicle
+          is now back at our base.
+        </p>` : ''}${params.milesDriven != null ? `
         <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
           Total miles driven: <strong>${params.milesDriven.toLocaleString()} miles</strong>
         </p>` : ''}${params.damageCount && params.damageCount > 0 ? `

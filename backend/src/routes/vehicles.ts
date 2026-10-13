@@ -2901,6 +2901,34 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
     // against this hirehop_job and the save-event side-effect records the
     // check-in WITHOUT un-swapping the row (preserves the swap audit).
     if (row.status === 'swapped') {
+      // The client handed this van over AT THE SWAP, so the swap's soft
+      // check-in reading (staff-entered, often blank for a breakdown) is the
+      // client's end point — not the base reading, which includes recovery /
+      // garage / our own driving. Latest soft-check-in event on this job.
+      let swapReading: { mileage: number | null; fuelLevel: string | null; at: string | null } = {
+        mileage: null,
+        fuelLevel: null,
+        at: row.swapped_at ? new Date(row.swapped_at).toISOString() : null,
+      };
+      try {
+        const index = await readR2Json<{ events: any[] }>(`vehicle-events/${vehicleReg}/_index.json`);
+        const softEvents = (index?.events || [])
+          .filter((e: any) => e.eventType === 'soft-check-in'
+            && row.hirehop_job_id != null
+            && String(e.hireHopJob) === String(row.hirehop_job_id))
+          .sort((a: any, b: any) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+        const ev = softEvents[0];
+        if (ev) {
+          swapReading = {
+            mileage: ev.mileage != null && Number(ev.mileage) > 0 ? Number(ev.mileage) : null,
+            fuelLevel: ev.fuelLevel || null,
+            at: ev.createdAt || swapReading.at,
+          };
+        }
+      } catch (err) {
+        // Non-fatal: no swap reading just means no client comparison.
+        console.warn('[vehicles/check-in-eligibility] swap reading lookup failed:', err);
+      }
       res.json({
         eligible: true,
         reason: null,
@@ -2908,6 +2936,7 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
         assignmentId: row.id,
         hirehopJob: row.hirehop_job_id,
         swapped: true,
+        swapReading,
       });
       return;
     }
@@ -4466,12 +4495,31 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       y += 2; addLine(y); y += 4;
     }
 
+    // Swapped out mid-hire: the client handed the van over AT THE SWAP, so
+    // their comparison is book-out -> swap. Readings are staff-entered and
+    // often blank for a breakdown — then no client comparison at all, never
+    // a fall-back to the base reading (which includes recovery / our driving).
+    const isSwappedOut = !hasCollection && data.swappedOut === true;
+    if (isSwappedOut) {
+      y = addRow('Swapped Out', data.swapDateTime ? formatFullDateTime(data.swapDateTime) : 'Not recorded', y);
+      y = addRow('Swap Mileage', data.swapMileage != null ? data.swapMileage.toLocaleString() + ' miles' : 'Not recorded', y);
+      y = addRow('Swap Fuel', data.swapFuelLevel || 'Not recorded', y);
+      if (data.bookOutMileage != null && data.swapMileage != null) {
+        const clientMiles = data.swapMileage - data.bookOutMileage;
+        y = addRow('Miles Driven', clientMiles.toLocaleString() + ' miles (book-out to swap)', y);
+      }
+      if (data.bookOutFuelLevel && data.swapFuelLevel && data.bookOutFuelLevel !== data.swapFuelLevel) {
+        y = addRow('Fuel Change', `${data.bookOutFuelLevel} -> ${data.swapFuelLevel} (book-out to swap)`, y);
+      }
+      y += 2; addLine(y); y += 4;
+    }
+
     y = addRow('Check-In Date/Time', timestamp, y);
     const currentMileageStr = data.mileage != null ? data.mileage.toLocaleString() + ' miles' : '-';
     y = addRow('Check-In Mileage', currentMileageStr, y);
     y = addRow('Check-In Fuel', data.fuelLevel || '-', y);
 
-    if (!hasCollection) {
+    if (!hasCollection && !isSwappedOut) {
       if (data.bookOutMileage != null && data.mileage != null) {
         const milesDiff = data.mileage - data.bookOutMileage;
         y = addRow('Miles Driven', milesDiff.toLocaleString() + ' miles', y);
@@ -5738,7 +5786,9 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       // assignment's booked_out_by / checked_in_by user reference.
       // (Not for a collection: the assignment holds no collector, and the
       // book-out operator would be mislabelled "Collected By".)
-      const performedByName = isCollectionRegen ? null : await resolveOperatorNameForEvent(
+      // Nor for an interim (swap) assessment: the swap isn't recorded there
+      // either, so the book-out operator would show as "Booked Out By".
+      const performedByName = (isCollectionRegen || isInterimRegen) ? null : await resolveOperatorNameForEvent(
         reg,
         event.hireHopJob,
         isCheckInRegen,
@@ -6179,6 +6229,7 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
           damageCount: emailMeta?.damageCount,
           fuelDifference: emailMeta?.fuelDifference ?? null,
           milesDriven: emailMeta?.milesDriven ?? null,
+          swappedOut: emailMeta?.swappedOut === true,
         };
         const subject = buildConditionReportSubject(emailParams);
         const html = (prependBanner || '') + buildConditionReportEmailHtml(emailParams);
