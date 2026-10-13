@@ -1,9 +1,10 @@
 # QUOTE VERSIONS SPEC — alternative quotes for one enquiry, as a group of jobs
 
-**Status:** 🔨 PR 1 BUILT (12 Oct 2026) — model, "Quote another option", link an existing
-quote, remove from group, the option bar. PRs 2–4 (§10) still to build; Phase 4 needs the
-**payment portal repo** in context. §1 is the settled decisions; §1.1 the build-session
-decisions; §13 is the handover note.
+**Status:** 🔨 PRs 1–2 BUILT (13 Oct 2026) — model, "Quote another option", link an existing
+quote, remove from group, the option bar, Compare, pin, the Kanban/list collapse and the
+headline-count dedup. PRs 3–4 (§10) still to build; Phase 4 needs the **payment portal repo**
+in context. §1 is the settled decisions; §1.1 the build-session decisions; §13 is the
+handover note.
 
 **Naming (jon, 12 Oct 2026): "version" in this spec is "option" in code and in the UI.** OP
 already has "quote versions" — the quote-PDF revisions of ONE job on the Activity Timeline
@@ -107,6 +108,14 @@ Combine Bookings section — the closest existing sibling of this feature),
 - **No right-click / long-press pin** (§6.1) — undiscoverable. The pin lives in Compare (PR 2).
 - **Copy lives in `frontend/src/lib/optionCopy.ts`** (§12's `versionCopy.ts`) — every
   user-facing string, for jon to tune.
+- **`job_duplicate.php` answers with the NEW job's data, number under `ID`** (proven live,
+  13 Oct 2026 — `{ ID: '16843', JOB_NAME, JOB_DATE, … }`). Re-open had read `data.job` and
+  so never got a number back; both paths now use `readDuplicatedJobNumber()` in
+  `job-groups.ts`. The 30-min sync WILL import an unread duplicate as an ordinary enquiry —
+  "Link an existing quote" is the repair.
+- **The bar is at the TOP of Job Detail**, above the banners (jon: which option you're on
+  must be the first thing you see). The modal's four dates use the Job Detail editor's rules
+  (`lib/jobDates.ts`, shared). `new_enquiry` and `quoting` share a rank in the lead rule.
 
 ## 2. The problem, in jon's words
 
@@ -409,9 +418,20 @@ chips, four dates, HireHop checkbox, "Link an existing quote" mode), `lib/quoteO
 **Live check:** add an option to a real enquiry → two OP jobs, two HH jobs named
 "(Option 1)"/"(Option 2)", items copied, dates as entered, bar shows both, portal links differ.
 
-**PR 2 — Compare + Kanban + lead.** `GET /groups/:id`; Compare slide-over; pin/unpin; Kanban
-collapse + "N versions" badge + headline dedup; search/hire-history tags. **Live check:** four
-versions in different columns render sensibly; open-enquiry count moves by one, not four.
+**PR 2 — Compare + Kanban + lead. BUILT 13 Oct 2026.** `GET /api/pipeline` returns
+`group_summary` per member with the lead resolved; `services/job-groups.ts`
+`nonLeadMemberIds()` is the "count a group once" helper, used by `/pipeline/stats` (by-status
+counts, chase counts, active pipeline value) and the dashboard's `open_enquiries_count`.
+`PipelinePage` collapses a group's members in the same column onto its lead's card ("3 options ▾"
+badge, chevron expands in place; "1 of 3 options" when the rest sit elsewhere) — board AND list;
+column counts, section counts and the "needs attention" banner count entries, not jobs.
+`components/CompareOptionsPanel.tsx` (from the bar's Compare button): config from
+`hh_derived_flags`, dates + ceil'd day count, physical item count (hover for names), client £,
+status, pin (★), inline label edit (`PATCH /:id/edit option_label`), Open. The ★ on the bar's
+pills pins too. **Not done:** §6.5 global-search and Hire History "Option 2 of 4" tags (small,
+PR 3 or later); "Mark lost" from a Compare row (PR 3's confirm panel covers the real case).
+**Live check:** options in different columns render sensibly; open-enquiry count moves by one,
+not three.
 
 **PR 3 — confirm-one-lose-others + guards.** The confirmation hook on all three entry points;
 Confirm panel; bell for unattended confirmations; group-wide chase bump; exclusions (§8:

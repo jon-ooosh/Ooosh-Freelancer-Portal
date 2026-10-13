@@ -28,10 +28,13 @@ import {
   OPTION_GROUP_KIND,
   getGroupById,
   insertOptionCopy,
+  nonLeadMemberIds,
+  resolveLeadJob,
   jobRef,
   nextOptionNo,
   noteOnTimeline,
   optionRefusalReason,
+  readDuplicatedJobNumber,
   stripOptionSuffix,
   withOptionSuffix,
 } from '../services/job-groups';
@@ -231,7 +234,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         (j.next_chase_date IS NOT NULL
          AND j.next_chase_date <= CURRENT_DATE
          AND j.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')) as is_chasing,
-        jf.hire_value_inc_vat::float8 as hire_value_inc_vat
+        jf.hire_value_inc_vat::float8 as hire_value_inc_vat,
+        (SELECT json_build_object(
+           'label', g.label,
+           'pinned_lead_id', g.lead_job_id,
+           'members', (SELECT json_agg(json_build_object(
+                         'id', m.id, 'option_no', m.option_no, 'option_label', m.option_label,
+                         'pipeline_status', m.pipeline_status, 'hh_job_number', m.hh_job_number,
+                         'is_chasing', (m.next_chase_date IS NOT NULL AND m.next_chase_date <= CURRENT_DATE
+                                        AND m.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional'))
+                       ) ORDER BY m.option_no)
+                       FROM jobs m WHERE m.group_id = g.id AND m.is_deleted = false)
+         ) FROM job_groups g WHERE g.id = j.group_id) AS group_summary
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id
@@ -242,6 +256,16 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
       [...params, limitNum, offset]
     );
+
+    // Quote options: resolve each group's lead once (pinned or most progressed)
+    // so the board can collapse members onto one card without re-deriving it.
+    for (const row of jobsResult.rows) {
+      const gs = row.group_summary as { pinned_lead_id: string | null; members: Array<{ id: string; option_no: number | null; pipeline_status: string | null }> | null } | null;
+      if (!gs) continue;
+      const members = gs.members ?? [];
+      const lead = resolveLeadJob(members, gs.pinned_lead_id);
+      row.group_summary = { ...gs, lead_job_id: lead?.id ?? null, member_count: members.length };
+    }
 
     res.json({
       data: jobsResult.rows,
@@ -262,6 +286,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
 router.get('/stats', async (_req: AuthRequest, res: Response) => {
   try {
+    // Quote options: a group of alternative quotes is ONE enquiry — only its
+    // lead counts towards the headline numbers and the pipeline value.
+    const nonLeads = await nonLeadMemberIds();
+
     // Counts and values by pipeline status
     const byStatus = await query(`
       SELECT
@@ -272,9 +300,10 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       WHERE is_deleted = false
         AND dismissed_at IS NULL
         AND pipeline_status IS NOT NULL
+        AND NOT (id = ANY($1::uuid[]))
       GROUP BY pipeline_status
       ORDER BY pipeline_status
-    `);
+    `, [nonLeads]);
 
     // Chase stats
     const chaseStats = await query(`
@@ -287,7 +316,8 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
         AND dismissed_at IS NULL
         AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
         AND next_chase_date IS NOT NULL
-    `);
+        AND NOT (id = ANY($1::uuid[]))
+    `, [nonLeads]);
 
     // Total active pipeline value (excl. confirmed and lost)
     const activeValue = await query(`
@@ -296,7 +326,8 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       WHERE is_deleted = false
         AND dismissed_at IS NULL
         AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
-    `);
+        AND NOT (id = ANY($1::uuid[]))
+    `, [nonLeads]);
 
     res.json({
       by_status: byStatus.rows,
@@ -2016,24 +2047,6 @@ async function clientLabelFor(job: { client_id: string | null; client_name: stri
   return job.client_name || job.company_name || null;
 }
 
-/** The new job number out of a job_duplicate.php reply, whatever key it is under. */
-function readDuplicatedJobNumber(data: unknown): number | null {
-  if (data == null) return null;
-  if (typeof data === 'number' || typeof data === 'string') {
-    const n = parseInt(String(data), 10);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  }
-  if (typeof data !== 'object') return null;
-  const d = data as Record<string, unknown>;
-  for (const key of ['job', 'JOB', 'ID', 'id', 'NUMBER', 'number', 'job_id', 'JOB_ID', 'new_job', 'new_id']) {
-    const v = d[key];
-    if (v == null || v === '') continue;
-    const n = parseInt(String(v), 10);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  return null;
-}
-
 /** Push a rename to HireHop, gated on the broker's result (a 327 RESOLVES false — never throws). */
 async function pushOptionRename(jobId: string, hhJobNumber: number | null, newName: string, email: string, warnings: string[]): Promise<void> {
   if (!hhJobNumber) return;
@@ -2184,10 +2197,9 @@ router.post('/:id/add-option', validate(addOptionSchema), async (req: AuthReques
         job_name: newName,
         local: new Date().toISOString().replace('T', ' ').substring(0, 16),
       }, { priority: 'high' });
-      // What job_duplicate.php answers with is not documented: Re-open assumed
-      // `{ job: N }`, and the first live run here got a reply with no `job` key
-      // (13 Oct 2026). Accept the shapes it could plausibly use and ALWAYS log
-      // the raw reply so the next failure says what came back.
+      // job_duplicate.php answers with the NEW job's data (`ID` is the number —
+      // readDuplicatedJobNumber). Log the raw reply so a change in shape is
+      // visible the day it happens.
       console.log(`[options] job_duplicate.php reply for #${source.hh_job_number}:`, JSON.stringify(dup).slice(0, 600));
       const newHhFromReply = readDuplicatedJobNumber(dup?.data);
       if (dup.success && newHhFromReply) {

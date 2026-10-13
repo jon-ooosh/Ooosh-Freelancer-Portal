@@ -10,6 +10,7 @@ import type {
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PERSON_ORG_ROLES } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
+import { stripOptionSuffix } from '../lib/quoteOptions';
 import { ukToday } from '../lib/ukDate';
 
 // Roles available for the "Linked organisations" picker on a job. These map
@@ -240,6 +241,61 @@ function sortJobs(jobs: Job[], mode: SortMode): Job[] {
 
 // ── Client Picker (search People & Organisations) ──────────────────────────
 
+// ── Quote options: one card per group ──────────────────────────────────────
+//
+// Alternative quotes for one enquiry (docs/QUOTE-VERSIONS-SPEC.md §6.4) are
+// sibling jobs sharing a group_id. On the board and the list they collapse
+// onto ONE card per group per column: the group's lead (pinned or most
+// progressed) when it sits in this column, else the lowest option number here.
+// A chevron expands the others in place. Members that sit in other columns
+// render there, each badged "1 of 4 options" so the split stays visible.
+
+interface BoardEntry { job: Job; others: Job[] }
+
+function collapseByGroup(list: Job[]): BoardEntry[] {
+  const out: BoardEntry[] = [];
+  const seen = new Set<string>();
+  for (const job of list) {
+    const gid = job.group_id;
+    if (!gid || !job.group_summary) { out.push({ job, others: [] }); continue; }
+    if (seen.has(gid)) continue;
+    seen.add(gid);
+    const here = list.filter((j) => j.group_id === gid);
+    const leadId = job.group_summary.lead_job_id;
+    const rep = here.find((j) => j.id === leadId)
+      ?? [...here].sort((a, b) => (a.option_no ?? 0) - (b.option_no ?? 0))[0];
+    out.push({ job: rep, others: here.filter((j) => j.id !== rep.id) });
+  }
+  return out;
+}
+
+function groupBadgeText(entry: BoardEntry): string | null {
+  const gs = entry.job.group_summary;
+  if (!gs) return null;
+  const here = entry.others.length + 1;
+  return here === gs.member_count ? `${gs.member_count} options` : `${here} of ${gs.member_count} options`;
+}
+
+/** The "3 options ▾" pill on a collapsed card or row; a plain tag when there's nothing to expand. */
+function GroupBadge({ entry, expanded, onToggle }: { entry: BoardEntry; expanded: boolean; onToggle: () => void }) {
+  const text = groupBadgeText(entry);
+  if (!text) return null;
+  const cls = 'text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-ooosh-100 text-ooosh-700 whitespace-nowrap';
+  if (entry.others.length === 0) {
+    return <span className={cls} title="Other options of this enquiry sit in other columns">{text}</span>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      className={`${cls} hover:bg-ooosh-200`}
+      title={expanded ? 'Hide the other options' : 'Show every option'}
+    >
+      {text} {expanded ? '▴' : '▾'}
+    </button>
+  );
+}
+
 function ClientPicker({
   value,
   onChange,
@@ -402,12 +458,22 @@ function PipelineCard({
   onClick,
   onChase,
   progress,
+  groupEntry,
+  groupExpanded,
+  onToggleGroup,
+  isGroupMember,
 }: {
   job: Job;
   onDragStart: (e: React.DragEvent, job: Job) => void;
   onClick: (job: Job) => void;
   onChase: (job: Job) => void;
   progress?: ReqProgress;
+  /** Quote options: the collapsed group this card stands for (board only). */
+  groupEntry?: BoardEntry;
+  groupExpanded?: boolean;
+  onToggleGroup?: () => void;
+  /** An option shown beneath its collapsed group card. */
+  isGroupMember?: boolean;
 }) {
   const isLost = job.pipeline_status === 'lost';
   const chase = isLost ? { text: '', urgency: 'none' as const } : chaseDueLabel(job.next_chase_date);
@@ -422,7 +488,7 @@ function PipelineCard({
       onDragStart={(e) => onDragStart(e, job)}
       onClick={() => onClick(job)}
       className={`bg-white rounded-lg shadow-sm border border-gray-200 p-3 cursor-grab active:cursor-grabbing
-        hover:shadow-md transition-shadow ${borderClass}`}
+        hover:shadow-md transition-shadow ${borderClass} ${isGroupMember ? 'ml-3 border-dashed' : ''}`}
     >
       {/* Row 1: Job number + (real status badge if visiting Chasing) + value */}
       <div className="flex items-center justify-between mb-1 gap-2">
@@ -440,6 +506,9 @@ function PipelineCard({
             </a>
           ) : (
             <span className="text-xs font-mono text-gray-400">NEW</span>
+          )}
+          {groupEntry && onToggleGroup && (
+            <GroupBadge entry={groupEntry} expanded={!!groupExpanded} onToggle={onToggleGroup} />
           )}
           {/* Underlying status badge: shown when card is visiting the Chasing
               virtual column so the real lifecycle state stays visible. */}
@@ -466,10 +535,15 @@ function PipelineCard({
         })()}
       </div>
 
-      {/* Row 2: Job name */}
+      {/* Row 2: Job name — a grouped job's "(Option N)" suffix becomes its own line */}
       <div className="text-sm font-medium text-gray-900 truncate mb-0.5">
-        {job.job_name || 'Untitled'}
+        {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled') : (job.job_name || 'Untitled')}
       </div>
+      {job.option_no && (
+        <div className="text-[11px] font-medium text-ooosh-700 truncate mb-0.5">
+          Option {job.option_no}{job.option_label ? ` · ${job.option_label}` : ''}
+        </div>
+      )}
 
       {/* Row 3: Lead organisation, else the client. One line either way — a
           lead org no longer demotes the client to a "Billed to:" sub-line. */}
@@ -3033,6 +3107,13 @@ export default function PipelinePage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [jobs, setJobs] = useState<Job[]>([]);
+  // Quote options: which collapsed group cards are expanded (by group id).
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = (groupId: string) => setExpandedGroups((prev) => {
+    const next = new Set(prev);
+    if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+    return next;
+  });
   const [stats, setStats] = useState<PipelineStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
@@ -3623,7 +3704,9 @@ export default function PipelinePage() {
             {visibleColumns.map((status) => {
               const config = PIPELINE_STATUS_CONFIG[status];
               const columnJobs = jobsByStatus[status];
-              const columnValue = columnJobs.reduce((sum, j) => sum + (pipelineDisplayValue(j).amount || 0), 0);
+              // One card per options group (its lead); the count and value follow suit.
+              const columnEntries = collapseByGroup(columnJobs);
+              const columnValue = columnEntries.reduce((sum, e) => sum + (pipelineDisplayValue(e.job).amount || 0), 0);
 
               return (
                 <div
@@ -3642,7 +3725,7 @@ export default function PipelinePage() {
                         />
                         <span className="text-sm font-semibold text-gray-900">{config.label}</span>
                         <span className="text-xs text-gray-400 bg-gray-200 px-1.5 py-0.5 rounded-full">
-                          {columnJobs.length}
+                          {columnEntries.length}
                         </span>
                       </div>
                       {columnValue > 0 && (
@@ -3660,16 +3743,35 @@ export default function PipelinePage() {
                         No jobs
                       </div>
                     ) : (
-                      columnJobs.map((job) => (
-                        <PipelineCard
-                          key={job.id}
-                          job={job}
-                          onDragStart={handleDragStart}
-                          onClick={handleCardClick}
-                          onChase={(j) => setChaseModal(j)}
-                          progress={reqProgress[job.id]}
-                        />
-                      ))
+                      columnEntries.map((entry) => {
+                        const gid = entry.job.group_id || '';
+                        const expanded = !!gid && expandedGroups.has(gid);
+                        return (
+                          <div key={entry.job.id} className="space-y-2">
+                            <PipelineCard
+                              job={entry.job}
+                              onDragStart={handleDragStart}
+                              onClick={handleCardClick}
+                              onChase={(j) => setChaseModal(j)}
+                              progress={reqProgress[entry.job.id]}
+                              groupEntry={entry.job.group_summary ? entry : undefined}
+                              groupExpanded={expanded}
+                              onToggleGroup={gid ? () => toggleGroup(gid) : undefined}
+                            />
+                            {expanded && entry.others.map((member) => (
+                              <PipelineCard
+                                key={member.id}
+                                job={member}
+                                onDragStart={handleDragStart}
+                                onClick={handleCardClick}
+                                onChase={(j) => setChaseModal(j)}
+                                progress={reqProgress[member.id]}
+                                isGroupMember
+                              />
+                            ))}
+                          </div>
+                        );
+                      })
                     )}
                   </div>
                 </div>
@@ -3715,17 +3817,30 @@ export default function PipelinePage() {
               }
             });
 
-            const renderListRow = (job: Job) => {
+            const renderListRow = (job: Job, entry?: BoardEntry, isMember = false) => {
               const statusConfig = PIPELINE_STATUS_CONFIG[job.pipeline_status || 'new_enquiry'];
               const chase = job.pipeline_status === 'lost' ? { text: '', urgency: 'none' as const } : chaseDueLabel(job.next_chase_date);
+              const gid = job.group_id || '';
               return (
                 <tr
                   key={job.id}
                   onClick={() => handleCardClick(job)}
-                  className="hover:bg-gray-50 cursor-pointer"
+                  className={`hover:bg-gray-50 cursor-pointer ${isMember ? 'bg-gray-50/60' : ''}`}
                 >
-                  <td className="px-4 py-3">
-                    <div className="text-sm font-medium text-gray-900">{job.job_name || 'Untitled'}</div>
+                  <td className={`px-4 py-3 ${isMember ? 'pl-10' : ''}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-900">
+                        {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled') : (job.job_name || 'Untitled')}
+                      </span>
+                      {entry && entry.job.group_summary && (
+                        <GroupBadge entry={entry} expanded={!!gid && expandedGroups.has(gid)} onToggle={() => gid && toggleGroup(gid)} />
+                      )}
+                    </div>
+                    {job.option_no && (
+                      <div className="text-[11px] font-medium text-ooosh-700">
+                        Option {job.option_no}{job.option_label ? ` · ${job.option_label}` : ''}
+                      </div>
+                    )}
                     <div className="text-xs font-mono">
                       {job.hh_job_number ? (
                         <a
@@ -3812,6 +3927,18 @@ export default function PipelinePage() {
               </thead>
             );
 
+            // Quote options: one row per group per section, expandable.
+            const renderSectionRows = (sectionJobs: Job[]) =>
+              collapseByGroup(sectionJobs).flatMap((entry) => {
+                const gid = entry.job.group_id || '';
+                const expanded = !!gid && expandedGroups.has(gid);
+                return [
+                  renderListRow(entry.job, entry),
+                  ...(expanded ? entry.others.map((m) => renderListRow(m, undefined, true)) : []),
+                ];
+              });
+            const actionEntries = collapseByGroup(actionRequired).length;
+
             const sections = [
               { key: 'action', label: 'Action Required', jobs: actionRequired, bgHeader: 'bg-red-50', textColor: 'text-red-700', borderColor: 'border-red-200 border-l-red-500' },
               { key: 'waiting', label: 'Waiting', jobs: waiting, bgHeader: 'bg-amber-50', textColor: 'text-amber-700', borderColor: 'border-amber-200 border-l-amber-500' },
@@ -3828,7 +3955,7 @@ export default function PipelinePage() {
                     <span className="text-red-600 text-lg">!</span>
                     <div>
                       <span className="text-sm font-semibold text-red-700">
-                        {actionRequired.length} enquir{actionRequired.length === 1 ? 'y' : 'ies'} need{actionRequired.length === 1 ? 's' : ''} attention
+                        {actionEntries} enquir{actionEntries === 1 ? 'y' : 'ies'} need{actionEntries === 1 ? 's' : ''} attention
                       </span>
                       <span className="text-sm text-red-600 ml-2">
                         — overdue chases, due today, or new enquiries without a chase date
@@ -3843,14 +3970,14 @@ export default function PipelinePage() {
                     <div key={section.key} className={`bg-white rounded-xl shadow-sm border border-l-4 ${section.borderColor} overflow-hidden`}>
                       <div className={`${section.bgHeader} px-4 py-2.5 border-b border-gray-200`}>
                         <span className={`text-xs font-semibold ${section.textColor} uppercase tracking-wide`}>
-                          {section.label} ({section.jobs.length})
+                          {section.label} ({collapseByGroup(section.jobs).length})
                         </span>
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full">
                           {tableHead}
                           <tbody className="divide-y divide-gray-200">
-                            {section.jobs.map(renderListRow)}
+                            {renderSectionRows(section.jobs)}
                           </tbody>
                         </table>
                       </div>

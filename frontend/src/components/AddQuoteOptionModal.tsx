@@ -256,7 +256,9 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
             </p>
 
             <div>
-              <label className="block text-sm font-semibold text-gray-800 mb-1">{OPTION_COPY.labelField}</label>
+              <label className="block text-sm font-semibold text-gray-800 mb-1">
+                {OPTION_COPY.labelField} <span className="text-red-500" title="Required">*</span>
+              </label>
               <input
                 autoFocus
                 type="text"
@@ -267,13 +269,13 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
                 onKeyDown={(e) => { if (e.key === 'Enter') submitCreate(); }}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
               />
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
+              <div className="mt-1.5 flex flex-nowrap gap-1 overflow-x-auto scrollbar-hide">
                 {OPTION_COPY.labelChips.map((chip) => (
                   <button
                     key={chip}
                     type="button"
                     onClick={() => setLabel(chip)}
-                    className={`px-2 py-0.5 rounded-full border text-xs transition-colors ${
+                    className={`shrink-0 px-2 py-0.5 rounded-full border text-[11px] whitespace-nowrap transition-colors ${
                       label === chip ? 'border-ooosh-500 bg-ooosh-50 text-ooosh-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
                     }`}
                   >
@@ -306,10 +308,7 @@ export default function AddQuoteOptionModal({ job, onClose, onDone }: Props) {
                   onChange={(e) => setCreateInHH(e.target.checked)}
                   className="mt-0.5 h-4 w-4 rounded border-gray-300 text-ooosh-600"
                 />
-                <span>
-                  <span className="font-medium">{OPTION_COPY.hhCheckbox}</span>
-                  <span className="block text-xs text-gray-500">{OPTION_COPY.hhCheckboxHint}</span>
-                </span>
+                <span className="font-medium">{OPTION_COPY.hhCheckbox}</span>
               </label>
             ) : (
               <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">

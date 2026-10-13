@@ -24,6 +24,16 @@ export const OPTION_COPY = {
   barRemove: 'Remove from group',
   barRemoveConfirm: 'Take this job out of the options group? Nothing else changes - it just stops being listed with the others.',
   barLabelPlaceholder: 'Name this set of options',
+  barCompare: 'Compare',
+
+  // Compare slide-over
+  compareTitle: 'Compare options',
+  compareNoLabel: 'add a label',
+  compareEditLabel: 'Click to edit what makes this option different',
+  compareItemsNote: '"Items" counts everything physical on the HireHop job - a Fender Twin and a splitter cable both count. Hover a count for the names.',
+  compareLeadLine: 'Lead option for the pipeline board:',
+  compareLeadAuto: 'automatic - most progressed',
+  compareLeadPinned: 'pinned',
 
   // Add-an-option modal
   modalTitle: 'Quote another option',
@@ -33,7 +43,7 @@ export const OPTION_COPY = {
   labelField: "What's different?",
   labelPlaceholder: 'e.g. Van + driver, whole stretch, with Fender Twin',
   labelHint: 'Shows on the option tab and in the comparison.',
-  labelChips: ['Different dates', 'Van + driver', 'Self-drive', 'Add backline', 'Whole stretch', 'Extra van'],
+  labelChips: ['Different dates', 'Van + driver', 'Self-drive', 'Add backline', 'Whole stretch'],
   datesHeading: 'Dates',
   datesHint: 'From this job. Times stay the same.',
   dateOut: 'Out',
@@ -41,7 +51,6 @@ export const OPTION_COPY = {
   dateEnd: 'End',
   dateReturn: 'Return',
   hhCheckbox: 'Create the HireHop job now',
-  hhCheckboxHint: 'Needed to send the client a quote. Uses HireHop\'s own duplicate, like Re-open.',
   hhUnavailable: 'This job is not in HireHop yet, so the option will be OP-only - use "Create in HireHop" on it afterwards.',
   submit: (optionNo: number) => `Create Option ${optionNo}`,
   submitting: 'Creating...',

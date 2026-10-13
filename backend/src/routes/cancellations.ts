@@ -18,6 +18,7 @@ import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { readDuplicatedJobNumber } from '../services/job-groups';
 import { calculatePreHireCancellation, calculateEarlyReturn } from '../services/cancellation-calculator';
 import emailService from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
@@ -644,9 +645,11 @@ router.post(
             local: new Date().toISOString().replace('T', ' ').substring(0, 16),
           }, { priority: 'high' });
 
-          const hhData = hhResult?.data as { job?: number } | undefined;
-          if (hhData?.job) {
-            newHhJobNumber = hhData.job;
+          // HireHop answers with the new job's data, number under `ID` — the
+          // old `data.job` read never matched (found via Quote options, Oct 2026).
+          const dupNumber = hhResult.success ? readDuplicatedJobNumber(hhResult.data) : null;
+          if (dupNumber) {
+            newHhJobNumber = dupNumber;
             console.log(`[Cancellation] HH duplicate created: J-${newHhJobNumber}`);
 
             // Update HH job dates to 09:00 (duplicate may use current time)

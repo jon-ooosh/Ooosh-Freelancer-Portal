@@ -112,7 +112,39 @@ export interface JobGroupMemberRow {
   lost_reason: string | null;
   dismissed_at: string | null;
   is_van_and_driver: boolean | null;
+  start_time: string | null;
+  end_time: string | null;
+  /** "Self-drive ×1 · + rehearsal" from hh_derived_flags; null until synced. */
+  config: string | null;
+  /** Physical kind=2 lines on the HireHop job — the Twin counts, so does a cable. */
+  items_count: number;
+  item_names: string[];
   is_lead: boolean;
+}
+
+/** Spec §6.2 "Config" column, from the HireHop-derived flags. */
+function describeConfig(flags: Record<string, unknown> | null | undefined, isVanAndDriver: boolean | null): string | null {
+  if (!flags) return isVanAndDriver ? 'Van + driver' : null;
+  const parts: string[] = [];
+  const sd = Number(flags.self_drive_count ?? 0);
+  const vd = Number(flags.van_and_driver_count ?? 0);
+  if (sd > 0) parts.push(`Self-drive${sd > 1 ? ` ×${sd}` : ''}`);
+  if (vd > 0) parts.push(`Van + driver${vd > 1 ? ` ×${vd}` : ''}`);
+  if (parts.length === 0 && isVanAndDriver) parts.push('Van + driver');
+  if (flags.has_rehearsal) parts.push('+ rehearsal');
+  if (Number(flags.crew_item_count ?? 0) > 0) parts.push('+ crew');
+  if (Number(flags.backline_item_count ?? 0) > 0) parts.push('+ backline');
+  return parts.length ? parts.join(' · ') : null;
+}
+
+function physicalItems(lineItems: unknown): { count: number; names: string[] } {
+  if (!Array.isArray(lineItems)) return { count: 0, names: [] };
+  const rows = lineItems.filter((li) => li && Number((li as any).kind ?? 2) === 2 && !(li as any).VIRTUAL);
+  const names = rows.map((li) => {
+    const q = Number((li as any).QUANTITY ?? 1);
+    return `${q > 1 ? `${q}× ` : ''}${String((li as any).ITEM_NAME ?? '')}`.trim();
+  }).filter(Boolean);
+  return { count: rows.length, names };
 }
 
 const MEMBER_SELECT = `
@@ -122,7 +154,8 @@ const MEMBER_SELECT = `
          j.job_value, j.next_chase_date,
          (j.next_chase_date IS NOT NULL AND j.next_chase_date <= CURRENT_DATE
           AND j.pipeline_status = ANY($2::text[])) AS is_chasing,
-         j.lost_reason, j.dismissed_at, j.is_van_and_driver
+         j.lost_reason, j.dismissed_at, j.is_van_and_driver,
+         j.start_time, j.end_time, j.hh_derived_flags, j.line_items
     FROM jobs j
    WHERE j.group_id = $1 AND j.is_deleted = false
    ORDER BY j.option_no ASC NULLS LAST, j.created_at ASC`;
@@ -132,10 +165,45 @@ export async function getGroupById(groupId: string): Promise<{ group: JobGroupRo
   if (g.rows.length === 0) return null;
   const group = g.rows[0] as JobGroupRow;
   const m = await query(MEMBER_SELECT, [groupId, PRE_CONFIRMED_STATUSES]);
-  const rows = m.rows as Omit<JobGroupMemberRow, 'is_lead'>[];
-  const lead = resolveLeadJob(rows, group.lead_job_id);
-  const members = rows.map((r) => ({ ...r, is_lead: !!lead && lead.id === r.id }));
+  const lead = resolveLeadJob(m.rows as Array<{ id: string; option_no: number | null; pipeline_status: string | null }>, group.lead_job_id);
+  const members: JobGroupMemberRow[] = m.rows.map((r) => {
+    const { hh_derived_flags, line_items, ...rest } = r;
+    const items = physicalItems(line_items);
+    return {
+      ...(rest as Omit<JobGroupMemberRow, 'is_lead' | 'config' | 'items_count' | 'item_names'>),
+      config: describeConfig(hh_derived_flags, r.is_van_and_driver),
+      items_count: items.count,
+      item_names: items.names,
+      is_lead: !!lead && lead.id === r.id,
+    };
+  });
   return { group, members };
+}
+
+/**
+ * "Count a group once": the ids of grouped jobs that are NOT their group's lead.
+ * Headline counts and pipeline values exclude them (`NOT (id = ANY($n::uuid[]))`),
+ * so a client asking for four options is one enquiry, not four. Per-job lists
+ * stay per-job (spec §6.4). Cheap: only jobs with a group_id are read.
+ */
+export async function nonLeadMemberIds(): Promise<string[]> {
+  const r = await query(
+    `SELECT id, group_id, option_no, pipeline_status,
+            (SELECT lead_job_id FROM job_groups g WHERE g.id = jobs.group_id) AS pinned
+       FROM jobs WHERE group_id IS NOT NULL AND is_deleted = false`,
+  );
+  const byGroup = new Map<string, typeof r.rows>();
+  for (const row of r.rows) {
+    const list = byGroup.get(row.group_id) ?? [];
+    list.push(row);
+    byGroup.set(row.group_id, list);
+  }
+  const out: string[] = [];
+  for (const members of byGroup.values()) {
+    const lead = resolveLeadJob(members, members[0]?.pinned ?? null);
+    for (const m of members) if (!lead || m.id !== lead.id) out.push(m.id);
+  }
+  return out;
 }
 
 /** The next free option number in a group (MAX + 1). Never reuses a removed number. */
@@ -266,6 +334,29 @@ export async function insertOptionCopy(
     [job.id, source.id],
   );
   return job;
+}
+
+/**
+ * The new job number out of a HireHop job_duplicate.php reply. HireHop answers
+ * with the NEW job's data — `{ ID: '16843', JOB_NAME, JOB_DATE, … }` (proven
+ * live, 13 Oct 2026). Re-open had assumed `{ job: N }` and never got a number
+ * back. Accepts the other shapes it could plausibly use.
+ */
+export function readDuplicatedJobNumber(data: unknown): number | null {
+  if (data == null) return null;
+  if (typeof data === 'number' || typeof data === 'string') {
+    const n = parseInt(String(data), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  if (typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  for (const key of ['ID', 'id', 'job', 'JOB', 'NUMBER', 'number', 'job_id', 'JOB_ID', 'new_job', 'new_id']) {
+    const v = d[key];
+    if (v == null || v === '') continue;
+    const n = parseInt(String(v), 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 }
 
 /** A system note on a job's timeline (the group's own audit trail). */
