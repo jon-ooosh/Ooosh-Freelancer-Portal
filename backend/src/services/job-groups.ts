@@ -424,6 +424,62 @@ export async function bumpSiblingChaseDates(jobId: string, chosen: string | null
   return r.rowCount ?? 0;
 }
 
+// ── The payment portal (spec §9) ────────────────────────────────────────────
+// Paying a link IS choosing an option, so the portal needs to know two things
+// about the job behind a link: may it still be paid, and what are its siblings.
+// `payable` is false for a lost / cancelled job and for a live option whose
+// sibling has already confirmed — the client has chosen; this link is stale.
+// Completed jobs stay payable (post-completion charges are paid through the
+// portal too), which differs from the spec's first draft on purpose.
+
+export interface PortalOptionsInfo {
+  payable: boolean;
+  not_payable_reason: 'lost' | 'cancelled' | 'confirmed_sibling' | null;
+  confirmed_sibling: { hh_job_number: number | null; option_no: number | null; option_label: string | null } | null;
+  version_group: {
+    label: string | null;
+    this: { option_no: number | null; option_label: string | null };
+    siblings: Array<{ hh_job_number: number | null; option_no: number | null; option_label: string | null; pipeline_status: string | null }>;
+  } | null;
+}
+
+export async function portalOptionsFor(jobId: string): Promise<PortalOptionsInfo> {
+  const r = await query(
+    `SELECT j.pipeline_status, j.option_no, j.option_label, j.group_id, g.label AS group_label
+       FROM jobs j LEFT JOIN job_groups g ON g.id = j.group_id
+      WHERE j.id = $1`,
+    [jobId],
+  );
+  const job = r.rows[0];
+  const dead = job?.pipeline_status === 'lost' ? 'lost' : job?.pipeline_status === 'cancelled' ? 'cancelled' : null;
+  if (!job?.group_id) {
+    return { payable: !dead, not_payable_reason: dead, confirmed_sibling: null, version_group: null };
+  }
+  const sib = await query(
+    `SELECT hh_job_number, option_no, option_label, pipeline_status
+       FROM jobs WHERE group_id = $1 AND id <> $2 AND is_deleted = false AND dismissed_at IS NULL
+      ORDER BY option_no`,
+    [job.group_id, jobId],
+  );
+  const siblings = sib.rows;
+  const confirmedSib = siblings.find((s) =>
+    !PRE_CONFIRMED_STATUSES.includes(s.pipeline_status || '') && s.pipeline_status !== 'lost' && s.pipeline_status !== 'cancelled');
+  const thisOpen = PRE_CONFIRMED_STATUSES.includes(job.pipeline_status || '');
+  const reason: PortalOptionsInfo['not_payable_reason'] = dead ?? (confirmedSib && thisOpen ? 'confirmed_sibling' : null);
+  return {
+    payable: !reason,
+    not_payable_reason: reason,
+    confirmed_sibling: confirmedSib
+      ? { hh_job_number: confirmedSib.hh_job_number, option_no: confirmedSib.option_no, option_label: confirmedSib.option_label }
+      : null,
+    version_group: {
+      label: job.group_label,
+      this: { option_no: job.option_no, option_label: job.option_label },
+      siblings,
+    },
+  };
+}
+
 /** A system note on a job's timeline (the group's own audit trail). */
 export async function noteOnTimeline(
   client: PoolClient | null,

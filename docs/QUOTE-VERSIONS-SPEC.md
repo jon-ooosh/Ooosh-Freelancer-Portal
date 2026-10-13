@@ -1,9 +1,9 @@
 # QUOTE VERSIONS SPEC — alternative quotes for one enquiry, as a group of jobs
 
-**Status:** 🔨 PRs 1–3 BUILT (13 Oct 2026) — model, "Quote another option", link an existing
-quote, remove from group, the option bar, Compare, pin, the Kanban/list collapse, the
-headline-count dedup, confirm-one-lose-others and the §8 guards. PR 4 (§10, the portal) still to
-build and needs the **payment portal repo** in context. §1 is the settled decisions; §1.1 the build-session decisions; §13 is the
+**Status:** ✅ PRs 1–4 BUILT (13 Oct 2026) — the whole alternative-options build: model,
+"Quote another option", link an existing quote, remove from group, the option bar, Compare, pin,
+the Kanban/list collapse, the headline-count dedup, confirm-one-lose-others, the §8 guards and the
+payment portal (OP flags + the portal repo's two screens). Phase 2 (`part_of`) is not built. §1 is the settled decisions; §1.1 the build-session decisions; §13 is the
 handover note.
 
 **Naming (jon, 12 Oct 2026): "version" in this spec is "option" in code and in the UI.** OP
@@ -458,9 +458,24 @@ interval from today) — jon, 13 Oct 2026. **Not built:** §6.5 search / Hire Hi
 shows the panel, marking lost runs the full cleanup, Lost & Cancelled shows them under the
 reason, the org's Hire History lost count is unchanged.
 
-**PR 4 — portal.** 4A OP flags (§9 OP side, with the "what does the portal do today on Lost"
-verification written up in the PR); 4B portal repo banner + dead-link reason + server-side
-refusal. **Live check:** pay v2 on test → v1's link shows state B naming v2.
+**PR 4 — portal. BUILT 13 Oct 2026.** 4A (this repo): `GET /api/money/job-lookup/:hh` carries
+`payable`, `not_payable_reason` (`lost` / `cancelled` / `confirmed_sibling`), `confirmed_sibling`
+and `version_group` (`services/job-groups.ts` `portalOptionsFor()`). **Completed jobs stay
+payable** (post-completion charges are paid through the portal) — a deliberate change from the
+draft above. 4B (`netlify-functions`): `get-job-details-v2.js` validates the hash FIRST (so a
+bare job number never reveals a client's other quotes), then asks OP, best-effort (a failed OP
+call falls through to the HireHop status check — a missed refusal is recoverable, a portal that
+dies with OP is not), and returns 403 `not_payable` with the sibling info; `create-stripe-session`
+passes that refusal through, so no Stripe session can exist for a refused option.
+`payment.html`: state A is an amber note under the title ("This is Option 2 - Van + driver of the
+3 options we sent you… Paying here books this option"), no links; state B is the error screen
+with the "You've already booked Option 2" wording. **Verified on the portal already locking a
+Lost job:** yes — HireHop status 9/10 was refused before this (and still is, after the OP check).
+Also in 4A: on the CONFIRMED option the group has done its job — the bar shows only the Confirm
+panel at the top and a collapsed, read-only record of the siblings at the bottom of the page;
+Compare / Remove / Add / pin disappear across the group once an option confirms (jon, 13 Oct).
+**Live check:** pay Option 2 on a test group through the portal → OP bells the managers, Option 1's
+link shows state B naming Option 2.
 
 **Phase 2 (not in this build) — `part_of` groups.** Same table, `kind='part_of'`: a festival's
 "Main stage" + per-artist jobs. Differences from `alternative`: no confirm-one-lose-others, no

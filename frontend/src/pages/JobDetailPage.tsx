@@ -3302,7 +3302,7 @@ function JobDetailContent() {
         <QuoteOptionsBar
           jobId={job.id}
           groupId={job.group_id}
-          refreshSignal={optionsRefresh}
+          refreshSignal={`${optionsRefresh}:${job.pipeline_status}`}
           onAdd={() => setShowAddOptionModal(true)}
           onRemoved={() => loadJob()}
         />
@@ -6712,6 +6712,19 @@ function JobDetailContent() {
             await loadInteractions();
           }}
           submit={(payload) => api.post(`/pipeline/${job.id}/dismiss`, payload)}
+        />
+      )}
+
+      {/* Quote options — on the CONFIRMED option the group has done its job:
+          its siblings live here at the bottom, collapsed and read-only. */}
+      {job.group_id && (
+        <QuoteOptionsBar
+          variant="bottom"
+          jobId={job.id}
+          groupId={job.group_id}
+          refreshSignal={`${optionsRefresh}:${job.pipeline_status}`}
+          onAdd={() => setShowAddOptionModal(true)}
+          onRemoved={() => loadJob()}
         />
       )}
       </div>

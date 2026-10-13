@@ -25,6 +25,7 @@ export const OPTION_COPY = {
   barRemoveConfirm: 'Take this job out of the options group? Nothing else changes - it just stops being listed with the others.',
   barLabelPlaceholder: 'Name this set of options',
   barCompare: 'Compare',
+  bottomCaption: (optionNo: number, total: number) => `This was Option ${optionNo} of ${total} quoted for this enquiry`,
 
   // Confirm panel — one option confirmed, the others still open
   confirmTitle: (optionNo: number, label: string | null) =>
