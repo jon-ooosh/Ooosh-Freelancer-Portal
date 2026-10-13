@@ -2901,6 +2901,34 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
     // against this hirehop_job and the save-event side-effect records the
     // check-in WITHOUT un-swapping the row (preserves the swap audit).
     if (row.status === 'swapped') {
+      // The client handed this van over AT THE SWAP, so the swap's soft
+      // check-in reading (staff-entered, often blank for a breakdown) is the
+      // client's end point — not the base reading, which includes recovery /
+      // garage / our own driving. Latest soft-check-in event on this job.
+      let swapReading: { mileage: number | null; fuelLevel: string | null; at: string | null } = {
+        mileage: null,
+        fuelLevel: null,
+        at: row.swapped_at ? new Date(row.swapped_at).toISOString() : null,
+      };
+      try {
+        const index = await readR2Json<{ events: any[] }>(`vehicle-events/${vehicleReg}/_index.json`);
+        const softEvents = (index?.events || [])
+          .filter((e: any) => e.eventType === 'soft-check-in'
+            && row.hirehop_job_id != null
+            && String(e.hireHopJob) === String(row.hirehop_job_id))
+          .sort((a: any, b: any) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+        const ev = softEvents[0];
+        if (ev) {
+          swapReading = {
+            mileage: ev.mileage != null && Number(ev.mileage) > 0 ? Number(ev.mileage) : null,
+            fuelLevel: ev.fuelLevel || null,
+            at: ev.createdAt || swapReading.at,
+          };
+        }
+      } catch (err) {
+        // Non-fatal: no swap reading just means no client comparison.
+        console.warn('[vehicles/check-in-eligibility] swap reading lookup failed:', err);
+      }
       res.json({
         eligible: true,
         reason: null,
@@ -2908,6 +2936,7 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
         assignmentId: row.id,
         hirehopJob: row.hirehop_job_id,
         swapped: true,
+        swapReading,
       });
       return;
     }
@@ -3556,7 +3585,14 @@ router.post('/save-collection', async (req: FlexibleVehicleRequest, res: Respons
     }
     const reg = String(collection.vehicleReg).toUpperCase();
     const job = String(collection.hireHopJob);
-    await writeR2Json(`collections/${reg}/${job}.json`, collection);
+    // collectedBy = whoever is logged in doing the collection (the freelancer
+    // or staff member), resolved server-side. The page used to send the
+    // CUSTOMER's name here, so check-in read "Collected by <client>".
+    const operatorName = await resolveOperatorName(req);
+    await writeR2Json(`collections/${reg}/${job}.json`, {
+      ...collection,
+      ...(operatorName ? { collectedBy: operatorName } : {}),
+    });
     res.json({ success: true });
   } catch (error) {
     console.error('[vehicles/save-collection] Failed:', error);
@@ -4313,12 +4349,19 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   // book-out nor a final return.
   const isInterim = data.isInterim === true;
   const isCheckIn = data.isCheckIn === true;
+  // Freelancer collection from the client: an interim record of the van as
+  // our driver picked it up, for the client's reference. The check-in back
+  // at base stays the authoritative return record. It used to fall through
+  // to the book-out template (16616, Oct 2026).
+  const isCollection = !isInterim && !isCheckIn && data.isCollection === true;
   const reportTitle = isInterim
     ? 'INTERIM VEHICLE ASSESSMENT'
-    : isCheckIn ? 'VEHICLE CHECK-IN REPORT' : 'VEHICLE CONDITION REPORT';
+    : isCheckIn ? 'VEHICLE CHECK-IN REPORT'
+    : isCollection ? 'VEHICLE COLLECTION REPORT' : 'VEHICLE CONDITION REPORT';
   const reportSubtitle = isInterim
     ? 'Mid-Hire Assessment Record'
-    : isCheckIn ? 'Return Record' : 'Book-Out Record';
+    : isCheckIn ? 'Return Record'
+    : isCollection ? 'Collection Record' : 'Book-Out Record';
 
   addText(reportTitle, 0, 15, { size: 18, bold: true, color: [255, 255, 255], align: 'center' });
   addText(reportSubtitle, 0, 23, { size: 11, color: [180, 190, 210], align: 'center' });
@@ -4338,6 +4381,21 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       size: 9, bold: true, color: [146, 64, 14],
     });
     addText('The hire is continuing on a replacement vehicle. A full check-in will follow when this vehicle returns to base.', margin + 4, y + 12, {
+      size: 7.5, color: [146, 64, 14],
+    });
+    y += 24;
+  }
+
+  // Collection context banner — says what this record is and that the final
+  // check-in follows at base.
+  if (isCollection) {
+    pdf.setFillColor(255, 251, 235);
+    pdf.setDrawColor(253, 230, 138);
+    pdf.roundedRect(margin, y, contentWidth, 18, 2, 2, 'FD');
+    addText('Recorded when our driver collected the vehicle from you.', margin + 4, y + 6.5, {
+      size: 9, bold: true, color: [146, 64, 14],
+    });
+    addText('For your reference only. The final check-in will be carried out when the vehicle is back at our base.', margin + 4, y + 12, {
       size: 7.5, color: [146, 64, 14],
     });
     y += 24;
@@ -4384,7 +4442,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   // bookout session (people lookup by personId), so it can't be spoofed
   // from the client payload.
   if (data.performedByName) {
-    const opLabel = isCheckIn ? 'Checked In By' : 'Booked Out By';
+    const opLabel = isCheckIn ? 'Checked In By' : isCollection ? 'Collected By' : 'Booked Out By';
     y = addRow(opLabel, data.performedByName, y);
   }
 
@@ -4437,12 +4495,31 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       y += 2; addLine(y); y += 4;
     }
 
+    // Swapped out mid-hire: the client handed the van over AT THE SWAP, so
+    // their comparison is book-out -> swap. Readings are staff-entered and
+    // often blank for a breakdown — then no client comparison at all, never
+    // a fall-back to the base reading (which includes recovery / our driving).
+    const isSwappedOut = !hasCollection && data.swappedOut === true;
+    if (isSwappedOut) {
+      y = addRow('Swapped Out', data.swapDateTime ? formatFullDateTime(data.swapDateTime) : 'Not recorded', y);
+      y = addRow('Swap Mileage', data.swapMileage != null ? data.swapMileage.toLocaleString() + ' miles' : 'Not recorded', y);
+      y = addRow('Swap Fuel', data.swapFuelLevel || 'Not recorded', y);
+      if (data.bookOutMileage != null && data.swapMileage != null) {
+        const clientMiles = data.swapMileage - data.bookOutMileage;
+        y = addRow('Miles Driven', clientMiles.toLocaleString() + ' miles (book-out to swap)', y);
+      }
+      if (data.bookOutFuelLevel && data.swapFuelLevel && data.bookOutFuelLevel !== data.swapFuelLevel) {
+        y = addRow('Fuel Change', `${data.bookOutFuelLevel} -> ${data.swapFuelLevel} (book-out to swap)`, y);
+      }
+      y += 2; addLine(y); y += 4;
+    }
+
     y = addRow('Check-In Date/Time', timestamp, y);
     const currentMileageStr = data.mileage != null ? data.mileage.toLocaleString() + ' miles' : '-';
     y = addRow('Check-In Mileage', currentMileageStr, y);
     y = addRow('Check-In Fuel', data.fuelLevel || '-', y);
 
-    if (!hasCollection) {
+    if (!hasCollection && !isSwappedOut) {
       if (data.bookOutMileage != null && data.mileage != null) {
         const milesDiff = data.mileage - data.bookOutMileage;
         y = addRow('Miles Driven', milesDiff.toLocaleString() + ' miles', y);
@@ -4521,6 +4598,28 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       });
       y += 8;
     }
+  } else if (isCollection) {
+    addText('VEHICLE STATE AT COLLECTION', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+    y += 3; addLine(y); y += 6;
+
+    // Book-out reference — only sent when the book-out belongs to this job.
+    if (data.bookOutMileage != null || data.bookOutFuelLevel) {
+      y = addRow('Book-Out Date', data.bookOutDate ? formatDayDate(data.bookOutDate) : '-', y);
+      y = addRow('Book-Out Mileage', data.bookOutMileage != null ? data.bookOutMileage.toLocaleString() + ' miles' : '-', y);
+      y = addRow('Book-Out Fuel', data.bookOutFuelLevel || '-', y);
+      y += 2; addLine(y); y += 4;
+    }
+
+    const mileageStr = data.mileage != null ? data.mileage.toLocaleString() + ' miles' : '-';
+    y = addRow('Collection Mileage', mileageStr, y);
+    y = addRow('Collection Fuel', data.fuelLevel || '-', y);
+    if (data.bookOutMileage != null && data.mileage != null) {
+      y = addRow('Miles Driven', (data.mileage - data.bookOutMileage).toLocaleString() + ' miles', y);
+    }
+    if (data.bookOutFuelLevel && data.fuelLevel && data.bookOutFuelLevel !== data.fuelLevel) {
+      y = addRow('Fuel Change', `${data.bookOutFuelLevel} -> ${data.fuelLevel}`, y);
+    }
+    y += 4;
   } else {
     addText('VEHICLE STATE AT BOOK-OUT', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
     y += 3; addLine(y); y += 6;
@@ -4551,7 +4650,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   // -- Book-Out Notes --
   if (data.bookOutNotes) {
     checkNewPage(20);
-    addText('NOTES', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+    addText(isCollection ? 'NOTES FROM CLIENT' : 'NOTES', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
     y += 3; addLine(y); y += 6;
 
     const noteLines = pdf.splitTextToSize(String(data.bookOutNotes), pageWidth - margin * 2) as string[];
@@ -4565,7 +4664,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
 
   // -- Condition Photos --
   checkNewPage(20);
-  const photosTitle = isCheckIn ? 'CHECK-IN PHOTOS' : 'CONDITION PHOTOS';
+  const photosTitle = isCheckIn ? 'CHECK-IN PHOTOS' : isCollection ? 'COLLECTION PHOTOS' : 'CONDITION PHOTOS';
   addText(photosTitle, margin, y, { size: 11, bold: true, color: [27, 42, 78] });
   y += 3; addLine(y); y += 6;
 
@@ -4774,7 +4873,8 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     const generated = ukToday();
     const footerLabel = isInterim
       ? 'Interim Vehicle Assessment'
-      : isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Condition Report';
+      : isCheckIn ? 'Vehicle Check-In Report'
+      : isCollection ? 'Vehicle Collection Report' : 'Vehicle Condition Report';
     pdf.text(
       'Ooosh Tours Ltd - ' + footerLabel + ' - Generated ' + generated,
       pageWidth / 2, 292, { align: 'center' },
@@ -4793,7 +4893,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     : eventDateStr;
   const safeReg = String(data.vehicleReg || 'unknown').replace(/\s+/g, '-');
   const jobPart = data.hireHopJob ? '-Job' + data.hireHopJob : '';
-  const docType = isInterim ? 'interim' : isCheckIn ? 'check-in' : 'book-out';
+  const docType = isInterim ? 'interim' : isCheckIn ? 'check-in' : isCollection ? 'collection' : 'book-out';
   const filename = `${safeReg}-${ddmmyy}${jobPart}-${docType}.pdf`;
 
   return { pdfBytes, filename };
@@ -5654,6 +5754,8 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     const normalisedRegenType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
     const isInterimRegen = normalisedRegenType === 'soft-check-in';
     const isCheckInRegen = event.eventType === 'Check In' || event.eventType === 'check-in';
+    // Freelancer collection ('Interim Check In') — its own report type.
+    const isCollectionRegen = normalisedRegenType === 'interim-check-in';
 
     let pdfBytes: Uint8Array;
     let filename: string;
@@ -5665,7 +5767,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     if (storedPdf) {
       // Frozen original — serve verbatim.
       pdfBytes = storedPdf;
-      const docType = isInterimRegen ? 'interim' : isCheckInRegen ? 'check-in' : 'book-out';
+      const docType = isInterimRegen ? 'interim' : isCheckInRegen ? 'check-in' : isCollectionRegen ? 'collection' : 'book-out';
       const dateStr = (event.eventDate || ukToday()).replace(/-/g, '');
       filename = `${reg}-${docType}-${dateStr}.pdf`;
       source = 'stored';
@@ -5682,7 +5784,11 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       // Operator name — for regenerated PDFs we want the ORIGINAL operator,
       // not the staff member clicking the regenerate button. Read from the
       // assignment's booked_out_by / checked_in_by user reference.
-      const performedByName = await resolveOperatorNameForEvent(
+      // (Not for a collection: the assignment holds no collector, and the
+      // book-out operator would be mislabelled "Collected By".)
+      // Nor for an interim (swap) assessment: the swap isn't recorded there
+      // either, so the book-out operator would show as "Booked Out By".
+      const performedByName = (isCollectionRegen || isInterimRegen) ? null : await resolveOperatorNameForEvent(
         reg,
         event.hireHopJob,
         isCheckInRegen,
@@ -5750,6 +5856,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
         signatureMissing: !isInterimRegen && !signatureBase64,
         isCheckIn: isCheckInRegen,
         isInterim: isInterimRegen,
+        isCollection: isCollectionRegen,
         // Reconstructed check-in comparison (undefined/[] for book-outs).
         bookOutMileage,
         bookOutFuelLevel,
@@ -5776,7 +5883,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
 
     if (!skipEmail && recipient) {
       const isCheckIn = event.eventType === 'Check In' || event.eventType === 'check-in';
-      const reportType = isCheckIn ? 'Check-In Report' : 'Condition Report';
+      const reportType = isCheckIn ? 'Check-In Report' : isCollectionRegen ? 'Collection Report' : 'Condition Report';
       const subject = `Vehicle ${reportType} - ${reg} - ${event.eventDate || ukToday()}`;
       const html = `
         <p>Hi ${driverName || 'there'},</p>
@@ -6116,11 +6223,13 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
           driverName,
           eventDate: String(data.eventDate || ''),
           isCheckIn: !!data.isCheckIn,
+          isCollection: !data.isCheckIn && data.isCollection === true,
           hireHopJob: data.hireHopJob ? String(data.hireHopJob) : null,
           driverPresent: emailMeta?.driverPresent,
           damageCount: emailMeta?.damageCount,
           fuelDifference: emailMeta?.fuelDifference ?? null,
           milesDriven: emailMeta?.milesDriven ?? null,
+          swappedOut: emailMeta?.swappedOut === true,
         };
         const subject = buildConditionReportSubject(emailParams);
         const html = (prependBanner || '') + buildConditionReportEmailHtml(emailParams);
