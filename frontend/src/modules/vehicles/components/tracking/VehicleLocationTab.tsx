@@ -88,11 +88,6 @@ export function VehicleLocationTab({ reg }: VehicleLocationTabProps) {
               </div>
             </div>
 
-            {position.attributes.totalDistance != null && (
-              <div className="mt-2 text-center text-xs text-gray-400">
-                Total tracked: {metresToMiles(position.attributes.totalDistance).toLocaleString()} miles
-              </div>
-            )}
           </>
         ) : (
           <p className="text-sm text-gray-400 text-center py-6">
