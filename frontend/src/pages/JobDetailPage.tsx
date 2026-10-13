@@ -7872,6 +7872,7 @@ function StatusTransitionModal({
   const [reminders, setReminders] = useState<Reminder[]>([
     { text: '', date: '', delivery: 'both', priority: 'normal', userId: '' },
   ]);
+  const [showReminders, setShowReminders] = useState(false);
   const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }>>([]);
   // Same rule as the reminder modal: "Remind me" already covers the current
   // user, so they must not also appear by name.
@@ -8003,11 +8004,15 @@ function StatusTransitionModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/30" onClick={onCancel} />
-      <div className="relative bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
-        <h3 className="text-lg font-semibold mb-4">
+      {/* Capped at 90% of the window: the title and the buttons stay put and
+          the middle scrolls, so a long completion (open Problems, outstanding
+          items, reminders) can never push Confirm off the screen. */}
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 max-h-[90vh] flex flex-col">
+        <h3 className="text-lg font-semibold px-6 pt-6 pb-4 shrink-0">
           Move to <span style={{ color: config.colour }}>{config.label}</span>
         </h3>
 
+        <div className="flex-1 min-h-0 overflow-y-auto px-6">
         {targetStatus === 'paused' && (
           <div className="space-y-3 mb-4">
             <label className="block text-sm font-medium text-gray-700">Reason for pausing</label>
@@ -8123,9 +8128,20 @@ function StatusTransitionModal({
                 </ul>
                 <p className="text-xs text-red-700 mt-2">
                   {isManagerUser
-                    ? 'A manager can complete the job anyway — say why in the note below. It goes on the timeline.'
+                    ? 'A manager can complete the job anyway — say why below. It goes on the timeline.'
                     : 'Resolve them first, or ask a manager to complete the job with a reason.'}
                 </p>
+                {/* The reason sits with the warning it answers, rather than at
+                    the foot of the modal (the general note below is hidden
+                    while this one is showing — they share `note`). */}
+                <label className="block text-xs font-medium text-red-800 mt-3 mb-1">Reason (required — Problems still open)</label>
+                <input
+                  type="text"
+                  placeholder="Why is this job being completed with Problems open?"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  className={`w-full border rounded px-3 py-2 text-sm bg-white ${!note.trim() ? 'border-red-300' : 'border-gray-300'}`}
+                />
               </div>
             )}
             {outstandingItems.length > 0 && (
@@ -8165,10 +8181,19 @@ function StatusTransitionModal({
               placeholder="Anything to note? Lessons learned, client feedback, things to improve..."
               value={retroNotes}
               onChange={(e) => setRetroNotes(e.target.value)}
-              rows={3}
+              rows={2}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
-            {/* Reminders */}
+            {/* Reminders — folded away until asked for; most completions don't set one */}
+            {!showReminders ? (
+              <button
+                type="button"
+                onClick={() => setShowReminders(true)}
+                className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+              >
+                + Add a follow-up reminder
+              </button>
+            ) : (
             <div className="space-y-2">
               <label className="block text-xs font-medium text-gray-600">Follow-up reminders</label>
               {reminders.map((rem, idx) => {
@@ -8281,6 +8306,7 @@ function StatusTransitionModal({
                 </button>
               )}
             </div>
+            )}
           </div>
         )}
 
@@ -8305,23 +8331,23 @@ function StatusTransitionModal({
           </div>
         )}
 
-        {(() => {
-          const reasonRequired = targetStatus === 'completed' && openProblems.length > 0;
-          return (
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">{reasonRequired ? 'Reason (required — Problems still open)' : 'Note (optional)'}</label>
-              <input
-                type="text"
-                placeholder={reasonRequired ? 'Why is this job being completed with Problems open?' : 'Why are you changing the status?'}
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                className={`w-full border rounded px-3 py-2 text-sm ${reasonRequired && !note.trim() ? 'border-red-300' : 'border-gray-300'}`}
-              />
-            </div>
-          );
-        })()}
+        {/* With open Problems on a completion, the (required) reason lives in
+            the red box above instead. */}
+        {!(targetStatus === 'completed' && openProblems.length > 0) && (
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
+            <input
+              type="text"
+              placeholder="Why are you changing the status?"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+          </div>
+        )}
+        </div>
 
-        <div className="flex gap-3 justify-end">
+        <div className="flex gap-3 justify-end px-6 py-4 border-t border-gray-100 shrink-0">
           <button
             onClick={onCancel}
             className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
