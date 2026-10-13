@@ -8,6 +8,7 @@ import emailService from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
 import { shiftLinkPath } from '../services/studio-sitter';
+import { bumpSiblingChaseDates } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
@@ -432,6 +433,9 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $2`,
         [chaseDate, job_id, chase_alert_user_id || null, chase_alert_delivery || null]
       );
+      // Quote options: one call covers the whole enquiry — the live siblings
+      // move too, never shortening a sibling's deliberately later date.
+      bumpSiblingChaseDates(job_id, chaseDate).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
     }
 
     // Auto-bump chase on contact-type interactions (call / email / meeting).
@@ -469,6 +473,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $1`,
         [job_id]
       );
+      // Quote options: the same bump for the enquiry's other live options.
+      bumpSiblingChaseDates(job_id, null).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
     }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);

@@ -444,7 +444,16 @@ export function startScheduler() {
         `UPDATE jobs
          SET pipeline_status = 'lost',
              pipeline_status_changed_at = NOW(),
-             lost_reason = 'No Decision',
+             -- Quote options: an option whose sibling has already confirmed was
+             -- not "no decision" — the client decided, on another option
+             -- (docs/QUOTE-VERSIONS-SPEC.md §8).
+             lost_reason = CASE
+               WHEN jobs.group_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM jobs s
+                  WHERE s.group_id = jobs.group_id AND s.id <> jobs.id AND s.is_deleted = false
+                    AND s.pipeline_status NOT IN ('new_enquiry','quoting','paused','provisional','lost','cancelled'))
+               THEN 'Confirmed Alternative Quote (from us)'
+               ELSE 'No Decision' END,
              updated_at = NOW()
          WHERE job_date IS NOT NULL
            AND job_date::date < CURRENT_DATE

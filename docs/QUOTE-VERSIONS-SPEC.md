@@ -1,9 +1,9 @@
 # QUOTE VERSIONS SPEC — alternative quotes for one enquiry, as a group of jobs
 
-**Status:** 🔨 PRs 1–2 BUILT (13 Oct 2026) — model, "Quote another option", link an existing
-quote, remove from group, the option bar, Compare, pin, the Kanban/list collapse and the
-headline-count dedup. PRs 3–4 (§10) still to build; Phase 4 needs the **payment portal repo**
-in context. §1 is the settled decisions; §1.1 the build-session decisions; §13 is the
+**Status:** 🔨 PRs 1–3 BUILT (13 Oct 2026) — model, "Quote another option", link an existing
+quote, remove from group, the option bar, Compare, pin, the Kanban/list collapse, the
+headline-count dedup, confirm-one-lose-others and the §8 guards. PR 4 (§10, the portal) still to
+build and needs the **payment portal repo** in context. §1 is the settled decisions; §1.1 the build-session decisions; §13 is the
 handover note.
 
 **Naming (jon, 12 Oct 2026): "version" in this spec is "option" in code and in the UI.** OP
@@ -433,12 +433,30 @@ PR 3 or later); "Mark lost" from a Compare row (PR 3's confirm panel covers the 
 **Live check:** options in different columns render sensibly; open-enquiry count moves by one,
 not three.
 
-**PR 3 — confirm-one-lose-others + guards.** The confirmation hook on all three entry points;
-Confirm panel; bell for unattended confirmations; group-wide chase bump; exclusions (§8:
-analytics, Fill-a-Gap, auto-loser reason, Combine refusal, suffix preservation on sync).
-**Live check:** confirm v2 via the portal on a test group → bell arrives, opening the job
-prompts, marking lost runs the full cleanup, Lost & Cancelled shows them under the reason,
-win/loss unchanged.
+**PR 3 — confirm-one-lose-others + guards. BUILT 13 Oct 2026.** `services/option-confirm.ts`
+`afterOptionConfirmed()` on all FOUR confirmation paths (pipeline status PATCH, portal
+payment-event, HireHop webhook, record-payment): a timeline note on the confirmed job naming the
+still-open options; on the unattended paths a `quote_option_confirmed` bell to the job's managers
+(admins + managers as fallback), one unread bell per user per job, deep-linked to
+`/jobs/:id?group_prompt=1`. **The Confirm panel lives in the options bar** (not a response-driven
+modal): it shows on a confirmed option's page while live, open siblings exist, pre-ticked; "Mark
+the N ticked as Lost" calls the existing lost transition per sibling (reason
+`Confirmed Alternative Quote (from us)`, `lost_detail` "Client took Option 2 (#16842)",
+`keep_requirement_ids: []` so the full cleanup runs), posts a note on the winner, then
+`POST /groups/:id/prompt-handled` retires the bells. "Keep them open for now" hides it for that
+exact sibling set (localStorage); the bell's `?group_prompt=1` overrides. §8 guards built:
+org Hire History + client-history stats exclude the alt-quote reason (`notAltQuoteLossSql`);
+Fill-a-Gap never offers an option's siblings and the "Find replacement" button is replaced on an
+alt-lost option; the 09:00 auto-loser uses the alt reason when a sibling has confirmed; Combine
+refuses two options of one enquiry; a contact or chase logged on any option bumps every live
+sibling (`bumpSiblingChaseDates`, sacred-future); the auto-chase runner drafts for the lead only
+and the draft is told about the other options; inbound HireHop names keep the "(Option N)"
+suffix (`jobNameKeepingOptionSuffixSql`, sync + webhook). Also: a linked existing quote takes the
+group's chase date when it has none, and a new option always gets one (the source's, else its
+interval from today) — jon, 13 Oct 2026. **Not built:** §6.5 search / Hire History tags.
+**Live check:** confirm Option 2 via the portal on a test group → bell arrives, opening the job
+shows the panel, marking lost runs the full cleanup, Lost & Cancelled shows them under the
+reason, the org's Hire History lost count is unchanged.
 
 **PR 4 — portal.** 4A OP flags (§9 OP side, with the "what does the portal do today on Lost"
 verification written up in the PR); 4B portal repo banner + dead-link reason + server-side

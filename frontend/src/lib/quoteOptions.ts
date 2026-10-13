@@ -16,6 +16,9 @@ export function stripOptionSuffix(name: string | null | undefined): string {
   return String(name ?? '').replace(OPTION_SUFFIX_RE, '').trim();
 }
 
+/** The lost reason for an option the client didn't pick (mirrors backend ALTERNATIVE_QUOTE_LOST_REASON). */
+export const ALTERNATIVE_QUOTE_LOST_REASON = 'Confirmed Alternative Quote (from us)';
+
 /** Statuses an option can still be chosen from (mirrors backend PRE_CONFIRMED_STATUSES). */
 export const OPTION_OPEN_STATUSES = ['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional'];
 

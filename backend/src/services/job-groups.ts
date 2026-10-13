@@ -25,6 +25,31 @@ import { PRE_CONFIRMED_STATUSES } from './pipeline-stage';
 
 export const OPTION_GROUP_KIND = 'alternative';
 
+/**
+ * The lost reason for an option the client didn't pick (migration 191 renamed it so
+ * "Competitor" keeps meaning the alternative came from someone else). NOT lost
+ * revenue — win/loss stats and Fill-a-Gap exclude it (spec §8).
+ */
+export const ALTERNATIVE_QUOTE_LOST_REASON = 'Confirmed Alternative Quote (from us)';
+
+/** SQL: this job's loss is a real loss, not an option the client didn't pick. */
+export function notAltQuoteLossSql(alias = 'j'): string {
+  return `(${alias}.lost_reason IS DISTINCT FROM '${ALTERNATIVE_QUOTE_LOST_REASON}')`;
+}
+
+/**
+ * SQL for a job_name write from an INBOUND HireHop name that keeps the "(Option N)"
+ * suffix when HireHop dropped it (staff renamed the job in HH). `param` is the
+ * placeholder holding the inbound name, e.g. '$1' — cast to text on every use so
+ * the varchar column assignment and the regex don't fight over its type (42P08).
+ */
+export function jobNameKeepingOptionSuffixSql(param: string): string {
+  const p = `${param}::text`;
+  return `CASE WHEN option_no IS NOT NULL AND ${p} !~* '\\(Option\\s+\\d+\\)\\s*$'
+               THEN ${p} || ' (Option ' || option_no || ')'
+          ELSE ${p} END`;
+}
+
 // ── The "(Option N)" job-name suffix ────────────────────────────────────────
 // Lives in the REAL job_name so HireHop, every quote PDF and every email agree.
 // The Job Detail header renders it as a pill (frontend lib/quoteOptions.ts).
@@ -294,7 +319,7 @@ export async function insertOptionCopy(
        $24, $25, $26, $27,
        $28, $29, $30,
        $31, $32, $33,
-       $34, $35,
+       $34::int, COALESCE($35::date, (CURRENT_DATE + (COALESCE($34::int, 5) || ' days')::interval)::date),
        0, 'Enquiry', 'quoting', NOW(),
        $36, $37, $38,
        $39
@@ -359,12 +384,52 @@ export function readDuplicatedJobNumber(data: unknown): number | null {
   return null;
 }
 
+/** The still-open (pre-confirmation, not dismissed) options of this job's group, other than itself. */
+export async function liveSiblingOptions(jobId: string): Promise<Array<{ id: string; option_no: number | null; option_label: string | null; hh_job_number: number | null }>> {
+  const r = await query(
+    `SELECT s.id, s.option_no, s.option_label, s.hh_job_number
+       FROM jobs j
+       JOIN jobs s ON s.group_id = j.group_id AND s.id <> j.id AND s.is_deleted = false
+      WHERE j.id = $1 AND j.group_id IS NOT NULL
+        AND s.dismissed_at IS NULL
+        AND s.pipeline_status = ANY($2::text[])
+      ORDER BY s.option_no`,
+    [jobId, PRE_CONFIRMED_STATUSES],
+  );
+  return r.rows;
+}
+
+/**
+ * One phone call covers the whole enquiry (spec §8): a contact logged on ANY
+ * option pushes every live sibling's chase date too — under the sacred-future
+ * rule, so a sibling's deliberately later date is never shortened. `chosen` is
+ * the date staff picked on a logged chase, else the sibling's own interval.
+ */
+export async function bumpSiblingChaseDates(jobId: string, chosen: string | null): Promise<number> {
+  const r = await query(
+    `UPDATE jobs s SET
+       next_chase_date = CASE
+         WHEN s.next_chase_date IS NULL OR s.next_chase_date <= CURRENT_DATE
+           THEN COALESCE($2::date, (CURRENT_DATE + (COALESCE(s.chase_interval_days, 5) || ' days')::interval)::date)
+         ELSE s.next_chase_date END,
+       last_chased_at = NOW(),
+       updated_at = NOW()
+      FROM jobs j
+     WHERE j.id = $1 AND j.group_id IS NOT NULL
+       AND s.group_id = j.group_id AND s.id <> j.id AND s.is_deleted = false
+       AND s.dismissed_at IS NULL
+       AND s.pipeline_status = ANY($3::text[])`,
+    [jobId, chosen, PRE_CONFIRMED_STATUSES],
+  );
+  return r.rowCount ?? 0;
+}
+
 /** A system note on a job's timeline (the group's own audit trail). */
 export async function noteOnTimeline(
   client: PoolClient | null,
   jobId: string,
   content: string,
-  actorId: string,
+  actorId: string | null,
   pipelineStatus: string | null,
 ): Promise<void> {
   const q = client ? client.query.bind(client) : query;

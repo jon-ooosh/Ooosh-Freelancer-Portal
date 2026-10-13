@@ -35,7 +35,7 @@ import CombineBookingsModal from '../components/CombineBookingsModal';
 import QuoteOptionsBar from '../components/QuoteOptionsBar';
 import AddQuoteOptionModal from '../components/AddQuoteOptionModal';
 import { OPTION_COPY } from '../lib/optionCopy';
-import { isOptionOpen, stripOptionSuffix } from '../lib/quoteOptions';
+import { isOptionOpen, stripOptionSuffix, ALTERNATIVE_QUOTE_LOST_REASON } from '../lib/quoteOptions';
 import { validateDateTimeOrdering, addDays } from '../lib/jobDates';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -3440,12 +3440,18 @@ function JobDetailContent() {
                 <p className="text-xs text-orange-600 mt-1">{job.lost_detail}</p>
               )}
             </div>
-            <Link
-              to={`/operations/fill-gap/${job.id}`}
-              className="text-xs px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 whitespace-nowrap text-center shrink-0"
-            >
-              Find replacement booking &rarr;
-            </Link>
+            {/* Quote options: an option the client didn't pick freed no slot —
+                its sibling is using it. No Fill-a-Gap (spec §8). */}
+            {job.lost_reason === ALTERNATIVE_QUOTE_LOST_REASON ? (
+              <p className="text-xs text-orange-600 max-w-xs">{OPTION_COPY.lostAltBanner}</p>
+            ) : (
+              <Link
+                to={`/operations/fill-gap/${job.id}`}
+                className="text-xs px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 whitespace-nowrap text-center shrink-0"
+              >
+                Find replacement booking &rarr;
+              </Link>
+            )}
           </div>
         </div>
       )}

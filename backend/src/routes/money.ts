@@ -29,6 +29,7 @@ import {
 } from '../services/confirmation-hooks';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 import { fireEventTriggeredReminders } from '../services/requirement-close-sweep';
+import { afterOptionConfirmed } from '../services/option-confirm';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
 import {
@@ -3370,6 +3371,9 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     // the reminder goes to its assignee or, for a "Me" reminder, its creator.
     if (statusChanged) {
       await fireEventTriggeredReminders(job.id, 'confirmed', null);
+      // Quote options: the client paid THIS option's link — bell the managers to
+      // mark the other options lost (never automatic; spec §7).
+      void afterOptionConfirmed(job.id, { actorUserId: null, source: 'payment_portal' });
     }
 
     if (statusChanged) {

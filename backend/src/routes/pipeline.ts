@@ -24,8 +24,10 @@ import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../serv
 import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
 import { syncSingleHireHopJob } from '../services/hirehop-job-sync';
+import { afterOptionConfirmed, markOptionPromptHandled } from '../services/option-confirm';
 import {
   OPTION_GROUP_KIND,
+  notAltQuoteLossSql,
   getGroupById,
   insertOptionCopy,
   nonLeadMemberIds,
@@ -820,6 +822,9 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       // confirmation reminder that wasn't yet done, days after the real
       // confirmation.
       await fireEventTriggeredReminders(jobId, 'confirmed', req.user!.id);
+      // Quote options: note the still-open siblings (the bar on the reloaded
+      // page shows the Confirm panel; a staff click needs no bell).
+      void afterOptionConfirmed(jobId, { actorUserId: req.user!.id, source: 'pipeline' });
     }
 
     // Last-minute booking alert + hire form email. `fromStatus` is what decides
@@ -1024,9 +1029,9 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
     }
     const statsResult = await query(
       `SELECT
-        COUNT(*) as total_jobs,
+        COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('j')}) as total_jobs,
         COUNT(*) FILTER (WHERE pipeline_status = 'confirmed' OR status = 2) as confirmed_jobs,
-        COUNT(*) FILTER (WHERE pipeline_status = 'lost' OR status IN (9, 10)) as lost_jobs,
+        COUNT(*) FILTER (WHERE (pipeline_status = 'lost' OR status IN (9, 10)) AND ${notAltQuoteLossSql('j')}) as lost_jobs,
         COALESCE(SUM(job_value) FILTER (WHERE pipeline_status = 'confirmed' OR status = 2), 0) as total_confirmed_value,
         COALESCE(SUM(job_value), 0) as total_value,
         MIN(job_date) as first_job_date,
@@ -1073,9 +1078,9 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
 
       const bandStats = await query(
         `SELECT
-          COUNT(*) as total_jobs,
+          COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('j')}) as total_jobs,
           COUNT(*) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2) as confirmed_jobs,
-          COUNT(*) FILTER (WHERE j.pipeline_status = 'lost' OR j.status IN (9, 10)) as lost_jobs,
+          COUNT(*) FILTER (WHERE (j.pipeline_status = 'lost' OR j.status IN (9, 10)) AND ${notAltQuoteLossSql('j')}) as lost_jobs,
           COALESCE(SUM(j.job_value) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2), 0) as total_confirmed_value,
           COALESCE(SUM(j.job_value), 0) as total_value
         FROM jobs j
@@ -2090,6 +2095,18 @@ router.patch('/groups/:groupId', validate(patchGroupSchema), async (req: AuthReq
   }
 });
 
+// POST /api/pipeline/groups/:groupId/prompt-handled — the Confirm panel has been
+// dealt with (siblings marked lost, or none left): retire the bells.
+router.post('/groups/:groupId/prompt-handled', async (req: AuthRequest, res: Response) => {
+  try {
+    const n = await markOptionPromptHandled(req.params.groupId as string);
+    res.json({ data: { retired: n } });
+  } catch (error: any) {
+    console.error('[options] prompt-handled error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to retire the prompt' });
+  }
+});
+
 // GET /api/pipeline/:id/group-candidates?q= — open, ungrouped, pre-confirmation
 // jobs that could be linked as an option of this one. Without `q`: the same
 // client's. With `q`: any, by job number or name, flagged same_client so the
@@ -2370,6 +2387,12 @@ router.post('/:id/group-with', validate(groupWithSchema), async (req: AuthReques
           );
           renames.push({ id: j.id, hh: j.hh_job_number, name });
         }
+        // Options chase together: a member without a chase date takes the other's.
+        await client.query(
+          `UPDATE jobs SET next_chase_date = (SELECT next_chase_date FROM jobs WHERE id = $2), updated_at = NOW()
+            WHERE id = $1 AND next_chase_date IS NULL`,
+          [second.id, first.id],
+        );
       } else {
         const joiner = a.group_id ? b : a;
         const n = await nextOptionNo(client, groupId);
@@ -2379,6 +2402,15 @@ router.post('/:id/group-with', validate(groupWithSchema), async (req: AuthReques
           [groupId, n, name, joiner.id],
         );
         renames.push({ id: joiner.id, hh: joiner.hh_job_number, name });
+        // Options chase together: the joiner takes the group's earliest open chase date when it has none.
+        await client.query(
+          `UPDATE jobs SET next_chase_date = (
+              SELECT MIN(next_chase_date) FROM jobs m
+               WHERE m.group_id = $2 AND m.id <> $1 AND m.is_deleted = false AND m.next_chase_date IS NOT NULL),
+             updated_at = NOW()
+            WHERE id = $1 AND next_chase_date IS NULL`,
+          [joiner.id, groupId],
+        );
       }
       await noteOnTimeline(client, a.id, `Linked ${jobRef(b)} as an option of this enquiry`, req.user!.id, a.pipeline_status);
       await noteOnTimeline(client, b.id, `Linked ${jobRef(a)} as an option of this enquiry`, req.user!.id, b.pipeline_status);
@@ -2537,6 +2569,11 @@ function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
   // Same client.
   if (!a.job.client_id || !b.job.client_id || a.job.client_id !== b.job.client_id) {
     blocks.push('The two bookings are for different clients — combine only works within one client.');
+  }
+  // Two options of ONE enquiry are alternatives, not two hires: the client picks one
+  // and the rest go lost (docs/QUOTE-VERSIONS-SPEC.md §8).
+  if (a.job.group_id && a.job.group_id === b.job.group_id) {
+    blocks.push('These are two options of the same enquiry — the client picks one and the others are marked lost; combining is for two real hires.');
   }
   // Both pre-on-hire.
   for (const c of [a, b]) {

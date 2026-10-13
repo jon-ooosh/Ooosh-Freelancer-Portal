@@ -10,6 +10,7 @@
 import { query, getClient } from '../config/database';
 import { hhBroker } from './hirehop-broker';
 import { flagForReview, looksLikeCompanyName } from './sync-review';
+import { jobNameKeepingOptionSuffixSql } from './job-groups';
 
 // HireHop status code → human-readable name
 const HH_JOB_STATUS_MAP: Record<number, string> = {
@@ -492,7 +493,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
         // search OR still finds the job under its old HireHop name too.
         const updated = await client.query(
           `UPDATE jobs SET
-             job_name = $1, job_type = $2, status = $3, status_name = $4,
+             job_name = ${jobNameKeepingOptionSuffixSql('$1')}, job_type = $2, status = $3, status_name = $4,
              colour = $5,
              client_id = CASE WHEN client_locked_at IS NOT NULL
                               THEN client_id
@@ -968,7 +969,7 @@ export async function syncSingleHireHopJob(
       // sync's identical guard and flagClientMismatch below.
       const updated = await client.query(
         `UPDATE jobs SET
-           job_name = $1, job_type = $2, status = $3, status_name = $4,
+           job_name = ${jobNameKeepingOptionSuffixSql('$1')}, job_type = $2, status = $3, status_name = $4,
            colour = $5,
            client_id = CASE WHEN client_locked_at IS NOT NULL
                             THEN client_id
