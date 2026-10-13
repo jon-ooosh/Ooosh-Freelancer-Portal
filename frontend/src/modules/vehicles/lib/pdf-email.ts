@@ -51,6 +51,12 @@ interface PdfData {
   collectionMileage?: number | null
   collectionFuelLevel?: string | null
   collectionDateTime?: string | null
+  // Swapped-out van (check-in only) — the swap's soft check-in reading is
+  // where the client handed it over; mileage/fuel null when not recorded
+  swappedOut?: boolean
+  swapMileage?: number | null
+  swapFuelLevel?: string | null
+  swapDateTime?: string | null
   driverPresent?: boolean
   damageItems?: Array<{
     location: string
@@ -136,6 +142,7 @@ export async function sendConditionReport(
     damageCount?: number
     fuelDifference?: string | null
     milesDriven?: number | null
+    swappedOut?: boolean
   },
 ): Promise<ConditionReportSendResult[]> {
   console.log(`[pdf-email] Calling send-condition-report for ${recipients.length} recipient(s)...`)
