@@ -41,6 +41,23 @@ export const FUEL_LEVELS: FuelLevel[] = [
   'Empty', '1/8', '2/8', '3/8', '4/8', '5/8', '6/8', '7/8', 'Full',
 ]
 
+/**
+ * True when `after` is a LOWER fuel reading than `before` — the only fuel
+ * change worth alerting a client about (more fuel coming back is not a
+ * problem). An unrecognised value (legacy free text) falls back to "any
+ * difference", so a real shortfall is never silently dropped.
+ */
+export function isFuelReduction(
+  before: string | null | undefined,
+  after: string | null | undefined,
+): boolean {
+  if (!before || !after || before === after) return false
+  const b = FUEL_LEVELS.indexOf(before as FuelLevel)
+  const a = FUEL_LEVELS.indexOf(after as FuelLevel)
+  if (b < 0 || a < 0) return true
+  return a < b
+}
+
 export interface VehicleEvent {
   id: string
   name: string

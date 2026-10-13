@@ -23,7 +23,7 @@ import type {
   CapturedPhoto,
   CollectionData,
 } from '../types/vehicle-event'
-import { FUEL_LEVELS, REQUIRED_PHOTOS } from '../types/vehicle-event'
+import { FUEL_LEVELS, REQUIRED_PHOTOS, isFuelReduction } from '../types/vehicle-event'
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
@@ -74,6 +74,11 @@ export function CollectionPage() {
   const [opResults, setOpResults] = useState<OpResult[]>([])
   const [bookOutMileage, setBookOutMileage] = useState<number | null>(null)
   const [bookOutFuelLevel, setBookOutFuelLevel] = useState<string | null>(null)
+  // The book-out event's own date + job: the collection report only compares
+  // against a book-out that belongs to THIS job (the van's latest book-out
+  // event can be a stale one from a previous hire).
+  const [bookOutDate, setBookOutDate] = useState<string | null>(null)
+  const [bookOutJob, setBookOutJob] = useState<string | null>(null)
   const signatureRef = useRef<SignatureCaptureHandle>(null!)
   const [queuedOffline, setQueuedOffline] = useState(false)
 
@@ -245,6 +250,8 @@ export function CollectionPage() {
       if (bo) {
         setBookOutMileage(bo.mileage)
         setBookOutFuelLevel(bo.fuelLevel)
+        setBookOutDate(bo.eventDate)
+        setBookOutJob(bo.hireHopJob)
       }
     }).catch(() => {})
     return () => { cancelled = true }
@@ -454,20 +461,27 @@ export function CollectionPage() {
       console.warn('Failed to convert signature to base64')
     }
 
-    // ── Steps 4+5: PDF + emails — ONE server-side call. The server builds
-    // the report and emails each recipient directly; the multi-MB base64 PDF
-    // never round-trips through the phone. Recipients: the customer (with
-    // the job-level address-book fallback when no email is on file) and the
-    // collecting freelancer (their own copy, when their email differs).
-    setUploadProgress('Generating PDF & sending emails...')
-    const freelancerEmail = freelancerContext?.driverEmail
+    // ── Steps 4+5: PDF + email — ONE server-side call. The server builds
+    // the report and emails it directly; the multi-MB base64 PDF never
+    // round-trips through the phone. Recipient: the customer only (with the
+    // job-level address-book fallback when no email is on file). The
+    // collecting freelancer no longer gets a copy (jon, Oct 2026) — the
+    // report is filed against the van either way.
+    setUploadProgress('Generating PDF & sending email...')
     const recipients: Array<{ driverName: string; email: string | null }> = []
     if (form.clientEmail || form.hireHopJob) {
       recipients.push({ driverName: form.driverName, email: form.clientEmail || null })
     }
-    if (freelancerEmail && freelancerEmail !== form.clientEmail) {
-      recipients.push({ driverName: form.driverName, email: freelancerEmail })
-    }
+
+    // Book-out -> collection comparison, only against a book-out that
+    // belongs to this job (never a stale one from a previous hire).
+    const bookOutIsThisJob = bookOutJob != null && String(bookOutJob) === String(form.hireHopJob)
+    const boMileage = bookOutIsThisJob ? bookOutMileage : null
+    const boFuel = bookOutIsThisJob ? bookOutFuelLevel : null
+    const clientMiles = boMileage != null && !isNaN(mileageNum) ? mileageNum - boMileage : null
+    const fuelDiff = isFuelReduction(boFuel, form.fuelLevel)
+      ? `${boFuel} at book-out -> ${form.fuelLevel} at collection`
+      : null
 
     if (recipients.length === 0) {
       results.push({
@@ -497,10 +511,18 @@ export function CollectionPage() {
               briefingItems: [],
               signatureBase64,
               isCheckIn: false,
+              isCollection: true,
+              bookOutMileage: boMileage,
+              bookOutFuelLevel: boFuel,
+              bookOutDate: bookOutIsThisJob ? bookOutDate : null,
+              // Anything the client mentioned at collection — the point of
+              // this report is "it was like this when we picked it up"
+              bookOutNotes: form.damageNotes || undefined,
             },
             recipients,
+            { fuelDifference: fuelDiff, milesDriven: clientMiles },
           ),
-        'Collection PDF + emails',
+        'Collection PDF + email',
       )
 
       if (reportResult.success && reportResult.data) {
@@ -1064,7 +1086,8 @@ function StepConfirm({
   signatureRef: React.RefObject<SignatureCaptureHandle>
   bookOutFuelLevel: string | null
 }) {
-  const fuelChanged = bookOutFuelLevel && form.fuelLevel && bookOutFuelLevel !== form.fuelLevel
+  // Only a reduction is worth flagging — more fuel coming back is fine.
+  const fuelChanged = isFuelReduction(bookOutFuelLevel, form.fuelLevel)
 
   return (
     <div className="space-y-5">

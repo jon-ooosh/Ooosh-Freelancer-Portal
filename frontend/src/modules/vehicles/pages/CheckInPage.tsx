@@ -34,7 +34,7 @@ import type {
   CapturedPhoto,
   DamageItem,
 } from '../types/vehicle-event'
-import { FUEL_LEVELS, DAMAGE_LOCATIONS } from '../types/vehicle-event'
+import { FUEL_LEVELS, DAMAGE_LOCATIONS, isFuelReduction } from '../types/vehicle-event'
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
@@ -803,9 +803,10 @@ export function CheckInPage() {
     // collection point to base uses fuel that's not the client's
     // responsibility), otherwise the check-in reading. Comparing collection
     // against base measured our own driver's fuel use (16616, Oct 2026).
+    // Only a REDUCTION alerts — more fuel coming back isn't the client's problem.
     const clientReturnFuel = collectionData ? collectionData.fuelLevel : form.fuelLevel
     const clientReturnLabel = collectionData ? 'collection' : 'check-in'
-    const fuelDiff = form.bookOutFuelLevel && clientReturnFuel && form.bookOutFuelLevel !== clientReturnFuel
+    const fuelDiff = isFuelReduction(form.bookOutFuelLevel, clientReturnFuel)
       ? `${form.bookOutFuelLevel} at book-out -> ${clientReturnFuel} at ${clientReturnLabel}`
       : null
 
