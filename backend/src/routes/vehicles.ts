@@ -4418,17 +4418,38 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     y = addRow('Book-Out Fuel', boFuelStr, y);
     y += 2; addLine(y); y += 4;
 
+    // Freelancer collection: the client handed the van back at the collection
+    // point, so THEIR comparison is book-out -> collection. The drive back to
+    // base is ours, not theirs (16616, Oct 2026: the email and PDF disagreed).
+    const hasCollection = data.collectionMileage != null || !!data.collectionFuelLevel;
+    if (hasCollection) {
+      y = addRow('Collection Date/Time', formatFullDateTime(data.collectionDateTime || undefined), y);
+      const colMileageStr = data.collectionMileage != null ? data.collectionMileage.toLocaleString() + ' miles' : '-';
+      y = addRow('Collection Mileage', colMileageStr, y);
+      y = addRow('Collection Fuel', data.collectionFuelLevel || '-', y);
+      if (data.bookOutMileage != null && data.collectionMileage != null) {
+        const clientMiles = data.collectionMileage - data.bookOutMileage;
+        y = addRow('Miles Driven', clientMiles.toLocaleString() + ' miles (book-out to collection)', y);
+      }
+      if (data.bookOutFuelLevel && data.collectionFuelLevel && data.bookOutFuelLevel !== data.collectionFuelLevel) {
+        y = addRow('Fuel Change', `${data.bookOutFuelLevel} -> ${data.collectionFuelLevel} (book-out to collection)`, y);
+      }
+      y += 2; addLine(y); y += 4;
+    }
+
     y = addRow('Check-In Date/Time', timestamp, y);
     const currentMileageStr = data.mileage != null ? data.mileage.toLocaleString() + ' miles' : '-';
     y = addRow('Check-In Mileage', currentMileageStr, y);
     y = addRow('Check-In Fuel', data.fuelLevel || '-', y);
 
-    if (data.bookOutMileage != null && data.mileage != null) {
-      const milesDiff = data.mileage - data.bookOutMileage;
-      y = addRow('Miles Driven', milesDiff.toLocaleString() + ' miles', y);
-    }
-    if (data.bookOutFuelLevel && data.fuelLevel && data.bookOutFuelLevel !== data.fuelLevel) {
-      y = addRow('Fuel Change', `${data.bookOutFuelLevel} -> ${data.fuelLevel}`, y);
+    if (!hasCollection) {
+      if (data.bookOutMileage != null && data.mileage != null) {
+        const milesDiff = data.mileage - data.bookOutMileage;
+        y = addRow('Miles Driven', milesDiff.toLocaleString() + ' miles', y);
+      }
+      if (data.bookOutFuelLevel && data.fuelLevel && data.bookOutFuelLevel !== data.fuelLevel) {
+        y = addRow('Fuel Change', `${data.bookOutFuelLevel} -> ${data.fuelLevel}`, y);
+      }
     }
     y += 4;
 
