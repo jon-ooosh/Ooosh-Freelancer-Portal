@@ -18,6 +18,7 @@ import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
 import CloseOutMoneyPanel from './CloseOutMoneyPanel';
+import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
 import type { JobExcess, Cost } from '../../../shared/types';
 
@@ -373,6 +374,17 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   // The client's payment portal link - computed live from HireHop by the backend so it
   // always matches the quote document (the hash changes when the hire dates change).
   const [portalLink, setPortalLink] = useState<{ url: string; hash: string } | null>(null);
+  // Charge invoices raised after completion (HIRE-CLOSE-OUT-SPEC.md §4.6) are not on the
+  // HireHop job, so the balance below can't see them — read them off the shared close-out
+  // plan (the panel's own read; no second HireHop call).
+  const [chargeInvoices, setChargeInvoices] = useState<CloseOutInvoice[]>([]);
+  useEffect(() => {
+    if (job?.is_internal || !job?.hh_job_number) return;
+    const take = (p: { invoices: CloseOutInvoice[] }) => setChargeInvoices(p.invoices.filter(i => i.chargeOnly && i.owing >= 0.005));
+    const unsub = subscribeCloseOutPlan(jobId, take);
+    loadCloseOutPlan(jobId).then(take).catch(() => undefined);
+    return unsub;
+  }, [jobId, job?.is_internal, job?.hh_job_number]);
   const [portalLinkCopied, setPortalLinkCopied] = useState(false);
   const role = useAuthStore((s) => s.user?.role);
   const isAdmin = role === 'admin';
@@ -1193,6 +1205,13 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                 >Resolve balance…</button>
               )}
             </div>
+            )}
+
+            {chargeInvoices.length > 0 && (
+              <p className="text-sm font-semibold text-red-600 mt-0.5">
+                + £{chargeInvoices.reduce((s, i) => s + i.owing, 0).toFixed(2)} owing on {chargeInvoices.length === 1 ? 'a charge' : 'charges'} raised after completion
+                <span className="font-normal text-gray-500"> ({chargeInvoices.map(i => i.number).join(', ')})</span>
+              </p>
             )}
 
             {/* Credit notes, ALWAYS shown when there are any. Previously this

@@ -62,6 +62,8 @@ export interface CloseOutInvoice {
   owing: number;
   inXero: boolean;
   xeroId: string | null;
+  /** A charge raised after completion (custom lines only, spec §4.6) — not part of the hire total. */
+  chargeOnly: boolean;
 }
 
 export interface CloseOutPayment {
@@ -229,6 +231,7 @@ export function approvedInvoices(rows: Row[]): CloseOutInvoice[] {
       owing: invoiceOwing(row) ?? 0,
       inXero: invoiceInXero(row),
       xeroId: String(row.data?.ACC_ID ?? '').trim() || null,
+      chargeOnly: isChargeOnlyInvoice(row),
     }))
     .sort((a, b) => a.date.localeCompare(b.date) || a.invoiceId - b.invoiceId);
 }
@@ -314,6 +317,7 @@ const toInvoice = (row: Row): CloseOutInvoice => ({
   owing: invoiceOwing(row) ?? 0,
   inXero: invoiceInXero(row),
   xeroId: String(row.data?.ACC_ID ?? '').trim() || null,
+  chargeOnly: isChargeOnlyInvoice(row),
 });
 
 async function planInvoice(rows: Row[], approved: CloseOutInvoice[], hhJobNumber: number, hhStatus: number | null): Promise<InvoicePlan> {
@@ -624,7 +628,9 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
   if (!opts.fresh && job.pipeline_status === 'completed') {
     const entries = await readLog(job.id);
     const completed = entries.find((e) => e.step === 'complete' && e.ok);
-    if (completed) {
+    // A charge raised after completion (spec §4.6) can still be owed — read HireHop live.
+    const charged = entries.some((e) => e.step === 'charge' && e.ok);
+    if (completed && !charged) {
       return {
         jobId: job.id, hhJobNumber: Number(job.hh_job_number), jobName: job.job_name, hhStatus: HH_COMPLETED_STATUS, fromLog: true,
         invoice: { accruedNet: 0, invoicedNet: 0, netToInvoice: 0, draft: null, euTrigger: false, notReturned: false, blockers: [], ready: false },

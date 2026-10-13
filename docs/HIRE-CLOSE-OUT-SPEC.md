@@ -341,7 +341,13 @@ from the INVOICES only when the job is Completed — every live hire keeps today
 carefully-tuned path. Until then, take these payments with Record payment. To be done
 with the portal repo in one session (handover pending the first live test).
 
-**First live use = a test on a scratch job jon has completed** — OP talks to HireHop as its
+**Proven 13 Oct 2026** on 15745 (£1 misc → OT-INV-12315, £1.20, HireHop + Xero) — OP's own
+HireHop user may invoice a Completed job. The plan marks such invoices `chargeOnly`; the
+Financial Summary adds a "+ £x owing on a charge raised after completion" line under its
+balance (read from the shared plan, no extra HireHop call), and a job completed through the
+old `/complete` route stops taking the from-the-log shortcut once it has a `charge` log line.
+
+**Originally: first live use = a test on a scratch job jon has completed** — OP talks to HireHop as its
 own user, and whether that user may invoice a Completed job is not yet proven (jon's own
 test was in admin mode). A refusal stops at step 2 with nothing written.
 
@@ -598,6 +604,17 @@ card (read-only, "Open in Money →"); charges after completion `services/comple
 `pages/JobDetailPage.tsx` `StatusTransitionModal` + `routes/pipeline.ts`. Tests:
 `services/__tests__/hire-close-out.test.ts`, `close-out-xero-sweep.test.ts`,
 `shop-close.test.ts` (the regression guard for the extraction).
+
+**A slow press is not a failed press (13 Oct 2026).** 15745's EU invoice took ~80 s; nginx
+cut the reply at 60 s ("Request failed") while the server finished the lot. Now
+`/api/close-out/` has 180 s in nginx (`deploy/nginx-ooosh-portal.conf` — applied by hand on the
+server), and if the reply is still lost (502/503/504, not JSON, network) the panel re-reads the
+plan every 10 s for up to 3 minutes and shows where HireHop got to. The job lock refuses a
+second press while the first is still running.
+
+**Step colours** (`closeOutView()`): grey to come · blue in hand · amber in hand but worth a
+look (money still owed on a Completed job) · red only when OP refuses to go on · green done.
+"Paid in full" shows "Nothing paid yet" / "£x paid · £y owing" while money is owed.
 
 **Next, in this order — each one only after jon says go:**
 

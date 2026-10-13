@@ -14,7 +14,7 @@
  * as the requirement's status always was. No Xero links: only jon and the
  * bookkeeper use Xero, and they find invoices there themselves.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
@@ -24,6 +24,25 @@ import {
 } from '../lib/closeOutPlan';
 
 const PENNY = 0.005;
+
+/**
+ * The reply never came back, but the work may well have gone through: nginx gives up on
+ * a request after a while and hands back its own error page (not JSON — so api.ts can
+ * only say "Request failed"), while the server carries on. An EU invoice split can take
+ * over a minute (job 15745, 13 Oct 2026). Never treat that as "it failed".
+ */
+const lostReply = (e: unknown) => {
+  const status = (e as any)?.status;
+  return status === 502 || status === 503 || status === 504 || e instanceof TypeError
+    || (e as any)?.message === 'Request failed';
+};
+/** Enough of a plan to tell that HireHop has moved on. */
+const fingerprint = (p: CloseOutPlan) => JSON.stringify([
+  p.invoices.map(i => [i.invoiceId, i.owing]), p.invoice.draft?.invoiceId ?? null,
+  p.allocations.length, p.payments.map(x => x.available),
+]);
+const POLL_MS = 10_000;
+const POLL_TRIES = 18;   // three minutes
 
 interface Props {
   jobId: string;
@@ -51,6 +70,9 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const [copied, setCopied] = useState(false);
   // "Add a charge" — Completed jobs only, managers only (spec §4.6).
   const [charge, setCharge] = useState<{ description: string; amount: string; reason: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
 
   const load = useCallback(async (force = true) => {
     setBusy('plan');
@@ -69,6 +91,32 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     void load(false);
     return unsub;
   }, [jobId, load]);
+
+  /** The reply was lost — keep reading the plan until HireHop has visibly moved on. */
+  const waitForHireHop = async (before: CloseOutPlan) => {
+    setBusy('run');
+    setResult(null);
+    setError(null);
+    setNotice('HireHop is still working on this — checking again every 10 seconds. No need to press anything.');
+    for (let i = 0; i < POLL_TRIES && alive.current; i++) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+      if (!alive.current) return;
+      try {
+        const p = await loadCloseOutPlan(jobId, true);
+        if (fingerprint(p) !== fingerprint(before)) {
+          setNotice('HireHop has finished — this is where it got to.');
+          setCharge(null);   // a charge that went through must not be one click from a second invoice
+          setBusy(null);
+          onChanged?.();
+          return;
+        }
+      } catch { /* a read can fail mid-write; try again next time round */ }
+    }
+    if (!alive.current) return;
+    setNotice(null);
+    setError('Still no change after three minutes. Look at the job in HireHop before pressing again.');
+    setBusy(null);
+  };
 
   if (!plan) {
     if (busy === 'plan') return null;   // the Financial Summary above is already on screen; no spinner of our own
@@ -93,6 +141,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     if (!window.confirm(`Raise a charge invoice for ${money(gross)} inc VAT ("${charge.description.trim()}"), approve it and send it to Xero?`)) return;
     setBusy('run');
     setError(null);
+    setNotice(null);
     try {
       const r = await api.post<{ data: CloseOutResult }>(`/close-out/${jobId}/charge`, {
         reason: charge.reason.trim(), lines: [{ type: 'misc', description: charge.description.trim(), amount: chargeNet }],
@@ -102,10 +151,12 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       if (r.data.done) setCharge(null);
       onChanged?.();
     } catch (e) {
+      if (lostReply(e)) { void waitForHireHop(plan); return; }
       setError(apiError(e, 'The charge was not raised.'));
-    } finally {
       setBusy(null);
+      return;
     }
+    setBusy(null);
   };
   const addCharge: Act | null = completed && isManager && !charge
     ? { label: 'Add a charge', onClick: () => setCharge({ description: '', amount: '', reason: '' }), kind: 'secondary' }
@@ -118,16 +169,17 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     if (!window.confirm(`${what}${view.stillOut ? '\n\nHireHop still shows this job as out.' : ''}\n\nCarry on?`)) return;
     setBusy('run');
     setError(null);
+    setNotice(null);
     try {
       const r = await api.post<{ data: CloseOutResult }>(`/close-out/${jobId}/run`, { allow_not_returned: view.stillOut });
       setResult(r.data);
       publishCloseOutPlan(jobId, r.data.plan);
       onChanged?.();
     } catch (e) {
+      if (lostReply(e)) { void waitForHireHop(plan); return; }
       setError(apiError(e, 'That did not finish.'));
-    } finally {
-      setBusy(null);
     }
+    setBusy(null);
   };
 
   const setSent = async (sent: boolean) => {
@@ -228,6 +280,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const stepDetail = (i: number): string => {
     if (i === 1 && hasInv) return plan.invoices.length === 1 ? plan.invoices[0].number : `${plan.invoices.length} invoices`;
     if (i === 2 && view.steps[2] === 'done') return allInXero ? 'HireHop ✓ Xero ✓' : 'HireHop ✓';
+    if (i === 4 && hasInv && view.owing >= PENNY) return view.paid >= PENNY ? `${money(view.paid)} paid · ${money(view.owing)} owing` : 'Nothing paid yet';
     return '';
   };
 
@@ -240,16 +293,6 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
         </h3>
         <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${tone.pill}`}>{view.pill}</span>
       </div>
-      {plan.invoices.length > 1 && (
-        <div className="px-5 pt-1 space-y-1">
-          {plan.invoices.map(i => (
-            <div key={i.invoiceId} className="flex justify-between gap-3 text-sm border border-gray-100 rounded-lg px-3 py-1.5">
-              <span className="text-gray-800 font-medium">{i.number} <span className="text-xs text-gray-500 font-normal">{fmtDay(i.date)}</span></span>
-              <span className="tabular-nums text-gray-700">{money(i.gross)} · <span className={i.owing >= PENNY ? 'text-amber-700' : 'text-green-700'}>{i.owing >= PENNY ? `${money(i.owing)} owing` : 'paid'}</span></span>
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Five steps */}
       <div className="px-5 pt-3 pb-4 grid grid-cols-5 gap-0 overflow-x-auto">
@@ -259,13 +302,14 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
               <span className={`w-6 h-6 flex-none rounded-full grid place-items-center text-xs font-bold border-2 ${
                 st === 'done' ? 'bg-green-600 border-green-600 text-white'
                 : st === 'error' ? 'bg-red-600 border-red-600 text-white'
+                : st === 'warn' ? 'border-amber-500 text-amber-700 bg-amber-50'
                 : st === 'current' ? 'border-ooosh-600 text-ooosh-600 bg-white'
                 : 'border-gray-300 text-gray-400 bg-white'}`}>
                 {st === 'done' ? '✓' : st === 'error' ? '!' : i + 1}
               </span>
               {i < 4 && <span className={`h-0.5 flex-1 mx-1.5 ${st === 'done' ? 'bg-green-600' : 'bg-gray-200'}`} />}
             </div>
-            <div className={`mt-2 pr-2 text-[13px] font-semibold ${st === 'todo' ? 'text-gray-400' : st === 'current' ? 'text-ooosh-600' : st === 'error' ? 'text-red-700' : 'text-gray-900'}`}>{STEP_NAMES[i]}</div>
+            <div className={`mt-2 pr-2 text-[13px] font-semibold ${st === 'todo' ? 'text-gray-400' : st === 'current' ? 'text-ooosh-600' : st === 'warn' ? 'text-amber-700' : st === 'error' ? 'text-red-700' : 'text-gray-900'}`}>{STEP_NAMES[i]}</div>
             {stepDetail(i) && <div className="pr-2 text-xs text-gray-500 mt-0.5">{stepDetail(i)}</div>}
           </div>
         ))}
@@ -327,6 +371,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
             ))}
           </div>
         )}
+        {notice && <p className="text-sm text-gray-700">{notice}</p>}
         {result && <p className={`text-sm ${result.done ? 'text-green-800' : 'text-red-800'}`}>{result.message}</p>}
         {error && <p className="text-sm text-red-700">{error}</p>}
       </div>
@@ -336,8 +381,12 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
         <div className="border-t border-gray-200 px-5 py-2 text-sm">
           {plan.invoices.map(i => (
             <div key={i.invoiceId} className="flex justify-between gap-3 py-1.5 border-b border-gray-100">
-              <span className="text-gray-800">{i.number} <span className="text-xs text-gray-500">{fmtDay(i.date)}</span></span>
-              <span className="tabular-nums font-semibold">{money(i.gross)}</span>
+              <span className="text-gray-800">{i.number} <span className="text-xs text-gray-500">{fmtDay(i.date)}</span>
+                {i.chargeOnly && <span className="ml-2 text-xs text-gray-500">charge after completion</span>}</span>
+              <span className="tabular-nums">
+                {plan.invoices.length > 1 && <span className={`mr-2 text-xs ${i.owing >= PENNY ? 'text-amber-700' : 'text-green-700'}`}>{i.owing >= PENNY ? `${money(i.owing)} owing` : 'paid'}</span>}
+                <span className="font-semibold">{money(i.gross)}</span>
+              </span>
             </div>
           ))}
           {paidSoFar >= PENNY && (
