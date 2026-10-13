@@ -798,12 +798,15 @@ export function CheckInPage() {
     setUploadProgress('Generating PDF & sending email...')
     const emailTo = form.bookOutClientEmail
     // Calculate fuel difference for email alert.
-    // When collection data exists, use collection fuel for client charge comparison
-    // (the drive from collection point to base uses fuel that's not the client's responsibility)
-    const clientFuelRef = collectionData?.fuelLevel || form.bookOutFuelLevel
-    const clientFuelLabel = collectionData ? 'collection' : 'book-out'
-    const fuelDiff = clientFuelRef && form.fuelLevel && clientFuelRef !== form.fuelLevel
-      ? `${clientFuelRef} (${clientFuelLabel}) -> ${form.fuelLevel} (base)`
+    // The client's fuel is book-out vs the point THEY handed the van back:
+    // the collection reading when a freelancer collected it (the drive from
+    // collection point to base uses fuel that's not the client's
+    // responsibility), otherwise the check-in reading. Comparing collection
+    // against base measured our own driver's fuel use (16616, Oct 2026).
+    const clientReturnFuel = collectionData ? collectionData.fuelLevel : form.fuelLevel
+    const clientReturnLabel = collectionData ? 'collection' : 'check-in'
+    const fuelDiff = form.bookOutFuelLevel && clientReturnFuel && form.bookOutFuelLevel !== clientReturnFuel
+      ? `${form.bookOutFuelLevel} at book-out -> ${clientReturnFuel} at ${clientReturnLabel}`
       : null
 
     if (!emailTo && !form.bookOutHireHopJob) {
@@ -845,6 +848,11 @@ export function CheckInPage() {
             bookOutMileage: form.bookOutMileage,
             bookOutFuelLevel: form.bookOutFuelLevel,
             bookOutDate: form.bookOutDate,
+            // Freelancer collection reading, so the PDF shows the same
+            // book-out -> collection comparison the email does
+            collectionMileage: collectionData?.mileage ?? null,
+            collectionFuelLevel: collectionData?.fuelLevel ?? null,
+            collectionDateTime: collectionData?.collectedAt ?? null,
             driverPresent: form.driverPresent,
             damageItems: damageItemsWithBase64,
           },
