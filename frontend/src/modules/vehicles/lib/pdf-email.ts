@@ -40,6 +40,9 @@ interface PdfData {
   allDrivers?: string[]
   // Check-in specific fields
   isCheckIn?: boolean
+  // Freelancer collection from the client — an interim record "as we
+  // picked it up", for the client's reference (not the final check-in)
+  isCollection?: boolean
   bookOutMileage?: number | null
   bookOutFuelLevel?: string | null
   bookOutDate?: string | null

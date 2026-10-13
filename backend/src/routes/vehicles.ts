@@ -3556,7 +3556,14 @@ router.post('/save-collection', async (req: FlexibleVehicleRequest, res: Respons
     }
     const reg = String(collection.vehicleReg).toUpperCase();
     const job = String(collection.hireHopJob);
-    await writeR2Json(`collections/${reg}/${job}.json`, collection);
+    // collectedBy = whoever is logged in doing the collection (the freelancer
+    // or staff member), resolved server-side. The page used to send the
+    // CUSTOMER's name here, so check-in read "Collected by <client>".
+    const operatorName = await resolveOperatorName(req);
+    await writeR2Json(`collections/${reg}/${job}.json`, {
+      ...collection,
+      ...(operatorName ? { collectedBy: operatorName } : {}),
+    });
     res.json({ success: true });
   } catch (error) {
     console.error('[vehicles/save-collection] Failed:', error);
@@ -4313,12 +4320,19 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   // book-out nor a final return.
   const isInterim = data.isInterim === true;
   const isCheckIn = data.isCheckIn === true;
+  // Freelancer collection from the client: an interim record of the van as
+  // our driver picked it up, for the client's reference. The check-in back
+  // at base stays the authoritative return record. It used to fall through
+  // to the book-out template (16616, Oct 2026).
+  const isCollection = !isInterim && !isCheckIn && data.isCollection === true;
   const reportTitle = isInterim
     ? 'INTERIM VEHICLE ASSESSMENT'
-    : isCheckIn ? 'VEHICLE CHECK-IN REPORT' : 'VEHICLE CONDITION REPORT';
+    : isCheckIn ? 'VEHICLE CHECK-IN REPORT'
+    : isCollection ? 'VEHICLE COLLECTION REPORT' : 'VEHICLE CONDITION REPORT';
   const reportSubtitle = isInterim
     ? 'Mid-Hire Assessment Record'
-    : isCheckIn ? 'Return Record' : 'Book-Out Record';
+    : isCheckIn ? 'Return Record'
+    : isCollection ? 'Collection Record' : 'Book-Out Record';
 
   addText(reportTitle, 0, 15, { size: 18, bold: true, color: [255, 255, 255], align: 'center' });
   addText(reportSubtitle, 0, 23, { size: 11, color: [180, 190, 210], align: 'center' });
@@ -4338,6 +4352,21 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       size: 9, bold: true, color: [146, 64, 14],
     });
     addText('The hire is continuing on a replacement vehicle. A full check-in will follow when this vehicle returns to base.', margin + 4, y + 12, {
+      size: 7.5, color: [146, 64, 14],
+    });
+    y += 24;
+  }
+
+  // Collection context banner — says what this record is and that the final
+  // check-in follows at base.
+  if (isCollection) {
+    pdf.setFillColor(255, 251, 235);
+    pdf.setDrawColor(253, 230, 138);
+    pdf.roundedRect(margin, y, contentWidth, 18, 2, 2, 'FD');
+    addText('Recorded when our driver collected the vehicle from you.', margin + 4, y + 6.5, {
+      size: 9, bold: true, color: [146, 64, 14],
+    });
+    addText('For your reference only. The final check-in will be carried out when the vehicle is back at our base.', margin + 4, y + 12, {
       size: 7.5, color: [146, 64, 14],
     });
     y += 24;
@@ -4384,7 +4413,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   // bookout session (people lookup by personId), so it can't be spoofed
   // from the client payload.
   if (data.performedByName) {
-    const opLabel = isCheckIn ? 'Checked In By' : 'Booked Out By';
+    const opLabel = isCheckIn ? 'Checked In By' : isCollection ? 'Collected By' : 'Booked Out By';
     y = addRow(opLabel, data.performedByName, y);
   }
 
@@ -4521,6 +4550,28 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       });
       y += 8;
     }
+  } else if (isCollection) {
+    addText('VEHICLE STATE AT COLLECTION', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+    y += 3; addLine(y); y += 6;
+
+    // Book-out reference — only sent when the book-out belongs to this job.
+    if (data.bookOutMileage != null || data.bookOutFuelLevel) {
+      y = addRow('Book-Out Date', data.bookOutDate ? formatDayDate(data.bookOutDate) : '-', y);
+      y = addRow('Book-Out Mileage', data.bookOutMileage != null ? data.bookOutMileage.toLocaleString() + ' miles' : '-', y);
+      y = addRow('Book-Out Fuel', data.bookOutFuelLevel || '-', y);
+      y += 2; addLine(y); y += 4;
+    }
+
+    const mileageStr = data.mileage != null ? data.mileage.toLocaleString() + ' miles' : '-';
+    y = addRow('Collection Mileage', mileageStr, y);
+    y = addRow('Collection Fuel', data.fuelLevel || '-', y);
+    if (data.bookOutMileage != null && data.mileage != null) {
+      y = addRow('Miles Driven', (data.mileage - data.bookOutMileage).toLocaleString() + ' miles', y);
+    }
+    if (data.bookOutFuelLevel && data.fuelLevel && data.bookOutFuelLevel !== data.fuelLevel) {
+      y = addRow('Fuel Change', `${data.bookOutFuelLevel} -> ${data.fuelLevel}`, y);
+    }
+    y += 4;
   } else {
     addText('VEHICLE STATE AT BOOK-OUT', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
     y += 3; addLine(y); y += 6;
@@ -4551,7 +4602,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   // -- Book-Out Notes --
   if (data.bookOutNotes) {
     checkNewPage(20);
-    addText('NOTES', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
+    addText(isCollection ? 'NOTES FROM CLIENT' : 'NOTES', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
     y += 3; addLine(y); y += 6;
 
     const noteLines = pdf.splitTextToSize(String(data.bookOutNotes), pageWidth - margin * 2) as string[];
@@ -4565,7 +4616,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
 
   // -- Condition Photos --
   checkNewPage(20);
-  const photosTitle = isCheckIn ? 'CHECK-IN PHOTOS' : 'CONDITION PHOTOS';
+  const photosTitle = isCheckIn ? 'CHECK-IN PHOTOS' : isCollection ? 'COLLECTION PHOTOS' : 'CONDITION PHOTOS';
   addText(photosTitle, margin, y, { size: 11, bold: true, color: [27, 42, 78] });
   y += 3; addLine(y); y += 6;
 
@@ -4774,7 +4825,8 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     const generated = ukToday();
     const footerLabel = isInterim
       ? 'Interim Vehicle Assessment'
-      : isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Condition Report';
+      : isCheckIn ? 'Vehicle Check-In Report'
+      : isCollection ? 'Vehicle Collection Report' : 'Vehicle Condition Report';
     pdf.text(
       'Ooosh Tours Ltd - ' + footerLabel + ' - Generated ' + generated,
       pageWidth / 2, 292, { align: 'center' },
@@ -4793,7 +4845,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     : eventDateStr;
   const safeReg = String(data.vehicleReg || 'unknown').replace(/\s+/g, '-');
   const jobPart = data.hireHopJob ? '-Job' + data.hireHopJob : '';
-  const docType = isInterim ? 'interim' : isCheckIn ? 'check-in' : 'book-out';
+  const docType = isInterim ? 'interim' : isCheckIn ? 'check-in' : isCollection ? 'collection' : 'book-out';
   const filename = `${safeReg}-${ddmmyy}${jobPart}-${docType}.pdf`;
 
   return { pdfBytes, filename };
@@ -5654,6 +5706,8 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     const normalisedRegenType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
     const isInterimRegen = normalisedRegenType === 'soft-check-in';
     const isCheckInRegen = event.eventType === 'Check In' || event.eventType === 'check-in';
+    // Freelancer collection ('Interim Check In') — its own report type.
+    const isCollectionRegen = normalisedRegenType === 'interim-check-in';
 
     let pdfBytes: Uint8Array;
     let filename: string;
@@ -5665,7 +5719,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     if (storedPdf) {
       // Frozen original — serve verbatim.
       pdfBytes = storedPdf;
-      const docType = isInterimRegen ? 'interim' : isCheckInRegen ? 'check-in' : 'book-out';
+      const docType = isInterimRegen ? 'interim' : isCheckInRegen ? 'check-in' : isCollectionRegen ? 'collection' : 'book-out';
       const dateStr = (event.eventDate || ukToday()).replace(/-/g, '');
       filename = `${reg}-${docType}-${dateStr}.pdf`;
       source = 'stored';
@@ -5682,7 +5736,9 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       // Operator name — for regenerated PDFs we want the ORIGINAL operator,
       // not the staff member clicking the regenerate button. Read from the
       // assignment's booked_out_by / checked_in_by user reference.
-      const performedByName = await resolveOperatorNameForEvent(
+      // (Not for a collection: the assignment holds no collector, and the
+      // book-out operator would be mislabelled "Collected By".)
+      const performedByName = isCollectionRegen ? null : await resolveOperatorNameForEvent(
         reg,
         event.hireHopJob,
         isCheckInRegen,
@@ -5750,6 +5806,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
         signatureMissing: !isInterimRegen && !signatureBase64,
         isCheckIn: isCheckInRegen,
         isInterim: isInterimRegen,
+        isCollection: isCollectionRegen,
         // Reconstructed check-in comparison (undefined/[] for book-outs).
         bookOutMileage,
         bookOutFuelLevel,
@@ -5776,7 +5833,7 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
 
     if (!skipEmail && recipient) {
       const isCheckIn = event.eventType === 'Check In' || event.eventType === 'check-in';
-      const reportType = isCheckIn ? 'Check-In Report' : 'Condition Report';
+      const reportType = isCheckIn ? 'Check-In Report' : isCollectionRegen ? 'Collection Report' : 'Condition Report';
       const subject = `Vehicle ${reportType} - ${reg} - ${event.eventDate || ukToday()}`;
       const html = `
         <p>Hi ${driverName || 'there'},</p>
@@ -6116,6 +6173,7 @@ router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: R
           driverName,
           eventDate: String(data.eventDate || ''),
           isCheckIn: !!data.isCheckIn,
+          isCollection: !data.isCheckIn && data.isCollection === true,
           hireHopJob: data.hireHopJob ? String(data.hireHopJob) : null,
           driverPresent: emailMeta?.driverPresent,
           damageCount: emailMeta?.damageCount,
