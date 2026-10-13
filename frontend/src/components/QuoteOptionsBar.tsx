@@ -59,6 +59,19 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
     }
   }
 
+  // The ★: click to pin this option as the lead (what the pipeline board will
+  // show); click a pinned star to unpin and let OP pick the most progressed again.
+  async function togglePin(memberId: string) {
+    setError('');
+    const pinned = group.lead_job_id === memberId;
+    try {
+      const res = await api.patch<{ data: JobGroupRead }>(`/pipeline/groups/${group.id}`, { lead_job_id: pinned ? null : memberId });
+      setData(res.data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not change the lead option');
+    }
+  }
+
   async function removeFromGroup() {
     if (!window.confirm(OPTION_COPY.barRemoveConfirm)) return;
     setBusy(true);
@@ -135,7 +148,6 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
               <div className={`text-sm font-semibold truncate ${dead ? 'line-through text-gray-400' : 'text-gray-900'}`}>
                 Option {m.option_no}
                 {m.option_label ? <span className={`font-normal ${dead ? '' : 'text-gray-600'}`}> · {m.option_label}</span> : null}
-                {m.is_lead && !dead && <span className="ml-1 text-amber-500" title="Lead option - what the pipeline board shows">★</span>}
               </div>
               <div className="mt-1 flex items-center gap-2 text-[11px] text-gray-500">
                 <span
@@ -149,15 +161,34 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
               </div>
             </>
           );
-          const cls = `min-w-[11rem] max-w-[16rem] flex-shrink-0 text-left rounded-lg border px-3 py-2 transition-colors ${
+          const cls = `block min-w-[11rem] max-w-[16rem] flex-1 text-left rounded-lg border px-3 py-2 pr-7 transition-colors ${
             isHere
               ? 'border-ooosh-500 bg-ooosh-50/60 border-b-2'
               : 'border-gray-200 hover:bg-gray-50'
           }`;
-          return isHere ? (
-            <div key={m.id} className={cls} aria-current="page">{inner}</div>
-          ) : (
-            <Link key={m.id} to={`/jobs/${m.id}`} className={cls}>{inner}</Link>
+          const pinned = group.lead_job_id === m.id;
+          const star = !dead && (
+            <button
+              type="button"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); togglePin(m.id); }}
+              className={`absolute top-1.5 right-1.5 text-base leading-none ${
+                m.is_lead ? 'text-amber-500' : 'text-gray-200 hover:text-amber-400'
+              }`}
+              title={pinned ? OPTION_COPY.barUnpin : m.is_lead ? OPTION_COPY.barAutoLead : OPTION_COPY.barPin}
+              aria-label={pinned ? OPTION_COPY.barUnpin : OPTION_COPY.barPin}
+            >
+              {m.is_lead ? '★' : '☆'}
+            </button>
+          );
+          return (
+            <div key={m.id} className="relative flex-shrink-0">
+              {isHere ? (
+                <div className={cls} aria-current="page">{inner}</div>
+              ) : (
+                <Link to={`/jobs/${m.id}`} className={cls}>{inner}</Link>
+              )}
+              {star}
+            </div>
           );
         })}
       </div>

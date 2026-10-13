@@ -36,6 +36,7 @@ import QuoteOptionsBar from '../components/QuoteOptionsBar';
 import AddQuoteOptionModal from '../components/AddQuoteOptionModal';
 import { OPTION_COPY } from '../lib/optionCopy';
 import { isOptionOpen, stripOptionSuffix } from '../lib/quoteOptions';
+import { validateDateTimeOrdering, addDays } from '../lib/jobDates';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { displayFullName } from '../lib/displayName';
@@ -1924,44 +1925,8 @@ function JobDetailContent() {
     return dateStr;
   }
 
-  // Validate ordering of out/start/end/return datetimes. Returns a friendly
-  // error string if invalid, or null if OK / insufficient data to check.
-  // Mirrors backend validateJobDateTimes — same rules, same messages.
-  function validateDateTimeOrdering(v: {
-    out_date: string; job_date: string; job_end: string; return_date: string;
-    out_time: string; start_time: string; end_time: string; return_time: string;
-  }): string | null {
-    const ms = (date: string, time: string): number => {
-      if (!date) return NaN;
-      const t = (time || '09:00').slice(0, 5);
-      return Date.parse(`${date}T${t}:00Z`);
-    };
-    const oMs = ms(v.out_date, v.out_time);
-    const sMs = ms(v.job_date, v.start_time);
-    const eMs = ms(v.job_end, v.end_time);
-    const rMs = ms(v.return_date, v.return_time);
-    // Out > Start is allowed on the same calendar day (e.g. charge starts 09:00,
-    // client collects at 15:00 — Outgoing here means the physical handover time).
-    // Cross-day Out-after-Start stays blocked: the inbound HH sync would clobber
-    // out_date back to job_date on the next pull (HH never sees the user's
-    // intended later date because we clamp on push), so we don't expose that case.
-    if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs && v.out_date !== v.job_date) {
-      return 'Outgoing date must be on or before Job Start date.';
-    }
-    if (!isNaN(sMs) && !isNaN(eMs) && sMs > eMs) {
-      return 'Job Start date/time must be on or before Job End date/time.';
-    }
-    if (!isNaN(eMs) && !isNaN(rMs) && eMs > rMs) {
-      return 'Job End date/time must be on or before Returning date/time.';
-    }
-    return null;
-  }
-
-  function addDays(dateStr: string, days: number): string {
-    const d = new Date(dateStr);
-    d.setDate(d.getDate() + days);
-    return d.toISOString().split('T')[0];
-  }
+  // validateDateTimeOrdering + addDays live in lib/jobDates.ts (shared with the
+  // Quote-another-option modal so the two editors can't drift).
 
   async function saveInlineField(patch: Record<string, unknown>) {
     if (!job) return;
@@ -3330,6 +3295,19 @@ function JobDetailContent() {
   return (
     <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
       <div className={showClientHistory ? 'flex-1 min-w-0' : ''}>
+      {/* Quote options bar — only renders once the enquiry has two or more options.
+          At the TOP of the page (jon, 13 Oct 2026): which option you are looking at
+          has to be the first thing you see. */}
+      {job.group_id && (
+        <QuoteOptionsBar
+          jobId={job.id}
+          groupId={job.group_id}
+          refreshSignal={optionsRefresh}
+          onAdd={() => setShowAddOptionModal(true)}
+          onRemoved={() => loadJob()}
+        />
+      )}
+
       {/* Combined banner — absorbed booking folded into another. Replaces the
           red cancelled banner (it's a merge, not a real cancellation). */}
       {job.combined_into_job_id && (
@@ -4578,17 +4556,6 @@ function JobDetailContent() {
           )}
         </div>
       </div>
-
-      {/* Quote options bar — only renders once the enquiry has two or more options */}
-      {job.group_id && (
-        <QuoteOptionsBar
-          jobId={job.id}
-          groupId={job.group_id}
-          refreshSignal={optionsRefresh}
-          onAdd={() => setShowAddOptionModal(true)}
-          onRemoved={() => loadJob()}
-        />
-      )}
 
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 -mx-4 px-4 sm:mx-0 sm:px-0 overflow-x-auto scrollbar-hide">

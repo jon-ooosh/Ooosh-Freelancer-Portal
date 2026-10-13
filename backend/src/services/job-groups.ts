@@ -51,9 +51,12 @@ export function optionNoFromName(name: string | null | undefined): number | null
 // wins; otherwise the most progressed live member, tie → lowest option_no.
 // Lost / cancelled never lead while a live member exists.
 
-const PROGRESSION_ORDER: string[] = [
-  'paused', 'new_enquiry', 'quoting', 'provisional', 'confirmed', 'prepping', 'prepped',
-  'dispatched', 'returned_incomplete', 'returned', 'completed',
+// new_enquiry and quoting share a rank: they are the same Kanban column, and a
+// fresh copy must not out-rank its source just because it was born `quoting`
+// (seen live, 13 Oct 2026 — Option 2 took the star off Option 1).
+const PROGRESSION_ORDER: string[][] = [
+  ['paused'], ['new_enquiry', 'quoting'], ['provisional'], ['confirmed'], ['prepping'], ['prepped'],
+  ['dispatched'], ['returned_incomplete'], ['returned'], ['completed'],
 ];
 const DEAD_STATUSES = new Set(['lost', 'cancelled']);
 
@@ -69,7 +72,7 @@ export function resolveLeadJob<T extends { id: string; option_no: number | null;
   const rank = (m: T) => {
     const s = m.pipeline_status || '';
     if (DEAD_STATUSES.has(s)) return -1;
-    const i = PROGRESSION_ORDER.indexOf(s);
+    const i = PROGRESSION_ORDER.findIndex((tier) => tier.includes(s));
     return i === -1 ? 0 : i;
   };
   return [...members].sort((a, b) => {
