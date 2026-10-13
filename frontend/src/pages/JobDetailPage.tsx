@@ -194,15 +194,16 @@ interface QuoteAssignment {
   is_ooosh_crew?: boolean;
 }
 
+// The STORED engine shape (`quotes.expenses`): `description` is the calculator's
+// label plus any note ("Other: Flight to Milan"). The calculator's on-screen form
+// fields (category/label/included/pdDays) are never saved — reading them here
+// is what left every line in the breakdown nameless (job 16840, Oct 2026).
 interface QuoteExpenseLine {
-  id: string;
-  category: string;
-  label: string;
-  amount: number;
-  included: boolean;
-  chargeMode?: 'included' | 'not_included' | 'recharge' | 'na';
+  type: string;
   description?: string;
-  pdDays?: number;
+  amount: number;
+  includedInCharge?: boolean;
+  chargeMode?: 'included' | 'not_included' | 'recharge' | 'na';
 }
 
 interface SavedQuote {
@@ -313,15 +314,14 @@ function QuoteExpensesBreakdown({ expenses }: { expenses: QuoteExpenseLine[] | n
       </button>
       {open && (
         <div className="mt-1 space-y-0.5 pl-3.5">
-          {lines.map((e) => {
-            const mode = e.chargeMode ?? (e.included ? 'included' : 'not_included');
+          {lines.map((e, i) => {
+            const mode = e.chargeMode ?? (e.includedInCharge === false ? 'not_included' : 'included');
             const pill = EXPENSE_MODE_PILL[mode] || EXPENSE_MODE_PILL.included;
-            const name = EXPENSE_LINE_LABELS[e.category] || e.label || e.category;
+            const name = e.description?.trim() || EXPENSE_LINE_LABELS[e.type] || e.type || 'Expense';
             return (
-              <div key={e.id} className="flex items-center justify-between gap-2">
-                <span className="text-gray-600 truncate">
+              <div key={i} className="flex items-center justify-between gap-2">
+                <span className="text-gray-600 truncate" title={name}>
                   {name}
-                  {e.category === 'pd' && e.pdDays ? ` (${e.pdDays}d)` : ''}
                 </span>
                 <span className="flex items-center gap-2 shrink-0">
                   <span className="text-gray-500">&pound;{Number(e.amount).toFixed(2)}</span>
