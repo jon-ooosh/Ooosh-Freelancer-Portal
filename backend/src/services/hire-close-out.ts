@@ -33,7 +33,7 @@ import {
   kindOf, idOf, invoiceRows, findInvoice, invoiceStatus, invoiceGross, invoiceOwing, invoiceInXero,
   invoiceAllocations, unallocatedPayments, readJobStatus, invoiceNet,
   postAllocation, applyCreditsInXero, completeJob, postDraftInvoice, postApproveInvoice, pushInvoiceToXero,
-  adoptLostXeroInvoices, isChargeOnlyInvoice,
+  adoptLostXeroInvoices, isChargeOnlyInvoice, readSupplyList, postPasteSupplyLines,
 } from './hh-invoice-close';
 import { splitEuDraft } from './eu-vat-split';
 import xeroBroker from './xero-broker';
@@ -373,6 +373,40 @@ export async function raiseHireInvoice(jobIdOrNumber: string, userId: string | n
   });
 }
 
+/** `system_settings.closeout_invoice_layout` = 'flat' switches the quote layout off without a deploy. */
+const LAYOUT_SETTING_KEY = 'closeout_invoice_layout';
+async function pasteLayoutEnabled(): Promise<boolean> {
+  const r = await query(`SELECT value FROM system_settings WHERE key = $1`, [LAYOUT_SETTING_KEY]).catch(() => ({ rows: [] as any[] }));
+  return String(r.rows[0]?.value ?? '').trim().toLowerCase() !== 'flat';
+}
+
+/**
+ * Paste the supply list onto the new, EMPTY draft and prove it landed: every priced line
+ * of the job exactly once, nothing else priced. The penny check after this still compares
+ * the draft with HireHop's quoted total. Any doubt stops at the draft — nothing reaches Xero.
+ */
+async function pasteSupplyList(rep: CloseReporter, hhJobNumber: number, draftId: number, draft: Row): Promise<void> {
+  const deleteHint = `Delete draft ${draftId} in HireHop, then ${rep.retryHint}.`;
+  if ((draft.data?.items || []).length) {
+    await rep.stop('invoice_draft', `HireHop put lines on draft ${draftId} before the paste — it should have been empty. Nothing has gone to Xero. ${deleteHint}`);
+  }
+  const supply = await readSupplyList(hhJobNumber);
+  if (!supply.length) await rep.stop('invoice_draft', `Could not read job ${hhJobNumber}'s supply list from HireHop. Nothing has gone to Xero. ${deleteHint}`);
+  const res = await postPasteSupplyLines(hhJobNumber, draftId, supply);
+  const lines: Row[] = findInvoice(await readBillingRows(hhJobNumber), draftId)?.data?.items || [];
+  const priced = supply.filter((r) => Number(r.kind ?? 0) !== 0 && Math.abs(Number(r.PRICE ?? 0)) >= PENNY);
+  // Count by job line id, not "exactly one": a prompt's id repeats when two vans carry it.
+  const count = (xs: Row[], id: number, key: 'ID' | 'MAIN_ID') => xs.filter((x) => Number(x[key]) === id).length;
+  const missing = priced.filter((r) => count(lines, Number(r.ID), 'MAIN_ID') !== count(priced, Number(r.ID), 'ID'));
+  const pricedLines = lines.filter((l) => Math.abs(Number(l.PRICE ?? 0)) >= PENNY);
+  if (!lines.length || missing.length || pricedLines.length !== priced.length) {
+    await rep.stop('invoice_draft', !lines.length
+      ? `HireHop did not paste the supply list onto draft ${draftId}${res?.error ? ` (${res.error})` : ''}. Nothing has gone to Xero. ${deleteHint}`
+      : `Draft ${draftId} doesn't match the supply list after the paste (${missing.length ? `${missing.map((r) => `"${String(r.alt_title || r.title || r.ID)}"`).slice(0, 3).join(', ')} missing or doubled` : `${pricedLines.length} priced lines, expected ${priced.length}`}). Nothing has gone to Xero. ${deleteHint}`);
+  }
+  await rep.log('invoice_draft', true, `Draft invoice ${draftId} laid out like the quote: ${lines.length} lines pasted from the supply list.`);
+}
+
 async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boolean): Promise<string> {
   const plan = await buildPlan(job);
   const inv = plan.invoice;
@@ -382,12 +416,16 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   if (blockers.length) await rep.stop('invoice_preflight', blockers.join(' '));
   if (inv.netToInvoice < PENNY && !inv.draft) await rep.stop('invoice_preflight', 'Nothing to invoice — every line is already on an invoice.');
 
-  // 1. Draft (or adopt).
+  // 1. Draft (or adopt). The job's FIRST invoice is laid out like the quote — an empty
+  // draft with the supply list pasted in (§3.1). A top-up invoice ("added since") stays
+  // "include all owing items": pasting the whole list again would invoice lines twice.
   let rows = await readBillingRows(hhJobNumber);
   let draftId = inv.draft?.invoiceId ?? 0;
+  const firstInvoice = !invoiceRows(rows).some((r) => !isProformaRow(r) && !isChargeOnlyInvoice(r));
+  const paste = !draftId && firstInvoice && await pasteLayoutEnabled();
   if (!draftId) {
     const before = new Set(draftRows(rows).map(idOf));
-    const { res, newId } = await postDraftInvoice(hhJobNumber, `Job ${hhJobNumber}`);
+    const { res, newId } = await postDraftInvoice(hhJobNumber, `Job ${hhJobNumber}`, { all: paste ? 0 : 1 });
     rows = await readBillingRows(hhJobNumber);
     const fresh = draftRows(rows).filter((r) => !before.has(idOf(r)));
     if (fresh.length !== 1) {
@@ -399,7 +437,12 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
     if (newId && newId !== draftId) {
       await rep.stop('invoice_draft', `HireHop returned invoice ${newId} but the job shows draft ${draftId}. Check the job by hand.`);
     }
-    await rep.log('invoice_draft', true, `Draft invoice ${draftId} created from the uninvoiced lines.`);
+    if (paste) {
+      await pasteSupplyList(rep, hhJobNumber, draftId, fresh[0]);
+      rows = await readBillingRows(hhJobNumber);
+    } else {
+      await rep.log('invoice_draft', true, `Draft invoice ${draftId} created from the uninvoiced lines.`);
+    }
   } else {
     await rep.log('invoice_draft', true, `Using the draft invoice ${draftId} already on the job.`);
   }
