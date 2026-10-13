@@ -20,6 +20,8 @@ export function VehicleLocationTab({ reg }: VehicleLocationTabProps) {
   // loaded. toISOString() also gets the UK offset right (the old
   // format(…'Z') stamped local time as UTC — an hour out in summer).
   const [tripDays, setTripDays] = useState(7)
+  // Newest first by default; clicking the "Recent Trips" heading flips it.
+  const [newestFirst, setNewestFirst] = useState(true)
   const now = new Date()
   const from = startOfDay(subDays(now, tripDays)).toISOString()
   const to = endOfDay(now).toISOString()
@@ -102,7 +104,17 @@ export function VehicleLocationTab({ reg }: VehicleLocationTabProps) {
       {/* Trip History */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Recent Trips</h3>
+          <button
+            type="button"
+            onClick={() => setNewestFirst(v => !v)}
+            title="Change the order"
+            className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-700"
+          >
+            Recent Trips
+            <span className="text-[11px] font-normal normal-case tracking-normal text-gray-400">
+              {newestFirst ? '↓ newest first' : '↑ oldest first'}
+            </span>
+          </button>
           <select
             value={tripDays}
             onChange={e => setTripDays(Number(e.target.value))}
@@ -125,7 +137,12 @@ export function VehicleLocationTab({ reg }: VehicleLocationTabProps) {
           </p>
         ) : (
           <div className="space-y-2">
-            {trips.map((trip, i) => (
+            {[...trips]
+              .sort((a, b) => {
+                const diff = new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+                return newestFirst ? -diff : diff
+              })
+              .map((trip, i) => (
               <TripRow key={i} trip={trip} />
             ))}
           </div>
