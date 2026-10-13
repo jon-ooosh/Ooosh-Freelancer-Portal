@@ -225,7 +225,7 @@ unverified), no phone card payments (policy), shop + sitter till in Phase 3. Rea
 building anything that takes a card in person. The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
-**PRs 1–3 BUILT, Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
+**BUILT (PRs 1–4), Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
 (three date spans / van vs van+driver / with a Twin) as a GROUP of jobs. **"Version" in the spec
 is "option" in code** (`jobs.option_no`, "(Option 2)" in the HireHop job name, `services/job-groups.ts`)
 — "quote versions" already means the quote-PDF diff on the Activity Timeline. §1 is settled: **one
@@ -239,7 +239,9 @@ and refuses a live option whose sibling confirmed (PR 4, portal repo). Built: PR
 (top of Job Detail), Compare, pin, one card per group on the pipeline, headline counts count a group
 once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`services/option-confirm.ts`
 `afterOptionConfirmed()` on all four confirmation paths; bells on the unattended ones), the §8 guards
-(`notAltQuoteLossSql`, `bumpSiblingChaseDates`, `jobNameKeepingOptionSuffixSql`). Next: PR 4 portal. **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
+(`notAltQuoteLossSql`, `bumpSiblingChaseDates`, `jobNameKeepingOptionSuffixSql`), and the portal hand-off
+(`portalOptionsFor()` on `GET /money/job-lookup/:hh` — `payable` is false for a live option whose sibling
+confirmed; the portal repo refuses before any Stripe session). Phase 2 (`part_of` groups) is not built. **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster

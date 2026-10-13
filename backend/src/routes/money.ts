@@ -30,6 +30,7 @@ import {
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 import { fireEventTriggeredReminders } from '../services/requirement-close-sweep';
 import { afterOptionConfirmed } from '../services/option-confirm';
+import { portalOptionsFor } from '../services/job-groups';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
 import {
@@ -802,7 +803,11 @@ router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) =
       return;
     }
 
-    res.json({ data: result.rows[0] });
+    // Quote options (docs/QUOTE-VERSIONS-SPEC.md §9): may this link still be
+    // paid, and which options are its siblings. The portal refuses a payment
+    // on payable:false before any Stripe session exists.
+    const options = await portalOptionsFor(result.rows[0].id);
+    res.json({ data: { ...result.rows[0], ...options } });
   } catch (error) {
     console.error('[money] Job lookup error:', error);
     res.status(500).json({ error: 'Job lookup failed' });

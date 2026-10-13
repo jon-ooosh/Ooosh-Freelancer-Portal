@@ -19,17 +19,24 @@ import type { JobGroupRead } from '../../../shared/types';
 interface Props {
   jobId: string;
   groupId: string;
-  /** Bumped by the parent after it changes the group (add, link, remove). */
-  refreshSignal?: number;
+  /** Changed by the parent after it changes the group or the job's status. */
+  refreshSignal?: number | string;
+  /**
+   * 'top' (default): the live bar — or, on the CONFIRMED option, only the Confirm
+   * panel (the group has done its job there; jon, 13 Oct 2026). 'bottom': the
+   * confirmed option's read-only, collapsed record of its siblings.
+   */
+  variant?: 'top' | 'bottom';
   onAdd: () => void;
   /** Called after this job leaves its group (the parent reloads the job). */
   onRemoved: () => void;
 }
 
-export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, onRemoved }: Props) {
+export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, variant = 'top', onAdd, onRemoved }: Props) {
   const [data, setData] = useState<JobGroupRead | null>(null);
   const [editingLabel, setEditingLabel] = useState(false);
   const [comparing, setComparing] = useState(false);
+  const [bottomOpen, setBottomOpen] = useState(false);
   // Confirm panel (spec §7): shown on a confirmed option while siblings are
   // still open. "Keep them open" hides it for this exact set of siblings;
   // ?group_prompt=1 (the bell's deep link) overrides that.
@@ -70,6 +77,13 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
   const showConfirmPanel = !!confirmed && confirmed.id === jobId && liveOthers.length > 0
     && (promptForced || keptOpen !== liveKey);
   const tickedLive = liveOthers.filter((m) => ticked.has(m.id));
+  // Once an option has confirmed the group is settled: no Compare, no Remove,
+  // no Add, no pinning — the record stays, the controls go.
+  const settled = !!confirmed;
+  const hereConfirmed = !!confirmed && confirmed.id === jobId;
+  if (variant === 'bottom' && !hereConfirmed) return null;
+  if (variant === 'top' && hereConfirmed && !showConfirmPanel) return null;
+  const readOnly = variant === 'bottom';
 
   function keepOpen() {
     try { localStorage.setItem(`ooosh_option_prompt_keep:${groupId}`, liveKey); } catch { /* fine */ }
@@ -155,9 +169,159 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
     }
   }
 
+  if (variant === 'top' && hereConfirmed) {
+    return (
+      <div className="mb-4">
+        {renderConfirmPanel()}
+      </div>
+    );
+  }
+
   return (
-    <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 mb-4">
-      {showConfirmPanel && confirmed && (
+    <div className={`bg-white rounded-xl border border-gray-200 px-4 py-3 ${readOnly ? 'mt-6' : 'mb-4'}`}>
+      {!readOnly && renderConfirmPanel()}
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 mb-2">
+        {readOnly ? (
+          <button
+            type="button"
+            onClick={() => setBottomOpen((o) => !o)}
+            className="text-sm font-semibold text-gray-700 hover:text-ooosh-700"
+            title={bottomOpen ? 'Hide the other options' : 'Show the other options'}
+          >
+            {bottomOpen ? '▾' : '▸'} {OPTION_COPY.bottomCaption(confirmed?.option_no ?? 0, members.length)}
+          </button>
+        ) : editingLabel ? (
+          <input
+            autoFocus
+            value={labelDraft}
+            placeholder={OPTION_COPY.barLabelPlaceholder}
+            onChange={(e) => setLabelDraft(e.target.value)}
+            onBlur={saveLabel}
+            onKeyDown={(e) => { if (e.key === 'Enter') saveLabel(); if (e.key === 'Escape') setEditingLabel(false); }}
+            className="text-sm font-semibold text-gray-900 border-b border-ooosh-400 outline-none bg-transparent px-0 py-0 min-w-[12rem]"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => { setLabelDraft(group.label || ''); setEditingLabel(true); }}
+            className="text-sm font-semibold text-gray-900 hover:text-ooosh-700"
+            title="Click to rename"
+          >
+            {group.label || OPTION_COPY.barLabelPlaceholder}
+          </button>
+        )}
+        {!readOnly && (
+          <>
+            <span>·</span>
+            <span>{OPTION_COPY.barCaption(members.length)}</span>
+            <span>·</span>
+            <span className={confirmed ? 'text-green-700 font-medium' : 'text-amber-700'}>
+              {confirmed ? OPTION_COPY.barChosen(confirmed.option_no ?? 0) : OPTION_COPY.barNoneChosen}
+            </span>
+          </>
+        )}
+        {!settled && (
+          <span className="ml-auto flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setComparing(true)}
+              className="inline-flex items-center px-2.5 py-1 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50"
+            >
+              {OPTION_COPY.barCompare}
+            </button>
+            <button
+              type="button"
+              onClick={removeFromGroup}
+              disabled={busy}
+              className="text-gray-400 hover:text-red-600 disabled:opacity-50"
+            >
+              {OPTION_COPY.barRemove}
+            </button>
+            <button
+              type="button"
+              onClick={onAdd}
+              className="inline-flex items-center px-2.5 py-1 rounded-lg bg-ooosh-600 text-white font-medium hover:bg-ooosh-700"
+              title={OPTION_COPY.barAddMoreTitle}
+            >
+              {OPTION_COPY.barAddMore}
+            </button>
+          </span>
+        )}
+      </div>
+
+      {(!readOnly || bottomOpen) && (
+      <div className="flex gap-2 overflow-x-auto scrollbar-hide -mx-1 px-1">
+        {members.map((m) => {
+          const isHere = m.id === jobId;
+          const dead = isOptionDead(m.pipeline_status);
+          const style = optionStatusStyle(m);
+          const inner = (
+            <>
+              <div className={`text-sm font-semibold truncate ${dead ? 'line-through text-gray-400' : 'text-gray-900'}`}>
+                Option {m.option_no}
+                {m.option_label ? <span className={`font-normal ${dead ? '' : 'text-gray-600'}`}> · {m.option_label}</span> : null}
+              </div>
+              <div className="mt-1 flex items-center gap-2 text-[11px] text-gray-500">
+                <span
+                  className="inline-flex px-1.5 py-0.5 rounded font-medium"
+                  style={{ backgroundColor: `${style.colour}1A`, color: style.colour }}
+                >
+                  {dead && m.lost_reason?.startsWith('Confirmed Alternative Quote') ? 'Lost · alt. quote' : style.label}
+                </span>
+                {optionDateSpan(m) && <span>{optionDateSpan(m)}</span>}
+                {m.hh_job_number && <span className="text-gray-400">#{m.hh_job_number}</span>}
+              </div>
+            </>
+          );
+          const cls = `block min-w-[11rem] max-w-[16rem] flex-1 text-left rounded-lg border px-3 py-2 pr-7 transition-colors ${
+            isHere
+              ? 'border-ooosh-500 bg-ooosh-50/60 border-b-2'
+              : 'border-gray-200 hover:bg-gray-50'
+          }`;
+          const pinned = group.lead_job_id === m.id;
+          const star = !dead && !settled && (
+            <button
+              type="button"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); togglePin(m.id); }}
+              className={`absolute top-1.5 right-1.5 text-base leading-none ${
+                m.is_lead ? 'text-amber-500' : 'text-gray-200 hover:text-amber-400'
+              }`}
+              title={pinned ? OPTION_COPY.barUnpin : m.is_lead ? OPTION_COPY.barAutoLead : OPTION_COPY.barPin}
+              aria-label={pinned ? OPTION_COPY.barUnpin : OPTION_COPY.barPin}
+            >
+              {m.is_lead ? '★' : '☆'}
+            </button>
+          );
+          return (
+            <div key={m.id} className="relative flex-shrink-0">
+              {isHere ? (
+                <div className={cls} aria-current="page">{inner}</div>
+              ) : (
+                <Link to={`/jobs/${m.id}`} className={cls}>{inner}</Link>
+              )}
+              {star}
+            </div>
+          );
+        })}
+      </div>
+      )}
+      {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
+
+      {comparing && (
+        <CompareOptionsPanel
+          group={data}
+          currentJobId={jobId}
+          onClose={() => setComparing(false)}
+          onAdd={onAdd}
+          onChanged={(next) => setData(next)}
+        />
+      )}
+    </div>
+  );
+
+  function renderConfirmPanel() {
+    return showConfirmPanel && confirmed && (
         <div className="mb-3 rounded-lg border border-green-300 bg-green-50 p-3">
           <p className="text-sm font-bold text-green-800">✓ {OPTION_COPY.confirmTitle(confirmed.option_no ?? 0, confirmed.option_label)}</p>
           <p className="text-sm text-green-800 mt-0.5">{OPTION_COPY.confirmIntro(liveOthers.length)}</p>
@@ -206,129 +370,6 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
             </button>
           </div>
         </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 mb-2">
-        {editingLabel ? (
-          <input
-            autoFocus
-            value={labelDraft}
-            placeholder={OPTION_COPY.barLabelPlaceholder}
-            onChange={(e) => setLabelDraft(e.target.value)}
-            onBlur={saveLabel}
-            onKeyDown={(e) => { if (e.key === 'Enter') saveLabel(); if (e.key === 'Escape') setEditingLabel(false); }}
-            className="text-sm font-semibold text-gray-900 border-b border-ooosh-400 outline-none bg-transparent px-0 py-0 min-w-[12rem]"
-          />
-        ) : (
-          <button
-            type="button"
-            onClick={() => { setLabelDraft(group.label || ''); setEditingLabel(true); }}
-            className="text-sm font-semibold text-gray-900 hover:text-ooosh-700"
-            title="Click to rename"
-          >
-            {group.label || OPTION_COPY.barLabelPlaceholder}
-          </button>
-        )}
-        <span>·</span>
-        <span>{OPTION_COPY.barCaption(members.length)}</span>
-        <span>·</span>
-        <span className={confirmed ? 'text-green-700 font-medium' : 'text-amber-700'}>
-          {confirmed ? OPTION_COPY.barChosen(confirmed.option_no ?? 0) : OPTION_COPY.barNoneChosen}
-        </span>
-        <span className="ml-auto flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setComparing(true)}
-            className="inline-flex items-center px-2.5 py-1 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50"
-          >
-            {OPTION_COPY.barCompare}
-          </button>
-          <button
-            type="button"
-            onClick={removeFromGroup}
-            disabled={busy}
-            className="text-gray-400 hover:text-red-600 disabled:opacity-50"
-          >
-            {OPTION_COPY.barRemove}
-          </button>
-          {!confirmed && (
-            <button
-              type="button"
-              onClick={onAdd}
-              className="inline-flex items-center px-2.5 py-1 rounded-lg bg-ooosh-600 text-white font-medium hover:bg-ooosh-700"
-              title={OPTION_COPY.barAddMoreTitle}
-            >
-              {OPTION_COPY.barAddMore}
-            </button>
-          )}
-        </span>
-      </div>
-
-      <div className="flex gap-2 overflow-x-auto scrollbar-hide -mx-1 px-1">
-        {members.map((m) => {
-          const isHere = m.id === jobId;
-          const dead = isOptionDead(m.pipeline_status);
-          const style = optionStatusStyle(m);
-          const inner = (
-            <>
-              <div className={`text-sm font-semibold truncate ${dead ? 'line-through text-gray-400' : 'text-gray-900'}`}>
-                Option {m.option_no}
-                {m.option_label ? <span className={`font-normal ${dead ? '' : 'text-gray-600'}`}> · {m.option_label}</span> : null}
-              </div>
-              <div className="mt-1 flex items-center gap-2 text-[11px] text-gray-500">
-                <span
-                  className="inline-flex px-1.5 py-0.5 rounded font-medium"
-                  style={{ backgroundColor: `${style.colour}1A`, color: style.colour }}
-                >
-                  {dead && m.lost_reason?.startsWith('Confirmed Alternative Quote') ? 'Lost · alt. quote' : style.label}
-                </span>
-                {optionDateSpan(m) && <span>{optionDateSpan(m)}</span>}
-                {m.hh_job_number && <span className="text-gray-400">#{m.hh_job_number}</span>}
-              </div>
-            </>
-          );
-          const cls = `block min-w-[11rem] max-w-[16rem] flex-1 text-left rounded-lg border px-3 py-2 pr-7 transition-colors ${
-            isHere
-              ? 'border-ooosh-500 bg-ooosh-50/60 border-b-2'
-              : 'border-gray-200 hover:bg-gray-50'
-          }`;
-          const pinned = group.lead_job_id === m.id;
-          const star = !dead && (
-            <button
-              type="button"
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); togglePin(m.id); }}
-              className={`absolute top-1.5 right-1.5 text-base leading-none ${
-                m.is_lead ? 'text-amber-500' : 'text-gray-200 hover:text-amber-400'
-              }`}
-              title={pinned ? OPTION_COPY.barUnpin : m.is_lead ? OPTION_COPY.barAutoLead : OPTION_COPY.barPin}
-              aria-label={pinned ? OPTION_COPY.barUnpin : OPTION_COPY.barPin}
-            >
-              {m.is_lead ? '★' : '☆'}
-            </button>
-          );
-          return (
-            <div key={m.id} className="relative flex-shrink-0">
-              {isHere ? (
-                <div className={cls} aria-current="page">{inner}</div>
-              ) : (
-                <Link to={`/jobs/${m.id}`} className={cls}>{inner}</Link>
-              )}
-              {star}
-            </div>
-          );
-        })}
-      </div>
-      {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
-
-      {comparing && (
-        <CompareOptionsPanel
-          group={data}
-          currentJobId={jobId}
-          onClose={() => setComparing(false)}
-          onAdd={onAdd}
-          onChanged={(next) => setData(next)}
-        />
-      )}
-    </div>
-  );
+    );
+  }
 }
