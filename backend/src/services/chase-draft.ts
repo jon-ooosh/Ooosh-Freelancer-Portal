@@ -90,6 +90,10 @@ export interface ChaseContext {
   priorHireCount: number;
   threadText: string | null;   // concatenated prior email thread (Phase 1), if any
   hasThread: boolean;
+  // Quote options: the OTHER options of this enquiry that are still open
+  // ("Option 1 - Self-drive (#16842)"), so one chase covers them all.
+  otherOptions: string[];
+  thisOption: string | null;   // "Option 2 - Van + driver" when the job is one of several
 }
 
 /** Build a short, human list of what's being hired from the cached HH line items. */
@@ -172,7 +176,29 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     priorHireCount: 0,
     threadText: null,
     hasThread: false,
+    otherOptions: [],
+    thisOption: null,
   };
+
+  // Quote options: name the enquiry's other open options so the draft says
+  // "the three options we sent" rather than chasing one of them in isolation.
+  try {
+    const opt = await query(
+      `SELECT j.option_no, j.option_label,
+              (SELECT json_agg(json_build_object('option_no', s.option_no, 'option_label', s.option_label, 'hh_job_number', s.hh_job_number) ORDER BY s.option_no)
+                 FROM jobs s WHERE s.group_id = j.group_id AND s.id <> j.id AND s.is_deleted = false
+                  AND s.dismissed_at IS NULL
+                  AND s.pipeline_status IN ('new_enquiry','quoting','paused','provisional')) AS siblings
+         FROM jobs j WHERE j.id = $1 AND j.group_id IS NOT NULL`,
+      [jobId],
+    );
+    const row = opt.rows[0];
+    if (row) {
+      ctx.thisOption = `Option ${row.option_no}${row.option_label ? ` - ${row.option_label}` : ''}`;
+      ctx.otherOptions = ((row.siblings ?? []) as Array<{ option_no: number; option_label: string | null; hh_job_number: number | null }>)
+        .map((s) => `Option ${s.option_no}${s.option_label ? ` - ${s.option_label}` : ''}${s.hh_job_number ? ` (#${s.hh_job_number})` : ''}`);
+    }
+  } catch { /* optional grounding */ }
 
   // Days until the hire starts (urgency/tone) + hire span in calendar days.
   if (ctx.outDate) {
@@ -303,6 +329,9 @@ function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string
   }
   if (ctx.jobValue != null) lines.push(`Quote value: £${ctx.jobValue.toFixed(2)} (do NOT state the price in the email unless it was already discussed in the thread — reference "the quote")`);
   if (ctx.itemsSummary.length) lines.push(`What they're hiring: ${ctx.itemsSummary.join(', ')}`);
+  if (ctx.thisOption && ctx.otherOptions.length) {
+    lines.push(`This quote is ${ctx.thisOption} of ${ctx.otherOptions.length + 1} options we sent for the SAME hire. The others still open: ${ctx.otherOptions.join('; ')}. Write ONE chase that covers all the options together ("the options we sent over") — do not chase this one as if it were the only quote, and do not send separate emails for the others.`);
+  }
   lines.push(
     ctx.isRepeatClient
       ? `Relationship: repeat client (${ctx.priorHireCount} prior hire${ctx.priorHireCount === 1 ? '' : 's'} with us — you can be warmer / more familiar).`

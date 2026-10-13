@@ -6,6 +6,7 @@ import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { JOB_OUTCOME_SQL, JOB_LOST_OR_CANCELLED_SQL } from '../services/job-outcomes';
 import { ukToday } from '../services/uk-date';
+import { notAltQuoteLossSql } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
@@ -1404,10 +1405,10 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const statsResult = await query(
       `${jobLinkCTE}
        SELECT
-         COUNT(*) AS total_jobs,
+         COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('j')}) AS total_jobs,
          COUNT(*) FILTER (WHERE j.pipeline_status = 'completed' OR j.status = 11) AS completed_jobs,
          COUNT(*) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2) AS confirmed_jobs,
-         COUNT(*) FILTER (WHERE j.pipeline_status = 'lost') AS lost_jobs,
+         COUNT(*) FILTER (WHERE j.pipeline_status = 'lost' AND ${notAltQuoteLossSql('j')}) AS lost_jobs,
          COALESCE(SUM(j.job_value), 0) AS total_value
        FROM org_jobs oj
        JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false

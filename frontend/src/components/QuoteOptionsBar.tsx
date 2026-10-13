@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import CompareOptionsPanel from './CompareOptionsPanel';
 import { api } from '../services/api';
 import { OPTION_COPY } from '../lib/optionCopy';
-import { isOptionDead, isOptionOpen, optionDateSpan, optionStatusStyle } from '../lib/quoteOptions';
+import { ALTERNATIVE_QUOTE_LOST_REASON, isOptionDead, isOptionOpen, optionDateSpan, optionStatusStyle } from '../lib/quoteOptions';
+import type { JobGroupMember } from '../../../shared/types';
 import type { JobGroupRead } from '../../../shared/types';
 
 /**
@@ -29,6 +30,16 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
   const [data, setData] = useState<JobGroupRead | null>(null);
   const [editingLabel, setEditingLabel] = useState(false);
   const [comparing, setComparing] = useState(false);
+  // Confirm panel (spec §7): shown on a confirmed option while siblings are
+  // still open. "Keep them open" hides it for this exact set of siblings;
+  // ?group_prompt=1 (the bell's deep link) overrides that.
+  const [searchParams] = useSearchParams();
+  const promptForced = searchParams.get('group_prompt') === '1';
+  const [keptOpen, setKeptOpen] = useState<string | null>(() => {
+    try { return localStorage.getItem(`ooosh_option_prompt_keep:${groupId}`); } catch { return null; }
+  });
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
+  const [marking, setMarking] = useState(false);
   const [labelDraft, setLabelDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -44,10 +55,65 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
 
   useEffect(() => { load(); }, [load, refreshSignal]);
 
+  // Pre-tick every live sibling whenever the set changes (spec: pre-ticked, staff untick).
+  const liveIds = data ? data.members
+    .filter((m) => isOptionOpen(m.pipeline_status) && !m.dismissed_at)
+    .map((m) => m.id).sort().join(',') : '';
+  useEffect(() => { setTicked(new Set(liveIds ? liveIds.split(',') : [])); }, [liveIds]);
+
   if (!data || data.members.length < 2) return null;
   const { group, members } = data;
   // Past pre-confirmation and not dead = the client chose this one.
   const confirmed = members.find((m) => !isOptionDead(m.pipeline_status) && !isOptionOpen(m.pipeline_status));
+  const liveOthers = members.filter((m) => m.id !== confirmed?.id && isOptionOpen(m.pipeline_status) && !m.dismissed_at);
+  const liveKey = liveOthers.map((m) => m.id).sort().join(',');
+  const showConfirmPanel = !!confirmed && confirmed.id === jobId && liveOthers.length > 0
+    && (promptForced || keptOpen !== liveKey);
+  const tickedLive = liveOthers.filter((m) => ticked.has(m.id));
+
+  function keepOpen() {
+    try { localStorage.setItem(`ooosh_option_prompt_keep:${groupId}`, liveKey); } catch { /* fine */ }
+    setKeptOpen(liveKey);
+  }
+
+  async function markTickedLost() {
+    if (!confirmed || tickedLive.length === 0) return;
+    setMarking(true);
+    setError('');
+    const ref = confirmed.hh_job_number ? `#${confirmed.hh_job_number}` : 'this job';
+    const failures: string[] = [];
+    const done: JobGroupMember[] = [];
+    for (const m of tickedLive) {
+      try {
+        // The existing lost transition — so the Lost/Cancelled cleanup pattern
+        // (requirements, transport, chase date, HireHop status 10) runs as for
+        // any lost job.
+        await api.patch(`/pipeline/${m.id}/status`, {
+          pipeline_status: 'lost',
+          lost_reason: ALTERNATIVE_QUOTE_LOST_REASON,
+          lost_detail: OPTION_COPY.confirmLostDetail(confirmed.option_no ?? 0, confirmed.option_label, ref),
+          transition_note: OPTION_COPY.confirmTransitionNote(confirmed.option_no ?? 0, ref),
+          keep_requirement_ids: [],
+        });
+        done.push(m);
+      } catch (e) {
+        failures.push(`Option ${m.option_no}: ${e instanceof Error ? e.message : 'failed'}`);
+      }
+    }
+    if (done.length) {
+      const losers = done.map((m) => `Option ${m.option_no}`).join(', ');
+      await api.post('/interactions', {
+        type: 'note',
+        content: OPTION_COPY.confirmNoteOnWinner(losers, confirmed.option_no ?? 0),
+        job_id: confirmed.id,
+      }).catch(() => { /* the lost transitions are the record; the note is a courtesy */ });
+    }
+    await api.post(`/pipeline/groups/${groupId}/prompt-handled`, {}).catch(() => { /* bells retire on the next visit */ });
+    if (failures.length) setError(failures.join(' · '));
+    setMarking(false);
+    setTicked(new Set());
+    await load();
+  }
 
   async function saveLabel() {
     setEditingLabel(false);
@@ -91,6 +157,57 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, onAdd, 
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 mb-4">
+      {showConfirmPanel && confirmed && (
+        <div className="mb-3 rounded-lg border border-green-300 bg-green-50 p-3">
+          <p className="text-sm font-bold text-green-800">✓ {OPTION_COPY.confirmTitle(confirmed.option_no ?? 0, confirmed.option_label)}</p>
+          <p className="text-sm text-green-800 mt-0.5">{OPTION_COPY.confirmIntro(liveOthers.length)}</p>
+          <ul className="mt-2 space-y-1">
+            {liveOthers.map((m) => {
+              const style = optionStatusStyle(m);
+              return (
+                <li key={m.id}>
+                  <label className="inline-flex items-center gap-2 text-sm text-gray-800">
+                    <input
+                      type="checkbox"
+                      checked={ticked.has(m.id)}
+                      onChange={(e) => setTicked((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(m.id); else next.delete(m.id);
+                        return next;
+                      })}
+                      className="h-4 w-4 rounded border-gray-300 text-green-700"
+                    />
+                    <span className="font-semibold">Option {m.option_no}</span>
+                    {m.option_label && <span>· {m.option_label}</span>}
+                    {m.hh_job_number && <span className="text-gray-400">· #{m.hh_job_number}</span>}
+                    <span className="text-xs" style={{ color: style.colour }}>· {style.label.toLowerCase()}</span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="mt-2 text-xs text-green-900/80">{OPTION_COPY.confirmExplain}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={markTickedLost}
+              disabled={marking || tickedLive.length === 0}
+              className="px-3 py-1.5 rounded-lg bg-green-700 text-white text-sm font-medium hover:bg-green-800 disabled:opacity-50"
+            >
+              {marking ? OPTION_COPY.confirmMarking : OPTION_COPY.confirmMark(tickedLive.length)}
+            </button>
+            <button
+              type="button"
+              onClick={keepOpen}
+              disabled={marking}
+              className="px-3 py-1.5 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {OPTION_COPY.confirmKeep}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 mb-2">
         {editingLabel ? (
           <input

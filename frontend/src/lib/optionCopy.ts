@@ -26,6 +26,21 @@ export const OPTION_COPY = {
   barLabelPlaceholder: 'Name this set of options',
   barCompare: 'Compare',
 
+  // Confirm panel — one option confirmed, the others still open
+  confirmTitle: (optionNo: number, label: string | null) =>
+    `Option ${optionNo}${label ? ` - ${label}` : ''} is confirmed`,
+  confirmIntro: (n: number) => `${n} other option${n === 1 ? '' : 's'} of this enquiry ${n === 1 ? 'is' : 'are'} still open. Mark ${n === 1 ? 'it' : 'them'} lost?`,
+  confirmExplain: 'Marking them lost uses the reason "Confirmed Alternative Quote (from us)" - not counted as lost business - moves their HireHop jobs to Not Interested and clears their chase dates. Untick any the client might still want.',
+  confirmMark: (n: number) => `Mark the ${n} ticked as Lost`,
+  confirmMarking: 'Marking...',
+  confirmKeep: 'Keep them open for now',
+  confirmNoteOnWinner: (losers: string, winnerNo: number) => `${losers} marked lost (Confirmed Alternative Quote) - client took Option ${winnerNo}`,
+  confirmLostDetail: (winnerNo: number, label: string | null, ref: string) => `Client took Option ${winnerNo}${label ? ` - ${label}` : ''} (${ref})`,
+  confirmTransitionNote: (winnerNo: number, ref: string) => `Client confirmed Option ${winnerNo} (${ref})`,
+
+  // Lost banner on an option the client didn't pick
+  lostAltBanner: 'The client chose another option of this enquiry - this slot is theirs, so there is no gap to fill.',
+
   // Compare slide-over
   compareTitle: 'Compare options',
   compareNoLabel: 'add a label',

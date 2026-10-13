@@ -25,6 +25,7 @@ import { isAnthropicConfigured } from '../config/anthropic';
 import { getSystemSetting } from '../routes/system-settings';
 import { evaluateChaseSuppression } from './chase-suppression';
 import { createChaseDraftForJob } from './gmail-draft';
+import { nonLeadMemberIds } from './job-groups';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
@@ -134,8 +135,12 @@ export async function runDueAutoChases(): Promise<AutoChaseRunSummary> {
         AND j.next_chase_date IS NOT NULL
         AND j.next_chase_date <= CURRENT_DATE
         AND j.pipeline_status IN ('new_enquiry','quoting','paused','provisional')
+        -- Quote options: one chase per enquiry — the lead option only, never
+        -- four "just checking in" emails for one client (spec §8).
+        AND NOT (j.id = ANY($1::uuid[]))
       ORDER BY j.next_chase_date ASC
       LIMIT 100`,
+    [await nonLeadMemberIds()],
   );
   summary.due = due.rows.length;
 

@@ -22,6 +22,8 @@ import {
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
 import { closeJobRequirements, fireEventTriggeredReminders } from '../services/requirement-close-sweep';
+import { afterOptionConfirmed } from '../services/option-confirm';
+import { jobNameKeepingOptionSuffixSql } from '../services/job-groups';
 import { sendLastMinuteAlert } from '../services/money-emails';
 import { isUnwonTransition, isBookingWonTransition } from '../services/pipeline-stage';
 
@@ -389,6 +391,8 @@ export async function handleJobStatusChange(
       // reminder, which the looser guard on this branch would allow.
       if (isBookingWonTransition(job.pipeline_status)) {
         void fireEventTriggeredReminders(job.id, 'confirmed', null);
+        // Quote options: confirmed in HireHop — bell the managers about the siblings.
+        void afterOptionConfirmed(job.id, { actorUserId: null, source: 'hirehop_webhook' });
       }
 
       void (async () => {
@@ -504,7 +508,10 @@ async function handleJobUpdate(
       const value = hhField === 'JOB_NAME' && typeof raw === 'string'
         ? stripProjectPrefix(raw)
         : (raw || null);
-      updates.push(`${dbField} = $${pIdx}`);
+      // Quote options: a rename in HireHop must not drop the "(Option N)" suffix.
+      updates.push(hhField === 'JOB_NAME'
+        ? `${dbField} = ${jobNameKeepingOptionSuffixSql(`$${pIdx}`)}`
+        : `${dbField} = $${pIdx}`);
       params.push(value);
       pIdx++;
     }
@@ -665,6 +672,7 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
     // else, so a status correction doesn't re-fire it.
     if (newPipelineStatus === 'confirmed' && isBookingWonTransition(job.pipeline_status)) {
       await fireEventTriggeredReminders(job.id, 'confirmed', null);
+      void afterOptionConfirmed(job.id, { actorUserId: null, source: 'hirehop_webhook' });
     }
 
     // Resurrection: reverse the Lost / Cancelled requirement sweep when an

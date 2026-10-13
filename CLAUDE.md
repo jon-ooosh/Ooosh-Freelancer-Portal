@@ -225,7 +225,7 @@ unverified), no phone card payments (policy), shop + sitter till in Phase 3. Rea
 building anything that takes a card in person. The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
-**PRs 1–2 BUILT, Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
+**PRs 1–3 BUILT, Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
 (three date spans / van vs van+driver / with a Twin) as a GROUP of jobs. **"Version" in the spec
 is "option" in code** (`jobs.option_no`, "(Option 2)" in the HireHop job name, `services/job-groups.ts`)
 — "quote versions" already means the quote-PDF diff on the Activity Timeline. §1 is settled: **one
@@ -235,10 +235,11 @@ option; **pre-confirmation only** and a group has at most one confirmed member (
 a thin layer (option bar, Compare slide-over, one collapsed Kanban card); confirm one → a HUMAN marks
 the rest lost as `'Confirmed Alternative Quote (from us)'`, which win/loss and Fill-a-Gap must
 exclude; option numbers never auto-bump. Payment = choosing: the portal link carries the job number
-and refuses a live option whose sibling confirmed (PR 4, portal repo). Built: PRs 1–2 (§10) — the bar
+and refuses a live option whose sibling confirmed (PR 4, portal repo). Built: PRs 1–3 (§10) — the bar
 (top of Job Detail), Compare, pin, one card per group on the pipeline, headline counts count a group
-once (`job-groups.ts` `nonLeadMemberIds()`). Next: PR 3 confirm-one-lose-others + the §8 guards, PR 4
-portal. **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
+once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`services/option-confirm.ts`
+`afterOptionConfirmed()` on all four confirmation paths; bells on the unattended ones), the §8 guards
+(`notAltQuoteLossSql`, `bumpSiblingChaseDates`, `jobNameKeepingOptionSuffixSql`). Next: PR 4 portal. **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster

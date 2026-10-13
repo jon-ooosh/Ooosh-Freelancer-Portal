@@ -22,6 +22,7 @@ import {
   sendConfirmationSilentSkipAlert,
 } from './confirmation-hooks';
 import { fireEventTriggeredReminders } from './requirement-close-sweep';
+import { afterOptionConfirmed } from './option-confirm';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
 import { fireArrivalHook } from './close-out-arrival';
 
@@ -272,6 +273,9 @@ export async function recordPayment(
         // decides `isServiceAccount`; see routes/money.ts).
         const actorId = actor.isServiceAccount ? null : actor.userId;
         await fireEventTriggeredReminders(job.id, 'confirmed', actorId);
+        // Quote options: a staff click sees the Confirm panel on the job; the
+        // Wise matcher (no actor) bells the managers instead.
+        void afterOptionConfirmed(job.id, { actorUserId: actorId, source: 'record_payment' });
       }
 
       // Hire form email: if job has self-drive vehicle and starts within 10 days, send now.
