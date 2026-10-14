@@ -188,7 +188,7 @@ log (offers; follow-ups are To Do items, `source_type = 'vehicle_sale'`). Phase 
 `shapeForBuyer()` in `services/vehicle-sale-links.ts`** — from an allow-list, per the link's switches. **A sale never changes the van** — it stays active and hireable; removing the van from the
 fleet closes its open sale as sold.
 
-**PHASES 1–3b BUILT, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
+**CLOSED, Oct 2026:** `docs/HIRE-CLOSE-OUT-SPEC.md` — the bookkeeping module:
 finishing a hire's money from the post-hire cards (raise invoice → excess decision → allocate
 deposits in HireHop AND Xero → complete), one job at a time, on the shared recipe
 `services/hh-invoice-close.ts` (`HIREHOP-BILLING-API.md` §8). Born from job 16015: HireHop's "New
@@ -200,7 +200,10 @@ The UI is ONE panel on the **Money tab**, `CloseOutMoneyPanel.tsx` (Oct 2026 red
 steps, one next-action line with its reason behind "Why?", a short ledger; stages from `lib/closeOutPlan.ts`
 `closeOutView()`, shared with the Overview's Invoice card (now a signpost, `CloseOutSignpost.tsx`, "Open in
 Money →") and the Money tab's coloured dot. One button raises the invoice if needed (draft from uninvoiced
-lines → penny check → approve dated today → Xero) then allocates in HireHop + Xero (`POST /close-out/:jobId/run`);
+lines → penny check → approve dated today → Xero) then allocates in HireHop + Xero (`POST /close-out/:jobId/run`).
+**A job's FIRST invoice is laid out like the quote**: an empty draft with the supply list pasted on
+(`billing_paste.php`, prices multiplied out by `MULTIPLIER` as HireHop's grid does — `HIREHOP-BILLING-API.md`
+§10.7); a top-up invoice stays `all: 1`; kill-switch `system_settings.closeout_invoice_layout = 'flat'`;
 "Mark as sent" ticks the Invoice requirement; "Complete the job" opens the page's own status modal. The balance
 shows once, in the Financial Summary, only when non-zero. No Xero links, no Details modal. **An EU hire** (the "Non-standard VAT rules" item)
 gets its draft split by `services/eu-vat-split.ts` (real lines to £0, each edited in place by its own id, per nominal a UK-days line at 20% and a
@@ -208,14 +211,22 @@ non-UK-days line at code 33; vehicles zero-rated only on a 31+ day hire or with 
 Completing a job is the status
 change at the top of the page, and that modal refuses open Problems (manager + reason to override;
 `routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
-(03:30) applies HireHop's allocations as credits in Xero, off until `system_settings.closeout_xero_sweep_enabled`
-is `'true'` (switched on 10 Oct 2026). **Arrival hook** `services/close-out-arrival.ts` (Phase 3b): a hire payment
-landing on a job with exactly one invoice owing is allocated to it in HireHop + Xero, after the payment has
-answered — THAT payment only (never money already sitting on the job), never completes the job; off until
-`closeout_arrival_hook_enabled` is `'true'`. An invoice HireHop pushed to Xero but lost the link to (`ACC_ID` empty) is found
+(03:30) applies HireHop's allocations as credits in Xero (`system_settings.closeout_xero_sweep_enabled`,
+on since 10 Oct 2026). **Arrival hook** `services/close-out-arrival.ts` (Phase 3b): a hire payment
+landing on a job with exactly one invoice owing (or the manager-chosen one) is allocated to it in HireHop + Xero,
+after the payment has answered — THAT payment only (never money already sitting on the job), never completes the
+job (`closeout_arrival_hook_enabled`, on). **Charges after completion** (misc, PCN) are their own invoice
+(`completed-charges.ts`); **the payment portal reads a Completed job's balance from its invoices** (portal repo,
+`get-job-details-v2.js`), every other status from the job value. Invoices split by hand (hire vs damage) are made
+by a manager in HireHop. An invoice HireHop pushed to Xero but lost the link to (`ACC_ID` empty) is found
 by number + total (`hh-invoice-close.ts` `adoptLostXeroInvoices()`). §1 is
-settled, §5 the allocation rule, §9 the phases, **§12 the current state and the ordered next steps — read it first.**
+settled, §5 the allocation rule, §9 the phases, **§12 the current state and the parked list — read it first.**
 Refunds only through the existing routes.
+
+**NEXT, Oct 2026: cancellations — the money end.** `docs/CANCELLATION-SPEC.md` (the April foundation:
+status, calculator, modal, Lost & Cancelled page) gains a §"Oct 2026 — the money end" that is the handover:
+the fee invoice on the close-out recipe, allocation, the refund of the rest, excess, and the five open
+decisions to settle with jon first.
 
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
