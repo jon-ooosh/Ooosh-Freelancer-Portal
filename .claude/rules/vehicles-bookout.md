@@ -44,6 +44,7 @@ invariants and multi-van scramble write-up in `docs/reference/SHARED-UTILITIES.m
 - **The portal link's token STAYS in the URL** — never strip it after resolve. A reload of the same link resumes the stored session (`linkToken` match); a phone that lost its storage just re-exchanges the link (valid 24h, reusable). Stripping it once sent a freelancer whose iPhone reloaded the page to the STAFF login (HH 16714, Oct 2026). Likewise a visitor not logged in to OP gets the freelancer shell on these URLs, never the staff login.
 - **A freelancer book-out books out EVERY live customer driver on the van, not just its session row** (save-event pulls in the same-van self-drive siblings; a NULL-van row only when no other van is on the job; referral-held drivers excluded). The freelancer flow skips the Driver & Hire step, so without this the other drivers sat on "Add to Hire" (HH 16665, Oct 2026).
 - **A freelancer book-out never generates the VE103B** — that's done at the desk before the van goes out, and `/api/ve103b` is staff-only.
+- **No book-out submit generates the VE103B** (Oct 2026, RX22SWN / 16573). It is made at the desk (Driver & Hire step's Generate button, or the VE103B page) and printed before the van leaves; the staff submit only READS `/api/ve103b/job/:hh/status` and reports amber if none is on file or the Confirm step's "handed to the driver" tick is off. A warning, never a gate.
 - **Neither resolver may answer "THE van on this job" — a job can have several.** Both used to take the top row with a `LIMIT 1`, so every freelancer on a multi-van job got the same one: HH 15307 (8 Sep) showed Lewis the van Charlie had already collected, and the van Lewis was standing at never got collected on the system. When more than one van is in play the resolver returns `needsVehicleSelection` + `candidates` and mints no session until the freelancer picks. A resolver may never widen this to trust a client-supplied `assignmentId` without re-deriving that job's candidate set.
 - **Candidates are deduped per VEHICLE, not per assignment row.** One van routinely has several live rows on a job (HH 15307 carried three for RX24SZG). The freelancer is reading a number plate, so offering the same reg three times is worse than offering it once.
 - **On a multi-van job the customer hire-form rows are NOT interchangeable.** Pair the allocation row to its customer row by `van_requirement_index` before falling back to lowest-index-first, or van #2 gets van #1's hirer, excess and hire agreement stapled to it.
@@ -53,6 +54,11 @@ invariants and multi-van scramble write-up in `docs/reference/SHARED-UTILITIES.m
 - **Thread `eventId` through every generation path so the PDF is FROZEN to R2** at `condition-reports/{REG}/{eventId}.pdf`. That frozen copy is the real record.
 - Retrieval is **stored-first, reconstruct-fallback**. Reconstructions are deliberately NOT re-stored — they read live/mutable sources and would otherwise pin a stale copy.
 - The event JSON is a THIN record: it stores neither the damage items, the vehicle descriptor, nor the book-out comparison. Reconstruction pulls damage from `job_issues` and the descriptor from `fleet_vehicles`.
+
+## Drafts and flaky signal (do not regress)
+
+- **Resuming a draft must keep autosave ON** — use `acceptDraft()`, never `dismissDraft()` (that deletes the draft and stops saving; it is for Discard only). With dismiss on Resume, a phone that killed the tab a second time (camera + low memory) came back to an empty form (Oct 2026).
+- **Every post-submit network step retries** (`lib/retry.ts` `withRetry`). A Wi-Fi/4G handover kills the request in flight as "Failed to fetch"; a single-shot call loses it for good. Photos retry ONE AT A TIME inside `uploadAllPhotos` / `uploadDamagePhotos` — those never throw, so an outer `withRetry` can't see a failed photo. Only retry steps that are safe to repeat.
 
 ## Photos — memory and speed (do not regress)
 
