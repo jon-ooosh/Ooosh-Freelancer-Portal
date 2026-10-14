@@ -342,3 +342,9 @@ See docs/SPEC.md for full phased plan.
   from HH's box, so reading back would create a divergence surface for no
   operational gain. Nice-to-have for HH-side visibility; not a gap that costs
   anyone anything today.
+
+- **DVLA Vehicle Enquiry Service — tax status / tax due from DVLA** (Oct 2026). Would do for
+  `tax_due` what DVSA now does for `mot_due` (services/dvsa-mot.ts). DVLA's API was closed to new
+  applications in Oct 2026; jon to check again later in the year. Separate key (x-api-key only),
+  separate service from DVSA.
+
