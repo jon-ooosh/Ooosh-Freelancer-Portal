@@ -3,7 +3,7 @@
  * deciding whether mot_due moves. The second is the one that matters — it
  * rewrites a compliance date on its own, so it must only ever move FORWARD.
  */
-import { parseMotPayload, compareMotDue, normaliseReg, describeDvsaError, entraErrorDetail } from '../dvsa-mot';
+import { parseMotPayload, compareMotDue, normaliseReg, describeDvsaError, entraErrorDetail, decideMotDue, latestTestSummary } from '../dvsa-mot';
 
 // Shaped like a real DVSA VehicleWithMotResponse (openapi spec, Sep 2026).
 const vanWithTests = {
@@ -266,5 +266,60 @@ describe('fetchMotHistoryByReg — API key refused', () => {
     expect(seenKeys[0]).toBe('key-with-spaces');   // trimmed before sending
     expect(err.kind).toBe('auth');
     expect(explainDvsaError(err)).toContain('MOTH-FB-03: Your API key is invalid — the login worked, so check DVSA_API_KEY');
+  });
+});
+
+// ── DVSA as THE MOT date (VEHICLE-SALES-SPEC §16) ──────────────────────────
+describe('decideMotDue', () => {
+  it('a never-reconciled date takes DVSA’s — either direction', () => {
+    expect(decideMotDue('2036-09-02', null, '2026-09-02'))   // junk ten years out
+      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true, manualKept: false });
+    expect(decideMotDue('2026-01-01', null, '2026-09-02').motDue).toBe('2026-09-02');
+  });
+
+  it('a DVSA-sourced date follows DVSA, even backwards', () => {
+    expect(decideMotDue('2027-09-01', 'dvsa', '2026-09-02'))
+      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true, manualKept: false });
+  });
+
+  it('keeps a manual date LATER than DVSA’s and flags it — the pass DVSA hasn’t shown yet', () => {
+    expect(decideMotDue('2027-10-13', 'manual', '2026-10-20'))
+      .toEqual({ motDue: '2027-10-13', source: 'manual', changed: false, manualKept: true });
+  });
+
+  it('a manual date EARLIER than DVSA’s gives way — DVSA has a newer test', () => {
+    expect(decideMotDue('2026-01-01', 'manual', '2026-09-02'))
+      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true, manualKept: false });
+  });
+
+  it('a manual date DVSA has caught up with becomes DVSA’s', () => {
+    expect(decideMotDue('2027-10-13', 'manual', '2027-10-13'))
+      .toEqual({ motDue: '2027-10-13', source: 'dvsa', changed: false, manualKept: false });
+  });
+
+  it('no DVSA date → leave ours exactly as it is', () => {
+    expect(decideMotDue('2027-01-01', 'manual', null))
+      .toEqual({ motDue: '2027-01-01', source: 'manual', changed: false, manualKept: false });
+    expect(decideMotDue(null, null, null).changed).toBe(false);
+  });
+});
+
+describe('latestTestSummary', () => {
+  it('counts advisories and minors on the LATEST test only', () => {
+    const s = parseMotPayload({
+      hasOutstandingRecall: 'No',
+      motTests: [
+        { completedDate: '2025-09-03T14:40:00Z', testResult: 'PASSED', expiryDate: '2026-09-02', odometerResultType: 'READ', dataSource: 'DVSA',
+          defects: [{ type: 'ADVISORY', text: 'a' }, { type: 'MINOR', text: 'b' }, { type: 'USER ENTERED', text: 'c' }] },
+        { completedDate: '2024-09-03T14:40:00Z', testResult: 'PASSED', expiryDate: '2025-09-02', odometerResultType: 'READ', dataSource: 'DVSA',
+          defects: [{ type: 'ADVISORY', text: 'old' }, { type: 'ADVISORY', text: 'old2' }, { type: 'ADVISORY', text: 'old3' }] },
+      ],
+    });
+    expect(latestTestSummary(s)).toEqual({ advisories: 2, result: 'PASSED', testedOn: '2025-09-03' });
+  });
+
+  it('nothing to say for a van with no tests', () => {
+    expect(latestTestSummary(parseMotPayload({ hasOutstandingRecall: 'No', motTestDueDate: '2028-03-01' })))
+      .toEqual({ advisories: null, result: null, testedOn: null });
   });
 });

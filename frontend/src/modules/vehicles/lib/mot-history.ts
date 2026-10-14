@@ -40,6 +40,7 @@ export interface VehicleMotView {
   lastError: string | null
   summary: MotSummary | null
   motDue: string | null
+  motDueSource: 'dvsa' | 'manual' | null
   comparison: 'update' | 'earlier' | 'same' | 'none'
 }
 
@@ -59,3 +60,26 @@ export async function refreshMotHistory(vehicleId: string): Promise<VehicleMotVi
   const body = await resp.json() as { data: VehicleMotView }
   return body.data
 }
+
+/** "Use DVSA date" — settle a flagged manual MOT Due in DVSA's favour. */
+export async function applyDvsaMotDate(vehicleId: string): Promise<VehicleMotView> {
+  const resp = await apiFetch(`/fleet/${vehicleId}/mot-history/use-dvsa`, { method: 'POST' })
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}))
+    throw new Error((body as { error?: string }).error || `HTTP ${resp.status}`)
+  }
+  const body = await resp.json() as { data: VehicleMotView }
+  return body.data
+}
+
+/** Admin: every active van from DVSA, in the background. */
+export async function refreshAllMots(): Promise<{ started: boolean; vehicles: number }> {
+  const resp = await apiFetch('/mot-history/refresh-all', { method: 'POST' })
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}))
+    throw new Error((body as { error?: string }).error || `HTTP ${resp.status}`)
+  }
+  const body = await resp.json() as { data: { started: boolean; vehicles: number } }
+  return body.data
+}
+

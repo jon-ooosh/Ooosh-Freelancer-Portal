@@ -1418,10 +1418,11 @@ export function startScheduler() {
   console.log('Scheduler: Vehicle forecast assessments scheduled weekly Sun 18:00 Europe/London');
 
   // ── DVSA MOT history ─────────────────────────────────────────────────────
-  // Weekly: Monday 07:30 Europe/London — BEFORE the 08:00 compliance check, so
-  // a mot_due moved forward from DVSA is what that check sees. Refreshes every
-  // active van's MOT history. See services/dvsa-mot.ts.
-  cron.schedule('30 7 * * 1', async () => {
+  // DAILY 07:30 Europe/London (weekly until 14 Oct 2026) — BEFORE the 08:00
+  // compliance check, so the MOT date that check reads is DVSA's from this
+  // morning. DVSA is now THE MOT date, so a week's lag after a pass was too
+  // long. Refreshes every active van. See services/dvsa-mot.ts.
+  cron.schedule('30 7 * * *', async () => {
     try {
       const { runScheduledMotRefresh } = await import('../services/dvsa-mot');
       const r = await runScheduledMotRefresh();
@@ -1430,7 +1431,7 @@ export function startScheduler() {
       console.error('Scheduler: DVSA MOT refresh failed:', err);
     }
   }, { timezone: 'Europe/London' });
-  console.log('Scheduler: DVSA MOT refresh scheduled weekly Mon 07:30 Europe/London');
+  console.log('Scheduler: DVSA MOT refresh scheduled daily 07:30 Europe/London');
 
   // ── PCN pay-direct chase ladder ──────────────────────────────────────────
   // Daily at 09:35 Europe/London. Chases drivers who were told to pay a charge

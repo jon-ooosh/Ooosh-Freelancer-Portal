@@ -19,6 +19,8 @@ import type { Vehicle } from '../types/vehicle'
 import type { ComplianceSettings } from '../lib/fleet-api'
 import { ForSalePill } from '../components/sales/ForSalePill'
 import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
+import { MotFlags } from '../components/mot/MotFlags'
+import { refreshAllMots } from '../lib/mot-history'
 
 /** Colour classes for simple vehicle types */
 const typeColours: Record<string, string> = {
@@ -138,7 +140,10 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
 
         {/* Key dates that need attention */}
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5">
-          <DateBadge label="MOT" date={vehicle.motDue} />
+          <span className="inline-flex items-center gap-1">
+            <DateBadge label="MOT" date={vehicle.motDue} />
+            <MotFlags v={vehicle} />
+          </span>
           <DateBadge label="Tax" date={vehicle.taxDue} />
           {vehicle.tflDue && <DateBadge label="TFL" date={vehicle.tflDue} />}
         </div>
@@ -247,12 +252,13 @@ function compactDate(dateStr: string | null): string {
 }
 
 /** A single colour-coded date cell for the fleet table. */
-function DateCell({ date, warningDays }: { date: string | null; warningDays: number }) {
+function DateCell({ date, warningDays, extra }: { date: string | null; warningDays: number; extra?: React.ReactNode }) {
   const urgency = getDateUrgency(date, warningDays)
   return (
     <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[urgency]}`}>
       {compactDate(date)}
       {urgency === 'overdue' && date && ' ⚠️'}
+      {extra}
     </td>
   )
 }
@@ -372,7 +378,9 @@ function FleetTable({
                       ? `${Math.abs(svc.milesRemaining).toLocaleString()} over ⚠️`
                       : `${svc.milesRemaining.toLocaleString()} mi`}
                 </td>
-                <DateCell date={vehicle.motDue} warningDays={settings.mot_warning_days} />
+                {/* The MOT date is DVSA's; the flags say what else DVSA knows (services/dvsa-mot.ts). */}
+                <DateCell date={vehicle.motDue} warningDays={settings.mot_warning_days}
+                  extra={<MotFlags v={vehicle} className="ml-1" />} />
                 <DateCell date={vehicle.taxDue} warningDays={settings.tax_warning_days} />
                 <DateCell date={vehicle.tflDue} warningDays={settings.tfl_warning_days} />
                 <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[ross.urgency]}`}>
@@ -560,6 +568,26 @@ export function VehiclesPage() {
 
   const sortedVehicles = forSaleOnly ? vehicles.filter(v => openSales.has(v.id)) : vehicles
 
+  // "Refresh MOTs from DVSA" (admin). The run is in the background on the
+  // server (one van every ~1.5 s), so reload the list once it should be done.
+  const [motRefreshMsg, setMotRefreshMsg] = useState<string | null>(null)
+  const [motRefreshing, setMotRefreshing] = useState(false)
+  async function handleRefreshAllMots() {
+    setMotRefreshing(true)
+    setMotRefreshMsg(null)
+    try {
+      const r = await refreshAllMots()
+      const secs = Math.ceil(r.vehicles * 1.8) + 5
+      setMotRefreshMsg(r.started
+        ? `Checking ${r.vehicles} vans with DVSA — about ${secs < 90 ? `${secs} seconds` : `${Math.ceil(secs / 60)} minutes`}. The list updates when it's done.`
+        : 'A DVSA check is already running — the list updates when it finishes.')
+      setTimeout(() => { void refetch(); setMotRefreshing(false) }, secs * 1000)
+    } catch (err) {
+      setMotRefreshMsg((err as Error).message)
+      setMotRefreshing(false)
+    }
+  }
+
   return (
     <div className="space-y-4">
       {/* Header with count */}
@@ -599,6 +627,16 @@ export function VehiclesPage() {
               </button>
             )}
           </div>
+          {isStrictAdmin && (
+            <button
+              onClick={handleRefreshAllMots}
+              disabled={motRefreshing}
+              title="Fetch every active van's MOT from DVSA now (it also runs every morning at 07:30)"
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {motRefreshing ? 'Checking MOTs…' : 'Refresh MOTs'}
+            </button>
+          )}
           {isAdmin && (
             <button
               onClick={() => setShowAddForm(true)}
@@ -616,6 +654,10 @@ export function VehiclesPage() {
           </button>
         </div>
       </div>
+
+      {motRefreshMsg && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">{motRefreshMsg}</div>
+      )}
 
       {/* Add Vehicle form */}
       {showAddForm && (

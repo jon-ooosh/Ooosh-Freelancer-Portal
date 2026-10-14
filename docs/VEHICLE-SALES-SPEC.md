@@ -429,3 +429,39 @@ withdraw and removal both log and cancel open follow-ups, a closed sale refuses 
   activity. Listed / Under offer: activity and links first. Nothing is hidden at any stage — you may
   well talk to a buyer before the van is formally listed.
 
+## 16. DVSA is THE MOT date (jon, 14 Oct 2026)
+
+Supersedes §3.4's "forward only, never back". jon: one system-derived MOT date throughout — fleet
+board, cards, the van's page — because catching a junk or ten-years-ahead date is the most valuable
+thing the service does.
+
+**The rule** — `services/dvsa-mot.ts` `decideMotDue()`, applied at every refresh:
+- DVSA has no date (never fetched, unknown reg) → `mot_due` is left alone.
+- `mot_due` came from DVSA, or was never reconciled (existing rows) → it becomes DVSA's date,
+  **either direction**. The first refresh after deploy therefore corrects any wrong date already
+  typed in — audited (`mot_due_from_dvsa`).
+- `mot_due` was typed by hand (`mot_due_source = 'manual'`):
+  - DVSA's date is the same or later → DVSA's wins (it caught up, or there's a newer test).
+  - DVSA's date is **earlier** → the typed date is kept and **flagged**: most likely the van passed
+    this morning and DVSA doesn't show it yet; possibly a typo. *Use DVSA date* under Key Dates
+    settles it (`mot_due_use_dvsa` in the audit log).
+- Any manual write (`PUT /fleet/:id` with `mot_due`, an MOT service record's next-due date) calls
+  `markMotDueEdited()`: typing DVSA's own date counts as DVSA's, anything else is `'manual'`.
+- **Daily** refresh at 07:30 (was weekly) so a pass is picked up the next morning, before the 08:00
+  compliance check. Admins also have **Refresh MOTs** on the fleet board (background, one van every
+  ~1.5 s, one run at a time).
+
+**What shows where** (cached on `fleet_vehicles` at each refresh, migration 287: `dvsa_mot_due`,
+`dvsa_advisories`, `dvsa_recall`, `dvsa_latest_result`, `dvsa_latest_test_on`, `dvsa_checked_at`):
+- Fleet board MOT cell and fleet cards: `components/mot/MotFlags.tsx` — **Manual** (amber, DVSA's date
+  on hover), **Recall** (red), **Failed** (latest test a fail, red), **N adv** (advisories + minor
+  items on the latest test only — older ones have usually been fixed).
+- Key Dates › MOT Due: "✓ From DVSA (checked …)", or the amber manual line with *Use DVSA date*, plus
+  the same flags.
+- Sale page Key facts: "Last MOT 3 Sep 2025 — passed, 2 advisories", and a Recall row when there is one.
+
+**Verified** against a real Postgres 16 with all 287 migrations, DVSA faked: a 2036 junk date replaced
+and audited; summary cached; DVSA's own date typed counts as DVSA; a later manual date kept and
+flagged, then taken over when DVSA catches up; an earlier typo replaced; a later typo kept until *Use
+DVSA date*; a brand-new van gets its first-MOT date.
+

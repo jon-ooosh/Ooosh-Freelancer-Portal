@@ -311,7 +311,7 @@ existing definition:
 | Texting someone about anything | `services/sms-service.ts` — each template goes live on its own via `SMS_LIVE_TEMPLATES` |
 | Preparing a photo for upload (EXIF time, HEIC, compress + thumb) | `frontend/src/lib/imageNormalise.ts` `prepareImage()` |
 | What is a van worth (approx.)? | `services/vehicle-value.ts` `estimateVehicleValue()` |
-| What does DVSA say about this van's MOT? | `services/dvsa-mot.ts` — moves `mot_due` forward only, never back |
+| What does DVSA say about this van's MOT? What IS its MOT date? | `services/dvsa-mot.ts` — DVSA's expiry is `mot_due` everywhere (`decideMotDue()`): a typed date is kept only while LATER than DVSA's, flagged (`mot_due_source = 'manual'`); `markMotDueEdited()` after any manual write. Board flags: `components/mot/MotFlags.tsx` |
 | Is this van for sale? Who may change the sale? Do its photos need a re-check? | `services/vehicle-sales.ts` (frontend pill: `useOpenSalesByVehicle()` in `modules/vehicles/lib/vehicle-sales.ts`) |
 | What may a buyer see on a sale link? | `services/vehicle-sale-links.ts` `shapeForBuyer()` (sections: `frontend/src/components/vehicle-sale/BuyerSections.tsx`) |
 | What is this person called? | `frontend/src/lib/displayName.ts` |
@@ -467,7 +467,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 · sitter task summary 16:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
-shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh Mon 07:30 ·
+shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh daily 07:30 ·
 Gmail ingestion every 10 min.
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the

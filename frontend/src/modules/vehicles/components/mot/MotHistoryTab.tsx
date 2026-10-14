@@ -1,16 +1,18 @@
 /**
  * MOT history tab — DVSA's record of every MOT on this van.
  *
- * Reads the last fetch from OP (refreshed weekly, Mon 07:30) with a
- * "Refresh from DVSA" button. A refresh can move the van's MOT Due date
- * FORWARD when DVSA knows of a later pass; it never moves it back — an
- * earlier DVSA date shows here as a warning instead.
- * See docs/VEHICLE-SALES-SPEC.md §3.
+ * Reads the last fetch from OP (refreshed daily, 07:30) with a "Refresh from
+ * DVSA" button. DVSA's expiry IS the van's MOT Due date (services/dvsa-mot.ts
+ * decideMotDue) — except a date typed by hand that is LATER than DVSA's, which
+ * is kept and flagged until DVSA catches up or someone uses DVSA's date.
+ * See docs/VEHICLE-SALES-SPEC.md §3 and §16.
  */
 
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMotHistory, refreshMotHistory, type MotTest } from '../../lib/mot-history'
+import { fetchMotHistory, refreshMotHistory, applyDvsaMotDate, type MotTest } from '../../lib/mot-history'
+import { MotFlags } from './MotFlags'
+import type { Vehicle } from '../../types/vehicle'
 
 interface Props {
   vehicleId: string
@@ -151,9 +153,9 @@ export function MotHistoryTab({ vehicleId }: Props) {
 
       {data.comparison === 'earlier' && summary?.dvsaMotDue && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-          DVSA says the MOT expires <strong>{fmtDate(summary.dvsaMotDue)}</strong>, but OP has{' '}
-          <strong>{fmtDate(data.motDue)}</strong>. OP won't move the date back on its own — check which is right
-          and correct MOT Due on the Details tab if needed.
+          DVSA says the MOT expires <strong>{fmtDate(summary.dvsaMotDue)}</strong>, but MOT Due was typed in by hand as{' '}
+          <strong>{fmtDate(data.motDue)}</strong>. That's kept because it's later — usually a pass DVSA doesn't show yet.
+          If it's a mistake, use DVSA's date under Details › Key Dates.
         </div>
       )}
 
@@ -169,34 +171,50 @@ export function MotHistoryTab({ vehicleId }: Props) {
 }
 
 /**
- * One line under Details › Key Dates › MOT Due, so the date and DVSA's record
- * never sit side by side disagreeing. MOT Due stays the ONE date (it's what
- * the compliance check reads); a DVSA refresh moves it forward itself, so the
- * only case that needs a person is DVSA being EARLIER. Shares the MOT tab's
- * query, so it costs nothing extra once either has loaded.
+ * One line under Details › Key Dates › MOT Due (VEHICLE-SALES-SPEC §16).
+ *
+ * The MOT Due date IS DVSA's (services/dvsa-mot.ts decideMotDue). This says so,
+ * or — when a date typed by hand is being kept because it is later than
+ * DVSA's — says that loudly, with a one-click "Use DVSA date". Reads the van's
+ * own cached DVSA fields, so it costs no request.
  */
-export function MotDvsaNote({ vehicleId }: Props) {
-  const { data } = useQuery({
-    queryKey: ['mot-history', vehicleId],
-    queryFn: () => fetchMotHistory(vehicleId),
-    staleTime: 5 * 60 * 1000,
-  })
-  const dvsaDue = data?.summary?.dvsaMotDue ?? null
-  if (!data || !dvsaDue) return null
+export function MotDvsaNote({ vehicle }: { vehicle: Vehicle }) {
+  const queryClient = useQueryClient()
+  const [busy, setBusy] = useState(false)
+  if (!vehicle.dvsaCheckedAt) return null
 
-  if (data.comparison === 'earlier') {
-    return (
-      <div className="border-b border-gray-100 py-1 text-[11px] text-amber-700">
-        ⚠ DVSA says the MOT expires {fmtDate(dvsaDue)} — earlier than the date above. Check which is right.
-      </div>
-    )
+  const manual = vehicle.motDueSource === 'manual' && !!vehicle.dvsaMotDue && vehicle.motDue !== vehicle.dvsaMotDue
+
+  async function useDvsa() {
+    setBusy(true)
+    try {
+      await applyDvsaMotDate(vehicle.id)
+      await queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+      await queryClient.invalidateQueries({ queryKey: ['mot-history', vehicle.id] })
+    } catch (err) {
+      alert((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
   }
-  if (data.comparison === 'same') {
-    return (
-      <div className="border-b border-gray-100 py-1 text-[11px] text-gray-400">
-        ✓ Matches DVSA (checked {fmtDateTime(data.fetchedAt)})
-      </div>
-    )
-  }
-  return null
+
+  return (
+    <div className={`border-b border-gray-100 py-1 text-[11px] ${manual ? 'text-amber-800' : 'text-gray-400'}`}>
+      {manual ? (
+        <>
+          ⚠ Typed in by hand — DVSA says <strong>{fmtDate(vehicle.dvsaMotDue ?? null)}</strong>. Kept because it's later
+          (a pass DVSA may not show yet); DVSA's date takes over once it catches up.{' '}
+          <button type="button" onClick={useDvsa} disabled={busy}
+            className="ml-1 rounded border border-amber-400 bg-white px-1.5 py-px font-medium text-amber-900 hover:bg-amber-50 disabled:opacity-50">
+            {busy ? 'Saving…' : 'Use DVSA date'}
+          </button>
+        </>
+      ) : vehicle.dvsaMotDue ? (
+        <>✓ From DVSA (checked {fmtDateTime(vehicle.dvsaCheckedAt)})</>
+      ) : (
+        <>DVSA has no MOT date for this van (checked {fmtDateTime(vehicle.dvsaCheckedAt)})</>
+      )}
+      <MotFlags v={vehicle} className="ml-1.5" />
+    </div>
+  )
 }
