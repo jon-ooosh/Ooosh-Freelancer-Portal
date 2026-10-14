@@ -650,6 +650,15 @@ function SnippetsPanel({ onInsert, canEdit }: { onInsert: (text: string) => void
 
 // ── Key facts (live) ───────────────────────────────────────────────────────
 
+/** "3 Sep 2025 — passed, 2 advisories": the first thing a dealer asks. From DVSA's cached summary. */
+function lastMotLine(v: Vehicle): string {
+  if (!v.dvsaCheckedAt) return 'Not checked with DVSA yet'
+  if (!v.dvsaLatestTestOn) return 'No MOT tests yet (DVSA)'
+  const result = v.dvsaLatestResult === 'FAILED' ? 'failed' : 'passed'
+  const adv = v.dvsaAdvisories ?? 0
+  return `${fmtDate(v.dvsaLatestTestOn)} — ${result}${adv > 0 ? `, ${adv} advisor${adv === 1 ? 'y' : 'ies'}` : ', no advisories'}`
+}
+
 function KeyFactsCard({ vehicle }: { vehicle: Vehicle }) {
   const rows: Array<[string, string]> = [
     ['Make / model', [vehicle.make, vehicle.model].filter(Boolean).join(' ') || '—'],
@@ -660,6 +669,8 @@ function KeyFactsCard({ vehicle }: { vehicle: Vehicle }) {
     ['Gearbox', vehicle.gearbox === 'auto' ? 'Automatic' : vehicle.gearbox === 'manual' ? 'Manual' : '—'],
     ['Mileage', vehicle.currentMileage != null ? `${vehicle.currentMileage.toLocaleString('en-GB')} mi` : '—'],
     ['MOT due', fmtDate(vehicle.motDue)],
+    ['Last MOT', lastMotLine(vehicle)],
+    ...(vehicle.dvsaRecall === 'Yes' ? [['Recall', 'Outstanding manufacturer recall (DVSA)'] as [string, string]] : []),
     ['Tax due', fmtDate(vehicle.taxDue)],
     ['Last service', fmtDate(vehicle.lastServiceDate)],
   ]

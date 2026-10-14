@@ -456,6 +456,47 @@ acc_nominal=24 …` (the `acc_nominal` here is a LIST-level id, not the §10.4 n
 id — the invoice resolves it; the assign list showed `NOMINAL_ID: 190` Misc income for
 this line). A kind-4 charge line is not stock: no availability, no scan, no prep.
 
+### 10.7 Paste the supply list onto a draft — `billing_paste.php` (POST) ✅ captured 13 Oct 2026 (job 16598)
+
+What staff do by hand to get an invoice laid out like the quote: select the supply list →
+Menu → Copy → a BLANK draft (`all: 0`) → right-click → Paste. **Copy never reaches the
+server** (nothing in Network); Paste sends the grid's rows:
+
+```
+POST /php_functions/billing_paste.php
+  selected=  bill=12966
+  data[0][ID]=8818    data[0][kind]=0  data[0][title]=Fuel  data[0][LFT]=1 data[0][RGT]=4 data[0][PRICE]=0 …
+  data[1][ID]=169041  data[1][kind]=2  data[1][qty]=1  data[1][title]=▶ Cost / fee / recharge
+      data[1][UNIT_PRICE]=10 data[1][PRICE]=10 data[1][MULTIPLIER]=5 data[1][VAT_RATE]=0
+      data[1][ACC_NOMINAL]=22 data[1][LIST_ID]=1796 data[1][LFT]=2 data[1][RGT]=3
+      data[1][inv_UNIT_PRICE]=10 data[1][inv_PRICE]=10  …(every scalar field of the supply-list row)
+  data[5][ID]=18340   data[5][kind]=3  data[5][title]=↑ Rear seats arranged around a table …
+  origin_type=1  origin_id=16598
+```
+
+The rows are the `items_to_supply_list.php` rows (same keys: `ID`, `kind`, `title`, `LFT`/`RGT`,
+`LIST_ID`, `AUTOPULL`…) plus `inv_UNIT_PRICE` / `inv_PRICE` — **with one difference that matters:
+the feed's `UNIT_PRICE` / `PRICE` are per charge PERIOD and `MULTIPLIER` is the number of
+periods; the grid sends them MULTIPLIED OUT** (16849, 13 Oct 2026: feed horizontal bar
+`UNIT_PRICE 4 PRICE 4 MULTIPLIER 2` (per Day, 2 days) → grid `UNIT_PRICE 8 PRICE 8 inv_* 8`;
+per-Week lines `MULTIPLIER 1`, unchanged). HireHop prices the pasted line from what it is sent,
+so the feed's figures put every per-Day line on at half price — OP's first live paste stopped at
+the penny check (£73.26 vs £90.76). The grid also sends a null `ACC_NOMINAL` / `DURATION` as 0.
+Response = the invoice row (§3 shape) with `items[]` in supply-list order, nesting kept
+(`LFT`/`RGT`): a header comes over as `KIND 0`, `MAIN_ID 0`, `DESCRIPTION` = its title; every
+other line has `MAIN_ID` = the job line `ID`. **HireHop resolves VAT and nominal itself** — the
+payload's `VAT_RATE: 0` / `ACC_NOMINAL: 22` (a list-level id) came back as 20% / nominal 190; the
+van as 185 Premium Splitter hire; £0 lines with `ACC_NOMINAL_ID: null`. `NET` 1210 = the job.
+
+`all: 1` ("include all owing items") puts only the priced lines on, flattened, in an order
+nobody chose — fine for two lines, unreadable for forty (16491's two pro-formas, 13 Oct).
+
+✅ Used by `hire-close-out.ts` for a job's FIRST invoice (`hh-invoice-close.ts`
+`readSupplyList()` + `postPasteSupplyLines()`), read back line by line. A top-up invoice stays
+`all: 1` — pasting the whole list again would put already-invoiced lines on a second time.
+❓ Not yet seen: whether a pasted line counts as invoiced for `billing_assign_list.php`'s
+`invoiced_so_far` (it must — staff have invoiced this way for years — but unproven by capture).
+
 ### 10.6 Xero today (checked 9 Oct 2026)
 
 Every OP-pushed deposit sits in Xero as an **unapplied Overpayment** and every

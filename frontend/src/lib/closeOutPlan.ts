@@ -52,6 +52,8 @@ export interface CloseOutPlan {
   invoiceRequirementId: string | null;
   invoiceSent: boolean;
   openProblems: number;
+  /** Several invoices owing: the one a manager chose for the hire payments; null = not chosen (or nothing to choose). */
+  paymentTarget: { invoiceId: number; number: string } | null;
 }
 export interface CloseOutResult { done: boolean; message: string; plan: CloseOutPlan }
 
@@ -115,7 +117,7 @@ export type StepState = 'done' | 'current' | 'warn' | 'todo' | 'error';
 export type CloseOutStage =
   | 'pre'          // not back yet, nothing invoiced — the panel is not shown
   | 'blocked'      // OP refuses until something is sorted
-  | 'to_invoice' | 'to_allocate' | 'credit' | 'to_send' | 'awaiting' | 'paid' | 'complete';
+  | 'to_invoice' | 'choose' | 'to_allocate' | 'credit' | 'to_send' | 'awaiting' | 'paid' | 'complete';
 export type CloseOutTone = 'grey' | 'amber' | 'blue' | 'green' | 'red';
 
 export interface CloseOutView {
@@ -137,6 +139,8 @@ export interface CloseOutView {
   chargeOwing: number;
   /** HireHop still shows the job out — a manager may invoice anyway. */
   stillOut: boolean;
+  /** Invoices owing, oldest first — more than one means the hire payments need a target. */
+  open: CloseOutInvoice[];
 }
 
 export const STEP_NAMES = ['Returned', 'Invoiced', 'Payments allocated', 'Sent to client', 'Paid in full'] as const;
@@ -154,8 +158,11 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
   const credit = plan.surplus.reduce((s, x) => s + x.amount, 0);
   const onlyNotReturned = inv.blockers.length === 1 && inv.notReturned;
   const stillOut = onlyNotReturned && opts.isManager && needsInvoice;
+  const open = plan.invoices.filter(i => i.owing >= PENNY);
+  // Several owing and nobody has said which takes the hire payments: a choice, not a refusal.
+  const needsTarget = open.length > 1 && !plan.paymentTarget;
   // "Raise the invoice first" is this panel's own job to clear, not a refusal.
-  const blockers = plan.blockers.filter(b => !b.startsWith('Raise the invoice first'))
+  const blockers = plan.blockers.filter(b => !b.startsWith('Raise the invoice first') && !b.includes('choose which one the hire payments go to'))
     .concat(stillOut ? [] : inv.blockers);
 
   let steps: StepState[] = completed && plan.fromLog
@@ -163,7 +170,7 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
     : [
         returned ? 'done' : 'todo',
         hasInv && !needsInvoice ? 'done' : 'todo',
-        hasInv && !needsInvoice && plan.allocations.length === 0 ? 'done' : 'todo',
+        hasInv && !needsInvoice && !needsTarget && plan.allocations.length === 0 ? 'done' : 'todo',
         plan.invoiceSent ? 'done' : 'todo',
         hasInv && !needsInvoice && owing < PENNY ? 'done' : 'todo',
       ];
@@ -174,6 +181,7 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
   else if (!returned && !hasInv && inv.draft == null) stage = 'pre';
   else if (blockers.length) stage = 'blocked';
   else if (needsInvoice) stage = 'to_invoice';
+  else if (needsTarget) stage = 'choose';
   else if (plan.ready) stage = 'to_allocate';
   else if (credit >= PENNY) stage = 'credit';
   else if (!plan.invoiceSent) stage = 'to_send';
@@ -192,6 +200,7 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
     pre: ['grey', 'Not back yet'],
     blocked: ['red', 'Needs sorting'],
     to_invoice: ['amber', 'Ready to invoice'],
+    choose: ['amber', 'Choose an invoice'],
     to_allocate: ['amber', 'Payments to allocate'],
     credit: ['amber', 'Money to sort'],
     to_send: ['amber', 'Not sent yet'],
@@ -202,7 +211,7 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
   return {
     stage, tone: look[stage][0], pill: look[stage][1], steps,
     stepsDone: steps.filter(s => s === 'done').length,
-    blockers, owing, credit, paid, chargeOwing, stillOut,
+    blockers, owing, credit, paid, chargeOwing, stillOut, open,
   };
 }
 

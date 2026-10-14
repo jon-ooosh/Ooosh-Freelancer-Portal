@@ -74,9 +74,15 @@ structurally impossible rather than merely discouraged.
    so a later charge is just another `all: 1` call.
 8. **Allocation spreads across open invoices, oldest first**, allocating
    `min(deposit available, invoice owing)`, hire deposits only, oldest deposit first.
-   **Phase 1 refuses a job with more than one OPEN invoice** ("two invoices owing — not
-   yet supported, allocate by hand") until the first real two-invoice job has been walked
-   through with the plan on screen; the rule is written, the live proof is not (§9 item 3).
+   ~~Phase 1 refuses a job with more than one OPEN invoice.~~ **Superseded 14 Oct 2026 (jon,
+   job 16491 — the band wanted the hire and the damage invoiced apart for their insurer):** with
+   more than one invoice owing, a manager picks which one takes the hire payments ("Hire payments
+   go to" on the Money panel → `POST /close-out/:jobId/payment-target`, kept in `job_closeout_log`
+   as step `payments_target`, newest wins). Allocation fills ONLY that invoice — never oldest-first
+   across all, or hire money would spill onto the damage invoice. The others are settled the way
+   damage already is: an excess claim (its flow picks the invoice) or Record payment. The arrival
+   hook follows the choice. The split itself is made by a manager in HireHop (two blank invoices,
+   paste each section); "Separate invoice for a Damage section" at Create invoice is a later option.
 9. **The HireHop permission lockdown waits for Phase 2** (Raise invoice) **and the
    additional-charges path.** Until then staff still need the Billing tab to invoice.
    Managers keep billing rights permanently as the escape hatch.
@@ -334,12 +340,12 @@ deliberately not on the HireHop job. On a Completed job with such an invoice owi
 Money panel shows "£x owing" (Awaiting payment) with Record payment; the arrival hook then
 allocates the payment. The Financial Summary does NOT include it (it reads the job total).
 
-**The payment portal can't see it yet.** The portal works its balance out from the HireHop
-job, which has no charge lines, so a portal link on a Completed job with a charge invoice
-would say nothing is owed. jon's rule for the portal change (13 Oct): read what is owed
-from the INVOICES only when the job is Completed — every live hire keeps today's
-carefully-tuned path. Until then, take these payments with Record payment. To be done
-with the portal repo in one session (handover pending the first live test).
+**The payment portal reads it (14 Oct 2026, `netlify-functions` #37).** The portal works its
+balance out from the HireHop job, which has no charge lines. jon's rule: at HireHop status 11
+(Completed) it reads what is owed from the INVOICES (the approved invoices' `owing`, no VAT
+adjustment on top) — every other status keeps its carefully-tuned job-value path
+(`financial.owingFromInvoices` says which ran). A portal payment then lands as a hire deposit
+and the arrival hook allocates it to the charge invoice.
 
 **Proven 13 Oct 2026** on 15745 (£1 misc → OT-INV-12315, £1.20, HireHop + Xero) — OP's own
 HireHop user may invoice a Completed job. The plan marks such invoices `chargeOnly`; the
@@ -506,6 +512,24 @@ deposit on the scratch job (a deposit creates a real Xero overpayment).
 
 ### 10.1 EU hires — the invoice-line VAT split ✅ BUILT 12 Oct 2026
 
+> **Corrected 14 Oct 2026 — the vehicle rule below was wrong.** jon, from the Ooosh! Tours guide
+> to VAT on hires (Jan 2025): vehicles are zero-rated ONLY on a hire of 31+ days or one that
+> starts AND ends outside the UK; otherwise the WHOLE vehicle hire is 20% — never split by days.
+> Equipment keeps the day split; services stay 20%. OP and the payment portal both had vehicles
+> split by days under 31 days. Now `vat-adjustment.ts` `vehiclesZeroRated()` (OP) and the portal's
+> `functions/vat-adjustment.js` carry the corrected rule; the split leaves short-hire vehicles at
+> 20% and zero-rates them with the new HireHop item **"Non-standard VAT rules - van hire starts
+> and ends outside the UK"** (stock 2056). Both item names start "Non-standard VAT rules", so the
+> days item is matched as "Non-standard VAT … and NOT starts-and-ends-outside". A priced prompt line
+> is classified through its own supply-list row; a line OP can't place stays at 20% (the guide's
+> default). Jobs touched: `scripts/vat-vehicle-rule-sweep.ts` (read-only). PCN fine moved to
+> zero-rated (code 33) the same day.
+>
+> **Pasted "Default" lines (14 Oct 2026, 16849).** A pasted line on the "Default" nominal reads
+> back with `ACC_NOMINAL_ID: null` (the old `all: 1` draft filled in 175). The split grouped them
+> as "Nominal 0"; HireHop put that custom line on 175, the read-back refused it. Lines with no
+> nominal now group on the invoice's DEFAULT nominal (`nominal_codes[].DEFAULT`, 175 Backline hire).
+
 The rule already exists and is already what the client has been told (`vat-adjustment.ts`,
 ported from the portal; HMRC 741A): vehicle and equipment revenue is 0% for the non-UK
 days (proportional), 0% on the whole vehicle hire at 31+ days, and services / delivery /
@@ -569,7 +593,27 @@ cancellation (next spec).
 
 ---
 
-## 12. Current state (10 Oct 2026) and what to do next
+## 12. Current state (14 Oct 2026) and what to do next
+
+**The module is CLOSED for now (jon, 14 Oct 2026).** Everything below is live and proven on
+real or scratch jobs; what is left is the short parked list at the end. The next money work is
+**cancellations** — `docs/CANCELLATION-SPEC.md` §"Oct 2026 — the money end" is its handover.
+
+What shipped, in one place (PRs #1409–#1418, #1432, #1447–#1450, #1453, #1454; portal
+`netlify-functions` #36, #37):
+- raise → (EU split) → approve → Xero → allocate in HireHop + Xero, one button on the Money tab;
+- the first invoice laid out like the quote (supply list pasted, §12 below; kill-switch setting);
+- charges after completion (§4.6; misc + PCN), and the portal reading a Completed job's balance
+  from its invoices (portal #37) so a charge invoice is payable on the link;
+- the vehicle VAT rule corrected (§10.1 box) in OP AND the portal, with the new "starts and ends
+  outside the UK" HireHop item;
+- more than one invoice owing → a manager picks which takes the hire payments (§1.8);
+- nightly Xero credit sweep and the arrival hook — both switched on;
+- slow presses re-read rather than "Request failed"; step colours; Financial Summary shows
+  charges after completion.
+- Invoices that need splitting (hire vs damage) are made by a MANAGER in HireHop by hand —
+  staff have no billing rights there (lockdown done, Oct 2026).
+
 
 **Lost Xero links (12 Oct).** HireHop now and then pushes an invoice to Xero but never records
 it (`ACC_ID` stays empty; a re-push fails "Invoice # must be unique" — OT-INV-12000, job
@@ -578,11 +622,11 @@ number and accepts it only when exactly one live invoice has that number AND the
 in memory (HireHop is never told). The plan, the allocation's Xero step and the sweep use it;
 an invoice with payments that still can't be found is a sweep STOP line, never "clean".
 
-**Live.** Phases 1, 2 and 3a (PRs #1409–#1418). **3b, the arrival hook, is built and
-OFF** — switch it on once the sweep has had a clean night or two (§4.5). The first real job through the whole chain
+**Live.** Phases 1, 2, 3a and 3b — the sweep (on since 10 Oct) and the arrival hook (on, confirmed
+14 Oct). The first real job through the whole chain
 was 16756 (raise ≈15 s, allocation read back in HireHop and Xero). The sweep setting was
 switched on by jon on 10 Oct, so the first backfill run is the night of 11 Oct; the
-bookkeeper has been told. Check it the morning after:
+bookkeeper has been told. To check a night's sweep:
 
 ```bash
 journalctl -u ooosh-portal --since "03:25" --until "03:45" --no-pager | grep -i sweep
@@ -616,23 +660,32 @@ second press while the first is still running.
 look (money still owed on a Completed job) · red only when OP refuses to go on · green done.
 "Paid in full" shows "Nothing paid yet" / "£x paid · £y owing" while money is owed.
 
-**Next, in this order — each one only after jon says go:**
+**The first invoice reads like the quote (13 Oct 2026).** jon: "include all owing items" (`all: 1`)
+gives a flat list in no sensible order. A job's FIRST invoice is now an empty draft with the
+supply list pasted onto it (`billing_paste.php`, `HIREHOP-BILLING-API.md` §10.7) — headers,
+nesting and the £0 accessory lines come through as on the quote. `pasteSupplyList()` reads back
+that every priced job line landed (counted by job line id), then the usual penny check. A top-up
+invoice ("Invoice the £x added since") stays `all: 1`. **An EU hire** keeps the quote layout with
+every priced line at £0 and the per-category UK / non-UK lines at the bottom (jon accepted that
+look, 13 Oct). Kill-switch without a deploy: `system_settings.closeout_invoice_layout` = `'flat'`.
 
-1. ~~Phase 3b, the arrival hook~~ — built (§4.5); switch `closeout_arrival_hook_enabled` on.
-2. ~~EU VAT split~~ — built (§10.1), proven on 15745 (12 Oct). Glance at the first real EU
-   invoice in Xero after it goes through.
-3. **HireHop permission lockdown** for non-managers (add payment / add deposit / billing)
-   once the first EU invoices have gone through OP cleanly.
-4. ~~Phase 4, additional charges~~ — rescoped and built as §4.6 (charges after completion only).
-5. **Cancellation** — separate spec, reuses the invoice call, allocation and refund route.
-6. Smaller, held on purpose (jon, 13 Oct — captured here so they aren't lost):
-   - the two-open-invoice case (§1.8) — allocation refuses it for now; decide on the first real job;
-   - §10.3 hold-on-account — a To Do to keep a surplus on account instead of refunding it;
-   - whether the `/complete` route stays (§4.4) — the panel now completes through the
-     status modal, so nothing in the UI calls it;
-   - a "record as overpayment" button for a client who paid too much;
-   - "Download PDF" of the invoice from Xero on the Money panel;
-   - ticking the invoice "sent" in Xero when staff press "Mark as sent".
-7. **The payment portal reading charge invoices** (§4.6) — the portal repo, owing from the
-   invoices ONLY when the job is Completed. A handover for a session with both repos follows
-   jon's first live test of §4.6.
+**Next — parked on purpose until a quiet time (jon, 14 Oct 2026):**
+
+- §10.3 hold-on-account — a To Do to keep a surplus on account instead of refunding it;
+- whether the `/complete` route stays (§4.4) — the panel completes through the status modal,
+  so nothing in the UI calls it;
+- a "record as overpayment" button for a client who paid too much;
+- "Download PDF" of the invoice from Xero on the Money panel;
+- ticking the invoice "sent" in Xero when staff press "Mark as sent";
+- a top-up invoice pasted (only the not-yet-invoiced lines) instead of `all: 1`;
+- "Separate invoice for the Damage section" at Create invoice (the OP-built version of the
+  manual split; the payment-target picker already handles the money);
+- the 31+ day vehicle rule for an international client whose hire never leaves the UK (the
+  rule needs one of the "Non-standard VAT" items to switch on at all — not asked for yet);
+- a winter-tyre style prompt under a van is classed by its own nominal (usually "Default" →
+  equipment), not as part of the vehicle — portal and invoice agree, but if it should follow
+  the van, both `classifyNominals()` copies change together.
+
+**Known one-offs, not code:** 15436 (pre-OP, backline invoiced as custom lines — Resolve balance
+on the Money tab; £330 van VAT under the old rule is a bookkeeper decision). The read-only sweep
+`scripts/vat-vehicle-rule-sweep.ts` found only it and the test job 16849 on 14 Oct.

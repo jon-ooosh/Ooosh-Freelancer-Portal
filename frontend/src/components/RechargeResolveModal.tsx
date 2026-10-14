@@ -288,3 +288,36 @@ export function RechargeStatusPill({ status, mode }: { status?: string | null; m
   const s = map[status || 'pending'] || map.pending;
   return <span className={`px-2 py-0.5 text-xs rounded-full ${s.cls}`}>{s.label}</span>;
 }
+
+// The one recharge slot, same place on every cost row (hub Status cell + Money
+// tab Extra costs). Three states, never a dead button:
+//   - an Extra cost not marked for recharge → "Recharge…" (opens the modal; both
+//     resolve routes flip recharge_mode 'none' → 'full' themselves, so no trip
+//     into the edit form first)
+//   - marked, not yet resolved → the amber pill IS the Resolve button
+//   - resolved → the plain status pill
+// Not offered on a part-of-quote cost (billed via the quote), a credit / £0 row
+// (a refund is never a recharge), or a cost with no job (nothing to bill onto).
+export function RechargeSlot({ cost, onResolve }: {
+  cost: { recharge_mode: 'none' | 'full' | 'partial'; recharge_status?: string | null; cost_intent?: string | null; amount_gross: number | null; job_id?: string | null };
+  onResolve: () => void;
+}) {
+  if (!cost.recharge_mode || cost.recharge_mode === 'none') {
+    if (cost.cost_intent !== 'extra' || !(Number(cost.amount_gross) > 0) || !cost.job_id) return null;
+    return (
+      <button onClick={onResolve} title="Not marked for recharge — click to bill this to the client"
+        className="px-2 py-0.5 text-xs rounded-full border border-gray-300 text-gray-500 hover:border-blue-400 hover:text-blue-700 hover:bg-blue-50 whitespace-nowrap">
+        Recharge…
+      </button>
+    );
+  }
+  if ((cost.recharge_status ?? 'pending') === 'pending') {
+    return (
+      <button onClick={onResolve} title="Push to HireHop, mark billed externally, or absorb"
+        className="px-2 py-0.5 text-xs rounded-full bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 whitespace-nowrap">
+        recharge pending · <span className="font-semibold">Resolve</span>
+      </button>
+    );
+  }
+  return <RechargeStatusPill status={cost.recharge_status} mode={cost.recharge_mode} />;
+}

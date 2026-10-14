@@ -803,7 +803,7 @@ When a vehicle breaks down mid-hire and needs swapping to a replacement.
 - [ ] **Auto-generated Interim Assessment PDF + vehicle Event-History entry for the swapped-out van.** The soft check-in's durable effects (Not Ready, mileage log, soft-checkin data on the Job Issue + job timeline) all happen, and the `isInterim` PDF variant + `save-event` soft-check-in branch exist (PR 1). The swap endpoint just doesn't fire them — the breakdown's system of record is the Job Issue. Wiring the interim PDF into the swap flow (or surfacing a "Generate interim PDF" button on the issue) is a small follow-up.
 - [ ] Client notification of vehicle change
 
-*Immediate follow-on after PR 2:* freelancer-led interim check-in UI (reuses the soft check-in primitive shipped in PR 1 — see spec §6 + §9).
+*Immediate follow-on after PR 2:* freelancer-led interim check-in UI (reuses the soft check-in primitive shipped in PR 1 — see spec §6 + §9). **Built (Oct 2026)** — the freelancer collection flow, which since 14 Oct can also collect a swapped-out van; see the spec §6 status note.
 
 ---
 

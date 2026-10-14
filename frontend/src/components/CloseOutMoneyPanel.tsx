@@ -64,7 +64,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
 
   const [plan, setPlan] = useState<CloseOutPlan | null>(null);
   const [result, setResult] = useState<CloseOutResult | null>(null);
-  const [busy, setBusy] = useState<'plan' | 'run' | 'sent' | null>(null);
+  const [busy, setBusy] = useState<'plan' | 'run' | 'sent' | 'target' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showWhy, setShowWhy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -195,6 +195,22 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     }
   };
 
+  // Several invoices owing: which one takes the hire payments. Only OP's own note — nothing
+  // moves in HireHop or Xero until Allocate — so it saves as soon as it is picked.
+  const saveTarget = async (invoiceId: number) => {
+    if (!invoiceId || invoiceId === plan.paymentTarget?.invoiceId) return;
+    setBusy('target');
+    setError(null);
+    try {
+      const r = await api.post<{ data: CloseOutPlan }>(`/close-out/${jobId}/payment-target`, { invoice_id: invoiceId });
+      publishCloseOutPlan(jobId, r.data);
+    } catch (e) {
+      setError(apiError(e, 'Could not save the choice.'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const copyLink = async () => {
     if (!portalUrl) return;
     try {
@@ -231,6 +247,11 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       chips.push(plan.excessHeld < PENNY ? [true, 'No excess held'] : [false, `${money(plan.excessHeld)} excess held`]);
       if (plan.openProblems > 0) chips.push([false, `${plan.openProblems} open Problem${plan.openProblems === 1 ? '' : 's'}`]);
       break;
+    case 'choose':
+      title = `${view.open.length} invoices owing — which takes the hire payments?`;
+      why = 'The hire payments are allocated to the invoice you choose, and only to it. The other (a separate damage invoice, say) is settled with an excess claim or Record payment, so the two stay apart.';
+      acts = [];
+      break;
     case 'to_allocate':
       title = 'Allocate the payments to the invoice';
       why = plan.sentences.join(' ');
@@ -265,6 +286,13 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       break;
   }
   if (addCharge) acts.unshift(addCharge);
+  // "Sent to client" is its own step, not a stage the money has to pass through: a job paid
+  // up front can be allocated, paid and Completed before anyone ticks it, and the to_send
+  // stage — the only one that offered the button — is skipped. Keep it on offer until it's
+  // ticked (job 16839, 14 Oct 2026: stuck at "4 of 5 steps" and 2/3 requirements).
+  if ((hasInv || plan.fromLog) && !plan.invoiceSent && plan.invoiceRequirementId && view.stage !== 'to_send' && view.stage !== 'blocked') {
+    acts.unshift({ label: busy === 'sent' ? 'Saving…' : '✓ Mark as sent', onClick: () => void setSent(true), kind: 'secondary' });
+  }
 
   const btn = (a: Act) => {
     const base = 'text-sm font-semibold rounded-lg px-3.5 py-1.5 disabled:opacity-50';
@@ -334,9 +362,30 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
             {!isManager && (view.stage === 'to_invoice' || view.stage === 'to_allocate') && (
               <span className="text-xs text-gray-500">A manager creates the invoice</span>
             )}
+            {!isManager && view.stage === 'choose' && <span className="text-xs text-gray-500">A manager chooses</span>}
           </div>
         </div>
         {why && showWhy && <p className="text-sm text-gray-600">{why}</p>}
+        {view.open.length > 1 && (
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-gray-700">Hire payments go to</span>
+            {isManager ? (
+              <select
+                value={plan.paymentTarget?.invoiceId ?? ''}
+                onChange={e => void saveTarget(Number(e.target.value))}
+                disabled={busy != null}
+                className={`rounded border px-2 py-1 text-sm ${plan.paymentTarget ? 'border-gray-300' : 'border-amber-400 bg-amber-50'}`}
+              >
+                {!plan.paymentTarget && <option value="">Choose an invoice…</option>}
+                {view.open.map(i => <option key={i.invoiceId} value={i.invoiceId}>{i.number} · {money(i.owing)} owing</option>)}
+              </select>
+            ) : (
+              <span className="font-semibold text-gray-900">{plan.paymentTarget?.number ?? 'not chosen yet'}</span>
+            )}
+            {busy === 'target' && <span className="text-xs text-gray-500">Saving…</span>}
+            {plan.paymentTarget && <span className="text-xs text-gray-500">{view.open.length > 2 ? 'the others are' : 'the other is'} settled with an excess claim or Record payment</span>}
+          </div>
+        )}
         {charge && (
           <div className="rounded-lg border border-gray-200 bg-white p-3 grid gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
             <label className="text-xs text-gray-600 grid gap-1">On the invoice (the client reads this)

@@ -15,7 +15,7 @@ import { hasOutstanding, isNonZero } from '../lib/money';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
 import CostAllocationModal from './CostAllocationModal';
-import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
+import RechargeResolveModal, { RechargeSlot } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
 import CloseOutMoneyPanel from './CloseOutMoneyPanel';
 import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
@@ -1039,7 +1039,10 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
     }
   }
 
-  if (loading) {
+  // Spinner on the FIRST load only. A refresh (e.g. the close-out panel's onChanged)
+  // keeps the tab mounted — swapping it for a spinner threw the panel away and, with it,
+  // the message saying what had just happened (16849, 13 Oct 2026).
+  if (loading && !data) {
     return (
       <div className="flex justify-center py-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
@@ -3015,7 +3018,6 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
               // job — recharge (and its resolution) belongs to that capture job,
               // so we show them read-only here, tagged as a split.
               const isSplit = !!c.is_allocation;
-              const pending = !isSplit && c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
               return (
                 <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
                   <span className="text-gray-600 truncate">
@@ -3028,13 +3030,7 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
                     <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
-                    {!isSplit && c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
-                    {pending && (
-                      <button onClick={() => setResolving(c)}
-                        className="px-2 py-0.5 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
-                        Resolve
-                      </button>
-                    )}
+                    {!isSplit && <RechargeSlot cost={{ ...c, job_id: c.job_id ?? jobId }} onResolve={() => setResolving(c)} />}
                   </span>
                 </li>
               );
@@ -3046,7 +3042,9 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
       {resolving && (
         <RechargeResolveModal
           cost={resolving}
-          onClose={() => setResolving(null)}
+          // A failed push from "Recharge…" has still marked the cost for recharge
+          // (it's now pending), so refresh on close too or the row reads stale.
+          onClose={() => { if (resolving.recharge_mode === 'none') onChanged(); setResolving(null); }}
           onResolved={() => { setResolving(null); onChanged(); }}
         />
       )}

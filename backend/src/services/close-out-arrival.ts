@@ -41,18 +41,20 @@ export async function allocateOnArrival(jobId: string, depositId: number): Promi
   if (!(await isArrivalHookEnabled())) return 'off';
   const plan = await planHireCloseOut(jobId, { fresh: true });
   const open = plan.invoices.filter((i) => i.owing >= PENNY);
-  // Not this hook's shape (no invoice yet — the usual case — or several owing): say nothing.
-  if (open.length !== 1) return 'skipped';
+  // Several owing: only once a manager has said which invoice the hire payments go to.
+  const target = open.length === 1 ? open[0] : open.find((i) => i.invoiceId === plan.paymentTarget?.invoiceId);
+  // Not this hook's shape (no invoice yet — the usual case — or several owing, none chosen): say nothing.
+  if (!target) return 'skipped';
   // Excess, or already allocated by someone else: nothing for this payment to do.
   const payment = plan.payments.find((p) => p.depositId === depositId);
   if (!payment) return 'skipped';
 
   await log(plan.jobId, null, 'arrival', true,
-    `Payment ${depositId} (${gbp(payment.available)}) arrived while ${open[0].number} shows ${gbp(open[0].owing)} owing — allocating it automatically.`,
-    { depositId, invoiceId: open[0].invoiceId });
+    `Payment ${depositId} (${gbp(payment.available)}) arrived while ${target.number} shows ${gbp(target.owing)} owing — allocating it automatically.`,
+    { depositId, invoiceId: target.invoiceId });
   const result = await runHireAllocation(plan.jobId, null, {
     onlyFromDeposit: depositId,
-    retryHint: 'press the button on the Invoice card',
+    retryHint: 'press the Money tab button',
   });
   return result.done ? 'allocated' : 'stopped';
 }

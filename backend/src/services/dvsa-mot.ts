@@ -2,10 +2,13 @@
  * DVSA MOT history — THE definition (docs/VEHICLE-SALES-SPEC.md §3).
  *
  * Talks to the DVSA MOT History API (https://history.mot.api.gov.uk), keeps the
- * last good response per van in `vehicle_mot_history`, and moves
- * `fleet_vehicles.mot_due` FORWARD when DVSA knows of a later expiry (jon,
- * Sep 2026 — the van passed and nobody typed the new date in). It never moves
- * the date backwards: an earlier DVSA date is shown as a warning only.
+ * last good response per van in `vehicle_mot_history`, and makes DVSA's MOT
+ * expiry THE `fleet_vehicles.mot_due` (jon, 14 Oct 2026 — one system-derived
+ * date on the board, the overview and the van's page; the safety check against
+ * a junk or ten-years-ahead date is the point). `decideMotDue()` is the rule:
+ * DVSA wins, except a manually typed date LATER than DVSA's is kept and flagged
+ * — that is the van that passed this morning, before DVSA shows it. Refreshed
+ * daily at 07:30, before the 08:00 compliance check.
  *
  * Auth is OAuth 2.0 client credentials via Microsoft Entra ID, plus an API key
  * header. All five values come from the DVSA registration email and live in
@@ -313,6 +316,55 @@ export function compareMotDue(ourMotDue: string | null, dvsaMotDue: string | nul
   return 'same';
 }
 
+/**
+ * THE rule for `fleet_vehicles.mot_due` given DVSA's date (VEHICLE-SALES-SPEC §16).
+ * Pure.
+ *   - DVSA has no date (never fetched, unknown reg)  → keep ours as it is.
+ *   - ours came from DVSA, or was never reconciled   → DVSA's date, either direction.
+ *   - ours was typed by hand:
+ *       DVSA's is the same or LATER                  → DVSA's (it has caught up, or
+ *                                                      there's a newer test).
+ *       DVSA's is EARLIER                            → keep ours, flag it — most
+ *         likely a pass DVSA hasn't shown yet; possibly a typo. A human decides
+ *         ("Use DVSA date"), and the flag shows wherever the date does.
+ */
+export type MotDueSource = 'dvsa' | 'manual';
+
+export interface MotDueDecision {
+  motDue: string | null;            // what mot_due should be
+  source: MotDueSource | null;      // what mot_due_source should be
+  changed: boolean;                 // mot_due moves
+  manualKept: boolean;              // a later manual date wins over DVSA's — flag it
+}
+
+export function decideMotDue(
+  ourMotDue: string | null,
+  ourSource: MotDueSource | null,
+  dvsaMotDue: string | null,
+): MotDueDecision {
+  if (!dvsaMotDue) {
+    return { motDue: ourMotDue, source: ourSource, changed: false, manualKept: false };
+  }
+  if (ourSource === 'manual' && ourMotDue && ourMotDue > dvsaMotDue) {
+    return { motDue: ourMotDue, source: 'manual', changed: false, manualKept: true };
+  }
+  return { motDue: dvsaMotDue, source: 'dvsa', changed: ourMotDue !== dvsaMotDue, manualKept: false };
+}
+
+/** The bits of the latest test the fleet board shows. Pure. */
+export function latestTestSummary(summary: MotSummary): {
+  advisories: number | null; result: string | null; testedOn: string | null;
+} {
+  const latest = summary.tests[0];
+  if (!latest) return { advisories: null, result: null, testedOn: null };
+  const advisories = latest.defects.filter((d) => d.type === 'ADVISORY' || d.type === 'MINOR').length;
+  return {
+    advisories,
+    result: latest.result === 'PASSED' || latest.result === 'FAILED' ? latest.result : null,
+    testedOn: latest.completedDate && /^\d{4}-\d{2}-\d{2}/.test(latest.completedDate) ? latest.completedDate.slice(0, 10) : null,
+  };
+}
+
 // ── Read / refresh ─────────────────────────────────────────────────────────
 
 export interface VehicleMotView {
@@ -322,13 +374,14 @@ export interface VehicleMotView {
   lastError: string | null;
   summary: MotSummary | null;
   motDue: string | null;             // OP's current mot_due
-  comparison: MotDueComparison;      // after any update
+  motDueSource: MotDueSource | null;
+  comparison: MotDueComparison;      // after any update — 'earlier' = a later manual date is being kept
 }
 
 /** What the Vehicle Detail MOT section shows. Null if the van doesn't exist. */
 export async function getVehicleMot(vehicleId: string): Promise<VehicleMotView | null> {
   const res = await query(
-    `SELECT to_char(fv.mot_due, 'YYYY-MM-DD') AS mot_due,
+    `SELECT to_char(fv.mot_due, 'YYYY-MM-DD') AS mot_due, fv.mot_due_source,
             h.payload, h.fetched_at, h.last_attempt_at, h.last_error
        FROM fleet_vehicles fv
        LEFT JOIN vehicle_mot_history h ON h.vehicle_id = fv.id
@@ -347,24 +400,27 @@ export async function getVehicleMot(vehicleId: string): Promise<VehicleMotView |
     lastError: (row.last_error as string | null) ?? null,
     summary,
     motDue,
+    motDueSource: (row.mot_due_source as MotDueSource | null) ?? null,
     comparison: compareMotDue(motDue, summary?.dvsaMotDue ?? null),
   };
 }
 
 /**
- * Fetch from DVSA, store, and move mot_due forward if DVSA is later.
+ * Fetch from DVSA, store, cache the summary on the van, and set mot_due by
+ * decideMotDue().
  * A failure is recorded on the row (keeping the last good payload) and
  * rethrown as a DvsaError. `actor` is the user id, or 'dvsa-sync' for the
- * weekly run — audit_log.user_id is NOT NULL.
+ * daily run — audit_log.user_id is NOT NULL.
  */
 export async function refreshVehicleMot(vehicleId: string, actor: string): Promise<VehicleMotView | null> {
   const v = await query(
-    `SELECT reg, to_char(mot_due, 'YYYY-MM-DD') AS mot_due FROM fleet_vehicles WHERE id = $1`,
+    `SELECT reg, to_char(mot_due, 'YYYY-MM-DD') AS mot_due, mot_due_source FROM fleet_vehicles WHERE id = $1`,
     [vehicleId],
   );
   if (!v.rows[0]) return null;
   const reg = v.rows[0].reg as string;
   const ourMotDue = (v.rows[0].mot_due as string | null) ?? null;
+  const ourSource = (v.rows[0].mot_due_source as MotDueSource | null) ?? null;
 
   let payload: unknown;
   try {
@@ -389,29 +445,95 @@ export async function refreshVehicleMot(vehicleId: string, actor: string): Promi
     [vehicleId, JSON.stringify(payload)],
   );
 
-  const { dvsaMotDue } = parseMotPayload(payload);
-  if (compareMotDue(ourMotDue, dvsaMotDue) === 'update') {
-    // Guarded on the value we read, so a staff edit in between is never overwritten.
-    const upd = await query(
-      `UPDATE fleet_vehicles SET mot_due = $1::date
-        WHERE id = $2 AND (mot_due IS NULL OR mot_due < $1::date)`,
-      [dvsaMotDue, vehicleId],
-    );
-    if ((upd.rowCount ?? 0) > 0) {
-      await query(
-        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
-         VALUES ($1, 'fleet_vehicle', $2, 'mot_due_from_dvsa', $3, $4)`,
-        [actor, vehicleId, JSON.stringify({ mot_due: ourMotDue }), JSON.stringify({ mot_due: dvsaMotDue })],
-      ).catch((err) => console.warn('[dvsa-mot] audit insert failed:', err));
-      console.log(`[dvsa-mot] ${reg}: mot_due ${ourMotDue ?? '(none)'} → ${dvsaMotDue} from DVSA`);
-    }
+  const summary = parseMotPayload(payload);
+  const latest = latestTestSummary(summary);
+  await query(
+    `UPDATE fleet_vehicles
+        SET dvsa_mot_due = $2::date, dvsa_advisories = $3, dvsa_recall = $4,
+            dvsa_latest_result = $5, dvsa_latest_test_on = $6::date, dvsa_checked_at = NOW()
+      WHERE id = $1`,
+    [vehicleId, summary.dvsaMotDue, latest.advisories, summary.hasOutstandingRecall, latest.result, latest.testedOn],
+  );
+
+  const decision = decideMotDue(ourMotDue, ourSource, summary.dvsaMotDue);
+  // Guarded on the values we read, so a staff edit in between is never overwritten.
+  const upd = await query(
+    `UPDATE fleet_vehicles SET mot_due = $2::date, mot_due_source = $3
+      WHERE id = $1 AND mot_due IS NOT DISTINCT FROM $4::date
+        AND mot_due_source IS NOT DISTINCT FROM $5`,
+    [vehicleId, decision.motDue, decision.source, ourMotDue, ourSource],
+  );
+  if (decision.changed && (upd.rowCount ?? 0) > 0) {
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+       VALUES ($1, 'fleet_vehicle', $2, 'mot_due_from_dvsa', $3, $4)`,
+      [actor, vehicleId, JSON.stringify({ mot_due: ourMotDue, mot_due_source: ourSource }),
+        JSON.stringify({ mot_due: decision.motDue, mot_due_source: decision.source })],
+    ).catch((err) => console.warn('[dvsa-mot] audit insert failed:', err));
+    console.log(`[dvsa-mot] ${reg}: mot_due ${ourMotDue ?? '(none)'} → ${decision.motDue} from DVSA`);
   }
 
   return getVehicleMot(vehicleId);
 }
 
 /**
- * Weekly run — every active van, one at a time with a small gap. A failure on
+ * "Use DVSA date" — a person settles a flagged manual date in DVSA's favour.
+ * Returns false when there is no DVSA date to use.
+ */
+export async function useDvsaMotDue(vehicleId: string, actor: string): Promise<boolean> {
+  const before = await query(
+    `SELECT to_char(mot_due, 'YYYY-MM-DD') AS mot_due, mot_due_source,
+            to_char(dvsa_mot_due, 'YYYY-MM-DD') AS dvsa_mot_due
+       FROM fleet_vehicles WHERE id = $1`,
+    [vehicleId],
+  );
+  const r = before.rows[0];
+  if (!r || !r.dvsa_mot_due) return false;
+  await query(
+    `UPDATE fleet_vehicles SET mot_due = dvsa_mot_due, mot_due_source = 'dvsa' WHERE id = $1`,
+    [vehicleId],
+  );
+  await query(
+    `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+     VALUES ($1, 'fleet_vehicle', $2, 'mot_due_use_dvsa', $3, $4)`,
+    [actor, vehicleId, JSON.stringify({ mot_due: r.mot_due, mot_due_source: r.mot_due_source }),
+      JSON.stringify({ mot_due: r.dvsa_mot_due, mot_due_source: 'dvsa' })],
+  ).catch((err) => console.warn('[dvsa-mot] audit insert failed:', err));
+  return true;
+}
+
+/**
+ * A manual edit to mot_due (Key Dates, an MOT service record). Typing DVSA's
+ * own date counts as DVSA's; anything else is 'manual' and decideMotDue()
+ * takes it from there on the next refresh.
+ */
+export async function markMotDueEdited(vehicleId: string): Promise<void> {
+  await query(
+    `UPDATE fleet_vehicles
+        SET mot_due_source = CASE WHEN mot_due IS NOT NULL AND mot_due = dvsa_mot_due THEN 'dvsa' ELSE 'manual' END
+      WHERE id = $1`,
+    [vehicleId],
+  );
+}
+
+let refreshAllRunning = false;
+
+/**
+ * "Refresh all from DVSA" (admin, fleet board). Runs in the background — one
+ * van every 1.5 s — and refuses to start a second run on top of the first.
+ */
+export function startRefreshAll(): boolean {
+  if (refreshAllRunning) return false;
+  refreshAllRunning = true;
+  void runScheduledMotRefresh()
+    .then((r) => console.log(`[dvsa-mot] refresh-all — ${r.done} done, ${r.failed} failed${r.stopped ? `, stopped (${r.stopped})` : ''}`))
+    .catch((err) => console.error('[dvsa-mot] refresh-all failed:', err))
+    .finally(() => { refreshAllRunning = false; });
+  return true;
+}
+
+/**
+ * Daily run — every active van, one at a time with a small gap. A failure on
  * one van is recorded and skipped. Stops early on a credential failure: every
  * later van would fail the same way.
  */

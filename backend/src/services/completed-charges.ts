@@ -11,13 +11,13 @@
  *
  * jon, 13 Oct 2026: managers only; two kinds for now — Misc income (with a reason) and
  * the PCN fine / handling fee (the PCN module calls this for a Completed job). The fine
- * goes on at No VAT (HireHop 27 → Xero NONE: a fine passed on is outside the scope of
- * VAT); the handling fee and misc at 20%. Damage is never charged this way — it is
+ * goes on zero-rated (HireHop 33 → Xero ZERORATEDOUTPUT — jon, 14 Oct 2026; first built
+ * as No VAT, code 27); the handling fee and misc at 20%. Damage is never charged this way — it is
  * charged before the invoice or not at all.
  *
  * A charge invoice is left out of the "invoices add up to the job" sums
- * (`isChargeOnlyInvoice`). The client pays it through Record payment (the arrival hook
- * then allocates it); the payment portal reads it only once its own change lands.
+ * (`isChargeOnlyInvoice`). The client pays it on the payment portal (which reads a Completed
+ * job's balance from its invoices) or staff use Record payment; the arrival hook allocates it.
  */
 import { query } from '../config/database';
 import { readBillingRows } from './hh-deposit-release';
@@ -33,7 +33,7 @@ const MISC_INCOME_NOMINAL = 190;
 
 export const CHARGE_TYPES = {
   misc:         { label: 'Misc income',       nominalId: MISC_INCOME_NOMINAL, rate: 20, taxId: 20 },
-  pcn_fine:     { label: 'PCN fine (no VAT)', nominalId: MISC_INCOME_NOMINAL, rate: 0,  taxId: 27 },
+  pcn_fine:     { label: 'PCN fine (zero-rated)', nominalId: MISC_INCOME_NOMINAL, rate: 0,  taxId: 33 },
   pcn_handling: { label: 'PCN handling fee',  nominalId: MISC_INCOME_NOMINAL, rate: 20, taxId: 20 },
 } as const;
 export type ChargeType = keyof typeof CHARGE_TYPES;

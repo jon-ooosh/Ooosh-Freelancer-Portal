@@ -48,7 +48,7 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 - [x] Notifications targeted to configurable roles (deduped: 7-day for soon, 1-day for overdue)
 - [x] Compliance settings API (GET/PUT for vehicle_compliance_settings)
 - [x] On-demand compliance check endpoint (GET /api/vehicles/compliance/check)
-- [ ] DVSA MOT History API integration (API key applied for 13 Mar 2026, ~5 day turnaround)
+- [x] DVSA MOT History API — LIVE Oct 2026 (`services/dvsa-mot.ts`). DVSA is THE MOT date: daily refresh 07:30, flags on the fleet board, a typed date kept only while later than DVSA's. See docs/VEHICLE-SALES-SPEC.md §3 + §16.
 - [ ] DVLA Vehicle Enquiry Service for tax status (deferred)
 
 **Phase D — Mileage Tracking** ✅ COMPLETE

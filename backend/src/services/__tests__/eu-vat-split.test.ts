@@ -166,6 +166,37 @@ describe('splitEuDraft', () => {
     expect(mockGet.mock.calls.some((c) => c[0] === '/php_functions/job_margins.php')).toBe(false);
   });
 
+  it('under 31 days: the van stays at 20% in full, backline is split by days — and the portal agrees', async () => {
+    job = { start: '2026-06-01T09:00:00Z', end: '2026-06-09T09:00:00Z' };   // 8 days, 3 outside the UK
+    supply = [{ ID: 500, kind: 2, title: 'Panel van', ACC_NOMINAL: 30, CATEGORY_ID: 369 }, backline(501), trigger(3)];
+    margins = [{ idx: 130, revenue: 800 }, { idx: 124, revenue: 400 }];
+    lines = [jobLine(500, 800, 243), jobLine(501, 400, 175)];
+    expect(await run()).toBe('split');
+    expect(lines.find((l) => l.MAIN_ID === 500)).toMatchObject({ PRICE: 800, ACC_TAX_RATE_ID: 20, VAT: 160 });
+    expect(lines.filter((l) => l.KIND === 3).map((l) => [l.DESCRIPTION, l.PRICE])).toEqual([
+      ['Backline hire, UK days (5 of 8)', 250],
+      ['Backline hire, non-UK days, zero-rated (HMRC 741A) (3 of 8)', 150],
+    ]);
+    // Portal: van £800 at 20% (£160), backline 5/8 of £400 at 20% (£50) → £1,410.00.
+    expect(draftRow().debit).toBe(1410);
+  });
+
+  it('starts and ends outside the UK: the van is zero-rated on a short hire, and "Non-standard VAT" in its name is not read as the days', async () => {
+    job = { start: '2026-06-01T09:00:00Z', end: '2026-06-09T09:00:00Z' };   // 8 days
+    supply = [
+      { ID: 500, kind: 2, title: 'Panel van', ACC_NOMINAL: 30, CATEGORY_ID: 369 },
+      backline(501),
+      { ID: 2, kind: 2, title: 'Non-standard VAT rules - van hire starts and ends outside the UK', qty: '1.00', ACC_NOMINAL: null, CATEGORY_ID: 369, VIRTUAL: '1' },
+      trigger(8),
+    ];
+    margins = [{ idx: 130, revenue: 800 }, { idx: 124, revenue: 400 }];
+    lines = [jobLine(500, 800, 243), jobLine(501, 400, 175)];
+    expect(await run()).toBe('split');
+    expect(lines.find((l) => l.MAIN_ID === 500)).toMatchObject({ PRICE: 800, ACC_TAX_RATE_ID: 33, VAT: 0 });
+    expect(lines.filter((l) => l.KIND === 3).map((l) => l.DESCRIPTION)).toEqual(['Backline hire, non-UK days, zero-rated (HMRC 741A) (8 of 8)']);
+    expect(draftRow().debit).toBe(1200);
+  });
+
   it('31+ days: vehicle lines are zero-rated at full price; backline is split; delivery is left alone', async () => {
     job = { start: '2026-06-01T09:00:00Z', end: '2026-07-06T09:00:00Z' };   // 35 days, 30 outside the UK
     supply = [
@@ -190,18 +221,43 @@ describe('splitEuDraft', () => {
 
 describe('planEuSplit', () => {
   const names = () => 'Backline hire';
-  it('refuses a line it cannot match to the job, and a custom line already on the draft', () => {
+  it('a line OP cannot place stays at 20% — the guide\'s default — and a priced prompt is placed like any other line', () => {
     const lineX = { ID: 1, MAIN_ID: 9, KIND: 2, PRICE: 10, ACC_NOMINAL_ID: 175 };
-    expect(planEuSplit({ lines: [lineX], classOf: () => null, nominalName: names, hireDays: 10, nonUkDays: 5 }))
-      .toEqual({ problem: expect.stringContaining("can't match") });
-    const custom = { ID: 2, MAIN_ID: 0, KIND: 3, PRICE: 10, DESCRIPTION: 'Something', ACC_NOMINAL_ID: 175 };
-    expect(planEuSplit({ lines: [custom], classOf: () => 'equipment', nominalName: names, hireDays: 10, nonUkDays: 5 }))
-      .toEqual({ problem: expect.stringContaining('custom line') });
+    const r1 = planEuSplit({ lines: [lineX], classOf: () => null, nominalName: names, hireDays: 10, nonUkDays: 5, vehicleZeroRated: false }) as any;
+    expect(r1.plan).toMatchObject({ zero: [], zeroRate: [], custom: [] });
+    // "Use of winter tyres (weekly rate)" — a priced prompt under a van (16849, 14 Oct 2026).
+    const prompt = { ID: 2, MAIN_ID: 18340, KIND: 3, PRICE: 40, DESCRIPTION: 'Use of winter tyres (weekly rate)', ACC_NOMINAL_ID: 175 };
+    const r2 = planEuSplit({ lines: [prompt], classOf: () => 'equipment', nominalName: names, hireDays: 10, nonUkDays: 5, vehicleZeroRated: false }) as any;
+    expect(r2.plan.zero).toEqual([prompt]);
   });
 
   it('every day outside the UK: one zero-rated line only', () => {
     const l = { ID: 1, MAIN_ID: 9, KIND: 2, PRICE: 100, ACC_NOMINAL_ID: 175 };
-    const r = planEuSplit({ lines: [l], classOf: () => 'equipment', nominalName: names, hireDays: 7, nonUkDays: 9 }) as any;
+    const r = planEuSplit({ lines: [l], classOf: () => 'equipment', nominalName: names, hireDays: 7, nonUkDays: 9, vehicleZeroRated: false }) as any;
     expect(r.plan.custom).toEqual([expect.objectContaining({ amount: 100, taxId: 33, description: 'Backline hire, non-UK days, zero-rated (HMRC 741A) (7 of 7)' })]);
+  });
+
+  it('a "Default" line (no nominal of its own) is split on the invoice\'s default nominal, never "Nominal 0" (16849)', () => {
+    const pasted = { ID: 1, MAIN_ID: 169054, KIND: 2, PRICE: 16, ACC_NOMINAL_ID: null };
+    const named = { ID: 2, MAIN_ID: 169058, KIND: 2, PRICE: 4, ACC_NOMINAL_ID: 175 };
+    const r = planEuSplit({ lines: [pasted, named], classOf: () => 'equipment', nominalName: (id) => (id === 175 ? 'Backline hire' : `Nominal ${id}`),
+      hireDays: 8, nonUkDays: 3, vehicleZeroRated: false, defaultNominalId: 175 }) as any;
+    expect(r.plan.custom.map((c: any) => [c.nominalId, c.description, c.amount])).toEqual([
+      [175, 'Backline hire, UK days (5 of 8)', 12.5],
+      [175, 'Backline hire, non-UK days, zero-rated (HMRC 741A) (3 of 8)', 7.5],
+    ]);
+  });
+
+  it('a vehicle on a hire under 31 days is never split by days — it stays at 20% (jon, 14 Oct 2026)', () => {
+    const van = { ID: 1, MAIN_ID: 9, KIND: 2, PRICE: 920, ACC_NOMINAL_ID: 240, ACC_TAX_RATE_ID: 20 };
+    const r = planEuSplit({ lines: [van], classOf: () => 'vehicle', nominalName: names, hireDays: 8, nonUkDays: 3, vehicleZeroRated: false }) as any;
+    expect(r.plan).toMatchObject({ zero: [], zeroRate: [], custom: [] });
+  });
+
+  it('a vehicle hire that starts and ends outside the UK is zero-rated whatever its length', () => {
+    const van = { ID: 1, MAIN_ID: 9, KIND: 2, PRICE: 920, ACC_NOMINAL_ID: 240, ACC_TAX_RATE_ID: 20 };
+    const r = planEuSplit({ lines: [van], classOf: () => 'vehicle', nominalName: names, hireDays: 8, nonUkDays: 0, vehicleZeroRated: true }) as any;
+    expect(r.plan.zeroRate).toEqual([van]);
+    expect(r.plan.custom).toEqual([]);
   });
 });
