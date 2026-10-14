@@ -286,6 +286,13 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       break;
   }
   if (addCharge) acts.unshift(addCharge);
+  // "Sent to client" is its own step, not a stage the money has to pass through: a job paid
+  // up front can be allocated, paid and Completed before anyone ticks it, and the to_send
+  // stage — the only one that offered the button — is skipped. Keep it on offer until it's
+  // ticked (job 16839, 14 Oct 2026: stuck at "4 of 5 steps" and 2/3 requirements).
+  if ((hasInv || plan.fromLog) && !plan.invoiceSent && plan.invoiceRequirementId && view.stage !== 'to_send' && view.stage !== 'blocked') {
+    acts.unshift({ label: busy === 'sent' ? 'Saving…' : '✓ Mark as sent', onClick: () => void setSent(true), kind: 'secondary' });
+  }
 
   const btn = (a: Act) => {
     const base = 'text-sm font-semibold rounded-lg px-3.5 py-1.5 disabled:opacity-50';
