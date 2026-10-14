@@ -1603,13 +1603,16 @@ function JobDetailContent() {
   // for returned jobs — the plan is a live HireHop read, shared (30 s) with the panel
   // and the Invoice card, so this costs nothing extra when either is on screen.
   const [closeOutPlan, setCloseOutPlan] = useState<CloseOutPlan | null>(null);
+  // The read failed — the cancelled banner falls back to the figure saved at cancellation.
+  const [closeOutFailed, setCloseOutFailed] = useState(false);
   const closeOutRelevant = !!id && !!job?.hh_job_number && !job?.is_internal
     && (job?.pipeline_status === 'returned' || job?.pipeline_status === 'returned_incomplete'
       || job?.pipeline_status === 'cancelled');   // a cancellation's fee and refund (CANCELLATION-SPEC.md)
   useEffect(() => {
     if (!closeOutRelevant || !id) { setCloseOutPlan(null); return; }
     const unsub = subscribeCloseOutPlan(id, setCloseOutPlan);
-    loadCloseOutPlan(id).then(setCloseOutPlan).catch(() => undefined);
+    setCloseOutFailed(false);
+    loadCloseOutPlan(id).then(setCloseOutPlan).catch(() => setCloseOutFailed(true));
     return unsub;
   }, [id, closeOutRelevant]);
   const moneyDot = (() => {
@@ -3357,6 +3360,11 @@ function JobDetailContent() {
                   {(() => {
                     // Where the money stands NOW, from the same plan as the Money tab's panel —
                     // the figure saved at cancellation is only an estimate and never changes.
+                    // Until HireHop has answered, say so — never show the old estimate and then
+                    // change it while someone is on the phone to the client (jon, 14 Oct 2026).
+                    if (!closeOutPlan && !closeOutFailed && job.hh_job_number && !job.is_internal) {
+                      return <span className="text-gray-500 italic">Reading HireHop…</span>;
+                    }
                     const c = closeOutPlan?.cancellation;
                     if (c && c.invoiced) {
                       const v = closeOutView(closeOutPlan!, { isManager: false });

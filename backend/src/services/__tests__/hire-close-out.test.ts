@@ -876,7 +876,8 @@ describe('a cancelled job (job 16739)', () => {
     expect(posts('/php_functions/billing_save.php')).toEqual([expect.objectContaining({ all: 0, job: 16739 })]);
     const lines = posts('/php_functions/billing_save_item.php');
     expect(lines).toEqual([expect.objectContaining({ id: 0, kind: 3, total: 412.5, vat_rate: 20, vat_id: 20, nominal_id: 190 })]);
-    expect(lines[0].note).toBe('Cancellation fee (T&Cs clause 7) — hire 12 Oct 2026 to 23 Oct 2026 — cancelled 8 Oct 2026');
+    expect(lines[0].note).toBe('Cancellation fee (T&Cs clause 7) - cancelled 8 Oct 2026');
+    expect(lines[0].note.length).toBeLessThanOrEqual(80);                 // HireHop keeps 80 characters
     expect(posts('/php_functions/billing_payments_save.php')).toEqual([expect.objectContaining({ deposit: 9354, paid: 495, OWNER: 13100 })]);
     expect(mockXeroAllocate).toHaveBeenCalledWith(expect.objectContaining({ overpaymentId: 'op-9354', amount: 495 }));
     expect(xero.invoiceDue['x-13100']).toBe(0);
