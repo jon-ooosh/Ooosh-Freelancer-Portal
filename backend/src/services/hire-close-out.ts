@@ -148,6 +148,13 @@ export interface CloseOutPlan {
   invoiceSent: boolean;
   /** Problems still open on the job — a warning for the invoice, a gate for Complete. */
   openProblems: number;
+  /**
+   * More than one invoice owing (a hire invoice and a separate damage one, say): the one a
+   * manager chose for the hire payments (`setPaymentTarget`, kept in the close-out log).
+   * Allocation fills only that invoice; the others are settled by an excess claim or Record
+   * payment. Null when there is nothing to choose, or nobody has chosen yet (jon, 14 Oct 2026).
+   */
+  paymentTarget: { invoiceId: number; number: string } | null;
 }
 
 export interface CloseOutResult {
@@ -541,6 +548,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     blockers, warnings, sentences: [] as string[], ready: false, readyToComplete: false,
     log: await readLog(job.id),
     ...await jobFacts(job.id),
+    paymentTarget: null as CloseOutPlan['paymentTarget'],
   };
   if (!job.hh_job_number) { blockers.push('This job has no HireHop job number.'); return base; }
   if (job.is_internal) { blockers.push('Internal job — there is no client to invoice.'); return base; }
@@ -568,9 +576,14 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   if (invoices.length === 0) {
     blockers.push('Raise the invoice first — the job has no approved invoice in HireHop.');
   }
+  // Several owing: the hire payments go to ONE of them, chosen by a manager — never spread
+  // oldest-first, or hire money would spill onto a damage invoice the client wants kept apart.
+  let target: CloseOutInvoice | null = open.length === 1 ? open[0] : null;
   if (open.length > 1) {
-    blockers.push(`${open.length} invoices are owing (${open.map((i) => i.number).join(', ')}) — allocating across more than `
-      + 'one open invoice is not switched on yet. Allocate this one by hand in HireHop, or ask for it to be turned on.');
+    const chosen = base.log.find((e) => e.step === PAYMENT_TARGET_STEP && e.ok);   // newest first
+    target = open.find((i) => i.invoiceId === Number((chosen?.hh_refs as any)?.invoiceId || 0)) ?? null;
+    if (target) base.paymentTarget = { invoiceId: target.invoiceId, number: target.number };
+    else blockers.push(`${open.length} invoices are owing (${open.map((i) => i.number).join(', ')}) — choose which one the hire payments go to.`);
   }
   for (const inv of open) {
     if (!inv.inXero) blockers.push(`${inv.number} is approved in HireHop but has not reached Xero — check it there first.`);
@@ -638,10 +651,10 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     }
     if (p.bankId == null) blockers.push(`Couldn't read which bank payment ${p.depositId} is on.`);
   }
-  const { allocations, surplus, shortfall } = planAllocations(open.length === 1 ? open : [], payments);
+  const { allocations, surplus } = planAllocations(target ? [target] : [], payments);
   base.allocations = allocations;
   base.surplus = surplus;
-  base.shortfall = open.length === 1 ? shortfall : round2(open.reduce((s, i) => s + i.owing, 0));
+  base.shortfall = round2(open.reduce((s, i) => s + i.owing, 0) - allocations.reduce((s, a) => s + a.amount, 0));
   if (base.excessHeld >= PENNY) {
     warnings.push(`${gbp(base.excessHeld)} excess is still held on this job — claim, roll over or reimburse it from the Excess card. It is never allocated here.`);
   }
@@ -650,6 +663,11 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   const sentences: string[] = [];
   for (const a of allocations) sentences.push(`Allocate ${gbp(a.amount)} of payment ${a.depositId} to ${a.invoiceNumber}.`);
   for (const s of surplus) sentences.push(`Leave ${gbp(s.amount)} of payment ${s.depositId} unallocated — refund it, apply it to another job, or hold it on account.`);
+  if (base.paymentTarget) {
+    for (const inv of open.filter((i) => i.invoiceId !== target!.invoiceId)) {
+      sentences.push(`${inv.number} (${gbp(inv.owing)} owing) takes no hire payments — settle it with an excess claim or Record payment.`);
+    }
+  }
   if (base.shortfall >= PENNY) sentences.push(`The client will still owe ${gbp(base.shortfall)} after this.`);
   if (allocations.length === 0 && blockers.length === 0) {
     sentences.push(open.length ? 'Nothing to allocate — no hire payment is holding money.' : 'Every invoice is at £0.00 in HireHop.');
@@ -666,6 +684,21 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
  * it's completed it's completed) — the card shows OP's own record instead,
  * and "Check again" (`fresh`) forces the full read.
  */
+const PAYMENT_TARGET_STEP = 'payments_target';
+
+/**
+ * A manager chooses which of several owing invoices the hire payments go to. Recorded in
+ * the close-out log (newest wins) — nothing in HireHop or Xero changes until Allocate.
+ */
+export async function setPaymentTarget(jobIdOrNumber: string, userId: string | null, invoiceId: number): Promise<CloseOutPlan> {
+  const job = await loadJob(jobIdOrNumber);
+  const plan = await buildPlan(job);
+  const inv = plan.invoices.find((i) => i.invoiceId === invoiceId && i.owing >= PENNY);
+  if (!inv) throw Object.assign(new Error('That invoice is not owing on this job.'), { status: 400 });
+  await log(job.id, userId, PAYMENT_TARGET_STEP, true, `Hire payments go to ${inv.number}.`, { invoiceId: inv.invoiceId, number: inv.number });
+  return buildPlan(job);
+}
+
 export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: boolean } = {}): Promise<CloseOutPlan> {
   const job = await loadJob(jobIdOrNumber);
   if (!opts.fresh && job.pipeline_status === 'completed') {
@@ -680,7 +713,7 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
         invoices: [], payments: [], allocations: [], surplus: [], shortfall: 0, excessHeld: 0,
         blockers: [], warnings: [],
         sentences: [`Completed in HireHop${completed.user_name ? ` by ${completed.user_name}` : ''} on ${String(completed.created_at).slice(0, 10)}.`],
-        ready: false, readyToComplete: false, log: entries, ...await jobFacts(job.id),
+        ready: false, readyToComplete: false, log: entries, ...await jobFacts(job.id), paymentTarget: null,
       };
     }
   }
