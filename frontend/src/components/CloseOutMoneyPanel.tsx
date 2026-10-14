@@ -338,7 +338,8 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     if (i === 2 && view.steps[2] === 'done') return allInXero ? 'HireHop ✓ Xero ✓' : 'HireHop ✓';
     if (cancel) {
       if (i === 0 && cancel.cancelledAt) return fmtDay(cancel.cancelledAt);
-      if (i === 3 && view.credit >= PENNY) return `${money(view.credit)} to refund`;
+      // Before the fee is invoiced every payment looks "spare" — the refund is only known after it.
+      if (i === 3 && view.credit >= PENNY && cancel.invoiced) return `${money(view.credit)} to refund`;
       if (i === 3 && view.owing >= PENNY) return `${money(view.owing)} owing`;
       return '';
     }

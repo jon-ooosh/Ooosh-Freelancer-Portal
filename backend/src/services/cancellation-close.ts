@@ -214,3 +214,18 @@ export async function syncRefundReminder(jobId: string, refundDue: number, userI
   }
   return `The pending refund of ${gbp(due)} on the Money tab is ready — press Process on it to refund the client.`;
 }
+
+/**
+ * A settled cancellation ticks its "Payment Reconciliation" card (made at cancellation as
+ * "Process refund of £x"). For a hire the derivation engine ticks it once the invoices owe
+ * nothing; a cancellation is only reconciled once the refund has ALSO gone, which only the
+ * plan knows — so the plan ticks it. Idempotent; never un-ticks.
+ */
+export async function markCancellationReconciled(jobId: string): Promise<void> {
+  await query(
+    `UPDATE job_requirements SET status = 'done', updated_at = NOW()
+      WHERE job_id = $1 AND requirement_type = 'payment_reconcile' AND phase = 'post_hire'
+        AND status NOT IN ('done', 'cancelled')`,
+    [jobId],
+  ).catch((e) => console.warn('[cancellation-close] could not tick Payment Reconciliation:', e));
+}
