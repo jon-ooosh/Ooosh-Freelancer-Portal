@@ -290,7 +290,7 @@ A cancelled job has financial records, cancelled assignments, crew notifications
 
 ---
 
-## Oct 2026 — the money end (BUILT 14 Oct 2026 — read this first)
+## Oct 2026 — the money end (BUILT and CLOSED 14 Oct 2026 — read this first)
 
 **Status:** the April foundation above is live (the `cancelled` status, the 7.1 calculator, the
 modal, the Lost & Cancelled page, crew and client emails, Re-open, the close-out requirements). What
@@ -360,6 +360,10 @@ by hand from the Excess card first. Tests: `hire-close-out.test.ts` "a cancelled
 it, but only the plan knows a cancellation's refund has gone); the red banner on Job Detail reads the
 live plan (refund due / fee owing / settled) instead of the figure saved at cancellation; "Process
 refund" warns (confirm, not a gate) while the fee isn't invoiced yet.
+
+**The fee line's wording** (jon, 14 Oct 2026): `Cancellation fee (T&Cs clause 7) - hire 12 Oct 2026 to 23 Oct 2026`.
+No cancellation date: HireHop cuts a line at 80 characters, so 16739's read "…cancelled 8", and the line
+already says it's a cancellation.
 
 **Not built (parked):** the credit-note path for a hire invoiced before cancelling; partial
 cancellation; zero-rating a fee (decision 5).

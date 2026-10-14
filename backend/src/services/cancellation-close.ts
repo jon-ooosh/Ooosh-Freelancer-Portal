@@ -107,10 +107,11 @@ const day = (iso: string | null) => {
 /** What the client reads on the invoice. */
 export function feeLineDescription(f: CancellationFacts): string {
   const hire = [day(f.jobDate), day(f.jobEnd)].filter(Boolean);
+  // Short on purpose: HireHop keeps only the first 80 characters of a line (CUSTOM_LINE_MAX).
+  // No cancellation date — the line already says it is a cancellation fee (jon, 14 Oct 2026).
   const parts = ['Cancellation fee (T&Cs clause 7)'];
   if (hire.length) parts.push(`hire ${hire.length === 2 && hire[0] !== hire[1] ? `${hire[0]} to ${hire[1]}` : hire[0]}`);
-  if (f.cancelledAt) parts.push(`cancelled ${day(f.cancelledAt)}`);
-  return parts.join(' — ');
+  return parts.join(' - ');
 }
 
 /**

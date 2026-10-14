@@ -159,6 +159,13 @@ describe('raiseChargeInvoice', () => {
     expect(mockSync).not.toHaveBeenCalled();
   });
 
+  it('refuses a line longer than HireHop keeps (80 characters) — nothing written', async () => {
+    const r = await raiseChargeInvoice('job-uuid', 'u1', { lines: [misc('x'.repeat(81), 10)], reason: 'y' });
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('HireHop keeps only 80');
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
   it('needs a reason and a description', async () => {
     expect((await raiseChargeInvoice('job-uuid', 'u1', { lines: [misc('X', 10)], reason: ' ' })).done).toBe(false);
     expect((await raiseChargeInvoice('job-uuid', 'u1', { lines: [misc(' ', 10)], reason: 'y' })).done).toBe(false);

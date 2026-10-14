@@ -223,7 +223,7 @@ by number + total (`hh-invoice-close.ts` `adoptLostXeroInvoices()`). §1 is
 settled, §5 the allocation rule, §9 the phases, **§12 the current state and the parked list — read it first.**
 Refunds only through the existing routes.
 
-**BUILT, 14 Oct 2026: cancellations — the money end.** `docs/CANCELLATION-SPEC.md` final section. A
+**CLOSED, 14 Oct 2026: cancellations — the money end** (first live job 16739, checked in HireHop and Xero). `docs/CANCELLATION-SPEC.md` final section. A
 cancelled job owes its FEE, not the hire: HireHop keeps the hire's lines on a cancelled job (never touch
 them — Re-open copies them), so the Money summary (`financial.cancellation`), the close-out plan
 (`CloseOutPlan.cancellation`) and the payment portal all read the fee / fee invoice instead. The fee is
