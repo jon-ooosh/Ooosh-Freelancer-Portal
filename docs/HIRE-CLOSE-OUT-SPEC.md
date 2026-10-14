@@ -506,6 +506,19 @@ deposit on the scratch job (a deposit creates a real Xero overpayment).
 
 ### 10.1 EU hires — the invoice-line VAT split ✅ BUILT 12 Oct 2026
 
+> **Corrected 14 Oct 2026 — the vehicle rule below was wrong.** jon, from the Ooosh! Tours guide
+> to VAT on hires (Jan 2025): vehicles are zero-rated ONLY on a hire of 31+ days or one that
+> starts AND ends outside the UK; otherwise the WHOLE vehicle hire is 20% — never split by days.
+> Equipment keeps the day split; services stay 20%. OP and the payment portal both had vehicles
+> split by days under 31 days. Now `vat-adjustment.ts` `vehiclesZeroRated()` (OP) and the portal's
+> `functions/vat-adjustment.js` carry the corrected rule; the split leaves short-hire vehicles at
+> 20% and zero-rates them with the new HireHop item **"Non-standard VAT rules - van hire starts
+> and ends outside the UK"** (stock 2056). Both item names start "Non-standard VAT rules", so the
+> days item is matched as "Non-standard VAT … and NOT starts-and-ends-outside". A priced prompt line
+> is classified through its own supply-list row; a line OP can't place stays at 20% (the guide's
+> default). Jobs touched: `scripts/vat-vehicle-rule-sweep.ts` (read-only). PCN fine moved to
+> zero-rated (code 33) the same day.
+
 The rule already exists and is already what the client has been told (`vat-adjustment.ts`,
 ported from the portal; HMRC 741A): vehicle and equipment revenue is 0% for the non-UK
 days (proportional), 0% on the whole vehicle hire at 31+ days, and services / delivery /

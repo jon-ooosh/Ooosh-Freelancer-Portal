@@ -174,7 +174,7 @@ export async function applyPcnAction(
 
   // ── 0. A COMPLETED HireHop job takes no new lines, so the handling fee and the
   // fine go on one charge invoice instead (HIRE-CLOSE-OUT-SPEC §4.6, jon 13 Oct 2026):
-  // the fee at 20%, the fine at No VAT. Same idempotency flags as the line path. ──
+  // the fee at 20%, the fine zero-rated (code 33). Same idempotency flags as the line path. ──
   let viaChargeInvoice = false;
   if ((opts.action === 'transfer_liability' || opts.action === 'pay_recharge') && pcn.hh_job_number
       && (await readJobStatus(Number(pcn.hh_job_number))) === 11) {
