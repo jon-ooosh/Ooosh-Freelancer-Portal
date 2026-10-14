@@ -602,7 +602,7 @@ export function VehicleDetailPage() {
           onSaveDate={v => saveField('mot_due', v)}
           onSaveBooked={v => saveField('mot_booked_in_date', v)}
         />
-        <MotDvsaNote vehicleId={vehicle.id} />
+        <MotDvsaNote vehicle={vehicle} />
         <ComplianceDateRow
           label="Tax Due" date={vehicle.taxDue} warningDays={cs.tax_warning_days}
           bookedIn={vehicle.taxBookedInDate}

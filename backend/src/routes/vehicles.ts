@@ -46,7 +46,7 @@ import {
   type ConditionReportEmailParams,
 } from '../services/condition-report-email';
 import { getSystemSetting } from './system-settings';
-import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError } from '../services/dvsa-mot';
+import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError, markMotDueEdited, useDvsaMotDue, startRefreshAll } from '../services/dvsa-mot';
 import { closeOpenSaleOnRemoval } from '../services/vehicle-sales';
 import { ukToday } from '../services/uk-date';
 import {
@@ -1355,7 +1355,7 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
     }
 
     values.push(id);
-    const result = await query(
+    let result = await query(
       `UPDATE fleet_vehicles SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
       values
     );
@@ -1363,6 +1363,13 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
     if (result.rows.length === 0) {
       res.status(404).json({ error: 'Vehicle not found' });
       return;
+    }
+
+    // A typed MOT Due is 'manual' unless it is DVSA's own date — DVSA's is the
+    // MOT date everywhere (services/dvsa-mot.ts decideMotDue).
+    if (v.mot_due !== undefined || v.motDue !== undefined) {
+      await markMotDueEdited(String(id));
+      result = await query('SELECT * FROM fleet_vehicles WHERE id = $1', [id]);
     }
 
     // Leaving the fleet ends any open sale on the van (services/vehicle-sales.ts).
@@ -1825,6 +1832,7 @@ router.post('/fleet/:vehicleId/service-log', async (req: AuthRequest, res: Respo
       if (next_due_date) {
         if (service_type === 'mot') {
           await query('UPDATE fleet_vehicles SET mot_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
+          await markMotDueEdited(String(vehicleId));
         } else if (service_type === 'insurance') {
           await query('UPDATE fleet_vehicles SET insurance_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
         } else if (service_type === 'tax') {
@@ -4056,6 +4064,47 @@ router.get('/fleet/:id/mot-history', authorize(...STAFF_ROLES), async (req: Auth
   } catch (error) {
     console.error('[vehicles/mot-history] error:', error);
     res.status(500).json({ error: 'Failed to load MOT history' });
+  }
+});
+
+/**
+ * POST /api/vehicles/mot-history/refresh-all — admin, fleet board. Every active
+ * van from DVSA, in the background (one every 1.5 s). The daily run does the
+ * same at 07:30; this is for "now", e.g. after a batch of MOTs.
+ */
+router.post('/mot-history/refresh-all', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { isDvsaConfigured } = await import('../services/dvsa-mot');
+    if (!isDvsaConfigured()) {
+      res.status(503).json({ error: 'DVSA is not set up on this server' });
+      return;
+    }
+    const count = await query(
+      `SELECT COUNT(*)::int AS n FROM fleet_vehicles WHERE is_active = true AND COALESCE(fleet_group, '') <> 'old_sold'`,
+    );
+    const started = startRefreshAll();
+    res.status(started ? 202 : 200).json({ data: { started, vehicles: count.rows[0].n } });
+  } catch (error) {
+    console.error('[vehicles/mot-history] refresh-all error:', error);
+    res.status(500).json({ error: 'Failed to start the DVSA refresh' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:id/mot-history/use-dvsa — settle a flagged manual
+ * MOT Due date in DVSA's favour ("Use DVSA date" under Key Dates).
+ */
+router.post('/fleet/:id/mot-history/use-dvsa', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const ok = await useDvsaMotDue(String(req.params.id), req.user!.id);
+    if (!ok) {
+      res.status(409).json({ error: 'There is no DVSA MOT date for this van yet — refresh from DVSA first' });
+      return;
+    }
+    res.json({ data: await getVehicleMot(String(req.params.id)) });
+  } catch (error) {
+    console.error('[vehicles/mot-history] use-dvsa error:', error);
+    res.status(500).json({ error: 'Failed to use the DVSA date' });
   }
 });
 
@@ -7545,6 +7594,16 @@ function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?
     serviceStatus: (row.service_status as string) || '',
     hireStatus: (row.hire_status as string) || '',
     motDue: formatDate(row.mot_due),
+    // DVSA is the MOT date (services/dvsa-mot.ts). Source + the cached summary
+    // drive the flags on the fleet board, cards and Key Dates.
+    motDueSource: (row.mot_due_source as string | null) ?? null,
+    dvsaMotDue: formatDate(row.dvsa_mot_due) || null,
+    dvsaAdvisories: row.dvsa_advisories != null ? Number(row.dvsa_advisories) : null,
+    dvsaRecall: (row.dvsa_recall as string | null) ?? null,
+    dvsaLatestResult: (row.dvsa_latest_result as string | null) ?? null,
+    dvsaLatestTestOn: formatDate(row.dvsa_latest_test_on) || null,
+    dvsaCheckedAt: row.dvsa_checked_at instanceof Date && !Number.isNaN(row.dvsa_checked_at.getTime())
+      ? row.dvsa_checked_at.toISOString() : null,
     taxDue: formatDate(row.tax_due),
     tflDue: formatDate(row.tfl_due),
     lastServiceDate: formatDate(row.last_service_date),
