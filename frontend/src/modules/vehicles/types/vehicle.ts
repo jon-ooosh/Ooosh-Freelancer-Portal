@@ -23,6 +23,8 @@ export interface Vehicle {
   /** DVSA's own summary, cached at each refresh (services/dvsa-mot.ts). */
   dvsaMotDue?: string | null
   dvsaAdvisories?: number | null
+  /** Of those, how many nobody has marked done / noted yet (§18) — the chip count. */
+  dvsaAdvisoriesOpen?: number | null
   dvsaRecall?: string | null
   dvsaLatestResult?: string | null
   dvsaLatestTestOn?: string | null

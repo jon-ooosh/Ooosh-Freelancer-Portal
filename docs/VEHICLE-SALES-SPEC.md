@@ -478,3 +478,30 @@ run), flagged *Manual* meanwhile; *Use DVSA date* applies it at once. No DVSA da
 alone. The `manualKept` flag is gone; migration 287's column comment describing the old rule is
 stale (migrations are never edited) — this section is the rule.
 
+
+## 18. Ticking off advisories (jon, 15 Oct 2026)
+
+DVSA's record can't be edited, and a buyer can read the same record on gov.uk — so advisories are
+never hidden or deleted. Instead staff record what WE did about each one.
+
+- **Per item, latest test only.** On Vehicle › History › MOT, each advisory / minor item on the
+  latest test has **Done** (fixed, replaced, checked) and **Noted** (seen, not fixed yet), each with
+  an optional note. The mark shows who and when, with *Undo*. Older tests are history — no ticks.
+- **The fleet board's "N adv" chip counts only unmarked ones** (`fleet_vehicles.dvsa_advisories_open`);
+  all marked → no chip. The sale page's Key facts says "2 advisories (1 open)" / "(all dealt with)".
+- **A mark belongs to one test** (`vehicle_mot_advisory_marks.test_key` = DVSA's test number). A
+  new MOT starts its advisories open again — a repeat advisory is the tester seeing it again.
+  Marks on old tests are kept as a record.
+- **The buyer page is unchanged** — DVSA's full, unedited history.
+- Accepted weak point: someone can tick *Done* without doing the work. Who / when is recorded
+  (and audited, `mot_advisory_marked` / `mot_advisory_cleared`), which jon judged enough.
+
+Code: `services/dvsa-mot.ts` — `advisoryKeys()` (one key per item, "TYPE|text#n" so identical items
+are told apart; the frontend twin in `lib/mot-history.ts` must match it), `markAdvisory()` (refuses a
+key it didn't build, or a test that's no longer the latest), `recountOpenAdvisories()` (the ONLY
+writer of the open count — after every refresh and every mark). Route
+`PUT /api/vehicles/fleet/:id/mot-history/advisories`, staff roles. Migration 288.
+
+**Verified** against a real Postgres 16 with all 288 migrations: identical items marked separately;
+done + noted both clear the count; re-mark updates; undo reopens; four audit rows; a stale test key
+and a MAJOR item refused; a new test starts fresh with the old marks kept.

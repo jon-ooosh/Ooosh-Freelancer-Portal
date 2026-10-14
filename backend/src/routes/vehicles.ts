@@ -46,7 +46,7 @@ import {
   type ConditionReportEmailParams,
 } from '../services/condition-report-email';
 import { getSystemSetting } from './system-settings';
-import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError, markMotDueEdited, useDvsaMotDue, startRefreshAll } from '../services/dvsa-mot';
+import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError, markMotDueEdited, useDvsaMotDue, startRefreshAll, markAdvisory } from '../services/dvsa-mot';
 import { closeOpenSaleOnRemoval } from '../services/vehicle-sales';
 import { ukToday } from '../services/uk-date';
 import {
@@ -4109,6 +4109,36 @@ router.post('/fleet/:id/mot-history/use-dvsa', authorize(...STAFF_ROLES), async 
 });
 
 /**
+ * PUT /api/vehicles/fleet/:id/mot-history/advisories — tick off one advisory on
+ * the latest MOT test (VEHICLE-SALES-SPEC §18). Body: { testKey, defectKey,
+ * state: 'done' | 'noted' | null (clear), note? }. Who and when are recorded.
+ */
+router.put('/fleet/:id/mot-history/advisories', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const { testKey, defectKey, state, note } = req.body ?? {};
+    if (typeof testKey !== 'string' || typeof defectKey !== 'string'
+      || !(state === 'done' || state === 'noted' || state === null)) {
+      res.status(400).json({ error: 'testKey, defectKey and state (done / noted / null) are required' });
+      return;
+    }
+    const cleanNote = typeof note === 'string' && note.trim() !== '' ? note.trim().slice(0, 500) : null;
+    const id = String(req.params.id);
+    const result = await markAdvisory(id, { testKey, defectKey, state, note: cleanNote }, req.user!.id);
+    if (result !== 'ok') {
+      res.status(409).json({
+        error: result === 'no_history' ? 'No MOT history for this van yet'
+          : 'The MOT record has changed since this page loaded — reload and try again',
+      });
+      return;
+    }
+    res.json({ data: await getVehicleMot(id) });
+  } catch (error) {
+    console.error('[vehicles/mot-history] advisories error:', error);
+    res.status(500).json({ error: 'Failed to save the advisory' });
+  }
+});
+
+/**
  * POST /api/vehicles/fleet/:id/mot-history/refresh
  * Fetch from DVSA now ("Refresh from DVSA" button). Moves mot_due forward
  * when DVSA knows a later expiry; never backwards. Weekly refresh runs
@@ -7599,6 +7629,7 @@ function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?
     motDueSource: (row.mot_due_source as string | null) ?? null,
     dvsaMotDue: formatDate(row.dvsa_mot_due) || null,
     dvsaAdvisories: row.dvsa_advisories != null ? Number(row.dvsa_advisories) : null,
+    dvsaAdvisoriesOpen: row.dvsa_advisories_open != null ? Number(row.dvsa_advisories_open) : null,
     dvsaRecall: (row.dvsa_recall as string | null) ?? null,
     dvsaLatestResult: (row.dvsa_latest_result as string | null) ?? null,
     dvsaLatestTestOn: formatDate(row.dvsa_latest_test_on) || null,

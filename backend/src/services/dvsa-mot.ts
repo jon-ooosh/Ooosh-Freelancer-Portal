@@ -25,6 +25,7 @@
  * average daily mileage and the Forecast tab's mileage pace.
  */
 import { query } from '../config/database';
+import { fullDisplayName } from './display-name';
 
 const DVSA_API_BASE = 'https://history.mot.api.gov.uk';
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -353,12 +354,145 @@ export function latestTestSummary(summary: MotSummary): {
 } {
   const latest = summary.tests[0];
   if (!latest) return { advisories: null, result: null, testedOn: null };
-  const advisories = latest.defects.filter((d) => d.type === 'ADVISORY' || d.type === 'MINOR').length;
+  const advisories = latest.defects.filter(isAdvisory).length;
   return {
     advisories,
     result: latest.result === 'PASSED' || latest.result === 'FAILED' ? latest.result : null,
     testedOn: latest.completedDate && /^\d{4}-\d{2}-\d{2}/.test(latest.completedDate) ? latest.completedDate.slice(0, 10) : null,
   };
+}
+
+// ── Advisory marks (VEHICLE-SALES-SPEC §18) ────────────────────────────────
+//
+// DVSA's record can't be changed, so staff record what WE did about each
+// advisory / minor item on the LATEST test: 'done' or 'noted', with an optional
+// note and who/when. A mark belongs to one test, so a new MOT starts its
+// advisories open again. The fleet board's chip counts only unmarked ones.
+
+export type AdvisoryState = 'done' | 'noted';
+
+export interface AdvisoryMark {
+  defectKey: string;
+  state: AdvisoryState;
+  note: string | null;
+  markedBy: string | null;   // display name
+  markedAt: string;          // ISO
+}
+
+/** The defects that can be ticked off — the same ones the chip counts. Pure. */
+export function isAdvisory(d: MotDefect): boolean {
+  return d.type === 'ADVISORY' || d.type === 'MINOR';
+}
+
+/** What a mark hangs on: DVSA's test number, else the test's date. Pure. */
+export function motTestKey(t: MotTest): string | null {
+  return t.testNumber ?? (t.completedDate ? `date:${t.completedDate}` : null);
+}
+
+/**
+ * One key per defect on the test, in order — null for anything that isn't an
+ * advisory. "TYPE|text#n", n counting identical items so two "tyre worn"
+ * advisories on one test are two keys. Pure.
+ */
+export function advisoryKeys(t: MotTest): Array<string | null> {
+  const seen = new Map<string, number>();
+  return t.defects.map((d) => {
+    if (!isAdvisory(d)) return null;
+    const base = `${d.type}|${(d.text ?? '').trim()}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return `${base}#${n}`;
+  });
+}
+
+async function readLatestTest(vehicleId: string): Promise<MotTest | null> {
+  const res = await query(`SELECT payload FROM vehicle_mot_history WHERE vehicle_id = $1`, [vehicleId]);
+  const payload = res.rows[0]?.payload;
+  return payload ? parseMotPayload(payload).tests[0] ?? null : null;
+}
+
+async function readMarks(vehicleId: string, testKey: string): Promise<AdvisoryMark[]> {
+  const res = await query(
+    `SELECT m.defect_key, m.state, m.note, m.marked_at,
+            p.first_name, p.last_name, p.preferred_name, u.email
+       FROM vehicle_mot_advisory_marks m
+       LEFT JOIN users u ON u.id = m.marked_by
+       LEFT JOIN people p ON p.id = u.person_id
+      WHERE m.vehicle_id = $1 AND m.test_key = $2`,
+    [vehicleId, testKey],
+  );
+  return res.rows.map((r) => ({
+    defectKey: r.defect_key as string,
+    state: r.state as AdvisoryState,
+    note: (r.note as string | null) ?? null,
+    markedBy: fullDisplayName(r) || null,
+    markedAt: (r.marked_at as Date).toISOString(),
+  }));
+}
+
+/**
+ * fleet_vehicles.dvsa_advisories_open — the latest test's advisories with no
+ * mark. The ONLY writer of that column; run after a refresh and every mark.
+ */
+export async function recountOpenAdvisories(vehicleId: string): Promise<void> {
+  const latest = await readLatestTest(vehicleId);
+  const key = latest ? motTestKey(latest) : null;
+  if (!latest || !key) {
+    await query(`UPDATE fleet_vehicles SET dvsa_advisories_open = dvsa_advisories WHERE id = $1`, [vehicleId]);
+    return;
+  }
+  const keys = advisoryKeys(latest).filter((k): k is string => k !== null);
+  const marked = new Set((await readMarks(vehicleId, key)).map((m) => m.defectKey));
+  const open = keys.filter((k) => !marked.has(k)).length;
+  await query(`UPDATE fleet_vehicles SET dvsa_advisories_open = $2 WHERE id = $1`, [vehicleId, open]);
+}
+
+export type MarkAdvisoryResult = 'ok' | 'no_history' | 'test_changed' | 'unknown_advisory';
+
+/**
+ * Mark one advisory on the latest test done / noted, or clear the mark
+ * (state null). `testKey` is the test the person was looking at — if DVSA has
+ * a newer test since, nothing is written ('test_changed'). Audited either way.
+ */
+export async function markAdvisory(
+  vehicleId: string,
+  input: { testKey: string; defectKey: string; state: AdvisoryState | null; note: string | null },
+  actor: string,
+): Promise<MarkAdvisoryResult> {
+  const latest = await readLatestTest(vehicleId);
+  const key = latest ? motTestKey(latest) : null;
+  if (!latest || !key) return 'no_history';
+  if (key !== input.testKey) return 'test_changed';
+  if (!advisoryKeys(latest).includes(input.defectKey)) return 'unknown_advisory';
+
+  const before = await query(
+    `SELECT state, note FROM vehicle_mot_advisory_marks WHERE vehicle_id = $1 AND test_key = $2 AND defect_key = $3`,
+    [vehicleId, key, input.defectKey],
+  );
+  if (input.state) {
+    await query(
+      `INSERT INTO vehicle_mot_advisory_marks (vehicle_id, test_key, defect_key, state, note, marked_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (vehicle_id, test_key, defect_key) DO UPDATE
+         SET state = EXCLUDED.state, note = EXCLUDED.note, marked_by = EXCLUDED.marked_by, marked_at = NOW()`,
+      [vehicleId, key, input.defectKey, input.state, input.note, actor],
+    );
+  } else {
+    await query(
+      `DELETE FROM vehicle_mot_advisory_marks WHERE vehicle_id = $1 AND test_key = $2 AND defect_key = $3`,
+      [vehicleId, key, input.defectKey],
+    );
+  }
+  await query(
+    `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+     VALUES ($1, 'fleet_vehicle', $2, $3, $4, $5)`,
+    [actor, vehicleId, input.state ? 'mot_advisory_marked' : 'mot_advisory_cleared',
+      JSON.stringify({ test_key: key, defect_key: input.defectKey, ...(before.rows[0] ?? {}) }),
+      JSON.stringify(input.state ? { state: input.state, note: input.note } : {})],
+  ).catch((err) => console.warn('[dvsa-mot] audit insert failed:', err));
+
+  await recountOpenAdvisories(vehicleId);
+  return 'ok';
 }
 
 // ── Read / refresh ─────────────────────────────────────────────────────────
@@ -371,7 +505,10 @@ export interface VehicleMotView {
   summary: MotSummary | null;
   motDue: string | null;             // OP's current mot_due
   motDueSource: MotDueSource | null;
-  comparison: MotDueComparison;      // after any update — 'earlier' = a later manual date is being kept
+  comparison: MotDueComparison;      // after any update — 'earlier' = a later typed date, until the next check
+  /** The latest test's key and its advisory marks (§18). */
+  latestTestKey: string | null;
+  advisoryMarks: AdvisoryMark[];
 }
 
 /** What the Vehicle Detail MOT section shows. Null if the van doesn't exist. */
@@ -389,6 +526,7 @@ export async function getVehicleMot(vehicleId: string): Promise<VehicleMotView |
 
   const summary = row.payload ? parseMotPayload(row.payload) : null;
   const motDue = (row.mot_due as string | null) ?? null;
+  const latestTestKey = summary?.tests[0] ? motTestKey(summary.tests[0]) : null;
   return {
     configured: isDvsaConfigured(),
     fetchedAt: row.fetched_at ? (row.fetched_at as Date).toISOString() : null,
@@ -398,6 +536,8 @@ export async function getVehicleMot(vehicleId: string): Promise<VehicleMotView |
     motDue,
     motDueSource: (row.mot_due_source as MotDueSource | null) ?? null,
     comparison: compareMotDue(motDue, summary?.dvsaMotDue ?? null),
+    latestTestKey,
+    advisoryMarks: latestTestKey ? await readMarks(vehicleId, latestTestKey) : [],
   };
 }
 
@@ -450,6 +590,8 @@ export async function refreshVehicleMot(vehicleId: string, actor: string): Promi
       WHERE id = $1`,
     [vehicleId, summary.dvsaMotDue, latest.advisories, summary.hasOutstandingRecall, latest.result, latest.testedOn],
   );
+  // A new test starts its advisories open again; marks on the old one stay as a record.
+  await recountOpenAdvisories(vehicleId);
 
   const decision = decideMotDue(ourMotDue, ourSource, summary.dvsaMotDue);
   // Guarded on the values we read, so a staff edit in between is never overwritten.

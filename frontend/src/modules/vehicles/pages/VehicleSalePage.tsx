@@ -656,7 +656,10 @@ function lastMotLine(v: Vehicle): string {
   if (!v.dvsaLatestTestOn) return 'No MOT tests yet (DVSA)'
   const result = v.dvsaLatestResult === 'FAILED' ? 'failed' : 'passed'
   const adv = v.dvsaAdvisories ?? 0
-  return `${fmtDate(v.dvsaLatestTestOn)} — ${result}${adv > 0 ? `, ${adv} advisor${adv === 1 ? 'y' : 'ies'}` : ', no advisories'}`
+  const open = v.dvsaAdvisoriesOpen ?? adv
+  return `${fmtDate(v.dvsaLatestTestOn)} — ${result}${adv > 0
+    ? `, ${adv} advisor${adv === 1 ? 'y' : 'ies'} (${open === 0 ? 'all dealt with' : `${open} open`})`
+    : ', no advisories'}`
 }
 
 function KeyFactsCard({ vehicle }: { vehicle: Vehicle }) {

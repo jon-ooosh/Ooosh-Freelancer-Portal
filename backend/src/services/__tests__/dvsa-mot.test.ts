@@ -3,7 +3,7 @@
  * deciding whether mot_due moves. The second is the one that matters — it
  * rewrites a compliance date on its own, so it must only ever move FORWARD.
  */
-import { parseMotPayload, compareMotDue, normaliseReg, describeDvsaError, entraErrorDetail, decideMotDue, latestTestSummary } from '../dvsa-mot';
+import { parseMotPayload, compareMotDue, normaliseReg, describeDvsaError, entraErrorDetail, decideMotDue, latestTestSummary, advisoryKeys, motTestKey } from '../dvsa-mot';
 
 // Shaped like a real DVSA VehicleWithMotResponse (openapi spec, Sep 2026).
 const vanWithTests = {
@@ -322,5 +322,34 @@ describe('latestTestSummary', () => {
   it('nothing to say for a van with no tests', () => {
     expect(latestTestSummary(parseMotPayload({ hasOutstandingRecall: 'No', motTestDueDate: '2028-03-01' })))
       .toEqual({ advisories: null, result: null, testedOn: null });
+  });
+});
+
+describe('advisory marks — keys (§18)', () => {
+  const test = parseMotPayload({
+    motTests: [{
+      completedDate: '2025-09-03T14:40:00Z', testResult: 'PASSED', expiryDate: '2026-09-02', motTestNumber: '999',
+      defects: [
+        { type: 'ADVISORY', text: 'Tyre worn close to legal limit' },
+        { type: 'MAJOR', text: 'Brake pipe corroded' },
+        { type: 'ADVISORY', text: 'Tyre worn close to legal limit' },
+        { type: 'MINOR', text: ' Wiper blade deteriorated ' },
+      ],
+    }],
+  }).tests[0];
+
+  it('one key per advisory / minor, identical items told apart, others null', () => {
+    expect(advisoryKeys(test)).toEqual([
+      'ADVISORY|Tyre worn close to legal limit#1',
+      null,
+      'ADVISORY|Tyre worn close to legal limit#2',
+      'MINOR|Wiper blade deteriorated#1',
+    ]);
+  });
+
+  it('a mark hangs on the test number, else the date — so a new MOT starts fresh', () => {
+    expect(motTestKey(test)).toBe('999');
+    expect(motTestKey({ ...test, testNumber: null })).toBe('date:2025-09-03T14:40:00Z');
+    expect(motTestKey({ ...test, testNumber: null, completedDate: null })).toBeNull();
   });
 });

@@ -327,6 +327,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '285_shop_auto_close_setting.sql',
         '286_job_groups.sql',
         '287_fleet_dvsa_mot_summary.sql',
+        '288_mot_advisory_marks.sql',
       ];
 
       for (const migration of migrations) {
