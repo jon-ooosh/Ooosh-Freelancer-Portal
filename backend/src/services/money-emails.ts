@@ -7,6 +7,29 @@ import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { resolveRoutingOverride } from './email-routing';
 import { isBookingWonTransition } from './pipeline-stage';
+import { greetingName } from './display-name';
+
+/**
+ * The greeting for one email that goes to several people: "Aaron",
+ * "Aaron and Reed", "Aaron, Reed, Mark and Tim". Past four names it is "all";
+ * with no usable name it is "there". Names should already be greeting names
+ * (preferred name, else first name) — a blank entry is someone we can't name,
+ * who still gets the email but isn't listed.
+ */
+export function greetEveryone(names: Array<string | null | undefined>): string {
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const raw of names) {
+    const name = (raw || '').trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    list.push(name);
+  }
+  if (list.length === 0) return 'there';
+  if (list.length > 4) return 'all';
+  if (list.length === 1) return list[0];
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
 
 /** Refund timescale based on payment method */
 export function getRefundTimescale(paymentMethod: string): string {
@@ -41,6 +64,8 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   primaryEmail: string | null;
   primaryFirstName: string | null;
   ccEmails: string[];
+  /** Greeting name for each recipient, primary first, then the CCs in order ('' = no usable name). */
+  recipientNames: string[];
 }> {
   // First pass: per-job contact selection (migration 086). When staff have
   // explicitly ticked who's on THIS hire via the contact picker, those rows
@@ -56,7 +81,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   // reachable, return `null` and let resolveClientEmailTarget route to
   // info@ with the "no client email on file" banner.
   const jobContactsRows = await query(
-    `SELECT p.email, p.first_name, p.last_name, jc.is_primary
+    `SELECT p.email, p.first_name, p.last_name, p.preferred_name, jc.is_primary
      FROM job_contacts jc
      JOIN people p ON p.id = jc.person_id
      WHERE jc.job_id = $1
@@ -80,6 +105,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
         primaryEmail: null,
         primaryFirstName: jobResult.rows[0]?.client_name?.split(' ')[0] || null,
         ccEmails: [],
+        recipientNames: [],
       };
     }
     // Preserve the staff-chosen primary if reachable; else the next
@@ -90,8 +116,9 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
     const ccEmails = reachable.slice(1).map((r: any) => r.email);
     return {
       primaryEmail: primary.email,
-      primaryFirstName: primary.first_name || primary.email?.split('@')[0] || null,
+      primaryFirstName: greetingName(primary, '') || primary.email?.split('@')[0] || null,
       ccEmails,
+      recipientNames: reachable.map((r: any) => greetingName(r, '')),
     };
   }
 
@@ -100,7 +127,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   // NOTE: manager1_person_id / manager2_person_id are INTERNAL Ooosh staff (account managers),
   // not client contacts — they are NOT included here.
   const result = await query(
-    `SELECT DISTINCT p.email, p.first_name, p.last_name,
+    `SELECT DISTINCT p.email, p.first_name, p.last_name, p.preferred_name,
        CASE
          WHEN por.role IN ('Tour Manager', 'Manager', 'Production Manager', 'Accountant', 'Booking Agent') THEN 1
          WHEN por.role = 'General Contact' THEN 2
@@ -152,6 +179,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
         primaryEmail: org.email,
         primaryFirstName: org.name?.split(' ')[0] || null,
         ccEmails: [],
+        recipientNames: [],
       };
     }
 
@@ -162,7 +190,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
     // with a valid email counts; anything fuzzier would risk routing a
     // stranger's confirmation to the wrong person.
     const clientNameMatch = await query(
-      `SELECT p.email, p.first_name
+      `SELECT p.email, p.first_name, p.preferred_name
        FROM jobs j
        JOIN people p
          ON p.is_deleted = false
@@ -178,8 +206,9 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
       const person = clientNameMatch.rows[0];
       return {
         primaryEmail: person.email,
-        primaryFirstName: person.first_name,
+        primaryFirstName: greetingName(person, '') || null,
         ccEmails: [],
+        recipientNames: [greetingName(person, '')],
       };
     }
 
@@ -188,16 +217,17 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
       `SELECT client_name, company_name FROM jobs WHERE id = $1`,
       [jobId]
     );
-    return { primaryEmail: null, primaryFirstName: jobResult.rows[0]?.client_name?.split(' ')[0] || null, ccEmails: [] };
+    return { primaryEmail: null, primaryFirstName: jobResult.rows[0]?.client_name?.split(' ')[0] || null, ccEmails: [], recipientNames: [] };
   }
 
   const primary = result.rows[0];
-  const ccEmails = result.rows.slice(1).map((r: any) => r.email).filter(Boolean);
+  const ccRows = result.rows.slice(1).filter((r: any) => r.email);
 
   return {
     primaryEmail: primary.email,
-    primaryFirstName: primary.first_name || primary.email?.split('@')[0] || null,
-    ccEmails,
+    primaryFirstName: greetingName(primary, '') || primary.email?.split('@')[0] || null,
+    ccEmails: ccRows.map((r: any) => r.email),
+    recipientNames: [primary, ...ccRows].map((r: any) => greetingName(r, '')),
   };
 }
 
@@ -217,6 +247,10 @@ export async function resolveClientEmailTarget(jobId: string, templateId?: strin
   primaryEmail: string;
   primaryFirstName: string;
   ccEmails: string[];
+  /** Everyone the email goes to, by name — "Reed, Mark and Tim". Use it for a client money email's "Hi …". */
+  greeting: string;
+  /** Greeting name per recipient, primary first ('' = no usable name). */
+  recipientNames: string[];
   isFallback: boolean;
   clientName: string | null;
   jobNumber: string | null;
@@ -231,6 +265,8 @@ export async function resolveClientEmailTarget(jobId: string, templateId?: strin
         primaryEmail: override.primaryEmail,
         primaryFirstName: override.primaryFirstName || 'there',
         ccEmails: override.ccEmails,
+        greeting: greetEveryone(override.recipientNames),
+        recipientNames: override.recipientNames,
         isFallback: false,
         clientName: null,
         jobNumber: null,
@@ -245,6 +281,11 @@ export async function resolveClientEmailTarget(jobId: string, templateId?: strin
       primaryEmail: recipients.primaryEmail,
       primaryFirstName: recipients.primaryFirstName || 'there',
       ccEmails: recipients.ccEmails,
+      // An org mailbox (no person) keeps the old single greeting.
+      greeting: recipients.recipientNames.length > 0
+        ? greetEveryone(recipients.recipientNames)
+        : recipients.primaryFirstName || 'there',
+      recipientNames: recipients.recipientNames,
       isFallback: false,
       clientName: null,
       jobNumber: null,
@@ -261,6 +302,8 @@ export async function resolveClientEmailTarget(jobId: string, templateId?: strin
     primaryEmail: 'info@oooshtours.co.uk',
     primaryFirstName: 'team',
     ccEmails: [],
+    greeting: 'team',
+    recipientNames: [],
     isFallback: true,
     clientName: job?.client_name || job?.company_name || null,
     jobNumber: job?.hh_job_number ? String(job.hh_job_number) : null,
@@ -334,7 +377,7 @@ export async function getDriverEmail(driverId: string): Promise<{
   firstName: string | null;
 }> {
   const result = await query(
-    `SELECT d.email, d.full_name, p.email AS person_email, p.first_name
+    `SELECT d.email, d.full_name, p.email AS person_email, p.first_name, p.preferred_name
      FROM drivers d
      LEFT JOIN people p ON p.id = d.person_id
      WHERE d.id = $1`,
@@ -345,7 +388,7 @@ export async function getDriverEmail(driverId: string): Promise<{
 
   const row = result.rows[0];
   // Extract first name, skipping common title prefixes (MR, MRS, MS, MISS, DR, etc.)
-  let firstName = row.first_name;
+  let firstName = greetingName(row, '') || null;
   if (!firstName && row.full_name) {
     const titles = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'sir', 'lady', 'lord']);
     const parts = row.full_name.trim().split(/\s+/);
@@ -406,12 +449,14 @@ export async function sendPaymentEmail(opts: {
   if (cleanOverride.length > 0) {
     toEmail = cleanOverride[0].email;
     ccEmails = cleanOverride.slice(1).map((r) => r.email);
-    firstName = cleanOverride[0].name.trim().split(/\s+/)[0] || toEmail.split('@')[0] || 'there';
+    firstName = cleanOverride.length > 1
+      ? greetEveryone(cleanOverride.map((r) => r.name.trim().split(/\s+/)[0]))
+      : cleanOverride[0].name.trim().split(/\s+/)[0] || toEmail.split('@')[0] || 'there';
   } else {
     target = await resolveClientEmailTarget(jobId, templateId);
     toEmail = target.primaryEmail;
     ccEmails = target.ccEmails;
-    firstName = target.primaryFirstName || 'there';
+    firstName = target.greeting;
     isFallback = target.isFallback;
   }
 
@@ -519,7 +564,7 @@ export async function sendRefundEmail(opts: {
           })
         : undefined,
       variables: {
-        firstName: target.primaryFirstName || 'there',
+        firstName: target.greeting,
         amount: `\u00A3${amount.toFixed(2)}`,
         jobName: job?.job_name || `Job #${job?.hh_job_number || ''}`,
         jobNumber: String(job?.hh_job_number || ''),
@@ -649,12 +694,14 @@ export async function sendPaymentStatementEmail(opts: {
   if (cleanOverride.length > 0) {
     toEmail = cleanOverride[0].email;
     ccEmails = cleanOverride.slice(1).map((r) => r.email);
-    firstName = cleanOverride[0].name.trim().split(/\s+/)[0] || toEmail.split('@')[0] || 'there';
+    firstName = cleanOverride.length > 1
+      ? greetEveryone(cleanOverride.map((r) => r.name.trim().split(/\s+/)[0]))
+      : cleanOverride[0].name.trim().split(/\s+/)[0] || toEmail.split('@')[0] || 'there';
   } else {
     target = await resolveClientEmailTarget(jobId, templateId);
     toEmail = target.primaryEmail;
     ccEmails = target.ccEmails;
-    firstName = target.primaryFirstName || 'there';
+    firstName = target.greeting;
     isFallback = target.isFallback;
   }
 
@@ -770,8 +817,11 @@ export async function sendExcessEmail(opts: {
   let isFallback = false;
   if (!recipientEmail) {
     recipientEmail = target.primaryEmail;
-    recipientFirstName = target.primaryFirstName;
+    recipientFirstName = target.greeting;
     isFallback = target.isFallback;
+  } else {
+    // The driver is the To and the job contacts are copied in — greet them all.
+    recipientFirstName = greetEveryone([recipientFirstName, ...target.recipientNames]);
   }
 
   // CC list: include job contacts that aren't the primary recipient (only when not falling back)
@@ -789,10 +839,6 @@ export async function sendExcessEmail(opts: {
   const isReimbursement = templateId.includes('reimburs');
   const hireStart = startDate ? ` that starts on ${fmtDate(startDate)}` : '';
   const hireEnd = endDate ? (isReimbursement ? ` that finished on ${fmtDate(endDate)}` : `, which finishes on ${fmtDate(endDate)}`) : '';
-
-  const reasonSection = reason
-    ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;"><tr><td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;"><p style="margin:0;font-size:15px;color:#991b1b;">${reason}</p></td></tr></table>`
-    : '';
 
   await emailService.send(templateId, {
     to: recipientEmail,
@@ -817,8 +863,9 @@ export async function sendExcessEmail(opts: {
       refundAmount: refundAmount != null ? `\u00A3${refundAmount.toFixed(2)}` : '',
       originalAmount: originalAmount != null ? `\u00A3${originalAmount.toFixed(2)}` : '',
       retainedAmount: retainedAmount != null ? `\u00A3${retainedAmount.toFixed(2)}` : '',
+      // Plain text only: every variable is HTML-escaped, so markup built here
+      // arrives as visible code. The reason box lives in the template.
       reason: reason || '',
-      reasonSection,
       previousJobNumber: previousJobNumber || '',
       previousJobRef: previousJobNumber ? ` #${previousJobNumber}` : '',
       claimAmount: `\u00A3${amount.toFixed(2)}`,

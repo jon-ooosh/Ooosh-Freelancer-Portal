@@ -1447,7 +1447,7 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         We need to let you know that <strong>{{claimAmount}}</strong> of your insurance excess for job <strong>#{{jobNumber}}</strong> has been retained.
       </p>
-      {{reasonSection}}
+      {{#if reason}}<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;"><tr><td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;"><p style="margin:0;font-size:15px;color:#991b1b;">{{reason}}</p></td></tr></table>{{/if}}
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         If you would like to discuss this, please reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
       </p>
