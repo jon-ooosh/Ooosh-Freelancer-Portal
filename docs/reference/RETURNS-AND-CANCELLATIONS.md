@@ -192,8 +192,8 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
 - [x] Dashboard widget: cancellation overview (pending refunds, outstanding close-out items, fees retained)
 - [x] "Back to Lost & Cancelled" navigation from Job Detail
 
-**Remaining work:**
-- [ ] HH invoice creation on cancellation (auto-create invoice for retained fee via `billing_deposit_save.php`)
+**Remaining work** — the money end is the NEXT piece (Oct 2026); its handover and five open decisions are `docs/CANCELLATION-SPEC.md` §"Oct 2026 — the money end", built on the hire close-out module's recipe:
+- [ ] HH invoice for the retained fee (custom-line invoice on `hh-invoice-close.ts`, NOT `billing_deposit_save.php` — see the handover)
 - [ ] Refund processing through OP (currently manual via Money tab — future enhancement)
 - [ ] Cancellation data surfaced in client hire history (like retro data)
 - [ ] Early return calculator frontend integration (clause 7.3 — backend built, UI not yet)

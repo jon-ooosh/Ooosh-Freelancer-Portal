@@ -16,8 +16,8 @@
  * charged before the invoice or not at all.
  *
  * A charge invoice is left out of the "invoices add up to the job" sums
- * (`isChargeOnlyInvoice`). The client pays it through Record payment (the arrival hook
- * then allocates it); the payment portal reads it only once its own change lands.
+ * (`isChargeOnlyInvoice`). The client pays it on the payment portal (which reads a Completed
+ * job's balance from its invoices) or staff use Record payment; the arrival hook allocates it.
  */
 import { query } from '../config/database';
 import { readBillingRows } from './hh-deposit-release';
