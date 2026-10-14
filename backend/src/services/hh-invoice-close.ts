@@ -312,8 +312,8 @@ export async function readSupplyList(hhJobNumber: number): Promise<Row[]> {
  * Put the whole supply list on an EMPTY draft in its own order — what staff do by hand
  * with Copy, then Paste on a blank invoice (`billing_paste.php`, captured 13 Oct 2026 on
  * 16598: HIREHOP-BILLING-API.md §10.7). Copy never reaches the server; Paste sends the
- * grid's rows, so we send the rows the supply list gave us, plus the `inv_UNIT_PRICE` /
- * `inv_PRICE` pair the grid adds. HireHop works out VAT and nominal from the stock (the
+ * grid's rows, so we send the rows the supply list gave us with the prices multiplied out
+ * as the grid shows them, plus the `inv_UNIT_PRICE` / `inv_PRICE` pair the grid adds. HireHop works out VAT and nominal from the stock (the
  * capture sent `VAT_RATE: 0` and got 20% back). Headers and nesting come through as on the
  * quote; "include all owing items" (`all: 1`) flattens them in an order nobody chose.
  * The caller reads back.
@@ -321,7 +321,20 @@ export async function readSupplyList(hhJobNumber: number): Promise<Row[]> {
 export async function postPasteSupplyLines(hhJobNumber: number, invoiceId: number, items: Row[]): Promise<any> {
   const body: Record<string, unknown> = { selected: '', bill: invoiceId };
   items.forEach((item, i) => {
-    const row: Row = { inv_UNIT_PRICE: item.UNIT_PRICE ?? 0, inv_PRICE: item.PRICE ?? 0, ...item };
+    // The feed's UNIT_PRICE / PRICE are per charge PERIOD (a day, a week); MULTIPLIER is how
+    // many periods the job runs. HireHop's grid multiplies them out before it pastes, and
+    // HireHop prices the invoice line from what it is sent — sending the feed's figures put
+    // every per-Day line on at half price on a 2-day job (16849, 13 Oct 2026: £8 bar → £4).
+    const m = Number(item.MULTIPLIER);
+    const times = Number.isFinite(m) && m > 0 ? m : 1;
+    const unit = round2(Number(item.UNIT_PRICE ?? 0) * times);
+    const price = round2(Number(item.PRICE ?? 0) * times);
+    const row: Row = {
+      ...item,
+      UNIT_PRICE: unit, PRICE: price, inv_UNIT_PRICE: unit, inv_PRICE: price,
+      // As the grid sends them: a missing nominal / duration is 0, not blank.
+      ACC_NOMINAL: item.ACC_NOMINAL ?? 0, ACC_NOMINAL_PO: item.ACC_NOMINAL_PO ?? 0, DURATION: item.DURATION ?? 0,
+    };
     for (const [k, v] of Object.entries(row)) {
       if (v !== null && typeof v === 'object') continue;   // TYPE_CUSTOM_FIELDS and the like: the grid doesn't send them
       body[`data[${i}][${k}]`] = v ?? '';

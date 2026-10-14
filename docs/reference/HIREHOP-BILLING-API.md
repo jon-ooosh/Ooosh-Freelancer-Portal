@@ -475,7 +475,13 @@ POST /php_functions/billing_paste.php
 ```
 
 The rows are the `items_to_supply_list.php` rows (same keys: `ID`, `kind`, `title`, `LFT`/`RGT`,
-`LIST_ID`, `AUTOPULL`…) plus `inv_UNIT_PRICE` / `inv_PRICE` (= `UNIT_PRICE` / `PRICE`).
+`LIST_ID`, `AUTOPULL`…) plus `inv_UNIT_PRICE` / `inv_PRICE` — **with one difference that matters:
+the feed's `UNIT_PRICE` / `PRICE` are per charge PERIOD and `MULTIPLIER` is the number of
+periods; the grid sends them MULTIPLIED OUT** (16849, 13 Oct 2026: feed horizontal bar
+`UNIT_PRICE 4 PRICE 4 MULTIPLIER 2` (per Day, 2 days) → grid `UNIT_PRICE 8 PRICE 8 inv_* 8`;
+per-Week lines `MULTIPLIER 1`, unchanged). HireHop prices the pasted line from what it is sent,
+so the feed's figures put every per-Day line on at half price — OP's first live paste stopped at
+the penny check (£73.26 vs £90.76). The grid also sends a null `ACC_NOMINAL` / `DURATION` as 0.
 Response = the invoice row (§3 shape) with `items[]` in supply-list order, nesting kept
 (`LFT`/`RGT`): a header comes over as `KIND 0`, `MAIN_ID 0`, `DESCRIPTION` = its title; every
 other line has `MAIN_ID` = the job line `ID`. **HireHop resolves VAT and nominal itself** — the

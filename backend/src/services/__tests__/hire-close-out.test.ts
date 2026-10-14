@@ -244,7 +244,9 @@ beforeEach(() => {
   pasteDrops = null;
   supply = [
     { ID: 8818, kind: 0, title: 'Vehicle', LFT: 1, RGT: 8, PRICE: 0, UNIT_PRICE: 0 },
-    { ID: 164980, kind: 2, qty: 1, title: 'Premium LWB Splitter Van', LFT: 2, RGT: 5, PRICE: 500, UNIT_PRICE: 500, TYPE_CUSTOM_FIELDS: { preptimemins: 60 } },
+    // As the feed sends it (16849): the price per DAY, as a string, and the number of days apart.
+    { ID: '164980', kind: '2', qty: '1.00', title: 'Premium LWB Splitter Van', LFT: '2', RGT: '5', PRICE: '250.000000', UNIT_PRICE: '250.000000', MULTIPLIER: 2,
+      ACC_NOMINAL: null, DURATION: null, TYPE_CUSTOM_FIELDS: { preptimemins: 60 } },
     { ID: 18340, kind: 3, qty: 1, title: '↑ Rear seats arranged around a table', LFT: 3, RGT: 4, PRICE: 0, UNIT_PRICE: 0 },
     { ID: 169041, kind: 2, qty: 1, title: '▶ Cost / fee / recharge', LFT: 6, RGT: 7, PRICE: 10, UNIT_PRICE: 10 },
   ];
@@ -554,7 +556,10 @@ describe('raiseHireInvoice', () => {
     const [paste] = posts('/php_functions/billing_paste.php');
     expect(paste).toMatchObject({
       bill: 13000, selected: '', origin_type: 1, origin_id: 16015,
-      'data[0][ID]': 8818, 'data[0][kind]': 0, 'data[1][ID]': 164980, 'data[1][inv_PRICE]': 500, 'data[1][inv_UNIT_PRICE]': 500,
+      'data[0][ID]': 8818, 'data[0][kind]': 0, 'data[1][ID]': '164980',
+      // Multiplied out as HireHop's grid does — the feed's £250/day × 2 days (16849 went on at half price).
+      'data[1][UNIT_PRICE]': 500, 'data[1][PRICE]': 500, 'data[1][inv_PRICE]': 500, 'data[1][inv_UNIT_PRICE]': 500,
+      'data[1][ACC_NOMINAL]': 0, 'data[1][DURATION]': 0,
       'data[2][kind]': 3, 'data[3][ID]': 169041,
     });
     expect(Object.keys(paste).some((k) => k.includes('TYPE_CUSTOM_FIELDS'))).toBe(false);   // objects are not sent
