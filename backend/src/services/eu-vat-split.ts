@@ -46,6 +46,8 @@ export const ZERO_RATED_TAX_ID = 33;
 export const UK_TAX_ID = 20;
 /** How far the invoice may sit from the portal's figure (what the client was asked to pay). */
 const PORTAL_TOLERANCE = 0.02;
+/** Backline hire (200) — HireHop's DEFAULT invoice nominal, when the draft doesn't say. */
+const DEFAULT_NOMINAL_ID = 175;
 /** Our own lines, by their wording. */
 const SPLIT_LINE = /, (?:non-)?UK days\b.*\(\d+ of \d+\)$/;
 
@@ -79,8 +81,16 @@ export function planEuSplit(input: {
   nonUkDays: number;
   /** The vehicle hire is zero-rated (`vehiclesZeroRated()`); otherwise vehicles stay at 20%. */
   vehicleZeroRated: boolean;
+  /**
+   * The invoice's default nominal (`nominal_codes[].DEFAULT`, 175 Backline hire). A line with no
+   * nominal of its own goes to it in Xero — a pasted "Default" line reads back with
+   * `ACC_NOMINAL_ID: null`, and a custom line sent with nominal 0 comes back on the default, so
+   * the split's lines must name it (16849, 14 Oct 2026: "Nominal 0, UK days" read back as 175).
+   */
+  defaultNominalId?: number;
 }): { plan: EuSplitPlan } | { problem: string } {
   const { lines, classOf, nominalName, hireDays, vehicleZeroRated } = input;
+  const defaultNominal = input.defaultNominalId || DEFAULT_NOMINAL_ID;
   const nonUkDays = Math.min(input.nonUkDays, hireDays);
   const ukDays = Math.max(0, hireDays - nonUkDays);
   const plan: EuSplitPlan = { hireDays, ukDays, nonUkDays, zero: [], zeroRate: [], custom: [] };
@@ -96,7 +106,7 @@ export function planEuSplit(input: {
     }
     if (nonUkDays <= 0) continue;   // no non-UK days: equipment is all UK
     plan.zero.push(line);
-    const nominal = num(line.ACC_NOMINAL_ID);
+    const nominal = num(line.ACC_NOMINAL_ID) || defaultNominal;
     groups.set(nominal, round2((groups.get(nominal) ?? 0) + num(line.PRICE)));
   }
   for (const [nominalId, net] of groups) {
@@ -196,11 +206,12 @@ export async function splitEuDraft(rep: CloseReporter, ctx: {
   const nominalNames = new Map<number, string>(
     (draft?.data?.nominal_codes || []).map((n: any) => [num(n.ID), String(n.NAME || `Nominal ${n.CODE}`)]),
   );
+  const defaultNominalId = num((draft?.data?.nominal_codes || []).find((n: any) => num(n.DEFAULT) === 1)?.ID) || DEFAULT_NOMINAL_ID;
   let changed = false;
 
   if (!invoiceItems(draft).some(isSplitLine)) {
     const result = planEuSplit({
-      lines: invoiceItems(draft), classOf, hireDays, nonUkDays, vehicleZeroRated,
+      lines: invoiceItems(draft), classOf, hireDays, nonUkDays, vehicleZeroRated, defaultNominalId,
       nominalName: (id) => nominalNames.get(id) || `Nominal ${id}`,
     });
     if ('problem' in result) await rep.stop('vat_split', result.problem);

@@ -237,6 +237,17 @@ describe('planEuSplit', () => {
     expect(r.plan.custom).toEqual([expect.objectContaining({ amount: 100, taxId: 33, description: 'Backline hire, non-UK days, zero-rated (HMRC 741A) (7 of 7)' })]);
   });
 
+  it('a "Default" line (no nominal of its own) is split on the invoice\'s default nominal, never "Nominal 0" (16849)', () => {
+    const pasted = { ID: 1, MAIN_ID: 169054, KIND: 2, PRICE: 16, ACC_NOMINAL_ID: null };
+    const named = { ID: 2, MAIN_ID: 169058, KIND: 2, PRICE: 4, ACC_NOMINAL_ID: 175 };
+    const r = planEuSplit({ lines: [pasted, named], classOf: () => 'equipment', nominalName: (id) => (id === 175 ? 'Backline hire' : `Nominal ${id}`),
+      hireDays: 8, nonUkDays: 3, vehicleZeroRated: false, defaultNominalId: 175 }) as any;
+    expect(r.plan.custom.map((c: any) => [c.nominalId, c.description, c.amount])).toEqual([
+      [175, 'Backline hire, UK days (5 of 8)', 12.5],
+      [175, 'Backline hire, non-UK days, zero-rated (HMRC 741A) (3 of 8)', 7.5],
+    ]);
+  });
+
   it('a vehicle on a hire under 31 days is never split by days — it stays at 20% (jon, 14 Oct 2026)', () => {
     const van = { ID: 1, MAIN_ID: 9, KIND: 2, PRICE: 920, ACC_NOMINAL_ID: 240, ACC_TAX_RATE_ID: 20 };
     const r = planEuSplit({ lines: [van], classOf: () => 'vehicle', nominalName: names, hireDays: 8, nonUkDays: 3, vehicleZeroRated: false }) as any;
