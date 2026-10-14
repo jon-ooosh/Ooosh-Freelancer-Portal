@@ -1189,7 +1189,7 @@ export default function JobDetailsPage() {
                               ? 'bg-blue-100 text-blue-700' 
                               : 'bg-gray-100 text-gray-600'
                           }`}>
-                            {job.whatIsIt === 'vehicle' ? '🚐 Vehicle' : '🎸 Equipment'}
+                            {job.whatIsIt === 'vehicle' ? '🚐 Vehicle' : job.whatIsIt === 'people' ? '🧑 People' : '🎸 Equipment'}
                           </span>
                         )}
                         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.style}`}>

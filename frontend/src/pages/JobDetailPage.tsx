@@ -835,7 +835,7 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
         <input type="text" value={checkinNotes} onChange={e => setCheckinNotes(e.target.value)} placeholder="Condition notes" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
         <p className="text-[11px] text-gray-500">
           {planned
-            ? <>Optional — the proper check-in on return captures the full state.</>
+            ? <>Optional — if you have the mileage and fuel at handover, they become the client's end reading at the final check-in (otherwise it shows "not recorded"). A freelancer collecting it on the portal records them instead.</>
             : <>{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</>}
         </p>
       </div>
