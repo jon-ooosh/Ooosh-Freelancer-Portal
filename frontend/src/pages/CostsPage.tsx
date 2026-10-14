@@ -17,7 +17,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
 import CostAllocationModal from '../components/CostAllocationModal';
-import RechargeResolveModal, { RechargeStatusPill } from '../components/RechargeResolveModal';
+import RechargeResolveModal, { RechargeSlot } from '../components/RechargeResolveModal';
 import RecordRefundModal from '../components/RecordRefundModal';
 import { PAID_NOW_METHODS } from '../lib/costOptions';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
@@ -797,8 +797,11 @@ export default function CostsPage() {
                     ) : (
                       <span className="text-xs text-gray-500">{c.payment_status.replace('_', ' ')}</span>
                     )}
-                    {c.recharge_mode !== 'none' && (
-                      <span className="ml-1"><RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} /></span>
+                    {/* The recharge slot — status, or the action that moves it on. It
+                        replaced the separate Resolve button in Actions, which kept
+                        that column wide on every recharge row. */}
+                    {!c.is_credit && (
+                      <span className="ml-1"><RechargeSlot cost={c} onResolve={() => setResolving(c)} /></span>
                     )}
                     {c.remittance_sent_at && (
                       <span className="ml-1 text-xs text-gray-400" title={`Remittance advice sent${c.remittance_email ? ` to ${c.remittance_email}` : ''}`}>✉︎</span>
@@ -815,12 +818,6 @@ export default function CostsPage() {
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
                         <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
-                      )}
-                      {c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending' && (
-                        <button onClick={() => setResolving(c)}
-                          className="px-2 py-1 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
-                          Resolve
-                        </button>
                       )}
                       {/* Money back. Not offered on a credit (you can't refund a
                           refund) or on a £0 row, which is what the server says too. */}
@@ -942,7 +939,9 @@ export default function CostsPage() {
       {resolving && (
         <RechargeResolveModal
           cost={resolving}
-          onClose={() => setResolving(null)}
+          // A failed push from "Recharge…" has still marked the cost for recharge
+          // (it's now pending), so refresh on close too or the row reads stale.
+          onClose={() => { if (resolving.recharge_mode === 'none') load(true); setResolving(null); }}
           onResolved={() => { setResolving(null); load(true); }}
         />
       )}
