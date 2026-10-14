@@ -43,3 +43,27 @@ export function hasOutstanding(amount: number | null | undefined): boolean {
 export function isNonZero(amount: number | null | undefined): boolean {
   return Math.abs(Number(amount) || 0) > MONEY_EPSILON;
 }
+
+/**
+ * A cancellation fee inc VAT: one line at 20%, rounded per line as HireHop rounds it.
+ * Mirrors the backend's `cancellationFeeGross()` (services/cancellation-close.ts), which
+ * raises the fee invoice — the modal's estimate and the invoice must come to the same penny.
+ */
+export function cancellationFeeGross(feeExVat: number): number {
+  const net = Math.round((Number(feeExVat) || 0) * 100) / 100;
+  return Math.round((net + Math.round(net * 20) / 100) * 100) / 100;
+}
+
+/**
+ * Where a cancelled job's money stands: what it is charged (the fee inc VAT, or the fee
+ * invoice once raised) against what the client has paid towards the hire. One answer for
+ * the cancellation modal (before) and the Money tab (after) — CANCELLATION-SPEC.md.
+ */
+export function cancellationBalance(chargeIncVat: number, hirePaid: number): { refundDue: number; feeOwing: number; square: boolean } {
+  const diff = Math.round(((Number(hirePaid) || 0) - (Number(chargeIncVat) || 0)) * 100) / 100;
+  return {
+    refundDue: diff > MONEY_EPSILON ? diff : 0,
+    feeOwing: diff < -MONEY_EPSILON ? -diff : 0,
+    square: Math.abs(diff) <= MONEY_EPSILON,
+  };
+}

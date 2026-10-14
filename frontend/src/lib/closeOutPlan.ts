@@ -54,6 +54,20 @@ export interface CloseOutPlan {
   openProblems: number;
   /** Several invoices owing: the one a manager chose for the hire payments; null = not chosen (or nothing to choose). */
   paymentTarget: { invoiceId: number; number: string } | null;
+  /** A cancelled job (CANCELLATION-SPEC.md, the money end): the invoice is the fee; null otherwise. */
+  cancellation?: CancellationPlan | null;
+}
+export interface CancellationPlan {
+  /** The retained fee ex VAT (transport and crew included) and inc VAT. */
+  feeNet: number;
+  feeGross: number;
+  cancelledAt: string | null;
+  /** The fee is on an approved invoice (or there is no fee). */
+  invoiced: boolean;
+  /** OP's pending refund reminders — what the Money tab's Process button acts on. */
+  refundReminders: Array<{ id: string; amount: number }>;
+  /** Fee invoiced and paid, nothing left on a hire payment. */
+  settled: boolean;
 }
 export interface CloseOutResult { done: boolean; message: string; plan: CloseOutPlan }
 
@@ -117,7 +131,9 @@ export type StepState = 'done' | 'current' | 'warn' | 'todo' | 'error';
 export type CloseOutStage =
   | 'pre'          // not back yet, nothing invoiced — the panel is not shown
   | 'blocked'      // OP refuses until something is sorted
-  | 'to_invoice' | 'choose' | 'to_allocate' | 'credit' | 'to_send' | 'awaiting' | 'paid' | 'complete';
+  | 'to_invoice' | 'choose' | 'to_allocate' | 'credit' | 'to_send' | 'awaiting' | 'paid' | 'complete'
+  // A cancelled job only: money to go back to the client · the money is done.
+  | 'refund' | 'settled';
 export type CloseOutTone = 'grey' | 'amber' | 'blue' | 'green' | 'red';
 
 export interface CloseOutView {
@@ -141,14 +157,18 @@ export interface CloseOutView {
   stillOut: boolean;
   /** Invoices owing, oldest first — more than one means the hire payments need a target. */
   open: CloseOutInvoice[];
+  /** The five steps' names — a cancelled job's differ (CANCEL_STEP_NAMES). */
+  stepNames: readonly string[];
 }
 
 export const STEP_NAMES = ['Returned', 'Invoiced', 'Payments allocated', 'Sent to client', 'Paid in full'] as const;
+export const CANCEL_STEP_NAMES = ['Cancelled', 'Fee invoiced', 'Payments allocated', 'Refunded / paid', 'Sent to client'] as const;
 
 /** The first clause of one of OP's refusal sentences — the bar's one line; the rest sits behind "Why?". */
 export const shortLine = (s: string) => s.split(' — ')[0].split('. ')[0].replace(/[.:]$/, '');
 
 export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): CloseOutView {
+  if (plan.cancellation) return cancellationView(plan, plan.cancellation);
   const inv = plan.invoice;
   const completed = !!plan.fromLog || plan.hhStatus === HH_COMPLETED;
   const returned = completed || (plan.hhStatus != null && plan.hhStatus >= HH_RETURNED_INCOMPLETE);
@@ -207,11 +227,68 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
     awaiting: [completed ? 'amber' : 'blue', 'Awaiting payment'],
     paid: ['green', 'Paid'],
     complete: ['green', 'Completed'],
+    refund: ['amber', 'Refund due'],      // a cancelled job's — never reached here
+    settled: ['green', 'Settled'],
   };
   return {
     stage, tone: look[stage][0], pill: look[stage][1], steps,
     stepsDone: steps.filter(s => s === 'done').length,
-    blockers, owing, credit, paid, chargeOwing, stillOut, open,
+    blockers, owing, credit, paid, chargeOwing, stillOut, open, stepNames: STEP_NAMES,
+  };
+}
+
+/**
+ * A cancelled job: Cancelled · Fee invoiced · Payments allocated · Refunded / paid · Sent.
+ * The fee invoice is raised and allocated by the same button as a hire's; what is left
+ * on the hire payments afterwards is a refund (`credit`), pressed through the Money tab's
+ * existing refund flow; the job is never completed.
+ */
+function cancellationView(plan: CloseOutPlan, c: CancellationPlan): CloseOutView {
+  const inv = plan.invoice;
+  const owing = plan.invoices.reduce((s, i) => s + i.owing, 0);
+  const credit = plan.surplus.reduce((s, x) => s + x.amount, 0);
+  const open = plan.invoices.filter(i => i.owing >= PENNY);
+  const needsInvoice = inv.netToInvoice >= PENNY;
+  const noFee = c.feeNet < PENNY;
+  const blockers = plan.blockers.filter(b => !b.startsWith('Raise the invoice first') && !b.includes('choose which one the hire payments go to'))
+    .concat(inv.blockers.filter(b => !plan.blockers.includes(b)));
+
+  let steps: StepState[] = [
+    'done',
+    c.invoiced ? 'done' : 'todo',
+    c.invoiced && plan.allocations.length === 0 ? 'done' : 'todo',
+    c.invoiced && plan.allocations.length === 0 && credit < PENNY && owing < PENNY ? 'done' : 'todo',
+    noFee || plan.invoiceSent ? 'done' : 'todo',
+  ];
+  let stage: CloseOutStage;
+  if (blockers.length) stage = 'blocked';
+  else if (needsInvoice) stage = 'to_invoice';
+  else if (open.length > 1 && !plan.paymentTarget) stage = 'choose';
+  else if (plan.ready) stage = 'to_allocate';
+  else if (credit >= PENNY) stage = 'refund';
+  else if (owing >= PENNY) stage = 'awaiting';
+  else if (!noFee && !plan.invoiceSent) stage = 'to_send';
+  else stage = 'settled';
+
+  const first = steps.findIndex(s => s !== 'done');
+  if (first >= 0) steps = steps.map((s, i) => (i === first ? (stage === 'blocked' ? 'error' : 'current') : s));
+  const look: Partial<Record<CloseOutStage, [CloseOutTone, string]>> = {
+    blocked: ['red', 'Needs sorting'],
+    to_invoice: ['amber', 'Fee to invoice'],
+    choose: ['amber', 'Choose an invoice'],
+    to_allocate: ['amber', 'Payments to allocate'],
+    refund: ['amber', 'Refund due'],
+    awaiting: ['blue', 'Fee owing'],
+    to_send: ['amber', 'Not sent yet'],
+    settled: ['green', 'Settled'],
+  };
+  const [tone, pill] = look[stage]!;
+  return {
+    stage, tone, pill, steps,
+    stepsDone: steps.filter(s => s === 'done').length,
+    blockers, owing, credit,
+    paid: plan.invoices.reduce((s, i) => s + (i.gross - i.owing), 0),
+    chargeOwing: 0, stillOut: false, open, stepNames: CANCEL_STEP_NAMES,
   };
 }
 

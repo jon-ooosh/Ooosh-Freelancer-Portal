@@ -20,16 +20,8 @@
  * job's balance from its invoices) or staff use Record payment; the arrival hook allocates it.
  */
 import { query } from '../config/database';
-import { readBillingRows } from './hh-deposit-release';
-import {
-  PENNY, round2, gbp, Stop, Row, findInvoice, invoiceRows, invoiceStatus, invoiceNet, invoiceGross, invoiceItems,
-  idOf, postDraftInvoice, postApproveInvoice, postCustomInvoiceLine, pushInvoiceToXero, readJobStatus,
-} from './hh-invoice-close';
+import { PENNY, round2, gbp, Stop, readJobStatus, raiseCustomLineInvoice, MISC_INCOME_NOMINAL } from './hh-invoice-close';
 import { loadJob, withJobLock, reporter, log, planHireCloseOut, CloseOutResult } from './hire-close-out';
-import { hhLocalNow } from './shop-stock';
-
-/** Misc income (Xero 275) — HireHop's invoice nominal id. */
-const MISC_INCOME_NOMINAL = 190;
 
 export const CHARGE_TYPES = {
   misc:         { label: 'Misc income',       nominalId: MISC_INCOME_NOMINAL, rate: 20, taxId: 20 },
@@ -42,9 +34,6 @@ export interface ChargeLine { type: ChargeType; description: string; amount: num
 
 const HH_COMPLETED = 11;
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
-
-/** What a line comes to inc VAT, rounded per line as HireHop does. */
-const lineGross = (l: ChargeLine) => round2(l.amount + round2(l.amount * CHARGE_TYPES[l.type].rate / 100));
 
 /**
  * Raise one charge invoice on a Completed job. `reason` is internal (log + timeline);
@@ -91,73 +80,19 @@ async function chargeSteps(jobId: string, hhJobNumber: number, pipelineStatus: s
   if (hhStatus !== HH_COMPLETED) {
     await rep.stop('charge', `HireHop doesn't show job ${hhJobNumber} as Completed (status ${hhStatus ?? 'unknown'}) — check it there first.`);
   }
-  let rows = await readBillingRows(hhJobNumber);
-  const drafts = invoiceRows(rows).filter((r) => invoiceStatus(r) === 0);
-  if (drafts.length) {
-    await rep.stop('charge', `Job ${hhJobNumber} already has a draft invoice in HireHop — approve or delete it there first.`);
-  }
-
-  // ── 1. An EMPTY draft ──
-  const { res: draftRes } = await postDraftInvoice(hhJobNumber, `Job ${hhJobNumber}`, { all: 0 });
-  rows = await readBillingRows(hhJobNumber);
-  const fresh = invoiceRows(rows).filter((r) => invoiceStatus(r) === 0);
-  if (fresh.length !== 1) {
-    await rep.stop('charge', fresh.length === 0
-      ? `HireHop did not create the draft (${draftRes?.error || 'no draft on the job afterwards'}) — it may not allow invoices on a Completed job for OP's HireHop user. Nothing was changed.`
-      : `HireHop now shows ${fresh.length} drafts on job ${hhJobNumber}; expected one. Delete them in HireHop, then ${rep.retryHint}.`);
-  }
-  const draftId = idOf(fresh[0]);
-  const deleteHint = `Delete draft ${draftId} in HireHop, then ${rep.retryHint}.`;
-  if (invoiceItems(fresh[0]).length) {
-    await rep.stop('charge', `HireHop put job lines on draft ${draftId} — a charge invoice must be empty to start. Nothing has gone to Xero. ${deleteHint}`);
-  }
-  await rep.log('charge', true, `Empty draft ${draftId} created for the charge.`);
-
-  // ── 2. The custom lines, each read back ──
-  let draft = findInvoice(rows, draftId);
-  for (const l of lines) {
-    const t = CHARGE_TYPES[l.type];
-    const before = invoiceItems(draft);
-    const after0 = before.length ? Number(before[before.length - 1].ID) : 0;
-    const res = await postCustomInvoiceLine(hhJobNumber, draftId, {
-      description: l.description, amount: l.amount, rate: t.rate, taxId: t.taxId, nominalId: t.nominalId, after: after0,
-    });
-    rows = await readBillingRows(hhJobNumber);
-    draft = findInvoice(rows, draftId);
-    const added = invoiceItems(draft).filter((x: Row) => !before.some((b: Row) => Number(b.ID) === Number(x.ID)));
-    const ok = added.length === 1 && Math.abs(Number(added[0].PRICE) - l.amount) < PENNY
-      && Number(added[0].ACC_TAX_RATE_ID) === t.taxId && Number(added[0].ACC_NOMINAL_ID) === t.nominalId;
-    if (!ok) {
-      await rep.stop('charge', `HireHop did not add "${l.description}" (${gbp(l.amount)}) as asked${res?.error ? ` (${res.error})` : ''}. Nothing has gone to Xero. ${deleteHint}`);
-    }
-  }
-
-  // ── 3. Penny check: the draft is exactly the lines ──
-  const wantNet = round2(lines.reduce((s, l) => s + l.amount, 0));
-  const wantGross = round2(lines.reduce((s, l) => s + lineGross(l), 0));
-  const net = invoiceNet(draft!) ?? 0;
-  const gross = invoiceGross(draft!) ?? 0;
-  if (Math.abs(net - wantNet) >= PENNY || Math.abs(gross - wantGross) >= PENNY) {
-    await rep.stop('charge', `Draft ${draftId} comes to ${gbp(net)} ex VAT / ${gbp(gross)} inc VAT; the charges are ${gbp(wantNet)} / ${gbp(wantGross)}. Nothing has gone to Xero. ${deleteHint}`);
-  }
-
-  // ── 4. Approve, dated today, then Xero ──
-  const approveRes = await postApproveInvoice(draftId, hhLocalNow());
-  rows = await readBillingRows(hhJobNumber);
-  const approved = findInvoice(rows, draftId);
-  const number = String(approved?.data?.NUMBER || '');
-  if (!approved || invoiceStatus(approved) < 2 || !number) {
-    await rep.stop('charge', `HireHop did not approve draft ${draftId} (${approveRes?.error || 'still a draft on read-back'}). Nothing has gone to Xero — ${rep.retryHint}.`);
-  }
-  await pushInvoiceToXero(rep, {
-    label: `completed-job charge — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross,
-    saved: { ...(approveRes?.data || {}), hh_task: approveRes?.data?.hh_task || 'post_invoice_credit', hh_id: approveRes?.data?.hh_id || draftId },
-    alert: { jobId, what: `charge invoice ${number}` },
+  // ── Empty draft → the lines → penny check → approve → Xero (the shared recipe) ──
+  const { invoiceId, number, gross } = await raiseCustomLineInvoice(rep, {
+    hhJobNumber, step: 'charge',
+    lines: lines.map((l) => {
+      const t = CHARGE_TYPES[l.type];
+      return { description: l.description, amount: l.amount, rate: t.rate, taxId: t.taxId, nominalId: t.nominalId };
+    }),
+    xeroLabel: 'completed-job charge', alert: { jobId, what: 'charge invoice' },
   });
 
   const what = lines.map((l) => `${CHARGE_TYPES[l.type].label}: ${l.description} ${gbp(l.amount)}`).join('; ');
   await log(jobId, userId, 'charge', true, `Charge invoice ${number} raised for ${gbp(gross)} — ${what}. Reason: ${reason}`,
-    { invoiceId: draftId, number, gross });
+    { invoiceId, number, gross });
   await query(
     `INSERT INTO interactions (job_id, type, content, created_by, source) VALUES ($1, 'note', $2, $3, 'system')`,
     [jobId, `🧾 Charge invoice ${number} raised after completion: ${gbp(gross)} inc VAT (${what}). Reason: ${reason}`, userId || SYSTEM_USER_ID],

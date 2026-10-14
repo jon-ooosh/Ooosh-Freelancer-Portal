@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { CANCELLATION_REASON_OPTIONS } from '../../../shared/types';
 import { api } from '../services/api';
+import { cancellationFeeGross, cancellationBalance } from '../lib/money';
 import CancelOpenRequirementsSection from './CancelOpenRequirementsSection';
 
 // Postgres NUMERIC columns come back as strings via the pg driver.
@@ -18,7 +19,8 @@ interface TransportCrewData {
   quotes: Array<{ id: string; job_type: string; venue_name: string; client_charge_total: number | string; ops_status: string }>;
   crew: Array<{ id: string; first_name: string; last_name: string; email: string; role: string; agreed_rate: number | string }>;
   vehicles: Array<{ id: string; registration: string; vehicle_name: string; status: string }>;
-  excess: Array<{ id: string; excess_amount_required: number | string; excess_amount_taken?: number | string; excess_status: string }>;
+  /** held_amount is v_excess_held's — what we actually hold (pre-auth money included). */
+  excess: Array<{ id: string; excess_amount_required: number | string; held_amount?: number | string; excess_status: string }>;
 }
 
 interface MoneySummary {
@@ -174,12 +176,15 @@ export default function CancellationModal({
     ? calcResult.refund
     : (useManual && manualFee ? Math.max(0, effectiveHireValueExVat - toNum(manualFee)) : 0);
   const totalHireDepositsPaid = toNum(moneySummary?.financial.total_hire_deposits);
-  const feeIncVat = effectiveFee * 1.2;
+  // The same sums the Money tab shows afterwards (lib/money.ts), and the fee rounded as
+  // the fee invoice will be — so the email's refund is the refund the panel will offer.
+  const feeIncVat = cancellationFeeGross(effectiveFee);
+  const balance = cancellationBalance(feeIncVat, totalHireDepositsPaid);
   const actualRefund = totalHireDepositsPaid > 0
-    ? Math.max(0, totalHireDepositsPaid - feeIncVat)
+    ? balance.refundDue
     : calculatedRefundExVat;
   const outstandingBalance = totalHireDepositsPaid > 0
-    ? Math.max(0, feeIncVat - totalHireDepositsPaid)
+    ? balance.feeOwing
     : 0;
   const allSquare = effectiveFee > 0
     && totalHireDepositsPaid > 0
@@ -196,11 +201,9 @@ export default function CancellationModal({
   // Flagged on summary so staff aren't surprised by what needs refunding.
   const excessHeldRecords = useMemo(() => {
     if (!transportCrew) return [] as TransportCrewData['excess'];
-    return transportCrew.excess.filter(e =>
-      ['taken', 'pre_auth', 'partially_paid'].includes(e.excess_status)
-    );
+    return transportCrew.excess.filter(e => toNum(e.held_amount) > 0.005);
   }, [transportCrew]);
-  const totalExcessHeld = excessHeldRecords.reduce((sum, e) => sum + toNum(e.excess_amount_taken ?? e.excess_amount_required), 0);
+  const totalExcessHeld = excessHeldRecords.reduce((sum, e) => sum + toNum(e.held_amount), 0);
 
   const handleSubmit = () => {
     onConfirm({

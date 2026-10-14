@@ -7,6 +7,8 @@
  *
  * Also handles recording payments (pushes to HH as deposits).
  */
+import { feeInvoiceRows, hireInvoiceRows, cancellationFeeGross } from '../services/cancellation-close';
+import { invoiceGross } from '../services/hh-invoice-close';
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
@@ -1305,9 +1307,11 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
       isUuid
-        ? `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date
+        ? `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date,
+                  pipeline_status, cancellation_fee
            FROM jobs WHERE id = $1`
-        : `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date
+        : `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date,
+                  pipeline_status, cancellation_fee
            FROM jobs WHERE hh_job_number = $1`,
       [isUuid ? jobId : parseInt(jobId)]
     );
@@ -2042,7 +2046,38 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // total, the VAT shown must be that total minus ex-VAT, or the Money tab
     // displays three figures where ex + VAT doesn't equal the total.
     const displayVatAmount = vatAdjustment ? effectiveVatAmount : effectiveHireValueIncVat - hireValueExVat;
-    const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits - creditNoteWriteOff;
+
+    // A CANCELLED job owes its cancellation charge, not the hire (CANCELLATION-SPEC.md, the
+    // money end). HireHop keeps the hire's lines on a cancelled job — they are the record of
+    // what was booked, and Re-open copies them — so the job total above still reads the whole
+    // hire, and "hire value minus payments" showed a phantom balance owed. Before the fee
+    // invoice the charge is the fee recorded at cancellation; once it is invoiced, the fee
+    // invoice(s). Negative balance = money to refund. The payment portal reads a status-9
+    // job's balance from its invoices the same way (netlify-functions get-job-details-v2.js).
+    let cancellation: {
+      fee_ex_vat: number; fee_inc_vat: number; charge_inc_vat: number; invoiced: boolean;
+      invoice_numbers: string[]; hire_invoiced: boolean; balance: number;
+    } | null = null;
+    if (job.pipeline_status === 'cancelled') {
+      const billingRows = Array.isArray(bl?.rows) ? bl!.rows : [];
+      const feeRows = feeInvoiceRows(billingRows);
+      const feeNet = Math.round((Number(job.cancellation_fee ?? 0) || 0) * 100) / 100;
+      const charge = feeRows.length
+        ? Math.round(feeRows.reduce((s: number, r: any) => s + (invoiceGross(r) ?? 0), 0) * 100) / 100
+        : cancellationFeeGross(feeNet);
+      cancellation = {
+        fee_ex_vat: feeNet,
+        fee_inc_vat: cancellationFeeGross(feeNet),
+        charge_inc_vat: charge,
+        invoiced: feeRows.length > 0,
+        invoice_numbers: feeRows.map((r: any) => String(r.data?.NUMBER || '')).filter(Boolean),
+        hire_invoiced: hireInvoiceRows(billingRows).length > 0,
+        balance: Math.round((charge - totalHireDeposits) * 100) / 100,
+      };
+    }
+    const effectiveBalanceOutstanding = cancellation
+      ? cancellation.balance
+      : effectiveHireValueIncVat - totalHireDeposits - creditNoteWriteOff;
 
     // Calculate deposit requirements using effective (VAT-adjusted) total
     let requiredDeposit = Math.max(effectiveHireValueIncVat * 0.25, 100);
@@ -2229,6 +2264,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           deposit_percent: depositPercent,
           deposits,
           pending_refunds: pendingRefunds,
+          /** Set on a cancelled job only — its charge is the fee, not the hire (balance_outstanding follows it). */
+          cancellation,
         },
         excess: {
           records: excessRecords,

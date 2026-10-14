@@ -13,6 +13,10 @@
  * allocating stay manager-tier (the route enforces it); "Mark as sent" is anyone's,
  * as the requirement's status always was. No Xero links: only jon and the
  * bookkeeper use Xero, and they find invoices there themselves.
+ *
+ * A CANCELLED job uses the same panel (CANCELLATION-SPEC.md, the money end): the
+ * invoice is the cancellation fee, what is left on the payments is a refund pressed
+ * through the Money tab's pending refund, and the job is never completed.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../services/api';
@@ -20,7 +24,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import {
   CloseOutPlan, CloseOutResult, loadCloseOutPlan, publishCloseOutPlan, subscribeCloseOutPlan,
-  closeOutView, shortLine, STEP_NAMES, TONE, money, fmtDay, apiError,
+  closeOutView, shortLine, TONE, money, fmtDay, apiError,
 } from '../lib/closeOutPlan';
 
 const PENNY = 0.005;
@@ -129,6 +133,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const inv = plan.invoice;
   const hasInv = plan.invoices.length > 0;
   const completed = !!plan.fromLog || plan.hhStatus === 11;
+  const cancel = plan.cancellation ?? null;
 
   const chargeNet = Math.round((parseFloat(charge?.amount || '') || 0) * 100) / 100;
   const raiseCharge = async () => {
@@ -163,7 +168,9 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     : null;
 
   const run = async () => {
-    const what = view.stage === 'to_invoice'
+    const what = view.stage === 'to_invoice' && cancel
+      ? `Raise the cancellation fee invoice for ${money(cancel.feeNet)} + VAT = ${money(cancel.feeGross)} (one Misc income line, dated today, approved, sent to Xero) and allocate the client's payments up to it. Anything left stays on the payment to be refunded`
+      : view.stage === 'to_invoice'
       ? `Create the invoice for ${money(inv.netToInvoice)} ex VAT (dated today, approved, sent to Xero) and allocate the payments`
       : 'Allocate the payments to the invoice in HireHop and Xero';
     if (!window.confirm(`${what}${view.stillOut ? '\n\nHireHop still shows this job as out.' : ''}\n\nCarry on?`)) return;
@@ -238,6 +245,14 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       acts = [{ ...checkAgain, kind: 'primary' }];
       break;
     case 'to_invoice':
+      if (cancel) {
+        title = `Raise the cancellation fee invoice — ${money(cancel.feeGross)} inc VAT`;
+        why = `One line, "Cancellation fee", ${money(cancel.feeNet)} + VAT on Misc income. It is raised in HireHop, sent to Xero, and the client's payments are allocated up to it — the rest stays on the payment so it can be refunded.`;
+        acts = [checkAgain];
+        if (isManager) acts.push({ label: 'Raise fee invoice', onClick: () => void run(), kind: 'primary' });
+        if (plan.excessHeld >= PENNY) chips.push([false, `${money(plan.excessHeld)} excess held — return it from the Excess card`]);
+        break;
+      }
       title = hasInv ? `Invoice the ${money(inv.netToInvoice)} ex VAT added since` : 'Create the final invoice';
       why = 'Raises it in HireHop, sends it to Xero, and allocates the payments already received in both.'
         + (inv.euTrigger ? ' EU hire: the VAT is split by UK / non-UK days.' : '');
@@ -263,14 +278,27 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       why = 'The client has paid more than the invoices need. Use Refund or Apply to another job on that payment in Payment History below. OP never decides this for you.';
       acts = [];
       break;
+    case 'refund':
+      title = `${money(view.credit)} to refund to the client`;
+      why = 'The fee has been paid from what the client had already paid. Refund the rest with Process on the pending refund below: a Stripe payment goes back to the card; a bank transfer is recorded here and sent from Wise. OP never refunds on its own.';
+      acts = [];
+      break;
+    case 'settled':
+      title = cancel && cancel.feeNet >= PENNY ? 'Cancellation settled' : 'Nothing left to settle';
+      why = 'The fee is invoiced and paid and nothing is left on the client\'s payments, in HireHop and Xero. The job stays Cancelled.';
+      acts = [checkAgain];
+      if (plan.excessHeld >= PENNY) chips.push([false, `${money(plan.excessHeld)} excess still held — return it from the Excess card`]);
+      break;
     case 'to_send':
       title = 'Send the invoice to the client';
       sub = 'Email the invoice and payment link from your inbox, then tick it off.';
       acts = [...(copy ? [copy] : []), { label: busy === 'sent' ? 'Saving…' : '✓ Mark as sent', onClick: () => void setSent(true), kind: 'primary' }];
       break;
     case 'awaiting':
-      title = completed ? `${money(view.owing)} owing` : 'Waiting on the client';
-      why = 'A portal payment, a Wise transfer or Record payment is allocated to the invoice automatically, and this moves to Paid.';
+      title = cancel ? `${money(view.owing)} of the fee still owing` : completed ? `${money(view.owing)} owing` : 'Waiting on the client';
+      why = cancel
+        ? 'What the client had paid didn\'t cover the fee. The payment link takes the rest now the fee is invoiced; a portal payment, a Wise transfer or Record payment is allocated to it automatically.'
+        : 'A portal payment, a Wise transfer or Record payment is allocated to the invoice automatically, and this moves to Paid.';
       acts = [{ label: 'Undo sent', onClick: () => void setSent(false), kind: 'link' }, ...(copy ? [{ ...copy, kind: 'secondary' as const }] : [])];
       if (onRecordPayment) acts.push({ label: 'Record payment', onClick: onRecordPayment, kind: 'primary' });
       if (completed) acts = acts.filter(a => a.label !== 'Undo sent');
@@ -308,6 +336,12 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const stepDetail = (i: number): string => {
     if (i === 1 && hasInv) return plan.invoices.length === 1 ? plan.invoices[0].number : `${plan.invoices.length} invoices`;
     if (i === 2 && view.steps[2] === 'done') return allInXero ? 'HireHop ✓ Xero ✓' : 'HireHop ✓';
+    if (cancel) {
+      if (i === 0 && cancel.cancelledAt) return fmtDay(cancel.cancelledAt);
+      if (i === 3 && view.credit >= PENNY) return `${money(view.credit)} to refund`;
+      if (i === 3 && view.owing >= PENNY) return `${money(view.owing)} owing`;
+      return '';
+    }
     if (i === 4 && hasInv && view.owing >= PENNY) return view.paid >= PENNY ? `${money(view.paid)} paid · ${money(view.owing)} owing` : 'Nothing paid yet';
     return '';
   };
@@ -317,7 +351,9 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       {/* Header: title + one pill. The balance lives in the Financial Summary above. */}
       <div className="px-5 pt-4 pb-1 flex flex-wrap items-center gap-2">
         <h3 className="text-lg font-semibold text-gray-900">
-          {plan.invoices.length === 1 ? `Invoice ${plan.invoices[0].number}` : plan.invoices.length > 1 ? 'Invoices' : 'Invoice'}
+          {cancel
+            ? (plan.invoices.length === 1 ? `Cancellation fee ${plan.invoices[0].number}` : 'Cancellation fee')
+            : plan.invoices.length === 1 ? `Invoice ${plan.invoices[0].number}` : plan.invoices.length > 1 ? 'Invoices' : 'Invoice'}
         </h3>
         <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${tone.pill}`}>{view.pill}</span>
       </div>
@@ -325,7 +361,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       {/* Five steps */}
       <div className="px-5 pt-3 pb-4 grid grid-cols-5 gap-0 overflow-x-auto">
         {view.steps.map((st, i) => (
-          <div key={STEP_NAMES[i]} className="min-w-[96px]">
+          <div key={view.stepNames[i]} className="min-w-[96px]">
             <div className="flex items-center">
               <span className={`w-6 h-6 flex-none rounded-full grid place-items-center text-xs font-bold border-2 ${
                 st === 'done' ? 'bg-green-600 border-green-600 text-white'
@@ -337,7 +373,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
               </span>
               {i < 4 && <span className={`h-0.5 flex-1 mx-1.5 ${st === 'done' ? 'bg-green-600' : 'bg-gray-200'}`} />}
             </div>
-            <div className={`mt-2 pr-2 text-[13px] font-semibold ${st === 'todo' ? 'text-gray-400' : st === 'current' ? 'text-ooosh-600' : st === 'warn' ? 'text-amber-700' : st === 'error' ? 'text-red-700' : 'text-gray-900'}`}>{STEP_NAMES[i]}</div>
+            <div className={`mt-2 pr-2 text-[13px] font-semibold ${st === 'todo' ? 'text-gray-400' : st === 'current' ? 'text-ooosh-600' : st === 'warn' ? 'text-amber-700' : st === 'error' ? 'text-red-700' : 'text-gray-900'}`}>{view.stepNames[i]}</div>
             {stepDetail(i) && <div className="pr-2 text-xs text-gray-500 mt-0.5">{stepDetail(i)}</div>}
           </div>
         ))}
@@ -431,7 +467,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
           {plan.invoices.map(i => (
             <div key={i.invoiceId} className="flex justify-between gap-3 py-1.5 border-b border-gray-100">
               <span className="text-gray-800">{i.number} <span className="text-xs text-gray-500">{fmtDay(i.date)}</span>
-                {i.chargeOnly && <span className="ml-2 text-xs text-gray-500">charge after completion</span>}</span>
+                {i.chargeOnly && <span className="ml-2 text-xs text-gray-500">{cancel ? 'cancellation fee' : 'charge after completion'}</span>}</span>
               <span className="tabular-nums">
                 {plan.invoices.length > 1 && <span className={`mr-2 text-xs ${i.owing >= PENNY ? 'text-amber-700' : 'text-green-700'}`}>{i.owing >= PENNY ? `${money(i.owing)} owing` : 'paid'}</span>}
                 <span className="font-semibold">{money(i.gross)}</span>

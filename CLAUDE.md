@@ -217,16 +217,22 @@ landing on a job with exactly one invoice owing (or the manager-chosen one) is a
 after the payment has answered — THAT payment only (never money already sitting on the job), never completes the
 job (`closeout_arrival_hook_enabled`, on). **Charges after completion** (misc, PCN) are their own invoice
 (`completed-charges.ts`); **the payment portal reads a Completed job's balance from its invoices** (portal repo,
-`get-job-details-v2.js`), every other status from the job value. Invoices split by hand (hire vs damage) are made
+`get-job-details-v2.js`) — and a Cancelled job's while its fee invoice is owing — every other status from the job value. Invoices split by hand (hire vs damage) are made
 by a manager in HireHop. An invoice HireHop pushed to Xero but lost the link to (`ACC_ID` empty) is found
 by number + total (`hh-invoice-close.ts` `adoptLostXeroInvoices()`). §1 is
 settled, §5 the allocation rule, §9 the phases, **§12 the current state and the parked list — read it first.**
 Refunds only through the existing routes.
 
-**NEXT, Oct 2026: cancellations — the money end.** `docs/CANCELLATION-SPEC.md` (the April foundation:
-status, calculator, modal, Lost & Cancelled page) gains a §"Oct 2026 — the money end" that is the handover:
-the fee invoice on the close-out recipe, allocation, the refund of the rest, excess, and the five open
-decisions to settle with jon first.
+**BUILT, 14 Oct 2026: cancellations — the money end.** `docs/CANCELLATION-SPEC.md` final section. A
+cancelled job owes its FEE, not the hire: HireHop keeps the hire's lines on a cancelled job (never touch
+them — Re-open copies them), so the Money summary (`financial.cancellation`), the close-out plan
+(`CloseOutPlan.cancellation`) and the payment portal all read the fee / fee invoice instead. The fee is
+ONE custom line on Misc income (190) at 20%, raised on the close-out panel's button
+(`services/cancellation-close.ts` on `hh-invoice-close.ts` `raiseCustomLineInvoice()`, shared with
+`completed-charges.ts`); payments are allocated up to the fee only; the rest is the pending refund
+(its amount re-set at allocation), refunded by a person with Process; excess is the Excess card's; the
+job stays HireHop 9 and is never completed. A hire invoiced before cancelling is refused (credit note,
+by hand). The portal takes payment at status 9 only while an approved invoice is owing.
 
 **PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
@@ -366,6 +372,8 @@ existing definition:
 | Splitting an EU hire's invoice by UK / non-UK days | `services/eu-vat-split.ts` — on the DRAFT only; which line gets which VAT rule is `vat-adjustment.ts` `classifyNominals()`, shared with the portal figure |
 | Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
 | Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |
+| A cancelled job's money (its fee invoice, what is owed / to refund, the refund reminder) | `services/cancellation-close.ts` — planned and allocated by `hire-close-out.ts` (`CloseOutPlan.cancellation`); frontend sums `lib/money.ts` `cancellationFeeGross()` / `cancellationBalance()` |
+| An invoice built only from custom lines (charge after completion, cancellation fee) | `services/hh-invoice-close.ts` `raiseCustomLineInvoice()` |
 | Charging a client after the job is Completed (misc, PCN fee + fine) | `services/completed-charges.ts` `raiseChargeInvoice()` — its own invoice from custom lines only; never before completion (those costs go on the HireHop job); left out of the job-total sums via `isChargeOnlyInvoice()` |
 | Finishing a HIRE's money (plan → allocate hire deposits in HH + Xero → complete) | `services/hire-close-out.ts` — on the recipe above; never excess, never a refund; `job_closeout_log` is its record |
 | Has the "OP Shop Sales" HireHop contact been edited? | `services/shop-contact-check.ts` |

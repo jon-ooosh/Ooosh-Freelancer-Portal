@@ -11,7 +11,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { describePreauth, paymentMethodLabel } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
-import { hasOutstanding, isNonZero } from '../lib/money';
+import { hasOutstanding, isNonZero, cancellationBalance } from '../lib/money';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
 import CostAllocationModal from './CostAllocationModal';
@@ -100,6 +100,12 @@ interface FinancialData {
        *  the real string through regardless. */
       id: string; amount: number; method: string | null; notes: string | null; date: string;
     }>;
+    /** A cancelled job only: it owes its cancellation fee, not the hire (CANCELLATION-SPEC.md).
+     *  `charge_inc_vat` is the fee invoice once raised, else the fee recorded at cancellation. */
+    cancellation?: {
+      fee_ex_vat: number; fee_inc_vat: number; charge_inc_vat: number; invoiced: boolean;
+      invoice_numbers: string[]; hire_invoiced: boolean; balance: number;
+    } | null;
   };
   vat_adjustment: {
     applies: boolean;
@@ -641,7 +647,13 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
 
   const openPendingRefundModal = (pr: NonNullable<FinancialData['financial']['pending_refunds']>[number]) => {
     setPendingRefund(pr);
-    const firstDep = refundableDeposits[0] || null;
+    // Default to a payment that still HOLDS the refund — not simply the first. After a
+    // cancellation's fee is allocated, the first payment is often fully applied to the fee
+    // invoice, and refunding from it would offer to release money off that invoice (job 16739).
+    const free = (d: typeof refundableDeposits[number]) => d.available_to_refund ?? d.amount;
+    const firstDep = refundableDeposits.find(d => free(d) >= pr.amount - 0.005)
+      || [...refundableDeposits].sort((a, b) => free(b) - free(a))[0]
+      || null;
     setPendingDepositId(firstDep ? firstDep.id : null);
     setRefundAmount(String(pr.amount));
     setRefundMethod(firstDep?.stripe_payment_intent ? 'stripe_gbp' : (firstDep?.op_payment_method as typeof refundMethod) || 'worldpay');
@@ -1129,7 +1141,46 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
           </div>
         )}
 
-        {financial.hire_value_ex_vat > 0 ? (
+        {financial.cancellation ? (() => {
+          // A cancelled job: the fee, not the hire. HireHop keeps the hire's lines on the
+          // job, so "hire value minus payments" would show the whole hire as owed.
+          const c = financial.cancellation;
+          const b = cancellationBalance(c.charge_inc_vat, financial.total_hire_deposits);
+          return (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-3">
+                <div>
+                  <p className="text-xs text-gray-500">Cancellation fee (ex VAT)</p>
+                  <p className="text-lg font-bold text-gray-900">£{c.fee_ex_vat.toFixed(2)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">Fee (inc VAT)</p>
+                  <p className="text-lg font-bold text-gray-900">£{c.charge_inc_vat.toFixed(2)}</p>
+                  <p className="text-xs text-gray-500">{c.invoiced ? c.invoice_numbers.join(', ') : 'not invoiced yet'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">Paid towards the hire</p>
+                  <p className="text-lg font-bold text-green-700">£{financial.total_hire_deposits.toFixed(2)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">{b.refundDue ? 'Refund due to client' : b.feeOwing ? 'Fee still owing' : 'Balance'}</p>
+                  <p className={`text-lg font-bold ${b.refundDue ? 'text-amber-700' : b.feeOwing ? 'text-red-600' : 'text-green-700'}`}>
+                    {b.square ? 'All square' : `£${(b.refundDue || b.feeOwing).toFixed(2)}`}
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500">
+                Cancelled — the hire (£{financial.hire_value_inc_vat.toFixed(2)} inc VAT) is no longer charged; the client owes the cancellation fee only.
+                {!c.invoiced && ' The fee invoice is raised from the panel below.'}
+              </p>
+              {c.hire_invoiced && (
+                <p className="mt-2 p-3 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-900">
+                  The hire was invoiced before it was cancelled. That invoice needs a credit note in HireHop before these figures are right.
+                </p>
+              )}
+            </>
+          );
+        })() : financial.hire_value_ex_vat > 0 ? (
           <>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
               <div>

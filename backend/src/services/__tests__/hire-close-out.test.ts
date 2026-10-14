@@ -80,7 +80,7 @@ function rows(): any[] {
   for (const i of hh.invoices) {
     out.push({
       kind: 1, status: String(i.status), debit: i.gross, owing: r2(i.gross - i.paid), date: i.date,
-      data: { ID: i.id, NUMBER: i.number, STATUS: i.status, NET: r2(i.gross / 1.2), TAX: r2(i.gross - i.gross / 1.2), ACC_ID: i.accId, TAX_POINT: i.date, DESCRIPTION: i.desc || '', ...(i.items ? { items: i.items } : {}) },
+      data: { ID: i.id, NUMBER: i.number, STATUS: i.status, NET: r2(i.gross / 1.2), TAX: r2(i.gross - i.gross / 1.2), ACC_ID: i.accId, TAX_POINT: i.date, DESCRIPTION: i.desc || '', ...(i.items ? { items: i.items.map((l) => ({ ...l })) } : {}) },
     });
   }
   for (const d of hh.deposits) {
@@ -132,6 +132,13 @@ function installHireHop() {
       const inv: Inv = { id: hh.nextInvoice++, status: 0, number: '', gross: r2(net * 1.2), paid: 0, accId: '', date: '2026-10-09' };
       hh.invoices.push(inv); hh.uninvoicedNet = 0;
       return { success: true, data: { rows: [{ kind: 1, data: { ID: inv.id } }] } };
+    }
+    if (path === '/php_functions/billing_save_item.php' && body.id === 0) {
+      // A custom line (§10.3b) — the cancellation fee. Lines are priced net; the fake's VAT is 20%.
+      const inv = hh.invoices.find((i) => i.id === body.bill)!;
+      inv.items!.push({ ID: 106000 + inv.items!.length, KIND: 3, MAIN_ID: 0, DESCRIPTION: body.note, PRICE: body.total, ACC_TAX_RATE_ID: body.vat_id, ACC_NOMINAL_ID: body.nominal_id });
+      inv.gross = r2(inv.items!.reduce((t, l) => t + l.PRICE, 0) * 1.2);
+      return { success: true, data: {} };
     }
     if (path === '/php_functions/billing_save_status.php') {
       const inv = hh.invoices.find((i) => i.id === body.id)!;
@@ -803,5 +810,157 @@ describe('allocateOnArrival (the arrival hook, §4.5)', () => {
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
     expect(logRows[0]).toMatchObject({ step: 'arrival', ok: false });
     expect(logRows[0].detail).toContain('HireHop unreachable');
+  });
+});
+
+// ── A cancelled job: the fee, not the hire (CANCELLATION-SPEC.md, the money end) ──
+
+describe('a cancelled job (job 16739)', () => {
+  /** 16739 as it stood on 14 Oct 2026: hire paid in full by Stripe, excess already refunded, fee £412.50 + VAT. */
+  let reminders: Array<{ id: string; amount: number }>;
+  let opWrites: Array<{ sql: string; params: any[] }>;
+  const CANCELLED = {
+    ...JOB, hh_job_number: 16739, job_name: 'AEG Presents - PREMIUM', pipeline_status: 'cancelled',
+    cancellation_fee: '412.50', cancelled_at: '2026-10-08T12:00:00Z', job_date: '2026-10-12T08:00:00Z', job_end: '2026-10-23T08:00:00Z',
+  };
+  let job: any;
+
+  beforeEach(() => {
+    job = { ...CANCELLED };
+    hh = {
+      jobStatus: 9, nextApp: 900, ignoreAllocations: false,
+      accruedNet: 1650, uninvoicedNet: 1650, euTrigger: false, nextInvoice: 13100,
+      invoices: [],
+      deposits: [
+        { id: 9354, credit: 495, bank: 267, allocated: 0, desc: '16739 - deposit', date: '2026-09-28' },
+        { id: 9412, credit: 1485, bank: 267, allocated: 0, desc: '16739 - balance', date: '2026-10-08' },
+        { id: 9413, credit: 1200, bank: 267, allocated: 1200, desc: '16739 - excess (Full excess - 1 van(s))', date: '2026-10-08' },
+      ],
+      apps: [{ id: 904, invoiceId: 0, depositId: 9413, amount: 1200 }],   // the excess, refunded
+    };
+    opPayments = [
+      { hirehop_deposit_id: 9354, payment_type: 'deposit', amount: 495, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
+      { hirehop_deposit_id: 9412, payment_type: 'balance', amount: 1485, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
+      { hirehop_deposit_id: 9413, payment_type: 'excess', amount: 1200, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
+    ];
+    reminders = [{ id: 'iou-1', amount: 1485 }];
+    opWrites = [];
+    installXero();
+    const base = mockQuery.getMockImplementation()!;
+    mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
+      if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...job }] };
+      if (sql.includes("payment_status = 'pending'") && sql.includes('SELECT')) return { rows: reminders };
+      if (sql.includes('INSERT INTO interactions')) { opWrites.push({ sql, params }); return { rows: [] }; }
+      if (sql.includes('INSERT INTO job_payments')) { opWrites.push({ sql, params }); reminders.push({ id: 'iou-new', amount: params[1] }); return { rows: [] }; }
+      if (sql.includes('UPDATE job_payments')) { opWrites.push({ sql, params }); reminders = reminders.map((r) => (r.id === params[0] ? { ...r, amount: params[1] } : r)); return { rows: [] }; }
+      return base(sql, params);
+    });
+  });
+
+  it('plans the FEE, not the hire: £412.50 + VAT to invoice, nothing allocated yet, the excess left alone', async () => {
+    const plan = await planHireCloseOut('16739');
+    expect(plan.cancellation).toEqual(expect.objectContaining({ feeNet: 412.5, feeGross: 495, invoiced: false, settled: false }));
+    expect(plan.invoice.netToInvoice).toBe(412.5);                   // not the £1,650 hire
+    expect(plan.invoice.blockers).toEqual([]);
+    expect(plan.blockers).toEqual(['Raise the invoice first — the job has no approved invoice in HireHop.']);
+    expect(plan.warnings.some((w) => w.includes("hasn't returned"))).toBe(false);
+    expect(plan.sentences[0]).toBe('Raise the cancellation fee invoice: £412.50 + VAT = £495.00.');
+    expect(plan.payments.map((p) => p.depositId)).toEqual([9354, 9412]);   // 9413 is excess
+    expect(plan.readyToComplete).toBe(false);
+  });
+
+  it('one press: the fee invoice (one Misc line, 20%), approved, in Xero; £495 of 9354 allocated; the £1,485 left to refund', async () => {
+    const r = await runHireCloseOut('16739', 'u-jon');
+    expect(r.done).toBe(true);
+    expect(posts('/php_functions/billing_save.php')).toEqual([expect.objectContaining({ all: 0, job: 16739 })]);
+    const lines = posts('/php_functions/billing_save_item.php');
+    expect(lines).toEqual([expect.objectContaining({ id: 0, kind: 3, total: 412.5, vat_rate: 20, vat_id: 20, nominal_id: 190 })]);
+    expect(lines[0].note).toBe('Cancellation fee (T&Cs clause 7) — hire 12 Oct 2026 to 23 Oct 2026 — cancelled 8 Oct 2026');
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([expect.objectContaining({ deposit: 9354, paid: 495, OWNER: 13100 })]);
+    expect(mockXeroAllocate).toHaveBeenCalledWith(expect.objectContaining({ overpaymentId: 'op-9354', amount: 495 }));
+    expect(xero.invoiceDue['x-13100']).toBe(0);
+    expect(posts('/frames/status_save.php')).toEqual([]);              // never completed
+    expect(r.plan.invoices).toEqual([expect.objectContaining({ number: 'OT-INV-13100', gross: 495, owing: 0, chargeOnly: true })]);
+    expect(r.plan.surplus).toEqual([{ depositId: 9412, amount: 1485 }]);
+    expect(r.plan.sentences).toContain('Refund £1485.00 of payment 9412 to the client.');
+    expect(r.message).toContain('Fee invoice OT-INV-13100 raised for £495.00');
+    expect(r.message).toContain('The pending refund of £1485.00 on the Money tab is ready');
+    expect(opWrites.filter((w) => w.sql.includes('job_payments'))).toEqual([]);   // the reminder was already right
+    expect(opWrites.some((w) => w.sql.includes('INSERT INTO interactions') && String(w.params[1]).includes('OT-INV-13100'))).toBe(true);
+    expect(r.plan.cancellation!.settled).toBe(false);                 // £1,485 still to go back
+  });
+
+  it('settled once the rest is refunded', async () => {
+    await runHireCloseOut('16739', 'u-jon');
+    hh.deposits.find((d) => d.id === 9412)!.allocated = 1485;           // the refund (OWNER 0), with OP's record of it
+    hh.apps.push({ id: 905, invoiceId: 0, depositId: 9412, amount: 1485, desc: 'Refund' });
+    opPayments.push({ hirehop_deposit_id: 9412, payment_type: 'refund', amount: 1485, payment_method: 'stripe_gbp', source: 'op', notes: null });
+    const plan = await planHireCloseOut('16739');
+    expect(plan.blockers).toEqual([]);
+    expect(plan.surplus).toEqual([]);
+    expect(plan.cancellation!.settled).toBe(true);
+  });
+
+  it('a reminder that guessed wrong follows the real figure; none at all gets one made', async () => {
+    reminders = [{ id: 'iou-1', amount: 1000 }];
+    let r = await runHireCloseOut('16739', 'u-jon');
+    expect(r.message).toContain('now £1485.00 (was £1000.00)');
+    expect(reminders).toEqual([{ id: 'iou-1', amount: 1485 }]);
+
+    reminders = [];
+    r = await runHireAllocation('16739', 'u-jon');
+    expect(r.message).toContain('A pending refund of £1485.00');
+    expect(reminders).toEqual([{ id: 'iou-new', amount: 1485 }]);
+  });
+
+  it('a fee bigger than what was paid: allocated in full, the rest owed (the portal takes it)', async () => {
+    job.cancellation_fee = '2000';
+    const r = await runHireCloseOut('16739', 'u-jon');
+    expect(r.done).toBe(true);
+    expect(r.plan.invoices[0].gross).toBe(2400);
+    expect(r.plan.invoices[0].owing).toBe(420);                        // £2,400 − £1,980
+    expect(r.plan.surplus).toEqual([]);
+    expect(r.message).toContain('The client still owes £420.00');
+    expect(reminders).toEqual([{ id: 'iou-1', amount: 1485 }]);        // left alone — and said so
+    expect(r.message).toContain('Nothing is left to refund, but OP still has a pending refund of £1485.00');
+  });
+
+  it('refuses to raise the fee while HireHop does not show the job Cancelled — nothing written', async () => {
+    hh.jobStatus = 2;
+    const r = await runHireCloseOut('16739', 'u-jon');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain("doesn't show job 16739 as Cancelled (status 2)");
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('refuses a job whose hire was invoiced before it was cancelled (that needs a credit note) — nothing written', async () => {
+    hh.invoices.push({ id: 12999, status: 2, number: 'OT-INV-12999', gross: 1980, paid: 0, accId: 'x-12999', date: '2026-10-01', items: [{ ID: 1, MAIN_ID: 164980, KIND: 2, PRICE: 1650 }] });
+    const plan = await planHireCloseOut('16739');
+    expect(plan.blockers.some((b) => b.includes('needs a credit note'))).toBe(true);
+    const r = await runHireCloseOut('16739', 'u-jon');
+    expect(r.done).toBe(false);
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('is never completed', async () => {
+    await runHireCloseOut('16739', 'u-jon');
+    const r = await completeHireJob('16739', 'u-jon');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('never completed');
+    expect(posts('/frames/status_save.php')).toEqual([]);
+  });
+
+  it('no fee at all: nothing to invoice, everything is a refund', async () => {
+    job.cancellation_fee = '0';
+    const plan = await planHireCloseOut('16739');
+    expect(plan.blockers).toEqual([]);
+    expect(plan.invoice.netToInvoice).toBe(0);
+    expect(plan.surplus).toEqual([{ depositId: 9354, amount: 495 }, { depositId: 9412, amount: 1485 }]);
+  });
+
+  it('a lost job is still refused', async () => {
+    job.pipeline_status = 'lost';
+    const plan = await planHireCloseOut('16739');
+    expect(plan.blockers).toEqual(['This job is lost — there is nothing to invoice.']);
   });
 });
