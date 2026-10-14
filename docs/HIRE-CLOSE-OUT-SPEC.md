@@ -518,6 +518,11 @@ deposit on the scratch job (a deposit creates a real Xero overpayment).
 > is classified through its own supply-list row; a line OP can't place stays at 20% (the guide's
 > default). Jobs touched: `scripts/vat-vehicle-rule-sweep.ts` (read-only). PCN fine moved to
 > zero-rated (code 33) the same day.
+>
+> **Pasted "Default" lines (14 Oct 2026, 16849).** A pasted line on the "Default" nominal reads
+> back with `ACC_NOMINAL_ID: null` (the old `all: 1` draft filled in 175). The split grouped them
+> as "Nominal 0"; HireHop put that custom line on 175, the read-back refused it. Lines with no
+> nominal now group on the invoice's DEFAULT nominal (`nominal_codes[].DEFAULT`, 175 Backline hire).
 
 The rule already exists and is already what the client has been told (`vat-adjustment.ts`,
 ported from the portal; HMRC 741A): vehicle and equipment revenue is 0% for the non-UK

@@ -357,7 +357,7 @@ export async function raiseHireInvoice(jobIdOrNumber: string, userId: string | n
   opts: { allowNotReturned?: boolean } = {}): Promise<CloseOutResult> {
   const job = await loadJob(jobIdOrNumber);
   return withJobLock(job.id, async () => {
-    const rep = reporter(job.id, userId, 'press Raise invoice');
+    const rep = reporter(job.id, userId, 'press the Money tab button');
     let done = false;
     let message: string;
     try {
@@ -701,7 +701,7 @@ export async function runHireCloseOut(jobIdOrNumber: string, userId: string | nu
   opts: { allowNotReturned?: boolean } = {}): Promise<CloseOutResult> {
   const job = await loadJob(jobIdOrNumber);
   return withJobLock(job.id, async () => {
-    const rep = reporter(job.id, userId, 'press Carry on');
+    const rep = reporter(job.id, userId, 'press the Money tab button');
     let done = false;
     let message: string;
     try {
