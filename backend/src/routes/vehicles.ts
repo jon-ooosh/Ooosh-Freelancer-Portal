@@ -706,6 +706,12 @@ router.post('/freelancer-checkin/resolve', freelancerResolveLimiter, async (req:
     //
     // No LIMIT 1 — see the multi-van note above. Several vans can be out on
     // one job and collected by different freelancers.
+    //
+    // A van SWAPPED OUT mid-hire is still with the client until someone
+    // collects it, so it counts as out until it is collected or checked in
+    // (a freelancer delivering the replacement brings the old one back —
+    // 14 Oct 2026). Its row stays 'swapped'; the soft check-in
+    // only stamps soft_checked_in_at, which is also what drops it from here.
     const outResult = await query(
       `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status, vha.soft_checked_in_at,
               fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
@@ -714,7 +720,8 @@ router.post('/freelancer-checkin/resolve', freelancerResolveLimiter, async (req:
          LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
          LEFT JOIN drivers d ON d.id = vha.driver_id
         WHERE (vha.job_id = $1 OR vha.hirehop_job_id = $2)
-          AND vha.status IN ('booked_out', 'active')
+          AND (vha.status IN ('booked_out', 'active')
+               OR (vha.status = 'swapped' AND vha.checked_in_at IS NULL AND vha.soft_checked_in_at IS NULL))
           AND vha.vehicle_id IS NOT NULL
         ORDER BY CASE vha.status WHEN 'active' THEN 0 WHEN 'booked_out' THEN 1 ELSE 2 END,
                  CASE WHEN vha.driver_id IS NOT NULL THEN 0 ELSE 1 END,

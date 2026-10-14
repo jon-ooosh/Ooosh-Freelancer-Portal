@@ -1603,13 +1603,19 @@ router.post(
       }
     }
 
-    // 4b. Interim assessment on the swapped-out van's Event History (breakdown
-    // only). Puts the soft check-in on the van's timeline and lets staff produce
+    // 4b. Interim assessment on the swapped-out van's Event History (breakdown,
+    // or a planned swap with a reading). Puts the soft check-in on the van's timeline and lets staff produce
     // the Interim Assessment PDF on demand via the existing Event History
     // "regenerate PDF" affordance (it derives isInterim from the soft-check-in
-    // eventType). Planned swaps skip this — the van takes a normal full check-in
-    // on return, which produces its own condition report. Best-effort.
-    if (!isPlanned && orig.vehicle_reg) {
+    // eventType). A planned swap writes it only when staff entered a reading:
+    // the van still takes a normal full check-in on return, but that check-in
+    // compares the client's fuel/miles book-out -> swap from this event, and
+    // without one the client figures read "not recorded". Best-effort.
+    const hasSoftReading = !!(soft_checkin && (
+      (soft_checkin.mileage && soft_checkin.mileage > 0) ||
+      soft_checkin.fuel_level || soft_checkin.location || soft_checkin.notes
+    ));
+    if (orig.vehicle_reg && (!isPlanned || hasSoftReading)) {
       const swapDriverNames = slotRows
         .map((r: any) => r.driver_name)
         .filter(Boolean)
@@ -1624,6 +1630,8 @@ router.post(
         driverName: swapDriverNames || orig.driver_name || null,
         toReg: newVehicle.reg,
         swapReason: swap_reason,
+        // Planned: the van is fine, so its timeline shouldn't say Not Ready.
+        hireStatus: isPlanned ? 'Prep Needed' : 'Not Ready',
       }).catch(err => console.warn('[assignments] swap interim event-history write failed:', err));
     }
 
