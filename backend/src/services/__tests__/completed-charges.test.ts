@@ -116,14 +116,14 @@ describe('raiseChargeInvoice', () => {
     expect(mockQuery.mock.calls.some((c) => String(c[0]).includes('INSERT INTO interactions') && String(c[1][1]).includes('Lost on tour'))).toBe(true);
   });
 
-  it('a PCN: handling fee at 20%, the fine at No VAT, on one invoice', async () => {
+  it('a PCN: handling fee at 20%, the fine zero-rated, on one invoice', async () => {
     const r = await raiseChargeInvoice('15745', null, {
       lines: [{ type: 'pcn_handling', description: 'PCN AB123 — handling fee', amount: 35 }, { type: 'pcn_fine', description: 'PCN AB123 — fine', amount: 65 }],
       reason: 'PCN AB123',
     });
     expect(r.done).toBe(true);
     const lines = posts('/php_functions/billing_save_item.php');
-    expect(lines.map((l) => [l.total, l.vat_rate, l.vat_id])).toEqual([[35, 20, 20], [65, 0, 27]]);
+    expect(lines.map((l) => [l.total, l.vat_rate, l.vat_id])).toEqual([[35, 20, 20], [65, 0, 33]]);
     expect(r.message).toContain('£107.00');
   });
 

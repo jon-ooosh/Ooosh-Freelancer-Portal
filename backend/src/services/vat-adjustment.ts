@@ -12,8 +12,15 @@
  */
 import { hhBroker } from './hirehop-broker';
 
-// Trigger item pattern
-const VAT_TRIGGER_NAME_PATTERN = /non-standard vat/i;
+// The two HireHop items (virtual, category 369). Both names start "Non-standard VAT
+// rules", so each is matched on its own words — never on the shared prefix alone:
+//   "… - number of days outside of UK"           qty = the non-UK days
+//   "… - van hire starts and ends outside the UK" (Oct 2026) vehicles zero-rated whatever the length
+const VAT_ITEM_PREFIX = /non-standard vat/i;
+const VAT_OUTSIDE_ITEM = /starts\s+and\s+ends\s+outside/i;
+const itemNameOf = (item: any): string => String(item.title || item.NAME || item.name || '');
+const isNonUkDaysItem = (item: any) => VAT_ITEM_PREFIX.test(itemNameOf(item)) && !VAT_OUTSIDE_ITEM.test(itemNameOf(item));
+const isOutsideItem = (item: any) => VAT_OUTSIDE_ITEM.test(itemNameOf(item));
 
 // Standard UK VAT rate
 const UK_VAT_RATE = 0.20;
@@ -30,6 +37,23 @@ const ALWAYS_20_KEYWORDS = ['delivery', 'shop', 've103', 'collection', 'admin', 
 // Min hire days for vehicle zero-rating on entire hire
 export const VEHICLE_ZERO_RATE_MIN_DAYS = 31;
 
+/**
+ * Vehicles (Ooosh! Tours guide to VAT on hires, Jan 2025; HMRC 744A/741A): zero-rated
+ * ONLY on a hire of 31+ days, or one that starts AND ends outside the UK. Otherwise the
+ * whole vehicle hire is UK VAT at 20% — it is never split by UK / non-UK days (that is
+ * equipment's rule). Until Oct 2026 vehicles under 31 days were split by days, here and
+ * in the payment portal — jon caught it on 14 Oct.
+ */
+export function vehiclesZeroRated(hireDays: number, startsAndEndsOutsideUk: boolean): boolean {
+  return hireDays >= VEHICLE_ZERO_RATE_MIN_DAYS || startsAndEndsOutsideUk;
+}
+
+/** The "starts and ends outside the UK" item is on the job (quantity 1 or more). */
+export function vehicleHireOutsideUk(rawItems: any[]): boolean {
+  const item = rawItems.find(isOutsideItem);
+  return !!item && (parseFloat(item.qty ?? item.QTY ?? '1') || 0) > 0;
+}
+
 /** The three VAT treatments, per HireHop nominal (ACC_NOMINAL on the job's items). */
 export type VatClass = 'vehicle' | 'equipment' | 'always20';
 
@@ -43,7 +67,7 @@ export async function readSupplyItems(hhJobId: number, fresh = false): Promise<a
 
 /** The "Non-standard VAT rules" item's quantity — the non-UK days. 0 when the job has none. */
 export function nonUkDaysOf(rawItems: any[]): number {
-  const trigger = rawItems.find((item: any) => VAT_TRIGGER_NAME_PATTERN.test(item.title || item.NAME || item.name || ''));
+  const trigger = rawItems.find(isNonUkDaysItem);
   return trigger ? (parseInt(trigger.qty || trigger.QTY || '0') || 0) : 0;
 }
 
@@ -119,8 +143,8 @@ export interface VatAdjustmentResult {
 }
 
 /**
- * Does the job carry the "Non-standard VAT rules" trigger item with a non-UK
- * day count? The hire close-out asks before raising an invoice: until the
+ * Does the job carry a "Non-standard VAT rules" item — a non-UK day count, or
+ * the vehicle hire starting and ending outside the UK? The hire close-out asks before raising an invoice: until the
  * invoice-line VAT split is built (HIRE-CLOSE-OUT-SPEC.md §10.1) such a job is
  * invoiced by hand. Null when HireHop could not be read.
  */
@@ -129,8 +153,7 @@ export async function hasNonStandardVatItem(hhJobId: number): Promise<boolean | 
     { job: hhJobId }, { priority: 'high', cacheTTL: 300 });
   if (!itemsRes.success || !itemsRes.data) return null;
   const rawItems: any[] = Array.isArray(itemsRes.data) ? itemsRes.data : (itemsRes.data.items || itemsRes.data.rows || []);
-  const trigger = rawItems.find((item: any) => VAT_TRIGGER_NAME_PATTERN.test(item.title || item.NAME || item.name || ''));
-  return !!trigger && parseInt(trigger.qty || trigger.QTY || '0') > 0;
+  return nonUkDaysOf(rawItems) > 0 || vehicleHireOutsideUk(rawItems);
 }
 
 export async function calculateVatAdjustment(
@@ -150,18 +173,12 @@ export async function calculateVatAdjustment(
       ? itemsRes.data
       : (itemsRes.data.items || itemsRes.data.rows || []);
 
-    // Step 2: Find trigger item and extract non-UK days
-    const triggerItem = rawItems.find((item: any) => {
-      const itemName = item.title || item.NAME || item.name || '';
-      return VAT_TRIGGER_NAME_PATTERN.test(itemName);
-    });
-
-    if (!triggerItem) return null; // No trigger = standard UK VAT
-
-    const nonUkDays = parseInt(triggerItem.qty || triggerItem.QTY || '0');
+    // Step 2: The two items — non-UK days, and a vehicle hire starting and ending outside the UK
+    const nonUkDays = Math.min(nonUkDaysOf(rawItems), hireDays);
+    const outside = vehicleHireOutsideUk(rawItems);
     const ukDays = Math.max(0, hireDays - nonUkDays);
 
-    if (nonUkDays <= 0) return null;
+    if (nonUkDays <= 0 && !outside) return null; // neither item = standard UK VAT
 
     // Step 3: Build ACC_NOMINAL → VAT category mapping
     const nominalClassification = classifyNominals(rawItems);
@@ -206,12 +223,14 @@ export async function calculateVatAdjustment(
     // Vehicles
     let vehicleVat: number;
     let vehicleVatReason: string;
-    if (vehicleRevenue > 0 && hireDays >= VEHICLE_ZERO_RATE_MIN_DAYS) {
+    if (vehiclesZeroRated(hireDays, outside)) {
       vehicleVat = 0;
-      vehicleVatReason = `0% VAT (${hireDays} days, 31+ to international business)`;
+      vehicleVatReason = hireDays >= VEHICLE_ZERO_RATE_MIN_DAYS
+        ? `0% VAT (${hireDays} days, 31+ to international business)`
+        : '0% VAT (hire starts and ends outside the UK)';
     } else {
-      vehicleVat = vehicleRevenue * ukProportion * UK_VAT_RATE;
-      vehicleVatReason = `Proportional: ${ukDays} UK days @ 20%, ${nonUkDays} non-UK days @ 0%`;
+      vehicleVat = vehicleRevenue * UK_VAT_RATE;
+      vehicleVatReason = 'Full 20% UK VAT (vehicle hire under 31 days that starts or ends in the UK)';
     }
 
     // Equipment

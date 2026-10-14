@@ -204,7 +204,7 @@ lines → penny check → approve dated today → Xero) then allocates in HireHo
 "Mark as sent" ticks the Invoice requirement; "Complete the job" opens the page's own status modal. The balance
 shows once, in the Financial Summary, only when non-zero. No Xero links, no Details modal. **An EU hire** (the "Non-standard VAT rules" item)
 gets its draft split by `services/eu-vat-split.ts` (real lines to £0, each edited in place by its own id, per nominal a UK-days line at 20% and a
-non-UK-days line at code 33; 31+ day vehicles zero-rated), checked against the portal's figure, then approved in the same press.
+non-UK-days line at code 33; vehicles zero-rated only on a 31+ day hire or with the "starts and ends outside the UK" item, otherwise 20% in full — never split by days), checked against the portal's figure, then approved in the same press.
 Completing a job is the status
 change at the top of the page, and that modal refuses open Problems (manager + reason to override;
 `routes/pipeline.ts` enforces it). **Nightly Xero credit sweep** `services/close-out-xero-sweep.ts`
@@ -351,6 +351,7 @@ existing definition:
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
 | What is a shop transaction worth? | `services/shop-sales.ts` |
 | Which HireHop job do shop sales go on? | `services/shop-period.ts` `getShopPeriodForSale()` (the week it was rung up in) → `getOrCreateShopPeriod()` |
+| Which VAT does an international hire attract (portal figure, Money tab box)? | `services/vat-adjustment.ts` `calculateVatAdjustment()` / `vehiclesZeroRated()` — equipment split by UK / non-UK days; vehicles 0% only at 31+ days or with the "starts and ends outside the UK" item, else 20%; rehearsals / services 20%. **The payment portal has its OWN copy** (`netlify-functions` `functions/vat-adjustment.js`) — change both |
 | Splitting an EU hire's invoice by UK / non-UK days | `services/eu-vat-split.ts` — on the DRAFT only; which line gets which VAT rule is `vat-adjustment.ts` `classifyNominals()`, shared with the portal figure |
 | Settling a HireHop invoice end to end (draft, approve, Xero, allocate in HH, apply credits in Xero, complete) | `services/hh-invoice-close.ts` — THE recipe (`HIREHOP-BILLING-API.md` §8); callers pass a `CloseReporter`. Shop and hire close-out both sit on it; never a second copy |
 | Closing a finished shop week (its pre-flight, penny check, state) | `services/shop-close.ts` — on the recipe above |

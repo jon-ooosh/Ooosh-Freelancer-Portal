@@ -7,15 +7,19 @@
  * that on the DRAFT invoice the way staff have done it by hand (job 15812,
  * jon's choice, 12 Oct 2026):
  *
- *   - Equipment, and vehicles on a hire under 31 days: each real line goes to
+ *   - Equipment: each real line goes to
  *     £0 (edited in place by its own id), and per NOMINAL two custom lines carry its money —
  *     "<nominal>, UK days (2 of 28)" at 20% and "<nominal>, non-UK days,
  *     zero-rated (HMRC 741A) (26 of 28)" at tax code 33. The nominal is kept,
  *     so Xero's revenue accounts are unchanged; VAT is rounded once per
  *     nominal, as the portal works it out.
- *   - Vehicles on a hire of 31+ days: the lines move to tax code 33, price
- *     untouched.
+ *   - Vehicles: zero-rated (tax code 33, price untouched) on a hire of 31+ days or one
+ *     that starts AND ends outside the UK (`vehiclesZeroRated()`); otherwise untouched at
+ *     20% — a vehicle hire is never split by days (jon, 14 Oct 2026; until then it was).
  *   - Delivery, crew, storage, rehearsals ("always 20%"): untouched.
+ *   - A line OP can't place (not one of the job's items): left at 20%, the guide's
+ *     default ("our default position will be to charge VAT at the prevailing rate").
+ *     A priced prompt line is placed through its own supply-list row like any other.
  *
  * The job's own lines are never touched — only the invoice's copies.
  * Order: add the custom lines, THEN zero the real ones, so any half-done
@@ -31,7 +35,7 @@ import {
 } from './hh-invoice-close';
 import {
   VatClass, readSupplyItems, nonUkDaysOf, classifyNominals, hireDaysBetween,
-  VEHICLE_ZERO_RATE_MIN_DAYS, calculateVatAdjustment,
+  VEHICLE_ZERO_RATE_MIN_DAYS, calculateVatAdjustment, vehiclesZeroRated, vehicleHireOutsideUk,
 } from './vat-adjustment';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -53,7 +57,7 @@ export interface EuSplitPlan {
   nonUkDays: number;
   /** Real lines that go to £0 (their money moves to the custom lines). */
   zero: Row[];
-  /** Vehicle lines on a 31+ day hire: to tax code 33, price untouched. */
+  /** Vehicle lines on a zero-rated vehicle hire (31+ days, or starts and ends outside the UK): to tax code 33, price untouched. */
   zeroRate: Row[];
   custom: CustomLine[];
 }
@@ -73,24 +77,24 @@ export function planEuSplit(input: {
   nominalName: (nominalId: number) => string;
   hireDays: number;
   nonUkDays: number;
+  /** The vehicle hire is zero-rated (`vehiclesZeroRated()`); otherwise vehicles stay at 20%. */
+  vehicleZeroRated: boolean;
 }): { plan: EuSplitPlan } | { problem: string } {
-  const { lines, classOf, nominalName, hireDays } = input;
+  const { lines, classOf, nominalName, hireDays, vehicleZeroRated } = input;
   const nonUkDays = Math.min(input.nonUkDays, hireDays);
   const ukDays = Math.max(0, hireDays - nonUkDays);
   const plan: EuSplitPlan = { hireDays, ukDays, nonUkDays, zero: [], zeroRate: [], custom: [] };
   const groups = new Map<number, number>();
   for (const line of lines) {
     if (num(line.PRICE) < PENNY) continue;
-    if (num(line.KIND) === 3) {
-      return { problem: `The draft has a custom line ("${lineName(line)}") — OP can't tell which VAT rule it follows. Delete the draft in HireHop and raise it again, or raise this one by hand.` };
-    }
     const cls = classOf(line);
-    if (!cls) return { problem: `OP can't match the invoice line "${lineName(line)}" to the job's items, so it can't tell which VAT rule applies. Raise this invoice by hand.` };
-    if (cls === 'always20') continue;
-    if (cls === 'vehicle' && hireDays >= VEHICLE_ZERO_RATE_MIN_DAYS) {
-      if (num(line.ACC_TAX_RATE_ID) !== ZERO_RATED_TAX_ID) plan.zeroRate.push(line);
+    // Not one of the job's items: OP can't say it qualifies, so it stays at 20%.
+    if (!cls || cls === 'always20') continue;
+    if (cls === 'vehicle') {
+      if (vehicleZeroRated && num(line.ACC_TAX_RATE_ID) !== ZERO_RATED_TAX_ID) plan.zeroRate.push(line);
       continue;
     }
+    if (nonUkDays <= 0) continue;   // no non-UK days: equipment is all UK
     plan.zero.push(line);
     const nominal = num(line.ACC_NOMINAL_ID);
     groups.set(nominal, round2((groups.get(nominal) ?? 0) + num(line.PRICE)));
@@ -116,9 +120,9 @@ export function planEuSplit(input: {
  * problems found (empty = fine).
  */
 export function checkSplitDraft(input: {
-  lines: Row[]; classOf: (line: Row) => VatClass | null; hireDays: number; nonUkDays: number;
+  lines: Row[]; classOf: (line: Row) => VatClass | null; hireDays: number; nonUkDays: number; vehicleZeroRated: boolean;
 }): string[] {
-  const { lines, classOf, hireDays } = input;
+  const { lines, classOf, hireDays, vehicleZeroRated } = input;
   const nonUkDays = Math.min(input.nonUkDays, hireDays);
   const ukDays = Math.max(0, hireDays - nonUkDays);
   const problems: string[] = [];
@@ -136,11 +140,12 @@ export function checkSplitDraft(input: {
     }
     if (price < PENNY) continue;
     const cls = classOf(line);
-    if (cls === 'always20') continue;
-    if (cls === 'vehicle' && hireDays >= VEHICLE_ZERO_RATE_MIN_DAYS) {
-      if (num(line.ACC_TAX_RATE_ID) !== ZERO_RATED_TAX_ID) problems.push(`"${lineName(line)}" should be zero-rated (31+ day vehicle hire) but is on tax code ${line.ACC_TAX_RATE_ID}.`);
+    if (!cls || cls === 'always20') continue;
+    if (cls === 'vehicle') {
+      if (vehicleZeroRated && num(line.ACC_TAX_RATE_ID) !== ZERO_RATED_TAX_ID) problems.push(`"${lineName(line)}" should be zero-rated (31+ days, or starts and ends outside the UK) but is on tax code ${line.ACC_TAX_RATE_ID}.`);
       continue;
     }
+    if (nonUkDays <= 0) continue;
     problems.push(`"${lineName(line)}" still carries ${gbp(price)} — it should be at £0 with its money on the UK / non-UK lines.`);
   }
   for (const [nominalId, g] of byNominal) {
@@ -173,9 +178,11 @@ export async function splitEuDraft(rep: CloseReporter, ctx: {
   const deleteHint = `Delete draft ${draftId} in HireHop and ${rep.retryHint} to start again.`;
   const supply = await readSupplyItems(hhJobNumber, true);
   if (!supply) await rep.stop('vat_split', `Could not read the job's items from HireHop to split the VAT. Nothing was changed — ${rep.retryHint} to try again.`);
-  const nonUkDays = nonUkDaysOf(supply!);
-  if (nonUkDays <= 0) return 'none';
   const hireDays = await hireDaysOf(ctx.jobId);
+  const nonUkDays = Math.min(nonUkDaysOf(supply!), hireDays);
+  const outside = vehicleHireOutsideUk(supply!);
+  if (nonUkDays <= 0 && !outside) return 'none';
+  const vehicleZeroRated = vehiclesZeroRated(hireDays, outside);
   const classes = classifyNominals(supply!);
   const byJobLine = new Map(supply!.map((i: any) => [num(i.ID), i]));
   const classOf = (line: Row): VatClass | null => {
@@ -193,7 +200,7 @@ export async function splitEuDraft(rep: CloseReporter, ctx: {
 
   if (!invoiceItems(draft).some(isSplitLine)) {
     const result = planEuSplit({
-      lines: invoiceItems(draft), classOf, hireDays, nonUkDays,
+      lines: invoiceItems(draft), classOf, hireDays, nonUkDays, vehicleZeroRated,
       nominalName: (id) => nominalNames.get(id) || `Nominal ${id}`,
     });
     if ('problem' in result) await rep.stop('vat_split', result.problem);
@@ -248,12 +255,12 @@ export async function splitEuDraft(rep: CloseReporter, ctx: {
         await rep.stop('vat_split', `HireHop did not zero-rate "${lineName(line)}" as asked${res?.error ? ` (${res.error})` : ''}. Nothing has gone to Xero. ${deleteHint}`);
       }
     }
-    if (plan.zeroRate.length) await rep.log('vat_split', true, `${plan.zeroRate.length} vehicle line${plan.zeroRate.length === 1 ? '' : 's'} zero-rated (${hireDays}-day hire, 31+).`);
+    if (plan.zeroRate.length) await rep.log('vat_split', true, `${plan.zeroRate.length} vehicle line${plan.zeroRate.length === 1 ? '' : 's'} zero-rated (${hireDays >= VEHICLE_ZERO_RATE_MIN_DAYS ? `${hireDays}-day hire, 31+` : 'starts and ends outside the UK'}).`);
     changed = plan.zero.length + plan.zeroRate.length > 0;
   }
 
   // Read back the whole draft: the split is all there, and the money matches.
-  const problems = checkSplitDraft({ lines: invoiceItems(draft), classOf, hireDays, nonUkDays });
+  const problems = checkSplitDraft({ lines: invoiceItems(draft), classOf, hireDays, nonUkDays, vehicleZeroRated });
   if (problems.length) await rep.stop('vat_split', `Draft ${draftId} isn't split correctly: ${problems.join(' ')} Nothing has gone to Xero. ${deleteHint}`);
   const net = invoiceNet(draft!) ?? 0;
   const gross = invoiceGross(draft!) ?? 0;
