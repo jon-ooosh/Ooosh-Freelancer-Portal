@@ -74,9 +74,15 @@ structurally impossible rather than merely discouraged.
    so a later charge is just another `all: 1` call.
 8. **Allocation spreads across open invoices, oldest first**, allocating
    `min(deposit available, invoice owing)`, hire deposits only, oldest deposit first.
-   **Phase 1 refuses a job with more than one OPEN invoice** ("two invoices owing — not
-   yet supported, allocate by hand") until the first real two-invoice job has been walked
-   through with the plan on screen; the rule is written, the live proof is not (§9 item 3).
+   ~~Phase 1 refuses a job with more than one OPEN invoice.~~ **Superseded 14 Oct 2026 (jon,
+   job 16491 — the band wanted the hire and the damage invoiced apart for their insurer):** with
+   more than one invoice owing, a manager picks which one takes the hire payments ("Hire payments
+   go to" on the Money panel → `POST /close-out/:jobId/payment-target`, kept in `job_closeout_log`
+   as step `payments_target`, newest wins). Allocation fills ONLY that invoice — never oldest-first
+   across all, or hire money would spill onto the damage invoice. The others are settled the way
+   damage already is: an excess claim (its flow picks the invoice) or Record payment. The arrival
+   hook follows the choice. The split itself is made by a manager in HireHop (two blank invoices,
+   paste each section); "Separate invoice for a Damage section" at Create invoice is a later option.
 9. **The HireHop permission lockdown waits for Phase 2** (Raise invoice) **and the
    additional-charges path.** Until then staff still need the Billing tab to invoice.
    Managers keep billing rights permanently as the escape hatch.
@@ -653,7 +659,7 @@ look, 13 Oct). Kill-switch without a deploy: `system_settings.closeout_invoice_l
 4. ~~Phase 4, additional charges~~ — rescoped and built as §4.6 (charges after completion only).
 5. **Cancellation** — separate spec, reuses the invoice call, allocation and refund route.
 6. Smaller, held on purpose (jon, 13 Oct — captured here so they aren't lost):
-   - the two-open-invoice case (§1.8) — allocation refuses it for now; decide on the first real job;
+   - ~~the two-open-invoice case (§1.8)~~ — built 14 Oct 2026 as the payment-target picker;
    - §10.3 hold-on-account — a To Do to keep a surplus on account instead of refunding it;
    - whether the `/complete` route stays (§4.4) — the panel now completes through the
      status modal, so nothing in the UI calls it;

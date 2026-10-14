@@ -15,7 +15,7 @@
  */
 import { Router, Response } from 'express';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
-import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, runHireCloseOut, JOB_NOT_FOUND } from '../services/hire-close-out';
+import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, runHireCloseOut, setPaymentTarget, JOB_NOT_FOUND } from '../services/hire-close-out';
 import { raiseChargeInvoice, CHARGE_TYPES, ChargeLine } from '../services/completed-charges';
 
 const router = Router();
@@ -43,6 +43,18 @@ router.post('/:jobId/run', authorize(...MANAGER_ROLES), async (req: AuthRequest,
   } catch (err) {
     console.error('[close-out] run failed:', err);
     fail(res, err, 'Could not finish the job\'s money.');
+  }
+});
+
+// Several invoices owing: which one the hire payments go to (spec §5.1). OP's own record only.
+router.post('/:jobId/payment-target', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const invoiceId = Number(req.body?.invoice_id);
+    if (!Number.isInteger(invoiceId) || invoiceId <= 0) { res.status(400).json({ error: 'Choose an invoice.' }); return; }
+    res.json({ data: await setPaymentTarget(String(req.params.jobId), req.user?.id ?? null, invoiceId) });
+  } catch (err) {
+    console.error('[close-out] payment-target failed:', err);
+    fail(res, err, 'Could not save the choice.');
   }
 });
 

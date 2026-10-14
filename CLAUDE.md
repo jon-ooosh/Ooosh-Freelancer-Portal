@@ -194,8 +194,8 @@ deposits in HireHop AND Xero → complete), one job at a time, on the shared rec
 `services/hh-invoice-close.ts` (`HIREHOP-BILLING-API.md` §8). Born from job 16015: HireHop's "New
 payment" dialog records a REFUND when its invoice dropdown is left at "none". Built:
 `services/hire-close-out.ts` + `routes/hire-close-out.ts` (`/api/close-out/:jobId/plan|allocate|complete`,
-log in `job_closeout_log`) — plan shown first, every write read back, excess NEVER allocated, more
-than one open invoice refused for now, HireHop↔OP payment and refund mismatches refuse by name.
+log in `job_closeout_log`) — plan shown first, every write read back, excess NEVER allocated; with more
+than one invoice owing a manager picks which one takes the hire payments (`setPaymentTarget()`, Oct 2026 — the rest go by excess claim / Record payment), HireHop↔OP payment and refund mismatches refuse by name.
 The UI is ONE panel on the **Money tab**, `CloseOutMoneyPanel.tsx` (Oct 2026 redesign): one pill, five
 steps, one next-action line with its reason behind "Why?", a short ledger; stages from `lib/closeOutPlan.ts`
 `closeOutView()`, shared with the Overview's Invoice card (now a signpost, `CloseOutSignpost.tsx`, "Open in

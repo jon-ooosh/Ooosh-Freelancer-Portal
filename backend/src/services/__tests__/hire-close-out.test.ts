@@ -42,7 +42,7 @@ import { readBillingRows } from '../hh-deposit-release';
 import xeroBroker from '../xero-broker';
 import { syncSavedRowToXero } from '../hh-xero-sync';
 import { hasNonStandardVatItem } from '../vat-adjustment';
-import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, runHireCloseOut, planAllocations } from '../hire-close-out';
+import { planHireCloseOut, runHireAllocation, completeHireJob, raiseHireInvoice, runHireCloseOut, planAllocations, setPaymentTarget } from '../hire-close-out';
 import { handleJobStatusChange } from '../../routes/webhooks';
 import { allocateOnArrival, fireArrivalHook } from '../close-out-arrival';
 import { splitEuDraft } from '../eu-vat-split';
@@ -331,11 +331,31 @@ describe('planHireCloseOut', () => {
     expect(plan.blockers.join(' ')).toContain('Raise the invoice first');
   });
 
-  it('refuses more than one open invoice (Phase 1)', async () => {
+  it('two invoices owing: asks which one the hire payments go to, and allocates nothing until told', async () => {
     hh.invoices.push({ id: 12300, status: 2, number: 'OT-INV-12300', gross: 120, paid: 0, accId: 'x-12300', date: '2026-10-01' });
     const plan = await planHireCloseOut(JOB.id);
-    expect(plan.blockers.join(' ')).toContain('2 invoices are owing');
+    expect(plan.blockers.join(' ')).toContain('2 invoices are owing (OT-INV-12252, OT-INV-12300) — choose which one the hire payments go to');
+    expect(plan.paymentTarget).toBeNull();
     expect(plan.allocations).toEqual([]);
+  });
+
+  it('once a manager chooses, the hire payments go to that invoice ONLY — the other (damage) is left alone', async () => {
+    hh.invoices.push({ id: 12300, status: 2, number: 'OT-INV-12300', gross: 120, paid: 0, accId: 'x-12300', date: '2026-10-01' });
+    const plan = await setPaymentTarget(JOB.id, 'u1', 12252);
+    expect(plan.paymentTarget).toEqual({ invoiceId: 12252, number: 'OT-INV-12252' });
+    expect(plan.blockers.join(' ')).not.toContain('invoices are owing');
+    // 8661 holds £1,140.97: £254.17 to the chosen invoice, the rest left — none of it spills onto OT-INV-12300.
+    expect(plan.allocations).toEqual([expect.objectContaining({ depositId: 8661, amount: 254.17, invoiceId: 12252 })]);
+    expect(plan.surplus).toEqual([{ depositId: 8661, amount: 886.8 }]);
+    expect(plan.shortfall).toBe(120);
+    expect(plan.sentences.join(' ')).toContain('OT-INV-12300 (£120.00 owing) takes no hire payments');
+    // Changing the choice: the newest wins.
+    const again = await setPaymentTarget(JOB.id, 'u1', 12300);
+    expect(again.allocations).toEqual([expect.objectContaining({ depositId: 8661, amount: 120, invoiceId: 12300 })]);
+  });
+
+  it('refuses to point the hire payments at an invoice that is not owing', async () => {
+    await expect(setPaymentTarget(JOB.id, 'u1', 99999)).rejects.toThrow('not owing');
   });
 
   it('warns about excess still held and never allocates the excess deposit', async () => {
