@@ -114,9 +114,14 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
     } catch (e) { console.warn('[Cancellation] vehicles query failed:', e); }
 
     try {
+      // held_amount from v_excess_held — the one definition of "how much do we hold"
+      // (pre-auth money sits in amount_held, not excess_amount_taken).
       excess = await query(
-        `SELECT id, excess_amount_required, excess_status, payment_method
-         FROM job_excess WHERE job_id = $1`,
+        `SELECT je.id, je.excess_amount_required, je.excess_status, je.payment_method,
+                COALESCE(h.held_amount, 0) AS held_amount
+         FROM job_excess je
+         LEFT JOIN v_excess_held h ON h.excess_id = je.id
+         WHERE je.job_id = $1`,
         [jobId]
       );
     } catch (e) { console.warn('[Cancellation] excess query failed:', e); }
@@ -284,8 +289,20 @@ router.post(
         [jobId]
       );
 
-      // 7. Write back to HireHop (status 9 = Cancelled)
+      // 7. Write back to HireHop (status 9 = Cancelled). Still in the background, but a
+      // refusal now lands on the job's timeline instead of only in the server log — the
+      // broker RESOLVES {success:false} on a rate limit, so .catch alone never saw it. The
+      // money end reads HireHop's status before raising the fee invoice either way.
       writeBackStatusToHireHop(jobId, 'cancelled', req.user!.email || userId)
+        .then(async (r) => {
+          if (r.success) return;
+          console.error('[Cancellation] HH write-back refused:', r.message);
+          await query(
+            `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+             VALUES ('note', $1, $2, $3, 'cancelled', 'system')`,
+            [`⚠️ HireHop was not set to Cancelled (${r.message}). Set it to Cancelled in HireHop by hand.`, jobId, userId]
+          );
+        })
         .catch(err => console.error('[Cancellation] HH write-back error:', err));
 
       // 8. Create pending refund record in job_payments if refund > 0

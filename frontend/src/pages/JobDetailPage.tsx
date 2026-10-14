@@ -58,6 +58,7 @@ import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
 import { openAuthedFile } from '../lib/openAuthedFile';
 import { ukToday } from '../lib/ukDate';
 import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPlan } from '../lib/closeOutPlan';
+import { cancellationBalance } from '../lib/money';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -1603,7 +1604,8 @@ function JobDetailContent() {
   // and the Invoice card, so this costs nothing extra when either is on screen.
   const [closeOutPlan, setCloseOutPlan] = useState<CloseOutPlan | null>(null);
   const closeOutRelevant = !!id && !!job?.hh_job_number && !job?.is_internal
-    && (job?.pipeline_status === 'returned' || job?.pipeline_status === 'returned_incomplete');
+    && (job?.pipeline_status === 'returned' || job?.pipeline_status === 'returned_incomplete'
+      || job?.pipeline_status === 'cancelled');   // a cancellation's fee and refund (CANCELLATION-SPEC.md)
   useEffect(() => {
     if (!closeOutRelevant || !id) { setCloseOutPlan(null); return; }
     const unsub = subscribeCloseOutPlan(id, setCloseOutPlan);
@@ -7023,6 +7025,8 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
      *  "Client is owed £120" (job 15187). Two surfaces, one source, opposite
      *  conclusions — and the Overview is the one people glance at. */
     client_overpaid?: number;
+    /** A cancelled job: it owes the fee, not the hire (CANCELLATION-SPEC.md) — same as the Money tab. */
+    cancellation?: { charge_inc_vat: number; invoiced: boolean } | null;
   } | null>(null);
 
   useEffect(() => {
@@ -7030,7 +7034,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
     api.get<{ data: { financial: any } }>(`/money/${jobId}/summary`)
       .then(res => {
         const f = res.data.financial;
-        if (f.hire_value_inc_vat > 0) {
+        if (f.hire_value_inc_vat > 0 || f.cancellation) {
           setData({
             hire_value_inc_vat: f.hire_value_inc_vat,
             total_hire_deposits: f.total_hire_deposits,
@@ -7038,6 +7042,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
             deposit_percent: f.deposit_percent,
             deposit_paid: f.deposit_paid,
             client_overpaid: f.client_overpaid,
+            cancellation: f.cancellation ?? null,
           });
         }
       })
@@ -7045,6 +7050,21 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   }, [jobId]);
 
   if (!data) return null;
+
+  if (data.cancellation) {
+    const c = data.cancellation;
+    const b = cancellationBalance(c.charge_inc_vat, data.total_hire_deposits);
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="text-gray-500">
+          Cancelled · fee £{c.charge_inc_vat.toFixed(2)}{c.invoiced ? '' : ' (not invoiced yet)'} · paid £{data.total_hire_deposits.toFixed(2)}
+        </span>
+        <span className={`font-semibold whitespace-nowrap ${b.refundDue ? 'text-amber-700' : b.feeOwing ? 'text-red-600' : 'text-green-700'}`}>
+          {b.refundDue ? `£${b.refundDue.toFixed(2)} refund due` : b.feeOwing ? `£${b.feeOwing.toFixed(2)} fee owing` : 'All square'}
+        </span>
+      </div>
+    );
+  }
 
   const state = getPaymentState(data);
   const stateClass = PAYMENT_STATE_CLASSES[state].text;

@@ -1,6 +1,6 @@
 # Cancellation System Spec
 
-**Status:** In progress (Apr 2026)
+**Status:** April foundation live; the money end BUILT 14 Oct 2026 (final section)
 **Depends on:** Money System (Step 3), Status Transition Engine (Step 4), Hire Form system
 
 ## Overview
@@ -290,7 +290,7 @@ A cancelled job has financial records, cancelled assignments, crew notifications
 
 ---
 
-## Oct 2026 — the money end (HANDOVER — read this first)
+## Oct 2026 — the money end (BUILT 14 Oct 2026 — read this first)
 
 **Status:** the April foundation above is live (the `cancelled` status, the 7.1 calculator, the
 modal, the Lost & Cancelled page, crew and client emails, Re-open, the close-out requirements). What
@@ -308,39 +308,62 @@ now does for finished hires. Build this on that module's parts; never a second c
 | Excess on the job | the Excess card's existing flows (release pre-auth, reimburse, claim) — `v_excess_held`; never re-derived |
 | Money panel UI | `components/CloseOutMoneyPanel.tsx` + `lib/closeOutPlan.ts` `closeOutView()` — one pill, steps, one next-action line |
 
-**The five decisions to settle with jon BEFORE writing code** (raised 14 Oct 2026; he agreed these
-are the right questions — get his answer to each):
+**The five decisions — SETTLED with jon, 14 Oct 2026:**
 
-1. **The fee invoice's shape.** Proposal: ONE custom line, "Cancellation fee (T&Cs 7.1)", at 20% on
-   Misc income (nominal 190 / Xero 275), plus any transport/crew costs ticked in the modal as their
-   own lines. Not the job's own lines — a fee is a percentage of the hire, not the hire.
-2. **Can OP's HireHop user invoice a job at status 9 (Cancelled)?** Proven for status 11
-   (Completed, 13 Oct) — NOT for 9. Test with £1 on a scratch job first. Today `routes/cancellations.ts`
-   step 7 writes status 9 to HireHop straight away (fire-and-forget, `.catch` only — against the
-   "`success: true` does not mean HireHop did it" rule); if HireHop refuses to invoice a cancelled job,
-   the fee invoice must be raised BEFORE the status write, and that write should be read back.
-3. **The money left after the fee.** Proposal: allocate the hire deposits to the fee invoice, then
-   show the surplus with a "Refund £x" button on the existing refund route — OP never refunds on its
-   own ("never silently move money"). Today step 8 inserts a `job_payments` row
-   (`payment_type 'refund'`, `payment_status 'pending'`, method `bank_transfer`) as a reminder — decide
-   whether that row survives once the panel shows the surplus (it is not real money and nothing
-   settles it).
-4. **Excess on a cancelled job.** Proposal: the cancellation panel lists what is held
-   (`v_excess_held`) and links to the Excess card's own actions (release a pre-auth, reimburse taken
-   money); it does not do them itself. Today step 6 only appends "[Job cancelled — refund due]" to the
-   notes.
-5. **VAT on the fee.** Proposal: 20%, including on EU hires — the fee is for the cancellation, not for
-   use of anything abroad, so the non-UK-days split (`eu-vat-split.ts`) does not apply. jon to confirm
-   with the bookkeeper. The calculator works EX-VAT (`MIN_CANCELLATION_FEE` = 25, see above) — keep it so.
+1. **The fee invoice's shape:** ONE custom line, everything (fee, transport, crew) on Misc income
+   (HireHop nominal 190 / Xero 275) — "we haven't actually provided anything". Wording:
+   `Cancellation fee (T&Cs clause 7) — hire 12 Oct 2026 to 23 Oct 2026 — cancelled 8 Oct 2026`.
+   Not the job's lines.
+2. **Invoicing at status 9:** proven by jon by hand before the build; OP's own user proven on the
+   first live job (16739). The status write-back at cancellation now puts a refusal on the job's
+   timeline, and the fee invoice refuses unless HireHop reads back status 9.
+3. **The money left after the fee:** allocate ONLY up to the fee (`min(payment, fee owing)`, the
+   close-out rule), so the rest stays refundable (a fully-applied deposit cannot be refunded — error
+   370); the rest goes back through the existing refund route, pressed by a person. The pending-refund
+   row the modal creates SURVIVES as the reminder (the Money overview's "Pending refunds" reads it with
+   no HireHop call), but its amount is re-set to the real figure at allocation (`syncRefundReminder`).
+4. **Excess:** the panel says what is held and points at the Excess card; it never moves excess.
+5. **VAT on the fee:** 20%, EU hires included. (Raised and parked: HMRC's view — Revenue & Customs
+   Brief 12/2020 — is that a cancellation charge is usually further consideration for the booked
+   supply, so a zero-rated hire's fee could be zero-rated. Bookkeeper to confirm; not built.)
 
-**Also worth knowing before starting:**
+**And the status rule (jon):** a cancelled job owes its FEE, not the hire — OP and the payment portal
+both let the status decide, but only in that narrow case. HireHop keeps the hire's lines on a cancelled
+job (they are the record of what was booked; Re-open duplicates them), so nothing touches the job's lines.
+
+### Built, 14 Oct 2026
+
+On the close-out module, not beside it — `hire-close-out.ts` `buildPlan()` plans a cancelled job like
+a hire with the fee in place of the hire invoice:
+
+| Piece | Where |
+|---|---|
+| Fee facts, the fee's plan, raising it, the refund reminder | `services/cancellation-close.ts` (`readCancellation`, `planCancellationInvoice`, `raiseCancellationFee`, `syncRefundReminder`, `cancellationFeeGross`) |
+| An invoice from custom lines only (empty draft → lines → penny check → approve → Xero) | `hh-invoice-close.ts` `raiseCustomLineInvoice()` — lifted out of `completed-charges.ts`, which now uses it too |
+| Plan / run / allocate | `/api/close-out/:jobId/plan|run|allocate` — unchanged routes; `CloseOutPlan.cancellation` is set on a cancelled job. `/complete` refuses ("never completed") |
+| The Money tab | `CloseOutMoneyPanel.tsx` in cancellation mode via `closeOutView()` → `cancellationView()` (steps Cancelled · Fee invoiced · Payments allocated · Refunded / paid · Sent; stages `to_invoice` → `to_allocate` → `refund` / `awaiting` → `to_send` → `settled`) |
+| The Financial Summary + Overview strip | `routes/money.ts` summary returns `financial.cancellation` (fee, charge = fee invoice once raised, balance); `balance_outstanding` follows it. Frontend sums: `lib/money.ts` `cancellationFeeGross()` / `cancellationBalance()` — the modal uses the same two |
+| Refund | the existing Pending refund → Process (`/money/:jobId/refund-payment` with `pending_refund_id`); the modal now defaults to a payment that still HOLDS the money, not the first one (which is usually the one applied to the fee) |
+| The payment portal | `netlify-functions` `get-job-details-v2.js`: HireHop 9 + an approved invoice owing → payable, balance read from the invoices, no excess offered, no deposit options; anything else at 9 is refused as before |
+| The modal's excess figure | `/cancellations/:jobId/transport-crew` returns `held_amount` from `v_excess_held` (it used to show the REQUIRED amount) |
+
+Refused by name, nothing written: a hire invoice raised before the cancellation (needs a credit
+note — not captured, so by hand), a draft on the job, HireHop not at 9, HireHop↔OP payment mismatches
+(the close-out §6 checks). A fee of £0 means nothing to invoice and everything is a refund.
+
+**First live job: 16739** (AEG Presents, cancelled 8 Oct, 25% tier): fee £412.50 + VAT = £495.00 =
+payment 9354 exactly; £1,485.00 (payment 9412, Stripe) to refund; the £1,200 excess was reimbursed
+by hand from the Excess card first. Tests: `hire-close-out.test.ts` "a cancelled job (job 16739)".
+
+**Not built (parked):** the credit-note path for a hire invoiced before cancelling; partial
+cancellation; zero-rating a fee (decision 5); auto-ticking the `payment_reconcile` card when settled.
+
+**Also worth knowing:**
 - `routes/cancellations.ts` `POST /:jobId/process` is the one place the cancellation happens (12
-  numbered steps); `services/cancellation-calculator.ts` the fee; `CancellationModal.tsx` the UI.
-- The close-out module's plan refuses cancelled/lost jobs on purpose ("cancellations have their own
-  path", `hire-close-out.ts` `buildPlan`). Either lift that for a cancellation's fee invoice or give
-  cancellations their own small plan on the same recipe — decide in the spec.
-- A cancelled job may already HAVE an approved invoice (a hire invoiced up front). Then the fee is a
-  credit note against it, not a new invoice — HireHop credit notes are not yet captured in
-  `HIREHOP-BILLING-API.md`; capture one (Network tab) before building that path, or refuse it by name.
+  numbered steps); `services/cancellation-calculator.ts` the fee (transport/crew already included in
+  `cancellation_fee`); `CancellationModal.tsx` the UI. The money end starts AFTER it, on the Money tab.
+- The close-out plan was lifted for cancelled jobs (lost jobs are still refused) — one plan, one panel.
+- A hire invoiced up front and then cancelled is refused by name: the fee would be a credit note
+  against that invoice, and HireHop credit notes are not yet captured in `HIREHOP-BILLING-API.md`.
 - Work style with jon: discuss and agree the design first, small PRs, give him the deploy commands
   (he deploys; Claude cannot SSH), test on a scratch job before any real one.

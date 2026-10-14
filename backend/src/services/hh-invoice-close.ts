@@ -48,6 +48,8 @@ export interface CloseReporter {
   log(step: string, ok: boolean, detail: string): Promise<void>;
   stop(step: string, detail: string): Promise<never>;
   retryHint: string;
+  /** Who pressed it, when a caller's own records need it (the shop leaves it out). */
+  userId?: string | null;
 }
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -296,6 +298,98 @@ export async function postCustomInvoiceLine(hhJobNumber: number, invoiceId: numb
     type: 1,
     selected: line.after,
   }, { priority: 'high' });
+}
+
+/** Misc income (Xero 275) — HireHop's invoice nominal id. Charges after completion and cancellation fees. */
+export const MISC_INCOME_NOMINAL = 190;
+
+/** One custom line on an invoice built from custom lines only (no job line behind it). */
+export interface CustomInvoiceLine { description: string; amount: number; rate: number; taxId: number; nominalId: number }
+
+/** What a custom line comes to inc VAT, rounded per line as HireHop does. */
+export const customLineGross = (l: { amount: number; rate: number }) => round2(l.amount + round2(l.amount * l.rate / 100));
+
+/**
+ * An invoice built ONLY from custom lines — a charge after completion
+ * (completed-charges.ts) or a cancellation fee (cancellation-close.ts):
+ * an EMPTY draft (`all: 0`), one custom line each (§10.3b), a penny check
+ * that the draft is exactly the lines, approve dated today, push to Xero.
+ * Every write read back; any doubt stops at the draft, which never reaches
+ * Xero. No job line and no stock is ever touched.
+ *
+ * The caller does its own pre-flight (who may, which job status) and its own
+ * logging of the result; this refuses a job that already has a draft.
+ */
+export async function raiseCustomLineInvoice(rep: CloseReporter, input: {
+  hhJobNumber: number;
+  /** The log step every line of this run is written under ('charge', 'cancel_fee'). */
+  step: string;
+  lines: CustomInvoiceLine[];
+  /** For the Xero push and its failure alert. */
+  xeroLabel: string;
+  alert: { jobId: string | null; what: string };
+}): Promise<{ invoiceId: number; number: string; gross: number }> {
+  const { hhJobNumber, step, lines } = input;
+  let rows = await readBillingRows(hhJobNumber);
+  if (invoiceRows(rows).some((r) => invoiceStatus(r) === 0)) {
+    await rep.stop(step, `Job ${hhJobNumber} already has a draft invoice in HireHop — approve or delete it there first.`);
+  }
+
+  // ── 1. An EMPTY draft ──
+  const { res: draftRes } = await postDraftInvoice(hhJobNumber, `Job ${hhJobNumber}`, { all: 0 });
+  rows = await readBillingRows(hhJobNumber);
+  const fresh = invoiceRows(rows).filter((r) => invoiceStatus(r) === 0);
+  if (fresh.length !== 1) {
+    await rep.stop(step, fresh.length === 0
+      ? `HireHop did not create the draft (${draftRes?.error || 'no draft on the job afterwards'}) — it may not allow invoices on this job for OP's HireHop user. Nothing was changed.`
+      : `HireHop now shows ${fresh.length} drafts on job ${hhJobNumber}; expected one. Delete them in HireHop, then ${rep.retryHint}.`);
+  }
+  const draftId = idOf(fresh[0]);
+  const deleteHint = `Delete draft ${draftId} in HireHop, then ${rep.retryHint}.`;
+  if (invoiceItems(fresh[0]).length) {
+    await rep.stop(step, `HireHop put job lines on draft ${draftId} — this invoice must be empty to start. Nothing has gone to Xero. ${deleteHint}`);
+  }
+  await rep.log(step, true, `Empty draft ${draftId} created.`);
+
+  // ── 2. The custom lines, each read back ──
+  let draft = findInvoice(rows, draftId);
+  for (const l of lines) {
+    const before = [...invoiceItems(draft)];   // a snapshot — never the live list the next read may share
+    const after0 = before.length ? Number(before[before.length - 1].ID) : 0;
+    const res = await postCustomInvoiceLine(hhJobNumber, draftId, { ...l, after: after0 });
+    rows = await readBillingRows(hhJobNumber);
+    draft = findInvoice(rows, draftId);
+    const added = invoiceItems(draft).filter((x: Row) => !before.some((b: Row) => Number(b.ID) === Number(x.ID)));
+    const ok = added.length === 1 && Math.abs(Number(added[0].PRICE) - l.amount) < PENNY
+      && Number(added[0].ACC_TAX_RATE_ID) === l.taxId && Number(added[0].ACC_NOMINAL_ID) === l.nominalId;
+    if (!ok) {
+      await rep.stop(step, `HireHop did not add "${l.description}" (${gbp(l.amount)}) as asked${res?.error ? ` (${res.error})` : ''}. Nothing has gone to Xero. ${deleteHint}`);
+    }
+  }
+
+  // ── 3. Penny check: the draft is exactly the lines ──
+  const wantNet = round2(lines.reduce((s, l) => s + l.amount, 0));
+  const wantGross = round2(lines.reduce((s, l) => s + customLineGross(l), 0));
+  const net = invoiceNet(draft!) ?? 0;
+  const gross = invoiceGross(draft!) ?? 0;
+  if (Math.abs(net - wantNet) >= PENNY || Math.abs(gross - wantGross) >= PENNY) {
+    await rep.stop(step, `Draft ${draftId} comes to ${gbp(net)} ex VAT / ${gbp(gross)} inc VAT; the lines are ${gbp(wantNet)} / ${gbp(wantGross)}. Nothing has gone to Xero. ${deleteHint}`);
+  }
+
+  // ── 4. Approve, dated today, then Xero ──
+  const approveRes = await postApproveInvoice(draftId, hhLocalNow());
+  rows = await readBillingRows(hhJobNumber);
+  const approved = findInvoice(rows, draftId);
+  const number = String(approved?.data?.NUMBER || '');
+  if (!approved || invoiceStatus(approved) < 2 || !number) {
+    await rep.stop(step, `HireHop did not approve draft ${draftId} (${approveRes?.error || 'still a draft on read-back'}). Nothing has gone to Xero — ${rep.retryHint}.`);
+  }
+  await pushInvoiceToXero(rep, {
+    label: `${input.xeroLabel} — invoice ${number}`, hhJobNumber, invoiceId: draftId, number, gross,
+    saved: { ...(approveRes?.data || {}), hh_task: approveRes?.data?.hh_task || 'post_invoice_credit', hh_id: approveRes?.data?.hh_id || draftId },
+    alert: { jobId: input.alert.jobId, what: `${input.alert.what} ${number}` },
+  });
+  return { invoiceId: draftId, number, gross };
 }
 
 // ── Laying an invoice out like the quote ──────────────────────────────────

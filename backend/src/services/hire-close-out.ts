@@ -43,6 +43,9 @@ import { hasNonStandardVatItem } from './vat-adjustment';
 import { hhLocalNow } from './shop-stock';
 import { getMethodForBankId, PAYMENT_METHODS_LABELS } from './hh-deposit';
 import { handleJobStatusChange } from '../routes/webhooks';
+import {
+  CancellationPlan, readCancellation, readRefundReminders, planCancellationInvoice, raiseCancellationFee, syncRefundReminder,
+} from './cancellation-close';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -155,6 +158,12 @@ export interface CloseOutPlan {
    * payment. Null when there is nothing to choose, or nobody has chosen yet (jon, 14 Oct 2026).
    */
   paymentTarget: { invoiceId: number; number: string } | null;
+  /**
+   * A CANCELLED job (CANCELLATION-SPEC.md, the money end): the invoice is the fee, not the
+   * hire; what is left on the hire payments after it is a refund due; the job is never
+   * completed. Null on every other job.
+   */
+  cancellation: CancellationPlan | null;
 }
 
 export interface CloseOutResult {
@@ -202,6 +211,7 @@ export function reporter(jobId: string, userId: string | null, retryHint: string
     log: (step, ok, detail) => log(jobId, userId, step, ok, detail),
     stop: async (step, detail) => { await log(jobId, userId, step, false, detail); throw new Stop(detail); },
     retryHint,
+    userId,
   };
 }
 
@@ -418,6 +428,12 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   const plan = await buildPlan(job);
   const inv = plan.invoice;
   const hhJobNumber = plan.hhJobNumber;
+  if (plan.cancellation) {
+    // A cancelled job's invoice is its fee — one Misc income line (cancellation-close.ts).
+    if (inv.blockers.length) await rep.stop('invoice_preflight', inv.blockers.join(' '));
+    if (inv.netToInvoice < PENNY) await rep.stop('invoice_preflight', 'Nothing to invoice — the cancellation fee is already on an invoice (or there is no fee).');
+    return raiseCancellationFee(rep, { jobId: job.id, hhJobNumber, facts: plan.cancellation, userId: rep.userId ?? null });
+  }
   const blockers = inv.blockers.filter((b) => !(allowNotReturned && b.includes("hasn't returned yet")));
   if (plan.blockers.some((b) => b.startsWith('This job') || b.startsWith('Internal'))) blockers.unshift(...plan.blockers);
   if (blockers.length) await rep.stop('invoice_preflight', blockers.join(' '));
@@ -525,7 +541,9 @@ async function jobFacts(jobId: string): Promise<{ invoiceRequirementId: string |
        LEFT JOIN LATERAL (
          SELECT id, status FROM job_requirements
           WHERE job_id = $1 AND requirement_type = 'invoice' AND COALESCE(notes, '') NOT LIKE '%[Suspended:%'
-          ORDER BY created_at LIMIT 1
+          -- A cancelled job's own fee-invoice card is made after the cancellation sweep closed
+          -- the hire's one: prefer the card that is still live.
+          ORDER BY (status = 'cancelled'), created_at LIMIT 1
        ) req ON true`,
     [jobId],
   );
@@ -549,12 +567,13 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     log: await readLog(job.id),
     ...await jobFacts(job.id),
     paymentTarget: null as CloseOutPlan['paymentTarget'],
+    cancellation: null as CancellationPlan | null,
   };
   if (!job.hh_job_number) { blockers.push('This job has no HireHop job number.'); return base; }
   if (job.is_internal) { blockers.push('Internal job — there is no client to invoice.'); return base; }
-  if (job.pipeline_status === 'cancelled' || job.pipeline_status === 'lost') {
-    blockers.push(`This job is ${job.pipeline_status} — cancellations have their own path.`); return base;
-  }
+  if (job.pipeline_status === 'lost') { blockers.push('This job is lost — there is nothing to invoice.'); return base; }
+  // A cancelled job is planned like a hire, with its cancellation fee in place of the hire invoice.
+  const cancelled = job.pipeline_status === 'cancelled';
 
   const hhJobNumber = Number(job.hh_job_number);
   const [rows, hhStatus, excess] = await Promise.all([
@@ -565,7 +584,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   base.hhStatus = hhStatus;
   base.excessHeld = round2(Number(excess.rows[0]?.held ?? 0));
   warnings.push(...await adoptLostXeroInvoices(rows));
-  if (hhStatus != null && hhStatus < HH_RETURNED_INCOMPLETE) {
+  if (!cancelled && hhStatus != null && hhStatus < HH_RETURNED_INCOMPLETE) {
     warnings.push(`HireHop says this job hasn't returned yet (status ${hhStatus}).`);
   }
 
@@ -573,7 +592,19 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   const invoices = approvedInvoices(rows);
   base.invoices = invoices;
   const open = invoices.filter((i) => i.owing >= PENNY);
-  if (invoices.length === 0) {
+
+  // A cancelled job's invoice is its fee (cancellation-close.ts); a hire's is its lines (§4.1).
+  let feeInvoiced = false;
+  if (cancelled) {
+    const facts = await readCancellation(job.id);
+    const c = planCancellationInvoice(rows, hhStatus, facts, hhJobNumber);
+    base.invoice = c.invoice;
+    blockers.push(...c.planBlockers);
+    warnings.push(...c.warnings);
+    feeInvoiced = c.invoiced;
+    base.cancellation = { ...facts, invoiced: c.invoiced, refundReminders: await readRefundReminders(job.id), settled: false };
+  }
+  if (invoices.length === 0 && !(cancelled && feeInvoiced)) {
     blockers.push('Raise the invoice first — the job has no approved invoice in HireHop.');
   }
   // Several owing: the hire payments go to ONE of them, chosen by a manager — never spread
@@ -590,7 +621,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   }
 
   // The Invoice card (§4.1): what is left to bill, and whether Raise invoice may run.
-  base.invoice = await planInvoice(rows, invoices, hhJobNumber, hhStatus);
+  if (!cancelled) base.invoice = await planInvoice(rows, invoices, hhJobNumber, hhStatus);
   if (base.invoice.euTrigger && (base.invoice.netToInvoice >= PENNY || base.invoice.draft)) {
     warnings.push('EU hire: the invoice\'s VAT is split by UK / non-UK days (HMRC 741A).');
   }
@@ -662,7 +693,14 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   // Sentences.
   const sentences: string[] = [];
   for (const a of allocations) sentences.push(`Allocate ${gbp(a.amount)} of payment ${a.depositId} to ${a.invoiceNumber}.`);
-  for (const s of surplus) sentences.push(`Leave ${gbp(s.amount)} of payment ${s.depositId} unallocated — refund it, apply it to another job, or hold it on account.`);
+  if (cancelled && base.invoice.netToInvoice >= PENNY) {
+    sentences.unshift(`Raise the cancellation fee invoice: ${gbp(base.invoice.netToInvoice)} + VAT = ${gbp(base.cancellation!.feeGross)}.`);
+  }
+  for (const s of surplus) {
+    sentences.push(cancelled
+      ? `Refund ${gbp(s.amount)} of payment ${s.depositId} to the client.`
+      : `Leave ${gbp(s.amount)} of payment ${s.depositId} unallocated — refund it, apply it to another job, or hold it on account.`);
+  }
   if (base.paymentTarget) {
     for (const inv of open.filter((i) => i.invoiceId !== target!.invoiceId)) {
       sentences.push(`${inv.number} (${gbp(inv.owing)} owing) takes no hire payments — settle it with an excess claim or Record payment.`);
@@ -674,7 +712,10 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   }
   base.sentences = sentences;
   base.ready = blockers.length === 0 && allocations.length > 0;
-  base.readyToComplete = blockers.length === 0 && invoices.length > 0 && open.length === 0 && surplus.length === 0 && payments.length === 0;
+  base.readyToComplete = !cancelled && blockers.length === 0 && invoices.length > 0 && open.length === 0 && surplus.length === 0 && payments.length === 0;
+  if (base.cancellation) {
+    base.cancellation.settled = blockers.length === 0 && feeInvoiced && open.length === 0 && payments.length === 0;
+  }
   return base;
 }
 
@@ -713,7 +754,7 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
         invoices: [], payments: [], allocations: [], surplus: [], shortfall: 0, excessHeld: 0,
         blockers: [], warnings: [],
         sentences: [`Completed in HireHop${completed.user_name ? ` by ${completed.user_name}` : ''} on ${String(completed.created_at).slice(0, 10)}.`],
-        ready: false, readyToComplete: false, log: entries, ...await jobFacts(job.id), paymentTarget: null,
+        ready: false, readyToComplete: false, log: entries, ...await jobFacts(job.id), paymentTarget: null, cancellation: null,
       };
     }
   }
@@ -865,7 +906,15 @@ async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: 
   if (plan.allocations.length) parts.push(`${plan.allocations.length === 1 ? 'Payment allocated' : `${plan.allocations.length} payments allocated`} in HireHop and Xero.`);
   else parts.push('Nothing to allocate in HireHop; Xero checked.');
   if (after.shortfall >= PENNY) parts.push(`The client still owes ${gbp(after.shortfall)}.`);
-  if (after.surplus.length) parts.push(`${gbp(round2(after.surplus.reduce((s, x) => s + x.amount, 0)))} is unallocated — refund it, apply it to another job, or hold it on account.`);
+  const left = round2(after.surplus.reduce((s, x) => s + x.amount, 0));
+  if (after.cancellation) {
+    // What is left after the fee is a refund due. OP's reminder follows the real figure;
+    // the refund itself is a person pressing Process (never moved here).
+    const note = await syncRefundReminder(job.id, left, rep.userId ?? null);
+    if (note) parts.push(note);
+  } else if (after.surplus.length) {
+    parts.push(`${gbp(left)} is unallocated — refund it, apply it to another job, or hold it on account.`);
+  }
   if (after.readyToComplete) parts.push('Ready to complete.');
   return parts.join(' ');
 }
@@ -886,6 +935,7 @@ export async function completeHireJob(jobIdOrNumber: string, userId: string | nu
     let message: string;
     try {
       const plan = await buildPlan(job);
+      if (plan.cancellation) await rep.stop('complete', 'A cancelled job stays Cancelled in HireHop — it is never completed.');
       const reasons = [...plan.blockers];
       const open = plan.invoices.filter((i) => i.owing >= PENNY);
       if (open.length) reasons.push(`${open.map((i) => `${i.number} still shows ${gbp(i.owing)} owing`).join('; ')} in HireHop.`);
