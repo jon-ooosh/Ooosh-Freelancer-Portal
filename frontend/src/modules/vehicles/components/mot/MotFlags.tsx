@@ -3,8 +3,8 @@
  *
  * The MOT date itself is DVSA's (services/dvsa-mot.ts decideMotDue); these say
  * what else DVSA knows, and when the date showing is NOT DVSA's:
- *   Manual   — typed by hand and later than DVSA's (a pass DVSA hasn't shown
- *              yet, or a typo) — amber, hover for DVSA's date
+ *   Manual   — typed by hand and not DVSA's; stands only until the next DVSA
+ *              check (07:30), when DVSA's date replaces it — amber, hover for DVSA's date
  *   Recall   — DVSA reports an outstanding manufacturer recall — red
  *   Failed   — the latest MOT test was a fail — red
  *   N adv    — advisories / minor items on the latest test — grey
@@ -35,7 +35,7 @@ export function MotFlags({ v, className = '' }: { v: MotFields; className?: stri
     <span className={`inline-flex flex-wrap gap-1 ${className}`}>
       {manual && (
         <span className={`${chip} bg-amber-100 text-amber-800`}
-          title={`Typed in by hand — DVSA says ${shortDate(v.dvsaMotDue)}. Settle it under the van's Key Dates.`}>
+          title={`Typed in by hand — DVSA says ${shortDate(v.dvsaMotDue)}. DVSA's date replaces it at the next check (07:30), or use it now under the van's Key Dates.`}>
           Manual
         </span>
       )}

@@ -3,9 +3,9 @@
  *
  * Reads the last fetch from OP (refreshed daily, 07:30) with a "Refresh from
  * DVSA" button. DVSA's expiry IS the van's MOT Due date (services/dvsa-mot.ts
- * decideMotDue) — except a date typed by hand that is LATER than DVSA's, which
- * is kept and flagged until DVSA catches up or someone uses DVSA's date.
- * See docs/VEHICLE-SALES-SPEC.md §3 and §16.
+ * decideMotDue). A date typed by hand only stands until the next check, flagged
+ * meanwhile — never "keep the later one", which would make alerts fire late.
+ * See docs/VEHICLE-SALES-SPEC.md §3, §16 and §17.
  */
 
 import { useState } from 'react'
@@ -154,8 +154,8 @@ export function MotHistoryTab({ vehicleId }: Props) {
       {data.comparison === 'earlier' && summary?.dvsaMotDue && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
           DVSA says the MOT expires <strong>{fmtDate(summary.dvsaMotDue)}</strong>, but MOT Due was typed in by hand as{' '}
-          <strong>{fmtDate(data.motDue)}</strong>. That's kept because it's later — usually a pass DVSA doesn't show yet.
-          If it's a mistake, use DVSA's date under Details › Key Dates.
+          <strong>{fmtDate(data.motDue)}</strong>. DVSA's date replaces it at the next check (07:30) — or use it now
+          under Details › Key Dates.
         </div>
       )}
 
@@ -174,9 +174,9 @@ export function MotHistoryTab({ vehicleId }: Props) {
  * One line under Details › Key Dates › MOT Due (VEHICLE-SALES-SPEC §16).
  *
  * The MOT Due date IS DVSA's (services/dvsa-mot.ts decideMotDue). This says so,
- * or — when a date typed by hand is being kept because it is later than
- * DVSA's — says that loudly, with a one-click "Use DVSA date". Reads the van's
- * own cached DVSA fields, so it costs no request.
+ * or — when a date typed by hand differs from DVSA's (it stands only until the
+ * next check) — says that loudly, with a one-click "Use DVSA date". Reads the
+ * van's own cached DVSA fields, so it costs no request.
  */
 export function MotDvsaNote({ vehicle }: { vehicle: Vehicle }) {
   const queryClient = useQueryClient()
@@ -202,8 +202,8 @@ export function MotDvsaNote({ vehicle }: { vehicle: Vehicle }) {
     <div className={`border-b border-gray-100 py-1 text-[11px] ${manual ? 'text-amber-800' : 'text-gray-400'}`}>
       {manual ? (
         <>
-          ⚠ Typed in by hand — DVSA says <strong>{fmtDate(vehicle.dvsaMotDue ?? null)}</strong>. Kept because it's later
-          (a pass DVSA may not show yet); DVSA's date takes over once it catches up.{' '}
+          ⚠ Typed in by hand — DVSA says <strong>{fmtDate(vehicle.dvsaMotDue ?? null)}</strong>. DVSA's date replaces
+          it at the next check (07:30).{' '}
           <button type="button" onClick={useDvsa} disabled={busy}
             className="ml-1 rounded border border-amber-400 bg-white px-1.5 py-px font-medium text-amber-900 hover:bg-amber-50 disabled:opacity-50">
             {busy ? 'Saving…' : 'Use DVSA date'}

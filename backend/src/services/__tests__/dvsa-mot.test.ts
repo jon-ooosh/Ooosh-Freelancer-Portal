@@ -273,33 +273,34 @@ describe('fetchMotHistoryByReg — API key refused', () => {
 describe('decideMotDue', () => {
   it('a never-reconciled date takes DVSA’s — either direction', () => {
     expect(decideMotDue('2036-09-02', null, '2026-09-02'))   // junk ten years out
-      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true, manualKept: false });
+      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true });
     expect(decideMotDue('2026-01-01', null, '2026-09-02').motDue).toBe('2026-09-02');
   });
 
   it('a DVSA-sourced date follows DVSA, even backwards', () => {
     expect(decideMotDue('2027-09-01', 'dvsa', '2026-09-02'))
-      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true, manualKept: false });
+      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true });
   });
 
-  it('keeps a manual date LATER than DVSA’s and flags it — the pass DVSA hasn’t shown yet', () => {
-    expect(decideMotDue('2027-10-13', 'manual', '2026-10-20'))
-      .toEqual({ motDue: '2027-10-13', source: 'manual', changed: false, manualKept: true });
+  it('a manual date LATER than DVSA’s is replaced — it would make the alert fire late (jon, 14 Oct)', () => {
+    // DVSA: due 1 March. Typed: 10 March. Keeping 10 March hides nine days of expired MOT.
+    expect(decideMotDue('2027-03-10', 'manual', '2027-03-01'))
+      .toEqual({ motDue: '2027-03-01', source: 'dvsa', changed: true });
   });
 
-  it('a manual date EARLIER than DVSA’s gives way — DVSA has a newer test', () => {
+  it('a manual date EARLIER than DVSA’s is replaced too', () => {
     expect(decideMotDue('2026-01-01', 'manual', '2026-09-02'))
-      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true, manualKept: false });
+      .toEqual({ motDue: '2026-09-02', source: 'dvsa', changed: true });
   });
 
-  it('a manual date DVSA has caught up with becomes DVSA’s', () => {
+  it('a manual date DVSA agrees with becomes DVSA’s', () => {
     expect(decideMotDue('2027-10-13', 'manual', '2027-10-13'))
-      .toEqual({ motDue: '2027-10-13', source: 'dvsa', changed: false, manualKept: false });
+      .toEqual({ motDue: '2027-10-13', source: 'dvsa', changed: false });
   });
 
   it('no DVSA date → leave ours exactly as it is', () => {
     expect(decideMotDue('2027-01-01', 'manual', null))
-      .toEqual({ motDue: '2027-01-01', source: 'manual', changed: false, manualKept: false });
+      .toEqual({ motDue: '2027-01-01', source: 'manual', changed: false });
     expect(decideMotDue(null, null, null).changed).toBe(false);
   });
 });

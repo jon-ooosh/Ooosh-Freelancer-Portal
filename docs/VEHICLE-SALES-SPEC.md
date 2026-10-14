@@ -465,3 +465,16 @@ and audited; summary cached; DVSA's own date typed counts as DVSA; a later manua
 flagged, then taken over when DVSA catches up; an earlier typo replaced; a later typo kept until *Use
 DVSA date*; a brand-new van gets its first-MOT date.
 
+## 17. DVSA always wins (jon, 15 Oct 2026)
+
+Supersedes §16's "a typed date LATER than DVSA's is kept". jon's catch: DVSA says due 1 March, we
+typed 10 March — keeping ours makes the compliance alert fire nine days late, which is exactly the
+failure the service exists to prevent. An MOT date must err EARLY: a stale DVSA date after a fresh
+pass costs a day of "MOT due" noise; a late date can hide an expired MOT.
+
+`decideMotDue()` is now: **DVSA has a date → DVSA's date**, whoever typed ours and in which
+direction. A typed date stands only until the next daily check (07:30, before the 08:00 compliance
+run), flagged *Manual* meanwhile; *Use DVSA date* applies it at once. No DVSA date → ours is left
+alone. The `manualKept` flag is gone; migration 287's column comment describing the old rule is
+stale (migrations are never edited) — this section is the rule.
+

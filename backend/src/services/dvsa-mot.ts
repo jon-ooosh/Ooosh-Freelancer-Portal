@@ -6,9 +6,10 @@
  * expiry THE `fleet_vehicles.mot_due` (jon, 14 Oct 2026 — one system-derived
  * date on the board, the overview and the van's page; the safety check against
  * a junk or ten-years-ahead date is the point). `decideMotDue()` is the rule:
- * DVSA wins, except a manually typed date LATER than DVSA's is kept and flagged
- * — that is the van that passed this morning, before DVSA shows it. Refreshed
- * daily at 07:30, before the 08:00 compliance check.
+ * whenever DVSA has a date, DVSA's date wins — a typed date only lasts until
+ * the next check, flagged meanwhile. Never "keep the later one": a date later
+ * than the real expiry makes the compliance alert fire late (jon, 14 Oct 2026).
+ * Refreshed daily at 07:30, before the 08:00 compliance check.
  *
  * Auth is OAuth 2.0 client credentials via Microsoft Entra ID, plus an API key
  * header. All five values come from the DVSA registration email and live in
@@ -317,16 +318,15 @@ export function compareMotDue(ourMotDue: string | null, dvsaMotDue: string | nul
 }
 
 /**
- * THE rule for `fleet_vehicles.mot_due` given DVSA's date (VEHICLE-SALES-SPEC §16).
+ * THE rule for `fleet_vehicles.mot_due` given DVSA's date (VEHICLE-SALES-SPEC §16–17).
  * Pure.
- *   - DVSA has no date (never fetched, unknown reg)  → keep ours as it is.
- *   - ours came from DVSA, or was never reconciled   → DVSA's date, either direction.
- *   - ours was typed by hand:
- *       DVSA's is the same or LATER                  → DVSA's (it has caught up, or
- *                                                      there's a newer test).
- *       DVSA's is EARLIER                            → keep ours, flag it — most
- *         likely a pass DVSA hasn't shown yet; possibly a typo. A human decides
- *         ("Use DVSA date"), and the flag shows wherever the date does.
+ *   - DVSA has no date (never fetched, unknown reg) → keep ours as it is.
+ *   - DVSA has a date → DVSA's date, either direction, whoever typed ours.
+ *
+ * A date typed by hand therefore only stands until the next check (daily
+ * 07:30), flagged "Manual" meanwhile. Erring early is the safe direction: the
+ * worst a stale DVSA date does after a fresh pass is a day of "MOT due" noise,
+ * while a typed date later than the real expiry would hide an expired MOT.
  */
 export type MotDueSource = 'dvsa' | 'manual';
 
@@ -334,7 +334,6 @@ export interface MotDueDecision {
   motDue: string | null;            // what mot_due should be
   source: MotDueSource | null;      // what mot_due_source should be
   changed: boolean;                 // mot_due moves
-  manualKept: boolean;              // a later manual date wins over DVSA's — flag it
 }
 
 export function decideMotDue(
@@ -343,12 +342,9 @@ export function decideMotDue(
   dvsaMotDue: string | null,
 ): MotDueDecision {
   if (!dvsaMotDue) {
-    return { motDue: ourMotDue, source: ourSource, changed: false, manualKept: false };
+    return { motDue: ourMotDue, source: ourSource, changed: false };
   }
-  if (ourSource === 'manual' && ourMotDue && ourMotDue > dvsaMotDue) {
-    return { motDue: ourMotDue, source: 'manual', changed: false, manualKept: true };
-  }
-  return { motDue: dvsaMotDue, source: 'dvsa', changed: ourMotDue !== dvsaMotDue, manualKept: false };
+  return { motDue: dvsaMotDue, source: 'dvsa', changed: ourMotDue !== dvsaMotDue };
 }
 
 /** The bits of the latest test the fleet board shows. Pure. */
