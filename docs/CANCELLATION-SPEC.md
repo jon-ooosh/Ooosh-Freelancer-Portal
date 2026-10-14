@@ -355,8 +355,14 @@ note — not captured, so by hand), a draft on the job, HireHop not at 9, HireHo
 payment 9354 exactly; £1,485.00 (payment 9412, Stripe) to refund; the £1,200 excess was reimbursed
 by hand from the Excess card first. Tests: `hire-close-out.test.ts` "a cancelled job (job 16739)".
 
+**Follow-ups after 16739 (14 Oct 2026):** a settled plan ticks the job's Payment Reconciliation card
+(`markCancellationReconciled` — it was the hidden 4th of "3/4"; for a hire the derivation engine ticks
+it, but only the plan knows a cancellation's refund has gone); the red banner on Job Detail reads the
+live plan (refund due / fee owing / settled) instead of the figure saved at cancellation; "Process
+refund" warns (confirm, not a gate) while the fee isn't invoiced yet.
+
 **Not built (parked):** the credit-note path for a hire invoiced before cancelling; partial
-cancellation; zero-rating a fee (decision 5); auto-ticking the `payment_reconcile` card when settled.
+cancellation; zero-rating a fee (decision 5).
 
 **Also worth knowing:**
 - `routes/cancellations.ts` `POST /:jobId/process` is the one place the cancellation happens (12

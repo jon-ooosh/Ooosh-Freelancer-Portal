@@ -851,6 +851,7 @@ describe('a cancelled job (job 16739)', () => {
       if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...job }] };
       if (sql.includes("payment_status = 'pending'") && sql.includes('SELECT')) return { rows: reminders };
       if (sql.includes('INSERT INTO interactions')) { opWrites.push({ sql, params }); return { rows: [] }; }
+      if (sql.includes('UPDATE job_requirements')) { opWrites.push({ sql, params }); return { rows: [] }; }
       if (sql.includes('INSERT INTO job_payments')) { opWrites.push({ sql, params }); reminders.push({ id: 'iou-new', amount: params[1] }); return { rows: [] }; }
       if (sql.includes('UPDATE job_payments')) { opWrites.push({ sql, params }); reminders = reminders.map((r) => (r.id === params[0] ? { ...r, amount: params[1] } : r)); return { rows: [] }; }
       return base(sql, params);
@@ -888,6 +889,7 @@ describe('a cancelled job (job 16739)', () => {
     expect(opWrites.filter((w) => w.sql.includes('job_payments'))).toEqual([]);   // the reminder was already right
     expect(opWrites.some((w) => w.sql.includes('INSERT INTO interactions') && String(w.params[1]).includes('OT-INV-13100'))).toBe(true);
     expect(r.plan.cancellation!.settled).toBe(false);                 // £1,485 still to go back
+    expect(opWrites.some((w) => w.sql.includes('UPDATE job_requirements'))).toBe(false);   // not reconciled yet
   });
 
   it('settled once the rest is refunded', async () => {
@@ -899,6 +901,8 @@ describe('a cancelled job (job 16739)', () => {
     expect(plan.blockers).toEqual([]);
     expect(plan.surplus).toEqual([]);
     expect(plan.cancellation!.settled).toBe(true);
+    // …and ticks the job's Payment Reconciliation card ("Process refund of £x").
+    expect(opWrites.some((w) => w.sql.includes("requirement_type = 'payment_reconcile'") && w.params[0] === JOB.id)).toBe(true);
   });
 
   it('a reminder that guessed wrong follows the real figure; none at all gets one made', async () => {
