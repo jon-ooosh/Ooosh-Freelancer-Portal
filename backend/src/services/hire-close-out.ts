@@ -44,7 +44,7 @@ import { hhLocalNow } from './shop-stock';
 import { getMethodForBankId, PAYMENT_METHODS_LABELS } from './hh-deposit';
 import { handleJobStatusChange } from '../routes/webhooks';
 import {
-  CancellationPlan, readCancellation, readRefundReminders, planCancellationInvoice, raiseCancellationFee, syncRefundReminder,
+  CancellationPlan, readCancellation, readRefundReminders, planCancellationInvoice, raiseCancellationFee, syncRefundReminder, markCancellationReconciled,
 } from './cancellation-close';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -715,6 +715,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   base.readyToComplete = !cancelled && blockers.length === 0 && invoices.length > 0 && open.length === 0 && surplus.length === 0 && payments.length === 0;
   if (base.cancellation) {
     base.cancellation.settled = blockers.length === 0 && feeInvoiced && open.length === 0 && payments.length === 0;
+    if (base.cancellation.settled) await markCancellationReconciled(job.id);
   }
   return base;
 }

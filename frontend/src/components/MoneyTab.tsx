@@ -1071,6 +1071,8 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   }
 
   const { financial, excess, client_balance_on_account } = data;
+  // A cancelled job whose fee invoice isn't raised yet (a hire invoiced before cancelling is its own case).
+  const feeNotInvoiced = !!financial.cancellation && !financial.cancellation.invoiced && !financial.cancellation.hire_invoiced;
   const depositPercent = financial.hire_value_inc_vat > 0
     ? Math.min(100, ((financial.total_hire_deposits + (financial.credit_note_write_off || 0)) / financial.hire_value_inc_vat) * 100)
     : 0;
@@ -2010,11 +2012,17 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                       <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">Awaiting refund</span>
                     </p>
                     {pr.notes && <p className="text-xs text-amber-700 mt-0.5">{pr.notes}</p>}
+                    {feeNotInvoiced && <p className="text-xs text-amber-800 mt-0.5 font-medium">Raise the fee invoice first (panel above) — the refund is what's left after it.</p>}
                   </div>
                   <div className="flex items-center gap-3">
                     <p className="text-sm font-semibold text-amber-900">£{Number(pr.amount).toFixed(2)}</p>
                     <button
-                      onClick={() => openPendingRefundModal(pr)}
+                      onClick={() => {
+                        // A cancellation's refund is what is left AFTER the fee — refunding first can
+                        // send back money the fee invoice then needs. A warning, not a gate.
+                        if (feeNotInvoiced && !window.confirm('The cancellation fee hasn\'t been invoiced yet. The usual order is: raise the fee invoice (it allocates the payments), then refund what is left.\n\nRefund anyway?')) return;
+                        openPendingRefundModal(pr);
+                      }}
                       disabled={refundableDeposits.length === 0}
                       title={refundableDeposits.length === 0 ? 'No deposit on this job to refund against' : 'Process this refund'}
                       className="text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md px-2.5 py-1 disabled:opacity-50"

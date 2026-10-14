@@ -2069,7 +2069,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         fee_ex_vat: feeNet,
         fee_inc_vat: cancellationFeeGross(feeNet),
         charge_inc_vat: charge,
-        invoiced: feeRows.length > 0,
+        // No fee at all counts as invoiced: there is nothing to raise before refunding.
+        invoiced: feeRows.length > 0 || feeNet < 0.005,
         invoice_numbers: feeRows.map((r: any) => String(r.data?.NUMBER || '')).filter(Boolean),
         hire_invoiced: hireInvoiceRows(billingRows).length > 0,
         balance: Math.round((charge - totalHireDeposits) * 100) / 100,
