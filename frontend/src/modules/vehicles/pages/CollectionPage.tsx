@@ -83,7 +83,7 @@ export function CollectionPage() {
   const [queuedOffline, setQueuedOffline] = useState(false)
 
   // Form autosave
-  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft } = useFormAutosave({
+  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft, acceptDraft } = useFormAutosave({
     flowType: 'collection',
     disabled: submitSuccess || queuedOffline,
   })
@@ -132,7 +132,7 @@ export function CollectionPage() {
       signatureBlob: draftLoaded.signatureBlob,
     })
     setStep(draftLoaded.step)
-    dismissDraft()
+    acceptDraft()
   }
 
   const vehicles = useMemo(
