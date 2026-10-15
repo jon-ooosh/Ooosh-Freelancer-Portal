@@ -1,7 +1,8 @@
-# AI Quoting — Claude drafts the quote (PRE-SPEC)
+# AI Quoting — Claude drafts the quote (PRE-SPEC, PARKED)
 
-**Status (15 Oct 2026): PRE-SPEC.** Findings and the decisions settled so far; the open
-questions in §5 come before a full spec. Nothing is built.
+**Status (15 Oct 2026): PARKED.** Findings and settled decisions only; nothing is built.
+Parked until the building blocks in §6 exist — the module is only as good as the house
+knowledge it can read, and most of that is not written down yet.
 
 Not to be confused with **quote versions** (the quote-PDF diff on the Activity Timeline,
 `AUTO-CHASE-SPEC.md` §7.3) or **options** (alternative quotes as a group of jobs,
@@ -70,17 +71,40 @@ If the manual PDF step later proves to be the bottleneck: a link to HireHop's on
 quote viewer (if §3(b) comes back yes), a quote summary in the email body plus the
 payment link, or — last — an OP-made document built from HireHop's live lines.
 
-## 5. Open questions (before the full spec)
+## 5. Decisions (jon, 15 Oct 2026)
 
-1. **What starts it** — every new enquiry automatically, or a "Draft a quote" button?
-2. **When the HireHop job is created** — today the enquiry intake never pushes to
-   HireHop (an explicit staff action, `AUTO-CHASE-SPEC.md` §11). Does Claude's proposal
-   live in OP until a person accepts it?
-3. **Who sets the price** — HireHop's rate card as-is, or does Claude ever adjust
-   (multi-week, repeat clients)?
-4. **Availability** — which is the truth for "is a Premium free those dates": HireHop
-   availability or OP's fleet allocations?
-5. **The minimum to quote a van** — which facts must be known, and which get a question?
-6. **Learning how we quote** — past enquiry → quote pairs already exist
-   (`job_quote_versions` holds extracted lines of every quote PDF we sent).
-7. **Measuring it** — compare Claude's proposal with what was actually sent.
+1. **Manual, admin-only to start.** A "Draft quote" button, used by admins while it is
+   tuned; staff get it later. Automatic on every enquiry is the long-term goal.
+2. **Built onto incoming enquiries.** OP links email threads to a job by its HireHop job
+   number, so before a HireHop job exists there is no thread in OP to work from. The
+   website enquiry (`POST /api/enquiry-intake`) already has dates, a contact and the
+   client's own words — that is the starting point. Claude's proposal lives in OP; the
+   HireHop job is created only when a person accepts it.
+3. **HireHop's rate card sets the price.** Vans and rehearsals are rarely discounted.
+   Backline and staging usually get a deal beyond a couple of days — not written down
+   yet (§6).
+4. **HireHop is the truth for availability.**
+5. **The minimum to quote a van:** dates, van type, collection or delivery, UK or abroad,
+   drivers. Times default to 9am–9am (our van pricing). The reply is our Gmail T&Cs
+   template in the body with the quote attached.
+
+Still open: learning from past enquiry → quote pairs (`job_quote_versions` holds the
+extracted lines of every quote PDF we sent), and measuring Claude's proposal against
+what was actually sent.
+
+## 6. Building blocks first (why this is parked)
+
+What a good reply needs, and where it lives today:
+
+- **How we quote and talk to clients** — what is safe to assume, what to ask, what never
+  to promise, how discounts work. Lives in people's heads. → How-to guides in Staff
+  Documents, with an admin-only "share with Claude" switch so the same approved,
+  versioned, owner-reviewed text guides staff and Claude alike.
+- **This client's terms** — discounts, trading terms. Partly in OP already
+  (`working_terms_*`, `payment_terms*`, `notes` on people and organisations), used
+  unevenly. → Audit and fill those before adding anything new.
+- **This client's history** — past jobs, outcomes, threads. Mostly in OP already
+  (`services/leads/history.ts` `getClientHistory()`, the email timeline). → One short
+  "client brief" assembled for each draft, shared with the chase drafts.
+- **The voice** — the chase-tone round already planned (`chase-draft.ts` voice
+  instructions, `AUTO-CHASE-SPEC.md` §13.6).
