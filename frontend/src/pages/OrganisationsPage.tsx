@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import { useUrlSearch } from '../hooks/useUrlSearch';
 import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
 
@@ -42,7 +43,10 @@ const typeColors: Record<string, string> = {
 
 export default function OrganisationsPage() {
   const [orgs, setOrgs] = useState<Organisation[]>([]);
-  const [search, setSearch] = useState('');
+  const { search, setSearch, debouncedSearch } = useUrlSearch();
+  // Bumped per request; a reply only lands if it is still the newest (a slow
+  // reply for "1" must not overwrite the answer for "1000mods").
+  const requestSeq = useRef(0);
   const [typeFilter, setTypeFilter] = useState('');
   const [filterMissingEmail, setFilterMissingEmail] = useState(false);
   const [filterMissingPhone, setFilterMissingPhone] = useState(false);
@@ -54,25 +58,29 @@ export default function OrganisationsPage() {
 
   useEffect(() => {
     loadOrgs();
-  }, [search, typeFilter, filterMissingEmail, filterMissingPhone, sortBy]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, typeFilter, filterMissingEmail, filterMissingPhone, sortBy]);
 
   async function loadOrgs(page = 1) {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: String(page), limit: '50' });
-      if (search) params.set('search', search);
+      if (debouncedSearch) params.set('search', debouncedSearch);
       if (typeFilter) params.set('type', typeFilter);
       if (filterMissingEmail) params.set('missing_email', 'true');
       if (filterMissingPhone) params.set('missing_phone', 'true');
       if (sortBy !== 'name') params.set('sort', sortBy);
 
       const data = await api.get<OrgsResponse>(`/organisations?${params}`);
+      if (seq !== requestSeq.current) return; // superseded by a newer search
       setOrgs(data.data);
       setPagination(data.pagination);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       console.error('Failed to load organisations:', err);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }
 
@@ -159,8 +167,10 @@ export default function OrganisationsPage() {
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Contact</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-200">
-            {loading ? (
+          {/* While a new search loads, keep the previous results up (faded) rather
+              than blanking to "Loading..." on every keystroke */}
+          <tbody className={`divide-y divide-gray-200 transition-opacity ${loading && orgs.length > 0 ? 'opacity-50' : ''}`}>
+            {loading && orgs.length === 0 ? (
               <tr><td colSpan={5} className="px-6 py-8 text-center text-sm text-gray-500">Loading...</td></tr>
             ) : orgs.length === 0 ? (
               <tr><td colSpan={5} className="px-6 py-8 text-center text-sm text-gray-500">No organisations found.</td></tr>
