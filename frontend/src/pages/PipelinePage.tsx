@@ -2877,8 +2877,9 @@ function NewEnquiryModal({
 
             {/* Working Terms */}
             {clientHistory!.client_info?.working_terms_type && (
-              <div className="mb-3 p-2.5 bg-white border border-gray-200 rounded-lg">
-                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
+              // Faded while Do Not Hire (the red box above leads) — kept, not hidden, in case a manager hires them anyway
+              <div className={`mb-3 p-2.5 bg-white border border-gray-200 rounded-lg ${clientHistory!.client_info.do_not_hire ? 'opacity-50' : ''}`}>
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms{clientHistory!.client_info.do_not_hire && <span className="normal-case font-normal italic"> — on hold while Do Not Hire</span>}</div>
                 <div className="flex items-center gap-2">
                   <span className={`inline-block px-2.5 py-1 rounded text-sm font-semibold text-white ${
                     { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[clientHistory!.client_info.working_terms_type] || 'bg-gray-500'

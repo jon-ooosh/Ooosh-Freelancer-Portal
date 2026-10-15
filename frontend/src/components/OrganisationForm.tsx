@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react';
 import { api } from '../services/api';
+import DoNotHireField, { saveDoNotHireIfChanged, type DoNotHireValue } from './DoNotHireField';
+import SimilarRecordsWarning from './SimilarRecordsWarning';
+import { displayFullName } from '../lib/displayName';
 
 interface OrgFormData {
   name: string;
@@ -15,6 +18,7 @@ interface OrgFormData {
   working_terms_type: string;
   working_terms_credit_days: string;
   working_terms_notes: string;
+  account_owner_user_id: string;
 }
 
 interface OrganisationFormProps {
@@ -42,7 +46,10 @@ const emptyForm: OrgFormData = {
   working_terms_type: 'usual',
   working_terms_credit_days: '',
   working_terms_notes: '',
+  account_owner_user_id: '',
 };
+
+interface StaffOption { id: string; first_name: string | null; last_name: string | null; preferred_name?: string | null }
 
 export default function OrganisationForm({ orgId, onSaved, onCancel }: OrganisationFormProps) {
   const [form, setForm] = useState<OrgFormData>(emptyForm);
@@ -51,12 +58,24 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!orgId);
   const [recordVersion, setRecordVersion] = useState<number | null>(null);
+  // Do Not Hire — saved through its own endpoint (see DoNotHireField)
+  const [dnh, setDnh] = useState<DoNotHireValue>({ on: false, reason: '' });
+  const [dnhOriginal, setDnhOriginal] = useState<DoNotHireValue>({ on: false, reason: '' });
+  // "Looked after by" picker — current staff, plus the saved owner if they've since left
+  const [staff, setStaff] = useState<StaffOption[]>([]);
+  const [savedOwnerName, setSavedOwnerName] = useState<string | null>(null);
 
   const isEdit = !!orgId;
 
   useEffect(() => {
     if (orgId) loadOrg(orgId);
   }, [orgId]);
+
+  useEffect(() => {
+    api.get<{ data: StaffOption[] }>('/users?assignable=true')
+      .then((r) => setStaff(r.data || []))
+      .catch(() => setStaff([]));
+  }, []);
 
   async function loadOrg(id: string) {
     try {
@@ -75,7 +94,12 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
         working_terms_type: (data.working_terms_type as string) || '',
         working_terms_credit_days: data.working_terms_credit_days != null ? String(data.working_terms_credit_days) : '',
         working_terms_notes: (data.working_terms_notes as string) || '',
+        account_owner_user_id: (data.account_owner_user_id as string) || '',
       });
+      setSavedOwnerName((data.account_owner_name as string) || null);
+      const loadedDnh = { on: !!data.do_not_hire, reason: (data.do_not_hire_reason as string) || '' };
+      setDnh(loadedDnh);
+      setDnhOriginal(loadedDnh);
       if (data.version !== undefined) setRecordVersion(data.version as number);
     } catch {
       setError('Failed to load organisation');
@@ -122,12 +146,14 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
         working_terms_type: form.working_terms_type || null,
         working_terms_credit_days: form.working_terms_credit_days ? parseInt(form.working_terms_credit_days) : null,
         working_terms_notes: form.working_terms_notes || null,
+        account_owner_user_id: form.account_owner_user_id || null,
       };
 
       if (isEdit) {
         const putBody = recordVersion !== null ? { ...body, version: recordVersion } : body;
         const result = await api.put<Record<string, unknown>>(`/organisations/${orgId}`, putBody);
         if (result.version !== undefined) setRecordVersion(result.version as number);
+        await saveDoNotHireIfChanged(api.post, `/organisations/${orgId}/do-not-hire`, dnhOriginal, dnh);
       } else {
         await api.post('/organisations', body);
       }
@@ -150,6 +176,7 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
       )}
 
       <Field label="Name *" value={form.name} onChange={v => set('name', v)} />
+      {!isEdit && <SimilarRecordsWarning type="organisation" params={{ name: form.name.trim() }} />}
 
       <div>
         <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Type *</label>
@@ -216,6 +243,26 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
       {form.working_terms_type && (
         <Field label="Terms Notes" value={form.working_terms_notes} onChange={v => set('working_terms_notes', v)} placeholder="Any additional terms details..." />
       )}
+      {isEdit && <DoNotHireField value={dnh} onChange={setDnh} />}
+
+      {/* Who at Ooosh looks after this client — a field ready for when we track it */}
+      <div>
+        <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Looked after by</label>
+        <select
+          value={form.account_owner_user_id}
+          onChange={e => set('account_owner_user_id', e.target.value)}
+          className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        >
+          <option value="">No one yet</option>
+          {/* A saved owner who's no longer on the staff list keeps their own option, so the select never renders blank and saves that blank */}
+          {form.account_owner_user_id && !staff.some(u => u.id === form.account_owner_user_id) && (
+            <option value={form.account_owner_user_id}>{savedOwnerName || 'Former staff member'}</option>
+          )}
+          {staff.map(u => (
+            <option key={u.id} value={u.id}>{displayFullName(u)}</option>
+          ))}
+        </select>
+      </div>
 
       {/* Notes */}
       <div>
