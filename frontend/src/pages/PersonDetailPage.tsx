@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { hasManagerRole } from '../lib/roles';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import SlidePanel from '../components/SlidePanel';
@@ -101,7 +101,10 @@ interface Interaction {
 // Key on `id` ONLY — never the pathname or a ?tab= param, or every tab click
 // would remount the page. The hand-written tab/cache resets below are kept as
 // belt-and-braces, and the tab effect still handles same-page ?tab= changes.
-type PersonTab = 'timeline' | 'hire_history' | 'freelancer' | 'details' | 'relationships' | 'excess' | 'held' | 'storage' | 'pcn';
+const VALID_PERSON_TABS = [
+  'timeline', 'hire_history', 'freelancer', 'details', 'relationships', 'excess', 'held', 'storage', 'pcn',
+] as const;
+type PersonTab = (typeof VALID_PERSON_TABS)[number];
 
 export default function PersonDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -119,6 +122,9 @@ function PersonDetailContent() {
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<PersonTab>('timeline');
+  // The tab lives in ?tab= (like the Organisation page) so a link can open on it
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
   const [heldCount, setHeldCount] = useState<number | null>(null);
   // Which secondary tabs have content — decides main row vs "More"
   const tabPresence = useTabPresence('person', id, { pcn: !!person?.is_freelancer });
@@ -158,12 +164,24 @@ function PersonDetailContent() {
     }
   }, [id]);
 
-  // Reset tab when switching people — component instance is reused across
-  // /people/A → /people/B so without this the active tab "drags across".
+  // Land on the tab named in ?tab=, else the timeline. Keyed on the ?tab= VALUE
+  // too, so a same-page link that only changes the query string still switches
+  // (same reasoning as OrganisationDetailPage).
   useEffect(() => {
-    setActiveTab('timeline');
+    setActiveTab(VALID_PERSON_TABS.includes(tabParam as PersonTab) ? (tabParam as PersonTab) : 'timeline');
+  }, [id, tabParam]);
+
+  // Counts belong to the person, not the tab — reset only on a person switch
+  useEffect(() => {
     setHeldCount(null);
   }, [id]);
+
+  function selectTab(tab: PersonTab) {
+    setActiveTab(tab);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', tab);
+    setSearchParams(next, { replace: true });
+  }
 
   async function loadPerson() {
     try {
@@ -460,7 +478,7 @@ function PersonDetailContent() {
       {/* Tabs — main tabs always; the rest only when they have something, else under "More" */}
       <EntityTabs<PersonTab>
         active={activeTab}
-        onSelect={setActiveTab}
+        onSelect={selectTab}
         tabs={[
           { key: 'timeline', label: 'Activity Timeline' },
           ...(isFreelancer ? [{ key: 'freelancer' as const, label: 'Freelancer' }] : []),
@@ -502,7 +520,7 @@ function PersonDetailContent() {
               <p className="text-sm text-gray-500">
                 Freelancer details, approval, review dates and documents now live on the{' '}
                 <button
-                  onClick={() => setActiveTab('freelancer')}
+                  onClick={() => selectTab('freelancer')}
                   className="text-ooosh-600 font-medium hover:underline"
                 >
                   Freelancer tab
