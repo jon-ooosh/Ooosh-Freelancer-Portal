@@ -1,6 +1,9 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query, getClient } from '../config/database';
+import { recentlyViewedOrderSql, recordAddressBookView } from '../services/address-book-views';
+import { phoneDigitsForSearch } from '../services/address-book-search';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
@@ -43,6 +46,8 @@ const createOrgSchema = z.object({
   working_terms_type: z.enum(['usual', 'flex_balance', 'no_deposit', 'credit', 'custom']).optional().nullable(),
   working_terms_credit_days: z.number().int().optional().nullable(),
   working_terms_notes: z.string().optional().nullable(),
+  // Who at Ooosh looks after this client (migration 289)
+  account_owner_user_id: z.string().uuid().optional().nullable(),
   // AI text fields
   ai_summary: z.string().optional().nullable(),
   ai_research: z.string().optional().nullable(),
@@ -53,7 +58,7 @@ const updateOrgSchema = createOrgSchema.partial();
 // GET /api/organisations
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, type, page = '1', limit = '50', tag, has_email, has_people, missing_email, missing_phone, location, sort } = req.query;
+    const { search, type, page = '1', limit = '50', tag, has_email, has_people, missing_email, missing_phone, location, sort, owner } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     // "Last contacted" = most recent GENUINE contact-type interaction (call/email/meeting —
@@ -90,9 +95,35 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const params: unknown[] = [];
     let paramIndex = 1;
 
+    // Search: name, email, a CURRENT member's name, and the phone when the search
+    // looks like one (digits only). Name matches sort first — see ORDER BY below.
+    let searchParam: string | null = null;
     if (search) {
-      sql += ` AND o.name ILIKE $${paramIndex}`;
-      params.push(`%${search}%`);
+      searchParam = `$${paramIndex}`;
+      const phone = phoneDigitsForSearch(String(search));
+      sql += ` AND (
+        o.name ILIKE $${paramIndex} OR
+        o.email ILIKE $${paramIndex} OR
+        EXISTS (
+          SELECT 1 FROM person_organisation_roles sr
+          JOIN people sp ON sp.id = sr.person_id AND sp.is_deleted = false
+          WHERE sr.organisation_id = o.id AND sr.status = 'active'
+            AND CONCAT(sp.first_name, ' ', sp.last_name) ILIKE $${paramIndex}
+        )${phone ? ` OR
+        regexp_replace(COALESCE(o.phone, ''), '\\D', '', 'g') LIKE $${paramIndex + 1}` : ''}
+      )`;
+      params.push(`%${String(search).trim()}%`);
+      paramIndex++;
+      if (phone) {
+        params.push(`%${phone}%`);
+        paramIndex++;
+      }
+    }
+
+    // "My clients" — orgs whose account owner is the caller
+    if (owner === 'me') {
+      sql += ` AND o.account_owner_user_id = $${paramIndex}`;
+      params.push(req.user!.id);
       paramIndex++;
     }
 
@@ -142,7 +173,15 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       'recently_updated': 'o.updated_at DESC',
       'last_contacted': `${lastContactSubquery} DESC NULLS LAST`,
     };
-    const orderBy = sortMap[sort as string] || 'o.name';
+    let orderBy = sortMap[sort as string] || 'o.name';
+    if (sort === 'recently_viewed') {
+      params.push(req.user!.id);
+      orderBy = `${recentlyViewedOrderSql('organisation', 'o.id', `$${paramIndex}`)}, o.name`;
+      paramIndex++;
+    } else if (searchParam && orderBy === 'o.name') {
+      // Orgs whose own name matched come before ones found via a member / email / phone
+      orderBy = `CASE WHEN o.name ILIKE ${searchParam} THEN 0 ELSE 1 END, o.name`;
+    }
 
     sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
@@ -187,7 +226,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         ) as people,
         (SELECT json_agg(json_build_object('id', sub.id, 'name', sub.name, 'type', sub.type))
          FROM organisations sub WHERE sub.parent_id = o.id AND sub.is_deleted = false
-        ) as subsidiaries
+        ) as subsidiaries,
+        (SELECT ${DISPLAY_NAME_SQL} FROM users ou JOIN people p ON p.id = ou.person_id
+          WHERE ou.id = o.account_owner_user_id) as account_owner_name
       FROM organisations o
       LEFT JOIN organisations parent ON parent.id = o.parent_id
       WHERE o.id = $1 AND o.is_deleted = false`,
@@ -198,6 +239,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       res.status(404).json({ error: 'Organisation not found' });
       return;
     }
+
+    // Only the Organisation page passes this — pickers/forms reading this GET don't count as a view.
+    if (req.query.track_view === '1') void recordAddressBookView(req.user?.id, 'organisation', String(req.params.id));
 
     // Fetch org-to-org relationships
     const relationships = await query(
@@ -304,7 +348,7 @@ router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Respon
   try {
     const {
       name, type, parent_id, website, email, phone, address, location, notes, tags, files,
-      working_terms_type, working_terms_credit_days, working_terms_notes,
+      working_terms_type, working_terms_credit_days, working_terms_notes, account_owner_user_id,
     } = req.body;
 
     // Default working terms to 'usual' when not explicitly set
@@ -313,13 +357,13 @@ router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Respon
     const result = await query(
       `INSERT INTO organisations (
         name, type, parent_id, website, email, phone, address, location, notes, tags, files,
-        working_terms_type, working_terms_credit_days, working_terms_notes, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        working_terms_type, working_terms_credit_days, working_terms_notes, created_by, account_owner_user_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING *`,
       [
         name, type, parent_id, website, email?.toLowerCase(), phone, address, location, notes, tags, JSON.stringify(files),
         effectiveWorkingTerms, working_terms_credit_days ?? null, working_terms_notes ?? null,
-        req.user!.id,
+        req.user!.id, account_owner_user_id ?? null,
       ]
     );
 
@@ -901,7 +945,7 @@ router.post('/:id/merge',
       const fillFields = [
         'website', 'email', 'phone', 'address', 'location', 'notes',
         'working_terms_type', 'working_terms_credit_days', 'working_terms_notes',
-        'ai_summary', 'ai_research', 'parent_id',
+        'ai_summary', 'ai_research', 'parent_id', 'account_owner_user_id',
       ];
       const updates: string[] = [];
       const params: unknown[] = [];

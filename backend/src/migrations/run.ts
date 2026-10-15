@@ -328,6 +328,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '286_job_groups.sql',
         '287_fleet_dvsa_mot_summary.sql',
         '288_mot_advisory_marks.sql',
+        '289_address_book_owner_and_views.sql',
       ];
 
       for (const migration of migrations) {

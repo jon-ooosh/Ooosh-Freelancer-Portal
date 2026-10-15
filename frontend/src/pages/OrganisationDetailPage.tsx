@@ -17,6 +17,10 @@ import PcnHistorySection from '../components/PcnHistorySection';
 import OohOrgIncidents from '../components/OohOrgIncidents';
 import { ORG_RELATIONSHIP_LABELS, PERSON_ORG_ROLES_WITH_MAIN_CONTACT, type OrgRelationshipType, type OrganisationRelationship, type FileAttachment } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { useTabPresence } from '../hooks/useTabPresence';
+import EntityTabs from '../components/EntityTabs';
+import RecordActionsMenu from '../components/RecordActionsMenu';
+import WorkingTermsSummary from '../components/WorkingTermsSummary';
 
 interface OrgDetail {
   id: string;
@@ -41,6 +45,7 @@ interface OrgDetail {
   working_terms_type: string | null;
   working_terms_credit_days: number | null;
   working_terms_notes: string | null;
+  account_owner_name?: string | null;
   ai_summary: string | null;
   ai_research: string | null;
   dismissed_suggestions: string[] | null;
@@ -142,8 +147,6 @@ function OrganisationDetailContent() {
   const isAdmin = hasManagerRole(user?.role);
 
   const [org, setOrg] = useState<OrgDetail | null>(null);
-  const [dnoReason, setDnoReason] = useState('');
-  const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -152,9 +155,11 @@ function OrganisationDetailContent() {
   const [pcnCount, setPcnCount] = useState<number | null>(null);
   const [heldCount, setHeldCount] = useState<number | null>(null);
 
-  // Edit/delete
+  // Which secondary tabs have content — decides main row vs "More"
+  const tabPresence = useTabPresence('organisation', id);
+
+  // Edit
   const [showEdit, setShowEdit] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Merge
   const [showMergeModal, setShowMergeModal] = useState(false);
@@ -239,7 +244,7 @@ function OrganisationDetailContent() {
 
   async function loadOrg() {
     try {
-      const data = await api.get<OrgDetail>(`/organisations/${id}`);
+      const data = await api.get<OrgDetail>(`/organisations/${id}?track_view=1`);
       setOrg(data);
     } catch {
       navigate('/organisations');
@@ -551,7 +556,7 @@ function OrganisationDetailContent() {
     <div>
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-        <div className="flex items-start justify-between">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-bold text-gray-900">{org.name}</h1>
@@ -565,8 +570,8 @@ function OrganisationDetailContent() {
               </p>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-500 mr-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="hidden sm:inline text-sm text-gray-500 mr-2">
               {activePeople.length} active {activePeople.length === 1 ? 'person' : 'people'}
             </span>
             <button
@@ -581,41 +586,13 @@ function OrganisationDetailContent() {
             >
               Edit
             </button>
-            {!org.do_not_hire && isAdmin && (
-              <button
-                onClick={() => setShowDnoForm(true)}
-                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
-                title="Flag as Do Not Hire"
-              >
-                DNH
-              </button>
-            )}
-            {isAdmin && (
-              <button
-                onClick={() => setShowMergeModal(true)}
-                className="px-3 py-1.5 text-sm border border-amber-200 text-amber-700 rounded hover:bg-amber-50 transition-colors"
-                title="Merge this organisation into another"
-              >
-                Merge
-              </button>
-            )}
-            <div className="relative">
-              <button
-                onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
-                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
-              >
-                Delete
-              </button>
-              {showDeleteConfirm && (
-                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded shadow-lg p-3 z-10 w-56">
-                  <p className="text-sm text-gray-700 mb-2">Delete this organisation?</p>
-                  <div className="flex gap-2">
-                    <button onClick={handleDelete} className="flex-1 bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Yes, delete</button>
-                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 border border-gray-300 px-3 py-1 rounded text-sm hover:bg-gray-50">Cancel</button>
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* Do Not Hire is set in Edit → Working Terms; Merge and Delete are rare, so they live in ⋯ */}
+            <RecordActionsMenu
+              actions={[
+                ...(isAdmin ? [{ label: 'Merge into another…', title: 'Merge this organisation into another', onClick: () => setShowMergeModal(true) }] : []),
+                { label: 'Delete', danger: true, onClick: () => { if (confirm(`Delete ${org.name}?`)) handleDelete(); } },
+              ]}
+            />
           </div>
         </div>
 
@@ -624,6 +601,7 @@ function OrganisationDetailContent() {
           {org.phone && <span>{org.phone}</span>}
           {org.website && <a href={org.website} target="_blank" rel="noopener noreferrer" className="text-ooosh-600 hover:text-ooosh-700">{org.website}</a>}
           {org.location && <span>{org.location}</span>}
+          {org.account_owner_name && <span className="text-gray-500">Looked after by <span className="text-gray-700">{org.account_owner_name}</span></span>}
         </div>
 
         {org.tags && org.tags.length > 0 && (
@@ -656,31 +634,6 @@ function OrganisationDetailContent() {
           )}
         </div>
       )}
-      {/* DNH reason form (shown when DNH button clicked) */}
-      {showDnoForm && !org.do_not_hire && (
-        <div className="mb-4 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
-          <input
-            value={dnoReason}
-            onChange={e => setDnoReason(e.target.value)}
-            placeholder="Reason for Do Not Hire (optional)..."
-            className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm"
-            autoFocus
-          />
-          <button
-            onClick={async () => {
-              await api.post(`/organisations/${id}/do-not-hire`, { do_not_hire: true, reason: dnoReason || null });
-              setShowDnoForm(false);
-              setDnoReason('');
-              loadOrg();
-            }}
-            className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700"
-          >
-            Confirm
-          </button>
-          <button onClick={() => { setShowDnoForm(false); setDnoReason(''); }} className="text-xs px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
-        </div>
-      )}
-
       {/* Smart suggestions */}
       {(() => {
         const suggestions: Array<{ key: string; text: string; action: string; newType: string }> = [];
@@ -747,52 +700,44 @@ function OrganisationDetailContent() {
         );
       })()}
 
-      {/* Tabs */}
-      <div className="border-b border-gray-200 mb-6">
-        <nav className="flex gap-6">
-          {(['people', 'relationships', 'hire_history', 'timeline', 'files', 'details', 'excess', 'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh'] as const).map((tab) => {
-            const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
-            // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
-            // matching the Hire History tab content. Falls back to local linked_jobs.length only
-            // if the backend hasn't been redeployed yet.
-            const linkedJobCount = typeof org.linked_job_count === 'number'
-              ? org.linked_job_count
-              : (org.linked_jobs || []).length;
-            const label = tab === 'people' ? `People (${(org.people || []).length})`
-              : tab === 'relationships' ? `Relationships${relCount ? ` (${relCount})` : ''}`
-              : tab === 'hire_history' ? `Hire History${linkedJobCount ? ` (${linkedJobCount})` : ''}`
-              : tab === 'timeline' ? 'Activity Timeline'
-              : tab === 'files' ? `Files${(org.files || []).length ? ` (${(org.files || []).length})` : ''}`
-              : tab === 'excess' ? 'Excess History'
-              : tab === 'issues' ? `Issues${issuesCount ? ` (${issuesCount})` : ''}`
-              : tab === 'held' ? (heldCount ? `Held Items (${heldCount})` : 'Held Items')
-              : tab === 'storage' ? 'Storage'
-              : tab === 'rehearsal' ? 'Rehearsals'
-              : tab === 'pcns' ? (pcnCount ? `PCNs (${pcnCount})` : 'PCNs')
-              : tab === 'ooh' ? 'OOH'
-              : 'Details';
-            return (
-              <button
-                key={tab}
-                onClick={() => {
-                  setActiveTab(tab);
-                  // Reflect the tab in the URL so it's deep-linkable + survives refresh.
-                  const next = new URLSearchParams(searchParams);
-                  next.set('tab', tab);
-                  setSearchParams(next, { replace: true });
-                }}
-                className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === tab
-                    ? 'border-ooosh-600 text-ooosh-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </nav>
-      </div>
+      {/* Tabs — main tabs always; the rest only when they have something, else under "More" */}
+      {(() => {
+        const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
+        // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
+        // matching the Hire History tab content. Falls back to local linked_jobs.length only
+        // if the backend hasn't been redeployed yet.
+        const linkedJobCount = typeof org.linked_job_count === 'number'
+          ? org.linked_job_count
+          : (org.linked_jobs || []).length;
+        const fileCount = (org.files || []).length;
+        return (
+          <EntityTabs<OrgTab>
+            active={activeTab}
+            onSelect={(tab) => {
+              setActiveTab(tab);
+              // Reflect the tab in the URL so it's deep-linkable + survives refresh.
+              const next = new URLSearchParams(searchParams);
+              next.set('tab', tab);
+              setSearchParams(next, { replace: true });
+            }}
+            tabs={[
+              { key: 'people', label: `People (${(org.people || []).length})` },
+              { key: 'relationships', label: `Relationships${relCount ? ` (${relCount})` : ''}` },
+              { key: 'hire_history', label: `Hire History${linkedJobCount ? ` (${linkedJobCount})` : ''}` },
+              { key: 'timeline', label: 'Activity Timeline' },
+              { key: 'files', label: `Files${fileCount ? ` (${fileCount})` : ''}` },
+              { key: 'details', label: 'Details' },
+              { key: 'excess', label: 'Excess History', secondary: true, hasContent: tabPresence.excess },
+              { key: 'issues', label: `Issues${issuesCount ? ` (${issuesCount})` : ''}`, secondary: true, hasContent: tabPresence.issues },
+              { key: 'held', label: heldCount ? `Held Items (${heldCount})` : 'Held Items', secondary: true, hasContent: tabPresence.held },
+              { key: 'storage', label: 'Storage', secondary: true, hasContent: tabPresence.storage },
+              { key: 'rehearsal', label: 'Rehearsals', secondary: true, hasContent: tabPresence.rehearsal },
+              { key: 'pcns', label: pcnCount ? `PCNs (${pcnCount})` : 'PCNs', secondary: true, hasContent: tabPresence.pcns },
+              { key: 'ooh', label: 'OOH', secondary: true, hasContent: tabPresence.ooh },
+            ]}
+          />
+        );
+      })()}
 
       {activeTab === 'people' && (
         <div className="space-y-6">
@@ -1317,29 +1262,15 @@ function OrganisationDetailContent() {
             <DetailField label="Website" value={org.website} />
             <DetailField label="Address" value={org.address} />
             <DetailField label="Created" value={formatDate(org.created_at)} />
+            <DetailField label="Looked after by" value={org.account_owner_name} />
           </div>
-          {/* Working Terms */}
-          <div className="mt-6 pt-4 border-t">
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">Working Terms</h3>
-            {org.working_terms_type ? (
-              <div className="text-sm">
-                <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold text-white ${
-                  { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[org.working_terms_type] || 'bg-gray-500'
-                }`}>{
-                  { usual: 'USUAL', flex_balance: 'FLEX BALANCE', no_deposit: 'NO DEPOSIT', credit: 'CREDIT', custom: 'CUSTOM' }[org.working_terms_type] || org.working_terms_type
-                }</span>
-                <span className="ml-2 text-gray-500 text-xs">{
-                  { usual: '25% deposit, full balance before hire', flex_balance: '25% deposit, flexible balance', no_deposit: 'Balance by start of hire', credit: 'No deposit, flexible balance', custom: '' }[org.working_terms_type]
-                }</span>
-                {(org.working_terms_type === 'flex_balance' || org.working_terms_type === 'credit') && org.working_terms_credit_days && (
-                  <span className="ml-1 text-gray-500 text-xs">({org.working_terms_credit_days} day credit)</span>
-                )}
-                {org.working_terms_notes && <p className="mt-1 text-gray-500 text-xs">{org.working_terms_notes}</p>}
-              </div>
-            ) : (
-              <p className="text-sm text-gray-400 italic">Not set — edit to configure</p>
-            )}
-          </div>
+          <WorkingTermsSummary
+            type={org.working_terms_type}
+            creditDays={org.working_terms_credit_days}
+            notes={org.working_terms_notes}
+            doNotHire={org.do_not_hire}
+            doNotHireReason={org.do_not_hire_reason}
+          />
 
           {/* Internal Notes */}
           <div className="mt-6 pt-4 border-t">

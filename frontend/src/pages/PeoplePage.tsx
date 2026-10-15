@@ -222,7 +222,7 @@ export default function PeoplePage() {
       <div className="mt-6 flex flex-wrap items-center gap-4">
         <input
           type="text"
-          placeholder="Search people by name or email..."
+          placeholder="Search by name, email, phone or organisation..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-md rounded border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
@@ -272,6 +272,7 @@ export default function PeoplePage() {
           <option value="recently_added">Sort: Recently added</option>
           <option value="recently_updated">Sort: Recently updated</option>
           <option value="last_contacted">Sort: Last contacted</option>
+          <option value="recently_viewed">Sort: Recently viewed (me)</option>
           {filterFreelancer && <option value="review_due">Sort: Review due soonest</option>}
         </select>
       </div>

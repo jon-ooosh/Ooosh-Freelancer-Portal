@@ -1,6 +1,8 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
+import { recentlyViewedOrderSql, recordAddressBookView } from '../services/address-book-views';
+import { phoneDigitsForSearch } from '../services/address-book-search';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { redactPrivateFields, redactPrivateFieldsAll } from '../services/people-private-fields';
 import { validate } from '../middleware/validate';
@@ -142,15 +144,31 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const params: unknown[] = [];
     let paramIndex = 1;
 
+    // Search: name / email, plus the name of an org they're CURRENTLY at, plus
+    // phone numbers when the search looks like one (digits only, so "07700 900123"
+    // finds "+44 7700 900123"). Name/email matches sort first — see ORDER BY below.
+    let searchParam: string | null = null;
     if (search) {
+      searchParam = `$${paramIndex}`;
+      const phone = phoneDigitsForSearch(String(search));
       sql += ` AND (
         p.first_name ILIKE $${paramIndex} OR
         p.last_name ILIKE $${paramIndex} OR
         p.email ILIKE $${paramIndex} OR
-        CONCAT(p.first_name, ' ', p.last_name) ILIKE $${paramIndex}
+        CONCAT(p.first_name, ' ', p.last_name) ILIKE $${paramIndex} OR
+        EXISTS (
+          SELECT 1 FROM person_organisation_roles sr
+          JOIN organisations so ON so.id = sr.organisation_id AND so.is_deleted = false
+          WHERE sr.person_id = p.id AND sr.status = 'active' AND so.name ILIKE $${paramIndex}
+        )${phone ? ` OR
+        regexp_replace(CONCAT_WS(' ', p.mobile, p.phone, p.international_phone), '\\D', '', 'g') LIKE $${paramIndex + 1}` : ''}
       )`;
-      params.push(`%${search}%`);
+      params.push(`%${String(search).trim()}%`);
       paramIndex++;
+      if (phone) {
+        params.push(`%${phone}%`);
+        paramIndex++;
+      }
     }
 
     if (tag) {
@@ -242,7 +260,16 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       'last_contacted': `${lastContactSubquery} DESC NULLS LAST`,
       'review_due': 'p.freelancer_next_review_date ASC NULLS LAST',
     };
-    const orderBy = sortMap[sort as string] || 'p.last_name, p.first_name';
+    let orderBy = sortMap[sort as string] || 'p.last_name, p.first_name';
+    if (sort === 'recently_viewed') {
+      params.push(req.user!.id);
+      orderBy = `${recentlyViewedOrderSql('person', 'p.id', `$${paramIndex}`)}, p.last_name, p.first_name`;
+      paramIndex++;
+    } else if (searchParam && orderBy === 'p.last_name, p.first_name') {
+      // Name order with a search: people whose own name/email matched come before
+      // people only found via their org or phone (keeps short pickers useful).
+      orderBy = `CASE WHEN CONCAT(p.first_name, ' ', p.last_name) ILIKE ${searchParam} OR p.email ILIKE ${searchParam} THEN 0 ELSE 1 END, ${orderBy}`;
+    }
 
     sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
@@ -352,6 +379,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       res.status(404).json({ error: 'Person not found' });
       return;
     }
+
+    // Only the Person page passes this — pickers/forms reading this GET don't count as a view.
+    if (req.query.track_view === '1') void recordAddressBookView(req.user?.id, 'person', String(req.params.id));
 
     // Same `SELECT p.*` redaction as the list above.
     res.json(redactPrivateFields(result.rows[0]));
