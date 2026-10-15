@@ -32,7 +32,7 @@ clients — the test bench for everything here.
 |---|---|---|---|
 | **Voice** — how we sound | British, understated, "Cheers, Jon" | A Staff Document, shared with Claude | §3 |
 | **House rules** — how we do things | 9am–9am vans; ask about drivers; backline deal over 2 days | Staff Documents, shared with Claude | §4 |
-| **Client terms** — the deal with this client | 10% off backline; 30-day account | Existing fields on people / organisations | §5 |
+| **Client terms** — the deal with this client | 5% off vans; 30-day account | Discounts: `DISCOUNTS-SPEC.md` (client tier / custom). Payment terms: existing fields | §5 |
 | **Client knowledge** — the relationship | "TM books, manager pays"; "breakdown in 2025, be careful" | Client facts (new, small) + retros + history | §5, §6 |
 
 ## 3. Phase A — the voice (the chase-tone round)
@@ -80,7 +80,8 @@ Claude is told is never hidden from the team. Claude reads the whole document.
 - **For Claude** — the AI-only rules
 
 **Fixed text is pasted by code, never rewritten by Claude.** The standard van T&Cs block
-that goes in every van quote email lives in OP (a shared document of its own) and OP appends
+that goes in every van quote email lives in OP (a shared document of its own — the ONE copy;
+the Gmail template retires once OP can make a van-quote draft without AI) and OP appends
 it verbatim under Claude's reply. Claude reads it to answer client questions (excess,
 drivers, collection times, Europe) but never rephrases it.
 
@@ -104,7 +105,10 @@ shared by chase drafts and (later) quotes. Sources, all existing unless marked:
 - **Retros** — the mini-retro after each hire (`interactions`, content `Job retro: <rating>\n<notes>`).
   The brief carries the latest few notes, not just the counts. Claude reads them for
   context and **never quotes a retro to the client**.
-- **Terms** — `working_terms_*`, `payment_terms`, `payment_terms_notes`, `notes` on the
+- **Discounts** — read from the discounts module (`DISCOUNTS-SPEC.md`: client tier,
+  custom deals, endorsements), never from client facts or free text. Until that is built,
+  Claude quotes the rate card and flags "this client may have a deal" for a person.
+- **Payment terms** — `working_terms_*`, `payment_terms`, `payment_terms_notes`, `notes` on the
   person and their organisation. These fields exist and are used unevenly; filling them
   for the regular clients is content work, not code.
 - **Client facts** (NEW, §6) — short dated lines.
@@ -125,7 +129,9 @@ every AI read (`email-and-notifications.md`).
 
 **Client facts** — a small new table: one line of text, about a person OR an organisation,
 author, date, the job it came from, archived flag. Shown as a "Things to know" card on the
-person's / organisation's address-book page, editable and archivable by staff. **Not for** health, personal life or anything
+person's / organisation's address-book **Details** tab (no new tab — the address book was
+just tidied to fewer headings), editable and archivable by staff. **Not for discounts** —
+those belong to the discounts module. **Not for** health, personal life or anything
 we wouldn't say to the client's face (§9.4).
 
 **The capture loop** (needs the passive draft-vs-sent capture already planned in
@@ -163,5 +169,6 @@ A and the content half of B can run in parallel this week.
 3. **Retros are read, never quoted** — they guide the reply and what to ask.
 4. **All staff see client facts.** Never health, personal life, or anything we wouldn't
    say to the client's face.
-5. **Terms to fill first:** a mix of people and organisations — whoever the deal is with.
-   jon to name them. How far the brief looks: §5.
+5. **Terms:** only one bespoke deal among 50+ upcoming hires (The Wedding Present: 5% off
+   vans, 20% off rehearsals of 2+ days). Simpler than expected. Discounts are the discounts
+   module's job; client facts still get built. How far the brief looks: §5.
