@@ -429,6 +429,10 @@ split's zero-rated line** (`HIRE-CLOSE-OUT-SPEC.md` §10.1): the job's supply li
 never touched. A job line can be put on an invoice once only (jon, 9 Oct), so this, not
 "the same line twice", is how a 0% share is expressed.
 
+**⚠️ A custom line's text is cut at 80 characters, silently** (job 16739, 14 Oct 2026: "…— cancelled 8 Oct
+2026" landed as "…— cancelled 8"). The save reports success and the price, tax and nominal read back fine.
+`raiseCustomLineInvoice()` refuses anything over `CUSTOM_LINE_MAX` (80) before writing.
+
 ### 10.4 Tax codes (the Xero mapping, from `tax_codes[]` on every billing response)
 
 | HireHop id | Rate | Description | Xero tax type |

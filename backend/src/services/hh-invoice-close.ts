@@ -306,6 +306,12 @@ export const MISC_INCOME_NOMINAL = 190;
 /** One custom line on an invoice built from custom lines only (no job line behind it). */
 export interface CustomInvoiceLine { description: string; amount: number; rate: number; taxId: number; nominalId: number }
 
+/**
+ * HireHop keeps only the first 80 characters of a custom line's text and says nothing:
+ * 16739's fee line lost "Oct 2026" off its end (14 Oct 2026). Longer is refused up front.
+ */
+export const CUSTOM_LINE_MAX = 80;
+
 /** What a custom line comes to inc VAT, rounded per line as HireHop does. */
 export const customLineGross = (l: { amount: number; rate: number }) => round2(l.amount + round2(l.amount * l.rate / 100));
 
@@ -330,6 +336,11 @@ export async function raiseCustomLineInvoice(rep: CloseReporter, input: {
   alert: { jobId: string | null; what: string };
 }): Promise<{ invoiceId: number; number: string; gross: number }> {
   const { hhJobNumber, step, lines } = input;
+  for (const l of lines) {
+    if (l.description.length > CUSTOM_LINE_MAX) {
+      await rep.stop(step, `"${l.description}" is ${l.description.length} characters — HireHop keeps only ${CUSTOM_LINE_MAX} on an invoice line, so shorten it. Nothing was changed.`);
+    }
+  }
   let rows = await readBillingRows(hhJobNumber);
   if (invoiceRows(rows).some((r) => invoiceStatus(r) === 0)) {
     await rep.stop(step, `Job ${hhJobNumber} already has a draft invoice in HireHop — approve or delete it there first.`);
@@ -552,7 +563,15 @@ export async function applyCreditsInXero(
 
   const depositRows = [...rows, ...extraRows];
   try {
-    if ((await amountDue()) <= expectedDue + PENNY) {
+    const dueNow = await amountDue();
+    // Xero AHEAD of HireHop — a credit applied by hand in Xero, or an allocation undone in
+    // HireHop but not in Xero (job 16015). Applying more can't fix that; say so, never "matches".
+    if (dueNow < expectedDue - PENNY) {
+      await rep.stop('xero', `Xero shows ${gbp(dueNow)} due on ${number} but HireHop says ${gbp(expectedDue)} — Xero has more `
+        + 'applied to it than HireHop (a credit applied by hand in Xero, or an allocation removed in HireHop but not in Xero). '
+        + `Nothing was applied. Check the invoice's payments in Xero, then ${rep.retryHint}.`);
+    }
+    if (dueNow <= expectedDue + PENNY) {
       await rep.log('xero', true, expectedDue < PENNY
         ? `${number} already shows paid in Xero.`
         : `${number} already shows ${gbp(expectedDue)} due in Xero — nothing more to apply.`);

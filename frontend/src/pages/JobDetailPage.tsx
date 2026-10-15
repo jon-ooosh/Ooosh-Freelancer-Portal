@@ -58,7 +58,7 @@ import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
 import { openAuthedFile } from '../lib/openAuthedFile';
 import { ukToday } from '../lib/ukDate';
 import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPlan } from '../lib/closeOutPlan';
-import { cancellationBalance } from '../lib/money';
+import { cancellationBalance, cancellationFeeGross } from '../lib/money';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -1603,13 +1603,16 @@ function JobDetailContent() {
   // for returned jobs — the plan is a live HireHop read, shared (30 s) with the panel
   // and the Invoice card, so this costs nothing extra when either is on screen.
   const [closeOutPlan, setCloseOutPlan] = useState<CloseOutPlan | null>(null);
+  // The read failed — the cancelled banner falls back to the figure saved at cancellation.
+  const [closeOutFailed, setCloseOutFailed] = useState(false);
   const closeOutRelevant = !!id && !!job?.hh_job_number && !job?.is_internal
     && (job?.pipeline_status === 'returned' || job?.pipeline_status === 'returned_incomplete'
       || job?.pipeline_status === 'cancelled');   // a cancellation's fee and refund (CANCELLATION-SPEC.md)
   useEffect(() => {
     if (!closeOutRelevant || !id) { setCloseOutPlan(null); return; }
     const unsub = subscribeCloseOutPlan(id, setCloseOutPlan);
-    loadCloseOutPlan(id).then(setCloseOutPlan).catch(() => undefined);
+    setCloseOutFailed(false);
+    loadCloseOutPlan(id).then(setCloseOutPlan).catch(() => setCloseOutFailed(true));
     return unsub;
   }, [id, closeOutRelevant]);
   const moneyDot = (() => {
@@ -3351,12 +3354,28 @@ function JobDetailContent() {
                   {job.cancellation_fee != null && (
                     <span className="text-red-600">
                       Fee retained (ex-VAT): <strong>£{Number(job.cancellation_fee).toFixed(2)}</strong>
-                      <span className="text-red-500/80 ml-1">(inc-VAT £{(Number(job.cancellation_fee) * 1.2).toFixed(2)})</span>
+                      <span className="text-red-500/80 ml-1">(inc-VAT £{cancellationFeeGross(Number(job.cancellation_fee)).toFixed(2)})</span>
                     </span>
                   )}
-                  {job.cancellation_refund != null && Number(job.cancellation_refund) > 0 && (
-                    <span className="text-green-700">Refund due to client: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
-                  )}
+                  {(() => {
+                    // Where the money stands NOW, from the same plan as the Money tab's panel —
+                    // the figure saved at cancellation is only an estimate and never changes.
+                    // Until HireHop has answered, say so — never show the old estimate and then
+                    // change it while someone is on the phone to the client (jon, 14 Oct 2026).
+                    if (!closeOutPlan && !closeOutFailed && job.hh_job_number && !job.is_internal) {
+                      return <span className="text-gray-500 italic">Reading HireHop…</span>;
+                    }
+                    const c = closeOutPlan?.cancellation;
+                    if (c && c.invoiced) {
+                      const v = closeOutView(closeOutPlan!, { isManager: false });
+                      if (v.credit >= 0.005) return <span className="text-green-700">Refund due to client: <strong>£{v.credit.toFixed(2)}</strong></span>;
+                      if (v.owing >= 0.005) return <span className="text-red-700">Fee still owing: <strong>£{v.owing.toFixed(2)}</strong></span>;
+                      if (c.settled) return <span className="text-green-700 font-semibold">Settled — fee paid, nothing left to refund</span>;
+                    }
+                    return job.cancellation_refund != null && Number(job.cancellation_refund) > 0
+                      ? <span className="text-green-700">Refund due to client: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
+                      : null;
+                  })()}
                 </div>
               )}
               {/* One-click into the reimburse modal for any excess still

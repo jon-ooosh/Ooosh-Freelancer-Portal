@@ -141,6 +141,14 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
     setDraftLoaded(null)
   }, [flowType])
 
+  // Draft restored — hide the prompt but KEEP the draft and keep autosaving.
+  // Resume used to call dismissDraft, which deleted the draft and switched
+  // autosave off for the rest of the visit: a phone that killed the tab a
+  // SECOND time (camera + low memory) came back to an empty form (Oct 2026).
+  const acceptDraft = useCallback(() => {
+    setDraftLoaded(null)
+  }, [])
+
   // Dismiss draft without restoring — permanently suppresses autosave for this session
   const dismissDraft = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current)
@@ -170,5 +178,7 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
     draftChecked,
     /** Dismiss the draft prompt without restoring */
     dismissDraft,
+    /** Hide the prompt after restoring the draft — autosave carries on */
+    acceptDraft,
   }
 }

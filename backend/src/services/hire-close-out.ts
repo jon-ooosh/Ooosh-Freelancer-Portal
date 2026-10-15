@@ -44,7 +44,7 @@ import { hhLocalNow } from './shop-stock';
 import { getMethodForBankId, PAYMENT_METHODS_LABELS } from './hh-deposit';
 import { handleJobStatusChange } from '../routes/webhooks';
 import {
-  CancellationPlan, readCancellation, readRefundReminders, planCancellationInvoice, raiseCancellationFee, syncRefundReminder,
+  CancellationPlan, readCancellation, readRefundReminders, planCancellationInvoice, raiseCancellationFee, syncRefundReminder, markCancellationReconciled,
 } from './cancellation-close';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -258,6 +258,40 @@ function hireDepositRows(rows: Row[]): Row[] {
   return rows.filter((row) => kindOf(row) === 6
     && parseFloat(row.credit ?? row.data?.credit ?? '0') > 0
     && !isExcessDeposit(row));
+}
+
+/**
+ * Excess money on an invoice that OP never recorded as claimed — job 16015, Oct 2026: an
+ * excess deposit applied to the hire invoice by hand in HireHop, so OP still showed the
+ * excess as held, and the nightly sweep copied the £1,200 into Xero as if it were hire money.
+ * OP's own ways of putting excess on an invoice (Excess → Claim, capture-and-apply) add to
+ * the record's claim_amount, so an excess deposit may stand on invoices up to that and no
+ * further. One sentence per excess deposit over the line; [] when OP knows about every use.
+ */
+export async function unrecordedExcessUse(rows: Row[], invoiceId: number, extraRows: Row[] = []): Promise<string[]> {
+  const all = [...rows, ...extraRows];
+  const excessIds = new Set<number>();
+  for (const app of invoiceAllocations(rows, invoiceId)) {
+    const id = Number(app.data?.OWNER_DEPOSIT ?? 0);
+    const dep = all.find((r) => kindOf(r) === 6 && idOf(r) === id);
+    if (dep && isExcessDeposit(dep)) excessIds.add(id);
+  }
+  const out: string[] = [];
+  for (const id of excessIds) {
+    // Everything that has left this deposit for an invoice, on any job (refunds are not invoices).
+    const seen = new Set<number>();
+    const applied = round2((readDepositAvailability(all, id)?.applications ?? [])
+      .filter((a) => !a.applicationId || (!seen.has(a.applicationId) && !!seen.add(a.applicationId)))
+      .reduce((sum, a) => sum + a.amount, 0));
+    const r = await query(`SELECT COALESCE(SUM(claim_amount), 0)::float8 AS claimed FROM job_excess WHERE hh_deposit_id = $1`, [id]);
+    const claimed = round2(Number(r.rows[0]?.claimed ?? 0));
+    if (applied - claimed >= PENNY) {
+      out.push(`Excess payment ${id} has ${gbp(applied)} applied to invoices in HireHop, but OP has recorded only ${gbp(claimed)} `
+        + 'claimed from that excess — it looks like it was applied by hand. If the excess should pay this, remove the allocation '
+        + 'in HireHop and use Excess → Claim; if not, just remove it in HireHop. Nothing is applied in Xero until the two agree.');
+    }
+  }
+  return out;
 }
 
 /** Hire deposits with money left, oldest first, with the display fields. */
@@ -619,6 +653,12 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   for (const inv of open) {
     if (!inv.inXero) blockers.push(`${inv.number} is approved in HireHop but has not reached Xero — check it there first.`);
   }
+  // Excess on an invoice that OP doesn't know was claimed — the same check the nightly sweep makes.
+  const excessNotes = new Set<string>();
+  for (const inv of invoices) {
+    for (const note of await unrecordedExcessUse(rows, inv.invoiceId, await sourceJobRows(rows, inv.invoiceId))) excessNotes.add(note);
+  }
+  blockers.push(...excessNotes);
 
   // The Invoice card (§4.1): what is left to bill, and whether Raise invoice may run.
   if (!cancelled) base.invoice = await planInvoice(rows, invoices, hhJobNumber, hhStatus);
@@ -715,6 +755,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   base.readyToComplete = !cancelled && blockers.length === 0 && invoices.length > 0 && open.length === 0 && surplus.length === 0 && payments.length === 0;
   if (base.cancellation) {
     base.cancellation.settled = blockers.length === 0 && feeInvoiced && open.length === 0 && payments.length === 0;
+    if (base.cancellation.settled) await markCancellationReconciled(job.id);
   }
   return base;
 }

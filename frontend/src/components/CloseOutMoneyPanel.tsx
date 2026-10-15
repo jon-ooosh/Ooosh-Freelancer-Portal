@@ -338,7 +338,8 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     if (i === 2 && view.steps[2] === 'done') return allInXero ? 'HireHop ✓ Xero ✓' : 'HireHop ✓';
     if (cancel) {
       if (i === 0 && cancel.cancelledAt) return fmtDay(cancel.cancelledAt);
-      if (i === 3 && view.credit >= PENNY) return `${money(view.credit)} to refund`;
+      // Before the fee is invoiced every payment looks "spare" — the refund is only known after it.
+      if (i === 3 && view.credit >= PENNY && cancel.invoiced) return `${money(view.credit)} to refund`;
       if (i === 3 && view.owing >= PENNY) return `${money(view.owing)} owing`;
       return '';
     }
@@ -425,7 +426,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
         {charge && (
           <div className="rounded-lg border border-gray-200 bg-white p-3 grid gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
             <label className="text-xs text-gray-600 grid gap-1">On the invoice (the client reads this)
-              <input id="charge-desc" value={charge.description} maxLength={200} onChange={e => setCharge({ ...charge, description: e.target.value })}
+              <input id="charge-desc" value={charge.description} maxLength={80} onChange={e => setCharge({ ...charge, description: e.target.value })}
                 className="rounded border border-gray-300 px-2 py-1.5 text-sm text-gray-900" placeholder="e.g. Replacement DI box" />
             </label>
             <label className="text-xs text-gray-600 grid gap-1">Amount ex VAT (£)

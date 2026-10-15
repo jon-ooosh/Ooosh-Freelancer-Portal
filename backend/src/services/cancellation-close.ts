@@ -107,10 +107,13 @@ const day = (iso: string | null) => {
 /** What the client reads on the invoice. */
 export function feeLineDescription(f: CancellationFacts): string {
   const hire = [day(f.jobDate), day(f.jobEnd)].filter(Boolean);
+  // Short on purpose: HireHop keeps only the first 80 characters of a line (CUSTOM_LINE_MAX).
+  // The cancellation date, not the hire dates — the invoice already prints Job Start / Job
+  // Finish (jon, 14 Oct 2026). Hire dates only when no cancellation date is recorded.
+  if (f.cancelledAt) return `Cancellation fee (T&Cs clause 7) - cancelled ${day(f.cancelledAt)}`;
   const parts = ['Cancellation fee (T&Cs clause 7)'];
   if (hire.length) parts.push(`hire ${hire.length === 2 && hire[0] !== hire[1] ? `${hire[0]} to ${hire[1]}` : hire[0]}`);
-  if (f.cancelledAt) parts.push(`cancelled ${day(f.cancelledAt)}`);
-  return parts.join(' — ');
+  return parts.join(' - ');
 }
 
 /**
@@ -213,4 +216,19 @@ export async function syncRefundReminder(jobId: string, refundDue: number, userI
     return `The pending refund on the Money tab is now ${gbp(due)} (was ${gbp(one.amount)}) — press Process on it to refund the client.`;
   }
   return `The pending refund of ${gbp(due)} on the Money tab is ready — press Process on it to refund the client.`;
+}
+
+/**
+ * A settled cancellation ticks its "Payment Reconciliation" card (made at cancellation as
+ * "Process refund of £x"). For a hire the derivation engine ticks it once the invoices owe
+ * nothing; a cancellation is only reconciled once the refund has ALSO gone, which only the
+ * plan knows — so the plan ticks it. Idempotent; never un-ticks.
+ */
+export async function markCancellationReconciled(jobId: string): Promise<void> {
+  await query(
+    `UPDATE job_requirements SET status = 'done', updated_at = NOW()
+      WHERE job_id = $1 AND requirement_type = 'payment_reconcile' AND phase = 'post_hire'
+        AND status NOT IN ('done', 'cancelled')`,
+    [jobId],
+  ).catch((e) => console.warn('[cancellation-close] could not tick Payment Reconciliation:', e));
 }

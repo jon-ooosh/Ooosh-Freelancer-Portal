@@ -95,7 +95,7 @@ export function CheckInPage() {
   const [queuedOffline, setQueuedOffline] = useState(false)
 
   // Form autosave
-  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft } = useFormAutosave({
+  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft, acceptDraft } = useFormAutosave({
     flowType: 'check-in',
     disabled: submitSuccess || queuedOffline,
   })
@@ -178,7 +178,7 @@ export function CheckInPage() {
       signatureBlob: draftLoaded.signatureBlob,
     })
     setStep(draftLoaded.step)
-    dismissDraft()
+    acceptDraft()
   }
 
   // Fetch driver hire forms for this job (for hire dates, insurance, etc.)
