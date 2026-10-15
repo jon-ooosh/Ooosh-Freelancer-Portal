@@ -34,7 +34,7 @@ const mockXeroFind = (xeroBroker as any).getInvoices as jest.Mock;
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 /** 16015 as settled by hand in HireHop on 25 Sep: invoice 12252 paid by 9091 + 9093, nothing applied in Xero. */
-function job16015Rows(opts: { noOverpayment?: boolean } = {}) {
+function job16015Rows(opts: { noOverpayment?: boolean; excess9093?: boolean } = {}) {
   const deps = [
     { id: 9091, credit: 4629.82, allocated: 4629.82 },
     { id: 9093, credit: 1200, allocated: 1200 },
@@ -46,7 +46,7 @@ function job16015Rows(opts: { noOverpayment?: boolean } = {}) {
   ];
   for (const d of deps) {
     rows.push({ kind: 6, credit: d.credit, owing: -(r2(d.credit - d.allocated)), paid: d.allocated, date: '2026-08-24',
-      data: { ID: d.id, ACC_ACCOUNT_ID: 267, DESCRIPTION: '16015 - deposit', ACC_DATA: opts.noOverpayment && d.id === 9091 ? {} : { OverpaymentID: `op-${d.id}` } } });
+      data: { ID: d.id, ACC_ACCOUNT_ID: 267, DESCRIPTION: opts.excess9093 && d.id === 9093 ? '16015 - excess (Full excess - 1 van(s))' : '16015 - deposit', ACC_DATA: opts.noOverpayment && d.id === 9091 ? {} : { OverpaymentID: `op-${d.id}` } } });
     rows.push({ kind: 3, credit: -d.allocated, data: { ID: 900 + d.id, OWNER: 12252, OWNER_DEPOSIT: d.id, parent_is: 'deposit' } });
     rows.push({ kind: 3, credit: d.allocated, data: { ID: 900 + d.id, OWNER: 12252, OWNER_DEPOSIT: d.id, AMOUNT: d.allocated, parent_is: 'invoice' } });
   }
@@ -54,6 +54,7 @@ function job16015Rows(opts: { noOverpayment?: boolean } = {}) {
 }
 
 let enabled: string;
+let excessClaimed: number;
 let jobs: Array<{ id: string; hh_job_number: number }>;
 let logRows: any[];
 let xero: { due: Record<string, number>; ops: Record<string, { remaining: number; allocations: any[] }> };
@@ -61,6 +62,7 @@ let xero: { due: Record<string, number>; ops: Record<string, { remaining: number
 beforeEach(() => {
   jest.clearAllMocks();
   enabled = 'true';
+  excessClaimed = 0;
   jobs = [{ id: 'j-16015', hh_job_number: 16015 }];
   logRows = [];
   mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
@@ -69,6 +71,7 @@ beforeEach(() => {
     if (sql.includes('INSERT INTO job_closeout_log')) { logRows.push({ step: params[1], ok: params[2], detail: params[3] }); return { rows: [] }; }
     if (sql.includes('FROM job_requirements')) return { rows: [{ invoice_req_id: null, invoice_req_status: null, open_problems: 0 }] };
     if (sql.includes('FROM job_closeout_log')) return { rows: [] };
+    if (sql.includes('FROM job_excess')) return { rows: [{ claimed: excessClaimed }] };
     throw new Error(`unexpected SQL: ${sql}`);
   });
   mockRead.mockImplementation(async () => job16015Rows());
@@ -114,6 +117,36 @@ describe('runCloseOutXeroSweep', () => {
     const r = await runCloseOutXeroSweep();
     expect(r).toMatchObject({ checked: 2, stopped: 1, applied: 1, errors: 0 });
     expect(logRows.some((l) => l.ok === false && /isn't in Xero as a payment/.test(l.detail))).toBe(true);
+  });
+
+  describe('excess on the invoice (job 16015, Oct 2026)', () => {
+    it('an excess applied by hand in HireHop (OP recorded no claim) is never copied into Xero: logged as a stop', async () => {
+      mockRead.mockImplementation(async () => job16015Rows({ excess9093: true }));
+      const r = await runCloseOutXeroSweep();
+      expect(r).toMatchObject({ checked: 1, applied: 0, stopped: 1 });
+      expect(mockXeroAllocate).not.toHaveBeenCalled();
+      expect(logRows.at(-1)).toMatchObject({ step: 'sweep', ok: false });
+      expect(logRows.at(-1).detail).toContain('Excess payment 9093 has £1200.00 applied');
+      expect(logRows.at(-1).detail).toContain('only £0.00');
+    });
+
+    it('an excess OP claimed (Excess → Claim) is applied in Xero like any other payment', async () => {
+      mockRead.mockImplementation(async () => job16015Rows({ excess9093: true }));
+      excessClaimed = 1200;
+      const r = await runCloseOutXeroSweep();
+      expect(r).toMatchObject({ checked: 1, applied: 1, stopped: 0 });
+      expect(xero.due['x-12252']).toBe(0);
+    });
+  });
+
+  it('Xero showing LESS due than HireHop is a stop, never "matches" (job 16015, after the HireHop allocation was undone)', async () => {
+    mockRead.mockImplementation(async () => job16015Rows().map((r: any) => (r.kind === 1 ? { ...r, owing: 313.2 } : r)));
+    xero.due['x-12252'] = 254.17;
+    const r = await runCloseOutXeroSweep();
+    expect(r).toMatchObject({ checked: 1, applied: 0, stopped: 1 });
+    expect(mockXeroAllocate).not.toHaveBeenCalled();
+    expect(logRows.some((l) => l.ok === false && /Xero shows £254.17 due on OT-INV-12252 but HireHop says £313.20/.test(l.detail))).toBe(true);
+    expect(logRows.some((l) => /matching HireHop|nothing more to apply/.test(l.detail))).toBe(false);
   });
 
   describe('an invoice HireHop lost the Xero link for (OT-INV-12000, job 15812)', () => {
