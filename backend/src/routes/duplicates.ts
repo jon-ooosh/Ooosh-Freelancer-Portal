@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { ukToday } from '../services/uk-date';
+import { findSimilarOrganisations, findSimilarPeople } from '../services/address-book-similar';
 
 const router = Router();
 router.use(authenticate);
@@ -23,6 +24,23 @@ interface DuplicateGroup {
     organisations: string[];
   }>;
 }
+
+// GET /api/duplicates/similar — "did you mean…?" while creating a person or org.
+// ?type=person&first=&last=&phone=  |  ?type=organisation&name=   (exclude_id optional)
+// Warn-only; see services/address-book-similar.ts.
+router.get('/similar', async (req: AuthRequest, res: Response) => {
+  try {
+    const q = (k: string) => (typeof req.query[k] === 'string' ? (req.query[k] as string) : undefined);
+    const excludeId = q('exclude_id') && /^[0-9a-f-]{36}$/i.test(q('exclude_id')!) ? q('exclude_id') : undefined;
+    const data = q('type') === 'organisation'
+      ? await findSimilarOrganisations({ name: q('name'), excludeId })
+      : await findSimilarPeople({ first: q('first'), last: q('last'), phone: q('phone'), excludeId });
+    res.json({ data });
+  } catch (error) {
+    console.error('Similar records error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // GET /api/duplicates — find potential duplicate people
 router.get('/', async (_req: AuthRequest, res: Response) => {
