@@ -563,7 +563,15 @@ export async function applyCreditsInXero(
 
   const depositRows = [...rows, ...extraRows];
   try {
-    if ((await amountDue()) <= expectedDue + PENNY) {
+    const dueNow = await amountDue();
+    // Xero AHEAD of HireHop — a credit applied by hand in Xero, or an allocation undone in
+    // HireHop but not in Xero (job 16015). Applying more can't fix that; say so, never "matches".
+    if (dueNow < expectedDue - PENNY) {
+      await rep.stop('xero', `Xero shows ${gbp(dueNow)} due on ${number} but HireHop says ${gbp(expectedDue)} — Xero has more `
+        + 'applied to it than HireHop (a credit applied by hand in Xero, or an allocation removed in HireHop but not in Xero). '
+        + `Nothing was applied. Check the invoice's payments in Xero, then ${rep.retryHint}.`);
+    }
+    if (dueNow <= expectedDue + PENNY) {
       await rep.log('xero', true, expectedDue < PENNY
         ? `${number} already shows paid in Xero.`
         : `${number} already shows ${gbp(expectedDue)} due in Xero — nothing more to apply.`);

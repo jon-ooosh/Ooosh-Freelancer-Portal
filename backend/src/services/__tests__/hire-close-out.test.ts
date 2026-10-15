@@ -194,6 +194,8 @@ function installXero() {
 const JOB = { id: '8d4ac717-705d-4378-b640-44adb766f65c', hh_job_number: 16015, job_name: 'Headsend', is_internal: false, pipeline_status: 'returned' };
 let opPayments: Array<{ hirehop_deposit_id: number; payment_type: string; amount: number; payment_method: string; source: string; notes: string | null }>;
 let excessHeld: number;
+/** What OP has recorded as claimed from an excess deposit (`job_excess.claim_amount`). */
+let excessClaimed: number;
 let logRows: any[];
 let arrivalEnabled: string;
 /** `closeout_invoice_layout` — 'flat' unless a test is about the quote layout. */
@@ -209,6 +211,7 @@ function installDb() {
     if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...JOB }] };
     if (sql.includes('FROM job_payments')) return { rows: opPayments };
     if (sql.includes('FROM v_excess_held')) return { rows: [{ held: excessHeld }] };
+    if (sql.includes('FROM job_excess')) return { rows: [{ claimed: excessClaimed }] };
     if (sql.includes('INSERT INTO job_closeout_log')) {
       logRows.unshift({ id: `l${logRows.length}`, step: params[1], ok: params[2], detail: params[3], hh_refs: params[4] ? JSON.parse(params[4]) : null, user_id: params[5], user_name: null, created_at: 'now' });
       return { rows: [] };
@@ -241,6 +244,8 @@ function job16015Corrected() {
     { hirehop_deposit_id: 9093, payment_type: 'excess', amount: 1200, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
   ];
   excessHeld = 0;
+  // These tests treat 9093's £1,200 on the invoice as a claim OP knows about; the by-hand case has its own test.
+  excessClaimed = 1200;
 }
 
 beforeEach(() => {
@@ -297,6 +302,16 @@ describe('planHireCloseOut', () => {
     expect(plan.payments.map((p) => p.depositId)).toEqual([8661]);          // 9093 (excess) excluded, 9091 holds nothing
     expect(plan.payments[0].bankName).toBe('Stripe GBP');
     expect(plan.sentences.join(' ')).toContain('Leave £886.80');
+  });
+
+  it('16015 as it really was: an excess applied by hand (OP recorded no claim) blocks, naming the deposit', async () => {
+    excessClaimed = 0;
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.ready).toBe(false);
+    expect(plan.blockers.join(' ')).toContain('Excess payment 9093 has £1200.00 applied to invoices in HireHop, but OP has recorded only £0.00');
+    const run = await runHireAllocation(JOB.id, 'u1');
+    expect(run.done).toBe(false);
+    expect(mockPost).not.toHaveBeenCalled();
   });
 
   it('16015 as HireHop had it: a blank, un-recorded refund row is a blocker that names the fix', async () => {
@@ -509,6 +524,7 @@ describe('completeHireJob', () => {
       if (sql.includes('INSERT INTO job_closeout_log')) { logRows.unshift({ id: 'x', step: params[1], ok: params[2], detail: params[3], hh_refs: null, user_id: params[5], user_name: null, created_at: 'now' }); return { rows: [] }; }
       if (sql.includes('FROM job_payments')) return { rows: opPayments };
       if (sql.includes('FROM v_excess_held')) return { rows: [{ held: excessHeld }] };
+      if (sql.includes('FROM job_excess')) return { rows: [{ claimed: excessClaimed }] };
       throw new Error(`unexpected SQL: ${sql}`);
     });
     const light = await planHireCloseOut(JOB.id);

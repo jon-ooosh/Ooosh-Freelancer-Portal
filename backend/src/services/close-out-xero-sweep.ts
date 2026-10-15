@@ -20,7 +20,7 @@
 import { query } from '../config/database';
 import { readBillingRows } from './hh-deposit-release';
 import { Stop, PENNY, invoiceAllocations, applyCreditsInXero, adoptLostXeroInvoices } from './hh-invoice-close';
-import { approvedInvoices, sourceJobRows, reporter, log } from './hire-close-out';
+import { approvedInvoices, sourceJobRows, reporter, log, unrecordedExcessUse } from './hire-close-out';
 import { isXeroConfigured } from '../config/xero';
 
 export const SWEEP_SETTING_KEY = 'closeout_xero_sweep_enabled';
@@ -78,6 +78,12 @@ export async function sweepJob(jobId: string, hhJobNumber: number): Promise<'app
       return 'stopped';
     }
     const extraRows = await sourceJobRows(rows, inv.invoiceId);
+    // Never copy a hand-applied excess into Xero (job 16015) — stop until OP and HireHop agree.
+    const unknown = await unrecordedExcessUse(rows, inv.invoiceId, extraRows);
+    if (unknown.length) {
+      await log(jobId, null, 'sweep', false, `Nightly sweep: ${inv.number} — ${unknown.join(' ')}`);
+      return 'stopped';
+    }
     const before = rep.log;
     let appliedHere = false;
     // Count a job as "applied" when the shared step logged an application line.
