@@ -1,6 +1,6 @@
 # House knowledge for Claude — the building blocks (SPEC, DRAFT)
 
-**Status (15 Oct 2026): DRAFT for jon.** Nothing is built. §9 lists the open decisions.
+**Status (15 Oct 2026): DRAFT.** Nothing is built. §9 records jon's decisions.
 
 **Why this exists.** `AI-QUOTING-SPEC.md` is parked because a good client reply needs
 knowledge that mostly lives in people's heads. This spec is how that knowledge gets into
@@ -64,6 +64,12 @@ approval, owners and a content-review cadence — the "how do we keep it current
 **What Claude reads:** only the CURRENT, APPROVED version's markdown body. Uploaded-PDF
 documents are not shared (no text to read reliably); a guide meant for Claude is written in-app.
 
+**One document, two audiences (jon, 15 Oct).** Staff need the judgement and the why;
+Claude needs explicit decision rules. So a shared guide is the staff text first, then a
+`## For Claude` section of AI-only rules. Both halves are reviewed and approved together,
+so they can't drift. Staff can still open the Claude section (collapsed by default) — what
+Claude is told is never hidden from the team. Claude reads the whole document.
+
 **The guide template** (offered when creating an AI-shared document; staff benefit too):
 - **What this covers**
 - **Safe to assume** (and what to assume — e.g. 9am–9am)
@@ -71,6 +77,12 @@ documents are not shared (no text to read reliably); a guide meant for Claude is
 - **Never do or promise**
 - **How we price / discount** (where relevant)
 - **Examples** — two or three real ones
+- **For Claude** — the AI-only rules
+
+**Fixed text is pasted by code, never rewritten by Claude.** The standard van T&Cs block
+that goes in every van quote email lives in OP (a shared document of its own) and OP appends
+it verbatim under Claude's reply. Claude reads it to answer client questions (excess,
+drivers, collection times, Europe) but never rephrases it.
 
 **One loader:** `services/house-knowledge.ts` `getGuidesFor(topics)` — the only way an AI
 caller gets guides. It returns text plus the document id + version used, so every draft
@@ -99,6 +111,12 @@ shared by chase drafts and (later) quotes. Sources, all existing unless marked:
 - **No history at all** — the Leads research (`services/leads/`) if the band has been
   researched; otherwise nothing. Never a fresh web search per draft.
 
+**How far the brief looks (one hop).** The brief covers the job's client (person or
+organisation), the person writing in, and the organisations that person belongs to.
+**Terms apply only to the job's client.** If X from band Y writes about a side project, the
+brief notes "X is also with Y (Y gets 10% off backline)" but Claude does not apply Y's
+deal; a person decides. Nothing further out (Y's other members, other bands X manages).
+
 The brief is **shown to the admin next to the draft** ("what Claude knew"), so a wrong or
 stale fact is spotted where it does harm. Hidden and detached emails stay out, as for
 every AI read (`email-and-notifications.md`).
@@ -106,8 +124,8 @@ every AI read (`email-and-notifications.md`).
 ## 6. Phase D — "remember this?"
 
 **Client facts** — a small new table: one line of text, about a person OR an organisation,
-author, date, the job it came from, archived flag. Shown on the person / organisation
-page, editable and archivable by staff. **Not for** health, personal life or anything
+author, date, the job it came from, archived flag. Shown as a "Things to know" card on the
+person's / organisation's address-book page, editable and archivable by staff. **Not for** health, personal life or anything
 we wouldn't say to the client's face (§9.4).
 
 **The capture loop** (needs the passive draft-vs-sent capture already planned in
@@ -137,16 +155,13 @@ is shared (B), and the brief exists (C). Phase D can follow; it isn't a blocker.
 
 A and the content half of B can run in parallel this week.
 
-## 9. Open decisions (jon)
+## 9. Decisions (jon, 15 Oct 2026)
 
-1. **Client facts: a new small table, or the existing free-text `notes` field?** Lean: the
-   table — one line each, dated, signed, archivable. A free-text field can't show which
-   line is stale or who said it, and the capture loop needs to add lines without editing
-   someone else's prose.
-2. **Voice: move it into a Staff Document, or keep the system setting?** Lean: the
-   document, so staff and Claude read the same thing and changes go through approval.
-3. **Retros in the brief** — any reason Claude shouldn't read retro notes (e.g. blunt
-   internal remarks)? Lean: read them, never quote them.
-4. **Who sees client facts** — all staff (lean), or managers only? Either way, the rule
-   in §6 on what never goes in one.
-5. **Which existing clients' terms to fill first** — jon to name the top ten or so.
+1. **Client facts are a new table**, shown on the address-book page (§6).
+2. **The voice moves into a Staff Document**, written as one document for two audiences
+   (§4): staff text, then a `## For Claude` section.
+3. **Retros are read, never quoted** — they guide the reply and what to ask.
+4. **All staff see client facts.** Never health, personal life, or anything we wouldn't
+   say to the client's face.
+5. **Terms to fill first:** a mix of people and organisations — whoever the deal is with.
+   jon to name them. How far the brief looks: §5.
