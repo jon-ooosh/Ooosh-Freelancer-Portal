@@ -261,6 +261,10 @@ once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`serv
 confirmed; the portal repo refuses before any Stripe session). Phase 2 (`part_of` groups) is not built — **spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
 
+**PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
+reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
+(support, 15 Oct 2026) — never work around it; §3 is the evidence. §5 the decisions, §6 what must exist first.
+
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
 outreach → chased Cold enquiry, jobs-for-this-tour linking. **§20 is the current state and what's
