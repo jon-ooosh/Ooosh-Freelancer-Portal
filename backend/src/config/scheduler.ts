@@ -215,6 +215,19 @@ export function startScheduler() {
     setTimeout(() => { void refreshShopStock('startup'); }, 20_000);
   }
 
+  // Card-reader receipts (STRIPE-TERMINAL-SPEC §12): a recorded reader payment nobody
+  // answered "Send receipt?" for within 15 minutes gets the usual email anyway, so no
+  // payment (and no booking confirmation) goes without one. Every 5 minutes.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { sweepTerminalReceipts } = await import('../services/stripe-terminal');
+      await sweepTerminalReceipts();
+    } catch (err) {
+      console.error('Scheduler: card-reader receipt sweep failed:', err instanceof Error ? err.message : err);
+    }
+  });
+  console.log('Scheduler: card-reader receipt sweep scheduled every 5 minutes');
+
   // ── HireHop Job Sync ──────────────────────────────────────────────────
   if (!isHireHopConfigured()) {
     console.log('Scheduler: HireHop not configured — job sync disabled');

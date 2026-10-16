@@ -11,6 +11,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../services/api';
+import RecipientPicker, { type PickedRecipient } from './RecipientPicker';
 
 export interface CardReaderAccess { enabled: boolean; mode: 'test' | 'live'; configured?: boolean }
 
@@ -25,6 +26,11 @@ interface Session {
   failure_message: string | null;
   hh_push_error: string | null;
   livemode: boolean;
+  /** This payment moved the job to Booked — its email is the booking confirmation. */
+  confirmed_booking?: boolean;
+  /** "Send receipt?" (migration 292). null on payments from before it. */
+  receipt_status?: 'pending' | 'sending' | 'sent' | 'auto_sent' | 'skipped' | 'failed' | null;
+  receipt_sent_to?: string | null;
 }
 
 const LAST_READER_KEY = 'card-reader-last-id';
@@ -62,6 +68,9 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
   const [session, setSession] = useState<Session | null>(null);
   const tick = useRef(0);
   const recordedRef = useRef(false);
+  // "Send receipt?" — who to pre-tick (undefined while asking), and who is ticked now.
+  const [receiptDefaults, setReceiptDefaults] = useState<string[] | null | undefined>(undefined);
+  const [receiptTo, setReceiptTo] = useState<PickedRecipient[]>([]);
 
   const isTest = access.mode === 'test';
 
@@ -96,7 +105,32 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
     return () => clearInterval(t);
   }, [session?.id, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { onActiveChange(!!open); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Waiting for "Send receipt?" counts as active too, so the form can't be closed by
+  // accident before it's answered (the 15-minute sweep is the backstop, not the plan).
+  const receiptPending = session?.status === 'succeeded' && session.receipt_status === 'pending';
+  const active = !!open || receiptPending;
+  useEffect(() => { onActiveChange(active); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!receiptPending || !session || receiptDefaults !== undefined) return;
+    api.get<{ data: { default_emails: string[] } }>(`/terminal/sessions/${session.id}/receipt`)
+      .then((r) => setReceiptDefaults(r.data.default_emails))
+      .catch(() => setReceiptDefaults(null));
+  }, [receiptPending, session?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Once the receipt is answered there's nothing left to see — close, unless HireHop
+  // refused the deposit (staff need to read that).
+  const receiptDone = session?.status === 'succeeded' && session.receipt_status !== 'pending';
+  useEffect(() => {
+    if (receiptDone && session && !session.hh_push_error && session.receipt_status !== null && session.receipt_status !== undefined) onClose();
+  }, [receiptDone]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function answerReceipt(skip: boolean) {
+    if (!session) return;
+    if (!skip && receiptTo.length === 0) { setError('Tick or add at least one email, or choose No receipt.'); return; }
+    void act(() => api.post<{ data: Session }>(`/terminal/sessions/${session.id}/receipt`,
+      skip ? { skip: true } : { recipients: receiptTo }));
+  }
 
   useEffect(() => {
     if (!recordedRef.current && session && (session.status === 'succeeded' || session.status === 'record_failed')) {
@@ -198,7 +232,35 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
       {session.status === 'succeeded' && (
         <div className="px-3 py-3 text-sm bg-green-50 border border-green-200 rounded-md text-green-800">
           <div className="font-semibold">Paid - {amt} recorded{session.livemode ? '' : ' (TEST MODE)'}</div>
-          <div className="text-xs mt-1">Recorded in OP and pushed to HireHop.</div>
+          <div className="text-xs mt-1">
+            Recorded in OP and pushed to HireHop.
+            {session.receipt_status === 'sent' || session.receipt_status === 'auto_sent'
+              ? ` Receipt sent to ${session.receipt_sent_to || 'the client'}.` : ''}
+            {session.receipt_status === 'skipped' ? ' No receipt sent.' : ''}
+          </div>
+        </div>
+      )}
+      {receiptPending && (
+        <div className="space-y-2">
+          <div className="text-sm font-medium text-gray-800">
+            {session.confirmed_booking ? 'Send the booking confirmation to:' : 'Send receipt?'}
+          </div>
+          {session.confirmed_booking && (
+            <p className="text-xs text-gray-500">This payment confirmed the booking, so the client gets the confirmation email.</p>
+          )}
+          <RecipientPicker jobId={jobId} preselect={receiptDefaults} onChange={setReceiptTo} disabled={busy} />
+          <div className="flex gap-2 pt-1">
+            <button disabled={busy || receiptTo.length === 0} onClick={() => answerReceipt(false)}
+              className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50">
+              {busy ? 'Sending...' : session.confirmed_booking ? 'Send confirmation' : 'Send receipt'}
+            </button>
+            {!session.confirmed_booking && (
+              <button disabled={busy} onClick={() => answerReceipt(true)}
+                className="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md disabled:opacity-50">
+                No receipt
+              </button>
+            )}
+          </div>
         </div>
       )}
       {session.status === 'succeeded' && session.hh_push_error && (
@@ -253,7 +315,7 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
             </button>
           </>
         )}
-        {!open && (
+        {!active && (
           <button onClick={onClose}
             className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md">
             Done

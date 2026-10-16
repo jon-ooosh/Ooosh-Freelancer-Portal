@@ -240,7 +240,7 @@ Stripe account, money on HireHop bank 267, recording ONLY through `services/reco
 pre-auths via extended authorisation (30 days — the account is "Car rentals", §9.1), no phone card
 payments (policy), shop + sitter till in Phase 3. Read it before building anything that takes a card
 in person; **§11 is what Phases 0–1 built and where they differ from the plan** (recorded as `stripe_gbp`,
-not a new method; Record Payment → Method → Card reader; polling, not Socket.io). The week's payments work it builds on (PayPal via
+not a new method; Record Payment → Method → Card reader; polling, not Socket.io); **§12 is "Send receipt?"** (the client email waits for staff; a booking confirmation can't be skipped; 15-minute safety net). The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
 **BUILT (PRs 1–4), Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
@@ -507,7 +507,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh daily 07:30 ·
-Gmail ingestion every 10 min.
+Gmail ingestion every 10 min · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email).
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `is_internal` rule (see `jobs-pipeline-dashboard.md`).

@@ -15,6 +15,7 @@ jest.mock('../record-payment', () => ({
   SYSTEM_SERVICE_USER_ID: '00000000-0000-0000-0000-000000000000',
 }));
 jest.mock('../email-service', () => ({ emailService: { sendRaw: jest.fn().mockResolvedValue({}) } }));
+jest.mock('../money-emails', () => ({ sendPaymentEmail: jest.fn(), resolveClientEmailTarget: jest.fn() }));
 
 const fakeStripe = {
   paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn() },
@@ -28,11 +29,13 @@ jest.mock('../../config/stripe', () => ({
 import { query } from '../../config/database';
 import { recordPayment } from '../record-payment';
 import { emailService } from '../email-service';
-import { handleTerminalWebhookEvent, checkSession, canUseTerminal } from '../stripe-terminal';
+import { sendPaymentEmail } from '../money-emails';
+import { handleTerminalWebhookEvent, checkSession, canUseTerminal, sendTerminalReceipt, sweepTerminalReceipts } from '../stripe-terminal';
 
 const mockQuery = query as jest.Mock;
 const mockRecord = recordPayment as jest.Mock;
 const mockEmail = (emailService as unknown as { sendRaw: jest.Mock }).sendRaw;
+const mockPaymentEmail = sendPaymentEmail as jest.Mock;
 
 // ── A tiny terminal_sessions + system_settings ─────────────────────────────
 
@@ -49,6 +52,9 @@ function fakeQuery(sql: string, params: unknown[] = []) {
   if (s.startsWith('SELECT * FROM terminal_sessions WHERE payment_intent_id')) {
     return { rows: sessions.filter((r) => r.payment_intent_id === params[0]).map((r) => ({ ...r })) };
   }
+  if (s.startsWith('SELECT id FROM terminal_sessions WHERE status')) {
+    return { rows: sessions.filter((r) => r.status === 'succeeded' && r.receipt_status === 'pending' && r.overdue).map((r) => ({ id: r.id })) };
+  }
   if (s.startsWith('SELECT * FROM terminal_sessions WHERE id')) {
     return { rows: sessions.filter((r) => r.id === params[0]).map((r) => ({ ...r })) };
   }
@@ -61,8 +67,15 @@ function fakeQuery(sql: string, params: unknown[] = []) {
       const allowed = guard[1]!.split(',').map((x) => x.trim().replace(/'/g, ''));
       if (!allowed.includes(row.status as string)) return { rows: [] };
     }
+    const receiptGuard = s.match(/AND receipt_status = '(\w+)'/);
+    if (receiptGuard && row.receipt_status !== receiptGuard[1]) return { rows: [] };
     const set = s.match(/SET status = '(\w+)'/);
     if (set) row.status = set[1];
+    if (s.includes('confirmed_booking = $4')) { row.confirmed_booking = params[3]; row.receipt_status = 'pending'; }
+    const rset = s.match(/receipt_status = '(\w+)'/);
+    if (rset && !s.includes('AND receipt_status')) row.receipt_status = rset[1];
+    else if (s.match(/SET receipt_status = '(\w+)'/)) row.receipt_status = s.match(/SET receipt_status = '(\w+)'/)![1];
+    if (s.includes('receipt_status = $2')) { row.receipt_status = params[1]; row.receipt_sent_to = params[2]; }
     if (s.includes('failure_code = $2')) { row.failure_code = params[1]; row.failure_message = params[2]; }
     if (s.includes('job_payment_id = $2')) row.job_payment_id = params[1];
     if (s.includes("status = 'record_failed', failure_message = $2")) row.failure_message = params[1];
@@ -187,5 +200,58 @@ describe('who may use the reader', () => {
     expect(await canUseTerminal('staff')).toBe(true);
     expect(await canUseTerminal('weekend_manager')).toBe(true);
     expect(await canUseTerminal('general_assistant')).toBe(false);
+  });
+});
+
+describe('Send receipt?', () => {
+  beforeEach(() => {
+    mockPaymentEmail.mockResolvedValue({ sent: true, toEmail: 'a@client.test', ccEmails: ['b@client.test'] });
+  });
+
+  it('holds the client email back when recording, and says whether it confirmed the booking', async () => {
+    mockRecord.mockResolvedValue({ status: 200, body: { data: { id: 'pay-1', booking_confirmed: true }, hh_push_error: null } });
+    await handleTerminalWebhookEvent({ type: 'payment_intent.succeeded', livemode: false, data: { object: succeededPi } });
+    expect(mockRecord.mock.calls[0][1].skip_client_email).toBe(true);
+    expect(sessions[0]).toMatchObject({ status: 'succeeded', confirmed_booking: true, receipt_status: 'pending' });
+    expect(mockPaymentEmail).not.toHaveBeenCalled();
+  });
+
+  it('sends to the picked people, once', async () => {
+    sessions = [session({ status: 'succeeded', receipt_status: 'pending', confirmed_booking: false })];
+    const picked = [{ email: 'a@client.test', name: 'Ann' }, { email: 'b@client.test' }];
+    await sendTerminalReceipt('sess-1', { recipients: picked });
+    await sendTerminalReceipt('sess-1', { recipients: picked });
+    expect(mockPaymentEmail).toHaveBeenCalledTimes(1);
+    expect(mockPaymentEmail.mock.calls[0][0]).toMatchObject({ jobId: 'job-1', amount: 50, isConfirmingBooking: false, bankName: 'card' });
+    expect(mockPaymentEmail.mock.calls[0][0].overrideRecipients).toHaveLength(2);
+    expect(sessions[0]).toMatchObject({ receipt_status: 'sent', receipt_sent_to: 'a@client.test, b@client.test' });
+  });
+
+  it('refuses No receipt when the payment confirmed the booking', async () => {
+    sessions = [session({ status: 'succeeded', receipt_status: 'pending', confirmed_booking: true })];
+    await expect(sendTerminalReceipt('sess-1', { skip: true })).rejects.toThrow(/confirmed the booking/);
+    expect(sessions[0]!.receipt_status).toBe('pending');
+  });
+
+  it('records No receipt on an ordinary payment', async () => {
+    sessions = [session({ status: 'succeeded', receipt_status: 'pending', confirmed_booking: false })];
+    await sendTerminalReceipt('sess-1', { skip: true });
+    expect(sessions[0]!.receipt_status).toBe('skipped');
+    expect(mockPaymentEmail).not.toHaveBeenCalled();
+  });
+
+  it('puts a failed send back to pending so staff can try again', async () => {
+    sessions = [session({ status: 'succeeded', receipt_status: 'pending', confirmed_booking: false })];
+    mockPaymentEmail.mockResolvedValue({ sent: false, reason: 'error', error: 'SMTP down' });
+    await expect(sendTerminalReceipt('sess-1', { recipients: [{ email: 'a@client.test' }] })).rejects.toThrow(/SMTP down/);
+    expect(sessions[0]!.receipt_status).toBe('pending');
+  });
+
+  it('the sweep sends an unanswered receipt to the usual recipient', async () => {
+    sessions = [session({ status: 'succeeded', receipt_status: 'pending', confirmed_booking: true, overdue: true })];
+    expect(await sweepTerminalReceipts()).toBe(1);
+    expect(mockPaymentEmail.mock.calls[0][0].overrideRecipients).toBeUndefined();
+    expect(mockPaymentEmail.mock.calls[0][0].isConfirmingBooking).toBe(true);
+    expect(sessions[0]!.receipt_status).toBe('auto_sent');
   });
 });

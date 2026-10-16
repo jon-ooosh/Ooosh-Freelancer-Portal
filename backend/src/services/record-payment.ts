@@ -44,6 +44,11 @@ export interface RecordPaymentInput {
   stripe_payment_intent?: string;
   /** job_payments.source — defaults to 'op' (a staff click / the Wise matcher). */
   source?: string;
+  /** Don't email the client here — the caller sends it itself (the card reader asks
+   *  "Send receipt?" while the client is at the desk). Internal alerts still fire.
+   *  The result's `data.booking_confirmed` says whether that email must be the
+   *  booking confirmation. */
+  skip_client_email?: boolean;
 }
 
 export interface RecordPaymentActor {
@@ -68,7 +73,7 @@ export async function recordPayment(
   actor: RecordPaymentActor,
 ): Promise<RecordPaymentResult> {
   try {
-    const { payment_type, payment_method, payment_reference, notes, push_to_hirehop, stripe_payment_intent, source } = input;
+    const { payment_type, payment_method, payment_reference, notes, push_to_hirehop, stripe_payment_intent, source, skip_client_email } = input;
     let { amount, excess_id, total_collected } = input;
 
     // Look up the job
@@ -363,7 +368,7 @@ export async function recordPayment(
 
       if (payment_type === 'excess') {
         // Excess payment email — only if linked to an excess record
-        if (excess_id) {
+        if (excess_id && !skip_client_email) {
           sendExcessEmail({
             templateId: 'excess_payment_confirmed',
             excessId: excess_id,
@@ -378,13 +383,15 @@ export async function recordPayment(
         // `isConfirmingBooking` must reflect "did THIS payment confirm the
         // booking?", not "is the booking currently confirmed?". Subsequent
         // payments on already-confirmed jobs are receipts, not confirmations.
-        const payResult = await sendPaymentEmail({
-          jobId: job.id,
-          amount,
-          bankName: bankLabel,
-          paymentType: payment_type,
-          isConfirmingBooking: statusChanged,
-        });
+        const payResult = skip_client_email
+          ? { sent: true as const }
+          : await sendPaymentEmail({
+              jobId: job.id,
+              amount,
+              bankName: bankLabel,
+              paymentType: payment_type,
+              isConfirmingBooking: statusChanged,
+            });
         if (!payResult.sent) {
           console.error(
             `[money] Payment email not sent (record-payment, job ${job.id}): ${payResult.reason}${payResult.error ? ` — ${payResult.error}` : ''}`
@@ -428,6 +435,7 @@ export async function recordPayment(
           ...payment,
           hirehop_deposit_id: hhDepositId,
           xero_synced: xeroSynced,
+          booking_confirmed: statusChanged,
         },
         hh_push_error: hhPushError,
       },

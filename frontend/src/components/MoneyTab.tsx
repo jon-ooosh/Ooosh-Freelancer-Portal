@@ -18,6 +18,7 @@ import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeSlot } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
 import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
+import RecipientPicker, { type PickedRecipient } from './RecipientPicker';
 import CloseOutMoneyPanel from './CloseOutMoneyPanel';
 import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
@@ -93,6 +94,8 @@ interface FinancialData {
       stripe_payment_intent?: string | null;
       /** Original OP-side payment method (when matched). Drives the modal's default. */
       op_payment_method?: string | null;
+      /** job_payments.source — 'stripe_terminal' when taken on the card reader. */
+      op_source?: string | null;
     }>;
     /** OP-only pending refund IOUs (e.g. cancellation refunds) awaiting processing. */
     pending_refunds?: Array<{
@@ -343,19 +346,40 @@ function ReleaseConsentPanel({ plan, refundAmount, depositAmount, viaStripe }: {
  * precisely so the exception can be caught. The label says the assumption out
  * loud rather than leaving it implicit.
  */
-function RefundNotifyControl({ viaStripe, checked, onChange }: {
+function RefundNotifyControl({ viaStripe, checked, onChange, jobId, onRecipients }: {
   viaStripe: boolean;
   checked: boolean;
   onChange: (v: boolean) => void;
+  jobId: string;
+  /** Who the confirmation goes to — the usual people pre-ticked, editable (jon, 16 Oct 2026). */
+  onRecipients: (r: PickedRecipient[]) => void;
 }) {
+  const emailing = viaStripe || checked;
+  const [defaults, setDefaults] = useState<string[] | null | undefined>(undefined);
+  useEffect(() => {
+    if (!emailing || defaults !== undefined) return;
+    api.get<{ data: { emails: string[] } }>(`/money/${jobId}/email-default?template=hire_refund_processed`)
+      .then((r) => setDefaults(r.data.emails))
+      .catch(() => setDefaults(null));
+  }, [emailing, jobId, defaults]);
+  const picker = emailing && (
+    <div className="mt-2">
+      <p className="text-[11px] text-gray-600 mb-1">Send the confirmation to:</p>
+      <RecipientPicker jobId={jobId} preselect={defaults} onChange={onRecipients} />
+    </div>
+  );
   if (viaStripe) {
     return (
-      <p className="text-[11px] text-gray-500">
-        The client will be emailed confirmation of this refund.
-      </p>
+      <div>
+        <p className="text-[11px] text-gray-500">
+          The client will be emailed confirmation of this refund.
+        </p>
+        {picker}
+      </div>
     );
   }
   return (
+    <div>
     <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
       <input
         type="checkbox"
@@ -370,6 +394,8 @@ function RefundNotifyControl({ viaStripe, checked, onChange }: {
         </span>
       </span>
     </label>
+    {picker}
+    </div>
   );
 }
 
@@ -468,6 +494,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   // has normally gone — but it's a checkbox precisely so the exception is
   // catchable. Ignored on the Stripe path, which always emails.
   const [refundNotifyClient, setRefundNotifyClient] = useState(true);
+  const [refundRecipients, setRefundRecipients] = useState<PickedRecipient[]>([]);
   // Set when the backend answered 409 `release_required`: this deposit is fully
   // applied to an invoice, so HireHop has nothing to refund from it until some
   // is released back off that invoice. We never do that silently — the panel
@@ -546,6 +573,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
     setRefundResult(null);
     setRefundRelease(null);
     setRefundNotifyClient(true);
+    setRefundRecipients([]);
   };
 
   const closeRefundModal = () => {
@@ -611,6 +639,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
           // Sent regardless of method; the backend ignores it on the Stripe
           // path, which always emails.
           notify_client: refundNotifyClient,
+          ...(refundRecipients.length > 0 ? { recipients: refundRecipients } : {}),
         }
       );
       setRefundRelease(null);
@@ -671,6 +700,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
     setRefundResult(null);
     setRefundRelease(null);
     setRefundNotifyClient(true);
+    setRefundRecipients([]);
   };
 
   const closePendingRefundModal = () => {
@@ -763,6 +793,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
           // Sent regardless of method; the backend ignores it on the Stripe
           // path, which always emails.
           notify_client: refundNotifyClient,
+          ...(refundRecipients.length > 0 ? { recipients: refundRecipients } : {}),
         }
       );
       setRefundRelease(null);
@@ -2577,7 +2608,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                     disabled={!!refundingDep.stripe_payment_intent}
                   >
-                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="stripe_gbp">{refundingDep.op_source === 'stripe_terminal' ? 'Stripe - Card reader' : 'Stripe GBP'}</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
                     <option value="wise_bacs">Wise (BACS)</option>
@@ -2586,7 +2617,11 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     <option value="paypal">PayPal</option>
                   </select>
                   {refundingDep.stripe_payment_intent && (
-                    <p className="text-[11px] text-gray-500 mt-1">Locked to Stripe — original payment was made via Stripe.</p>
+                    <p className="text-[11px] text-gray-500 mt-1">
+                      {refundingDep.op_source === 'stripe_terminal'
+                        ? 'Locked - goes back to the card used on the reader.'
+                        : 'Locked to Stripe — original payment was made via Stripe.'}
+                    </p>
                   )}
                 </div>
                 <div>
@@ -2613,6 +2648,8 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                   viaStripe={!!refundingDep.stripe_payment_intent}
                   checked={refundNotifyClient}
                   onChange={setRefundNotifyClient}
+                  jobId={jobId}
+                  onRecipients={setRefundRecipients}
                 />
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
@@ -2799,7 +2836,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                     disabled={!!selectedDeposit?.stripe_payment_intent}
                   >
-                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="stripe_gbp">{selectedDeposit?.op_source === 'stripe_terminal' ? 'Stripe - Card reader' : 'Stripe GBP'}</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
                     <option value="wise_bacs">Wise (BACS)</option>
@@ -2836,6 +2873,8 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                   viaStripe={!!selectedDeposit?.stripe_payment_intent}
                   checked={refundNotifyClient}
                   onChange={setRefundNotifyClient}
+                  jobId={jobId}
+                  onRecipients={setRefundRecipients}
                 />
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
