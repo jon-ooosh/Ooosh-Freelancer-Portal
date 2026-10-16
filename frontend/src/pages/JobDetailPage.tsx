@@ -59,6 +59,7 @@ import { openAuthedFile } from '../lib/openAuthedFile';
 import { ukToday } from '../lib/ukDate';
 import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPlan } from '../lib/closeOutPlan';
 import { cancellationBalance, cancellationFeeGross } from '../lib/money';
+import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -2333,6 +2334,7 @@ function JobDetailContent() {
       stats: { total_jobs: string; confirmed_jobs: string; lost_jobs: string; total_confirmed_value: string; total_value: string };
       band_info?: { id: string; name: string; do_not_hire: boolean; do_not_hire_reason: string | null; internal_notes: string | null } | null;
     } | null;
+    endorsements?: Endorsement[];
   } | null>(null);
 
   useEffect(() => {
@@ -6782,6 +6784,9 @@ function JobDetailContent() {
                 )}
               </div>
             )}
+
+            {/* Endorsed artists — only when there are any */}
+            <EndorsementsNote endorsements={clientHistoryData!.endorsements} />
 
             {/* Working Terms */}
             {clientHistoryData!.client_info?.working_terms_type && (

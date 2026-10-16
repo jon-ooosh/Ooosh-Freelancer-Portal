@@ -20,6 +20,7 @@ import DriverDetailPage from './pages/DriverDetailPage';
 import TransportOpsPage from './pages/TransportOpsPage';
 import BacklinePage from './pages/BacklinePage';
 import BacklineMatcherPage from './pages/BacklineMatcherPage';
+import EndorsementsPage from './pages/EndorsementsPage';
 import CarnetsPage from './pages/CarnetsPage';
 import CarnetDetailPage from './pages/CarnetDetailPage';
 import RehearsalsPage from './pages/RehearsalsPage';
@@ -245,6 +246,7 @@ export default function App() {
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />
                 <Route path="/operations/backline" element={<BacklinePage />} />
+                <Route path="/operations/endorsements" element={<EndorsementsPage />} />
                 <Route path="/operations/backline-matcher" element={<BacklineMatcherPage />} />
                 <Route path="/operations/carnets" element={<CarnetsPage />} />
                 <Route path="/operations/carnets/:id" element={<CarnetDetailPage />} />

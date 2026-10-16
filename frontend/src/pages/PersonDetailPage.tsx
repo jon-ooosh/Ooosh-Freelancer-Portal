@@ -19,6 +19,7 @@ import { useTabPresence } from '../hooks/useTabPresence';
 import EntityTabs from '../components/EntityTabs';
 import RecordActionsMenu from '../components/RecordActionsMenu';
 import WorkingTermsSummary from '../components/WorkingTermsSummary';
+import EndorsementsPanel from '../components/EndorsementsPanel';
 
 interface FileAttachment {
   name: string;
@@ -536,6 +537,12 @@ function PersonDetailContent() {
             doNotHire={person.do_not_hire}
             doNotHireReason={person.do_not_hire_reason}
           />
+
+          {/* Artist endorsements — also listed on Operations › Backline – Endorsements */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Endorsements</h3>
+            <EndorsementsPanel personId={id!} />
+          </div>
 
           {/* Internal Notes */}
           <div className="mt-6 pt-4 border-t">
