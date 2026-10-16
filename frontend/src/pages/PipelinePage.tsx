@@ -12,6 +12,7 @@ import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revi
 import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
 import { stripOptionSuffix } from '../lib/quoteOptions';
 import { ukToday } from '../lib/ukDate';
+import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 
 // Roles available for the "Linked organisations" picker on a job. These map
 // to `job_organisations.role` (VARCHAR(50), free-text). Keep aligned with the
@@ -1056,6 +1057,7 @@ function NewEnquiryModal({
       };
       band_info?: { id: string; name: string; do_not_hire: boolean; do_not_hire_reason: string | null; internal_notes: string | null } | null;
     } | null;
+    endorsements?: Endorsement[];
   } | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -2874,6 +2876,9 @@ function NewEnquiryModal({
                 )}
               </div>
             )}
+
+            {/* Endorsed artists — only when there are any */}
+            <EndorsementsNote endorsements={clientHistory!.endorsements} />
 
             {/* Working Terms */}
             {clientHistory!.client_info?.working_terms_type && (

@@ -21,6 +21,7 @@ import { useTabPresence } from '../hooks/useTabPresence';
 import EntityTabs from '../components/EntityTabs';
 import RecordActionsMenu from '../components/RecordActionsMenu';
 import WorkingTermsSummary from '../components/WorkingTermsSummary';
+import EndorsementsPanel from '../components/EndorsementsPanel';
 
 interface OrgDetail {
   id: string;
@@ -1271,6 +1272,12 @@ function OrganisationDetailContent() {
             doNotHire={org.do_not_hire}
             doNotHireReason={org.do_not_hire_reason}
           />
+
+          {/* Artist endorsements — also listed on Operations › Backline – Endorsements */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Endorsements</h3>
+            <EndorsementsPanel organisationId={id!} />
+          </div>
 
           {/* Internal Notes */}
           <div className="mt-6 pt-4 border-t">

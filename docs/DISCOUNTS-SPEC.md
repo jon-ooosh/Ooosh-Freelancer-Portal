@@ -45,11 +45,33 @@ answers aren't lost before the build starts. Also the groundwork for AI quoting
 - How big a job counts as "large" — thresholds for the job-value adjustment.
 - Exact numbers for every table — jon to fill in once the page exists.
 
-## 4. Phases
+## 4. Phase 1 — endorsements (BUILT, 16 Oct 2026)
+
+Decisions (jon): a reference, not a calculator — start recording, refine later.
+
+- **Where:** Operations › **Backline – Endorsements** (`/operations/endorsements`) lists everything,
+  filter by brand / check state, plus the editable brand list. Each person's and band's **Details**
+  tab has the same panel for theirs (a band's also shows its CURRENT members' personal ones).
+  **New Enquiry and Job view** show an "Endorsed artists" box in Client History **only when there is one**.
+- **Belongs to the artist.** On a person; on the band only when the artist isn't in OP, with "who"
+  ("Drummer — Sam"). Edit → "A person" moves it once they are. Exactly one owner (DB CHECK).
+  A drummer who leaves takes theirs with them; a former member's never shows on the band.
+- **Deal is free text.** Blank = the brand's standard deal (also free text, on the brand list).
+  Standard is 70%. Nothing is calculated from it.
+- **Confirmed** = any staff member got the nod from the brand's rep / A&R. Recorded as
+  "Confirmed with" + last checked = today. **Over 12 months is flagged red; never confirmed is grey.**
+  No expiry dates — we only ever see a snapshot.
+- **Brands seeded:** DW, Orange, C&C, Paiste, GK. Anyone can add; "hide from pickers" rather than delete.
+- Ended, never deleted. Code: `services/endorsements.ts` (THE place), `routes/endorsements.ts`,
+  `components/EndorsementsPanel.tsx`; migration 290.
+
+Possible later: collapse Backline / Endorsements / Backline Matcher into one tabbed Backline page.
+
+## 5. Phases
 
 | Phase | What |
 |---|---|
-| 1 | Endorsements table (on the person, shown on their bands) |
+| 1 | Endorsements table (on the person, shown on their bands) — **BUILT, §4** |
 | 2 | Discount policy page: rate tables (group × length × context), job-value steps, quiet periods, client tiers, written rules |
 | 3 | "Suggested discount" box on a job: reads the job's HireHop lines, shows each group's % and why. Display only — staff apply it in HireHop |
 | later | AI quoting reads the same calculation (one service, THE definition). Writing discounts into HireHop optional |
