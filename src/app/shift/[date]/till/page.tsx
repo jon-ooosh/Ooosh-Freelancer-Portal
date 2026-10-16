@@ -33,8 +33,22 @@ interface TillContext {
   locked_up?: boolean
   jobs: TillJob[]
   tenders: Tender[]
+  /** The card reader, when switched on for this sitter (STRIPE-TERMINAL-SPEC §14). */
+  card_reader?: { enabled: boolean; mode?: 'test' | 'live' }
   stock_as_of: string | null
   error?: string
+}
+/** A card-reader payment, as OP shows it to the phone. */
+interface ReaderSession {
+  id: string
+  status: 'pending' | 'failed' | 'recording' | 'succeeded' | 'record_failed' | 'cancelled'
+  amount: string
+  reader_label: string | null
+  failure_code: string | null
+  failure_message: string | null
+  livemode: boolean
+  shop_sale_id: string | null
+  warning: string | null
 }
 interface StockItem {
   hhStockId: number
@@ -126,6 +140,12 @@ export default function SitterTillPage() {
   const [jobId, setJobId] = useState<string | null | undefined>(undefined)
   const [tender, setTender] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  // The card reader: the basket goes to the reader, and the sale is made once the
+  // card is approved — so a declined card leaves nothing behind.
+  const [reader, setReader] = useState<ReaderSession | null>(null)
+  const [readerBusy, setReaderBusy] = useState(false)
+  const readerReceipt = useRef('')
+  const readerTick = useRef(0)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
   const [sales, setSales] = useState<TonightSale[]>([])
@@ -234,12 +254,86 @@ export default function SitterTillPage() {
   const tenderObj = ctx?.tenders.find((t) => t.key === tender)
   const canTake = !!ctx?.open && basket.length > 0 && !!tender && jobId !== undefined && !saving
 
+  // ── Card reader ────────────────────────────────────────────────────────
+  const readerUrl = (p: string) => `/api/studio-sitter/shifts/${date}/till/reader/${p}`
+  const readerOpen = !!reader && ['pending', 'failed', 'recording'].includes(reader.status)
+
+  async function readerCall(p: string, body?: unknown): Promise<ReaderSession | null> {
+    setReaderBusy(true)
+    try {
+      const r = await fetch(readerUrl(p), body === undefined
+        ? undefined
+        : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) { setError(data.error || 'The card reader didn’t answer.'); return null }
+      if (data.session) setReader(data.session)
+      return data.session ?? null
+    } catch {
+      setError('Couldn’t reach the office system — check your signal.')
+      return null
+    } finally {
+      setReaderBusy(false)
+    }
+  }
+
+  async function takeOnReader() {
+    // Which reader: the first one that's online (there is one, at reception).
+    const rr = await fetch(readerUrl('readers')).then((r) => r.json()).catch(() => null)
+    const pick = rr?.readers?.find((x: { status: string }) => x.status === 'online') ?? rr?.readers?.[0]
+    if (!pick) { setError(rr?.error || 'No card reader is available.'); return }
+    readerReceipt.current = receiptTo
+    readerTick.current = 0
+    await readerCall('pay', {
+      lines: basket.map((l) => ({ hhStockId: l.item.hhStockId, qty: l.qty })),
+      jobId,
+      readerId: pick.id,
+    })
+  }
+
+  // Poll while the card is on the reader (every 5th poll asks Stripe directly).
+  useEffect(() => {
+    if (!reader || !readerOpen) return
+    const t = setInterval(async () => {
+      readerTick.current += 1
+      try {
+        const r = await fetch(readerUrl(`sessions/${reader.id}${readerTick.current % 5 === 0 ? '?check=1' : ''}`))
+        const data = await r.json()
+        if (r.ok && data.session) setReader(data.session)
+      } catch { /* a blip — keep polling */ }
+    }, 2000)
+    return () => clearInterval(t)
+  }, [reader?.id, readerOpen]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Approved: the sale is in — send the receipt, then clear the till as a cash sale does.
+  useEffect(() => {
+    if (reader?.status !== 'succeeded' || !reader.shop_sale_id) return
+    const saleId = reader.shop_sale_id
+    const paid = Number(reader.amount)
+    ;(async () => {
+      let receiptNote = ''
+      if (readerReceipt.current.trim()) {
+        const err = await postReceipt(saleId, readerReceipt.current)
+        if (err) setError(`Sale recorded, but the receipt didn’t send: ${err}`)
+        else receiptNote = ` Receipt sent to ${readerReceipt.current.trim()}.`
+      }
+      setDone(`Paid on the card reader — ${money(paid)}.${reader.warning ? ` ${reader.warning}` : ''}` + receiptNote)
+      readerReceipt.current = ''
+      setReceiptTo('')
+      setBasket([])
+      setTender(null)
+      setJobId(ctx ? defaultRoute(ctx) : undefined)
+      setReader(null)
+      loadSales()
+    })()
+  }, [reader?.status]) // eslint-disable-line react-hooks/exhaustive-deps
+
   async function take() {
     if (!canTake) return
     setError(null)
     // A typo in the receipt box stops here, before anything is recorded.
     const addrProblem = !tenderObj?.needsJob ? receiptAddressProblem(receiptTo) : null
     if (addrProblem) { setError(addrProblem); return }
+    if (tender === 'card_reader') { await takeOnReader(); return }
     setSaving(true)
     try {
       const r = await fetch(`/api/studio-sitter/shifts/${date}/till/sales`, {
@@ -470,6 +564,7 @@ export default function SitterTillPage() {
                         className={`rounded-lg px-3 py-3 text-sm font-medium ${choice(tender === t.key)} ${t.needsJob ? 'col-span-2' : ''}`}
                       >
                         {tender === t.key ? '✓ ' : ''}{t.label}
+                        {t.key === 'card_reader' && ctx.card_reader?.mode === 'test' ? ' (TEST)' : ''}
                       </button>
                     ))}
                   </div>
@@ -510,7 +605,57 @@ export default function SitterTillPage() {
                   </div>
                 )}
 
-                <button
+                {/* The card on the reader — replaces the Take button until it's done. */}
+                {reader && reader.status !== 'succeeded' && (
+                  <div className="rounded-xl border border-gray-200 bg-white p-4">
+                    {reader.status === 'pending' && (
+                      <>
+                        <p className="text-base font-semibold text-gray-900">Waiting for card…</p>
+                        <p className="mt-1 text-sm text-gray-600">
+                          {money(Number(reader.amount))} is on {reader.reader_label || 'the reader'}. Ask them to tap their card.
+                        </p>
+                      </>
+                    )}
+                    {reader.status === 'recording' && <p className="text-base font-semibold text-gray-900">Card approved — recording…</p>}
+                    {reader.status === 'failed' && (
+                      <>
+                        <p className="text-base font-semibold text-red-700">Not taken</p>
+                        <p className="mt-1 text-sm text-red-700">{reader.failure_message || 'The card was declined.'}</p>
+                      </>
+                    )}
+                    {reader.status === 'record_failed' && (
+                      <p className="text-sm text-red-700">
+                        The card was charged but the sale didn’t record ({reader.failure_message}). The office has been told — don’t take it again.
+                      </p>
+                    )}
+                    {reader.status === 'cancelled' && <p className="text-sm text-gray-700">Cancelled — nothing was taken.</p>}
+
+                    {!reader.livemode && reader.status === 'pending' && (
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <button disabled={readerBusy} onClick={() => readerCall(`sessions/${reader.id}/simulate`, { outcome: 'approve' })}
+                          className="rounded-lg border border-green-300 px-3 py-3 text-sm font-medium text-green-700">Test: approve</button>
+                        <button disabled={readerBusy} onClick={() => readerCall(`sessions/${reader.id}/simulate`, { outcome: 'decline' })}
+                          className="rounded-lg border border-red-300 px-3 py-3 text-sm font-medium text-red-700">Test: decline</button>
+                      </div>
+                    )}
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {reader.status === 'failed' && (
+                        <button disabled={readerBusy} onClick={() => readerCall(`sessions/${reader.id}/retry`, {})}
+                          className="rounded-lg bg-green-600 px-3 py-3 text-sm font-semibold text-white">Try again</button>
+                      )}
+                      {(reader.status === 'pending' || reader.status === 'failed') && (
+                        <button disabled={readerBusy} onClick={() => readerCall(`sessions/${reader.id}/cancel`, {})}
+                          className="rounded-lg border border-gray-300 px-3 py-3 text-sm font-medium text-gray-700">Cancel payment</button>
+                      )}
+                      {(reader.status === 'cancelled' || reader.status === 'record_failed') && (
+                        <button onClick={() => setReader(null)}
+                          className="col-span-2 rounded-lg border border-gray-300 px-3 py-3 text-sm font-medium text-gray-700">OK</button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {!reader && <button
                   onClick={take}
                   disabled={!canTake}
                   className="w-full rounded-xl bg-green-600 px-4 py-4 text-base font-semibold text-white active:bg-green-700 disabled:bg-gray-300"
@@ -523,8 +668,10 @@ export default function SitterTillPage() {
                       ? 'Pick how they paid'
                       : tenderObj?.needsJob
                         ? `Put ${money(total)} on their bill`
-                        : `Take ${money(total)}`}
-                </button>
+                        : tender === 'card_reader'
+                          ? `Take ${money(total)} on card reader`
+                          : `Take ${money(total)}`}
+                </button>}
               </div>
             </section>
           </>

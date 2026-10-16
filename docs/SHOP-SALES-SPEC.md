@@ -1227,6 +1227,7 @@ once the mirror lands — it costs one query, and any item below 100 means today
 | **Sync exclusion** | Shop jobs never enter OP's `jobs` table — bulk sync and webhook both guarded. |
 | **Availability** | Free-vs-reserved on basket items, via `picklist_get_availability.php`. |
 | **Stock usage** | `GET /shop/consumption` + a panel on the till. |
+| **Card reader (Oct 2026)** | Tender **Card reader** (`card_reader`, HireHop bank 267) on both tills, when the Stripe reader is switched on for the person. The card is taken FIRST; the sale is created once it's approved — `docs/STRIPE-TERMINAL-SPEC.md` §14. Refund goes back to the card through Stripe. |
 
 ### Settings (all in `system_settings`, category `shop`)
 

@@ -1396,6 +1396,11 @@ async function isTillOpen(date: string, email: string, shiftId: string): Promise
   if (await isLockedUp(shiftId)) return false;
   const now = londonNow();
   if (date === now.date || (date === addDaysIsoP(now.date, -1) && now.hour < 6)) return true;
+  return isTillTestAccount(email);
+}
+
+/** Is this portal login a listed till TEST account (`shop_till_test_emails`)? */
+async function isTillTestAccount(email: string): Promise<boolean> {
   try {
     const r = await query(`SELECT value FROM system_settings WHERE key = 'shop_till_test_emails'`);
     const list = JSON.parse(r.rows[0]?.value || '[]');
@@ -1404,6 +1409,16 @@ async function isTillOpen(date: string, email: string, shiftId: string): Promise
   } catch {
     return false;   // a malformed setting opens nothing
   }
+}
+
+/**
+ * May this sitter take a card on the reader? When `stripe_terminal_roles` includes
+ * 'freelancer' (the switch for every sitter), or for a listed till test account —
+ * so the sitter till can be tried before it is opened to everyone (STRIPE-TERMINAL-SPEC §14).
+ */
+async function sitterCardReader(email: string): Promise<boolean> {
+  const { canUseTerminal } = await import('../services/stripe-terminal');
+  return (await canUseTerminal('freelancer')) || isTillTestAccount(email);
 }
 
 /** Has the sitter submitted the lock-up report for this shift? */
@@ -1427,8 +1442,10 @@ router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest
   try {
     const gate = await tillGate(req, res);
     if (!gate) return;
-    const { SHOP_TENDERS } = await import('../services/shop-tenders');
+    const { shopTendersFor } = await import('../services/shop-tenders');
     const { getCacheAge } = await import('../services/shop-stock');
+    const { getTerminalMode } = await import('../services/stripe-terminal');
+    const cardReader = await sitterCardReader(req.portalUser!.email);
     const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
     res.json({
       success: true,
@@ -1440,7 +1457,9 @@ router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest
       jobs: (detail?.jobs ?? []).map((j: any) => ({
         job_id: j.job_id, hh_job_number: j.hh_job_number, label: j.label, rooms: j.rooms ?? [],
       })),
-      tenders: SHOP_TENDERS,
+      tenders: shopTendersFor(cardReader),
+      // The card reader, when switched on for this sitter — and whether it's the simulator.
+      card_reader: cardReader ? { enabled: true, mode: await getTerminalMode() } : { enabled: false },
       stock_as_of: (await getCacheAge()).refreshedAt,
     });
   } catch (error) {
@@ -1602,6 +1621,116 @@ router.post('/studio-sitter/shifts/:date/till/sales/:id/cancel', async (req: Por
   } catch (error) {
     console.error('Portal till cancel error:', error);
     res.status(500).json({ error: 'Could not cancel that sale' });
+  }
+});
+
+// ── The card reader on the sitter till (STRIPE-TERMINAL-SPEC §14) ─────────
+// The same rostered-to-this-evening gate, the till must be open, and the reader must
+// be switched on for this sitter. A sitter can only sell a basket (never a job payment
+// or a pre-auth), the amount is the server's total, and a sitter only ever sees the
+// reader payments they started themselves.
+
+async function readerGate(req: PortalRequest, res: Response): Promise<{ date: string; shiftId: string } | null> {
+  const gate = await tillGate(req, res);
+  if (!gate) return null;
+  if (!(await sitterCardReader(req.portalUser!.email))) {
+    res.status(403).json({ error: "The card reader isn't switched on for the sitter till yet." });
+    return null;
+  }
+  return gate;
+}
+
+/** A reader payment, as the phone needs it — nothing about the job or the basket. */
+function sitterSessionView(s: any) {
+  return {
+    id: s.id, status: s.status, amount: s.amount, reader_label: s.reader_label,
+    failure_code: s.failure_code, failure_message: s.failure_message,
+    livemode: s.livemode, shop_sale_id: s.shop_sale_id, warning: s.warning,
+  };
+}
+
+router.get('/studio-sitter/shifts/:date/till/reader/readers', async (req: PortalRequest, res: Response) => {
+  try {
+    if (!(await readerGate(req, res))) return;
+    const { listReaders } = await import('../services/stripe-terminal');
+    const r = await listReaders();
+    res.json({ success: true, mode: r.mode, readers: r.readers.map((x) => ({ id: x.id, label: x.label, status: x.status })) });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Could not load the readers' });
+  }
+});
+
+router.post('/studio-sitter/shifts/:date/till/reader/pay', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await readerGate(req, res);
+    if (!gate) return;
+    if (!(await isTillOpen(gate.date, req.portalUser!.email, gate.shiftId))) {
+      res.status(409).json({ error: 'The till for this evening is closed.' });
+      return;
+    }
+    const jobId = req.body?.jobId ? String(req.body.jobId) : null;
+    if (jobId) {
+      const detail = await getSitterShiftDetail(gate.date, req.portalUser!.id);
+      if (!(detail?.jobs ?? []).some((j: any) => j.job_id === jobId)) {
+        res.status(400).json({ error: "That band isn't in tonight." });
+        return;
+      }
+    }
+    // Item and quantity only — never a price from the phone (as for a cash sale).
+    const lines = Array.isArray(req.body?.lines)
+      ? req.body.lines.slice(0, 50).map((l: any) => ({ hhStockId: Number(l.hhStockId), qty: Number(l.qty) }))
+      : [];
+    const { startShopTerminalPayment } = await import('../services/stripe-terminal');
+    const session = await startShopTerminalPayment({
+      input: {
+        lines,
+        soldToJobId: jobId,
+        notes: req.body?.notes ? String(req.body.notes).slice(0, 300) : null,
+        recordedIn: 'sitter_till',
+        shiftId: gate.shiftId,
+      },
+      actor: { id: null, personId: req.portalUser!.id, role: 'freelancer' },
+      readerId: String(req.body?.readerId || ''),
+    });
+    res.json({ success: true, session: sitterSessionView(session) });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Could not send that to the reader.' });
+  }
+});
+
+router.get('/studio-sitter/shifts/:date/till/reader/sessions/:sid', async (req: PortalRequest, res: Response) => {
+  try {
+    if (!(await readerGate(req, res))) return;
+    const { readSession, sessionStartedByPerson } = await import('../services/stripe-terminal');
+    if (!(await sessionStartedByPerson(String(req.params.sid), req.portalUser!.id))) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+    const s = await readSession(String(req.params.sid), req.query.check === '1');
+    res.json({ success: true, session: s ? sitterSessionView(s) : null });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Could not read the payment' });
+  }
+});
+
+router.post('/studio-sitter/shifts/:date/till/reader/sessions/:sid/:action', async (req: PortalRequest, res: Response) => {
+  try {
+    if (!(await readerGate(req, res))) return;
+    const action = String(req.params.action);
+    const sid = String(req.params.sid);
+    const svc = await import('../services/stripe-terminal');
+    if (!(await svc.sessionStartedByPerson(sid, req.portalUser!.id))) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+    const s = action === 'retry' ? await svc.retrySession(sid)
+      : action === 'cancel' ? await svc.cancelSession(sid)
+      : action === 'simulate' ? await svc.simulateTap(sid, req.body?.outcome === 'decline' ? 'decline' : 'approve')
+      : null;
+    if (!s) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json({ success: true, session: sitterSessionView(s) });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'That did not work.' });
   }
 });
 

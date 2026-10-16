@@ -19,6 +19,7 @@ jest.mock('../money-emails', () => ({
   sendPaymentEmail: jest.fn(), sendExcessEmail: jest.fn(),
   resolveClientEmailTarget: jest.fn(), resolveExcessEmailTarget: jest.fn(),
 }));
+jest.mock('../shop-sales', () => ({ createShopSale: jest.fn(), validateShopSale: jest.fn() }));
 jest.mock('../excess-preauth', () => ({
   ...jest.requireActual('../excess-preauth'),
   recordPreauthHold: jest.fn(),
@@ -38,6 +39,7 @@ import { recordPayment } from '../record-payment';
 import { emailService } from '../email-service';
 import { sendPaymentEmail, sendExcessEmail } from '../money-emails';
 import { recordPreauthHold, preauthEligibility } from '../excess-preauth';
+import { createShopSale } from '../shop-sales';
 import { handleTerminalWebhookEvent, checkSession, canUseTerminal, sendTerminalReceipt, sweepTerminalReceipts } from '../stripe-terminal';
 
 const mockQuery = query as jest.Mock;
@@ -46,6 +48,7 @@ const mockEmail = (emailService as unknown as { sendRaw: jest.Mock }).sendRaw;
 const mockPaymentEmail = sendPaymentEmail as jest.Mock;
 const mockExcessEmail = sendExcessEmail as jest.Mock;
 const mockRecordPreauth = recordPreauthHold as jest.Mock;
+const mockCreateShopSale = createShopSale as jest.Mock;
 
 // ── A tiny terminal_sessions + system_settings ─────────────────────────────
 
@@ -90,6 +93,7 @@ function fakeQuery(sql: string, params: unknown[] = []) {
     else if (s.match(/SET receipt_status = '(\w+)'/)) row.receipt_status = s.match(/SET receipt_status = '(\w+)'/)![1];
     if (s.includes('receipt_status = $2')) { row.receipt_status = params[1]; row.receipt_sent_to = params[2]; }
     if (s.includes('capture_before = $2')) { row.capture_before = params[1]; row.warning = params[2]; row.receipt_status = 'pending'; }
+    if (s.includes('shop_sale_id = $2')) { row.shop_sale_id = params[1]; row.warning = params[2]; }
     if (s.includes('failure_code = $2')) { row.failure_code = params[1]; row.failure_message = params[2]; }
     if (s.includes('job_payment_id = $2')) row.job_payment_id = params[1];
     if (s.includes("status = 'record_failed', failure_message = $2")) row.failure_message = params[1];
@@ -349,5 +353,41 @@ describe('an excess payment on the reader', () => {
     sessions = [session({ payment_type: 'excess', excess_id: 'ex-1' })];
     await handleTerminalWebhookEvent({ type: 'payment_intent.succeeded', livemode: false, data: { object: succeededPi } });
     expect(mockRecord.mock.calls[0][1]).toMatchObject({ payment_type: 'excess', excess_id: 'ex-1', stripe_payment_intent: 'pi_1', skip_client_email: true });
+  });
+});
+
+describe('a till sale on the reader', () => {
+  const payload = {
+    input: { kind: 'sale', lines: [{ hhStockId: 25, qty: 2, unitPriceCharged: 7.5 }], soldToJobId: null, recordedIn: 'staff_till', tender: 'card_reader' },
+    actor: { id: 'user-1', role: 'admin' },
+  };
+  const paid = { id: 'pi_1', status: 'succeeded', amount: 1800, amount_received: 1800, metadata: { source: 'op_terminal' } };
+
+  beforeEach(() => {
+    sessions = [session({ payment_type: 'shop', job_id: null, amount: '18.00', shop_payload: payload })];
+  });
+
+  it('creates the sale only once the card is approved, as card_reader with its PaymentIntent, and never as a job payment', async () => {
+    mockCreateShopSale.mockResolvedValue({ id: 'sale-1', kind: 'sale', totals: { gross: 18 }, pushAfter: '' });
+    await handleTerminalWebhookEvent({ type: 'payment_intent.succeeded', livemode: false, data: { object: paid } });
+    await handleTerminalWebhookEvent({ type: 'payment_intent.succeeded', livemode: false, data: { object: paid } });
+    expect(mockRecord).not.toHaveBeenCalled();
+    expect(mockCreateShopSale).toHaveBeenCalledTimes(1);
+    expect(mockCreateShopSale.mock.calls[0][0]).toMatchObject({ tender: 'card_reader', stripePaymentIntent: 'pi_1', kind: 'sale' });
+    expect(mockCreateShopSale.mock.calls[0][1]).toEqual({ id: 'user-1', role: 'admin' });
+    expect(sessions[0]).toMatchObject({ status: 'succeeded', shop_sale_id: 'sale-1', warning: null });
+  });
+
+  it('warns when the sale comes to a different total than the card was charged', async () => {
+    mockCreateShopSale.mockResolvedValue({ id: 'sale-1', kind: 'sale', totals: { gross: 17.5 }, pushAfter: '' });
+    await handleTerminalWebhookEvent({ type: 'payment_intent.succeeded', livemode: false, data: { object: paid } });
+    expect(sessions[0]!.warning).toMatch(/charged £18.00 but the sale came to £17.50/);
+  });
+
+  it('a sale that will not record is record_failed, and info@ is told the money was taken', async () => {
+    mockCreateShopSale.mockRejectedValue(new Error('That job is closed.'));
+    await handleTerminalWebhookEvent({ type: 'payment_intent.succeeded', livemode: false, data: { object: paid } });
+    expect(sessions[0]!.status).toBe('record_failed');
+    expect(mockEmail.mock.calls[0][0].html).toMatch(/refund it in the Stripe dashboard/);
   });
 });

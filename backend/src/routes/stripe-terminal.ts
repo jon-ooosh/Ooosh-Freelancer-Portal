@@ -8,6 +8,7 @@
  *   POST /terminal/sessions/:id/retry         Try again after a decline — the SAME PaymentIntent
  *   POST /terminal/sessions/:id/cancel        clear the reader and cancel the PaymentIntent
  *   POST /terminal/sessions/:id/simulate      test mode only: tap a pretend card (body: outcome approve|decline)
+ *   POST /terminal/shop/pay                   a staff-till sale on the reader (body: lines, sold_to_job_id, sold_to_person_id, notes, reader_id) — the sale is created once the card is approved
  *   GET  /terminal/excess/:excessId/options   what the excess Manage modal may offer: payment, pre-auth (with the reason when not)
  *   GET  /terminal/sessions/:id/receipt       who "Send receipt?" pre-ticks
  *   POST /terminal/sessions/:id/receipt       answer it (body: recipients [{email,name}] | skip: true)
@@ -23,7 +24,7 @@ import { validate } from '../middleware/validate';
 import {
   canUseTerminal, getTerminalMode, isModeConfigured, listReaders, startTerminalPayment,
   readSession, retrySession, cancelSession, simulateTap, TerminalError,
-  sendTerminalReceipt, defaultReceiptRecipients, excessReaderOptions,
+  sendTerminalReceipt, defaultReceiptRecipients, excessReaderOptions, startShopTerminalPayment,
 } from '../services/stripe-terminal';
 
 const router = Router();
@@ -88,6 +89,38 @@ router.post('/jobs/:jobId/pay', requireTerminalAccess, validate(paySchema), asyn
     res.json({ data: session });
   } catch (err) {
     fail(res, err, 'Failed to send the payment to the reader');
+  }
+});
+
+const shopPaySchema = z.object({
+  lines: z.array(z.object({
+    hhStockId: z.number().int().positive(),
+    qty: z.number().positive(),
+    unitPriceCharged: z.number().min(0).optional(),
+  })).min(1).max(100),
+  sold_to_job_id: z.string().uuid().nullable().optional(),
+  sold_to_person_id: z.string().uuid().nullable().optional(),
+  notes: z.string().max(1000).nullable().optional(),
+  reader_id: z.string().min(1).max(100),
+});
+
+router.post('/shop/pay', requireTerminalAccess, validate(shopPaySchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const session = await startShopTerminalPayment({
+      input: {
+        lines: req.body.lines,
+        soldToJobId: req.body.sold_to_job_id || null,
+        soldToPersonId: req.body.sold_to_person_id || null,
+        notes: req.body.notes || null,
+        recordedIn: 'staff_till',
+        shiftId: null,
+      },
+      actor: { id: req.user!.id, role: req.user!.role },
+      readerId: req.body.reader_id,
+    });
+    res.json({ data: session });
+  } catch (err) {
+    fail(res, err, 'Failed to send the sale to the reader');
   }
 });
 
