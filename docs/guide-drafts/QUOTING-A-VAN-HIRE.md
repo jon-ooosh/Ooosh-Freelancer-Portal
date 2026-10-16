@@ -1,42 +1,61 @@
 # Quoting a van hire — DRAFT guide
 
-**Draft 2, 15 Oct 2026 (jon + Claude).** Written here until the Staff Documents "Share with
+**Draft 3, 16 Oct 2026 (jon + Claude).** Written here until the Staff Documents "Share with
 Claude" switch exists (`docs/AI-KNOWLEDGE-SPEC.md` §4); then it moves into OP and this file is
-deleted. **[?]** marks something still to confirm.
+deleted. **[?]** marks something still to confirm. Draft 3 adds what four real threads showed
+(Cootie Catcher, Rum Jungle, Robbie Pick, Emma McIvor — Oct 2026).
 
 ## What this covers
 
 Quotes for self-drive splitter vans. Van + driver is a separate guide (not written yet).
 
+## The aim
+
+**Get a quote in front of them fast.** The quote is the hook that books the van. Ask a
+question only when we genuinely can't quote without the answer; otherwise quote, and put the
+question alongside it. No "roughly how much?" back-and-forth — the rate card and the quote
+answer price.
+
 ## Our vans
 
-| Style | Vehicle | Seats (inc. driver) | Suits | 1–2 days | 3–4 | 5–6 | 7+ |
-|---|---|---|---|---|---|---|---|
-| **Mini** | Mercedes Vito 114 | 6 | Small bands, budget, easier to drive and park | £120 | £110 | £100 | £95 |
-| **Basic** | Mercedes Sprinter 315 MWB | 9 | The everyday splitter | £145 | £130 | £120 | £115 |
-| **Premium** | Mercedes 317 LWB | 9 leather | Comfort on longer tours: bunk, Apple TV, EU wifi, air con, 240V, bigger equipment bay | £180 | £170 | £160 | £150 |
+Three styles today, each in **auto and manual** (each its own HireHop stock item, so
+availability is per style AND gearbox):
 
-Per day, plus VAT, from the 2026 rate cards. **HireHop's rate card sets the actual price** — this
-table is for answering "roughly how much?" questions, not for building a quote.
+- **Mini** — Mercedes Vito, 6 seats inc. driver. Small bands, budget, easier to drive and park.
+- **Basic** — Mercedes Sprinter MWB, 9 seats. The everyday splitter.
+- **Premium** — Mercedes LWB, 9 leather seats. Comfort on longer tours: bunk, Apple TV, EU wifi,
+  air con, 240V, bigger equipment bay. Rear seating **forward-facing or round a table**.
 
-Every style comes in **auto and manual**; each is its own stock item in HireHop, so
-availability is per style AND gearbox. A **Standard** splitter (between Basic and Premium)
-arrives around April 2027 — not quotable yet.
+Prices: **HireHop's rate card, always.** Never quote a price from memory or from this guide —
+the rate card changes. The per-style info sheets (rate card + dimensions) and the comparison
+chart can be attached for anyone choosing.
 
-Info sheets (rate card + dimensions): one per style, plus the comparison chart. Send the
-chart when someone hasn't chosen a style.
+A **Standard** splitter (between Basic and Premium) arrives around April 2027 — not quotable
+yet. From January 2027 the Premium seat layouts become fixed stock items (so many
+forward-facing vans, so many table vans) rather than an option we change.
 
-## Safe to assume
+## Choosing the van
 
-- **Collection from and return to us** (Portslade), unless they say otherwise.
-- **UK only**, unless they mention going abroad. (The quote states this through HireHop's
-  auto-picker on the van.)
-- **No organisation name** → use their own name as the organisation ("Jon Wood of Jon Wood").
-- **Party size rules vans out, not in.** 7 or more people → not the Mini. Fewer than 6 doesn't
-  mean they want the Mini — read the tone: "on a budget" / "cheapest" vs "comfy" / "long tour".
-- **Drivers meet our standard terms**, unless they tell us otherwise up front ("our driver is
-  22") — then flag it for a person.
-- **Gearbox:** **[?]** default when they don't say — quote manual, auto, or ask?
+- **Style stated** → quote that style.
+- **Size clearly hinted** ("small splitter for 4 people") → quote the style that fits.
+- **No style, 7–9 people or unclear** → **quote the options rather than ask**: a Basic and a
+  Premium as two options of one enquiry (the options module), so they choose from real quotes.
+  (Rum Jungle: "two quotes for our two 9 seater splitter options".)
+- **Party size rules vans out, never in.** 7 or more → never the Mini. Fewer than 6 doesn't
+  mean the Mini — read the tone: "budget" / "cheapest" vs "comfy" / "long tour".
+- **Gear list** helps: a full backline plus cases for 4 people still fits a Mini (Emma); a
+  big rig may not. **[?]** any rule of thumb for gear vs van?
+
+## Gearbox and seating
+
+- Most people don't mind either gearbox. If they state one, quote it.
+- **Flying in from the US, Canada or Australia → assume auto** (very likely an auto-only
+  licence).
+- **Manuals fully booked → quote an auto and say so.** Autos fully booked → offer a manual but
+  check they can drive one.
+- **Premium seating:** if they ask ("the table and usual seats, not all forward facing" —
+  Robbie), note it on the job and confirm we've noted it.
+- Preferences go in the client's **"Things to know"** so next time they don't have to say it.
 
 ## Dates and hire length — get this exactly right
 
@@ -46,72 +65,92 @@ Hire periods run **9am to 9am**. The number of days is the number of 9am-to-9am 
   Say so plainly, and add: *"If you can return by 9am on the 15th, let me know and I can
   reduce the hire by a day."*
 - A 1st–4th hire is **4 days**, returning at 9am on the 5th. Returning at midday on the 5th
-  would make it **5 days**.
+  makes it **5 days**.
+- Given times: collect 27th 11:00, return 5th 11:00 → the 5th is a hire day → 27th–5th
+  inclusive, **9 days** (Rum Jungle).
 - Collection on the first day any time 9am–5pm (allow 30 minutes; aim to arrive by 4.30pm).
-  The hire still started at 9am that day.
-- Collecting the day before (before 5pm) is sometimes possible at no charge, but only
-  confirmed at 10am that day by phone. Never promise it. If their plan depends on it,
-  advise booking the extra day.
+- Collecting the afternoon before is sometimes possible at no charge, confirmed only at 10am
+  that day by phone. Never promise it; if their plan depends on it, advise booking the day.
 
-## Always ask
+## Safe to assume
 
-- **Which van style**, if they haven't said. Don't quote a single van; ask which they prefer
-  and send the comparison chart. Leave out styles their party size can't fit.
-- **Dates**, if missing or ambiguous.
+- **Collection from and return to us** (Portslade), unless they say otherwise.
+- **UK only**, unless they mention going abroad. (The quote states it via HireHop's auto-picker.)
+- **No organisation name** → their own name as the organisation ("Jon Wood of Jon Wood").
+- **Drivers meet our standard terms**, unless they say otherwise up front ("our driver is
+  22") — then flag it for a person.
 
-## Look out for
+## Delivery, collection and getting to us
 
 - **Flying in?** A band from abroad asking for the van "in London" is probably arriving by
-  plane. Offer airport delivery and collection as the better option. **If they then give a
-  specific address, that wins** — never keep pushing the airport.
-- **Delivery or collection anywhere** is priced case by case with the transport calculator in
-  OP (including one-way hires and the driver's train home). Claude doesn't price it in phase 1:
-  it says a delivery quote will follow and flags it for a person. Anything needing more than a
-  day's travel is always a person's job.
+  plane. Offer to meet them at the airport, AND mention the train: Heathrow → central London →
+  Victoria → Portslade (about 80 minutes from Victoria; the depot is a ten-minute walk from
+  Portslade station). **If they give a specific address, that wins.**
+- **Prices** are worked out case by case with the transport calculator. Phase 1: a person
+  prices it. Staff do give a range for London ("£180–£240 + VAT for London and surrounding
+  areas") **[?] is that the standing range to use?** — and say delivery figures are estimates
+  that depend on address and time of day.
+- One-way and abroad (e.g. collection in Brussels) are a person's job.
+
+## Going abroad
+
+- Insured for the UK, mainland EU, Norway and Switzerland **[?] Ireland and EU islands
+  (Corsica, Sardinia, Balearics)?** No extra insurance or breakdown charge.
+- A VE103B admin fee — it appears on the quote once the abroad item is added.
+- **Backline going to Europe needs a carnet.** We can administer it (usually around £750 + VAT)
+  or they can arrange their own (around £550 + VAT) **[?] confirm these are standing figures.**
+- If a client changes plan so the van now goes abroad (Emma: "I'll drive it back to the UK"),
+  the abroad item, VE103B and carnet questions all come back in — check them.
+- London ULEZ: our vans meet it. Congestion Charge: on autopay, recharged after the hire.
+  Paris Crit'Air: **[?]** Will told Emma "all our vehicles have been registered with Paris
+  crit'air", but the T&Cs say "we are unable to advise if a vehicle has Clean Air / Crit Air
+  stickers". One of them needs to change.
+
+## When something changes
+
+**Every change gets a fresh quote attached**, with a one-line note of what changed ("I've
+removed the collection and added the backline"). Same when chasing for a decision — attach the
+current quote. Short is fine: *"Please see the attached amended quote."*
 
 ## If their choice is fully booked
 
-HireHop availability is the truth. If the style they asked for is fully booked on their
-dates, suggest another style that is free **and** fits their party (7 people → never the
-Mini). Say plainly that their first choice is booked.
+HireHop availability is the truth. Say plainly their first choice is booked, then suggest a
+style (or gearbox) that is free **and** fits their party.
+
+**Scarcity is worth saying when it's true** ("we now have only one Basic left; a handful of
+Premiums" — Rich, Rum Jungle). Only from a real availability check, never as a sales line.
 
 ## Pricing
 
 HireHop's rate card. **No discounts on vans** except named client deals, which come from the
-discounts module (`docs/DISCOUNTS-SPEC.md`), never from Claude's judgement.
+discounts module (`docs/DISCOUNTS-SPEC.md`), never from judgement.
 
 ## The reply
 
 A short personal reply in our voice, then the **standard van T&Cs block, pasted word for word
-by OP** (never retyped), with the quote attached. The T&Cs answer most follow-up questions:
-excess (£1,000 + VAT = £1,200), who can drive (23+, licence 2+ years, max 6 points), two
-drivers included and extras £20 + VAT each, opening hours, Europe, deposits (25% or £100,
-whichever is greater; single-day hires paid in full), provisional holds (max five days).
+by OP** (never retyped), with the quote attached. The T&Cs answer most follow-ups: excess, who
+can drive, extra drivers, opening hours, Europe, deposits, provisional holds.
 
-## Europe
-
-Fine to take abroad: UK, mainland EU, **Norway and Switzerland** **[?] full country list from
-the insurance document**. No extra insurance or breakdown charges; a VE103B admin fee **[?]
-amount** — it appears on the quote once the abroad item is added. We can't advise on Clean Air /
-Crit'Air stickers.
+Tone from the real threads: first names, warm, brief. "Thanks Nolan, great to be working on
+this tour with you!" Personal touches when we have them ("don't forget your sunglasses — we've
+got them in lost property").
 
 ## Never
 
-- Never promise a specific registration in advance (only confirmed at collection).
-- Never promise day-before collection.
+- Never quote a price from memory or this guide — only HireHop's.
+- Never promise a specific registration in advance.
+- Never promise collection the day before.
 - Never offer a discount on a van.
+- Never claim other people are interested in a van unless it's true.
 - Never retype or "improve" the T&Cs block.
-
-## Examples
-
-**[?]** Two or three real enquiries and the replies we sent — to add.
 
 ## For Claude
 
-- Count hire days as 9am-to-9am periods; state the inclusive dates AND the 9am return day
-  in the reply, and offer the one-day-shorter option when their return date suggests it.
-- If the request names no van style, the reply asks which style they'd like and mentions
-  the comparison chart. It does not pick one for them.
-- If a style is unavailable on their dates, say so before suggesting the alternative.
-- Delivery, collection, airport runs, one-way hires and drivers outside the standard terms
-  are flagged for a person, not priced.
+- Count hire days as 9am-to-9am periods; state the inclusive dates AND the 9am return day;
+  offer the one-day-shorter option when their dates suggest it.
+- No style named and a 9-seater party → propose Basic and Premium as two options, not a question.
+- Default to quoting; a question goes alongside the quote unless the quote is impossible without it.
+- Availability before suggestion: if their style or gearbox is booked, say so, then suggest.
+- Delivery, collection, airport runs, one-way, abroad collections and drivers outside the
+  standard terms are flagged for a person, not priced.
+- Read "Things to know" for gearbox and seating preferences before choosing.
