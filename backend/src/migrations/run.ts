@@ -330,6 +330,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '288_mot_advisory_marks.sql',
         '289_address_book_owner_and_views.sql',
         '290_artist_endorsements.sql',
+        '291_stripe_terminal.sql',
       ];
 
       for (const migration of migrations) {

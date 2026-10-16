@@ -17,6 +17,7 @@ import CostCaptureModal from './CostCaptureModal';
 import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeSlot } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
+import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
 import CloseOutMoneyPanel from './CloseOutMoneyPanel';
 import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
@@ -419,6 +420,13 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   const [payLoading, setPayLoading] = useState(false);
   const [payError, setPayError] = useState('');
   const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
+  // Card reader (STRIPE-TERMINAL-SPEC): whether this login may use it (asked once,
+  // when the form first opens), whether a payment is on the reader right now (locks
+  // amount + method, and the form can't be closed by accident), and whether one was
+  // recorded (the tab refreshes on close, never mid-flow).
+  const [readerAccess, setReaderAccess] = useState<CardReaderAccess | null>(null);
+  const [readerActive, setReaderActive] = useState(false);
+  const [readerRecorded, setReaderRecorded] = useState(false);
 
   // Excess action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
@@ -872,18 +880,39 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
 
   useEffect(() => { loadJobCosts(); }, [loadJobCosts]);
 
-  // Escape key closes payment modal
+  // Close the Record Payment form. After a card-reader payment, reset the form and
+  // refresh the tab — the reader flow defers that to here so it can't unmount itself.
+  function closePaymentForm() {
+    setShowPaymentForm(false);
+    setPayError('');
+    setPayHHPushError(null);
+    if (readerRecorded) {
+      setReaderRecorded(false);
+      setPayAmount('');
+      setPayNotes('');
+      setPayMethod('worldpay');
+      loadData();
+      onJobChanged?.();
+    }
+  }
+
+  // Ask once whether this login may use the card reader (admin-only while testing).
+  useEffect(() => {
+    if (!showPaymentForm || readerAccess) return;
+    api.get<{ data: CardReaderAccess }>('/terminal/access')
+      .then((r) => setReaderAccess(r.data))
+      .catch(() => setReaderAccess({ enabled: false, mode: 'test' }));
+  }, [showPaymentForm, readerAccess]);
+
+  // Escape key closes payment modal — but not while a payment is on the reader.
   useEffect(() => {
     if (!showPaymentForm) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setShowPaymentForm(false);
-        setPayHHPushError(null);
-      }
+      if (e.key === 'Escape' && !readerActive) closePaymentForm();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [showPaymentForm]);
+  }, [showPaymentForm, readerActive, readerRecorded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleRecordPayment(typeOverride?: string) {
     if (!payAmount || parseFloat(payAmount) <= 0) {
@@ -2092,8 +2121,21 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
         // Auto-detect type: if deposit not yet paid, it's a deposit; otherwise balance
         const autoType = !financial.deposit_paid ? 'deposit' : 'balance';
 
+        const isReader = payMethod === 'card_reader';
+        const methodOptions = readerAccess?.enabled
+          ? [{ value: 'card_reader', label: readerAccess.mode === 'test' ? 'Card reader (TEST MODE)' : 'Card reader' }, ...PAYMENT_METHODS_BASE]
+          : PAYMENT_METHODS_BASE;
+        // An amount that isn't one of the buttons needs a reason (spec §1.11).
+        const validateReader = (): string | null => {
+          const amt = parseFloat(payAmount);
+          if (!payAmount || isNaN(amt) || amt < 1) return 'Enter an amount of at least £1.00';
+          const isQuick = quickAmounts.some((qa) => qa.amount.toFixed(2) === amt.toFixed(2));
+          if (!isQuick && !payNotes.trim()) return 'Add a reason for a custom amount (in Notes)';
+          return null;
+        };
+
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowPaymentForm(false)}>
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { if (!readerActive) closePaymentForm(); }}>
             <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Record Payment</h3>
 
@@ -2111,6 +2153,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                       {quickAmounts.map((qa) => (
                         <button
                           key={qa.label}
+                          disabled={readerActive}
                           onClick={() => setPayAmount(qa.amount.toFixed(2))}
                           className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
                             payAmount === qa.amount.toFixed(2)
@@ -2128,6 +2171,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                         type="number"
                         step="0.01"
                         value={payAmount}
+                        disabled={readerActive}
                         onChange={(e) => setPayAmount(e.target.value)}
                         className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
                         placeholder="Or enter custom amount"
@@ -2146,6 +2190,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                         type="number"
                         step="0.01"
                         value={payAmount}
+                        disabled={readerActive}
                         onChange={(e) => setPayAmount(e.target.value)}
                         className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
                         placeholder="0.00"
@@ -2158,15 +2203,17 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                   <label className="block text-xs font-medium text-gray-600 mb-1">Method</label>
                   <select
                     value={payMethod}
+                    disabled={readerActive}
                     onChange={(e) => setPayMethod(e.target.value)}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   >
-                    {PAYMENT_METHODS_BASE.map((m) => (
+                    {methodOptions.map((m) => (
                       <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
                   </select>
                 </div>
 
+                {!isReader && (
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Reference (optional)</label>
                   <input
@@ -2177,18 +2224,37 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
+                )}
 
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    {isReader ? 'Notes (required for a custom amount)' : 'Notes (optional)'}
+                  </label>
                   <input
                     type="text"
                     value={payNotes}
+                    disabled={readerActive}
                     onChange={(e) => setPayNotes(e.target.value)}
-                    placeholder="Any additional details"
+                    placeholder={isReader ? 'Why this amount, if not one of the buttons' : 'Any additional details'}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
 
+                {isReader && readerAccess?.enabled && (
+                  <CardReaderPayment
+                    jobId={jobId}
+                    access={readerAccess}
+                    amount={parseFloat(payAmount) || 0}
+                    paymentType={autoType}
+                    notes={payNotes.trim()}
+                    validate={validateReader}
+                    onRecorded={() => setReaderRecorded(true)}
+                    onActiveChange={setReaderActive}
+                    onClose={closePaymentForm}
+                  />
+                )}
+
+                {!isReader && (<>
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
@@ -2226,6 +2292,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     {payHHPushError ? 'Close' : 'Cancel'}
                   </button>
                 </div>
+                </>)}
               </div>
             </div>
           </div>

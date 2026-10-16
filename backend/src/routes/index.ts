@@ -35,6 +35,7 @@ import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
 import shopRouter from './shop';
 import hireCloseOutRouter from './hire-close-out';
+import stripeTerminalRouter from './stripe-terminal';
 import systemSettingsRouter from './system-settings';
 import freelancerDaysPublicRouter from './freelancer-days';
 import staffCalendarFeedRouter from './staff-calendar-feed';
@@ -125,6 +126,7 @@ router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not
 router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
 router.use('/shop', shopRouter);  // Shop till — ad-hoc sales, internal stock consumption, sale-stock lookup
 router.use('/close-out', hireCloseOutRouter);  // Hire close-out — allocate deposits in HireHop + Xero, complete (HIRE-CLOSE-OUT-SPEC.md)
+router.use('/terminal', stripeTerminalRouter);  // Card reader (Stripe Terminal S700) — in-person card payments (STRIPE-TERMINAL-SPEC.md)
 router.use('/system-settings', systemSettingsRouter);
 router.use('/staff-calendar-feed', staffCalendarFeedRouter);  // PUBLIC personal iCal feed (token auth, no JWT) — services/staff-ical.ts decides what is in it
 router.use('/freelancer-days', freelancerDaysPublicRouter);  // PUBLIC accept/decline for a yard-day offer (token auth, no JWT)

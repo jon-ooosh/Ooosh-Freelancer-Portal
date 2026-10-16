@@ -39,6 +39,11 @@ export interface RecordPaymentInput {
   notes?: string;
   excess_id?: string;
   push_to_hirehop: boolean;
+  /** The Stripe PaymentIntent, when the money arrived through Stripe (the card reader).
+   *  Stored on job_payments so the existing refund paths find it. */
+  stripe_payment_intent?: string;
+  /** job_payments.source — defaults to 'op' (a staff click / the Wise matcher). */
+  source?: string;
 }
 
 export interface RecordPaymentActor {
@@ -63,7 +68,7 @@ export async function recordPayment(
   actor: RecordPaymentActor,
 ): Promise<RecordPaymentResult> {
   try {
-    const { payment_type, payment_method, payment_reference, notes, push_to_hirehop } = input;
+    const { payment_type, payment_method, payment_reference, notes, push_to_hirehop, stripe_payment_intent, source } = input;
     let { amount, excess_id, total_collected } = input;
 
     // Look up the job
@@ -134,8 +139,8 @@ export async function recordPayment(
       `INSERT INTO job_payments
         (job_id, hirehop_job_id, payment_type, amount, payment_method,
          payment_reference, payment_status, source, excess_id,
-         client_name, recorded_by, notes, payment_date)
-       VALUES ($1, $2, $3, $4, $5, $6, 'completed', 'op', $7, $8, $9, $10, NOW())
+         client_name, recorded_by, notes, payment_date, stripe_payment_intent)
+       VALUES ($1, $2, $3, $4, $5, $6, 'completed', $11, $7, $8, $9, $10, NOW(), $12)
        RETURNING *`,
       [
         job.id,
@@ -148,6 +153,8 @@ export async function recordPayment(
         job.client_name || job.company_name,
         actor.userId,
         notes || null,
+        source || 'op',
+        stripe_payment_intent || null,
       ]
     );
 
