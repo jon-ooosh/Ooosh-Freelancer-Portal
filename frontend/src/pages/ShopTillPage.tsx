@@ -24,6 +24,7 @@ import { hasManagerRole } from '../lib/roles';
 import { jobDisplayOrgName } from '../lib/jobOrgName';
 import ShopWeekPanel from '../components/shop/ShopWeekPanel';
 import { TENDERS } from '../lib/shopTenders';
+import CardReaderPayment, { type CardReaderAccess, type Session as ReaderSession } from '../components/CardReaderPayment';
 
 type BottomTab = 'recent' | 'attention' | 'review' | 'week' | 'used' | 'reorder';
 const BOTTOM_TABS: BottomTab[] = ['recent', 'attention', 'review', 'week', 'used', 'reorder'];
@@ -160,6 +161,8 @@ function refundHow(tender: string | null, amount: number): string {
     case 'worldpay':
     case 'amex': return `Refund ${a} on the card terminal`;
     case 'stripe_gbp': return `Refund ${a} in Stripe`;
+    // OP refunds it to the card through Stripe when the refund is made.
+    case 'card_reader': return `${a} goes back to their card automatically`;
     case 'paypal': return `Refund ${a} in PayPal`;
     case 'wise_bacs': return `Send ${a} back by bank transfer`;
     // It was never paid — it simply comes off the job, and their invoice.
@@ -191,6 +194,12 @@ export default function ShopTillPage() {
   // Card is what almost every walk-in pays with, so it is the default.
   const [tender, setTender] = useState('worldpay');
   const [notes, setNotes] = useState('');
+  // The card reader (STRIPE-TERMINAL-SPEC §14): offered as a payment method only
+  // when switched on for this login; picking it sends the sale to the reader, and
+  // the sale is created once the card is approved.
+  const [readerAccess, setReaderAccess] = useState<CardReaderAccess | null>(null);
+  const [readerOpen, setReaderOpen] = useState(false);
+  const [readerActive, setReaderActive] = useState(false);
   const [maxDiscountPct, setMaxDiscountPct] = useState(0);
   const [cacheAge, setCacheAge] = useState<string | null>(null);
   const [availability, setAvailability] = useState<Record<string, number | null>>({});
@@ -257,8 +266,19 @@ export default function ShopTillPage() {
     setJobSearchOpen(false);
     setJobTerm('');
     setJobResults([]);
-    if (!j && tender === 'invoice_later') setTender('worldpay');
+    if (!j && tender === 'invoice_later') setTender(readerAccess?.enabled ? 'card_reader' : 'worldpay');
   };
+
+  // Is the card reader switched on for this login? If so it is the default card.
+  useEffect(() => {
+    api.get<{ data: CardReaderAccess }>('/terminal/access')
+      .then(r => {
+        setReaderAccess(r.data);
+        if (r.data.enabled) setTender(t => (t === 'worldpay' ? 'card_reader' : t));
+      })
+      .catch(() => setReaderAccess({ enabled: false, mode: 'test' }));
+  }, []);
+  const tenderOptions = TENDERS.filter(t => (!t.needsJob || route) && (t.key !== 'card_reader' || readerAccess?.enabled));
 
   // A band's job: offer its contacts in the receipt box (THE contact pool, server-side).
   useEffect(() => {
@@ -321,7 +341,10 @@ export default function ShopTillPage() {
     if (addrProblem) { setError(addrProblem); return; }
     setRefundBusy(true);
     try {
-      const r = await api.post<{ data: { reversalId: string } }>(`/shop/sales/${id}/reverse`, { reason: refundReason.trim() });
+      const r = await api.post<{ data: { reversalId: string; cardRefund?: { ok: boolean; error?: string } } }>(`/shop/sales/${id}/reverse`, { reason: refundReason.trim() });
+      if (r.data.cardRefund && !r.data.cardRefund.ok) {
+        setError(`Refund recorded, but Stripe didn't refund the card (${r.data.cardRefund.error || 'no reason given'}). Refund it in the Stripe dashboard, then press Done on the outstanding refund.`);
+      }
       if (refundReceiptTo.trim()) {
         const err = await sendReceipt(r.data.reversalId, refundReceiptTo);
         if (err) setError(`Refund recorded, but the refund receipt didn't send: ${err}`);
@@ -530,12 +553,37 @@ export default function ShopTillPage() {
 
   const overDiscountCap = totals.discount > 0 && totals.discountPct > maxDiscountPct + 0.001;
 
+  /** The till's basket as the backend takes it. */
+  const basketLines = () => basket.map(l => ({
+    hhStockId: l.stock.hhStockId,
+    qty: l.qty,
+    unitPriceCharged: num(l.priceText),
+  }));
+
+  /** After a sale is recorded (by Save, or by the reader once the card went through). */
+  async function afterSaleRecorded(saleId: string, gross: number) {
+    let receipt: string | undefined;
+    if (receiptTo.trim()) {
+      const err = await sendReceipt(saleId, receiptTo);
+      receipt = err ? undefined : receiptTo.trim();
+      if (err) setError(`Sale recorded, but the receipt didn't send: ${err}`);
+    }
+    setSaved({ gross, id: saleId, kind: 'sale', receipt });
+    setBasket([]);
+    setNotes('');
+    setReceiptTo('');
+    chooseRoute(null);
+    loadRecent();
+  }
+
   async function submit() {
     setError(null);
     // Check the receipt address first, so a typo never leaves "sale recorded,
     // but…" — nothing is taken until the address is right or the box is empty.
     const addrProblem = mode === 'sale' && tender !== 'invoice_later' ? receiptAddressProblem(receiptTo) : null;
     if (addrProblem) { setError(addrProblem); return; }
+    // The card reader: the sale is made once the card is approved, not here.
+    if (mode === 'sale' && tender === 'card_reader') { setReaderOpen(true); return; }
     setSaving(true);
     try {
       const body = {
@@ -698,7 +746,8 @@ export default function ShopTillPage() {
         {refundOwed && (
           <span className="mt-1 flex w-full flex-wrap items-center gap-2 text-xs sm:pl-[3.75rem]">
             <span className="font-medium text-amber-700">
-              Refund outstanding — {refundHow(r.tender, gross)}.
+              {/* A card-reader refund is only outstanding when Stripe refused it — so it's a dashboard job. */}
+              Refund outstanding — {refundHow(r.tender === 'card_reader' ? 'stripe_gbp' : r.tender, gross)}.
             </span>
             <button
               onClick={() => settleRefund(r.id)}
@@ -764,6 +813,8 @@ export default function ShopTillPage() {
             <p className="mb-2 font-medium text-amber-900">
               {r.tender === 'invoice_later'
                 ? `${refundHow(r.tender, gross)}.`
+                : r.tender === 'card_reader'
+                ? `${refundHow(r.tender, gross)} when you confirm (through Stripe).`
                 : r.refund_at_counter
                 ? `${refundHow(r.tender, gross)}, then confirm.`
                 : `${refundHow(r.tender, gross)} afterwards — it stays on the list as outstanding until you tick it off.`}
@@ -1103,8 +1154,10 @@ export default function ShopTillPage() {
                 {/* "Their bill" only exists once there is a job to bill: the
                     weekly shop job pools every customer, so its invoice can
                     never go to one of them (spec §9). */}
-                {TENDERS.filter(t => !t.needsJob || route).map(t => (
-                  <option key={t.key} value={t.key}>{t.label}</option>
+                {tenderOptions.map(t => (
+                  <option key={t.key} value={t.key}>
+                    {t.key === 'card_reader' && readerAccess?.mode === 'test' ? `${t.label} (TEST MODE)` : t.label}
+                  </option>
                 ))}
               </select>
               {route && tender === 'invoice_later' && (
@@ -1153,7 +1206,9 @@ export default function ShopTillPage() {
                 ? 'Record use'
                 : tender === 'invoice_later'
                   ? `Put ${money(totals.gross)} on their bill`
-                  : `Take ${money(totals.gross)}`}
+                  : tender === 'card_reader'
+                    ? `Take ${money(totals.gross)} on card reader`
+                    : `Take ${money(totals.gross)}`}
           </button>
         </div>
       )}
@@ -1327,6 +1382,39 @@ export default function ShopTillPage() {
           </div>
         )}
       </div>
+
+      {/* The card reader: the basket goes to the reader; the sale is created when the
+          card is approved. Can't be closed while the card is on the reader. */}
+      {readerOpen && readerAccess?.enabled && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { if (!readerActive) setReaderOpen(false); }}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Card reader</h3>
+            <p className="text-xs text-gray-500 mb-4">{basket.length} item{basket.length === 1 ? '' : 's'}{route ? ` · on job #${route.hhJobNumber}` : ' · walk-in'}</p>
+            <CardReaderPayment
+              jobId=""
+              access={readerAccess}
+              amount={totals.gross}
+              paymentType="shop"
+              notes={notes.trim()}
+              validate={() => null}
+              startPayment={(readerId) => api.post<{ data: ReaderSession }>('/terminal/shop/pay', {
+                lines: basketLines(),
+                sold_to_job_id: route ? route.id : null,
+                notes: notes.trim() || null,
+                reader_id: readerId,
+              })}
+              onRecorded={(sess) => {
+                if (sess.status === 'succeeded' && sess.shop_sale_id) {
+                  void afterSaleRecorded(sess.shop_sale_id, Number(sess.amount));
+                  if (!sess.warning) setReaderOpen(false);
+                }
+              }}
+              onActiveChange={setReaderActive}
+              onClose={() => { setReaderActive(false); setReaderOpen(false); loadRecent(); }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

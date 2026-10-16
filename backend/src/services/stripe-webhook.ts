@@ -270,6 +270,16 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
       // on job_payments matches the original payment). Try excess first, then
       // hire. Differentiate the email content so staff aren't told "no matching
       // excess" when it was a hire payment refund the whole time.
+      // A card-reader shop sale refunded from the till (shop-sales.ts reverseShopSale):
+      // the till already recorded it and the drain handles HireHop — nothing to tell info@.
+      if (piRef) {
+        const shop = await query(`SELECT id FROM shop_sales WHERE stripe_payment_intent = $1 LIMIT 1`, [piRef]);
+        if (shop.rows.length > 0) {
+          console.log(`[stripe-webhook] charge.refunded for shop sale ${shop.rows[0].id} (card reader) — recorded by the till, no action`);
+          break;
+        }
+      }
+
       const ex = await findExcessByPaymentIntent(piRef);
       let subject: string;
       let bodyLines: string[];

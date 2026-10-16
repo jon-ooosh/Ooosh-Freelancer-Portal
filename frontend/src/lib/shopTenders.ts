@@ -5,6 +5,8 @@
  */
 /** Tender keys map to HireHop bank accounts via getHHBankId() on the backend. */
 export const TENDERS: { key: string; label: string; needsJob?: boolean }[] = [
+  // Only offered when the card reader is switched on for this login (ShopTillPage).
+  { key: 'card_reader', label: 'Card reader' },
   { key: 'worldpay', label: 'Card (Worldpay)' },
   { key: 'amex', label: 'Card (AmEx)' },
   { key: 'till_cash', label: 'Cash' },

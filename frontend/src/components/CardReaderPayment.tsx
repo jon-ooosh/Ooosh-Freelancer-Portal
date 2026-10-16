@@ -17,7 +17,7 @@ export interface CardReaderAccess { enabled: boolean; mode: 'test' | 'live'; con
 
 interface Reader { id: string; label: string; status: string; device_type: string | null }
 
-interface Session {
+export interface Session {
   id: string;
   status: 'pending' | 'failed' | 'recording' | 'succeeded' | 'record_failed' | 'cancelled';
   amount: string;
@@ -33,6 +33,8 @@ interface Session {
   receipt_sent_to?: string | null;
   /** Something to read before closing (e.g. a pre-auth that expires before the hire ends). */
   warning?: string | null;
+  /** A till sale: the sale created once the card was approved. */
+  shop_sale_id?: string | null;
   capture_before?: string | null;
 }
 
@@ -50,7 +52,10 @@ interface Props {
   access: CardReaderAccess;
   amount: number;
   /** deposit / balance from Record Payment; excess / excess_preauth from the excess Manage modal. */
-  paymentType: 'deposit' | 'balance' | 'excess' | 'excess_preauth';
+  paymentType: 'deposit' | 'balance' | 'excess' | 'excess_preauth' | 'shop';
+  /** Starts the payment instead of POST /terminal/jobs/:jobId/pay — the shop till
+   *  sends its basket to /terminal/shop/pay. */
+  startPayment?: (readerId: string) => Promise<{ data: Session }>;
   /** The excess record, for excess / excess_preauth. */
   excessId?: string;
   notes: string;
@@ -58,14 +63,14 @@ interface Props {
   validate: () => string | null;
   /** The payment was recorded (or the card taken). Only a flag for the parent — it
    *  refreshes on close, because refreshing mid-flow unmounts the open form. */
-  onRecorded: () => void;
+  onRecorded: (session: Session) => void;
   /** A payment is on the reader (or just failed): the parent locks amount + method. */
   onActiveChange: (active: boolean) => void;
   /** Close the form. */
   onClose: () => void;
 }
 
-export default function CardReaderPayment({ jobId, access, amount, paymentType, excessId, notes, validate, onRecorded, onActiveChange, onClose }: Props) {
+export default function CardReaderPayment({ jobId, access, amount, paymentType, excessId, startPayment, notes, validate, onRecorded, onActiveChange, onClose }: Props) {
   const isPreauth = paymentType === 'excess_preauth';
   const [readers, setReaders] = useState<Reader[] | null>(null);
   const [readerId, setReaderId] = useState('');
@@ -142,7 +147,7 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
   useEffect(() => {
     if (!recordedRef.current && session && (session.status === 'succeeded' || session.status === 'record_failed')) {
       recordedRef.current = true;
-      onRecorded();
+      onRecorded(session);
     }
   }, [session?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -164,6 +169,7 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
     if (problem) { setError(problem); return; }
     if (!readerId) { setError('Pick a reader'); return; }
     writeLastReader(readerId);
+    if (startPayment) { void act(() => startPayment(readerId)); return; }
     void act(() => api.post<{ data: Session }>(`/terminal/jobs/${jobId}/pay`, {
       amount, payment_type: paymentType, reader_id: readerId, notes: notes || undefined,
       ...(excessId ? { excess_id: excessId } : {}),
@@ -245,7 +251,7 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
           <div className="text-xs mt-1">
             {isPreauth
               ? `Nothing is taken until you capture it from the excess record.${session.capture_before ? ` Expires ${new Date(session.capture_before).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}.` : ''}`
-              : 'Recorded in OP and pushed to HireHop.'}
+              : paymentType === 'shop' ? 'Sale recorded.' : 'Recorded in OP and pushed to HireHop.'}
             {session.receipt_status === 'sent' || session.receipt_status === 'auto_sent'
               ? ` Receipt sent to ${session.receipt_sent_to || 'the client'}.` : ''}
             {session.receipt_status === 'skipped' ? ' No receipt sent.' : ''}

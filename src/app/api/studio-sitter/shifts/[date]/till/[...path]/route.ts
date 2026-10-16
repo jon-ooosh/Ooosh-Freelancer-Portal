@@ -8,6 +8,10 @@
  * POST /api/studio-sitter/shifts/[date]/till/sales            → take a sale
  * POST /api/studio-sitter/shifts/[date]/till/sales/[id]/cancel → undo one inside its hold
  * POST /api/studio-sitter/shifts/[date]/till/sales/[id]/receipt → email a receipt
+ * GET  /api/studio-sitter/shifts/[date]/till/reader/readers   → the card reader(s)
+ * POST /api/studio-sitter/shifts/[date]/till/reader/pay       → send a basket to the card reader
+ * GET  /api/studio-sitter/shifts/[date]/till/reader/sessions/[id]?check=1 → how that payment is going
+ * POST /api/studio-sitter/shifts/[date]/till/reader/sessions/[id]/retry|cancel|simulate
  *
  * OP-only. Access is enforced OP-side — the sitter must be rostered to this
  * evening (or be the shared staff account), else OP returns 403. Only the
@@ -29,8 +33,14 @@ function allowed(method: 'GET' | 'POST', path: string[]): boolean {
   if (method === 'GET') {
     return p === 'context' || p === 'search' || p === 'sales'
       || (path.length === 3 && path[0] === 'jobs' && UUID_RE.test(path[1]) && path[2] === 'receipt-contacts')
+      // The card reader (STRIPE-TERMINAL-SPEC §14).
+      || p === 'reader/readers'
+      || (path.length === 3 && path[0] === 'reader' && path[1] === 'sessions' && UUID_RE.test(path[2]))
   }
-  if (p === 'sales') return true
+  if (p === 'sales' || p === 'reader/pay') return true
+  if (path.length === 4 && path[0] === 'reader' && path[1] === 'sessions' && UUID_RE.test(path[2])) {
+    return path[3] === 'retry' || path[3] === 'cancel' || path[3] === 'simulate'
+  }
   return path.length === 3 && path[0] === 'sales' && UUID_RE.test(path[1])
     && (path[2] === 'cancel' || path[2] === 'receipt')
 }
@@ -56,11 +66,13 @@ async function handle(request: NextRequest, method: 'GET' | 'POST', { params }: 
 
     const body = method === 'POST' ? await request.json().catch(() => ({})) : undefined
     const q = request.nextUrl.searchParams.get('q')
+    // `check=1` asks Stripe directly (the card reader's poll) — the only other query passed on.
+    const check = request.nextUrl.searchParams.get('check') === '1'
     try {
       const data = await sitterTillOP(sessionToken, date, path.join('/'), {
         method,
         body,
-        search: q ? `q=${encodeURIComponent(q)}` : undefined,
+        search: q ? `q=${encodeURIComponent(q)}` : check ? 'check=1' : undefined,
       })
       return NextResponse.json(data)
     } catch (opError) {

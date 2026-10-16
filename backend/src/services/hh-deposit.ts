@@ -25,6 +25,9 @@ import { ukToday } from './uk-date';
 export const HH_BANK_IDS: Record<string, number> = {
   stripe_gbp: 267, worldpay: 169, amex: 165, wise_bacs: 265,
   till_cash: 168, paypal: 173, lloyds_bank: 170, rolled_over: 265,
+  // The till's card-reader tender (STRIPE-TERMINAL-SPEC §14) — money in the Stripe
+  // balance, so the Stripe GBP bank, like every other Stripe payment.
+  card_reader: 267,
 };
 
 // HireHop bank account labels (for emails / memos).
@@ -37,6 +40,7 @@ export const PAYMENT_METHODS_LABELS: Record<string, string> = {
   paypal: 'PayPal',
   lloyds_bank: 'bank transfer',
   rolled_over: 'account balance',
+  card_reader: 'card reader',
 };
 
 /**
@@ -60,6 +64,7 @@ export function getHHBankId(paymentMethod: string): number {
     paypal: 173,
     lloyds_bank: 170,
     rolled_over: 265,
+    card_reader: 267,
   };
   return mapping[paymentMethod] || 169;
 }

@@ -31,6 +31,7 @@ import { recordPayment, SYSTEM_SERVICE_USER_ID } from './record-payment';
 import { emailService } from './email-service';
 import { sendPaymentEmail, sendExcessEmail, resolveClientEmailTarget, resolveExcessEmailTarget } from './money-emails';
 import { recordPreauthHold, preauthEligibility, PreauthRecordError } from './excess-preauth';
+import { createShopSale, validateShopSale, type CreateShopSaleInput, type ShopActor } from './shop-sales';
 
 // Structural types for the fields we read (the codebase avoids naming Stripe.* types).
 type ReaderAction = {
@@ -62,7 +63,7 @@ type PaymentIntentLike = {
 export type TerminalMode = 'test' | 'live';
 /** deposit / balance = hire money (Record Payment); excess / excess_preauth = the excess
  *  Manage modal (Phase 2). An excess_preauth is a manual-capture PaymentIntent. */
-export type TerminalPaymentType = 'deposit' | 'balance' | 'excess' | 'excess_preauth';
+export type TerminalPaymentType = 'deposit' | 'balance' | 'excess' | 'excess_preauth' | 'shop';
 
 export interface TerminalSession {
   id: string;
@@ -90,6 +91,11 @@ export interface TerminalSession {
   capture_before: string | null;
   /** Something staff must read on the result screen. */
   warning: string | null;
+  /** A till sale (Phase 3): the basket waits here until the card is approved. */
+  shop_payload: { input: CreateShopSaleInput; actor: ShopActor } | null;
+  shop_sale_id: string | null;
+  /** A studio sitter who started it (people, no users row). */
+  started_by_person_id: string | null;
   started_by: string | null;
   started_at: string;
   finished_at: string | null;
@@ -397,6 +403,12 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
   if (claim.rows.length === 0) return;
   const s: TerminalSession = claim.rows[0];
 
+  // A walk-in till sale has no job, so this comes before the job check below.
+  if (s.payment_type === 'shop') {
+    await recordApprovedShop(s, pi);
+    return;
+  }
+
   if (!s.job_id) {
     await query(
       `UPDATE terminal_sessions SET status = 'record_failed', failure_message = $2, finished_at = NOW(), updated_at = NOW() WHERE id = $1`,
@@ -540,6 +552,142 @@ async function recordApprovedPreauth(s: TerminalSession, piIn: PaymentIntentLike
     [s.id, captureBefore ? captureBefore.toISOString() : null, warning],
   );
   console.log(`[terminal] Pre-auth £${amount.toFixed(2)} (${pi.id}) recorded on excess ${s.excess_id}, expires ${captureBefore?.toISOString() || 'unknown'}${s.livemode ? '' : ' [TEST]'}`);
+}
+
+/**
+ * A till sale's card was approved: NOW create the sale, exactly as the till would
+ * (createShopSale — tender 'card_reader', bank 267), with the PaymentIntent on it so
+ * a Refund goes back to the card. Its receipt is the till's own (shop-receipts.ts),
+ * sent by the till once it sees the sale — so no "Send receipt?" here.
+ */
+async function recordApprovedShop(s: TerminalSession, pi: PaymentIntentLike): Promise<void> {
+  const charged = (pi.amount_received ?? pi.amount) / 100;
+  const payload = s.shop_payload;
+  let saleId: string | null = null;
+  let warning: string | null = null;
+  let reason: string | null = null;
+  if (!payload) {
+    reason = 'The basket for this payment was not saved.';
+  } else {
+    try {
+      const created = await createShopSale(
+        { ...payload.input, kind: 'sale', tender: 'card_reader', stripePaymentIntent: pi.id },
+        payload.actor,
+      );
+      saleId = created.id;
+      if (Math.abs(created.totals.gross - charged) >= 0.005) {
+        warning = `The card was charged £${charged.toFixed(2)} but the sale came to £${created.totals.gross.toFixed(2)} (a price changed in between). Check the sale.`;
+      }
+    } catch (err) {
+      reason = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (saleId) {
+    await query(
+      `UPDATE terminal_sessions
+          SET status = 'succeeded', shop_sale_id = $2, warning = $3,
+              failure_code = NULL, failure_message = NULL, finished_at = NOW(), updated_at = NOW()
+        WHERE id = $1`,
+      [s.id, saleId, warning],
+    );
+    console.log(`[terminal] Shop sale ${saleId} recorded, £${charged.toFixed(2)} (${pi.id})${s.livemode ? '' : ' [TEST]'}`);
+    return;
+  }
+
+  await query(
+    `UPDATE terminal_sessions SET status = 'record_failed', failure_message = $2, finished_at = NOW(), updated_at = NOW() WHERE id = $1`,
+    [s.id, reason],
+  );
+  console.error(`[terminal] Shop card approved but the sale was NOT recorded (session ${s.id}, ${pi.id}): ${reason}`);
+  await emailService.sendRaw({
+    to: ALERT_EMAIL,
+    subject: `⚠ Card reader shop sale NOT recorded - £${charged.toFixed(2)}`,
+    html: `<p>A shop sale of <strong>£${charged.toFixed(2)}</strong> was paid on the card reader${s.livemode ? '' : ' (TEST MODE)'} but OP could not record the sale.</p>
+<p>Reason: ${reason}</p>
+<p>Stripe PaymentIntent: ${pi.id}. The money has been taken - either refund it in the Stripe dashboard, or ring the sale up on the till by hand (method Stripe) so the stock and the money are recorded.</p>`,
+    variant: 'internal',
+  }).catch((e) => console.error('[terminal] alert email failed:', e));
+}
+
+export interface StartShopPaymentInput {
+  /** The till's basket — createShopSale's input, minus the tender (it is the reader). */
+  input: Omit<CreateShopSaleInput, 'tender' | 'kind' | 'stripePaymentIntent'>;
+  actor: ShopActor;
+  readerId: string;
+}
+
+/**
+ * Take a till sale on the reader. The basket is priced and checked FIRST
+ * (validateShopSale — the same checks createShopSale makes), and the amount sent
+ * to the reader is the server's total, never the till's. The prices are frozen on
+ * the session so the sale created after the tap charges what the card was charged.
+ */
+export async function startShopTerminalPayment(opts: StartShopPaymentInput): Promise<TerminalSession> {
+  const mode = await getTerminalMode();
+  const livemode = mode === 'live';
+  if (!isModeConfigured(mode)) throw new TerminalError('The Stripe key for the card reader is not set on the server.', 503);
+
+  const input: CreateShopSaleInput = { ...opts.input, kind: 'sale', tender: 'card_reader' };
+  let checked: Awaited<ReturnType<typeof validateShopSale>>;
+  try {
+    checked = await validateShopSale(input, opts.actor);
+  } catch (err) {
+    throw new TerminalError(err instanceof Error ? err.message : 'Could not price that basket.');
+  }
+  const pence = Math.round(checked.totals.gross * 100);
+  // Stripe's own floor for a GBP card payment.
+  if (pence < 30) throw new TerminalError('A card payment must be at least £0.30.');
+  const frozen: CreateShopSaleInput = {
+    ...input,
+    lines: checked.priced.map((l) => ({ hhStockId: l.hhStockId, qty: l.qty, unitPriceCharged: l.unitPriceCharged })),
+  };
+
+  const stripe = getStripeClientFor(livemode);
+  let reader: ReaderLike;
+  try {
+    reader = (await stripe.terminal.readers.retrieve(opts.readerId)) as ReaderLike;
+  } catch {
+    throw new TerminalError('That reader was not found. Refresh the reader list.');
+  }
+  if (reader.deleted) throw new TerminalError('That reader has been removed from Stripe.');
+
+  const pi = await stripe.paymentIntents.create({
+    amount: pence,
+    currency: 'gbp',
+    payment_method_types: ['card_present'],
+    capture_method: 'automatic',
+    description: `Shop sale (card reader${input.recordedIn === 'sitter_till' ? ', sitter till' : ''})`,
+    metadata: {
+      source: PI_SOURCE,
+      paymentType: 'shop',
+      ...(input.soldToJobId ? { jobId: input.soldToJobId } : {}),
+      ...(opts.actor.id ? { op_user_id: opts.actor.id } : {}),
+      ...(opts.actor.personId ? { op_person_id: opts.actor.personId } : {}),
+    },
+  });
+
+  const ins = await query(
+    `INSERT INTO terminal_sessions
+       (job_id, livemode, reader_id, reader_label, payment_intent_id, payment_type, amount, notes,
+        started_by, started_by_person_id, shop_payload)
+     VALUES ($1, $2, $3, $4, $5, 'shop', $6, $7, $8, $9, $10)
+     RETURNING *`,
+    [
+      input.soldToJobId || null, livemode, reader.id, reader.label || null, pi.id, pence / 100,
+      input.notes || null, opts.actor.id || null, opts.actor.personId || null,
+      JSON.stringify({ input: frozen, actor: opts.actor }),
+    ],
+  );
+  const session: TerminalSession = ins.rows[0];
+  await sendToReader(session);
+  return (await getSession(session.id))!;
+}
+
+/** For the sitter till: a sitter may only see and act on sessions they started. */
+export async function sessionStartedByPerson(id: string, personId: string): Promise<boolean> {
+  const r = await query(`SELECT 1 FROM terminal_sessions WHERE id = $1 AND started_by_person_id = $2`, [id, personId]);
+  return r.rows.length > 0;
 }
 
 /** Approved: a payment that succeeded, or a pre-auth that is now waiting to be captured. */

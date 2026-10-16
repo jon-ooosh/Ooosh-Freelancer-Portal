@@ -183,7 +183,7 @@ pre-auth link instead") and does not proceed unless a manager overrides.
 | 1 | §4 payments from the Money tab (deposit / balance / excess / other) | A live £1 payment on a test job lands in OP, HireHop (bank 267) and the client email, and a decline + retry works |
 | 2 | §5 pre-auth with extended authorisation; expiry stored; capture/release reused | A live £1 hold shows on the Money tab as `pre_auth`, releases from the existing button, and the 09:40 sweep ignores it until `capture_before` |
 | 3 | §6 shop till + sitter till tender | A shop sale paid on the reader reconciles in the weekly close |
-| 4 | Retire Worldpay/Amex: hide the tenders and methods for NEW entries (keep for history), drop the card-slip to-do, update `.claude/rules/money-excess.md` | March 2027, after a clean month |
+| 4 | **Revised by jon, 16 Oct 2026:** the card reader becomes THE card payment for everyone (staff and sitters); Worldpay/Amex methods, tenders and "Record Pre-Auth" become **admin only** — jon's backup terminal and the odd historical excess refund — so nobody falls back to the old way out of habit. Kept for history. See §15. | After Phase 3 has been tried, not waiting for March 2027 |
 
 ## 9. Open questions (answer before the phase that needs them)
 
@@ -331,4 +331,59 @@ work on test payments (until now a test-mode refund would have gone to the live 
 existing button, and the 09:40 sweep leaves it alone until it expires. Optional: add
 `payment_intent.amount_capturable_updated` to the live webhook endpoint (the reader event already
 covers it).
+
+## 14. Phase 3: the shop till and the sitter till (16 Oct 2026)
+
+**Same name everywhere:** the tender is **"Card reader"** (`card_reader`) on both tills, next to the
+existing ones, offered only when the reader is switched on for the person at the till — staff by
+`stripe_terminal_roles`; sitters when that list includes `freelancer`, or for a listed till test account
+(`shop_till_test_emails`), so the sitter till can be tried first.
+
+**Pay first, then the sale.** On Money the payment records money that has arrived; a till sale is
+saved and pushed to HireHop two minutes later. With the reader the card is taken FIRST and the sale is
+created only once it is approved — a declined card never leaves a sale (or stock movement) behind:
+1. The till sends its basket to `POST /terminal/shop/pay` (staff) or the sitter till's
+   `…/till/reader/pay`. `validateShopSale()` — the checks `createShopSale()` makes (catalogue prices,
+   discount ceiling, tender rules, sellable job), lifted out so they run before the card — prices it;
+   the amount on the reader is the SERVER's total; the priced basket is frozen on
+   `terminal_sessions.shop_payload`.
+2. Approved → `createShopSale()` with tender `card_reader` and the PaymentIntent
+   (`shop_sales.stripe_payment_intent`). From there it is an ordinary till sale: the 120-second hold,
+   the drain, a deposit on **HireHop bank 267** (`card_reader` added to `HH_BANK_IDS` / `getHHBankId()`
+   — it would otherwise have defaulted to Worldpay 169), the weekly close, the balance check.
+3. The till's own receipt (shop-receipts.ts) is sent by the till once it sees the sale — no
+   "Send receipt?" step for till sales.
+4. If the sale won't record after the card was taken (a job closed in between, say), the session is
+   `record_failed` and info@ is told to refund in Stripe or ring it up by hand. A total that differs
+   from what was charged is recorded and warned about.
+- `createShopSale()` REFUSES tender `card_reader` without a PaymentIntent, so neither till's ordinary
+  Save can record a card-reader sale nobody took.
+
+**Refunds.** A manager's Refund on a card-reader sale gives the money back to the card through Stripe
+there and then (`reverseShopSale()`, idempotency key per reversal) and settles the refund; HireHop is
+handled by the drain as for any refund. If Stripe refuses, the refund stays outstanding and the till
+says to do it in the dashboard and press Done. `charge.refunded` for a till sale is logged, not emailed.
+
+**The sitter till** (`src/app/shift/[date]/till`): picking Card reader sends the basket to the reader
+at reception (first online one), shows "Waiting for card…" with Try again / Cancel payment (test mode
+adds approve / decline buttons), and clears the till when approved, as a cash sale does. Item and
+quantity only from the phone; a sitter sees only the reader payments they started; the till must be
+open (the night, not locked up). Proxy: `src/app/api/studio-sitter/shifts/[date]/till/[...path]`.
+
+**Data:** migration 294 — `terminal_sessions.shop_payload`, `shop_sale_id`, `started_by_person_id`;
+`shop_sales.stripe_payment_intent`.
+
+**Done when** (§8): a shop sale paid on the reader shows on the week's shop job (bank 267) and
+reconciles in the weekly close; a sitter sale the same from a test account.
+
+## 15. Phase 4, revised (jon, 16 Oct 2026)
+
+Not "retire Worldpay in March" but **one way of taking a card, now**:
+- Card reader for everyone: `stripe_terminal_roles` = all staff roles + `freelancer`, and the reader the
+  default card method on Record Payment, the excess Manage modal and both tills.
+- Worldpay and Amex (Record Payment methods, excess payment / pre-auth methods, till tenders) and the
+  manual **Record Pre-Auth** become **admin only**: jon's backup terminal, and the odd historical excess
+  refund that has to go back through Worldpay. History keeps its labels.
+- The card-slip to-do stays (it only ever fires for Worldpay/Amex); update `.claude/rules/money-excess.md`.
+- When the reader is down, staff use the client's payment portal link (§1.10) — or ask jon.
 
