@@ -230,7 +230,7 @@ outside — only Cancel payment or Done.
    in the excess Manage modal and comes with Phase 2's pre-auth, which lives there too.
 4. **One gate for everything:** `system_settings.stripe_terminal_roles` (default `admin`, comma-separated;
    `weekend_manager` follows `manager`). Every `/api/terminal` route checks it except `/access`, which the
-   form asks to decide whether to offer the method at all. Widen it in Settings when ready; no deploy.
+   form asks to decide whether to offer the method at all. Widen it in Settings → Card reader (admin only) when ready; no deploy.
 5. **Test mode records for real** (jon, 16 Oct): `system_settings.stripe_terminal_mode = 'test'` (the
    default) drives a simulated reader on `STRIPE_TEST_SECRET_KEY` — OP creates the test Location and reader
    itself the first time — and the result goes through `recordPayment()` exactly as live money does,
@@ -258,6 +258,6 @@ outside — only Cancel payment or Done.
    (`payment_intent.succeeded` is already on it).
 2. If `STRIPE_SECRET_KEY` is a restricted key: add **Terminal readers (write)** and **Terminal locations
    (read)** to its permissions.
-3. OP Settings → `stripe_terminal_mode` → `live`. The picker then lists the real S700.
+3. OP Settings → **Card reader** (admin only) → Mode: Live, then reload the job page. The picker then lists the real S700.
 4. £1 deposit on the dummy job, tap a real card; check OP, HireHop (bank 267) and the client email; then
    refund it from the Money tab (a Stripe refund against the PaymentIntent).
