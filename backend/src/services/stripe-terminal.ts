@@ -29,7 +29,8 @@ import { query } from '../config/database';
 import { getStripeClientFor, isStripeError } from '../config/stripe';
 import { recordPayment, SYSTEM_SERVICE_USER_ID } from './record-payment';
 import { emailService } from './email-service';
-import { sendPaymentEmail, resolveClientEmailTarget } from './money-emails';
+import { sendPaymentEmail, sendExcessEmail, resolveClientEmailTarget, resolveExcessEmailTarget } from './money-emails';
+import { recordPreauthHold, preauthEligibility, PreauthRecordError } from './excess-preauth';
 
 // Structural types for the fields we read (the codebase avoids naming Stripe.* types).
 type ReaderAction = {
@@ -52,12 +53,16 @@ type PaymentIntentLike = {
   status: string;
   amount: number;
   amount_received?: number;
+  amount_capturable?: number;
+  latest_charge?: string | { id: string; payment_method_details?: { card_present?: { capture_before?: number | null } | null } | null } | null;
   metadata?: Record<string, string> | null;
   last_payment_error?: { code?: string | null; decline_code?: string | null; message?: string | null } | null;
 };
 
 export type TerminalMode = 'test' | 'live';
-export type TerminalPaymentType = 'deposit' | 'balance';
+/** deposit / balance = hire money (Record Payment); excess / excess_preauth = the excess
+ *  Manage modal (Phase 2). An excess_preauth is a manual-capture PaymentIntent. */
+export type TerminalPaymentType = 'deposit' | 'balance' | 'excess' | 'excess_preauth';
 
 export interface TerminalSession {
   id: string;
@@ -79,6 +84,12 @@ export interface TerminalSession {
   /** "Send receipt?" — see migration 292. NULL on sessions from before it. */
   receipt_status: 'pending' | 'sending' | 'sent' | 'auto_sent' | 'skipped' | 'failed' | null;
   receipt_sent_to: string | null;
+  /** The excess record an excess payment / pre-auth lands on (migration 293). */
+  excess_id: string | null;
+  /** A pre-auth's real expiry, from Stripe. */
+  capture_before: string | null;
+  /** Something staff must read on the result screen. */
+  warning: string | null;
   started_by: string | null;
   started_at: string;
   finished_at: string | null;
@@ -229,11 +240,69 @@ export interface StartPaymentInput {
   readerId: string;
   notes?: string | null;
   userId: string;
+  /** Required for excess / excess_preauth. */
+  excessId?: string | null;
+}
+
+/** The job's hire dates, as the portal reads them for the pre-auth rule. */
+async function jobHireDates(jobId: string): Promise<{ start: Date | null; end: Date | null }> {
+  const r = await query(`SELECT job_date, out_date, job_end, return_date FROM jobs WHERE id = $1`, [jobId]);
+  const j = r.rows[0] || {};
+  const start = j.job_date || j.out_date || null;
+  const end = j.job_end || j.return_date || null;
+  return { start: start ? new Date(start) : null, end: end ? new Date(end) : null };
+}
+
+/**
+ * What the excess Manage modal may offer on the reader for this record: an excess
+ * payment (any time the record still needs money), and a pre-auth only when the
+ * portal's rule allows it (preauthEligibility) and the record has nothing on it yet.
+ */
+export async function excessReaderOptions(excessId: string): Promise<{
+  outstanding: number;
+  payment: { allowed: boolean; reason: string };
+  preauth: { allowed: boolean; reason: string; code: string };
+}> {
+  const r = await query(
+    `SELECT id, job_id, excess_status, excess_amount_required, excess_amount_taken, amount_held, hh_deposit_id
+       FROM job_excess WHERE id = $1`,
+    [excessId],
+  );
+  const ex = r.rows[0];
+  if (!ex || !ex.job_id) throw new TerminalError('Excess record not found', 404);
+  const required = Number(ex.excess_amount_required || 0);
+  const taken = Number(ex.excess_amount_taken || 0);
+  const held = Number(ex.amount_held || 0);
+  const outstanding = Math.max(0, Math.round((required - taken) * 100) / 100);
+
+  // Same states the modal offers "Record Excess Payment" from. A top-up on a record
+  // already tied to a HireHop deposit (a rollover chain) goes through the normal form,
+  // which carries the chain-break warning — the reader doesn't duplicate it.
+  const collectable = ['needed', 'pending', 'partially_paid'].includes(ex.excess_status);
+  const chainTopUp = ex.hh_deposit_id != null && !['needed', 'pending'].includes(ex.excess_status);
+  const payment = !collectable
+    ? { allowed: false, reason: `Nothing to collect: the record is ${String(ex.excess_status).replace(/_/g, ' ')}.` }
+    : chainTopUp
+      ? { allowed: false, reason: 'This record is tied to a rolled-forward HireHop deposit. Use Record Excess Payment, which handles the chain.' }
+      : { allowed: true, reason: '' };
+
+  const clean = ['needed', 'pending'].includes(ex.excess_status) && held === 0 && taken === 0;
+  let preauth: { allowed: boolean; reason: string; code: string };
+  if (!clean) {
+    preauth = { allowed: false, code: 'not_clean', reason: 'A pre-auth needs a record with nothing collected or held yet.' };
+  } else {
+    const { start, end } = await jobHireDates(ex.job_id);
+    const e = preauthEligibility(start, end);
+    preauth = { allowed: e.allowed, reason: e.reason, code: e.code };
+  }
+  return { outstanding, payment, preauth };
 }
 
 /** Create the PaymentIntent, record the pending session, send it to the reader. */
 export async function startTerminalPayment(input: StartPaymentInput): Promise<TerminalSession> {
   const { jobId, amount, paymentType, readerId, notes, userId } = input;
+  const isExcess = paymentType === 'excess' || paymentType === 'excess_preauth';
+  const isPreauth = paymentType === 'excess_preauth';
   const mode = await getTerminalMode();
   const livemode = mode === 'live';
   if (!isModeConfigured(mode)) throw new TerminalError('The Stripe key for the card reader is not set on the server.', 503);
@@ -245,6 +314,20 @@ export async function startTerminalPayment(input: StartPaymentInput): Promise<Te
   const pence = Math.round(amount * 100);
   if (pence < 100) throw new TerminalError('A card payment must be at least £1.00.');
 
+  // Excess: the record must be this job's, and what's being asked must be allowed now —
+  // checked here as well as in the modal, so a stale screen can't take a pre-auth the
+  // rule no longer permits.
+  let excessId: string | null = null;
+  if (isExcess) {
+    if (!input.excessId) throw new TerminalError('Which excess record is this for?');
+    const own = await query(`SELECT id FROM job_excess WHERE id = $1 AND job_id = $2`, [input.excessId, job.id]);
+    if (own.rows.length === 0) throw new TerminalError('That excess record is not on this job.', 404);
+    const opts = await excessReaderOptions(input.excessId);
+    const allowed = isPreauth ? opts.preauth : opts.payment;
+    if (!allowed.allowed) throw new TerminalError(allowed.reason);
+    excessId = input.excessId;
+  }
+
   const stripe = getStripeClientFor(livemode);
   let reader: ReaderLike;
   try {
@@ -254,27 +337,45 @@ export async function startTerminalPayment(input: StartPaymentInput): Promise<Te
   }
   if (reader.deleted) throw new TerminalError('That reader has been removed from Stripe.');
 
-  const pi = await stripe.paymentIntents.create({
+  const createPi = (extended: boolean) => stripe.paymentIntents.create({
     amount: pence,
     currency: 'gbp',
     payment_method_types: ['card_present'],
-    capture_method: 'automatic',
-    description: `Job ${job.hh_job_number ?? ''} ${paymentType} (card reader)`.replace(/\s+/g, ' '),
+    // A pre-auth is authorised now and captured (or released) later from the excess
+    // record, exactly like the portal's. Extended authorisation asks for the longer
+    // in-person window (the account is "Car rentals" — spec §1.5); the real expiry
+    // comes back on the charge as capture_before and is what OP stores.
+    capture_method: isPreauth ? 'manual' : 'automatic',
+    ...(isPreauth && extended ? { payment_method_options: { card_present: { request_extended_authorization: true } } } : {}),
+    description: `Job ${job.hh_job_number ?? ''} ${isPreauth ? 'excess pre-auth' : paymentType} (card reader)`.replace(/\s+/g, ' '),
     metadata: {
       source: PI_SOURCE,
       jobId: job.id,
       hhJobNumber: job.hh_job_number ? String(job.hh_job_number) : '',
       paymentType,
       op_user_id: userId,
+      ...(excessId ? { excessId } : {}),
     },
   });
+  let pi: Awaited<ReturnType<typeof createPi>>;
+  try {
+    pi = await createPi(isPreauth);
+  } catch (err) {
+    // If Stripe won't take extended authorisation (account or card network not
+    // eligible), take the ordinary in-person pre-auth instead. Its real expiry still
+    // comes back as capture_before, and the result screen warns if it is shorter than
+    // the hire.
+    if (!isPreauth || !/extended_authorization/i.test(err instanceof Error ? err.message : '')) throw err;
+    console.warn('[terminal] extended authorisation refused, using a standard pre-auth:', err instanceof Error ? err.message : err);
+    pi = await createPi(false);
+  }
 
   const ins = await query(
     `INSERT INTO terminal_sessions
-       (job_id, livemode, reader_id, reader_label, payment_intent_id, payment_type, amount, notes, started_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       (job_id, livemode, reader_id, reader_label, payment_intent_id, payment_type, amount, notes, started_by, excess_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
-    [job.id, livemode, reader.id, reader.label || null, pi.id, paymentType, pence / 100, notes || null, userId],
+    [job.id, livemode, reader.id, reader.label || null, pi.id, paymentType, pence / 100, notes || null, userId, excessId],
   );
   const session: TerminalSession = ins.rows[0];
 
@@ -304,6 +405,11 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
     return;
   }
 
+  if (s.payment_type === 'excess_preauth') {
+    await recordApprovedPreauth(s, pi);
+    return;
+  }
+
   const amount = (pi.amount_received ?? pi.amount) / 100;
   // Rides into the HireHop memo ("… via Stripe GBP (Ref: pi_…) - <notes>"), which is
   // what tells someone in HireHop or Xero that this was the reader, and a test.
@@ -316,8 +422,9 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
   let result: { status: number; body: { error?: string; hh_push_error?: string | null; data?: { id?: string; booking_confirmed?: boolean } } };
   try {
     result = await recordPayment(s.job_id, {
-      payment_type: s.payment_type,
+      payment_type: s.payment_type as 'deposit' | 'balance' | 'excess',
       amount,
+      ...(s.payment_type === 'excess' && s.excess_id ? { excess_id: s.excess_id } : {}),
       payment_method: 'stripe_gbp',
       payment_reference: pi.id,
       notes: noteParts.join(' - '),
@@ -366,6 +473,81 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
 }
 
 /**
+ * Record an authorised pre-auth on its excess record — recordPreauthHold(), the same
+ * path the Manage modal's "Record Pre-Auth" uses — with Stripe's real expiry.
+ * Nothing goes to HireHop (that happens at capture). The money is NOT taken: if
+ * recording fails the authorisation is still live on the card, so the alert says so.
+ */
+async function recordApprovedPreauth(s: TerminalSession, piIn: PaymentIntentLike): Promise<void> {
+  const stripe = getStripeClientFor(s.livemode);
+  let pi = piIn;
+  try {
+    pi = (await stripe.paymentIntents.retrieve(piIn.id, { expand: ['latest_charge'] })) as PaymentIntentLike;
+  } catch (err) {
+    console.warn('[terminal] could not expand latest_charge for capture_before:', err instanceof Error ? err.message : err);
+  }
+  const charge = pi.latest_charge && typeof pi.latest_charge === 'object' ? pi.latest_charge : null;
+  const cb = charge?.payment_method_details?.card_present?.capture_before;
+  const captureBefore = cb ? new Date(cb * 1000) : null;
+  const amount = (pi.amount_capturable || pi.amount) / 100;
+
+  // The hold must last the hire. The rule already only offers a pre-auth within 5 days
+  // of the end; this is the check that Stripe's real window agrees.
+  let warning: string | null = null;
+  if (s.job_id && captureBefore) {
+    const { end } = await jobHireDates(s.job_id);
+    if (end && captureBefore.getTime() < end.getTime()) {
+      const fmt = (d: Date) => d.toLocaleDateString('en-GB', { timeZone: 'Europe/London', weekday: 'short', day: 'numeric', month: 'short' });
+      warning = `This pre-auth expires on ${fmt(captureBefore)}, before the hire ends on ${fmt(end)}. Release it and take a payment instead, or capture it before it expires.`;
+    }
+  }
+
+  try {
+    await recordPreauthHold({
+      excessId: s.excess_id || '',
+      amount,
+      method: 'stripe_gbp',
+      reference: pi.id,
+      stripePaymentIntentId: pi.id,
+      expiresAt: captureBefore,
+      notes: [s.livemode ? 'Card reader' : 'Card reader TEST MODE - not real money', s.reader_label, s.notes].filter(Boolean).join(' - '),
+      userId: s.started_by,
+      source: 'stripe_terminal',
+    });
+  } catch (err) {
+    const reason = err instanceof PreauthRecordError ? `${err.message}${err.detail ? ` - ${err.detail}` : ''}` : (err instanceof Error ? err.message : String(err));
+    await query(
+      `UPDATE terminal_sessions SET status = 'record_failed', failure_message = $2, finished_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [s.id, reason],
+    );
+    console.error(`[terminal] Pre-auth authorised but recording FAILED for session ${s.id} (${pi.id}): ${reason}`);
+    await emailService.sendRaw({
+      to: ALERT_EMAIL,
+      subject: `⚠ Card reader pre-auth NOT recorded - £${amount.toFixed(2)}`,
+      html: `<p>A pre-auth of <strong>£${amount.toFixed(2)}</strong> was authorised on the reader${s.livemode ? '' : ' (TEST MODE)'} but OP could not record it on the excess record.</p>
+<p>Reason: ${reason}</p>
+<p>Stripe PaymentIntent: ${pi.id}. Nothing has been taken, but the amount is held on the client's card. Either record it on the excess (Record Pre-Auth, method Stripe, PaymentIntent ${pi.id}) or cancel it in the Stripe dashboard to release it.</p>`,
+      variant: 'internal',
+    }).catch((e) => console.error('[terminal] alert email failed:', e));
+    return;
+  }
+
+  await query(
+    `UPDATE terminal_sessions
+        SET status = 'succeeded', capture_before = $2, warning = $3, receipt_status = 'pending',
+            failure_code = NULL, failure_message = NULL, finished_at = NOW(), updated_at = NOW()
+      WHERE id = $1`,
+    [s.id, captureBefore ? captureBefore.toISOString() : null, warning],
+  );
+  console.log(`[terminal] Pre-auth £${amount.toFixed(2)} (${pi.id}) recorded on excess ${s.excess_id}, expires ${captureBefore?.toISOString() || 'unknown'}${s.livemode ? '' : ' [TEST]'}`);
+}
+
+/** Approved: a payment that succeeded, or a pre-auth that is now waiting to be captured. */
+function isApproved(session: TerminalSession, pi: PaymentIntentLike): boolean {
+  return pi.status === 'succeeded' || (session.payment_type === 'excess_preauth' && pi.status === 'requires_capture');
+}
+
+/**
  * Bring a session in line with what Stripe says about its PaymentIntent.
  *
  * `trustLastError`: only a fresh `payment_intent.payment_failed` event may mark the
@@ -374,7 +556,7 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
  * still waiting for the card — polls read the reader's action instead.
  */
 async function applyPaymentIntent(session: TerminalSession, pi: PaymentIntentLike, trustLastError: boolean): Promise<void> {
-  if (pi.status === 'succeeded') {
+  if (isApproved(session, pi)) {
     await recordApproved(session, pi);
   } else if (pi.status === 'canceled') {
     await query(
@@ -488,6 +670,21 @@ export async function simulateTap(id: string, outcome: 'approve' | 'decline'): P
   return (await checkSession(id))!;
 }
 
+/**
+ * The Stripe client a PaymentIntent belongs to. Everything is live except a card-reader
+ * session started in test mode, so the existing capture / release / refund paths can act
+ * on a test pre-auth or payment without knowing about test mode. Falls back to live.
+ */
+export async function stripeClientForPaymentIntent(piId: string | null | undefined): Promise<ReturnType<typeof getStripeClientFor>> {
+  if (piId) {
+    try {
+      const r = await query(`SELECT livemode FROM terminal_sessions WHERE payment_intent_id = $1`, [piId]);
+      if (r.rows[0] && r.rows[0].livemode === false) return getStripeClientFor(false);
+    } catch { /* table missing on a fresh DB — live */ }
+  }
+  return getStripeClientFor(true);
+}
+
 // ── Receipt ───────────────────────────────────────────────────────────────
 
 /** How long a recorded payment waits for "Send receipt?" before OP sends it itself. */
@@ -532,16 +729,26 @@ export async function sendTerminalReceipt(
   }
 
   const recipients = (opts.recipients || []).map((r) => ({ email: r.email.trim(), name: r.name || null })).filter((r) => r.email);
-  let sent: Awaited<ReturnType<typeof sendPaymentEmail>>;
+  let sent: { sent: boolean; reason?: string; error?: string; toEmail?: string; ccEmails?: string[] };
   try {
-    sent = await sendPaymentEmail({
-      jobId: session.job_id,
-      amount: Number(session.amount),
-      bankName: 'card',
-      paymentType: session.payment_type,
-      isConfirmingBooking: session.confirmed_booking,
-      ...(recipients.length > 0 ? { overrideRecipients: recipients } : {}),
-    });
+    sent = session.excess_id && (session.payment_type === 'excess' || session.payment_type === 'excess_preauth')
+      // The excess emails OP already sends for these (portal pre-auth / excess payment).
+      ? await sendExcessEmail({
+          templateId: session.payment_type === 'excess_preauth' ? 'excess_preauth_confirmed' : 'excess_payment_confirmed',
+          excessId: session.excess_id,
+          jobId: session.job_id,
+          amount: Number(session.amount),
+          paymentMethod: 'stripe_gbp',
+          ...(recipients.length > 0 ? { overrideRecipients: recipients } : {}),
+        })
+      : await sendPaymentEmail({
+          jobId: session.job_id,
+          amount: Number(session.amount),
+          bankName: 'card',
+          paymentType: session.payment_type,
+          isConfirmingBooking: session.confirmed_booking,
+          ...(recipients.length > 0 ? { overrideRecipients: recipients } : {}),
+        });
   } catch (err) {
     sent = { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err) };
   }
@@ -579,6 +786,21 @@ export async function sendTerminalReceipt(
 export async function defaultReceiptRecipients(id: string): Promise<string[]> {
   const session = await getSession(id);
   if (!session?.job_id) return [];
+  if (session.excess_id && (session.payment_type === 'excess' || session.payment_type === 'excess_preauth')) {
+    // Excess emails go to the driver with the job's contacts copied — the same rule
+    // sendExcessEmail sends by.
+    const d = await query(
+      `SELECT vha.driver_id FROM job_excess je LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id WHERE je.id = $1`,
+      [session.excess_id],
+    );
+    const t = await resolveExcessEmailTarget(
+      d.rows[0]?.driver_id || null,
+      session.job_id,
+      session.payment_type === 'excess_preauth' ? 'excess_preauth_confirmed' : 'excess_payment_confirmed',
+    );
+    if (t.isFallback) return [];
+    return [t.recipientEmail, ...t.ccList].filter(Boolean);
+  }
   const target = await resolveClientEmailTarget(
     session.job_id,
     session.confirmed_booking ? 'booking_confirmed_deposit' : 'payment_received',
@@ -620,6 +842,8 @@ const TERMINAL_EVENT_TYPES = new Set([
   'terminal.reader.action_failed',
   'payment_intent.succeeded',
   'payment_intent.payment_failed',
+  // A pre-auth (manual capture) never "succeeds" at the reader — it becomes capturable.
+  'payment_intent.amount_capturable_updated',
 ]);
 
 export function isTerminalEventType(type: string): boolean {

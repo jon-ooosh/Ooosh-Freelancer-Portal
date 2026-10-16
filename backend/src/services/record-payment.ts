@@ -191,9 +191,12 @@ export async function recordPayment(
           payment_date = NOW(),
           receipt_required = CASE WHEN $5::boolean THEN TRUE ELSE receipt_required END,
           receipt_uploaded_at = CASE WHEN $5::boolean THEN NULL ELSE receipt_uploaded_at END,
+          -- A Stripe-taken excess (the card reader) carries its PaymentIntent, so the
+          -- reimburse path can refund it through Stripe (as the portal's do).
+          stripe_payment_intent_id = COALESCE($6, stripe_payment_intent_id),
           updated_at = NOW()
         WHERE id = $4`,
-        [amount, payment_method, payment_reference || null, excess_id, needsReceipt]
+        [amount, payment_method, payment_reference || null, excess_id, needsReceipt, stripe_payment_intent || null]
       );
 
       // Promote the excess requirement to 'done' if coverage is now met

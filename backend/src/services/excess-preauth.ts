@@ -90,10 +90,11 @@ export async function reconcileExcessPreauth(excessId: string): Promise<PreauthR
 
   // ── Stripe channel — ask Stripe for the real state ──
   if (r.payment_method === 'stripe_gbp' && r.stripe_payment_intent_id) {
-    const { getStripeClient, isStripeConfigured } = await import('../config/stripe');
+    const { isStripeConfigured } = await import('../config/stripe');
     if (!isStripeConfigured()) return { changed: false, status: 'unknown', reason: 'stripe_not_configured' };
     try {
-      const pi = await getStripeClient().paymentIntents.retrieve(r.stripe_payment_intent_id);
+      const { stripeClientForPaymentIntent } = await import('./stripe-terminal');
+      const pi = await (await stripeClientForPaymentIntent(r.stripe_payment_intent_id)).paymentIntents.retrieve(r.stripe_payment_intent_id);
       if (pi.status === 'canceled') {
         const flipped = await markExcessReleased(excessId, 'Stripe hold canceled (reconciled)');
         return { changed: flipped, status: 'released', stripeStatus: pi.status };
@@ -149,4 +150,198 @@ export async function reconcileExpiredPreauthsForJob(jobId: string): Promise<num
     }
   }
   return changed;
+}
+
+// ── Recording a pre-auth hold on a record ─────────────────────────────────
+
+export class PreauthRecordError extends Error {
+  constructor(message: string, public status = 400, public detail?: string) { super(message); }
+}
+
+export interface RecordPreauthInput {
+  excessId: string;
+  amount: number;
+  /** worldpay | amex | till_cash | stripe_gbp (the card reader is stripe_gbp + its PaymentIntent). */
+  method: string;
+  reference?: string | null;
+  stripePaymentIntentId?: string | null;
+  /** How long the hold lasts: days from now (the manual form), or an exact time (the card
+   *  reader passes Stripe's `capture_before`). One of the two. */
+  expiresInDays?: number;
+  expiresAt?: Date | null;
+  notes?: string | null;
+  userId?: string | null;
+  /** job_payments.source of the audit row. */
+  source: string;
+}
+
+/**
+ * Put a record into `pre_auth` — THE path for a hold OP records itself (the Manage
+ * modal's "Record Pre-Auth", and the card reader). Lifted verbatim from
+ * POST /excess/:id/record-preauth (Oct 2026) so the reader can't drift from it.
+ *
+ * Sets the hold in amount_held (NOT excess_amount_taken — no money is in our account
+ * yet). No HireHop deposit — that happens at capture. Only valid from a "no money yet"
+ * state (needed / pending); anything else throws PreauthRecordError (400).
+ *
+ * stripe_payment_intent_id is the load-bearing field for a Stripe-channel hold.
+ * It is written to BOTH job_excess and the job_payments audit row, because:
+ *   - Capture (422s without it) and Release (Stripe cancel) both need the PI.
+ *   - services/stripe-preauth-reconciler.ts diffs live Stripe holds against those
+ *     two columns, so a hold recorded WITHOUT the PI still reads as "unrecorded"
+ *     and re-alerts info@ every morning until the hold expires.
+ */
+export async function recordPreauthHold(input: RecordPreauthInput): Promise<Record<string, unknown>> {
+  const { excessId: id, amount, method, reference, stripePaymentIntentId, notes, userId, source } = input;
+
+  const currentResult = await query(
+    `SELECT je.*, j.hh_job_number FROM job_excess je
+     LEFT JOIN jobs j ON j.id = je.job_id
+     WHERE je.id = $1`,
+    [id]
+  );
+  if (currentResult.rows.length === 0) throw new PreauthRecordError('Excess record not found', 404);
+  const current = currentResult.rows[0];
+
+  // Guard: only record a hold when there's no money/hold already on the record.
+  // 'needed'/'pending' are the collectable pre-money states. Anything else
+  // (taken, pre_auth, fully_claimed, etc.) means money or a hold is already
+  // attached and a fresh hold would be ambiguous.
+  const alreadyHeld = parseFloat(current.amount_held || '0');
+  const alreadyTaken = parseFloat(current.excess_amount_taken || '0');
+  if (!['needed', 'pending'].includes(current.excess_status) || alreadyHeld > 0 || alreadyTaken > 0) {
+    throw new PreauthRecordError(
+      'Cannot record a pre-auth on this record',
+      400,
+      `Status is "${current.excess_status}" with £${alreadyTaken.toFixed(2)} taken and £${alreadyHeld.toFixed(2)} held. Pre-auth holds can only be recorded on a record that is still Needed with nothing collected. If a hold already exists, capture or release it first.`,
+    );
+  }
+
+  const holdDays = input.expiresInDays || 5;
+  const expiresAt = input.expiresAt && !Number.isNaN(input.expiresAt.getTime()) ? input.expiresAt : null;
+  // Only card-machine CARD methods produce a paper receipt to scan
+  // (Worldpay/Amex). Stripe has an electronic trail; cash-held has no card
+  // receipt — so neither flags a receipt as required.
+  const needsReceipt = method === 'worldpay' || method === 'amex';
+
+  const dateStr = ukToday();
+  const expiryText = expiresAt
+    ? `Expires ${expiresAt.toLocaleDateString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', year: 'numeric' })}.`
+    : `Expires in ${holdDays} days.`;
+  const preauthNote = `[${dateStr}] Pre-auth hold of £${amount.toFixed(2)} recorded via ${method.replace(/_/g, ' ')}${reference ? ` (ref ${reference})` : ''}${notes ? `. ${notes}` : ''}. ${expiryText}`;
+  const newNotes = current.notes ? `${current.notes}\n${preauthNote}` : preauthNote;
+
+  const result = await query(
+    `UPDATE job_excess SET
+      amount_held              = $1,
+      excess_amount_taken      = 0,
+      excess_status            = 'pre_auth',
+      held_at                  = NOW(),
+      held_expires_at          = COALESCE($9::timestamptz, NOW() + ($2 || ' days')::interval),
+      payment_method           = $3,
+      payment_reference        = $4,
+      stripe_payment_intent_id = COALESCE($5, stripe_payment_intent_id),
+      receipt_required         = $6,
+      notes                    = $7,
+      updated_at               = NOW()
+    WHERE id = $8
+    RETURNING *`,
+    [
+      amount,                       // $1
+      String(holdDays),             // $2
+      method,                       // $3
+      reference || null,            // $4
+      stripePaymentIntentId || null, // $5
+      needsReceipt,                 // $6
+      newNotes,                     // $7
+      id,                           // $8
+      expiresAt ? expiresAt.toISOString() : null, // $9
+    ]
+  );
+
+  // Audit row in job_payments (payment_status='pre_auth' — not completed). Keeps
+  // the hold visible in payment history, consistent with the portal path in money.ts.
+  //
+  // stripe_payment_intent is populated deliberately: the Stripe → OP pre-auth
+  // reconciler (services/stripe-preauth-reconciler.ts) diffs live Stripe holds
+  // against BOTH job_excess.stripe_payment_intent_id and this column. Leaving it
+  // null here meant a hold recorded by hand still read as "not present in OP"
+  // and re-alerted info@ every morning.
+  try {
+    await query(
+      `INSERT INTO job_payments
+        (job_id, hirehop_job_id, payment_type, amount, payment_method,
+         payment_reference, payment_status, source, excess_id,
+         client_name, recorded_by, notes, stripe_payment_intent, payment_date)
+       VALUES ($1, $2, 'excess', $3, $4, $5, 'pre_auth', $11, $6, $7, $8, $9, $10, NOW())`,
+      [
+        current.job_id,
+        current.hh_job_number || null,
+        amount,
+        method,
+        reference || null,
+        id,
+        current.client_name || null,
+        userId || null,
+        notes || `Pre-auth hold recorded (${expiresAt ? expiryText.toLowerCase().replace(/\.$/, '') : `expires ${holdDays}d`})`,
+        stripePaymentIntentId || null,
+        source,
+      ]
+    );
+  } catch (err) {
+    console.error('[excess] Failed to insert job_payments row for pre-auth (non-fatal):', err);
+  }
+
+  // Held money counts as coverage — sync requirement status.
+  if (current.job_id) {
+    syncExcessRequirementStatus(current.job_id).catch(e =>
+      console.error('[excess] syncExcessRequirementStatus failed (record-preauth):', e)
+    );
+  }
+
+  console.log(`[excess] Pre-auth recorded: ${id}, £${amount} held via ${method}, ${expiresAt ? `expires ${expiresAt.toISOString()}` : `expires ${holdDays}d`}`);
+  return result.rows[0];
+}
+
+// ── May this hire have a pre-auth now? ────────────────────────────────────
+
+export interface PreauthEligibility {
+  allowed: boolean;
+  /** 'ok' | 'long_hire' | 'too_early' | 'too_late' | 'no_dates' */
+  code: string;
+  /** In words, for the Manage modal. */
+  reason: string;
+  hireDays: number | null;
+  daysFromNowToEnd: number | null;
+}
+
+/**
+ * The payment portal's pre-auth rule, copied exactly (netlify-functions
+ * `get-job-details-v2.js` determineExcessPaymentTiming — jon, 16 Oct 2026: "copy
+ * exactly what we have" before deviating). A hire of 4 days or fewer may be
+ * pre-authed, and only once the hold can last until the hire ends: no more than 5
+ * days from now to the end. Anything else is a payment. Day counts round UP, as there.
+ * Used by the card reader; the manual "Record Pre-Auth" form is not gated by it.
+ */
+export function preauthEligibility(start: Date | string | null | undefined, end: Date | string | null | undefined, now: Date = new Date()): PreauthEligibility {
+  const s = start ? new Date(start) : null;
+  const e = end ? new Date(end) : null;
+  if (!s || !e || Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) {
+    return { allowed: false, code: 'no_dates', reason: 'The job has no hire dates, so a pre-auth can\'t be offered. Take a payment.', hireDays: null, daysFromNowToEnd: null };
+  }
+  const DAY = 1000 * 60 * 60 * 24;
+  const hireDays = Math.ceil((e.getTime() - s.getTime()) / DAY);
+  const daysFromNowToEnd = Math.ceil((e.getTime() - now.getTime()) / DAY);
+  if (hireDays > 4) {
+    return { allowed: false, code: 'long_hire', reason: `This hire is ${hireDays} days. Pre-auths are for hires of 4 days or fewer, so take a payment.`, hireDays, daysFromNowToEnd };
+  }
+  if (daysFromNowToEnd > 5) {
+    const from = new Date(e.getTime() - 5 * DAY);
+    const fromText = from.toLocaleDateString('en-GB', { timeZone: 'Europe/London', weekday: 'short', day: 'numeric', month: 'short' });
+    return { allowed: false, code: 'too_early', reason: `Too early for a pre-auth: it would expire before the hire ends. Available from ${fromText}, or take a payment now.`, hireDays, daysFromNowToEnd };
+  }
+  if (daysFromNowToEnd < 0) {
+    return { allowed: false, code: 'too_late', reason: 'The hire has ended, so take a payment.', hireDays, daysFromNowToEnd };
+  }
+  return { allowed: true, code: 'ok', reason: 'Short hire within the pre-auth window.', hireDays, daysFromNowToEnd };
 }

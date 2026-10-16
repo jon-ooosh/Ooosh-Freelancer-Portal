@@ -408,6 +408,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
     case 'terminal.reader.action_failed':
     case 'payment_intent.succeeded':
     case 'payment_intent.payment_failed':
+    case 'payment_intent.amount_capturable_updated':
       return handleTerminalWebhookEvent(event);
     default:
       // Subscribed to a narrow set; ignore anything else quietly.

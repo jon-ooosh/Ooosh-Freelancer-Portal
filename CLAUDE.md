@@ -234,13 +234,13 @@ ONE custom line on Misc income (190) at 20%, raised on the close-out panel's but
 job stays HireHop 9 and is never completed. A hire invoiced before cancelling is refused (credit note,
 by hand). The portal takes payment at status 9 only while an approved invoice is owing.
 
-**PHASES 0–1 BUILT (admin-only, test mode), Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
+**PHASES 0–2 BUILT (admin-only), Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
 Stripe account, money on HireHop bank 267, recording ONLY through `services/record-payment.ts`,
 pre-auths via extended authorisation (30 days — the account is "Car rentals", §9.1), no phone card
 payments (policy), shop + sitter till in Phase 3. Read it before building anything that takes a card
 in person; **§11 is what Phases 0–1 built and where they differ from the plan** (recorded as `stripe_gbp`,
-not a new method; Record Payment → Method → Card reader; polling, not Socket.io); **§12 is "Send receipt?"** (the client email waits for staff; a booking confirmation can't be skipped; 15-minute safety net). The week's payments work it builds on (PayPal via
+not a new method; Record Payment → Method → Card reader; polling, not Socket.io); **§12 is "Send receipt?"** (the client email waits for staff; a booking confirmation can't be skipped; 15-minute safety net). **§13 is Phase 2** — excess payments + pre-auths on the reader from the excess Manage modal; the pre-auth rule is the portal's, copied (`excess-preauth.ts` `preauthEligibility()`); a reader pre-auth is recorded by `recordPreauthHold()`, the Manage modal's own code. The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
 **BUILT (PRs 1–4), Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
