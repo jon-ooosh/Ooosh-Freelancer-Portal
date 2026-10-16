@@ -52,10 +52,14 @@ It follows directly on from the auto-responder voice / chase-tone work
   ourselves and harvesting the attachment, or logging in as a staff user). It is the
   same generator by a side door, and the API token it would put at risk also carries the
   payment portal, sync, close-out and the shop.
-- **Asked, awaiting an answer (15 Oct):** (a) may HireHop's own "email document"
-  function be triggered via the API, sending to the client; (b) is HireHop's client-facing
-  online quote viewer (the "Share" option off the print menu) reachable via the API, so
-  the email could carry a link instead of an attachment. Record the answer here.
+- **HireHop's own "email document" via the API: also NO** (Justin, HireHop, 16 Oct 2026:
+  "it is open to abuse. Imagine someone sending emails from you via the API." He pointed at
+  online HTML-to-PDF generators, i.e. making our own document).
+- **Still unanswered:** is the client-facing online quote viewer (the "Share" option off the
+  print menu) reachable via the API, so the email could carry a link instead of an attachment?
+- **Weighs on the own-document question:** jon wants the current quote attached on EVERY change
+  and every chase, so the manual download happens many times per enquiry, not once. Measure
+  how often in phase 1 before deciding whether OP should make its own quote document (§4).
 
 ## 4. Phase 1 working method
 
