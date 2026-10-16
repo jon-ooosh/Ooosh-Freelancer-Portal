@@ -43,6 +43,10 @@ answers aren't lost before the build starts. Also the groundwork for AI quoting
   unsafe ("Ludwig" contains "DW"). Not a blocker for phases 1–2. Likely answer: tag items with a
   brand once (a small item→brand table maintained in OP), not text matching.
 - How big a job counts as "large" — thresholds for the job-value adjustment.
+- **Endorsement deals are free text by decision** (phase 1). Phase 3's suggested-discount box needs a
+  number for the endorsed brand's items: either add an optional rate % to the endorsement / brand
+  then, or show the text alongside the calculated figures and let the person apply it. Don't parse
+  the free text.
 - Exact numbers for every table — jon to fill in once the page exists.
 
 ## 4. Phase 1 — endorsements (BUILT, 16 Oct 2026)
@@ -59,8 +63,9 @@ Decisions (jon): a reference, not a calculator — start recording, refine later
 - **Deal is free text.** Blank = the brand's standard deal (also free text, on the brand list).
   Standard is 70%. Nothing is calculated from it.
 - **Confirmed** = any staff member got the nod from the brand's rep / A&R. Recorded as
-  "Confirmed with" + last checked = today. **Over 12 months is flagged red; never confirmed is grey.**
-  No expiry dates — we only ever see a snapshot.
+  "Confirmed with" + **"Confirmed on"** — any past date (jon is backfilling what we already knew) or
+  Today; never a future date (the route refuses it). Whoever changes the date is recorded as checking it.
+  **Over 12 months is flagged red; never confirmed is grey.** No expiry dates — we only ever see a snapshot.
 - **Brands seeded:** DW, Orange, C&C, Paiste, GK. Anyone can add; "hide from pickers" rather than delete.
 - Ended, never deleted. Code: `services/endorsements.ts` (THE place), `routes/endorsements.ts`,
   `components/EndorsementsPanel.tsx`; migration 290.
