@@ -37,15 +37,21 @@ clients — the test bench for everything here.
 
 ## 3. Phase A — the voice (the chase-tone round)
 
-Today the voice is `system_settings.chase_voice_instructions`, appended to the code rails
-in `chase-draft.ts`, and refined by `learnChaseVoice()` from pasted examples. Drafts read
-"too AI / too American" (jon, Sep 2026).
+**First round BUILT (16 Oct 2026).** Drafts read "too AI / too American" (jon, Sep 2026).
 
-- **Rework the rails** in `chase-draft.ts` SYSTEM_PROMPT toward British, understated, short.
-- **Move the voice into a Staff Document**, "How we write to clients", shared with Claude
-  (§4). Staff read it too — a new starter learns the same voice. `learnChaseVoice()` then
-  proposes a **new version** of that document (the existing draft → approve flow) rather
-  than overwriting a setting. The setting stays as a fallback until the document exists.
+- **The house voice is written into the rails** in `chase-draft.ts` SYSTEM_PROMPT, distilled
+  from 150 real sent emails (info@, Jul–Oct 2026) — modelled on Jon and Will, whom jon prefers
+  to Rich's cooler register: short, greeting on its own line, "Hope you're well." at most,
+  closing line + first name, warm through being helpful not enthusiastic, a list of banned
+  AI/American phrases, no em dashes. **One house voice** for every sender (jon); only the
+  name changes.
+- **The staff half** is the draft guide `docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md`; its
+  For-Claude half mirrors the prompt (change both together) until Phase B moves the voice into
+  a Staff Document and the prompt reads it from there.
+- **`chase_voice_instructions` stays** as the no-deploy steer on top of the house voice.
+- **"Teach the voice from real examples" REMOVED** (`learnChaseVoice()`,
+  `POST /api/auto-chase/voice/learn`, the Settings panel) — never used; the voice now comes
+  from the real-email analysis, and Phase B's guide versions replace it.
 - **Iterate on real drafts** with jon (preview endpoint `POST /api/auto-chase/preview-draft/:jobId`).
 - Done when jon would send the drafts unedited most of the time. Auto-send stays OFF
   (that's still `AUTO-CHASE-SPEC.md` Phase 3, after this).
@@ -160,7 +166,7 @@ is shared (B), and the brief exists (C). Phase D can follow; it isn't a blocker.
 
 | Step | Code (Claude) | Content (jon / team) |
 |---|---|---|
-| A | Rails rework; voice → Staff Document; learn-voice → proposed version | Review drafts until they'd go unedited |
+| A | Rails rework (built 16 Oct); voice guide draft; learn-voice removed | Review drafts until they'd go unedited |
 | B | `ai_shared` + `ai_topics` + template + `house-knowledge.ts`; chase drafts use it | Write "Chasing a quote" + "Quoting a van hire"; triage Monday guides |
 | C | `client-brief.ts`; brief shown beside the draft; chase drafts use it | Fill terms for the top regular clients |
 | D | Client facts table + page section; draft-vs-sent capture; proposal UI | Tick or reject suggestions as they come |
