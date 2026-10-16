@@ -629,12 +629,16 @@ router.post('/:id/unacknowledge', async (req: AuthRequest, res: Response) => {
     const notif = result.rows[0];
 
     // Reverse the reminder cascade if applicable.
+    // The pattern is a PLAIN '...' string, never E'...' (Oct 2026): an E''
+    // string eats the backslashes, so `\[` reached the regex as a bare `[` and
+    // the marker became a one-character class — stripping every M, a, r, k, e,
+    // d… from the notes ("Check the van tyres" came back as "Chhys").
     if (notif.entity_type === 'job_requirements' && notif.entity_id) {
       try {
         await query(
           `UPDATE job_requirements
            SET status = 'in_progress',
-               notes = REGEXP_REPLACE(COALESCE(notes, ''), E'\\n?\\[Marked done via inbox acknowledgement\\]', '', 'g'),
+               notes = REGEXP_REPLACE(COALESCE(notes, ''), '\\n?\\[Marked done via inbox acknowledgement\\]', '', 'g'),
                updated_at = NOW()
            WHERE id = $1
              AND requirement_type = 'reminder'
