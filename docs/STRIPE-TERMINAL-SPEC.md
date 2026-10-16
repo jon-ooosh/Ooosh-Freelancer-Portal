@@ -261,3 +261,24 @@ outside — only Cancel payment or Done.
 3. OP Settings → **Card reader** (admin only) → Mode: Live, then reload the job page. The picker then lists the real S700.
 4. £1 deposit on the dummy job, tap a real card; check OP, HireHop (bank 267) and the client email; then
    refund it from the Money tab (a Stripe refund against the PaymentIntent).
+
+## 12. Receipts and refunds (16 Oct 2026, after the first live £1)
+
+**"Send receipt?"** (jon's call, from the live test). A reader payment no longer emails the client the
+moment it records (`recordPayment()` `skip_client_email`). Once the card is approved the panel asks,
+using `components/RecipientPicker.tsx`: the job's contacts, with whoever the email would go to by
+itself pre-ticked (`resolveClientEmailTarget`), more than one allowed, or a typed address. It sends the
+SAME email as before (`sendPaymentEmail`, method "card"); the panel closes once it's answered.
+- **No receipt** is refused when the payment moved the job to Booked (`terminal_sessions.confirmed_booking`):
+  that email is the booking confirmation, so the button reads **Send confirmation** and there is no skip.
+- **Safety net:** a payment nobody answered for 15 minutes gets the usual email anyway
+  (`sweepTerminalReceipts()`, scheduler every 5 minutes). A failed automatic send emails info@.
+- `terminal_sessions.receipt_status` (migration 292): pending → sending → sent | auto_sent | skipped |
+  failed. `sending` is a claim, so the panel and the sweep can never both send.
+
+**Refunds of a reader payment** go through the existing Stripe refund path unchanged (it is `stripe_gbp`
+with its PaymentIntent). The modal's method reads **"Stripe - Card reader"** (`deposits[].op_source`),
+the refund email says "As you paid by card…" instead of "…through our online link" (`getRefundTimescale`
+key `stripe_terminal`), and both refund modals now have the same recipient picker (refund route
+`recipients`; usual people from `GET /money/:jobId/email-default?template=hire_refund_processed`).
+

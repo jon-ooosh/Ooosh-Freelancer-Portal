@@ -37,6 +37,9 @@ export function getRefundTimescale(paymentMethod: string): string {
     worldpay: 'As you paid by card in person, this should take 2 to 3 working days to come back.',
     amex: 'As you paid by Amex, this should take 2 to 3 working days to come back.',
     stripe_gbp: 'As you paid by card through our online link, this should take 5 to 10 working days to come back.',
+    // Not a payment method — the key the refund route passes for a card-reader payment
+    // (recorded as stripe_gbp, source 'stripe_terminal'), which was never "our online link".
+    stripe_terminal: 'As you paid by card, this should take 5 to 10 working days to come back.',
     wise_bacs: 'For UK bank transfers this should be with you within an hour. For international transfers, please allow 1 to 2 working days.',
     till_cash: 'As you paid by cash, please contact us to arrange collection of your refund.',
     paypal: 'As you paid by PayPal, this should be instant.',
@@ -537,13 +540,27 @@ export async function sendRefundEmail(opts: {
   amount: number;
   /** OP payment-method key — drives the method-specific timescale sentence. */
   paymentMethod: string;
+  /** Staff's picked recipients (the refund modal's picker). When non-empty it REPLACES
+   *  the address-book resolution — first is To, the rest CC — as in sendPaymentEmail. */
+  overrideRecipients?: Array<{ email: string; name?: string | null }>;
 }): Promise<{ sent: boolean; reason?: 'error'; error?: string; isFallback?: boolean; toEmail?: string }> {
-  const { jobId, amount, paymentMethod } = opts;
+  const { jobId, amount, paymentMethod, overrideRecipients } = opts;
   const templateId = 'hire_refund_processed';
 
   // templateId passed through so the job's per-bucket routing override applies,
   // same as every other client-facing money email.
   const target = await resolveClientEmailTarget(jobId, templateId);
+  const cleanOverride = (overrideRecipients || [])
+    .map((r) => ({ email: (r.email || '').trim(), name: r.name || '' }))
+    .filter((r) => r.email);
+  if (cleanOverride.length > 0) {
+    target.primaryEmail = cleanOverride[0].email;
+    target.ccEmails = cleanOverride.slice(1).map((r) => r.email);
+    target.greeting = cleanOverride.length > 1
+      ? greetEveryone(cleanOverride.map((r) => r.name.trim().split(/\s+/)[0]))
+      : cleanOverride[0].name.trim().split(/\s+/)[0] || cleanOverride[0].email.split('@')[0] || 'there';
+    target.isFallback = false;
+  }
 
   const jobResult = await query(
     `SELECT job_name, hh_job_number FROM jobs WHERE id = $1`,

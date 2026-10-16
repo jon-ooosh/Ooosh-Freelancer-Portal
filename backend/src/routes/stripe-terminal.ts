@@ -8,6 +8,8 @@
  *   POST /terminal/sessions/:id/retry         Try again after a decline — the SAME PaymentIntent
  *   POST /terminal/sessions/:id/cancel        clear the reader and cancel the PaymentIntent
  *   POST /terminal/sessions/:id/simulate      test mode only: tap a pretend card (body: outcome approve|decline)
+ *   GET  /terminal/sessions/:id/receipt       who "Send receipt?" pre-ticks
+ *   POST /terminal/sessions/:id/receipt       answer it (body: recipients [{email,name}] | skip: true)
  *
  * Everything but /access is gated on `system_settings.stripe_terminal_roles`
  * (admin only while testing — jon, 16 Oct 2026), so hiding the option in the UI is
@@ -20,6 +22,7 @@ import { validate } from '../middleware/validate';
 import {
   canUseTerminal, getTerminalMode, isModeConfigured, listReaders, startTerminalPayment,
   readSession, retrySession, cancelSession, simulateTap, TerminalError,
+  sendTerminalReceipt, defaultReceiptRecipients,
 } from '../services/stripe-terminal';
 
 const router = Router();
@@ -117,6 +120,35 @@ router.post('/sessions/:id/simulate', requireTerminalAccess, validate(simulateSc
     res.json({ data: await simulateTap(req.params.id as string, req.body.outcome) });
   } catch (err) {
     fail(res, err, 'Failed to simulate the card');
+  }
+});
+
+router.get('/sessions/:id/receipt', requireTerminalAccess, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: { default_emails: await defaultReceiptRecipients(req.params.id as string) } });
+  } catch (err) {
+    fail(res, err, 'Failed to read the receipt recipients');
+  }
+});
+
+const receiptSchema = z.object({
+  recipients: z.array(z.object({
+    email: z.string().email().max(255),
+    name: z.string().max(255).nullable().optional(),
+  })).max(10).optional(),
+  skip: z.boolean().optional(),
+}).refine((v) => v.skip === true || (v.recipients && v.recipients.length > 0), {
+  message: 'Pick at least one recipient, or choose No receipt',
+});
+
+router.post('/sessions/:id/receipt', requireTerminalAccess, validate(receiptSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await sendTerminalReceipt(req.params.id as string, {
+      recipients: req.body.recipients || null,
+      skip: req.body.skip === true,
+    }) });
+  } catch (err) {
+    fail(res, err, 'Failed to send the receipt');
   }
 });
 

@@ -29,6 +29,7 @@ import { query } from '../config/database';
 import { getStripeClientFor, isStripeError } from '../config/stripe';
 import { recordPayment, SYSTEM_SERVICE_USER_ID } from './record-payment';
 import { emailService } from './email-service';
+import { sendPaymentEmail, resolveClientEmailTarget } from './money-emails';
 
 // Structural types for the fields we read (the codebase avoids naming Stripe.* types).
 type ReaderAction = {
@@ -73,6 +74,11 @@ export interface TerminalSession {
   failure_message: string | null;
   hh_push_error: string | null;
   job_payment_id: string | null;
+  /** This payment moved the job to Booked — its email is the booking confirmation. */
+  confirmed_booking: boolean;
+  /** "Send receipt?" — see migration 292. NULL on sessions from before it. */
+  receipt_status: 'pending' | 'sending' | 'sent' | 'auto_sent' | 'skipped' | 'failed' | null;
+  receipt_sent_to: string | null;
   started_by: string | null;
   started_at: string;
   finished_at: string | null;
@@ -307,7 +313,7 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
     s.notes,
   ].filter(Boolean);
 
-  let result: { status: number; body: { error?: string; hh_push_error?: string | null; data?: { id?: string } } };
+  let result: { status: number; body: { error?: string; hh_push_error?: string | null; data?: { id?: string; booking_confirmed?: boolean } } };
   try {
     result = await recordPayment(s.job_id, {
       payment_type: s.payment_type,
@@ -318,6 +324,8 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
       push_to_hirehop: true,
       stripe_payment_intent: pi.id,
       source: 'stripe_terminal',
+      // The panel asks "Send receipt?" instead (sendTerminalReceipt below).
+      skip_client_email: true,
     }, {
       userId: s.started_by || SYSTEM_SERVICE_USER_ID,
       isServiceAccount: !s.started_by,
@@ -330,9 +338,10 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
     await query(
       `UPDATE terminal_sessions
           SET status = 'succeeded', job_payment_id = $2, hh_push_error = $3,
+              confirmed_booking = $4, receipt_status = 'pending',
               failure_code = NULL, failure_message = NULL, finished_at = NOW(), updated_at = NOW()
         WHERE id = $1`,
-      [s.id, result.body.data?.id || null, result.body.hh_push_error || null],
+      [s.id, result.body.data?.id || null, result.body.hh_push_error || null, !!result.body.data?.booking_confirmed],
     );
     console.log(`[terminal] Recorded £${amount.toFixed(2)} (${pi.id}) on job ${s.job_id}${s.livemode ? '' : ' [TEST]'}`);
     return;
@@ -477,6 +486,131 @@ export async function simulateTap(id: string, outcome: 'approve' | 'decline'): P
   // The webhook normally lands within a second; checking here means the modal is
   // right even if the test webhook endpoint is not set up.
   return (await checkSession(id))!;
+}
+
+// ── Receipt ───────────────────────────────────────────────────────────────
+
+/** How long a recorded payment waits for "Send receipt?" before OP sends it itself. */
+const RECEIPT_WAIT_MINUTES = 15;
+
+export interface ReceiptRecipient { email: string; name?: string | null }
+
+/**
+ * Answer "Send receipt?" for a recorded reader payment.
+ *  - `recipients` given → the usual payment email to them (first is To, the rest CC).
+ *  - `recipients` null → the usual recipient (the job's address-book resolution).
+ *  - `skip` → no email; refused when the payment confirmed the booking, because that
+ *    email is the booking confirmation, not just a receipt.
+ * Claimed pending → sending in one statement, so the panel and the sweep can't both send.
+ * A failed send from the panel goes back to pending so staff can try again.
+ */
+export async function sendTerminalReceipt(
+  id: string,
+  opts: { recipients?: ReceiptRecipient[] | null; skip?: boolean; auto?: boolean },
+): Promise<TerminalSession> {
+  const session = await getSession(id);
+  if (!session) throw new TerminalError('Payment not found', 404);
+  if (session.status !== 'succeeded' || !session.job_id) throw new TerminalError('This payment has not been recorded.');
+  if (session.receipt_status !== 'pending') return session;
+  if (opts.skip && session.confirmed_booking) {
+    throw new TerminalError('This payment confirmed the booking, so the client must get the confirmation email.');
+  }
+
+  const claim = await query(
+    `UPDATE terminal_sessions SET receipt_status = 'sending', updated_at = NOW()
+      WHERE id = $1 AND receipt_status = 'pending' RETURNING id`,
+    [id],
+  );
+  if (claim.rows.length === 0) return (await getSession(id))!;
+
+  if (opts.skip) {
+    await query(
+      `UPDATE terminal_sessions SET receipt_status = 'skipped', receipt_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [id],
+    );
+    return (await getSession(id))!;
+  }
+
+  const recipients = (opts.recipients || []).map((r) => ({ email: r.email.trim(), name: r.name || null })).filter((r) => r.email);
+  let sent: Awaited<ReturnType<typeof sendPaymentEmail>>;
+  try {
+    sent = await sendPaymentEmail({
+      jobId: session.job_id,
+      amount: Number(session.amount),
+      bankName: 'card',
+      paymentType: session.payment_type,
+      isConfirmingBooking: session.confirmed_booking,
+      ...(recipients.length > 0 ? { overrideRecipients: recipients } : {}),
+    });
+  } catch (err) {
+    sent = { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (sent.sent) {
+    const to = [sent.toEmail, ...(sent.ccEmails || [])].filter(Boolean).join(', ');
+    await query(
+      `UPDATE terminal_sessions SET receipt_status = $2, receipt_sent_to = $3, receipt_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [id, opts.auto ? 'auto_sent' : 'sent', to || null],
+    );
+    return (await getSession(id))!;
+  }
+
+  const reason = sent.reason === 'no_recipient' ? 'No email address found for this job.' : (sent.error || 'The email could not be sent.');
+  if (opts.auto) {
+    await query(`UPDATE terminal_sessions SET receipt_status = 'failed', updated_at = NOW() WHERE id = $1`, [id]);
+    await emailService.sendRaw({
+      to: ALERT_EMAIL,
+      subject: `Card reader receipt NOT sent - £${Number(session.amount).toFixed(2)}`,
+      html: `<p>A card reader payment of £${Number(session.amount).toFixed(2)} was recorded, but nobody answered "Send receipt?" and the automatic email failed.</p>
+<p>Reason: ${reason}</p><p>Send the client their ${session.confirmed_booking ? 'booking confirmation' : 'payment receipt'} from the job's Money tab (Resend confirmation).</p>`,
+      variant: 'internal',
+    }).catch((e) => console.error('[terminal] receipt alert email failed:', e));
+    return (await getSession(id))!;
+  }
+  await query(`UPDATE terminal_sessions SET receipt_status = 'pending', updated_at = NOW() WHERE id = $1`, [id]);
+  throw new TerminalError(`Not sent - ${reason}`);
+}
+
+/**
+ * Who "Send receipt?" pre-ticks: whoever the email would go to by itself
+ * (`resolveClientEmailTarget`, the one recipient rule). Empty when that would only be
+ * the info@ safety net, so staff pick or type an address instead.
+ */
+export async function defaultReceiptRecipients(id: string): Promise<string[]> {
+  const session = await getSession(id);
+  if (!session?.job_id) return [];
+  const target = await resolveClientEmailTarget(
+    session.job_id,
+    session.confirmed_booking ? 'booking_confirmed_deposit' : 'payment_received',
+  );
+  if (target.isFallback) return [];
+  return [target.primaryEmail, ...target.ccEmails].filter(Boolean);
+}
+
+/**
+ * The safety net (scheduler, every 5 minutes): a recorded payment nobody answered
+ * "Send receipt?" for within RECEIPT_WAIT_MINUTES gets the usual email anyway, so no
+ * payment — and no booking confirmation — goes without one.
+ */
+export async function sweepTerminalReceipts(): Promise<number> {
+  const r = await query(
+    `SELECT id FROM terminal_sessions
+      WHERE status = 'succeeded' AND receipt_status = 'pending'
+        AND finished_at < NOW() - make_interval(mins => $1)
+      ORDER BY finished_at LIMIT 20`,
+    [RECEIPT_WAIT_MINUTES],
+  );
+  let sent = 0;
+  for (const row of r.rows) {
+    try {
+      const s = await sendTerminalReceipt(row.id, { recipients: null, auto: true });
+      if (s.receipt_status === 'auto_sent') sent += 1;
+    } catch (err) {
+      console.error(`[terminal] receipt sweep failed for ${row.id}:`, err instanceof Error ? err.message : err);
+    }
+  }
+  if (sent > 0) console.log(`[terminal] Receipt sweep sent ${sent} unanswered receipt(s)`);
+  return sent;
 }
 
 // ── Webhook ───────────────────────────────────────────────────────────────
