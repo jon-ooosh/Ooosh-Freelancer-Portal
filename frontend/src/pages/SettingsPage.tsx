@@ -96,6 +96,9 @@ function SettingsContent() {
       {/* Shop till settings — admin only (discount ceilings are money policy) */}
       {currentUser?.role === 'admin' && <ShopSettingsSection />}
 
+      {/* Card reader (Stripe Terminal S700) — test/live switch + who may use it, admin only */}
+      {currentUser?.role === 'admin' && <CardReaderSettingsSection />}
+
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
 
@@ -1960,6 +1963,93 @@ function ShopSettingsSection() {
  * insured block printed on every broker PDF, and the four numbers behind the
  * estimated vehicle value (§6.6). Plain text boxes — each is one value.
  */
+/**
+ * Card reader (docs/STRIPE-TERMINAL-SPEC.md §11): test or live, and which roles see
+ * "Card reader" on Record Payment. Admin only — it decides whether real cards are charged.
+ */
+function CardReaderSettingsSection() {
+  const [mode, setMode] = useState<'test' | 'live'>('test');
+  const [roles, setRoles] = useState('admin');
+  const [orig, setOrig] = useState<{ mode: string; roles: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=money');
+      const get = (k: string) => res.data.find(r => r.key === k)?.value ?? '';
+      const m = get('stripe_terminal_mode') === 'live' ? 'live' : 'test';
+      const r = get('stripe_terminal_roles') || 'admin';
+      setMode(m); setRoles(r); setOrig({ mode: m, roles: r });
+    } catch {
+      setError('Could not load the card reader settings (has migration 291 run?).');
+    }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const cleanRoles = roles.split(',').map(x => x.trim()).filter(Boolean).join(',') || 'admin';
+      await api.put('/system-settings', { settings: { stripe_terminal_mode: mode, stripe_terminal_roles: cleanRoles } });
+      setSuccess('Saved. Reload any open job page to pick it up.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (!orig) return error ? <div className="mb-6 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div> : null;
+  const changed = mode !== orig.mode || roles !== orig.roles;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Card reader</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        The Stripe S700 on Record Payment. Test uses Stripe&apos;s simulated reader and no card is charged;
+        live sends the payment to the real reader.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+          <label htmlFor="stripe_terminal_mode" className="text-sm text-gray-700">
+            Mode
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_mode</span>
+          </label>
+          <select id="stripe_terminal_mode" value={mode} onChange={e => setMode(e.target.value === 'live' ? 'live' : 'test')}
+            className="px-2 py-1.5 rounded border border-gray-300 text-sm max-w-xs">
+            <option value="test">Test (simulated reader)</option>
+            <option value="live">Live (real S700, real cards)</option>
+          </select>
+        </div>
+        <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+          <label htmlFor="stripe_terminal_roles" className="text-sm text-gray-700">
+            Who can use it (comma-separated roles)
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_roles</span>
+          </label>
+          <input id="stripe_terminal_roles" value={roles} onChange={e => setRoles(e.target.value)}
+            placeholder="admin" className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+        </div>
+        <p className="text-xs text-gray-500">
+          Roles: admin, manager, staff, general_assistant (weekend managers follow manager). Leave as admin while testing.
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving || !changed}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ClaimsSettingsSection() {
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const [vals, setVals] = useState<Record<string, string>>({});
