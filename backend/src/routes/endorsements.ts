@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { ukToday } from '../services/uk-date';
 import {
   listEndorsements, getEndorsement, createEndorsement, updateEndorsement, markChecked, endEndorsement,
   listBrands, addBrand, updateBrand, type CheckState,
@@ -26,9 +27,13 @@ const endorsementSchema = z.object({
   deal: optText,
   confirmed_with: z.string().max(300).optional().nullable(),
   notes: optText,
+  // When the rep / A&R confirmed it — a past date when backfilling; null = not confirmed
+  checked_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
   checked_now: z.boolean().optional(),
 }).refine((d) => (!!d.person_id) !== (!!d.organisation_id), {
   message: 'An endorsement belongs to a person OR a band — pick exactly one',
+}).refine((d) => !d.checked_on || d.checked_on <= ukToday(), {
+  message: 'The confirmed date can’t be in the future',
 });
 
 // ── Brands ──

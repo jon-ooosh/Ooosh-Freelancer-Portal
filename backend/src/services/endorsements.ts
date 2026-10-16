@@ -128,13 +128,26 @@ export interface EndorsementInput {
   deal?: string | null;
   confirmed_with?: string | null;
   notes?: string | null;
-  /** Record "confirmed today" as part of this save */
+  /**
+   * The date the rep / A&R confirmed it (YYYY-MM-DD, never in the future — the
+   * route checks). Past dates are normal: backfilling what we already knew.
+   * null = not confirmed; left out = unchanged (on edit).
+   */
+  checked_on?: string | null;
+  /** Older form of checked_on = today; still accepted */
   checked_now?: boolean;
 }
 
 const blank = (v: string | null | undefined) => (v && v.trim() ? v.trim() : null);
 
+/** checked_on wins; the old checked_now flag means today; undefined = not given */
+function resolveCheckedOn(input: EndorsementInput): string | null | undefined {
+  if (input.checked_on !== undefined) return input.checked_on || null;
+  return input.checked_now ? ukToday() : undefined;
+}
+
 export async function createEndorsement(input: EndorsementInput, userId: string): Promise<Endorsement> {
+  const checkedOn = resolveCheckedOn(input) ?? null;
   const r = await query(
     `INSERT INTO artist_endorsements
        (brand_id, person_id, organisation_id, who, deal, confirmed_with, notes,
@@ -144,7 +157,7 @@ export async function createEndorsement(input: EndorsementInput, userId: string)
     [
       input.brand_id, input.person_id || null, input.organisation_id || null,
       blank(input.who), blank(input.deal), blank(input.confirmed_with), blank(input.notes),
-      input.checked_now ? ukToday() : null, input.checked_now ? userId : null, userId,
+      checkedOn, checkedOn ? userId : null, userId,
     ]
   );
   return (await getEndorsement(r.rows[0].id))!;
@@ -152,18 +165,23 @@ export async function createEndorsement(input: EndorsementInput, userId: string)
 
 /** Edit the text fields, the brand, or who it sits on ("Move to person"). */
 export async function updateEndorsement(id: string, input: EndorsementInput, userId: string): Promise<Endorsement | null> {
+  const checkedOn = resolveCheckedOn(input);
   const r = await query(
     `UPDATE artist_endorsements SET
        brand_id = $2, person_id = $3, organisation_id = $4, who = $5, deal = $6,
        confirmed_with = $7, notes = $8,
        last_checked_on = CASE WHEN $9::boolean THEN $10::date ELSE last_checked_on END,
-       last_checked_by = CASE WHEN $9::boolean THEN $11::uuid ELSE last_checked_by END,
+       -- whoever changes the date owns it; an unchanged date keeps its recorder
+       last_checked_by = CASE
+         WHEN $9::boolean AND $10::date IS DISTINCT FROM last_checked_on
+           THEN CASE WHEN $10::date IS NULL THEN NULL ELSE $11::uuid END
+         ELSE last_checked_by END,
        updated_at = NOW()
      WHERE id = $1 RETURNING id`,
     [
       id, input.brand_id, input.person_id || null, input.organisation_id || null,
       blank(input.who), blank(input.deal), blank(input.confirmed_with), blank(input.notes),
-      !!input.checked_now, ukToday(), userId,
+      checkedOn !== undefined, checkedOn ?? null, userId,
     ]
   );
   return r.rows[0] ? getEndorsement(id) : null;
