@@ -41,7 +41,7 @@ writing any new billing call).
 
 - **`pre_auth` holds its value in `amount_held`, NOT `excess_amount_taken`** (0 until capture). Coverage = `excess_amount_taken + amount_held`.
 - **`released` is terminal.** Exclude it from every "find an existing non-terminal record to reuse / absorb / re-arm" lookup, alongside `reimbursed` / `fully_claimed` / `rolled_over` / `not_required` / `waived`. Missing it lets a late duplicate event resurrect a released hold and re-surface stale money in Total Held.
-- **`waived` must be excluded from EVERY absorb lookup too** — one query that missed it silently un-waived a stub back to £1,200 when the driver's hire form landed.
+- **`waived` must be excluded from EVERY absorb lookup too** — one query that missed it silently un-waived a stub back to £1,200 when the driver's hire form landed. **One exception:** a stub waived by account auto-cover (`[Auto-covered by account]` in notes) IS absorbed — auto-cover re-covers it straight after. Skipping it left the stub beside a new driver record and doubled the job's excess (job 16833, Oct 2026).
 - **"Held on account" is an ATTRIBUTE (`held_on_account`), not a status.** The record stays `taken`. `rolled_over` is set ONLY by a genuine apply-forward to a child hire — it is excluded from `v_excess_held` on the assumption the cash moved.
 - **A rolled-over record's `payment_date` is when the rollover was applied, not when cash arrived.** Render "Carried over" and name the origin hire.
 
