@@ -482,6 +482,22 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
   }
 });
 
+// Normalise before comparing, or nothing ever compares equal: pg returns
+// DATE columns as JS Date objects (String() => "Wed May 28 2026 01:00:00
+// GMT+0100…") while the form posts "2026-05-28". Every date field therefore
+// logged as "changed" on every save, burying the one field staff actually
+// touched in a wall of noise — which is exactly what made the job 16291
+// audit trail hard to read. Shared by every write here that keeps an audit
+// trail, so they agree on what "changed" means.
+const normaliseForCompare = (v: unknown): string => {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
+  const str = String(v);
+  // "2026-05-28T00:00:00.000Z" and "2026-05-28" are the same day.
+  const iso = str.match(/^(\d{4}-\d{2}-\d{2})T/);
+  return iso ? iso[1] : str;
+};
+
 // ── GET /api/drivers/:id/audit-log — Edit history for a driver ──
 
 router.get('/:id/audit-log', async (req: AuthRequest, res: Response) => {
@@ -551,21 +567,6 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
 
     // Track what actually changed for audit
     const changedFields: Record<string, { old: unknown; new: unknown }> = {};
-
-    // Normalise before comparing, or nothing ever compares equal: pg returns
-    // DATE columns as JS Date objects (String() => "Wed May 28 2026 01:00:00
-    // GMT+0100…") while the form posts "2026-05-28". Every date field therefore
-    // logged as "changed" on every save, burying the one field staff actually
-    // touched in a wall of noise — which is exactly what made the job 16291
-    // audit trail hard to read.
-    const normaliseForCompare = (v: unknown): string => {
-      if (v === null || v === undefined) return '';
-      if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
-      const str = String(v);
-      // "2026-05-28T00:00:00.000Z" and "2026-05-28" are the same day.
-      const iso = str.match(/^(\d{4}-\d{2}-\d{2})T/);
-      return iso ? iso[1] : str;
-    };
 
     for (const [key, value] of Object.entries(fields)) {
       const prev = previousValues[key];
@@ -779,16 +780,25 @@ router.patch(
         params,
       );
 
-      await query(
-        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
-         VALUES ($1, 'driver', $2, 'update_document_dates', $3, $4)`,
-        [
-          req.user!.id, id,
-          JSON.stringify(Object.fromEntries(
-            Object.keys(fields).map(k => [k, previous.rows[0][k] ?? null]))),
-          JSON.stringify(fields),
-        ],
+      // Log only what actually moved. Every save re-derives all five
+      // *_valid_until windows, so logging every written column put
+      // "DVLA Valid Until: empty → empty" (×5) on each entry and buried the
+      // one date staff actually changed (Nick Harris, job 16535, Oct 2026).
+      const changed = Object.keys(fields).filter(
+        k => normaliseForCompare(previous.rows[0][k]) !== normaliseForCompare(fields[k]),
       );
+      if (changed.length > 0) {
+        await query(
+          `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+           VALUES ($1, 'driver', $2, 'update_document_dates', $3, $4)`,
+          [
+            req.user!.id, id,
+            JSON.stringify(Object.fromEntries(
+              changed.map(k => [k, previous.rows[0][k] ?? null]))),
+            JSON.stringify(Object.fromEntries(changed.map(k => [k, fields[k]]))),
+          ],
+        );
+      }
 
       res.json({ data: decryptDriverRow(result.rows[0]) });
     } catch (error) {

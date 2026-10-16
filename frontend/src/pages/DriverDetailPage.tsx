@@ -2265,6 +2265,9 @@ function DetailsTab({
                       const label = FIELD_LABELS[key] || key;
                       const oldStr = oldVal == null || oldVal === '' ? 'empty' : String(oldVal);
                       const newStr = newVal == null || newVal === '' ? 'empty' : String(newVal);
+                      // Entries written before Oct 2026 logged every re-derived
+                      // window, changed or not — hide those non-changes.
+                      if (oldStr === 'empty' && newStr === 'empty') return null;
                       // Format date values
                       const isDate = key.includes('date') || key.includes('valid') || key.includes('until');
                       const displayOld = isDate && oldStr !== 'empty' ? formatDate(oldStr) : oldStr;
