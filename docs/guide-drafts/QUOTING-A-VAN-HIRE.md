@@ -1,6 +1,6 @@
 # Quoting a van hire — DRAFT guide
 
-**Draft 4, 16 Oct 2026 (jon + Claude).** Written here until the Staff Documents "Share with
+**Draft 5, 16 Oct 2026 (jon + Claude).** Written here until the Staff Documents "Share with
 Claude" switch exists (`docs/AI-KNOWLEDGE-SPEC.md` §4); then it moves into OP and this file is
 deleted. **[?]** marks something still to confirm. Draft 3 adds what four real threads showed
 (Cootie Catcher, Rum Jungle, Robbie Pick, Emma McIvor — Oct 2026).
@@ -43,8 +43,12 @@ forward-facing vans, so many table vans) rather than an option we change.
   (Rum Jungle: "two quotes for our two 9 seater splitter options".)
 - **Party size rules vans out, never in.** 7 or more → never the Mini. Fewer than 6 doesn't
   mean the Mini — read the tone: "budget" / "cheapest" vs "comfy" / "long tour".
-- **Gear list** helps: a drum kit, keyboard, 3 guitars, 5–7 cases and 4 suitcases fitted a
-  Mini for 4 people (Emma); a big rig may not. **[?]** any rule of thumb for gear vs van?
+- **"Will all this fit?"** Never say yes or no. Fitting is rarely the issue — **weight** is,
+  and we can't know theirs (their own instruments, luggage, personal kit). Send the info sheet
+  for the van (rear photos, layout, approximate payload) and let them judge. A guess becomes
+  "you told me it would fit".
+- A gear list can still help choose between styles (Emma fitted a drum kit, keyboard, 3
+  guitars, 5–7 cases and 4 suitcases in a Mini for 4 people) — as a suggestion, never a promise.
 
 ## Gearbox and seating
 
@@ -94,9 +98,9 @@ Hire periods run **9am to 9am**. The number of days is the number of 9am-to-9am 
 ## Going abroad
 
 - Insured for **the UK, every EU country (including the Republic of Ireland), Iceland,
-  Liechtenstein, Norway and Switzerland** (insurance document, Markerstudy / Tradex). No extra
-  insurance or breakdown charge. **[?] the policy also says cover abroad is "for up to 30 days in
-  any period of insurance" — check with the broker what that means for a long European tour.**
+  Liechtenstein, Norway and Switzerland** (insurance document, Markerstudy / Tradex) — the same
+  countries for breakdown cover. No extra insurance or breakdown charge. (The policy's 30-day
+  wording is covered by a blanket extension to about 90 days per trip; no tour comes near it.)
 - A VE103B admin fee — it appears on the quote once the abroad item is added.
 - If a client changes plan so the van now goes abroad (Emma: "I'll drive it back to the UK"),
   the abroad item and VE103B come back in — check them. (Backline abroad needs a carnet — the
@@ -142,6 +146,7 @@ got them in lost property").
 - Never offer a discount on a van.
 - Never claim other people are interested in a van unless it's true.
 - Never retype or "improve" the T&Cs block.
+- Never tell a client their gear will (or won't) fit — send the info sheet.
 
 ## For Claude
 
