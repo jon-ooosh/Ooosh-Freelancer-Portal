@@ -12,6 +12,14 @@
  *   charge.refunded                  → email info@ (notify only; staff reconcile).
  *   refund.updated / charge.refund.updated (status=failed) → email info@ (refund
  *                                       bounced at the issuer — reimburse another way).
+ *   terminal.reader.action_succeeded/_failed, payment_intent.succeeded/_payment_failed
+ *                                     → card-reader payments (services/stripe-terminal.ts);
+ *                                       anything that isn't a reader payment is ignored.
+ *
+ * Two signing secrets: the live endpoint's (STRIPE_WEBHOOK_SECRET) and, while the
+ * card reader is being tested, the TEST-mode endpoint's (STRIPE_TEST_WEBHOOK_SECRET).
+ * A test-mode event only ever reaches the card-reader handler — never the live
+ * excess / refund / dispute handlers.
  *
  * Idempotency: stripe_events table. A row is inserted on receipt; processed_at is
  * stamped only after the handler succeeds. A failed handler returns 500 so Stripe
@@ -22,11 +30,12 @@ import { query } from '../config/database';
 import { getStripeClient, isStripeConfigured } from '../config/stripe';
 import { emailService } from './email-service';
 import { markExcessReleased } from './excess-preauth';
+import { handleTerminalWebhookEvent, isTerminalEventType } from './stripe-terminal';
 
 // Minimal structural types for the webhook payload fields we read. The Stripe v22
 // SDK doesn't merge its resource types into the default export's namespace, and
 // the codebase avoids naming `Stripe.*` types, so we type just what we use.
-type StripeEventLike = { id: string; type: string; data: { object: unknown } };
+type StripeEventLike = { id: string; type: string; livemode?: boolean; data: { object: unknown } };
 type PaymentIntentObj = { id: string };
 type DisputeObj = {
   id: string;
@@ -393,6 +402,13 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
       }
       break;
     }
+    // Card-reader payments. Returns false for anything that isn't one (a portal
+    // PaymentIntent, say), so the receipt row is dropped exactly as for `default`.
+    case 'terminal.reader.action_succeeded':
+    case 'terminal.reader.action_failed':
+    case 'payment_intent.succeeded':
+    case 'payment_intent.payment_failed':
+      return handleTerminalWebhookEvent(event);
     default:
       // Subscribed to a narrow set; ignore anything else quietly.
       console.log(`[stripe-webhook] Ignoring unhandled event type: ${event.type}`);
@@ -418,10 +434,22 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
     // signature and returns the parsed, typed event (we read it structurally).
     event = getStripeClient().webhooks.constructEvent(req.body, sig as string, secret);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('[stripe-webhook] signature verification failed:', msg);
-    res.status(400).send(`Webhook signature verification failed`);
-    return;
+    // Not signed by the live endpoint — try the test endpoint's secret (card-reader
+    // testing). Verification is local, so the live client does the check for both.
+    const testSecret = process.env.STRIPE_TEST_WEBHOOK_SECRET;
+    let testEvent: StripeEventLike | null = null;
+    if (testSecret) {
+      try {
+        testEvent = getStripeClient().webhooks.constructEvent(req.body, sig as string, testSecret);
+      } catch { /* fall through to the 400 below */ }
+    }
+    if (!testEvent) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[stripe-webhook] signature verification failed:', msg);
+      res.status(400).send(`Webhook signature verification failed`);
+      return;
+    }
+    event = testEvent;
   }
 
   try {
@@ -436,7 +464,11 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       [event.id, event.type]
     );
 
-    const handled = await processStripeEvent(event);
+    // A test-mode event may only reach the card-reader handler: every other handler
+    // here acts on live money (excess holds, refunds, disputes).
+    const handled = event.livemode === false && !isTerminalEventType(event.type)
+      ? false
+      : await processStripeEvent(event);
 
     if (handled) {
       await query(`UPDATE stripe_events SET processed_at = NOW() WHERE id = $1`, [event.id]);
