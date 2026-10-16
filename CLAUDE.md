@@ -263,7 +263,7 @@ it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
-Decisions captured, nothing built; the groundwork AI quoting will read.
+Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
@@ -349,8 +349,9 @@ existing definition:
 | Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |
 | Is this new person / org probably already in the address book? | `services/address-book-similar.ts` (fuzzy, warn-only; `GET /duplicates/similar`, frontend `SimilarRecordsWarning.tsx`). The Duplicates page is the exact after-the-fact clean-up |
 | Does this search look like a phone number? | `services/address-book-search.ts` `phoneDigitsForSearch()` — shared by the People and Organisations list searches |
+| Artist endorsements (who, which brand, the deal, last confirmed) | `services/endorsements.ts` — on a person OR a band (artist not in OP), never both; deal is free text; over 12 months since the last check is flagged. `forClientContext()` feeds New Enquiry / Job view. Page: Operations › Backline – Endorsements |
 | Recently viewed (per user) | `services/address-book-views.ts` — written ONLY when a detail page passes `?track_view=1`; pickers reading the same GET must not count |
-| Which address-book tabs have content (main row vs "More")? | `frontend/src/hooks/useTabPresence.ts` + `components/EntityTabs.tsx` — asks each tab's own endpoint; an empty tab moves under More, never hidden |
+| Which address-book tabs have content (main row vs "More")? | `frontend/src/hooks/useTabPresence.ts` + `components/EntityTabs.tsx` — asks each tab's own endpoint; an empty tab moves under More, never hidden; one opened during a visit stays in the row until you leave the page. Both pages keep the tab in `?tab=` |
 | Find-or-create a person (by email) / org (by exact name) from an inbound source | `services/address-book-resolve.ts` — exact only; shared by the website enquiry intake and Leads. Also `isGenericMailbox()` (info@, bookings@… is an org email, not a person) |
 | Did this job book, get lost, get cancelled? (history views) | `services/job-outcomes.ts` `JOB_OUTCOME_SQL` — org Hire History tab + Leads client history |
 | What does OP know about a lead's band (enquiries, losses, retros)? | `services/leads/history.ts` `getClientHistory()` |

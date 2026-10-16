@@ -41,6 +41,7 @@ import {
   withOptionSuffix,
 } from '../services/job-groups';
 import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
+import { forClientContext } from '../services/endorsements';
 
 const router = Router();
 router.use(authenticate);
@@ -1104,11 +1105,18 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
       };
     }
 
+    // Artist endorsements for the client / band and their current members —
+    // shown on New Enquiry and Job view only when there are any.
+    const endorsements = await forClientContext(
+      [client_id, band_id].filter((v): v is string => typeof v === 'string' && /^[0-9a-f-]{36}$/i.test(v))
+    );
+
     res.json({
       jobs: result.rows,
       stats: statsResult.rows[0],
       client_info,
       band_history,
+      endorsements,
     });
   } catch (error) {
     console.error('Client history error:', error);
