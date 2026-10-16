@@ -1,7 +1,8 @@
 # STRIPE TERMINAL SPEC — in-person card payments driven from OP
 
-**Status:** 📋 PLANNED (6–7 Oct 2026) — jon + Claude. Nothing built. Hardware on order (Stripe Reader
-S700); the build starts in a fresh session once it has arrived. Worldpay contract ends **March 2027**,
+**Status:** 🔨 PHASES 0–1 BUILT (16 Oct 2026) — admin-only, test mode first; **§11 is what shipped and
+where it differs from the plan below**. The S700 arrived 16 Oct and is registered (live mode) to the
+Ooosh location. Worldpay contract ends **March 2027**,
 which is the crossover deadline, not the start date. §1 is the settled decisions (jon's 7 Oct answers
 folded in); §9 has one open question left (online extended authorisation).
 
@@ -199,3 +200,85 @@ pre-auth link instead") and does not proceed unless a manager overrides.
 
 Tap to Pay on phones, offline mode (server-driven readers don't support it; Worldpay was online-only
 too), tips, multi-currency, Stripe Connect, replacing the online portal.
+
+## 11. What Phases 0–1 built (16 Oct 2026)
+
+**Where it lives.** `services/stripe-terminal.ts` (all of it), `routes/stripe-terminal.ts` (`/api/terminal/…`),
+migration 291 (`terminal_sessions` + two settings), `frontend/src/components/CardReaderPayment.tsx`.
+Tests: `services/__tests__/stripe-terminal.test.ts`.
+
+**The path (jon, 16 Oct).** Job → Money → **Record Payment → Method → "Card reader"**. Not a separate
+"Take card payment" button (§4.1 is superseded): the form's amount buttons are the portal's options, so
+choosing the reader just swaps Reference / "Also create deposit in HireHop" / Record for a reader picker
+and **Send £X to reader**. A custom amount (not one of the buttons) needs a reason in Notes (§1.11). While a
+payment is on the reader the amount and method lock and the form can't be closed by Escape or a click
+outside — only Cancel payment or Done.
+
+**Decisions taken in the build — differences from §1–§7:**
+1. **Recorded as `stripe_gbp`, not a new `stripe_terminal` method** (§1.6, §7 superseded). The money is in
+   the Stripe balance, exactly like portal money, and every refund path (`routes/money.ts` refund-payment,
+   `routes/excess.ts` reimburse, the pre-auth release) keys on `stripe_gbp` + the PaymentIntent — a new
+   method would have needed each of them changed and would have defaulted HireHop to Worldpay (169) in
+   `getHHBankId()` if one was missed. Same reasoning as PayPal-via-Stripe. In-person is told apart by
+   `job_payments.source = 'stripe_terminal'`, `stripe_payment_intent` set on the row (new optional
+   `recordPayment()` inputs), and "Card reader - <reader>" in the HireHop memo. No card-slip to-do follows
+   automatically (that rule is `worldpay`/`amex` only).
+2. **Polling, not Socket.io** (§4.6). The modal reads the session every 2s and asks Stripe directly every
+   ~10s and on **Check status**. Less code, and it also covers the missing-webhook case. The backend records
+   the payment itself, so closing the browser mid-payment loses nothing.
+3. **Hire payments only** (deposit / balance — what Record Payment records). Excess on the reader belongs
+   in the excess Manage modal and comes with Phase 2's pre-auth, which lives there too.
+4. **One gate for everything:** `system_settings.stripe_terminal_roles` (default `admin`, comma-separated;
+   `weekend_manager` follows `manager`). Every `/api/terminal` route checks it except `/access`, which the
+   form asks to decide whether to offer the method at all. Widen it in Settings → Card reader (admin only) when ready; no deploy.
+5. **Test mode records for real** (jon, 16 Oct): `system_settings.stripe_terminal_mode = 'test'` (the
+   default) drives a simulated reader on `STRIPE_TEST_SECRET_KEY` — OP creates the test Location and reader
+   itself the first time — and the result goes through `recordPayment()` exactly as live money does,
+   HireHop deposit, Xero and client email included, with "TEST MODE - not real money" in the memo. Use a
+   dummy job and void the deposit in HireHop/Xero afterwards. The form shows **Simulate approved card** /
+   **Simulate declined card** in place of a tap.
+6. **Webhooks.** The shared receiver (`POST /api/webhooks/stripe`) verifies against the live secret, then
+   `STRIPE_TEST_WEBHOOK_SECRET`. A TEST-mode event only ever reaches the card-reader handler, never the
+   live excess / refund / dispute handlers. Handled: `terminal.reader.action_succeeded` / `_failed`,
+   `payment_intent.succeeded` / `_payment_failed` — a PaymentIntent without `metadata.source = 'op_terminal'`
+   (i.e. every portal payment) is ignored and its receipt row dropped, as before.
+7. **Once only.** Recording flips `terminal_sessions.status` pending|failed → `recording` in one statement;
+   the reader event, the PaymentIntent event, a re-delivery and a poll can't record twice. If
+   `recordPayment()` fails after the card was approved the row goes `record_failed` and info@ is emailed —
+   nothing retries it automatically, because a retry could double-record.
+8. **Try again re-sends the SAME PaymentIntent.** Polls read the reader's action, not the PaymentIntent's
+   `last_payment_error` (which survives a re-send and would fail a payment still waiting for its card).
+9. **No Stripe receipt emails** (§1.7 stands; §4.7's `receipt_email` was a contradiction and is dropped).
+
+**Still to do for Phase 1's "done when":** the live switch (below) and the £1 live test.
+
+**Going live (when test mode has run cleanly):**
+1. Stripe Dashboard, LIVE mode → Developers → Webhooks → the **OP Stripe connection** endpoint → add
+   `terminal.reader.action_succeeded`, `terminal.reader.action_failed`, `payment_intent.payment_failed`
+   (`payment_intent.succeeded` is already on it).
+2. If `STRIPE_SECRET_KEY` is a restricted key: add **Terminal readers (write)** and **Terminal locations
+   (read)** to its permissions.
+3. OP Settings → **Card reader** (admin only) → Mode: Live, then reload the job page. The picker then lists the real S700.
+4. £1 deposit on the dummy job, tap a real card; check OP, HireHop (bank 267) and the client email; then
+   refund it from the Money tab (a Stripe refund against the PaymentIntent).
+
+## 12. Receipts and refunds (16 Oct 2026, after the first live £1)
+
+**"Send receipt?"** (jon's call, from the live test). A reader payment no longer emails the client the
+moment it records (`recordPayment()` `skip_client_email`). Once the card is approved the panel asks,
+using `components/RecipientPicker.tsx`: the job's contacts, with whoever the email would go to by
+itself pre-ticked (`resolveClientEmailTarget`), more than one allowed, or a typed address. It sends the
+SAME email as before (`sendPaymentEmail`, method "card"); the panel closes once it's answered.
+- **No receipt** is refused when the payment moved the job to Booked (`terminal_sessions.confirmed_booking`):
+  that email is the booking confirmation, so the button reads **Send confirmation** and there is no skip.
+- **Safety net:** a payment nobody answered for 15 minutes gets the usual email anyway
+  (`sweepTerminalReceipts()`, scheduler every 5 minutes). A failed automatic send emails info@.
+- `terminal_sessions.receipt_status` (migration 292): pending → sending → sent | auto_sent | skipped |
+  failed. `sending` is a claim, so the panel and the sweep can never both send.
+
+**Refunds of a reader payment** go through the existing Stripe refund path unchanged (it is `stripe_gbp`
+with its PaymentIntent). The modal's method reads **"Stripe - Card reader"** (`deposits[].op_source`),
+the refund email says "As you paid by card…" instead of "…through our online link" (`getRefundTimescale`
+key `stripe_terminal`), and both refund modals now have the same recipient picker (refund route
+`recipients`; usual people from `GET /money/:jobId/email-default?template=hire_refund_processed`).
+

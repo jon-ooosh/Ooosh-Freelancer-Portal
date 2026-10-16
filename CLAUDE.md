@@ -234,12 +234,13 @@ ONE custom line on Misc income (190) at 20%, raised on the close-out panel's but
 job stays HireHop 9 and is never completed. A hire invoiced before cancelling is refused (credit note,
 by hand). The portal takes payment at status 9 only while an approved invoice is owing.
 
-**PLANNED, Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
+**PHASES 0–1 BUILT (admin-only, test mode), Oct 2026:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
 Stripe account, money on HireHop bank 267, recording ONLY through `services/record-payment.ts`,
-pre-auths via extended authorisation (window depends on the account's merchant category — §9.1,
-unverified), no phone card payments (policy), shop + sitter till in Phase 3. Read it before
-building anything that takes a card in person. The week's payments work it builds on (PayPal via
+pre-auths via extended authorisation (30 days — the account is "Car rentals", §9.1), no phone card
+payments (policy), shop + sitter till in Phase 3. Read it before building anything that takes a card
+in person; **§11 is what Phases 0–1 built and where they differ from the plan** (recorded as `stripe_gbp`,
+not a new method; Record Payment → Method → Card reader; polling, not Socket.io); **§12 is "Send receipt?"** (the client email waits for staff; a booking confirmation can't be skipped; 15-minute safety net). The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
 **BUILT (PRs 1–4), Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
@@ -268,6 +269,11 @@ Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisi
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
 (support, 15 Oct 2026) — never work around it; §3 is the evidence. §5 the decisions, §6 what must exist first.
+
+**DRAFT SPEC, Oct 2026:** `docs/AI-KNOWLEDGE-SPEC.md` — the house knowledge every AI client draft
+reads: the voice (absorbs the chase-tone round), house guides as Staff Documents shared with Claude,
+the client brief, and "remember this?" client facts. **Code rails beat written guidance**; nothing is
+learned without a human tick. §9 is the open decisions.
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
@@ -397,6 +403,7 @@ existing definition:
 | A shop sale's receipt / refund receipt | `services/shop-receipts.ts` |
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
 | The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
+| A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
 | A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee |
 
@@ -500,7 +507,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh daily 07:30 ·
-Gmail ingestion every 10 min.
+Gmail ingestion every 10 min · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email).
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `is_internal` rule (see `jobs-pipeline-dashboard.md`).

@@ -12,7 +12,7 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { getGmailIngestionStatus, runIngestionForAllMailboxes, getAllGmailIngestionStatus } from '../services/gmail-ingestion';
 import { runEmailRetentionSweep } from '../services/email-retention';
-import { draftChaseEmail, learnChaseVoice } from '../services/chase-draft';
+import { draftChaseEmail } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
 import { getJobCommsSummaryStatus, generateJobCommsSummary } from '../services/comms-summary';
 import { answerCommsQuery } from '../services/comms-query';
@@ -526,27 +526,6 @@ router.get('/quote-versions-sweep', authorize('admin', 'manager'), (_req: AuthRe
       ...quoteSweepState.summary,
     },
   });
-});
-
-// POST /api/auto-chase/voice/learn — distil example client emails + our replies
-// into a PROPOSED chase_voice_instructions note (§9.3). Does NOT save — returns
-// the proposal for the human to review + save via the Settings PUT. Manager-tier
-// (this shapes every future client-facing chase). Needs Anthropic.
-router.post('/voice/learn', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
-  if (!isAnthropicConfigured()) {
-    return res.status(503).json({ error: 'Voice learning unavailable — ANTHROPIC_API_KEY not configured.' });
-  }
-  try {
-    const body = (req.body || {}) as { examples?: string; current?: string };
-    const examples = String(body.examples || '').trim();
-    if (!examples) return res.status(400).json({ error: 'Paste some example emails to learn from.' });
-    const proposed = await learnChaseVoice(examples, body.current ?? null);
-    res.json({ data: { proposed } });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[auto-chase] voice learn error:', error);
-    res.status(500).json({ error: message || 'Failed to learn chase voice' });
-  }
 });
 
 export default router;

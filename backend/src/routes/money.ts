@@ -21,7 +21,7 @@ import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh
 import { fetchDepositAvailability, releaseFromInvoice, revertRelease, type ReleaseResult } from '../services/hh-deposit-release';
 import { syncSavedRowToXero, sendXeroSyncFailedAlert, type XeroSyncResult } from '../services/hh-xero-sync';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
-import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, sendRefundEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
+import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, sendRefundEmail, logResendToTimeline, resolveClientEmailTarget, type StatementPaymentLine } from '../services/money-emails';
 import {
   triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
   triggerCarnetFormOnConfirmation,
@@ -773,6 +773,11 @@ const refundPaymentSchema = z.object({
   // the house rule is do-then-record — so the Money tab defaults this ON and
   // lets whoever is recording it untick when they haven't sent it yet.
   notify_client: z.boolean().optional(),
+  // Who the refund email goes to (the modal's picker). Omitted = the usual recipients.
+  recipients: z.array(z.object({
+    email: z.string().email().max(255),
+    name: z.string().max(255).nullable().optional(),
+  })).max(10).optional(),
   // Staff have seen the "this deposit is fully applied to invoice X — I'll
   // release £Y back from it first" panel and confirmed. Without it a refund
   // needing a release returns 409 `release_required` rather than quietly
@@ -2128,17 +2133,18 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         const hireDepIds = deposits.filter(d => !d.is_refund && d.id).map(d => d.id);
         if (hireDepIds.length > 0) {
           const opPayments = await query(
-            `SELECT hirehop_deposit_id, stripe_payment_intent, payment_method
+            `SELECT hirehop_deposit_id, stripe_payment_intent, payment_method, source
              FROM job_payments
              WHERE job_id = $1 AND hirehop_deposit_id = ANY($2)
                AND payment_type IN ('deposit', 'balance', 'other')`,
             [job.id, hireDepIds]
           );
-          const byHhDep = new Map<number, { stripe_payment_intent: string | null; payment_method: string | null }>();
+          const byHhDep = new Map<number, { stripe_payment_intent: string | null; payment_method: string | null; source: string | null }>();
           for (const r of opPayments.rows) {
             byHhDep.set(r.hirehop_deposit_id, {
               stripe_payment_intent: r.stripe_payment_intent || null,
               payment_method: r.payment_method || null,
+              source: r.source || null,
             });
           }
           for (const d of deposits) {
@@ -2147,6 +2153,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
             if (match) {
               (d as Record<string, unknown>).stripe_payment_intent = match.stripe_payment_intent;
               (d as Record<string, unknown>).op_payment_method = match.payment_method;
+              // 'stripe_terminal' = taken on the card reader (the refund modal says so).
+              (d as Record<string, unknown>).op_source = match.source;
             }
           }
         }
@@ -2318,6 +2326,22 @@ router.get('/:jobId/payments', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[money] Payments error:', error);
     res.status(500).json({ error: 'Failed to load payments' });
+  }
+});
+
+// ── GET /api/money/:jobId/email-default?template=… — who a client money email goes to by itself ──
+// Lets a recipient picker pre-tick the usual people (resolveClientEmailTarget, the one
+// recipient rule). Empty when that would only be the info@ safety net.
+const EMAIL_DEFAULT_TEMPLATES = new Set(['hire_refund_processed', 'payment_received', 'booking_confirmed_deposit']);
+router.get('/:jobId/email-default', async (req: AuthRequest, res: Response) => {
+  try {
+    const template = typeof req.query.template === 'string' ? req.query.template : '';
+    if (!EMAIL_DEFAULT_TEMPLATES.has(template)) { res.status(400).json({ error: 'Unknown template' }); return; }
+    const target = await resolveClientEmailTarget(req.params.jobId as string, template);
+    res.json({ data: { emails: target.isFallback ? [] : [target.primaryEmail, ...target.ccEmails].filter(Boolean) } });
+  } catch (error) {
+    console.error('[money] email-default error:', error);
+    res.status(500).json({ error: 'Failed to read the usual recipients' });
   }
 });
 
@@ -2512,7 +2536,7 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
 router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
-    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id, allow_release, notify_client } = req.body;
+    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id, allow_release, notify_client, recipients } = req.body;
 
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
@@ -2531,14 +2555,14 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
     // original amount for validation. Best-effort: HH-originating deposits
     // may not have an OP row, in which case we just record-keep against HH.
     const opPaymentRes = await query(
-      `SELECT id, amount, stripe_payment_intent, payment_method, payment_type
+      `SELECT id, amount, stripe_payment_intent, payment_method, payment_type, source
        FROM job_payments
        WHERE job_id = $1 AND hirehop_deposit_id = $2
          AND payment_type IN ('deposit', 'balance', 'other')
        ORDER BY payment_date DESC LIMIT 1`,
       [job.id, hh_deposit_id]
     );
-    const originalPayment: { id: number; amount: string; stripe_payment_intent: string | null; payment_method: string; payment_type: string } | null = opPaymentRes.rows[0] || null;
+    const originalPayment: { id: number; amount: string; stripe_payment_intent: string | null; payment_method: string; payment_type: string; source: string | null } | null = opPaymentRes.rows[0] || null;
     let stripePaymentIntent = originalPayment?.stripe_payment_intent || null;
 
     // Validate amount against the original (when we know it). Allow up to the
@@ -2956,7 +2980,9 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
     let clientEmail: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null = null;
     if (shouldEmail) {
       try {
-        clientEmail = await sendRefundEmail({ jobId: job.id, amount, paymentMethod: method });
+        // A card-reader payment is stripe_gbp too, but was never "our online link".
+        const timescaleKey = method === 'stripe_gbp' && originalPayment?.source === 'stripe_terminal' ? 'stripe_terminal' : method;
+        clientEmail = await sendRefundEmail({ jobId: job.id, amount, paymentMethod: timescaleKey, overrideRecipients: recipients });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error('[money] Refund confirmation email threw (refund itself is unaffected):', msg);

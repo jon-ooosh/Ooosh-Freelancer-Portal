@@ -17,6 +17,8 @@ import CostCaptureModal from './CostCaptureModal';
 import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeSlot } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
+import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
+import RecipientPicker, { type PickedRecipient } from './RecipientPicker';
 import CloseOutMoneyPanel from './CloseOutMoneyPanel';
 import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
@@ -92,6 +94,8 @@ interface FinancialData {
       stripe_payment_intent?: string | null;
       /** Original OP-side payment method (when matched). Drives the modal's default. */
       op_payment_method?: string | null;
+      /** job_payments.source — 'stripe_terminal' when taken on the card reader. */
+      op_source?: string | null;
     }>;
     /** OP-only pending refund IOUs (e.g. cancellation refunds) awaiting processing. */
     pending_refunds?: Array<{
@@ -342,19 +346,40 @@ function ReleaseConsentPanel({ plan, refundAmount, depositAmount, viaStripe }: {
  * precisely so the exception can be caught. The label says the assumption out
  * loud rather than leaving it implicit.
  */
-function RefundNotifyControl({ viaStripe, checked, onChange }: {
+function RefundNotifyControl({ viaStripe, checked, onChange, jobId, onRecipients }: {
   viaStripe: boolean;
   checked: boolean;
   onChange: (v: boolean) => void;
+  jobId: string;
+  /** Who the confirmation goes to — the usual people pre-ticked, editable (jon, 16 Oct 2026). */
+  onRecipients: (r: PickedRecipient[]) => void;
 }) {
+  const emailing = viaStripe || checked;
+  const [defaults, setDefaults] = useState<string[] | null | undefined>(undefined);
+  useEffect(() => {
+    if (!emailing || defaults !== undefined) return;
+    api.get<{ data: { emails: string[] } }>(`/money/${jobId}/email-default?template=hire_refund_processed`)
+      .then((r) => setDefaults(r.data.emails))
+      .catch(() => setDefaults(null));
+  }, [emailing, jobId, defaults]);
+  const picker = emailing && (
+    <div className="mt-2">
+      <p className="text-[11px] text-gray-600 mb-1">Send the confirmation to:</p>
+      <RecipientPicker jobId={jobId} preselect={defaults} onChange={onRecipients} />
+    </div>
+  );
   if (viaStripe) {
     return (
-      <p className="text-[11px] text-gray-500">
-        The client will be emailed confirmation of this refund.
-      </p>
+      <div>
+        <p className="text-[11px] text-gray-500">
+          The client will be emailed confirmation of this refund.
+        </p>
+        {picker}
+      </div>
     );
   }
   return (
+    <div>
     <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
       <input
         type="checkbox"
@@ -369,6 +394,8 @@ function RefundNotifyControl({ viaStripe, checked, onChange }: {
         </span>
       </span>
     </label>
+    {picker}
+    </div>
   );
 }
 
@@ -419,6 +446,13 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   const [payLoading, setPayLoading] = useState(false);
   const [payError, setPayError] = useState('');
   const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
+  // Card reader (STRIPE-TERMINAL-SPEC): whether this login may use it (asked once,
+  // when the form first opens), whether a payment is on the reader right now (locks
+  // amount + method, and the form can't be closed by accident), and whether one was
+  // recorded (the tab refreshes on close, never mid-flow).
+  const [readerAccess, setReaderAccess] = useState<CardReaderAccess | null>(null);
+  const [readerActive, setReaderActive] = useState(false);
+  const [readerRecorded, setReaderRecorded] = useState(false);
 
   // Excess action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
@@ -460,6 +494,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   // has normally gone — but it's a checkbox precisely so the exception is
   // catchable. Ignored on the Stripe path, which always emails.
   const [refundNotifyClient, setRefundNotifyClient] = useState(true);
+  const [refundRecipients, setRefundRecipients] = useState<PickedRecipient[]>([]);
   // Set when the backend answered 409 `release_required`: this deposit is fully
   // applied to an invoice, so HireHop has nothing to refund from it until some
   // is released back off that invoice. We never do that silently — the panel
@@ -538,6 +573,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
     setRefundResult(null);
     setRefundRelease(null);
     setRefundNotifyClient(true);
+    setRefundRecipients([]);
   };
 
   const closeRefundModal = () => {
@@ -603,6 +639,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
           // Sent regardless of method; the backend ignores it on the Stripe
           // path, which always emails.
           notify_client: refundNotifyClient,
+          ...(refundRecipients.length > 0 ? { recipients: refundRecipients } : {}),
         }
       );
       setRefundRelease(null);
@@ -663,6 +700,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
     setRefundResult(null);
     setRefundRelease(null);
     setRefundNotifyClient(true);
+    setRefundRecipients([]);
   };
 
   const closePendingRefundModal = () => {
@@ -755,6 +793,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
           // Sent regardless of method; the backend ignores it on the Stripe
           // path, which always emails.
           notify_client: refundNotifyClient,
+          ...(refundRecipients.length > 0 ? { recipients: refundRecipients } : {}),
         }
       );
       setRefundRelease(null);
@@ -872,18 +911,39 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
 
   useEffect(() => { loadJobCosts(); }, [loadJobCosts]);
 
-  // Escape key closes payment modal
+  // Close the Record Payment form. After a card-reader payment, reset the form and
+  // refresh the tab — the reader flow defers that to here so it can't unmount itself.
+  function closePaymentForm() {
+    setShowPaymentForm(false);
+    setPayError('');
+    setPayHHPushError(null);
+    if (readerRecorded) {
+      setReaderRecorded(false);
+      setPayAmount('');
+      setPayNotes('');
+      setPayMethod('worldpay');
+      loadData();
+      onJobChanged?.();
+    }
+  }
+
+  // Ask once whether this login may use the card reader (admin-only while testing).
+  useEffect(() => {
+    if (!showPaymentForm || readerAccess) return;
+    api.get<{ data: CardReaderAccess }>('/terminal/access')
+      .then((r) => setReaderAccess(r.data))
+      .catch(() => setReaderAccess({ enabled: false, mode: 'test' }));
+  }, [showPaymentForm, readerAccess]);
+
+  // Escape key closes payment modal — but not while a payment is on the reader.
   useEffect(() => {
     if (!showPaymentForm) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setShowPaymentForm(false);
-        setPayHHPushError(null);
-      }
+      if (e.key === 'Escape' && !readerActive) closePaymentForm();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [showPaymentForm]);
+  }, [showPaymentForm, readerActive, readerRecorded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleRecordPayment(typeOverride?: string) {
     if (!payAmount || parseFloat(payAmount) <= 0) {
@@ -2092,8 +2152,24 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
         // Auto-detect type: if deposit not yet paid, it's a deposit; otherwise balance
         const autoType = !financial.deposit_paid ? 'deposit' : 'balance';
 
+        const isReader = payMethod === 'card_reader';
+        const methodOptions = readerAccess?.enabled
+          ? [{ value: 'card_reader', label: readerAccess.mode === 'test' ? 'Card reader (TEST MODE)' : 'Card reader' }, ...PAYMENT_METHODS_BASE]
+          : PAYMENT_METHODS_BASE;
+        // An amount that isn't one of the buttons needs a reason (spec §1.11). The
+        // Notes box only says so once such an amount is in the box (jon, 16 Oct).
+        const enteredAmt = parseFloat(payAmount);
+        const isCustomAmount = !!payAmount && !isNaN(enteredAmt)
+          && !quickAmounts.some((qa) => qa.amount.toFixed(2) === enteredAmt.toFixed(2));
+        const reasonRequired = isReader && isCustomAmount;
+        const validateReader = (): string | null => {
+          if (!payAmount || isNaN(enteredAmt) || enteredAmt < 1) return 'Enter an amount of at least £1.00';
+          if (isCustomAmount && !payNotes.trim()) return 'Add a reason for a custom amount (in Notes)';
+          return null;
+        };
+
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowPaymentForm(false)}>
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { if (!readerActive) closePaymentForm(); }}>
             <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Record Payment</h3>
 
@@ -2111,6 +2187,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                       {quickAmounts.map((qa) => (
                         <button
                           key={qa.label}
+                          disabled={readerActive}
                           onClick={() => setPayAmount(qa.amount.toFixed(2))}
                           className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
                             payAmount === qa.amount.toFixed(2)
@@ -2128,6 +2205,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                         type="number"
                         step="0.01"
                         value={payAmount}
+                        disabled={readerActive}
                         onChange={(e) => setPayAmount(e.target.value)}
                         className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
                         placeholder="Or enter custom amount"
@@ -2146,6 +2224,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                         type="number"
                         step="0.01"
                         value={payAmount}
+                        disabled={readerActive}
                         onChange={(e) => setPayAmount(e.target.value)}
                         className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
                         placeholder="0.00"
@@ -2158,15 +2237,17 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                   <label className="block text-xs font-medium text-gray-600 mb-1">Method</label>
                   <select
                     value={payMethod}
+                    disabled={readerActive}
                     onChange={(e) => setPayMethod(e.target.value)}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   >
-                    {PAYMENT_METHODS_BASE.map((m) => (
+                    {methodOptions.map((m) => (
                       <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
                   </select>
                 </div>
 
+                {!isReader && (
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Reference (optional)</label>
                   <input
@@ -2177,18 +2258,39 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
+                )}
 
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    {reasonRequired
+                      ? <>Reason for this amount <span className="text-red-600">*</span></>
+                      : 'Notes (optional)'}
+                  </label>
                   <input
                     type="text"
                     value={payNotes}
+                    disabled={readerActive}
                     onChange={(e) => setPayNotes(e.target.value)}
-                    placeholder="Any additional details"
+                    placeholder={reasonRequired ? 'Why this amount, not one of the buttons above' : 'Any additional details'}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
 
+                {isReader && readerAccess?.enabled && (
+                  <CardReaderPayment
+                    jobId={jobId}
+                    access={readerAccess}
+                    amount={parseFloat(payAmount) || 0}
+                    paymentType={autoType}
+                    notes={payNotes.trim()}
+                    validate={validateReader}
+                    onRecorded={() => setReaderRecorded(true)}
+                    onActiveChange={setReaderActive}
+                    onClose={closePaymentForm}
+                  />
+                )}
+
+                {!isReader && (<>
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
@@ -2226,6 +2328,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     {payHHPushError ? 'Close' : 'Cancel'}
                   </button>
                 </div>
+                </>)}
               </div>
             </div>
           </div>
@@ -2505,7 +2608,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                     disabled={!!refundingDep.stripe_payment_intent}
                   >
-                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="stripe_gbp">{refundingDep.op_source === 'stripe_terminal' ? 'Stripe - Card reader' : 'Stripe GBP'}</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
                     <option value="wise_bacs">Wise (BACS)</option>
@@ -2514,7 +2617,11 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     <option value="paypal">PayPal</option>
                   </select>
                   {refundingDep.stripe_payment_intent && (
-                    <p className="text-[11px] text-gray-500 mt-1">Locked to Stripe — original payment was made via Stripe.</p>
+                    <p className="text-[11px] text-gray-500 mt-1">
+                      {refundingDep.op_source === 'stripe_terminal'
+                        ? 'Locked - goes back to the card used on the reader.'
+                        : 'Locked to Stripe — original payment was made via Stripe.'}
+                    </p>
                   )}
                 </div>
                 <div>
@@ -2541,6 +2648,8 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                   viaStripe={!!refundingDep.stripe_payment_intent}
                   checked={refundNotifyClient}
                   onChange={setRefundNotifyClient}
+                  jobId={jobId}
+                  onRecipients={setRefundRecipients}
                 />
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
@@ -2727,7 +2836,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                     disabled={!!selectedDeposit?.stripe_payment_intent}
                   >
-                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="stripe_gbp">{selectedDeposit?.op_source === 'stripe_terminal' ? 'Stripe - Card reader' : 'Stripe GBP'}</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
                     <option value="wise_bacs">Wise (BACS)</option>
@@ -2764,6 +2873,8 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                   viaStripe={!!selectedDeposit?.stripe_payment_intent}
                   checked={refundNotifyClient}
                   onChange={setRefundNotifyClient}
+                  jobId={jobId}
+                  onRecipients={setRefundRecipients}
                 />
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>

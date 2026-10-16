@@ -11,6 +11,10 @@
  *   STRIPE_WEBHOOK_SECRET — for verifying inbound webhook signatures (PR 3).
  *                          Not required for outbound API calls (capture / refund / cancel).
  *
+ * Optional, for the card reader's test mode only (docs/STRIPE-TERMINAL-SPEC.md):
+ *   STRIPE_TEST_SECRET_KEY     — the account's sk_test_ key (simulated reader).
+ *   STRIPE_TEST_WEBHOOK_SECRET — signing secret of the TEST-mode webhook endpoint.
+ *
  * Stripe API version is pinned so behaviour doesn't shift under us when Stripe
  * releases new versions. Bump deliberately, test in dev, then deploy.
  */
@@ -51,6 +55,42 @@ export function getStripeClient(): StripeInstance {
   }
 
   return stripeClient;
+}
+
+let stripeTestClient: StripeInstance | null = null;
+
+/**
+ * The TEST-mode client (STRIPE_TEST_SECRET_KEY). Used ONLY by the card-reader module
+ * (services/stripe-terminal.ts) while it is in test mode, to drive a simulated reader
+ * without a card. Nothing else should ever reach for it — every other Stripe path is
+ * live money.
+ */
+export function getStripeTestClient(): StripeInstance {
+  if (!process.env.STRIPE_TEST_SECRET_KEY) {
+    throw new Error(
+      'STRIPE_TEST_SECRET_KEY is not set. Add it to backend/.env on the server to use the card reader in test mode.'
+    );
+  }
+
+  if (!stripeTestClient) {
+    stripeTestClient = new Stripe(process.env.STRIPE_TEST_SECRET_KEY, {
+      typescript: true,
+      appInfo: {
+        name: 'Ooosh Operations Platform',
+        version: '1.0.0',
+      },
+      maxNetworkRetries: 2,
+      timeout: 20_000,
+    });
+    console.log('[stripe] Test-mode client initialised');
+  }
+
+  return stripeTestClient;
+}
+
+/** The live client or the test client, by an object's `livemode`. */
+export function getStripeClientFor(livemode: boolean): StripeInstance {
+  return livemode ? getStripeClient() : getStripeTestClient();
 }
 
 /**
