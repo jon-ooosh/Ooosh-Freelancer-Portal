@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import SearchPicker, { type PickerOption } from './SearchPicker';
+import DatePicker from './DatePicker';
+import { ukToday } from '../lib/ukDate';
 
 /**
  * Artist endorsements — list + add/edit. Used on Operations › Backline –
@@ -97,7 +99,8 @@ function EndorsementForm({ initial, fixedOwner, brands, onBrandAdded, onSaved, o
   const [who, setWho] = useState(initial?.who ?? '');
   const [deal, setDeal] = useState(initial?.deal ?? '');
   const [confirmedWith, setConfirmedWith] = useState(initial?.confirmed_with ?? '');
-  const [checkedNow, setCheckedNow] = useState(false);
+  // When the rep / A&R confirmed it — any past date (backfilling), or Today
+  const [checkedOn, setCheckedOn] = useState(initial?.last_checked_on ?? '');
   const [notes, setNotes] = useState(initial?.notes ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -134,7 +137,7 @@ function EndorsementForm({ initial, fixedOwner, brands, onBrandAdded, onSaved, o
       deal: deal || null,
       confirmed_with: confirmedWith || null,
       notes: notes || null,
-      checked_now: checkedNow,
+      checked_on: checkedOn || null,
     };
     try {
       if (initial) await api.put(`/endorsements/${initial.id}`, body);
@@ -152,7 +155,8 @@ function EndorsementForm({ initial, fixedOwner, brands, onBrandAdded, onSaved, o
       {error && <div className="bg-red-50 text-red-700 px-3 py-2 rounded text-sm">{error}</div>}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div>
-          <label className={labelCls}>Brand *</label>
+          {/* Same height as the artist label row (which carries the person / band switch) */}
+          <div className="flex items-center h-6 mb-1"><label className={`${labelCls} mb-0`}>Brand *</label></div>
           <div className="flex gap-2">
             <select value={brandId} onChange={(e) => setBrandId(e.target.value)} className={inputCls}>
               <option value="">Pick a brand…</option>
@@ -167,14 +171,22 @@ function EndorsementForm({ initial, fixedOwner, brands, onBrandAdded, onSaved, o
         </div>
         {canPickOwner && (
           <div>
-            <label className={labelCls}>Endorsed artist *</label>
-            <div className="flex gap-3 mb-1.5 text-sm">
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input type="radio" checked={ownerKind === 'person'} onChange={() => { setOwnerKind('person'); setOwner(null); }} /> A person
-              </label>
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input type="radio" checked={ownerKind === 'organisation'} onChange={() => { setOwnerKind('organisation'); setOwner(null); }} /> The band (artist not in OP)
-              </label>
+            {/* Person / band switch sits in the label row so the picker lines up with Brand */}
+            <div className="flex items-center justify-between gap-2 h-6 mb-1">
+              <span className={`${labelCls} mb-0`}>Endorsed artist *</span>
+              <div className="inline-flex rounded border border-gray-300 overflow-hidden text-xs" role="group" aria-label="Endorsement is on">
+                {([['person', 'A person'], ['organisation', 'The band (artist not in OP)']] as const).map(([k, label]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => { if (ownerKind !== k) { setOwnerKind(k); setOwner(null); } }}
+                    aria-pressed={ownerKind === k}
+                    className={`px-2 py-0.5 ${ownerKind === k ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
             <SearchPicker
               key={ownerKind}
@@ -204,14 +216,19 @@ function EndorsementForm({ initial, fixedOwner, brands, onBrandAdded, onSaved, o
         <div>
           <label className={labelCls}>Confirmed with (rep / A&R)</label>
           <input value={confirmedWith}
-            onChange={(e) => { setConfirmedWith(e.target.value); if (!initial && e.target.value.trim()) setCheckedNow(true); }}
+            onChange={(e) => { setConfirmedWith(e.target.value); if (!checkedOn && e.target.value.trim()) setCheckedOn(ukToday()); }}
             placeholder="e.g. Jo Smith, DW artist relations" className={inputCls} />
         </div>
-        <div className="flex items-end pb-2">
-          <label className="flex items-center gap-2 text-sm cursor-pointer">
-            <input type="checkbox" checked={checkedNow} onChange={(e) => setCheckedNow(e.target.checked)} className="rounded border-gray-300" />
-            They confirmed it today
-          </label>
+        <div>
+          <label className={labelCls}>Confirmed on</label>
+          <div className="flex items-center gap-2">
+            <DatePicker value={checkedOn} onChange={setCheckedOn} max={ukToday()} className="flex-1" placeholder="Not confirmed yet" />
+            <button type="button" onClick={() => setCheckedOn(ukToday())} className="px-3 py-2 text-sm border border-gray-300 rounded bg-white hover:bg-gray-50">Today</button>
+            {checkedOn && (
+              <button type="button" onClick={() => setCheckedOn('')} className="text-xs text-gray-500 hover:underline" title="Not confirmed yet">Clear date</button>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-gray-500">Backfilling? Pick the date they actually confirmed it — over 12 months ago shows red.</p>
         </div>
       </div>
       <div>
