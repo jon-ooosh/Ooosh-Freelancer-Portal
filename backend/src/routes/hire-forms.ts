@@ -36,7 +36,7 @@ import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
 import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
-import { applyAccountAutoCover } from '../services/hh-requirement-derivation';
+import { applyAccountAutoCover, AUTO_COVER_MARKER } from '../services/hh-requirement-derivation';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
 
@@ -500,12 +500,19 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // back to 'pending' at £1,200 the moment the driver's hire form landed,
       // with nothing to tell staff it had happened. Every sibling query in this
       // file already excluded it — this was the one that did not.
+      //
+      // The ONE exception (Oct 2026): a stub waived by account auto-cover
+      // (AUTO_COVER_MARKER in notes). That waive is the machine's, not a staff
+      // decision, and applyAccountAutoCover re-covers the absorbed record right
+      // after COMMIT. Skipping it stranded the stub beside a NEW driver record —
+      // two £1,200 records on a one-van hire, "£2,400 required" (job 16833).
       `SELECT id, excess_amount_taken, excess_status, payment_method, payment_reference, payment_date, hh_deposit_id
        FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND (excess_status <> 'waived' OR COALESCE(notes, '') LIKE '%' || $2 || '%')
        ORDER BY created_at DESC LIMIT 1`,
-      [jobId]
+      [jobId, AUTO_COVER_MARKER]
     ) : { rows: [] };
 
     if (existingPortalExcess.rows.length > 0) {
@@ -1126,12 +1133,15 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     // internal-job cascade) must never be silently flipped back to 'pending'.
     // 'released' is terminal (migration 087) — absorbing one resurrects a dead
     // pre-auth to 'pending' with stale amount_held (job 15934 incident, Jun 2026).
+    // Exception: a stub waived by account auto-cover (marker present) IS
+    // absorbed — same reason as the hire-form POST above (job 16833).
     const orphanExcess = await query(
       `SELECT id FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND (excess_status <> 'waived' OR COALESCE(notes, '') LIKE '%' || $2 || '%')
        ORDER BY created_at ASC LIMIT 1`,
-      [f.job_id]
+      [f.job_id, AUTO_COVER_MARKER]
     );
 
     if (orphanExcess.rows.length > 0) {
