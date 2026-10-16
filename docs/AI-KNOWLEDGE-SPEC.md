@@ -144,6 +144,13 @@ we wouldn't say to the client's face (§9.4).
    ones become a **proposed new version** of the guide (existing approval flow).
 4. Nothing is saved without a tick. An ignored suggestion is not asked again for that draft.
 
+## 6a. Later — real scarcity
+
+"Only one Basic left on your dates" moves bookings, and OP can know it honestly: HireHop
+availability plus OP's own open pipeline (quotes out for the same style and dates). A later
+feature for the chase drafts and quotes (`AUTO-CHASE-SPEC.md`); until then Claude only states
+scarcity that HireHop availability shows, never "other people are interested".
+
 ## 7. Phase E — back to quoting
 
 Un-park `AI-QUOTING-SPEC.md` for vans once: the voice is trusted (A), "Quoting a van hire"

@@ -60,6 +60,9 @@ It follows directly on from the auto-responder voice / chase-tone work
 - **Weighs on the own-document question:** jon wants the current quote attached on EVERY change
   and every chase, so the manual download happens many times per enquiry, not once. Measure
   how often in phase 1 before deciding whether OP should make its own quote document (§4).
+- **Decided (jon, 16 Oct 2026): quotes stay HireHop's, downloaded by hand.** An OP-made quote
+  would differ slightly in layout from HireHop's, and clients would see two different-looking
+  versions of one quote. Not revisited unless HireHop's position changes.
 
 ## 4. Phase 1 working method
 

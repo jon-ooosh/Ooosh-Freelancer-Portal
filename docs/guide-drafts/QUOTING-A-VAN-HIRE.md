@@ -1,6 +1,6 @@
 # Quoting a van hire — DRAFT guide
 
-**Draft 3, 16 Oct 2026 (jon + Claude).** Written here until the Staff Documents "Share with
+**Draft 4, 16 Oct 2026 (jon + Claude).** Written here until the Staff Documents "Share with
 Claude" switch exists (`docs/AI-KNOWLEDGE-SPEC.md` §4); then it moves into OP and this file is
 deleted. **[?]** marks something still to confirm. Draft 3 adds what four real threads showed
 (Cootie Catcher, Rum Jungle, Robbie Pick, Emma McIvor — Oct 2026).
@@ -43,8 +43,8 @@ forward-facing vans, so many table vans) rather than an option we change.
   (Rum Jungle: "two quotes for our two 9 seater splitter options".)
 - **Party size rules vans out, never in.** 7 or more → never the Mini. Fewer than 6 doesn't
   mean the Mini — read the tone: "budget" / "cheapest" vs "comfy" / "long tour".
-- **Gear list** helps: a full backline plus cases for 4 people still fits a Mini (Emma); a
-  big rig may not. **[?]** any rule of thumb for gear vs van?
+- **Gear list** helps: a drum kit, keyboard, 3 guitars, 5–7 cases and 4 suitcases fitted a
+  Mini for 4 people (Emma); a big rig may not. **[?]** any rule of thumb for gear vs van?
 
 ## Gearbox and seating
 
@@ -87,24 +87,23 @@ Hire periods run **9am to 9am**. The number of days is the number of 9am-to-9am 
   Victoria → Portslade (about 80 minutes from Victoria; the depot is a ten-minute walk from
   Portslade station). **If they give a specific address, that wins.**
 - **Prices** are worked out case by case with the transport calculator. Phase 1: a person
-  prices it. Staff do give a range for London ("£180–£240 + VAT for London and surrounding
-  areas") **[?] is that the standing range to use?** — and say delivery figures are estimates
-  that depend on address and time of day.
+  prices it — but Claude may give the London ballpark: **around £180–£240 + VAT for London and
+  surrounding areas**, as an estimate that depends on the address and time of day.
 - One-way and abroad (e.g. collection in Brussels) are a person's job.
 
 ## Going abroad
 
-- Insured for the UK, mainland EU, Norway and Switzerland **[?] Ireland and EU islands
-  (Corsica, Sardinia, Balearics)?** No extra insurance or breakdown charge.
+- Insured for **the UK, every EU country (including the Republic of Ireland), Iceland,
+  Liechtenstein, Norway and Switzerland** (insurance document, Markerstudy / Tradex). No extra
+  insurance or breakdown charge. **[?] the policy also says cover abroad is "for up to 30 days in
+  any period of insurance" — check with the broker what that means for a long European tour.**
 - A VE103B admin fee — it appears on the quote once the abroad item is added.
-- **Backline going to Europe needs a carnet.** We can administer it (usually around £750 + VAT)
-  or they can arrange their own (around £550 + VAT) **[?] confirm these are standing figures.**
 - If a client changes plan so the van now goes abroad (Emma: "I'll drive it back to the UK"),
-  the abroad item, VE103B and carnet questions all come back in — check them.
+  the abroad item and VE103B come back in — check them. (Backline abroad needs a carnet — the
+  backline guide's job.)
 - London ULEZ: our vans meet it. Congestion Charge: on autopay, recharged after the hire.
-  Paris Crit'Air: **[?]** Will told Emma "all our vehicles have been registered with Paris
-  crit'air", but the T&Cs say "we are unable to advise if a vehicle has Clean Air / Crit Air
-  stickers". One of them needs to change.
+- **Crit'Air / Clean Air stickers: we can't advise.** Every van has one, but after a windscreen
+  change there's a gap of a couple of weeks before the new sticker arrives — so never promise one.
 
 ## When something changes
 
