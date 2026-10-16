@@ -1182,12 +1182,18 @@ export async function applyAccountAutoCover(
   // touch excess_amount_required: each record's required figure (the driver's
   // individual liability, or the derivation stub's van-total) is maintained by
   // its own creation/derivation path, so we only flip the status label.
+  //
+  // The pattern is a PLAIN '...' string, never E'...' (Oct 2026). In an E''
+  // string Postgres eats the backslashes, so `\[` arrived as a bare `[`, the
+  // marker became a bracket expression with the invalid range `o-c`, and this
+  // UPDATE threw "invalid regular expression" the first time it met a real row
+  // — rolling back the whole derivation for that job. It had never fired.
   const revert = async (): Promise<number> => {
     const r = await q(
       `UPDATE job_excess
        SET excess_status = 'needed',
            claim_notes = NULL,
-           notes = NULLIF(regexp_replace(COALESCE(notes, ''), E'\\n?\\[Auto-covered by account\\][^\\n]*', '', 'g'), ''),
+           notes = NULLIF(regexp_replace(COALESCE(notes, ''), '\\n?\\[Auto-covered by account\\][^\\n]*', '', 'g'), ''),
            updated_at = NOW()
        WHERE job_id = $1
          AND excess_status = 'waived'

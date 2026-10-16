@@ -455,6 +455,11 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
   only surfaces once the feature is genuinely used.
 - **Never reuse a pg parameter in two different type contexts** (a varchar column
   assignment and a text operator) — Postgres rejects the statement with `42P08`.
+- **A regex in SQL is a plain `'...'` string, never `E'...'`.** An `E''` string eats
+  the backslashes, so `\[` reaches the regex as a bare `[` and the pattern becomes a
+  character class: it either throws ("invalid character range" — the auto-cover
+  revert) or strips every matching letter (the inbox un-ack: "Check the van tyres" →
+  "Chhys"). Both shipped and sat unnoticed until Oct 2026.
 - API responses are `{ data, pagination }` or `{ error }`.
 
 ## Dependencies
