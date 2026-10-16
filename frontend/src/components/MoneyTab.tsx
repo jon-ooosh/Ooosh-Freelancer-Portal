@@ -2125,12 +2125,15 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
         const methodOptions = readerAccess?.enabled
           ? [{ value: 'card_reader', label: readerAccess.mode === 'test' ? 'Card reader (TEST MODE)' : 'Card reader' }, ...PAYMENT_METHODS_BASE]
           : PAYMENT_METHODS_BASE;
-        // An amount that isn't one of the buttons needs a reason (spec §1.11).
+        // An amount that isn't one of the buttons needs a reason (spec §1.11). The
+        // Notes box only says so once such an amount is in the box (jon, 16 Oct).
+        const enteredAmt = parseFloat(payAmount);
+        const isCustomAmount = !!payAmount && !isNaN(enteredAmt)
+          && !quickAmounts.some((qa) => qa.amount.toFixed(2) === enteredAmt.toFixed(2));
+        const reasonRequired = isReader && isCustomAmount;
         const validateReader = (): string | null => {
-          const amt = parseFloat(payAmount);
-          if (!payAmount || isNaN(amt) || amt < 1) return 'Enter an amount of at least £1.00';
-          const isQuick = quickAmounts.some((qa) => qa.amount.toFixed(2) === amt.toFixed(2));
-          if (!isQuick && !payNotes.trim()) return 'Add a reason for a custom amount (in Notes)';
+          if (!payAmount || isNaN(enteredAmt) || enteredAmt < 1) return 'Enter an amount of at least £1.00';
+          if (isCustomAmount && !payNotes.trim()) return 'Add a reason for a custom amount (in Notes)';
           return null;
         };
 
@@ -2228,14 +2231,16 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
 
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">
-                    {isReader ? 'Notes (required for a custom amount)' : 'Notes (optional)'}
+                    {reasonRequired
+                      ? <>Reason for this amount <span className="text-red-600">*</span></>
+                      : 'Notes (optional)'}
                   </label>
                   <input
                     type="text"
                     value={payNotes}
                     disabled={readerActive}
                     onChange={(e) => setPayNotes(e.target.value)}
-                    placeholder={isReader ? 'Why this amount, if not one of the buttons' : 'Any additional details'}
+                    placeholder={reasonRequired ? 'Why this amount, not one of the buttons above' : 'Any additional details'}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
