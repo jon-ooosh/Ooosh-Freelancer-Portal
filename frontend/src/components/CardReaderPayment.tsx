@@ -31,6 +31,9 @@ interface Session {
   /** "Send receipt?" (migration 292). null on payments from before it. */
   receipt_status?: 'pending' | 'sending' | 'sent' | 'auto_sent' | 'skipped' | 'failed' | null;
   receipt_sent_to?: string | null;
+  /** Something to read before closing (e.g. a pre-auth that expires before the hire ends). */
+  warning?: string | null;
+  capture_before?: string | null;
 }
 
 const LAST_READER_KEY = 'card-reader-last-id';
@@ -46,7 +49,10 @@ interface Props {
   jobId: string;
   access: CardReaderAccess;
   amount: number;
-  paymentType: 'deposit' | 'balance';
+  /** deposit / balance from Record Payment; excess / excess_preauth from the excess Manage modal. */
+  paymentType: 'deposit' | 'balance' | 'excess' | 'excess_preauth';
+  /** The excess record, for excess / excess_preauth. */
+  excessId?: string;
   notes: string;
   /** Returns an error to show instead of sending, or null when the form is good. */
   validate: () => string | null;
@@ -59,7 +65,8 @@ interface Props {
   onClose: () => void;
 }
 
-export default function CardReaderPayment({ jobId, access, amount, paymentType, notes, validate, onRecorded, onActiveChange, onClose }: Props) {
+export default function CardReaderPayment({ jobId, access, amount, paymentType, excessId, notes, validate, onRecorded, onActiveChange, onClose }: Props) {
+  const isPreauth = paymentType === 'excess_preauth';
   const [readers, setReaders] = useState<Reader[] | null>(null);
   const [readerId, setReaderId] = useState('');
   const [loadError, setLoadError] = useState('');
@@ -122,7 +129,7 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
   // refused the deposit (staff need to read that).
   const receiptDone = session?.status === 'succeeded' && session.receipt_status !== 'pending';
   useEffect(() => {
-    if (receiptDone && session && !session.hh_push_error && session.receipt_status !== null && session.receipt_status !== undefined) onClose();
+    if (receiptDone && session && !session.hh_push_error && !session.warning && session.receipt_status !== null && session.receipt_status !== undefined) onClose();
   }, [receiptDone]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function answerReceipt(skip: boolean) {
@@ -159,6 +166,7 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
     writeLastReader(readerId);
     void act(() => api.post<{ data: Session }>(`/terminal/jobs/${jobId}/pay`, {
       amount, payment_type: paymentType, reader_id: readerId, notes: notes || undefined,
+      ...(excessId ? { excess_id: excessId } : {}),
     }));
   }
 
@@ -198,7 +206,7 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
         <div className="flex gap-2 pt-2">
           <button onClick={send} disabled={busy || !readerId}
             className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50">
-            {busy ? 'Sending...' : `Send £${amount > 0 ? amount.toFixed(2) : '0.00'} to reader`}
+            {busy ? 'Sending...' : `${isPreauth ? 'Pre-auth' : 'Send'} £${amount > 0 ? amount.toFixed(2) : '0.00'} ${isPreauth ? 'on' : 'to'} reader`}
           </button>
           <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md">
             Cancel
@@ -231,13 +239,23 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
       )}
       {session.status === 'succeeded' && (
         <div className="px-3 py-3 text-sm bg-green-50 border border-green-200 rounded-md text-green-800">
-          <div className="font-semibold">Paid - {amt} recorded{session.livemode ? '' : ' (TEST MODE)'}</div>
+          <div className="font-semibold">
+            {isPreauth ? `Pre-auth of ${amt} recorded` : `Paid - ${amt} recorded`}{session.livemode ? '' : ' (TEST MODE)'}
+          </div>
           <div className="text-xs mt-1">
-            Recorded in OP and pushed to HireHop.
+            {isPreauth
+              ? `Nothing is taken until you capture it from the excess record.${session.capture_before ? ` Expires ${new Date(session.capture_before).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}.` : ''}`
+              : 'Recorded in OP and pushed to HireHop.'}
             {session.receipt_status === 'sent' || session.receipt_status === 'auto_sent'
               ? ` Receipt sent to ${session.receipt_sent_to || 'the client'}.` : ''}
             {session.receipt_status === 'skipped' ? ' No receipt sent.' : ''}
           </div>
+        </div>
+      )}
+      {session.status === 'succeeded' && session.warning && (
+        <div className="px-3 py-2 text-xs bg-amber-50 border border-amber-300 rounded-md text-amber-900">
+          <div className="font-semibold mb-1">Check this</div>
+          <div>{session.warning}</div>
         </div>
       )}
       {receiptPending && (
@@ -271,8 +289,11 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
       )}
       {session.status === 'record_failed' && (
         <div className="px-3 py-3 text-sm bg-red-50 border border-red-200 rounded-md text-red-800">
-          <div className="font-semibold">Card taken, but OP could not record it</div>
-          <div className="text-xs mt-1">{session.failure_message} - info@ has been emailed the details. Record it by hand (Stripe GBP).</div>
+          <div className="font-semibold">{isPreauth ? 'Pre-auth authorised, but OP could not record it' : 'Card taken, but OP could not record it'}</div>
+          <div className="text-xs mt-1">
+            {session.failure_message} - info@ has been emailed the details.
+            {isPreauth ? ' The amount is held on the card: record it with Record Pre-Auth, or cancel it in Stripe.' : ' Record it by hand (Stripe GBP).'}
+          </div>
         </div>
       )}
       {session.status === 'cancelled' && (

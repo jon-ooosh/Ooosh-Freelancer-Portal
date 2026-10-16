@@ -2770,7 +2770,9 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
         return;
       }
       try {
-        const stripe = getStripeClient();
+        // Live, unless the payment came from a TEST-mode card-reader session.
+        const { stripeClientForPaymentIntent } = await import('../services/stripe-terminal');
+        const stripe = await stripeClientForPaymentIntent(stripePaymentIntent as string);
         const refund = await stripe.refunds.create({
           payment_intent: stripePaymentIntent as string,
           amount: Math.round(amount * 100),

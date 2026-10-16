@@ -23,6 +23,8 @@ import { createMobileUploadToken } from '../services/mobile-upload-token';
 import { attachExcessReceipt } from '../services/excess-receipt';
 import { syncSavedRowToXero, sendXeroSyncFailedAlert, type XeroSyncResult } from '../services/hh-xero-sync';
 import { ukToday } from '../services/uk-date';
+import { recordPreauthHold, PreauthRecordError } from '../services/excess-preauth';
+import { stripeClientForPaymentIntent } from '../services/stripe-terminal';
 
 const router = Router();
 router.use(authenticate);
@@ -1508,115 +1510,28 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
 //     and re-alerts info@ every morning until the hold expires.
 
 router.post('/:id/record-preauth', validate(recordPreauthSchema), async (req: AuthRequest, res: Response) => {
+  // The body lives in services/excess-preauth.ts recordPreauthHold() — shared with the
+  // card reader (services/stripe-terminal.ts), so a hold taken on the S700 lands on the
+  // record exactly as one recorded here does.
   try {
-    const { id } = req.params;
     const { amount, method, reference, stripe_payment_intent_id, expires_in_days, notes } = req.body;
-
-    const currentResult = await query(
-      `SELECT je.*, j.hh_job_number FROM job_excess je
-       LEFT JOIN jobs j ON j.id = je.job_id
-       WHERE je.id = $1`,
-      [id]
-    );
-    if (currentResult.rows.length === 0) {
-      res.status(404).json({ error: 'Excess record not found' });
-      return;
-    }
-    const current = currentResult.rows[0];
-
-    // Guard: only record a hold when there's no money/hold already on the record.
-    // 'needed'/'pending' are the collectable pre-money states. Anything else
-    // (taken, pre_auth, fully_claimed, etc.) means money or a hold is already
-    // attached and a fresh hold would be ambiguous.
-    const alreadyHeld = parseFloat(current.amount_held || '0');
-    const alreadyTaken = parseFloat(current.excess_amount_taken || '0');
-    if (!['needed', 'pending'].includes(current.excess_status) || alreadyHeld > 0 || alreadyTaken > 0) {
-      res.status(400).json({
-        error: 'Cannot record a pre-auth on this record',
-        detail: `Status is "${current.excess_status}" with £${alreadyTaken.toFixed(2)} taken and £${alreadyHeld.toFixed(2)} held. Pre-auth holds can only be recorded on a record that is still Needed with nothing collected. If a hold already exists, capture or release it first.`,
-      });
-      return;
-    }
-
-    const holdDays = expires_in_days || 5;
-    // Only card-machine CARD methods produce a paper receipt to scan
-    // (Worldpay/Amex). Stripe has an electronic trail; cash-held has no card
-    // receipt — so neither flags a receipt as required.
-    const needsReceipt = method === 'worldpay' || method === 'amex';
-
-    const dateStr = ukToday();
-    const preauthNote = `[${dateStr}] Pre-auth hold of £${amount.toFixed(2)} recorded via ${method.replace(/_/g, ' ')}${reference ? ` (ref ${reference})` : ''}${notes ? `. ${notes}` : ''}. Expires in ${holdDays} days.`;
-    const newNotes = current.notes ? `${current.notes}\n${preauthNote}` : preauthNote;
-
-    const result = await query(
-      `UPDATE job_excess SET
-        amount_held              = $1,
-        excess_amount_taken      = 0,
-        excess_status            = 'pre_auth',
-        held_at                  = NOW(),
-        held_expires_at          = NOW() + ($2 || ' days')::interval,
-        payment_method           = $3,
-        payment_reference        = $4,
-        stripe_payment_intent_id = COALESCE($5, stripe_payment_intent_id),
-        receipt_required         = $6,
-        notes                    = $7,
-        updated_at               = NOW()
-      WHERE id = $8
-      RETURNING *`,
-      [
-        amount,                       // $1
-        String(holdDays),             // $2
-        method,                       // $3
-        reference || null,            // $4
-        stripe_payment_intent_id || null, // $5
-        needsReceipt,                 // $6
-        newNotes,                     // $7
-        id,                           // $8
-      ]
-    );
-
-    // Audit row in job_payments (payment_status='pre_auth' — not completed). Keeps
-    // the hold visible in payment history, consistent with the portal path in money.ts.
-    //
-    // stripe_payment_intent is populated deliberately: the Stripe → OP pre-auth
-    // reconciler (services/stripe-preauth-reconciler.ts) diffs live Stripe holds
-    // against BOTH job_excess.stripe_payment_intent_id and this column. Leaving it
-    // null here meant a hold recorded by hand still read as "not present in OP"
-    // and re-alerted info@ every morning.
-    try {
-      await query(
-        `INSERT INTO job_payments
-          (job_id, hirehop_job_id, payment_type, amount, payment_method,
-           payment_reference, payment_status, source, excess_id,
-           client_name, recorded_by, notes, stripe_payment_intent, payment_date)
-         VALUES ($1, $2, 'excess', $3, $4, $5, 'pre_auth', 'op_excess_modal', $6, $7, $8, $9, $10, NOW())`,
-        [
-          current.job_id,
-          current.hh_job_number || null,
-          amount,
-          method,
-          reference || null,
-          id,
-          current.client_name || null,
-          req.user?.id || null,
-          notes || `Pre-auth hold recorded (expires ${holdDays}d)`,
-          stripe_payment_intent_id || null,
-        ]
-      );
-    } catch (err) {
-      console.error('[excess] Failed to insert job_payments row for pre-auth (non-fatal):', err);
-    }
-
-    // Held money counts as coverage — sync requirement status.
-    if (current.job_id) {
-      syncExcessRequirementStatus(current.job_id).catch(e =>
-        console.error('[excess] syncExcessRequirementStatus failed (record-preauth):', e)
-      );
-    }
-
-    console.log(`[excess] Pre-auth recorded: ${id}, £${amount} held via ${method}, expires ${holdDays}d`);
-    res.json({ data: result.rows[0] });
+    const row = await recordPreauthHold({
+      excessId: req.params.id as string,
+      amount,
+      method,
+      reference: reference || null,
+      stripePaymentIntentId: stripe_payment_intent_id || null,
+      expiresInDays: expires_in_days || 5,
+      notes: notes || null,
+      userId: req.user?.id || null,
+      source: 'op_excess_modal',
+    });
+    res.json({ data: row });
   } catch (error) {
+    if (error instanceof PreauthRecordError) {
+      res.status(error.status).json({ error: error.message, ...(error.detail ? { detail: error.detail } : {}) });
+      return;
+    }
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error('[excess] Record-preauth error:', errMsg, error);
     res.status(500).json({ error: 'Failed to record pre-auth hold', detail: errMsg });
@@ -1858,7 +1773,8 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
       }
 
       try {
-        const stripe = getStripeClient();
+        // Live, unless the hold came from a TEST-mode card-reader session.
+        const stripe = await stripeClientForPaymentIntent(current.stripe_payment_intent_id);
         const captured = await stripe.paymentIntents.capture(
           current.stripe_payment_intent_id,
           {
@@ -1928,7 +1844,7 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
         // least we don't have orphaned money in Stripe that HH/Xero doesn't
         // know about.
         try {
-          const stripe = getStripeClient();
+          const stripe = await stripeClientForPaymentIntent(current.stripe_payment_intent_id);
           await stripe.refunds.create({
             charge: stripeChargeId,
             reason: 'requested_by_customer',
@@ -2149,7 +2065,7 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
     let stripeOutcome: string | null = null;
     if (current.payment_method === 'stripe_gbp' && current.stripe_payment_intent_id && isStripeConfigured()) {
       try {
-        const stripe = getStripeClient();
+        const stripe = await stripeClientForPaymentIntent(current.stripe_payment_intent_id);
         const cancelled = await stripe.paymentIntents.cancel(
           current.stripe_payment_intent_id,
           { cancellation_reason: 'abandoned' }
@@ -2626,7 +2542,7 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
         return;
       }
       try {
-        const stripe = getStripeClient();
+        const stripe = await stripeClientForPaymentIntent(resolvedPi as string);
         const refund = await stripe.refunds.create({
           payment_intent: resolvedPi as string,
           amount: Math.round(amount * 100),

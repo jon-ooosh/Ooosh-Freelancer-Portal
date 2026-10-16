@@ -15,7 +15,14 @@ jest.mock('../record-payment', () => ({
   SYSTEM_SERVICE_USER_ID: '00000000-0000-0000-0000-000000000000',
 }));
 jest.mock('../email-service', () => ({ emailService: { sendRaw: jest.fn().mockResolvedValue({}) } }));
-jest.mock('../money-emails', () => ({ sendPaymentEmail: jest.fn(), resolveClientEmailTarget: jest.fn() }));
+jest.mock('../money-emails', () => ({
+  sendPaymentEmail: jest.fn(), sendExcessEmail: jest.fn(),
+  resolveClientEmailTarget: jest.fn(), resolveExcessEmailTarget: jest.fn(),
+}));
+jest.mock('../excess-preauth', () => ({
+  ...jest.requireActual('../excess-preauth'),
+  recordPreauthHold: jest.fn(),
+}));
 
 const fakeStripe = {
   paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn() },
@@ -29,13 +36,16 @@ jest.mock('../../config/stripe', () => ({
 import { query } from '../../config/database';
 import { recordPayment } from '../record-payment';
 import { emailService } from '../email-service';
-import { sendPaymentEmail } from '../money-emails';
+import { sendPaymentEmail, sendExcessEmail } from '../money-emails';
+import { recordPreauthHold, preauthEligibility } from '../excess-preauth';
 import { handleTerminalWebhookEvent, checkSession, canUseTerminal, sendTerminalReceipt, sweepTerminalReceipts } from '../stripe-terminal';
 
 const mockQuery = query as jest.Mock;
 const mockRecord = recordPayment as jest.Mock;
 const mockEmail = (emailService as unknown as { sendRaw: jest.Mock }).sendRaw;
 const mockPaymentEmail = sendPaymentEmail as jest.Mock;
+const mockExcessEmail = sendExcessEmail as jest.Mock;
+const mockRecordPreauth = recordPreauthHold as jest.Mock;
 
 // ── A tiny terminal_sessions + system_settings ─────────────────────────────
 
@@ -45,6 +55,9 @@ let settings: Record<string, string>;
 
 function fakeQuery(sql: string, params: unknown[] = []) {
   const s = sql.replace(/\s+/g, ' ');
+  if (s.startsWith('SELECT job_date, out_date, job_end, return_date FROM jobs')) {
+    return { rows: [{ job_date: '2026-10-20T09:00:00Z', job_end: '2026-10-23T09:00:00Z' }] };
+  }
   if (s.includes('FROM system_settings')) {
     const v = settings[params[0] as string];
     return { rows: v === undefined ? [] : [{ value: v }] };
@@ -76,6 +89,7 @@ function fakeQuery(sql: string, params: unknown[] = []) {
     if (rset && !s.includes('AND receipt_status')) row.receipt_status = rset[1];
     else if (s.match(/SET receipt_status = '(\w+)'/)) row.receipt_status = s.match(/SET receipt_status = '(\w+)'/)![1];
     if (s.includes('receipt_status = $2')) { row.receipt_status = params[1]; row.receipt_sent_to = params[2]; }
+    if (s.includes('capture_before = $2')) { row.capture_before = params[1]; row.warning = params[2]; row.receipt_status = 'pending'; }
     if (s.includes('failure_code = $2')) { row.failure_code = params[1]; row.failure_message = params[2]; }
     if (s.includes('job_payment_id = $2')) row.job_payment_id = params[1];
     if (s.includes("status = 'record_failed', failure_message = $2")) row.failure_message = params[1];
@@ -253,5 +267,87 @@ describe('Send receipt?', () => {
     expect(mockPaymentEmail.mock.calls[0][0].overrideRecipients).toBeUndefined();
     expect(mockPaymentEmail.mock.calls[0][0].isConfirmingBooking).toBe(true);
     expect(sessions[0]!.receipt_status).toBe('auto_sent');
+  });
+});
+
+describe('the pre-auth rule (copied from the payment portal)', () => {
+  const now = new Date('2026-10-18T12:00:00Z');
+  it('allows a 4-day hire ending within 5 days', () => {
+    expect(preauthEligibility('2026-10-19T09:00:00Z', '2026-10-23T09:00:00Z', now)).toMatchObject({ allowed: true, hireDays: 4 });
+  });
+  it('refuses a 5-day hire: take a payment', () => {
+    expect(preauthEligibility('2026-10-19T09:00:00Z', '2026-10-24T09:00:00Z', now)).toMatchObject({ allowed: false, code: 'long_hire', hireDays: 5 });
+  });
+  it('refuses a short hire that ends more than 5 days away: too early', () => {
+    expect(preauthEligibility('2026-10-28T09:00:00Z', '2026-10-30T09:00:00Z', now)).toMatchObject({ allowed: false, code: 'too_early' });
+  });
+  it('refuses once the hire has ended', () => {
+    expect(preauthEligibility('2026-10-10T09:00:00Z', '2026-10-12T09:00:00Z', now)).toMatchObject({ allowed: false, code: 'too_late' });
+  });
+  it('refuses without dates', () => {
+    expect(preauthEligibility(null, null, now)).toMatchObject({ allowed: false, code: 'no_dates' });
+  });
+});
+
+describe('a pre-auth on the reader', () => {
+  const capturable = {
+    id: 'pi_1', status: 'requires_capture', amount: 120000, amount_capturable: 120000,
+    metadata: { source: 'op_terminal' },
+    latest_charge: { id: 'ch_1', payment_method_details: { card_present: { capture_before: Date.parse('2026-11-14T12:00:00Z') / 1000 } } },
+  };
+
+  beforeEach(() => {
+    sessions = [session({ payment_type: 'excess_preauth', excess_id: 'ex-1', amount: '1200.00' })];
+    fakeStripe.paymentIntents.retrieve.mockResolvedValue(capturable);
+    mockRecordPreauth.mockResolvedValue({ id: 'ex-1', excess_status: 'pre_auth' });
+  });
+
+  it('is recorded on the excess record once it is capturable, with Stripe\'s expiry, and never as a payment', async () => {
+    const ev = {
+      type: 'terminal.reader.action_succeeded', livemode: false,
+      data: { object: { id: 'tmr_1', action: { status: 'succeeded', process_payment_intent: { payment_intent: 'pi_1' } } } },
+    };
+    await handleTerminalWebhookEvent(ev);
+    await handleTerminalWebhookEvent({ type: 'payment_intent.amount_capturable_updated', livemode: false, data: { object: capturable } });
+    expect(mockRecord).not.toHaveBeenCalled();
+    expect(mockRecordPreauth).toHaveBeenCalledTimes(1);
+    expect(mockRecordPreauth.mock.calls[0][0]).toMatchObject({
+      excessId: 'ex-1', amount: 1200, method: 'stripe_gbp', stripePaymentIntentId: 'pi_1', source: 'stripe_terminal',
+    });
+    expect(mockRecordPreauth.mock.calls[0][0].expiresAt.toISOString()).toBe('2026-11-14T12:00:00.000Z');
+    expect(sessions[0]).toMatchObject({ status: 'succeeded', receipt_status: 'pending', warning: null });
+  });
+
+  it('warns when the pre-auth would expire before the hire ends', async () => {
+    fakeStripe.paymentIntents.retrieve.mockResolvedValue({
+      ...capturable,
+      latest_charge: { id: 'ch_1', payment_method_details: { card_present: { capture_before: Date.parse('2026-10-21T12:00:00Z') / 1000 } } },
+    });
+    await handleTerminalWebhookEvent({ type: 'payment_intent.amount_capturable_updated', livemode: false, data: { object: capturable } });
+    expect(sessions[0]!.warning).toMatch(/expires .* before the hire ends/);
+  });
+
+  it('a pre-auth the record refuses is record_failed, and info@ is told the amount is still held', async () => {
+    const { PreauthRecordError } = jest.requireActual('../excess-preauth');
+    mockRecordPreauth.mockRejectedValue(new PreauthRecordError('Cannot record a pre-auth on this record'));
+    await handleTerminalWebhookEvent({ type: 'payment_intent.amount_capturable_updated', livemode: false, data: { object: capturable } });
+    expect(sessions[0]!.status).toBe('record_failed');
+    expect(mockEmail.mock.calls[0][0].html).toMatch(/held on the client's card/);
+  });
+
+  it('its receipt is the excess pre-auth email', async () => {
+    sessions = [session({ payment_type: 'excess_preauth', excess_id: 'ex-1', status: 'succeeded', receipt_status: 'pending', amount: '1200.00' })];
+    mockExcessEmail.mockResolvedValue({ sent: true, toEmail: 'driver@client.test', ccEmails: [] });
+    await sendTerminalReceipt('sess-1', { recipients: [{ email: 'driver@client.test' }] });
+    expect(mockPaymentEmail).not.toHaveBeenCalled();
+    expect(mockExcessEmail.mock.calls[0][0]).toMatchObject({ templateId: 'excess_preauth_confirmed', excessId: 'ex-1', amount: 1200 });
+  });
+});
+
+describe('an excess payment on the reader', () => {
+  it('goes through recordPayment as excess on its record', async () => {
+    sessions = [session({ payment_type: 'excess', excess_id: 'ex-1' })];
+    await handleTerminalWebhookEvent({ type: 'payment_intent.succeeded', livemode: false, data: { object: succeededPi } });
+    expect(mockRecord.mock.calls[0][1]).toMatchObject({ payment_type: 'excess', excess_id: 'ex-1', stripe_payment_intent: 'pi_1', skip_client_email: true });
   });
 });

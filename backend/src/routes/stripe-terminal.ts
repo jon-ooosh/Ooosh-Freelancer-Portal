@@ -8,6 +8,7 @@
  *   POST /terminal/sessions/:id/retry         Try again after a decline — the SAME PaymentIntent
  *   POST /terminal/sessions/:id/cancel        clear the reader and cancel the PaymentIntent
  *   POST /terminal/sessions/:id/simulate      test mode only: tap a pretend card (body: outcome approve|decline)
+ *   GET  /terminal/excess/:excessId/options   what the excess Manage modal may offer: payment, pre-auth (with the reason when not)
  *   GET  /terminal/sessions/:id/receipt       who "Send receipt?" pre-ticks
  *   POST /terminal/sessions/:id/receipt       answer it (body: recipients [{email,name}] | skip: true)
  *
@@ -22,7 +23,7 @@ import { validate } from '../middleware/validate';
 import {
   canUseTerminal, getTerminalMode, isModeConfigured, listReaders, startTerminalPayment,
   readSession, retrySession, cancelSession, simulateTap, TerminalError,
-  sendTerminalReceipt, defaultReceiptRecipients,
+  sendTerminalReceipt, defaultReceiptRecipients, excessReaderOptions,
 } from '../services/stripe-terminal';
 
 const router = Router();
@@ -66,9 +67,11 @@ router.get('/readers', requireTerminalAccess, async (_req: AuthRequest, res: Res
 
 const paySchema = z.object({
   amount: z.number().min(1).max(50000),
-  payment_type: z.enum(['deposit', 'balance']),
+  payment_type: z.enum(['deposit', 'balance', 'excess', 'excess_preauth']),
   reader_id: z.string().min(1).max(100),
   notes: z.string().max(1000).optional(),
+  // Required for excess / excess_preauth — the record the money or pre-auth lands on.
+  excess_id: z.string().uuid().optional(),
 });
 
 router.post('/jobs/:jobId/pay', requireTerminalAccess, validate(paySchema), async (req: AuthRequest, res: Response) => {
@@ -80,10 +83,19 @@ router.post('/jobs/:jobId/pay', requireTerminalAccess, validate(paySchema), asyn
       readerId: req.body.reader_id,
       notes: req.body.notes || null,
       userId: req.user!.id,
+      excessId: req.body.excess_id || null,
     });
     res.json({ data: session });
   } catch (err) {
     fail(res, err, 'Failed to send the payment to the reader');
+  }
+});
+
+router.get('/excess/:excessId/options', requireTerminalAccess, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await excessReaderOptions(req.params.excessId as string) });
+  } catch (err) {
+    fail(res, err, 'Failed to read the card reader options');
   }
 });
 

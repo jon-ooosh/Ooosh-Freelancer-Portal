@@ -795,8 +795,11 @@ export async function sendExcessEmail(opts: {
   originalAmount?: number;
   retainedAmount?: number;
   previousJobNumber?: string;
-}) {
-  const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount, previousJobNumber } = opts;
+  /** Staff's picked recipients (the card reader's "Send receipt?"). When non-empty it
+   *  REPLACES the driver + job-contact resolution — first is To, the rest CC. */
+  overrideRecipients?: Array<{ email: string; name?: string | null }>;
+}): Promise<{ sent: boolean; error?: string; toEmail?: string; ccEmails?: string[] }> {
+  const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount, previousJobNumber, overrideRecipients } = opts;
 
   // Get excess record + optional driver info (LEFT JOIN — assignment may be NULL for Money tab records)
   const excessResult = await query(
@@ -807,7 +810,7 @@ export async function sendExcessEmail(opts: {
      WHERE je.id = $1`,
     [excessId]
   );
-  if (excessResult.rows.length === 0) return;
+  if (excessResult.rows.length === 0) return { sent: false, error: 'Excess record not found' };
   const excess = excessResult.rows[0];
 
   // Get job info
@@ -816,38 +819,20 @@ export async function sendExcessEmail(opts: {
   const jobName = job?.job_name || `Job #${job?.hh_job_number || ''}`;
   const jobNumber = job?.hh_job_number || '';
 
-  // Determine recipient: driver email if available, otherwise job contacts
-  let recipientEmail: string | null = null;
-  let recipientFirstName: string | null = null;
-
-  if (excess.driver_id) {
-    const driver = await getDriverEmail(excess.driver_id);
-    recipientEmail = driver.email;
-    recipientFirstName = driver.firstName;
+  const resolved = await resolveExcessEmailTarget(excess.driver_id || null, jobId, templateId);
+  const { target } = resolved;
+  let { recipientEmail, recipientFirstName, isFallback, ccList } = resolved;
+  const cleanOverride = (overrideRecipients || [])
+    .map((r) => ({ email: (r.email || '').trim(), name: r.name || '' }))
+    .filter((r) => r.email);
+  if (cleanOverride.length > 0) {
+    recipientEmail = cleanOverride[0].email;
+    ccList = cleanOverride.slice(1).map((r) => r.email);
+    recipientFirstName = cleanOverride.length > 1
+      ? greetEveryone(cleanOverride.map((r) => r.name.trim().split(/\s+/)[0]))
+      : cleanOverride[0].name.trim().split(/\s+/)[0] || recipientEmail.split('@')[0] || 'there';
+    isFallback = false;
   }
-
-  // Fall back to job client contacts if no driver email.
-  // If nothing is reachable, resolveClientEmailTarget returns info@ with isFallback=true
-  // so the message still lands somewhere and staff get an amber banner + timeline entry.
-  // templateId passed through so per-bucket excess routing overrides take effect.
-  const target = await resolveClientEmailTarget(jobId, templateId);
-  let isFallback = false;
-  if (!recipientEmail) {
-    recipientEmail = target.primaryEmail;
-    recipientFirstName = target.greeting;
-    isFallback = target.isFallback;
-  } else {
-    // The driver is the To and the job contacts are copied in — greet them all.
-    recipientFirstName = greetEveryone([recipientFirstName, ...target.recipientNames]);
-  }
-
-  // CC list: include job contacts that aren't the primary recipient (only when not falling back)
-  const ccList = isFallback
-    ? []
-    : [
-        ...(target.primaryEmail && target.primaryEmail !== recipientEmail ? [target.primaryEmail] : []),
-        ...target.ccEmails,
-      ].filter(e => e !== recipientEmail);
 
   // Format dates — use future tense for payment receipt, past tense for reimbursement
   const fmtDate = (d: any) => d ? new Date(d).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '';
@@ -857,7 +842,7 @@ export async function sendExcessEmail(opts: {
   const hireStart = startDate ? ` that starts on ${fmtDate(startDate)}` : '';
   const hireEnd = endDate ? (isReimbursement ? ` that finished on ${fmtDate(endDate)}` : `, which finishes on ${fmtDate(endDate)}`) : '';
 
-  await emailService.send(templateId, {
+  const sendResult = await emailService.send(templateId, {
     to: recipientEmail,
     cc: ccList.length > 0 ? ccList : undefined,
     prependBanner: isFallback
@@ -889,9 +874,60 @@ export async function sendExcessEmail(opts: {
     },
   });
 
+  if (!sendResult.success) return { sent: false, error: sendResult.error, toEmail: recipientEmail, ccEmails: ccList };
   if (isFallback) {
     await logFallbackToTimeline({ jobId, templateId, amount });
   }
+  return { sent: true, toEmail: recipientEmail, ccEmails: ccList };
+}
+
+/**
+ * Who an excess email goes to by itself: the driver (when the record has one) as To,
+ * with the job's contacts copied in; else the job's contacts (resolveClientEmailTarget,
+ * landing on info@ with isFallback when nothing is reachable). sendExcessEmail uses
+ * it, and so does the card reader's "Send receipt?" pre-tick — one rule, not two.
+ */
+export async function resolveExcessEmailTarget(driverId: string | null, jobId: string, templateId: string): Promise<{
+  recipientEmail: string;
+  recipientFirstName: string;
+  ccList: string[];
+  isFallback: boolean;
+  target: Awaited<ReturnType<typeof resolveClientEmailTarget>>;
+}> {
+  // Determine recipient: driver email if available, otherwise job contacts
+  let recipientEmail: string | null = null;
+  let recipientFirstName: string | null = null;
+
+  if (driverId) {
+    const driver = await getDriverEmail(driverId);
+    recipientEmail = driver.email;
+    recipientFirstName = driver.firstName;
+  }
+
+  // Fall back to job client contacts if no driver email.
+  // If nothing is reachable, resolveClientEmailTarget returns info@ with isFallback=true
+  // so the message still lands somewhere and staff get an amber banner + timeline entry.
+  // templateId passed through so per-bucket excess routing overrides take effect.
+  const target = await resolveClientEmailTarget(jobId, templateId);
+  let isFallback = false;
+  if (!recipientEmail) {
+    recipientEmail = target.primaryEmail;
+    recipientFirstName = target.greeting;
+    isFallback = target.isFallback;
+  } else {
+    // The driver is the To and the job contacts are copied in — greet them all.
+    recipientFirstName = greetEveryone([recipientFirstName, ...target.recipientNames]);
+  }
+
+  // CC list: include job contacts that aren't the primary recipient (only when not falling back)
+  const ccList = isFallback
+    ? []
+    : [
+        ...(target.primaryEmail && target.primaryEmail !== recipientEmail ? [target.primaryEmail] : []),
+        ...target.ccEmails,
+      ].filter(e => e !== recipientEmail);
+
+  return { recipientEmail, recipientFirstName: recipientFirstName || 'there', ccList, isFallback, target };
 }
 
 /**

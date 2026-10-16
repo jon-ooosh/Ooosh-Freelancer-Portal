@@ -282,3 +282,53 @@ the refund email says "As you paid by card…" instead of "…through our online
 key `stripe_terminal`), and both refund modals now have the same recipient picker (refund route
 `recipients`; usual people from `GET /money/:jobId/email-default?template=hire_refund_processed`).
 
+## 13. Phase 2: excess payments and pre-auths on the reader (16 Oct 2026)
+
+**Where.** The excess **Manage** modal (`ExcessPaymentModal.tsx`) offers, for admins while testing:
+**Pre-auth on card reader** (badged "Recommended · short hire") and **Excess payment on card reader**,
+above the existing manual forms. What it may offer comes from `GET /terminal/excess/:id/options`
+(`excessReaderOptions()`); the pay route checks the same thing again, so a stale screen can't take
+what the rule no longer allows. Wording is "pre-auth" throughout (jon); the manual form is now
+"Record Pre-Auth".
+
+**The rule — copied exactly from the portal** (jon: prove it before deviating). `preauthEligibility()`
+in `services/excess-preauth.ts` is `get-job-details-v2.js` `determineExcessPaymentTiming`: a hire of
+**4 days or fewer**, and only once the end is **no more than 5 days away**; otherwise a payment. When
+it isn't allowed the action list says why ("Too early… Available from Wed 25 Nov"). **A payment is
+always allowed** while the record needs money (holding money for several bookings, a card that won't
+pre-auth, whatever the reason). The Manage modal's "Recommended · short hire" badge was `< 4` days and
+is now `<= 4` to match; the manual "Record Pre-Auth" loses the badge whenever the reader has answered
+for the record (so it no longer recommends a pre-auth the window doesn't allow). The manual form
+itself is NOT gated — it records Worldpay/Amex holds during the crossover.
+
+**A reader pre-auth** is a manual-capture PaymentIntent with `request_extended_authorization` (falls
+back to a standard one if Stripe refuses the flag). Approved = `requires_capture`. It is recorded by
+`recordPreauthHold()` — **the Manage modal's own record-preauth code, lifted out of
+`routes/excess.ts`** — as `stripe_gbp` + its PaymentIntent, with `held_expires_at` = Stripe's
+`capture_before`. From there it is an ordinary Stripe pre-auth: **Capture** and **Release** on the
+record, the 09:40 expiry sweep, the `payment_intent.canceled` webhook. If `capture_before` is before
+the hire's end the result screen warns. If recording fails, the session is `record_failed` and info@
+is told the amount is still held on the card. The 09:50 Stripe discovery job ignores reader
+PaymentIntents (they don't carry the portal's `isPreAuth` metadata).
+
+**A reader excess payment** goes through `recordPayment()` (payment_type `excess`, its `excess_id`),
+which now also stores the PaymentIntent on `job_excess.stripe_payment_intent_id` so Reimburse can
+refund it through Stripe. A top-up on a record tied to a rolled-forward HireHop deposit is refused on
+the reader (the normal form carries the chain-break warning).
+
+**Receipts** for both use "Send receipt?" (§12) with the excess emails (`excess_payment_confirmed` /
+`excess_preauth_confirmed`); pre-ticked from `resolveExcessEmailTarget()` — the driver plus the job's
+contacts, the rule `sendExcessEmail` itself now uses. `sendExcessEmail` gained `overrideRecipients`
+and now returns whether it sent.
+
+**Test mode end to end.** `stripeClientForPaymentIntent()` picks the TEST key for a PaymentIntent from
+a test-mode reader session, so Capture, Release, Reimburse, the hire refund and the expiry check all
+work on test payments (until now a test-mode refund would have gone to the live key and failed).
+
+**Data:** migration 293 — `terminal_sessions.excess_id`, `capture_before`, `warning`.
+
+**Done when** (§8): a live £1 pre-auth shows on the Money tab as Pre-auth held, releases from the
+existing button, and the 09:40 sweep leaves it alone until it expires. Optional: add
+`payment_intent.amount_capturable_updated` to the live webhook endpoint (the reader event already
+covers it).
+
