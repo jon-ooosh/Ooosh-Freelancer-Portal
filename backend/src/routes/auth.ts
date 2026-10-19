@@ -9,6 +9,11 @@ import { query } from '../config/database';
 import { validate } from '../middleware/validate';
 import { authenticate, authorize, AuthRequest, MANAGER_ROLES } from '../middleware/auth';
 import { signFor, verifyFor } from '../services/tokens';
+import {
+  secondsBlocked, recordLoginFailure, clearLoginFailures, readTrustedDevice, isEnforcedNow,
+  sendLoginCode, verifyLoginCode, markEnrolled, trustThisDevice, deviceLabelFrom, securityInfo,
+  listTrustedDevices, revokeTrustedDevice, signOutEverywhere, peekDeviceId, clearDeviceCookie,
+} from '../services/staff-login-security';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 
 const router = Router();
@@ -18,6 +23,16 @@ const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   message: { error: 'Too many login attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate limiting: second-factor steps — the code check shares the login limiter
+// (a code is a credential); sending is capped on its own.
+const codeSendLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many code requests — try again later' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -94,6 +109,60 @@ function generateTokens(user: { id: string; email: string; role: string }) {
   return { accessToken, refreshToken };
 }
 
+// A users-row joined to people, as /login and the second-factor steps load it.
+type LoginRow = {
+  id: string; email: string; role: string; password_hash: string;
+  first_name: string | null; last_name: string | null; preferred_name: string | null;
+  avatar_url: string | null; force_password_change: boolean | null;
+  mfa_enrolled_at: Date | null; login_disabled: boolean | null;
+};
+
+const LOGIN_ROW_SQL = `SELECT u.*, p.first_name, p.last_name, p.preferred_name
+       FROM users u JOIN people p ON u.person_id = p.id`;
+
+function userPayload(user: LoginRow) {
+  return {
+    id: user.id,
+    email: user.email,
+    role: user.role,
+    first_name: user.first_name,
+    last_name: user.last_name,
+    // What they are actually called. Display code uses this in preference
+    // to first_name — see frontend lib/displayName.ts.
+    preferred_name: user.preferred_name || null,
+    avatar_url: user.avatar_url || null,
+    force_password_change: user.force_password_change || false,
+  };
+}
+
+/** The login is complete: mint the pair, remember the refresh token, answer. */
+async function issueSession(res: Response, user: LoginRow): Promise<void> {
+  const tokens = generateTokens(user);
+  await query(
+    'UPDATE users SET refresh_token = $1, last_login = NOW() WHERE id = $2',
+    [tokens.refreshToken, user.id]
+  );
+  res.json({ user: { ...userPayload(user), ...(await securityInfo(user)) }, ...tokens });
+}
+
+/** "j***@oooshtours.co.uk" — enough for the person to know which inbox, no more. */
+function hintEmail(email: string): string {
+  const [local, domain] = email.split('@');
+  return `${(local || '').slice(0, 1)}***@${domain ?? ''}`;
+}
+
+/** The person a `login_pending` token names, if they may still log in. */
+async function userFromPending(token: unknown): Promise<LoginRow | null> {
+  if (typeof token !== 'string') return null;
+  const p = verifyFor<{ id?: string }>('login_pending', token);
+  if (!p?.id) return null;
+  const r = await query(
+    `${LOGIN_ROW_SQL} WHERE u.id = $1 AND u.is_active = true AND u.role <> 'freelancer' AND u.login_disabled = false`,
+    [p.id]
+  );
+  return (r.rows[0] as LoginRow | undefined) ?? null;
+}
+
 // POST /api/auth/login
 router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, res: Response) => {
   try {
@@ -111,39 +180,164 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
       return;
     }
 
-    const user = result.rows[0];
-    const validPassword = await bcrypt.compare(password, user.password_hash);
+    const user = result.rows[0] as LoginRow;
 
+    // Per-account slowdown (STAFF-LOGIN-SECURITY-SPEC §3.6): a blocked account
+    // gets the same 401 as a wrong password, plus retryAfter so the real
+    // owner's screen can say how long.
+    const wait = await secondsBlocked(user.id);
+    if (wait > 0) {
+      res.status(401).json({ error: 'Invalid email or password', retryAfter: wait });
+      return;
+    }
+
+    const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
+      await recordLoginFailure(user);
+      res.status(401).json({ error: 'Invalid email or password' });
+      return;
+    }
+    await clearLoginFailures(user.id);
+
+    // The service identity (system@) and anything else switched off: right
+    // password, still no login.
+    if (user.login_disabled) {
       res.status(401).json({ error: 'Invalid email or password' });
       return;
     }
 
-    const tokens = generateTokens(user);
+    // Second factor (§3.1). A trusted device, or a person not yet enrolled
+    // before the enforcement date, goes straight in. Everyone else gets a
+    // 5-minute pending token and a code in their inbox.
+    const trustedDeviceId = await readTrustedDevice(req, user.id);
+    const enrolled = !!user.mfa_enrolled_at;
+    if (!trustedDeviceId && (enrolled || await isEnforcedNow())) {
+      const pending = signFor('login_pending', { id: user.id }, '5m');
+      const sent = await sendLoginCode(user, deviceLabelFrom(req.headers['user-agent']));
+      res.json({
+        pending,
+        methods: ['email'],
+        emailHint: hintEmail(user.email),
+        codeSent: sent.ok,
+        codeError: sent.ok ? null : sent.error,
+      });
+      return;
+    }
 
-    // Store refresh token
-    await query(
-      'UPDATE users SET refresh_token = $1, last_login = NOW() WHERE id = $2',
-      [tokens.refreshToken, user.id]
-    );
-
-    res.json({
-      user: {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        // What they are actually called. Display code uses this in preference
-        // to first_name — see frontend lib/displayName.ts.
-        preferred_name: user.preferred_name || null,
-        avatar_url: user.avatar_url || null,
-        force_password_change: user.force_password_change || false,
-      },
-      ...tokens,
-    });
+    await issueSession(res, user);
   } catch (error) {
     console.error('Login error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Second factor (STAFF-LOGIN-SECURITY-SPEC §3) ───────────────────────────
+
+// POST /api/auth/login/send-code — (re)send the code for a pending login
+router.post('/login/send-code', codeSendLimiter, async (req: Request, res: Response) => {
+  try {
+    const user = await userFromPending(req.body?.pending);
+    if (!user) { res.status(401).json({ error: 'Your login has expired — start again' }); return; }
+    const sent = await sendLoginCode(user, deviceLabelFrom(req.headers['user-agent']));
+    if (!sent.ok) { res.status(sent.status).json({ error: sent.error }); return; }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Login send-code error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/login/code — the second step: code → session (+ trust this device)
+router.post('/login/code', loginLimiter, async (req: Request, res: Response) => {
+  try {
+    const user = await userFromPending(req.body?.pending);
+    if (!user) { res.status(401).json({ error: 'Your login has expired — start again' }); return; }
+    const code = String(req.body?.code ?? '');
+    if (!/^\d{6}$/.test(code)) { res.status(400).json({ error: 'Enter the 6-digit code' }); return; }
+    const check = await verifyLoginCode(user.id, code);
+    if (!check.ok) { res.status(401).json({ error: check.error }); return; }
+    await markEnrolled(user.id);
+    user.mfa_enrolled_at = user.mfa_enrolled_at ?? new Date();
+    if (req.body?.trustDevice !== false) {
+      await trustThisDevice(res, user.id, deviceLabelFrom(req.headers['user-agent']));
+    }
+    await issueSession(res, user);
+  } catch (error) {
+    console.error('Login code error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/auth/security — my own second-factor state and trusted devices
+router.get('/security', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(`SELECT id, email, role, mfa_enrolled_at FROM users WHERE id = $1`, [req.user!.id]);
+    const me = r.rows[0];
+    if (!me) { res.status(404).json({ error: 'User not found' }); return; }
+    const current = peekDeviceId(req, me.id);
+    const devices = (await listTrustedDevices(me.id)).map((d) => ({ ...d, current: d.id === current }));
+    res.json({ ...(await securityInfo(me)), devices });
+  } catch (error) {
+    console.error('Security state error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/security/send-code — enrolling from My profile: a code to myself
+router.post('/security/send-code', authenticate, codeSendLimiter, async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(`${LOGIN_ROW_SQL} WHERE u.id = $1`, [req.user!.id]);
+    const me = r.rows[0] as LoginRow | undefined;
+    if (!me) { res.status(404).json({ error: 'User not found' }); return; }
+    const sent = await sendLoginCode(me, deviceLabelFrom(req.headers['user-agent']));
+    if (!sent.ok) { res.status(sent.status).json({ error: sent.error }); return; }
+    res.json({ success: true, emailHint: hintEmail(me.email) });
+  } catch (error) {
+    console.error('Security send-code error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/security/enrol — the code proves the inbox; this device becomes trusted
+router.post('/security/enrol', authenticate, loginLimiter, async (req: AuthRequest, res: Response) => {
+  try {
+    const code = String(req.body?.code ?? '');
+    if (!/^\d{6}$/.test(code)) { res.status(400).json({ error: 'Enter the 6-digit code' }); return; }
+    const check = await verifyLoginCode(req.user!.id, code);
+    if (!check.ok) { res.status(401).json({ error: check.error }); return; }
+    await markEnrolled(req.user!.id);
+    let deviceId: string | null = null;
+    if (req.body?.trustDevice !== false) {
+      deviceId = await trustThisDevice(res, req.user!.id, deviceLabelFrom(req.headers['user-agent']));
+    }
+    res.json({ success: true, mfa_enrolled: true, deviceId });
+  } catch (error) {
+    console.error('Security enrol error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/auth/security/devices/:id — forget one of my trusted devices
+router.delete('/security/devices/:id', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const ok = await revokeTrustedDevice(req.user!.id, String(req.params.id));
+    if (!ok) { res.status(404).json({ error: 'Device not found' }); return; }
+    if (peekDeviceId(req, req.user!.id) === String(req.params.id)) clearDeviceCookie(res);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Revoke device error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/security/sign-out-everywhere — every refresh token and device, gone
+router.post('/security/sign-out-everywhere', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    await signOutEverywhere(req.user!.id);
+    clearDeviceCookie(res);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Sign out everywhere error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -231,7 +425,8 @@ router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
     const result = await query(
       `SELECT u.*, p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
-       WHERE u.id = $1 AND u.refresh_token = $2 AND u.is_active = true AND u.role <> 'freelancer'`,
+       WHERE u.id = $1 AND u.refresh_token = $2 AND u.is_active = true AND u.role <> 'freelancer'
+         AND u.login_disabled = false`,
       [decoded.id, refreshToken]
     );
 
@@ -269,7 +464,7 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
       `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
-              u.cot_card_last4,
+              u.cot_card_last4, u.mfa_enrolled_at,
               p.first_name, p.last_name, p.preferred_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1`,
@@ -281,7 +476,8 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    res.json(result.rows[0]);
+    const { mfa_enrolled_at: _enrolledAt, ...row } = result.rows[0];
+    res.json({ ...row, ...(await securityInfo(result.rows[0])) });
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ error: 'Internal server error' });

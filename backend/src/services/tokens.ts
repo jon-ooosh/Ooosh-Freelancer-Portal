@@ -26,7 +26,9 @@ export type TokenAudience =
   | 'warehouse'               // kiosk PIN session — routes/warehouse.ts
   | 'freelancer_bookout'      // one assignment — middleware/freelancer-bookout-auth.ts
   | 'freelancer_prep'         // one van, one task — same file
-  | 'freelancer_prep_redeem'; // 15-min link token that becomes a prep session — same file
+  | 'freelancer_prep_redeem'  // 15-min link token that becomes a prep session — same file
+  | 'login_pending'           // password accepted, second factor still owed — routes/auth.ts (5 min)
+  | 'trusted_device';         // the op_device cookie: this browser passed the second factor — services/staff-login-security.ts (90 days)
 
 if (!process.env.JWT_SECRET) {
   throw new Error('FATAL: JWT_SECRET environment variable is required');

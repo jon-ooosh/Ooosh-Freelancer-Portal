@@ -1858,6 +1858,26 @@ const templates: Record<string, EmailTemplate> = {
 
   // ── Freelancer portal auth ─────────────────────────────────────────────
 
+  // Staff login second factor (docs/STAFF-LOGIN-SECURITY-SPEC.md §3.3). Job-less.
+  staff_login_code: {
+    variant: 'internal',
+    preheader: 'Your OP login code',
+    subject: 'Your OP login code: {{code}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Your login code</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{name}}, enter this code to finish logging in to OP{{#if deviceLabel}} on {{deviceLabel}}{{/if}}:
+      </p>
+      <div style="margin:0 0 20px;padding:20px;text-align:center;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+        <p style="margin:0;font-size:32px;font-weight:700;letter-spacing:6px;color:#7B5EA7;font-family:monospace;">{{code}}</p>
+      </div>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        It expires in {{expiryMinutes}} minutes. If you did not just try to log in, someone else has your
+        password: change it from My profile straight away and tell an admin.
+      </p>
+    `,
+  },
+
   portal_verification_code: {
     variant: 'internal',
     subject: 'Your Ooosh freelancer verification code',

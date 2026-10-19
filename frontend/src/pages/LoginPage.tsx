@@ -15,12 +15,28 @@ interface LoginResponse {
   refreshToken: string;
 }
 
+/** The password was right but a second factor is owed (STAFF-LOGIN-SECURITY-SPEC §3.1). */
+interface PendingResponse {
+  pending: string;
+  methods: string[];
+  emailHint: string;
+  codeSent: boolean;
+  codeError: string | null;
+}
+
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  // Second step: the pending token from /auth/login, the code typed, and
+  // whether this browser should be remembered (the default — it is what keeps
+  // 2FA bearable: one code per device per 90 days, not one per login).
+  const [pending, setPending] = useState<PendingResponse | null>(null);
+  const [code, setCode] = useState('');
+  const [trustDevice, setTrustDevice] = useState(true);
+  const [notice, setNotice] = useState('');
   const login = useAuthStore((s) => s.login);
   const navigate = useNavigate();
   const location = useLocation();
@@ -47,14 +63,108 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const data = await api.post<LoginResponse>('/auth/login', { email, password });
+      const data = await api.post<LoginResponse | PendingResponse>('/auth/login', { email, password });
+      if ('pending' in data) {
+        setPending(data);
+        setCode('');
+        setNotice(data.codeSent
+          ? `We've emailed a 6-digit code to ${data.emailHint}.`
+          : (data.codeError || 'The code could not be sent — try "Send again".'));
+        return;
+      }
       login(data.user, data.accessToken, data.refreshToken);
       navigate(getRedirectTarget(), { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      const e = err as Error & { body?: { retryAfter?: number } };
+      const wait = e.body?.retryAfter;
+      setError(wait
+        ? `Too many wrong passwords — try again in ${Math.max(1, Math.ceil(wait / 60))} minute${wait > 90 ? 's' : ''}.`
+        : (err instanceof Error ? err.message : 'Login failed'));
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleCode(e: FormEvent) {
+    e.preventDefault();
+    if (!pending) return;
+    setError('');
+    setLoading(true);
+    try {
+      const data = await api.post<LoginResponse>('/auth/login/code', { pending: pending.pending, code: code.trim(), trustDevice });
+      login(data.user, data.accessToken, data.refreshToken);
+      navigate(getRedirectTarget(), { replace: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'That code was not accepted';
+      setError(msg);
+      // A dead pending token means the five minutes are up: back to the password.
+      if (/expired — start again/i.test(msg)) { setPending(null); setCode(''); }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function resendCode() {
+    if (!pending) return;
+    setError('');
+    try {
+      await api.post('/auth/login/send-code', { pending: pending.pending });
+      setNotice(`A new code is on its way to ${pending.emailHint}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send a new code');
+    }
+  }
+
+  if (pending) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4">
+        <div className="max-w-md w-full space-y-8">
+          <div className="text-center">
+            <img src="/ooosh-logo-full.jpg" alt="Ooosh! Tours" className="h-40 mx-auto mb-4" />
+            <p className="mt-2 text-sm text-gray-600">Operations Platform</p>
+          </div>
+          <form onSubmit={handleCode} className="mt-8 space-y-5 bg-white p-8 rounded-xl shadow-sm">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Check your email</h2>
+              <p className="mt-1 text-sm text-gray-600">{notice}</p>
+            </div>
+            {error && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded text-sm">{error}</div>
+            )}
+            <div>
+              <label htmlFor="code" className="block text-sm font-medium text-gray-700">6-digit code</label>
+              <input
+                id="code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                pattern="[0-9]{6}"
+                maxLength={6}
+                required
+                autoFocus
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+                className="mt-1 block w-full rounded border border-gray-300 px-3 py-2 shadow-sm text-center text-2xl tracking-[0.4em] focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+            </div>
+            <label className="flex items-start gap-2 text-sm text-gray-700">
+              <input type="checkbox" className="mt-0.5" checked={trustDevice} onChange={(e) => setTrustDevice(e.target.checked)} />
+              <span>Remember this device for 90 days<span className="block text-xs text-gray-500">Untick on a shared or borrowed computer.</span></span>
+            </label>
+            <button
+              type="submit"
+              disabled={loading || code.length !== 6}
+              className="w-full flex justify-center py-2.5 px-4 border border-transparent rounded shadow-sm text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ooosh-500 disabled:opacity-50"
+            >
+              {loading ? 'Checking…' : 'Continue'}
+            </button>
+            <div className="flex justify-between text-sm">
+              <button type="button" onClick={resendCode} className="text-ooosh-700 hover:underline">Send again</button>
+              <button type="button" onClick={() => { setPending(null); setCode(''); setError(''); }} className="text-gray-500 hover:underline">Start over</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
   }
 
   return (

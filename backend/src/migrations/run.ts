@@ -335,6 +335,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '293_terminal_excess.sql',
         '294_terminal_shop.sql',
         '295_retire_stranded_auto_cover_stubs.sql',
+        '296_staff_login_security.sql',
       ];
 
       for (const migration of migrations) {

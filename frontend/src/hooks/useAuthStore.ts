@@ -11,6 +11,9 @@ interface User {
   avatar_url?: string | null;
   force_password_change?: boolean;
   cot_card_last4?: string | null;
+  /** Login security (STAFF-LOGIN-SECURITY-SPEC): has a second factor; the date from which one is required. */
+  mfa_enrolled?: boolean;
+  mfa_enforced_from?: string | null;
 }
 
 interface AuthState {

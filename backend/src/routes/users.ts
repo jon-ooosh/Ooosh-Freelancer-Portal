@@ -2,9 +2,10 @@ import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { listAssignableStaff } from '../services/assignable-staff';
+import { listTrustedDevices, resetSecondFactor, signOutEverywhere, enforcedFrom } from '../services/staff-login-security';
 
 const router = Router();
 router.use(authenticate);
@@ -165,6 +166,79 @@ router.post('/:id/force-password', authorize('admin'), validate(forcePasswordSch
     res.json({ success: true, message: 'Password reset. User will be prompted to change it on next login.' });
   } catch (error) {
     console.error('Force password error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Login security, per person (STAFF-LOGIN-SECURITY-SPEC §3.7) ───────────
+// Manager-tier, except that only an admin may touch another admin. Every write
+// lands in audit_log; a reset also tells the person.
+
+async function securityTarget(req: AuthRequest, res: Response): Promise<{ id: string; email: string; role: string; mfa_enrolled_at: Date | null } | null> {
+  const r = await query(`SELECT id, email, role, mfa_enrolled_at FROM users WHERE id = $1`, [req.params.id]);
+  const target = r.rows[0];
+  if (!target) { res.status(404).json({ error: 'User not found' }); return null; }
+  if (target.role === 'admin' && req.user!.role !== 'admin') {
+    res.status(403).json({ error: "Only an admin can change an admin's login security" });
+    return null;
+  }
+  return target;
+}
+
+// GET /api/users/:id/security — enrolment state + trusted devices
+router.get('/:id/security', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const target = await securityTarget(req, res);
+    if (!target) return;
+    res.json({
+      mfa_enrolled: !!target.mfa_enrolled_at,
+      mfa_enrolled_at: target.mfa_enrolled_at,
+      mfa_enforced_from: await enforcedFrom(),
+      devices: await listTrustedDevices(target.id),
+    });
+  } catch (error) {
+    console.error('User security read error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/users/:id/security/reset — wipe their second factor; next login re-enrols
+router.post('/:id/security/reset', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const target = await securityTarget(req, res);
+    if (!target) return;
+    await resetSecondFactor(target.id);
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, new_values)
+       VALUES ($1, 'users', $2, 'login_security_reset', $3)`,
+      [req.user!.id, target.id, JSON.stringify({ by: req.user!.email })],
+    ).catch((e) => console.warn('[users] audit insert failed:', e));
+    await query(
+      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+       VALUES ($1, 'login_security_reset', 'Your login security was reset', $2, 'users', $1, '/me?tab=profile', 'high')`,
+      [target.id, `${req.user!.email} reset your second factor and signed you out of every device. Your next login will ask for an email code again.`],
+    ).catch((e) => console.error('[users] reset bell failed:', e));
+    res.json({ success: true });
+  } catch (error) {
+    console.error('User security reset error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/users/:id/security/sign-out-everywhere — refresh tokens + devices gone
+router.post('/:id/security/sign-out-everywhere', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const target = await securityTarget(req, res);
+    if (!target) return;
+    await signOutEverywhere(target.id);
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, new_values)
+       VALUES ($1, 'users', $2, 'signed_out_everywhere', $3)`,
+      [req.user!.id, target.id, JSON.stringify({ by: req.user!.email })],
+    ).catch((e) => console.warn('[users] audit insert failed:', e));
+    res.json({ success: true });
+  } catch (error) {
+    console.error('User sign-out-everywhere error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

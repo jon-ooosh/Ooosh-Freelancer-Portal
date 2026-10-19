@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { displayFullName, displayInitials } from '../lib/displayName';
 import { api } from '../services/api';
+import LoginSecurityCard from '../components/LoginSecurityCard';
 
 // Client-side only — a nudge, not a rule. The server's only rule is 8+ chars.
 // +1 each for 8+ characters, 12+ characters, mixed case, a digit, a symbol;
@@ -408,6 +409,8 @@ export default function ProfilePage() {
               )}
             </div>
           </form>
+
+          <LoginSecurityCard />
         </div>
       </div>
     </div>
