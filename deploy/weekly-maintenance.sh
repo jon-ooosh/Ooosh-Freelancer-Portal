@@ -39,6 +39,14 @@ RUN_START_EPOCH=$(date +%s)
 # from config.env.
 SETTLE_SECONDS="${SETTLE_SECONDS:-45}"
 
+# Where OP is deployed. Read for backend/.env, to tell whether the nightly
+# Traccar backup is switched on. Overridable from config.env.
+APP_DIR="${APP_DIR:-/var/www/ooosh-portal}"
+
+# Last report's disk-used figure, so this one can say how much it changed.
+# Not .txt or .log, so the 12-week clean-up at the bottom never deletes it.
+DISK_STATE="$LOG_DIR/disk-used.last"
+
 # Log everything to file
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -130,7 +138,21 @@ done
 
 # Traccar via Docker
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -q traccar; then
-    echo "RUNNING - traccar (docker)" >> "$REPORT_FILE"
+    # Docker restarts the container by itself (--restart always), so "running"
+    # alone hides a crash. On 19 Oct 2026 it had been up 5 hours and nothing
+    # said why. Report when it last started, like the services above.
+    TC_STARTED=$(docker inspect -f '{{.State.StartedAt}}' traccar 2>/dev/null)
+    TC_START_EPOCH=0
+    if [ -n "$TC_STARTED" ]; then
+        TC_START_EPOCH=$(date -d "$TC_STARTED" +%s 2>/dev/null || echo 0)
+    fi
+    if [ "$TC_START_EPOCH" -gt "$RUN_START_EPOCH" ]; then
+        echo "RUNNING - traccar (docker) (restarted during maintenance)" >> "$REPORT_FILE"
+    elif [ "$TC_START_EPOCH" -gt $((RUN_START_EPOCH - 7 * 86400)) ]; then
+        echo "RUNNING - traccar (docker) (last started $(date -d "@$TC_START_EPOCH" '+%a %d %b %H:%M') - a reboot, a manual restart or a crash; not this maintenance run)" >> "$REPORT_FILE"
+    else
+        echo "RUNNING - traccar (docker)" >> "$REPORT_FILE"
+    fi
 else
     echo "DOWN - traccar (docker)" >> "$REPORT_FILE"
 fi
@@ -198,6 +220,35 @@ if [ -n "$BACKUP_LINES" ]; then
     echo "$BACKUP_LINES" | sed 's/^/  /' >> "$REPORT_FILE"
 else
     echo "WARNING: no backup activity in the journal for the last 7 days" >> "$REPORT_FILE"
+fi
+
+# Each backup counted on its own. In the mixed tail above, a missing Traccar
+# backup could hide behind seven good OP ones. Once the old H2 copies are gone
+# (docs/TRACCAR-POSTGRES.md Phase 6), the nightly R2 dump is the only
+# off-server copy of the GPS history, so a gap there must be loud.
+OP_BACKUP_OK=$(echo "$APP_JOURNAL" | grep -c "Scheduler: Backup complete" || true)
+OP_BACKUP_FAIL=$(echo "$APP_JOURNAL" | grep -c "Scheduler: Backup failed" || true)
+if [ "$OP_BACKUP_OK" -gt 0 ]; then
+    OP_BACKUP_LAST=$(echo "$APP_JOURNAL" | grep "Scheduler: Backup complete" | tail -1 | awk '{print $1, $2, $3}')
+    echo "OK - OP database: $OP_BACKUP_OK good backup(s) in 7 days, last $OP_BACKUP_LAST" >> "$REPORT_FILE"
+else
+    echo "WARNING - OP database: no successful backup in 7 days" >> "$REPORT_FILE"
+fi
+[ "$OP_BACKUP_FAIL" -gt 0 ] && echo "WARNING - OP database: $OP_BACKUP_FAIL failed backup(s) in 7 days" >> "$REPORT_FILE"
+
+if grep -q '^TRACCAR_DATABASE_URL=' "$APP_DIR/backend/.env" 2>/dev/null; then
+    TC_BACKUP_OK=$(echo "$APP_JOURNAL" | grep -c "Scheduler: Traccar backup complete" || true)
+    TC_BACKUP_FAIL=$(echo "$APP_JOURNAL" | grep -c "Scheduler: Traccar backup failed" || true)
+    if [ "$TC_BACKUP_OK" -gt 0 ]; then
+        TC_BACKUP_LAST=$(echo "$APP_JOURNAL" | grep "Scheduler: Traccar backup complete" | tail -1)
+        echo "OK - Traccar (GPS) database: $TC_BACKUP_OK good backup(s) in 7 days, last $(echo "$TC_BACKUP_LAST" | awk '{print $1, $2, $3}')" >> "$REPORT_FILE"
+        echo "  $(echo "$TC_BACKUP_LAST" | sed 's/.*Scheduler: //')" >> "$REPORT_FILE"
+    else
+        echo "WARNING - Traccar (GPS) database: no successful backup in 7 days" >> "$REPORT_FILE"
+    fi
+    [ "$TC_BACKUP_FAIL" -gt 0 ] && echo "WARNING - Traccar (GPS) database: $TC_BACKUP_FAIL failed backup(s) in 7 days" >> "$REPORT_FILE"
+else
+    echo "WARNING - Traccar (GPS) database: nightly backup is not switched on (no TRACCAR_DATABASE_URL in backend/.env) - the GPS history has no off-server copy" >> "$REPORT_FILE"
 fi
 echo "" >> "$REPORT_FILE"
 
@@ -288,11 +339,71 @@ echo "--- Post-Update State ---" >> "$REPORT_FILE"
 echo "Disk: $(df -h / | tail -1 | awk '{print $3, "used of", $2, "("$5")"}')" >> "$REPORT_FILE"
 echo "Memory: $(free -h | grep Mem | awk '{print $3, "used of", $2}')" >> "$REPORT_FILE"
 
+# The memory line above is one reading at 3am, when nothing is busy. The real
+# sign of a box short of memory is the kernel killing a process to survive -
+# on 4GB, most likely Traccar's Java or PostgreSQL. _TRANSPORT=kernel rather
+# than -k, because -k only reads since the last boot.
+KERNEL_JOURNAL=$(journalctl _TRANSPORT=kernel --since "7 days ago" --no-pager 2>/dev/null)
+OOM_KILLS=$(echo "$KERNEL_JOURNAL" | grep -ci "out of memory: killed process" || true)
+echo "Out-of-memory kills (7 days): $OOM_KILLS" >> "$REPORT_FILE"
+if [ "$OOM_KILLS" -gt 0 ]; then
+    echo "WARNING - the kernel killed a process to free memory:" >> "$REPORT_FILE"
+    echo "$KERNEL_JOURNAL" | grep -i "out of memory: killed process" | tail -3 | cut -c1-220 | sed 's/^/  /' >> "$REPORT_FILE"
+fi
+
 if [ -f /var/run/reboot-required ]; then
     echo "REBOOT REQUIRED: Yes" >> "$REPORT_FILE"
     echo "Reason: $(cat /var/run/reboot-required.pkgs 2>/dev/null || echo 'Unknown')" >> "$REPORT_FILE"
 else
     echo "REBOOT REQUIRED: No" >> "$REPORT_FILE"
+fi
+echo "" >> "$REPORT_FILE"
+
+# --- Disk space ---
+# A percentage on its own hides the trend. On 12 Oct 2026 the disk was about
+# half full; a week later it was 76% and the digest called it "acceptable" -
+# 11GB had landed in one go (the Traccar move's safety copies). So say how
+# much it changed since last week, and where the space is.
+echo "--- Disk Space ---" >> "$REPORT_FILE"
+DISK_USED_MB=$(df -BM --output=used / | tail -1 | tr -dc 0-9)
+DISK_PCT=$(df --output=pcent / | tail -1 | tr -dc 0-9)
+PREV_DATE=""
+PREV_MB=""
+[ -r "$DISK_STATE" ] && read -r PREV_DATE PREV_MB < "$DISK_STATE"
+if [[ "$PREV_MB" =~ ^[0-9]+$ ]]; then
+    DIFF_MB=$((DISK_USED_MB - PREV_MB))
+    echo "Change since last report ($PREV_DATE): $(awk -v d="$DIFF_MB" 'BEGIN { printf "%+.1f", d / 1024 }') GB" >> "$REPORT_FILE"
+    if [ "$DIFF_MB" -ge 2048 ]; then
+        echo "WARNING - disk use grew by more than 2GB since the last report - the list below shows where" >> "$REPORT_FILE"
+    fi
+else
+    echo "Change since last report: no earlier figure yet (first run with this check)" >> "$REPORT_FILE"
+fi
+echo "$(date +%F) $DISK_USED_MB" > "$DISK_STATE"
+
+# A full disk stops PostgreSQL writing, which takes OP and GPS down with it.
+if [ "$DISK_PCT" -ge 85 ]; then
+    echo "WARNING - disk at ${DISK_PCT}% - act now" >> "$REPORT_FILE"
+elif [ "$DISK_PCT" -ge 80 ]; then
+    echo "NOTE - disk at ${DISK_PCT}% - time to look at what is using it" >> "$REPORT_FILE"
+fi
+
+echo "Largest folders:" >> "$REPORT_FILE"
+du -xh / --max-depth=2 2>/dev/null | sort -h | tail -12 | sed 's/^/  /' >> "$REPORT_FILE"
+
+echo "PostgreSQL databases:" >> "$REPORT_FILE"
+sudo -u postgres psql -Atc "SELECT datname || ': ' || pg_size_pretty(pg_database_size(datname)) FROM pg_database WHERE datname NOT IN ('postgres', 'template0', 'template1') ORDER BY pg_database_size(datname) DESC" 2>/dev/null | sed 's/^/  /' >> "$REPORT_FILE"
+
+# journald caps itself (10% of the disk by default), so this levels off
+# rather than growing for ever.
+echo "System logs (journal): $(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[KMGT]' | head -1)" >> "$REPORT_FILE"
+
+# A stopped container keeps everything inside it until it is removed -
+# traccar-h2-old held 3.65GB of the old GPS database this way.
+STOPPED_CONTAINERS=$(docker ps -a --filter status=exited --size --format '{{.Names}} - {{.Status}} - {{.Size}}' 2>/dev/null)
+if [ -n "$STOPPED_CONTAINERS" ]; then
+    echo "Stopped Docker containers (still taking disk space until removed):" >> "$REPORT_FILE"
+    echo "$STOPPED_CONTAINERS" | sed 's/^/  /' >> "$REPORT_FILE"
 fi
 echo "" >> "$REPORT_FILE"
 
