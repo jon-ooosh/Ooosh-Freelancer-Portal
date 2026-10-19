@@ -463,7 +463,7 @@ Built on branch `claude/excess-preauth-lifecycle-ZvUQA` as one PR (jon's call). 
 
 ##### Phase F — Staff Card Payments (OP-first money loop)
 
-OP is now the staff control surface for the FULL post-collection money loop. Initial collection (PaymentIntent creation, payment-link generation) is the remaining piece — staff still walks to the card terminal for that.
+OP is now the staff control surface for the FULL post-collection money loop. Initial collection is covered too since Oct 2026: the payment portal link, and in person the Stripe card reader driven from OP (`docs/STRIPE-TERMINAL-SPEC.md`).
 
 **Shipped (Jun 2026):**
 - [x] **OP-initiated Stripe refunds — excess** (`/excess/:id/reimburse` with `method='stripe_gbp'` + `stripe_payment_intent_id` on the record). Calls `stripe.refunds.create()` directly; HH paperwork pushed best-effort once Stripe succeeds; `refund_legs` JSONB pre-records the leg so the incoming `charge.refunded` webhook is a no-op.
@@ -844,9 +844,10 @@ deposit / excess queries also now exclude `is_deleted` jobs (the soft-deleted sc
 service (route = validate + relay, same HTTP contract) so the matcher — and the planned
 Stripe Terminal module — record through one chain.
 
-**Next: Stripe Terminal** (`docs/STRIPE-TERMINAL-SPEC.md`, planned, hardware ordered;
-Worldpay contract ends March 2027). Pre-auths hinge on extended authorisation and the
-account's merchant category — open question §9.1 there.
+**Stripe Terminal — CLOSED 19 Oct 2026, live for everyone** (`docs/STRIPE-TERMINAL-SPEC.md` §15–16).
+Card-reader money is `stripe_gbp` + `source = 'stripe_terminal'`; staff record new money by the reader,
+Wise or cash, everything else is admin-only (`services/payment-methods.ts`); refunds keep every method.
+Worldpay contract ends March 2027.
 
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.

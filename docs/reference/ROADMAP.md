@@ -25,7 +25,7 @@ shipped, so treat it as a map of what exists rather than a queue to work through
 | 1b | Vehicle maintenance & compliance | Phases A/C/D/E complete; F (turnaround schedule) in progress; B (AI extraction) deferred | `VEHICLES-AND-FLEET.md` |
 | 2 | Driver hire forms & excess | Live since Apr 2026. Verification cockpit, document validity, identity review, referral gate all shipped. Phase 4 (document extraction) next, not built | `DRIVERS-AND-HIRE-FORMS.md` |
 | 3 | Money system | Phases A–F largely shipped — Money tab, excess lifecycle, pre-auth, top-N reconciliation, VAT adjustment, payment-portal repointing, OP-initiated refunds. **Oct 2026:** PayPal via Stripe, portal redesign + hash lockdown, portal link in OP, **Wise incoming-payment matcher (live, awaiting its first real email)** | `MONEY-AND-EXCESS.md` ("Payments, Oct 2026") |
-| 3b | Stripe Terminal — in-person card payments driven from OP, replacing Worldpay/Amex | **Phases 0–3 built** (16 Oct 2026) — hire payments (live-tested), receipts, excess payments + pre-auths from the excess Manage modal; admin-only. Phase 3 (shop + sitter till) built 16 Oct; next: try it, then Phase 4 as revised (reader for everyone, Worldpay/Amex admin-only). Crossover deadline March 2027 | `docs/STRIPE-TERMINAL-SPEC.md` |
+| 3b | Stripe Terminal — in-person card payments driven from OP, replacing Worldpay/Amex | ✅ **Closed 19 Oct 2026, live for everyone** — hire payments, receipts, excess payments + pre-auths, shop + sitter till; new money by reader / Wise / cash, the rest admin-only; refunds unchanged. Left: online-portal extended pre-auth (spec §9.5); cancel Worldpay/Amex March 2027 | `docs/STRIPE-TERMINAL-SPEC.md` |
 | 4 | Status transition engine | Mostly complete — bidirectional HireHop sync live | `PIPELINE-AND-ORGS.md` |
 | 4b | Returns & close-out | Phases A–D mostly complete | `RETURNS-AND-CANCELLATIONS.md` |
 | 4d | Hire close-out / bookkeeping — raise invoice, allocate deposits in HireHop + Xero from the Invoice card; nightly Xero credit sweep; Problems gate on completion | **Phases 1–3a live, Oct 2026.** Next: arrival hook (3b), EU VAT split, HireHop permission lockdown, additional charges | `docs/HIRE-CLOSE-OUT-SPEC.md` §12 |
@@ -79,7 +79,6 @@ to come up:
 - Staff calendar — **everything planned has shipped** (Oct 2026: working from home, the personal calendar feed, the payroll email, days in lieu for company days and the Staff page restyle closed it). Open with jon, not code: an HR-advisor check on the lieu-day policy (spec §20.5b); compare Chris's and Matt's BrightHR TOIL balances for any more 2025 carry-over (add with the balance panel's adjustment form). Left on purpose, each shaped in `docs/STAFF-CALENDAR-SPEC.md` §16: **cover intelligence** (Phase F — wants a season of real data; jon to fill in `staff.min_headcount_by_weekday` first), on-site / travelling locations, half-day WFH, a team feed. §18 "Where it stands" is the handover.
 - Sub-hires module (`job_subhires`).
 - Global operations dashboard widgets (transport, crew, deliveries, carnets, lost property, rehearsals, payments).
-- Initial card collection from OP (PaymentIntent create) — staff still walk to the terminal.
 - Xero financial summary integration; win/loss analysis dashboard.
 - Quote editing, quote status transition validation, RBAC on calculator settings.
 

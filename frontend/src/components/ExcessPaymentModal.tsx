@@ -108,11 +108,11 @@ interface ExcessPaymentModalProps {
 }
 
 const PAYMENT_METHODS = [
-  { value: 'stripe_gbp', label: 'Stripe (Online)' },
   { value: 'wise_bacs', label: 'Wise (Bank Transfer)' },
   { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'rolled_over', label: 'Rolled Over from Previous Hire' },
   // Admin only for new money (STRIPE-TERMINAL-SPEC §15) — filtered by newPaymentMethodAllowed().
+  { value: 'stripe_gbp', label: 'Stripe (Online)' },
   { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
   { value: 'amex', label: 'Amex' },
   { value: 'paypal', label: 'Paypal' },
@@ -122,8 +122,8 @@ const PAYMENT_METHODS = [
 const REIMBURSE_METHODS = [
   { value: 'worldpay', label: 'Worldpay (Card Refund)' },
   { value: 'amex', label: 'Amex (Card Refund)' },
-  { value: 'stripe_gbp', label: 'Stripe GBP (Online Card Refund)' },
-  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
+  { value: 'stripe_gbp', label: 'Stripe (Online)' },
+  { value: 'wise_bacs', label: 'Wise (Bank Transfer)' },
   { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'paypal', label: 'PayPal' },
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
@@ -330,7 +330,7 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   const userRole = useAuthStore((s) => s.user?.role);
   const isAdminUser = userRole === 'admin';
   const paymentMethodOptions = PAYMENT_METHODS.filter((m) => newPaymentMethodAllowed(m.value, userRole));
-  const [payMethod, setPayMethod] = useState(isAdminUser ? 'worldpay' : 'stripe_gbp');
+  const [payMethod, setPayMethod] = useState(isAdminUser ? 'worldpay' : 'wise_bacs');
   const [payReference, setPayReference] = useState('');
   const [payPushToHH, setPayPushToHH] = useState(true);
   const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
@@ -1914,12 +1914,12 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                     onChange={(e) => setExtResolvedMethod(e.target.value as typeof extResolvedMethod)}
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                   >
-                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="stripe_gbp">Stripe (Online)</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
-                    <option value="wise_bacs">Wise (BACS)</option>
+                    <option value="wise_bacs">Wise (Bank Transfer)</option>
                     <option value="lloyds_bank">Lloyds Bank</option>
-                    <option value="till_cash">Cash</option>
+                    <option value="till_cash">Till (Cash)</option>
                     <option value="paypal">PayPal</option>
                   </select>
                 </div>
