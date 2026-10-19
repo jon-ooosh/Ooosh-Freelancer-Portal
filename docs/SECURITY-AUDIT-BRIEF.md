@@ -98,7 +98,17 @@ everywhere. Both portal-secret guards were seen to refuse startup.
 
 ## B. Open
 
-1. **Content-Security-Policy — report-only phase.** Nginx sends the usual
+1. **Content-Security-Policy — enforced 19 Oct 2026** after a week report-only.
+   The week's reports (two staff IPs) found exactly two things: `heic2any`
+   compiling WebAssembly when an iPhone HEIC photo is chosen (now
+   `'wasm-unsafe-eval'` in `script-src` — wasm only, never JS eval) and three
+   migrated Jotform reference photos on the studio-sitter lock-up template
+   (`www.jotform.com` allowed in `img-src` until they are re-uploaded to R2, then
+   drop it). Maps, blob PDFs, Socket.io and the framed staging calculator reported
+   nothing. `stage-view.html`'s viewer script moved to `stage-view.js` so no
+   inline exception is needed. Enforcement itself still reports to
+   `/api/csp-report`, so a regression shows in the log. History follows.
+   **Report-only phase (12–19 Oct).** Nginx sends the usual
    headers (nosniff, frame DENY, HSTS, Referrer-Policy, Permissions-Policy) but
    no CSP, and the staff login sits in `localStorage`, so an XSS anywhere in the
    app is a token theft. **Built (Oct 2026):** the policy as a
