@@ -684,6 +684,12 @@ export async function startShopTerminalPayment(opts: StartShopPaymentInput): Pro
   return (await getSession(session.id))!;
 }
 
+/** For the kiosk till: it may only see and act on sessions a kiosk sale started. */
+export async function sessionStartedByKiosk(id: string): Promise<boolean> {
+  const r = await query(`SELECT 1 FROM terminal_sessions WHERE id = $1 AND shop_payload->'actor'->>'via' = 'kiosk'`, [id]);
+  return r.rows.length > 0;
+}
+
 /** For the sitter till: a sitter may only see and act on sessions they started. */
 export async function sessionStartedByPerson(id: string, personId: string): Promise<boolean> {
   const r = await query(`SELECT 1 FROM terminal_sessions WHERE id = $1 AND started_by_person_id = $2`, [id, personId]);

@@ -190,7 +190,9 @@ router.get('/:id/security', authorize(...MANAGER_ROLES), async (req: AuthRequest
   try {
     const target = await securityTarget(req, res);
     if (!target) return;
+    const { countPasskeys } = await import('../services/staff-passkeys');
     res.json({
+      passkeys: await countPasskeys(target.id),
       mfa_enrolled: !!target.mfa_enrolled_at,
       mfa_enrolled_at: target.mfa_enrolled_at,
       mfa_enforced_from: await enforcedFrom(),

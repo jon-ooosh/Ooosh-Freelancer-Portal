@@ -7,7 +7,7 @@ import { api } from '../services/api';
 import { Card, btnSecondary } from './StaffCard';
 
 interface Device { id: string; label: string; created_at: string; last_used_at: string }
-interface State { mfa_enrolled: boolean; mfa_enrolled_at: string | null; mfa_enforced_from: string | null; devices: Device[] }
+interface State { mfa_enrolled: boolean; mfa_enrolled_at: string | null; mfa_enforced_from: string | null; devices: Device[]; passkeys?: number }
 
 export default function StaffLoginSecurity({ userId, name, onSaved, onError }: {
   userId: string; name: string;
@@ -20,7 +20,7 @@ export default function StaffLoginSecurity({ userId, name, onSaved, onError }: {
   useEffect(() => { void load(); }, [load]);
 
   async function reset() {
-    if (!confirm(`Reset ${name}'s login security? Every remembered device is forgotten and they are signed out everywhere; their next login asks for an email code again.`)) return;
+    if (!confirm(`Reset ${name}'s login security? Every remembered device and passkey is forgotten and they are signed out everywhere; their next login asks for an email code again.`)) return;
     try { await api.post(`/users/${userId}/security/reset`, {}); await load(); await onSaved(`${name}'s login security reset.`); }
     catch (err) { onError(err instanceof Error ? err.message : 'Reset failed'); }
   }
@@ -35,7 +35,7 @@ export default function StaffLoginSecurity({ userId, name, onSaved, onError }: {
     <Card title="Login security" subtitle="Second factor and remembered devices">
       <p className="text-sm text-gray-700">
         {state.mfa_enrolled
-          ? `Second factor set up${state.mfa_enrolled_at ? ` on ${new Date(state.mfa_enrolled_at).toLocaleDateString('en-GB')}` : ''}.`
+          ? `Second factor set up${state.mfa_enrolled_at ? ` on ${new Date(state.mfa_enrolled_at).toLocaleDateString('en-GB')}` : ''}${state.passkeys ? ` · ${state.passkeys} passkey${state.passkeys === 1 ? '' : 's'}` : ' · email codes only'}.`
           : `No second factor yet${state.mfa_enforced_from ? ` — required from ${new Date(state.mfa_enforced_from).toLocaleDateString('en-GB')}` : ''}.`}
       </p>
       {state.devices.length > 0 ? (

@@ -1325,6 +1325,18 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Staff records reminders scheduled daily at 09:45 Europe/London');
 
+  // Daily at 09:47 Europe/London: three months since the warehouse PIN changed →
+  // a bell to admins (STAFF-LOGIN-SECURITY-SPEC §4.5), repeated fortnightly.
+  cron.schedule('47 9 * * *', async () => {
+    try {
+      const { runKioskPinRotationCheck } = await import('../services/kiosk-till');
+      const r = await runKioskPinRotationCheck();
+      if (r.belled) console.log('[scheduler] Kiosk PIN rotation: admins reminded');
+    } catch (err) {
+      console.error('[scheduler] Kiosk PIN rotation check failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+
   // ── Freelancer yard-day offer chase (spec §9.4) ───────────────────────────
   // Daily at 09:05 Europe/London — after the 09:00 cluster, before the carnet
   // forms at 09:15. Two legs, each firing at most once per booking:

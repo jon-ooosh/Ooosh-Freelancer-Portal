@@ -1,4 +1,5 @@
 import { useAuthStore } from '../hooks/useAuthStore';
+import { getWarehouseToken } from './warehouseSession';
 
 const API_BASE = '/api';
 
@@ -58,6 +59,12 @@ async function request<T>(
 
   if (accessToken) {
     headers['Authorization'] = `Bearer ${accessToken}`;
+  } else if (window.location.pathname.startsWith('/warehouse')) {
+    // The warehouse kiosk's PIN session (STAFF-LOGIN-SECURITY-SPEC §4): on the
+    // kiosk pages only, and only when nobody is logged in to OP in this browser.
+    // The server decides what that session may call; nothing here widens it.
+    const kiosk = getWarehouseToken();
+    if (kiosk) headers['Authorization'] = `Bearer ${kiosk}`;
   }
 
   let response = await fetch(`${API_BASE}${path}`, { ...options, headers });

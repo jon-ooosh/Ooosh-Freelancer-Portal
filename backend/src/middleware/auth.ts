@@ -9,6 +9,8 @@ export interface AuthUser {
 
 export interface AuthRequest extends Request {
   user?: AuthUser;
+  /** A warehouse-kiosk till session on a shop route (services/kiosk-till.ts) — never alongside `user`. */
+  kiosk?: { sessionId: string; scopes: string[] };
 }
 
 // Everyone on the team — used to gate routes the whole staff needs.

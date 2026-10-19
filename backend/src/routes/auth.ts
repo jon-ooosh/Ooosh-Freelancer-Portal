@@ -14,6 +14,11 @@ import {
   sendLoginCode, verifyLoginCode, markEnrolled, trustThisDevice, deviceLabelFrom, securityInfo,
   listTrustedDevices, revokeTrustedDevice, signOutEverywhere, peekDeviceId, clearDeviceCookie,
 } from '../services/staff-login-security';
+import {
+  countPasskeys, listPasskeys, removePasskey, registrationOptions, verifyRegistration,
+  authenticationOptions, verifyAuthentication, generateRecoveryCodes, recoveryCodesLeft,
+  useRecoveryCode, PasskeyError,
+} from '../services/staff-passkeys';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 
 const router = Router();
@@ -163,6 +168,37 @@ async function userFromPending(token: unknown): Promise<LoginRow | null> {
   return (r.rows[0] as LoginRow | undefined) ?? null;
 }
 
+/**
+ * Which second factors this person may use, and the email code sent if it is one
+ * of them (§3.1, §1.2). A passkey holder is offered the passkey; a non-admin keeps
+ * the email code as the fallback; an ADMIN with a passkey has the passkey and the
+ * recovery codes only — the mandate means the mailbox is no longer a way in.
+ */
+async function secondFactorOffer(user: LoginRow, req: Request) {
+  const passkeys = await countPasskeys(user.id);
+  const methods = passkeys > 0 ? (user.role === 'admin' ? ['passkey'] : ['passkey', 'email']) : ['email'];
+  const sent = methods.includes('email')
+    ? await sendLoginCode(user, deviceLabelFrom(req.headers['user-agent']))
+    : null;
+  return {
+    methods,
+    emailHint: hintEmail(user.email),
+    codeSent: sent?.ok ?? false,
+    codeError: sent && !sent.ok ? sent.error : null,
+    recovery: user.role === 'admin' && (await recoveryCodesLeft(user.id)) > 0,
+  };
+}
+
+/** The second factor passed: enrolled, device trusted if asked, session issued. */
+async function finishSecondFactor(req: Request, res: Response, user: LoginRow): Promise<void> {
+  await markEnrolled(user.id);
+  user.mfa_enrolled_at = user.mfa_enrolled_at ?? new Date();
+  if (req.body?.trustDevice !== false) {
+    await trustThisDevice(res, user.id, deviceLabelFrom(req.headers['user-agent']));
+  }
+  await issueSession(res, user);
+}
+
 // POST /api/auth/login
 router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, res: Response) => {
   try {
@@ -213,14 +249,7 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
     const enrolled = !!user.mfa_enrolled_at;
     if (!trustedDeviceId && (enrolled || await isEnforcedNow())) {
       const pending = signFor('login_pending', { id: user.id }, '5m');
-      const sent = await sendLoginCode(user, deviceLabelFrom(req.headers['user-agent']));
-      res.json({
-        pending,
-        methods: ['email'],
-        emailHint: hintEmail(user.email),
-        codeSent: sent.ok,
-        codeError: sent.ok ? null : sent.error,
-      });
+      res.json({ pending, ...(await secondFactorOffer(user, req)) });
       return;
     }
 
@@ -256,14 +285,128 @@ router.post('/login/code', loginLimiter, async (req: Request, res: Response) => 
     if (!/^\d{6}$/.test(code)) { res.status(400).json({ error: 'Enter the 6-digit code' }); return; }
     const check = await verifyLoginCode(user.id, code);
     if (!check.ok) { res.status(401).json({ error: check.error }); return; }
-    await markEnrolled(user.id);
-    user.mfa_enrolled_at = user.mfa_enrolled_at ?? new Date();
-    if (req.body?.trustDevice !== false) {
-      await trustThisDevice(res, user.id, deviceLabelFrom(req.headers['user-agent']));
+    // An admin with a passkey is not let in on the mailbox alone (§1.2).
+    if (user.role === 'admin' && (await countPasskeys(user.id)) > 0) {
+      res.status(401).json({ error: 'Use your passkey (or a recovery code) — admin logins need one.' });
+      return;
     }
-    await issueSession(res, user);
+    await finishSecondFactor(req, res, user);
   } catch (error) {
     console.error('Login code error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Passkeys (STAFF-LOGIN-SECURITY-SPEC §3.4) ──────────────────────────────
+
+const passkeyFail = (res: Response, err: unknown, where: string) => {
+  if (err instanceof PasskeyError) { res.status(err.status).json({ error: err.message }); return; }
+  console.error(`${where} error:`, err);
+  res.status(500).json({ error: 'Internal server error' });
+};
+
+// POST /api/auth/login/passkey/options — { pending? }: a challenge. With a pending
+// token (after the password) only that person's passkeys are offered; without
+// one the passkey IS the login and the browser names the person.
+router.post('/login/passkey/options', loginLimiter, async (req: Request, res: Response) => {
+  try {
+    let userId: string | null = null;
+    if (req.body?.pending !== undefined) {
+      const user = await userFromPending(req.body.pending);
+      if (!user) { res.status(401).json({ error: 'Your login has expired — start again' }); return; }
+      userId = user.id;
+    }
+    res.json(await authenticationOptions(userId));
+  } catch (err) {
+    passkeyFail(res, err, 'Passkey options');
+  }
+});
+
+// POST /api/auth/login/passkey — { nonce, response, trustDevice }: the signed
+// challenge → a session. Both factors at once (§3.4), no password.
+router.post('/login/passkey', loginLimiter, async (req: Request, res: Response) => {
+  try {
+    const { userId } = await verifyAuthentication(String(req.body?.nonce ?? ''), req.body?.response);
+    const r = await query(
+      `${LOGIN_ROW_SQL} WHERE u.id = $1 AND u.is_active = true AND u.role <> 'freelancer' AND u.login_disabled = false`,
+      [userId],
+    );
+    const user = r.rows[0] as LoginRow | undefined;
+    if (!user) { res.status(401).json({ error: 'That login is no longer active' }); return; }
+    await clearLoginFailures(user.id);
+    await finishSecondFactor(req, res, user);
+  } catch (err) {
+    passkeyFail(res, err, 'Passkey login');
+  }
+});
+
+// POST /api/auth/login/recovery — { pending, recoveryCode, trustDevice }: an
+// admin without their passkey to hand. Each code works once.
+router.post('/login/recovery', loginLimiter, async (req: Request, res: Response) => {
+  try {
+    const user = await userFromPending(req.body?.pending);
+    if (!user) { res.status(401).json({ error: 'Your login has expired — start again' }); return; }
+    if (user.role !== 'admin') { res.status(403).json({ error: 'Recovery codes are for admin logins; ask an admin to reset yours.' }); return; }
+    if (!(await useRecoveryCode(user.id, String(req.body?.recoveryCode ?? '')))) {
+      await recordLoginFailure(user);
+      res.status(401).json({ error: 'That recovery code is not valid (each works once).' });
+      return;
+    }
+    await finishSecondFactor(req, res, user);
+  } catch (error) {
+    console.error('Recovery login error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/security/passkeys/options — about to add a passkey to MY login
+router.post('/security/passkeys/options', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(`${LOGIN_ROW_SQL} WHERE u.id = $1`, [req.user!.id]);
+    const me = r.rows[0] as LoginRow | undefined;
+    if (!me) { res.status(404).json({ error: 'User not found' }); return; }
+    const name = [me.preferred_name || me.first_name, me.last_name].filter(Boolean).join(' ') || me.email;
+    res.json(await registrationOptions({ id: me.id, email: me.email, name }));
+  } catch (err) {
+    passkeyFail(res, err, 'Passkey registration options');
+  }
+});
+
+// POST /api/auth/security/passkeys — { response, label }: the new passkey. Counts
+// as enrolment; an ADMIN's first passkey also mints their recovery codes (shown once).
+router.post('/security/passkeys', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const label = String(req.body?.label ?? '') || deviceLabelFrom(req.headers['user-agent']);
+    const passkey = await verifyRegistration(req.user!.id, req.body?.response, label);
+    await markEnrolled(req.user!.id);
+    let recoveryCodes: string[] | null = null;
+    if (req.user!.role === 'admin' && (await recoveryCodesLeft(req.user!.id)) === 0) {
+      recoveryCodes = await generateRecoveryCodes(req.user!.id);
+    }
+    res.json({ success: true, passkey, recoveryCodes });
+  } catch (err) {
+    passkeyFail(res, err, 'Passkey registration');
+  }
+});
+
+// DELETE /api/auth/security/passkeys/:id — remove one of my passkeys
+router.delete('/security/passkeys/:id', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const ok = await removePasskey(req.user!.id, String(req.params.id));
+    if (!ok) { res.status(404).json({ error: 'Passkey not found' }); return; }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Remove passkey error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/security/recovery-codes — a fresh set of ten (admins); the old set is void
+router.post('/security/recovery-codes', authenticate, authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ recoveryCodes: await generateRecoveryCodes(req.user!.id) });
+  } catch (error) {
+    console.error('Recovery codes error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -276,7 +419,12 @@ router.get('/security', authenticate, async (req: AuthRequest, res: Response) =>
     if (!me) { res.status(404).json({ error: 'User not found' }); return; }
     const current = peekDeviceId(req, me.id);
     const devices = (await listTrustedDevices(me.id)).map((d) => ({ ...d, current: d.id === current }));
-    res.json({ ...(await securityInfo(me)), devices });
+    res.json({
+      ...(await securityInfo(me)),
+      devices,
+      passkeys: await listPasskeys(me.id),
+      recovery_codes_left: me.role === 'admin' ? await recoveryCodesLeft(me.id) : null,
+    });
   } catch (error) {
     console.error('Security state error:', error);
     res.status(500).json({ error: 'Internal server error' });

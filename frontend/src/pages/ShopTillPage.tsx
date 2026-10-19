@@ -17,7 +17,8 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
+import { getWarehouseToken, clearWarehouseToken } from '../services/warehouseSession';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { newPaymentMethodAllowed } from '../lib/paymentMethods';
@@ -30,6 +31,18 @@ import CardReaderPayment, { type CardReaderAccess, type Session as ReaderSession
 type BottomTab = 'recent' | 'attention' | 'review' | 'week' | 'used' | 'reorder';
 const BOTTOM_TABS: BottomTab[] = ['recent', 'attention', 'review', 'week', 'used', 'reorder'];
 const TAB_KEY = 'shopTill.tab';
+// The kiosk till remembers who is selling for 30 minutes (STAFF-LOGIN-SECURITY-SPEC §4.3).
+const KIOSK_SELLER_KEY = 'kioskTill.seller';
+const KIOSK_SELLER_MINUTES = 30;
+interface Seller { person_id: string; name: string | null }
+function rememberedSeller(): string {
+  try {
+    const raw = sessionStorage.getItem(KIOSK_SELLER_KEY);
+    if (!raw) return '';
+    const { id, at } = JSON.parse(raw) as { id: string; at: number };
+    return Date.now() - at < KIOSK_SELLER_MINUTES * 60_000 ? id : '';
+  } catch { return ''; }
+}
 
 interface StockItem {
   hhStockId: number;
@@ -184,8 +197,30 @@ function ago(iso: string | null): string {
   return `${Math.floor(mins / 60)}h ago`;
 }
 
-export default function ShopTillPage() {
+/**
+ * `kiosk`: the warehouse iPad's till (/warehouse/till) — the PIN session, no
+ * login. Sales only, cash or the reader, each naming a person from the dropdown;
+ * no refunds, no cancel, no week, no reorder (STAFF-LOGIN-SECURITY-SPEC §4). The
+ * server holds the same line (KIOSK_TILL_ALLOW); this just hides what it refuses.
+ */
+export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}) {
   const { user } = useAuthStore();
+  const navigate = useNavigate();
+  const [sellers, setSellers] = useState<Seller[]>([]);
+  const [sellerId, setSellerIdState] = useState<string>(() => (kiosk ? rememberedSeller() : ''));
+  const setSellerId = (id: string) => {
+    setSellerIdState(id);
+    try { sessionStorage.setItem(KIOSK_SELLER_KEY, JSON.stringify({ id, at: Date.now() })); } catch { /* a convenience */ }
+  };
+  // No PIN session → the PIN page. A session that has expired shows up as a 401
+  // on the first load below and goes the same way.
+  useEffect(() => {
+    if (!kiosk) return;
+    if (!getWarehouseToken() && !useAuthStore.getState().accessToken) navigate('/warehouse', { replace: true });
+    api.get<{ data: Seller[] }>('/shop/sellers')
+      .then(r => setSellers(r.data))
+      .catch((e: any) => { if (e?.status === 401) { clearWarehouseToken(); navigate('/warehouse', { replace: true }); } });
+  }, [kiosk, navigate]);
 
   const [mode, setMode] = useState<'sale' | 'consumption'>('sale');
   const [term, setTerm] = useState('');
@@ -250,7 +285,7 @@ export default function ShopTillPage() {
   const [refundFor, setRefundFor] = useState<string | null>(null);
   const [refundReason, setRefundReason] = useState('');
   const [refundBusy, setRefundBusy] = useState(false);
-  const canRefund = hasManagerRole(user?.role);
+  const canRefund = !kiosk && hasManagerRole(user?.role);
 
   // Who the sale is for: null = walk-in (the week's shop job), or a real job.
   // Editable right up to payment — "oh, can it go on the band's bill?" is the
@@ -285,6 +320,8 @@ export default function ShopTillPage() {
   }, []);
   const tenderOptions = TENDERS.filter(t => (!t.needsJob || route)
     && (t.key !== 'card_reader' || readerAccess?.enabled)
+    // The kiosk takes cash or the reader — never "their bill" (§4.2).
+    && (!kiosk || t.key === 'till_cash' || t.key === 'card_reader')
     && newPaymentMethodAllowed(t.key, user?.role));
 
   // A band's job: offer its contacts in the receipt box (THE contact pool, server-side).
@@ -410,13 +447,14 @@ export default function ShopTillPage() {
     api.get<{ data: RecentSale[] }>('/shop/sales?limit=10')
       .then(r => setRecent(r.data))
       .catch(() => setRecent([]));
+    if (kiosk) return;   // the kiosk sees its own last five; the rest is a staff login's
     api.get<{ data: RecentSale[] }>('/shop/sales?attention=1&limit=50')
       .then(r => setAttention(r.data))
       .catch(() => setAttention([]));
     api.get<{ data: RecentSale[] }>('/shop/sales?review=1&limit=200')
       .then(r => setToReview(r.data))
       .catch(() => setToReview([]));
-  }, []);
+  }, [kiosk]);
 
   /** Tick off sitter sales — one, or the whole list. */
   const markReviewed = useCallback(async (ids: string[]) => {
@@ -603,6 +641,8 @@ export default function ShopTillPage() {
         tender: mode === 'sale' ? tender : null,
         soldToJobId: mode === 'sale' && route ? route.id : null,
         notes: notes.trim() || null,
+        // The kiosk names the person; a staff login is the person.
+        ...(kiosk ? { soldByPersonId: sellerId } : {}),
       };
       const r = await api.post<{ data: { id: string; kind: string; totals: Totals } }>('/shop/sales', body);
       // The sale is recorded whatever happens to the email — a receipt that
@@ -629,7 +669,8 @@ export default function ShopTillPage() {
   }
 
   const canSubmit = basket.length > 0 && !saving && !overDiscountCap
-    && (mode === 'consumption' ? notes.trim().length > 0 : true);
+    && (mode === 'consumption' ? notes.trim().length > 0 : true)
+    && (!kiosk || !!sellerId);
 
   /** One Recent Sales / Needs attention row — the same row in both lists. */
   const renderSaleRow = (r: RecentSale) => {
@@ -701,7 +742,7 @@ export default function ShopTillPage() {
                 queued means not yet, pushed means it did. */}
             <span className={`w-20 rounded px-2 py-0.5 text-center text-xs ${chip.cls}`}>{chip.label}</span>
             <span className="ml-auto flex justify-end gap-2 sm:ml-0 sm:w-36">
-              {(r.status === 'queued' || r.status === 'failed') && (
+              {!kiosk && (r.status === 'queued' || r.status === 'failed') && (
                 <button
                   onClick={() => cancelSale(r.id)}
                   className="text-xs font-medium text-gray-500 hover:text-red-600"
@@ -709,7 +750,7 @@ export default function ShopTillPage() {
                   Cancel
                 </button>
               )}
-              {r.status === 'failed' && (
+              {!kiosk && r.status === 'failed' && (
                 <button
                   onClick={() => retrySale(r.id)}
                   className="text-xs font-medium text-ooosh-600 hover:underline"
@@ -728,7 +769,7 @@ export default function ShopTillPage() {
                   Receipt
                 </button>
               )}
-              {r.needs_review && !r.reviewed_at && r.status !== 'cancelled' && (
+              {!kiosk && r.needs_review && !r.reviewed_at && r.status !== 'cancelled' && (
                 <button
                   onClick={() => markReviewed([r.id])}
                   className="text-xs font-medium text-green-700 hover:underline"
@@ -857,14 +898,62 @@ export default function ShopTillPage() {
   };
 
   return (
+    <div className={kiosk ? 'min-h-screen bg-gray-100' : ''}>
+    {/* The kiosk page sits outside the staff Layout, so it brings its own bar:
+        back to Collections, and the same logout as the collections page. */}
+    {kiosk && (
+      <header className="bg-white shadow-sm sticky top-0 z-10">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <img src="/ooosh-logo-full.jpg" alt="Ooosh Tours" className="h-10 w-auto" />
+            <div>
+              <h1 className="text-lg font-bold text-gray-800">Shop Till</h1>
+              <p className="text-xs text-gray-500">Warehouse kiosk</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => navigate('/warehouse/collections')}
+              className="px-3 py-1.5 rounded-lg bg-purple-600 text-white text-sm font-medium hover:bg-purple-700">
+              Collections
+            </button>
+            <button onClick={() => { clearWarehouseToken(); navigate('/warehouse', { replace: true }); }}
+              className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg" title="Logout">
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </header>
+    )}
     <div className="max-w-6xl mx-auto px-4 py-6">
+      {!kiosk && (
       <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
         <h1 className="text-2xl font-bold text-gray-900">Shop Till</h1>
         <span className="text-xs text-gray-500">Stock as of {ago(cacheAge)}</span>
       </div>
+      )}
+
+      {/* The kiosk: who is selling, before anything else (§4.3). Remembered for
+          30 minutes so a run of sales by one person is one tap each. */}
+      {kiosk && (
+        <div className={`mb-4 rounded-lg border px-4 py-3 ${sellerId ? 'border-gray-200 bg-white' : 'border-amber-300 bg-amber-50'}`}>
+          <label className="block text-sm font-medium text-gray-800 mb-1">Who's selling?</label>
+          <select
+            value={sellerId}
+            onChange={e => setSellerId(e.target.value)}
+            className="w-full max-w-sm rounded border border-gray-300 px-3 py-2 text-base"
+          >
+            <option value="">Pick your name…</option>
+            {sellers.map(p => <option key={p.person_id} value={p.person_id}>{p.name || p.person_id}</option>)}
+          </select>
+          {!sellerId && <p className="mt-1 text-xs text-amber-800">Every sale on the kiosk is recorded against a name.</p>}
+        </div>
+      )}
 
       {/* Sale vs internal use. Deliberately different-looking: consumption is a
           stock event with no money, not a 100%-discounted sale. */}
+      {!kiosk && (
       <div className="flex gap-2 mb-4">
         {(['sale', 'consumption'] as const).map(m => (
           <button
@@ -878,6 +967,7 @@ export default function ShopTillPage() {
           </button>
         ))}
       </div>
+      )}
 
       {/* No "this week's HireHop job" banner (jon, Sep 2026): the first sale
           creates the job on its own, so a warning asking staff to act only
@@ -1228,7 +1318,7 @@ export default function ShopTillPage() {
           per browser; clicking the open tab folds it away. */}
       <div className="mt-24 border-t border-gray-200 pt-3">
         <div className="flex flex-wrap gap-1">
-          {([
+          {(kiosk ? ([['recent', 'Last few sales']] as [BottomTab, string][]) : [
             ['recent', 'Recent sales'],
             ['attention', attention.length ? `Needs attention (${attention.length})` : 'Needs attention'],
             ['review', toReview.length ? `Sitter sales to review (${toReview.length})` : 'Sitter sales'],
@@ -1409,6 +1499,7 @@ export default function ShopTillPage() {
                 sold_to_job_id: route ? route.id : null,
                 notes: notes.trim() || null,
                 reader_id: readerId,
+                ...(kiosk ? { sold_by_person_id: sellerId } : {}),
               })}
               onRecorded={(sess) => {
                 if (sess.status === 'succeeded' && sess.shop_sale_id) {
@@ -1422,6 +1513,7 @@ export default function ShopTillPage() {
           </div>
         </div>
       )}
+    </div>
     </div>
   );
 }
