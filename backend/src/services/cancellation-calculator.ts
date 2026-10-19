@@ -69,8 +69,15 @@ export interface EarlyReturnResult {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-/** £25 + VAT = £30 minimum cancellation fee */
-const MIN_CANCELLATION_FEE = 30;
+/**
+ * Minimum cancellation fee, EX-VAT. The whole calculator works in ex-VAT terms
+ * (`totalHireCost` is the ex-VAT hire value, the 10%/25% tiers apply to it, and
+ * the callers/email add 20% VAT for display). The T&Cs minimum is "£25 + VAT"
+ * i.e. £25 ex-VAT (= £30 inc-VAT). It MUST be the ex-VAT figure here — using £30
+ * made the fee £25+VAT+VAT = £36 inc-VAT (VAT applied twice). Reported Jun 2026
+ * (job 16114: showed £36 retained / £165.60 refund instead of £30 / £171.60).
+ */
+const MIN_CANCELLATION_FEE = 25;
 
 /** Minimum charge period: 7 calendar days */
 const MIN_CHARGE_DAYS = 7;
@@ -105,7 +112,7 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
     if (percentFee < MIN_CANCELLATION_FEE) {
       fee = MIN_CANCELLATION_FEE;
       minimumApplied = true;
-      breakdownParts.push(`10% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £30 (£25+VAT) applied`);
+      breakdownParts.push(`10% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £25+VAT applied (£${MIN_CANCELLATION_FEE.toFixed(2)} ex-VAT)`);
     } else {
       fee = percentFee;
       breakdownParts.push(`10% of £${totalHireCost.toFixed(2)} = £${fee.toFixed(2)}`);
@@ -118,7 +125,7 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
     if (percentFee < MIN_CANCELLATION_FEE) {
       fee = MIN_CANCELLATION_FEE;
       minimumApplied = true;
-      breakdownParts.push(`25% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £30 (£25+VAT) applied`);
+      breakdownParts.push(`25% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £25+VAT applied (£${MIN_CANCELLATION_FEE.toFixed(2)} ex-VAT)`);
     } else {
       fee = percentFee;
       breakdownParts.push(`25% of £${totalHireCost.toFixed(2)} = £${fee.toFixed(2)}`);

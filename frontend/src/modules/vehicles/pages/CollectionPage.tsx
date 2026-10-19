@@ -23,7 +23,7 @@ import type {
   CapturedPhoto,
   CollectionData,
 } from '../types/vehicle-event'
-import { FUEL_LEVELS, REQUIRED_PHOTOS } from '../types/vehicle-event'
+import { FUEL_LEVELS, REQUIRED_PHOTOS, isFuelReduction } from '../types/vehicle-event'
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
@@ -62,7 +62,10 @@ export function CollectionPage() {
   const { scope, freelancerContext } = useAuth()
   const isFreelancer = scope === 'freelancer'
   const { data: allVehicles, isLoading: vehiclesLoading } = useVehicles()
-  const { data: allAllocations } = useAllocations()
+  // Staff-only data hooks — a freelancer collection session isn't allowed to
+  // reach these endpoints (403 via the freelancer allowlist) and doesn't need
+  // them: the van + job + customer come pre-filled from the resolve context.
+  const { data: allAllocations } = useAllocations({ enabled: !isFreelancer })
   const [step, setStep] = useState(0)
   const [form, setForm] = useState<CollectionFormState>(INITIAL_FORM)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -71,11 +74,16 @@ export function CollectionPage() {
   const [opResults, setOpResults] = useState<OpResult[]>([])
   const [bookOutMileage, setBookOutMileage] = useState<number | null>(null)
   const [bookOutFuelLevel, setBookOutFuelLevel] = useState<string | null>(null)
+  // The book-out event's own date + job: the collection report only compares
+  // against a book-out that belongs to THIS job (the van's latest book-out
+  // event can be a stale one from a previous hire).
+  const [bookOutDate, setBookOutDate] = useState<string | null>(null)
+  const [bookOutJob, setBookOutJob] = useState<string | null>(null)
   const signatureRef = useRef<SignatureCaptureHandle>(null!)
   const [queuedOffline, setQueuedOffline] = useState(false)
 
   // Form autosave
-  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft } = useFormAutosave({
+  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft, acceptDraft } = useFormAutosave({
     flowType: 'collection',
     disabled: submitSuccess || queuedOffline,
   })
@@ -124,7 +132,7 @@ export function CollectionPage() {
       signatureBlob: draftLoaded.signatureBlob,
     })
     setStep(draftLoaded.step)
-    dismissDraft()
+    acceptDraft()
   }
 
   const vehicles = useMemo(
@@ -138,15 +146,49 @@ export function CollectionPage() {
     preSelectedJobId && !form.hireHopJob ? parseInt(preSelectedJobId, 10) : null,
   )
 
-  // Driver hire forms for this job
-  const { data: hireForms } = useDriverHireForms(form.hireHopJob || null)
+  // Driver hire forms for this job (staff only — see note above)
+  const { data: hireForms } = useDriverHireForms(isFreelancer ? null : (form.hireHopJob || null))
 
-  // Known issues for selected vehicle
-  const { data: vehicleIssues } = useVehicleIssues(form.vehicleReg || undefined)
+  // Known issues for selected vehicle (staff only — see note above)
+  const { data: vehicleIssues } = useVehicleIssues(isFreelancer ? undefined : (form.vehicleReg || undefined))
   const openIssues = useMemo(
     () => (vehicleIssues || []).filter(i => i.status !== 'Resolved'),
     [vehicleIssues],
   )
+
+  // Freelancer auto-fill from context (mirrors BookOutPage). The checkin
+  // resolve endpoint already identified the van that's out on this job and
+  // put it in the session — but the allocations hook that normally drives
+  // auto-select below is staff-only (gated off for freelancers), so without
+  // this effect a freelancer sits on "Waiting for vehicle allocation"
+  // forever even though the van is right there in freelancerContext.
+  // Waits for the vehicles query so vehicleType/simpleType come through.
+  const freelancerAutoSelectedRef = useRef(false)
+
+  useEffect(() => {
+    if (!isFreelancer) return
+    if (!freelancerContext?.vehicleId || !freelancerContext?.vehicleReg) return
+    if (freelancerAutoSelectedRef.current) return
+    const ctxVehicle = vehicles.find(v => v.id === freelancerContext.vehicleId)
+    if (!ctxVehicle) return // wait for vehicles list
+    freelancerAutoSelectedRef.current = true
+    // On a collection the "driver" on the interim assessment is the CUSTOMER
+    // who had the van (from the hire form, via the resolve payload); the
+    // freelancer is just the collection agent. Fall back to the freelancer's
+    // own name if no customer hire form is linked — field stays editable.
+    const customerName = freelancerContext.customerDriverName || ''
+    const customerEmail = freelancerContext.customerDriverEmail || ''
+    setForm(f => ({
+      ...f,
+      vehicleId: ctxVehicle.id,
+      vehicleReg: ctxVehicle.reg,
+      vehicleType: ctxVehicle.vehicleType,
+      vehicleSimpleType: ctxVehicle.simpleType,
+      hireHopJob: freelancerContext.jobId || f.hireHopJob,
+      driverName: customerName || freelancerContext.driverName || f.driverName,
+      clientEmail: customerEmail || f.clientEmail,
+    }))
+  }, [isFreelancer, freelancerContext, vehicles])
 
   // Auto-select vehicle from allocation
   const autoSelectedRef = useRef(false)
@@ -208,6 +250,8 @@ export function CollectionPage() {
       if (bo) {
         setBookOutMileage(bo.mileage)
         setBookOutFuelLevel(bo.fuelLevel)
+        setBookOutDate(bo.eventDate)
+        setBookOutJob(bo.hireHopJob)
       }
     }).catch(() => {})
     return () => { cancelled = true }
@@ -417,20 +461,27 @@ export function CollectionPage() {
       console.warn('Failed to convert signature to base64')
     }
 
-    // ── Steps 4+5: PDF + emails — ONE server-side call. The server builds
-    // the report and emails each recipient directly; the multi-MB base64 PDF
-    // never round-trips through the phone. Recipients: the customer (with
-    // the job-level address-book fallback when no email is on file) and the
-    // collecting freelancer (their own copy, when their email differs).
-    setUploadProgress('Generating PDF & sending emails...')
-    const freelancerEmail = freelancerContext?.driverEmail
+    // ── Steps 4+5: PDF + email — ONE server-side call. The server builds
+    // the report and emails it directly; the multi-MB base64 PDF never
+    // round-trips through the phone. Recipient: the customer only (with the
+    // job-level address-book fallback when no email is on file). The
+    // collecting freelancer no longer gets a copy (jon, Oct 2026) — the
+    // report is filed against the van either way.
+    setUploadProgress('Generating PDF & sending email...')
     const recipients: Array<{ driverName: string; email: string | null }> = []
     if (form.clientEmail || form.hireHopJob) {
       recipients.push({ driverName: form.driverName, email: form.clientEmail || null })
     }
-    if (freelancerEmail && freelancerEmail !== form.clientEmail) {
-      recipients.push({ driverName: form.driverName, email: freelancerEmail })
-    }
+
+    // Book-out -> collection comparison, only against a book-out that
+    // belongs to this job (never a stale one from a previous hire).
+    const bookOutIsThisJob = bookOutJob != null && String(bookOutJob) === String(form.hireHopJob)
+    const boMileage = bookOutIsThisJob ? bookOutMileage : null
+    const boFuel = bookOutIsThisJob ? bookOutFuelLevel : null
+    const clientMiles = boMileage != null && !isNaN(mileageNum) ? mileageNum - boMileage : null
+    const fuelDiff = isFuelReduction(boFuel, form.fuelLevel)
+      ? `${boFuel} at book-out -> ${form.fuelLevel} at collection`
+      : null
 
     if (recipients.length === 0) {
       results.push({
@@ -443,6 +494,7 @@ export function CollectionPage() {
         () =>
           sendConditionReport(
             {
+              eventId,
               vehicleReg: form.vehicleReg,
               vehicleType: form.vehicleType,
               vehicleMake: selectedVehicle?.make,
@@ -459,10 +511,18 @@ export function CollectionPage() {
               briefingItems: [],
               signatureBase64,
               isCheckIn: false,
+              isCollection: true,
+              bookOutMileage: boMileage,
+              bookOutFuelLevel: boFuel,
+              bookOutDate: bookOutIsThisJob ? bookOutDate : null,
+              // Anything the client mentioned at collection — the point of
+              // this report is "it was like this when we picked it up"
+              bookOutNotes: form.damageNotes || undefined,
             },
             recipients,
+            { fuelDifference: fuelDiff, milesDriven: clientMiles },
           ),
-        'Collection PDF + emails',
+        'Collection PDF + email',
       )
 
       if (reportResult.success && reportResult.data) {
@@ -1026,7 +1086,8 @@ function StepConfirm({
   signatureRef: React.RefObject<SignatureCaptureHandle>
   bookOutFuelLevel: string | null
 }) {
-  const fuelChanged = bookOutFuelLevel && form.fuelLevel && bookOutFuelLevel !== form.fuelLevel
+  // Only a reduction is worth flagging — more fuel coming back is fine.
+  const fuelChanged = isFuelReduction(bookOutFuelLevel, form.fuelLevel)
 
   return (
     <div className="space-y-5">

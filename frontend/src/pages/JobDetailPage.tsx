@@ -1,32 +1,83 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { hasManagerRole } from '../lib/roles';
+import { vehiclePrepPill } from '../lib/vehiclePrep';
+import { referralBadge } from '../lib/driverStatus';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
+import PcnHistorySection from '../components/PcnHistorySection';
+import { ClaimsSection } from '../components/claims/format';
 import SendMerchFormButton from '../components/SendMerchFormButton';
+import AddHeldItemButton from '../components/AddHeldItemButton';
 import TransportCalculator from '../components/TransportCalculator';
+import { StagingCalculatorModal, StagingOverviewCard } from '../components/StagingCalculator';
+import BacklineMatcherModal from '../components/BacklineMatcherModal';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
-import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import ExcessPaymentModal, {
+  computeHireDays,
+  // Aliased: this file has its own `statusLabel` for the pipeline status.
+  statusLabel as excessStatusLabel,
+  statusColor as excessStatusColor,
+} from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
+import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
 import JobContactsCard from '../components/JobContactsCard';
+import { VenuePicker } from '../components/VenuePicker';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
+import CombineBookingsModal from '../components/CombineBookingsModal';
+import QuoteOptionsBar from '../components/QuoteOptionsBar';
+import AddQuoteOptionModal from '../components/AddQuoteOptionModal';
+import { OPTION_COPY } from '../lib/optionCopy';
+import { isOptionOpen, stripOptionSuffix, ALTERNATIVE_QUOTE_LOST_REASON } from '../lib/quoteOptions';
+import { validateDateTimeOrdering, addDays } from '../lib/jobDates';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFullName } from '../lib/displayName';
 import MoneyTab from '../components/MoneyTab';
+import RackPlanModal from '../components/rackplan/RackPlanModal';
+import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
+import StudioHandoverCard from '../components/StudioHandoverCard';
+import RehearsalDetailsCard from '../components/RehearsalDetailsCard';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
 import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
-import FileEmailModal from '../components/FileEmailModal';
+import EntityFilesSection from '../components/EntityFilesSection';
 import QuoteEditModal from '../components/QuoteEditModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
+import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
+import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
+import { openAuthedFile } from '../lib/openAuthedFile';
+import { ukToday } from '../lib/ukDate';
+import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPlan } from '../lib/closeOutPlan';
+import { cancellationBalance, cancellationFeeGross } from '../lib/money';
+import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
+
+
+// Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
+// an inline array literal would refetch on every parent render.
+const HELD_KINDS = ['incoming', 'temp_storage', 'lost_property'] as const;
+
+// Enquiry dismissal reasons (migration 196) — keep in step with the backend
+// DISMISSAL_REASONS enum in routes/pipeline.ts.
+const DISMISSAL_REASON_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: 'spam', label: 'Spam', hint: 'Bot / junk submission' },
+  { value: 'not_an_enquiry', label: 'Not an enquiry', hint: 'A message that isn’t a booking request' },
+  { value: 'about_an_existing_job', label: 'About an existing job', hint: 'Belongs on another job, not a new one' },
+  { value: 'duplicate', label: 'Duplicate', hint: 'Same enquiry already logged' },
+  { value: 'other', label: 'Other', hint: 'Something else — add a note' },
+];
+const DISMISSAL_REASON_LABELS: Record<string, string> = Object.fromEntries(
+  DISMISSAL_REASON_OPTIONS.map((o) => [o.value, o.label])
+);
 
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
@@ -50,34 +101,6 @@ const STATUS_COLOURS: Record<number, string> = {
   11: 'bg-emerald-100 text-emerald-700',
 };
 
-const FILE_TAGS = [
-  'Stage Plot', 'Rider', 'Tour Dates', 'Quote', 'Invoice',
-  'Contract', 'Production Schedule', 'Site Map', 'Risk Assessment', 'Other',
-] as const;
-
-function fileTagColour(label: string): string {
-  const map: Record<string, string> = {
-    'Stage Plot': 'bg-purple-100 text-purple-700',
-    'Rider': 'bg-blue-100 text-blue-700',
-    'Tour Dates': 'bg-amber-100 text-amber-700',
-    'Quote': 'bg-green-100 text-green-700',
-    'Invoice': 'bg-emerald-100 text-emerald-700',
-    'Contract': 'bg-red-100 text-red-700',
-    'Production Schedule': 'bg-indigo-100 text-indigo-700',
-    'Site Map': 'bg-teal-100 text-teal-700',
-    'Risk Assessment': 'bg-orange-100 text-orange-700',
-  };
-  return map[label] || 'bg-gray-100 text-gray-600';
-}
-
-// Check if a file can be previewed inline
-function isPreviewable(name: string): 'image' | 'pdf' | null {
-  const lower = name.toLowerCase();
-  if (/\.(jpg|jpeg|png|gif|webp|svg)$/.test(lower)) return 'image';
-  if (/\.pdf$/.test(lower)) return 'pdf';
-  return null;
-}
-
 interface JobDetail {
   id: string;
   hh_job_number: number | null;
@@ -89,6 +112,7 @@ interface JobDetail {
   client_id: string | null;
   client_name: string | null;
   company_name: string | null;
+  client_org_name: string | null;
   client_ref: string | null;
   venue_id: string | null;
   venue_name: string | null;
@@ -114,6 +138,7 @@ interface JobDetail {
   custom_index: string | null;
   depot_name: string | null;
   is_internal: boolean;
+  recharge_running_costs?: boolean;
   job_value: number | null;
   pipeline_status: string | null;
   likelihood: string | null;
@@ -134,10 +159,19 @@ interface JobDetail {
   cancellation_tier: string | null;
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
+  combined_into_job_id?: string | null;
+  // Quote options (migration 286) — sibling jobs for one enquiry
+  group_id?: string | null;
+  option_no?: number | null;
+  option_label?: string | null;
   // Lost-job fields (mirror of cancellation, populated by pipeline transition)
   lost_at?: string | null;
   lost_reason?: string | null;
   lost_detail?: string | null;
+  // Dismissal (migration 196) — dud/spam/orphan enquiry, distinct from Lost
+  dismissed_at?: string | null;
+  dismissal_reason?: string | null;
+  dismissal_notes?: string | null;
   has_client_email?: boolean;
 }
 
@@ -161,6 +195,18 @@ interface QuoteAssignment {
   agreed_rate: number | null;
   rate_type: string | null;
   is_ooosh_crew?: boolean;
+}
+
+// The STORED engine shape (`quotes.expenses`): `description` is the calculator's
+// label plus any note ("Other: Flight to Milan"). The calculator's on-screen form
+// fields (category/label/included/pdDays) are never saved — reading them here
+// is what left every line in the breakdown nameless (job 16840, Oct 2026).
+interface QuoteExpenseLine {
+  type: string;
+  description?: string;
+  amount: number;
+  includedInCharge?: boolean;
+  chargeMode?: 'included' | 'not_included' | 'recharge' | 'na';
 }
 
 interface SavedQuote {
@@ -211,6 +257,8 @@ interface SavedQuote {
   run_notes: string | null;
   // Assignments
   assignments: QuoteAssignment[];
+  // Expense line items (from the calculator) — per-line category/amount/charge-mode
+  expenses: QuoteExpenseLine[] | null;
   // Notes
   internal_notes: string | null;
   freelancer_notes: string | null;
@@ -235,8 +283,93 @@ interface PersonOption {
   skills: string[];
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
+  freelancer_status?: string | null;
   current_organisations?: PersonOrgLink[] | null;
 }
+
+// Per-line expense breakdown on a quote card — surfaces what staff picked in the
+// calculator ("what's included": fuel/parking/hotels + each line's charge mode)
+// which the summary Client-charges/Our-costs grid otherwise lumps into one figure.
+// Collapsible, default-open when the quote has expenses. Read-only.
+const EXPENSE_LINE_LABELS: Record<string, string> = {
+  fuel: 'Fuel', parking: 'Parking', tolls: 'Tolls', transport_out: 'Travel (out)',
+  transport_back: 'Travel (back)', hotel: 'Hotel', pd: 'Per Diem', other: 'Other',
+};
+const EXPENSE_MODE_PILL: Record<string, { label: string; cls: string }> = {
+  included: { label: 'In quote', cls: 'bg-gray-100 text-gray-600' },
+  not_included: { label: 'Client pays', cls: 'bg-gray-100 text-gray-500' },
+  recharge: { label: 'Recharge', cls: 'bg-amber-100 text-amber-700' },
+  na: { label: 'N/A', cls: 'bg-gray-100 text-gray-400' },
+};
+
+function QuoteExpensesBreakdown({ expenses }: { expenses: QuoteExpenseLine[] | null }) {
+  const lines = Array.isArray(expenses) ? expenses.filter((e) => Number(e.amount) > 0) : [];
+  const [open, setOpen] = useState(true);
+  if (lines.length === 0) return null;
+  return (
+    <div className="mt-2 text-xs">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="text-gray-400 font-medium hover:text-gray-600 flex items-center gap-1"
+      >
+        <span className="text-[10px]">{open ? '▾' : '▸'}</span>
+        Expense breakdown ({lines.length})
+      </button>
+      {open && (
+        <div className="mt-1 space-y-0.5 pl-3.5">
+          {lines.map((e, i) => {
+            const mode = e.chargeMode ?? (e.includedInCharge === false ? 'not_included' : 'included');
+            const pill = EXPENSE_MODE_PILL[mode] || EXPENSE_MODE_PILL.included;
+            const name = e.description?.trim() || EXPENSE_LINE_LABELS[e.type] || e.type || 'Expense';
+            return (
+              <div key={i} className="flex items-center justify-between gap-2">
+                <span className="text-gray-600 truncate" title={name}>
+                  {name}
+                </span>
+                <span className="flex items-center gap-2 shrink-0">
+                  <span className="text-gray-500">&pound;{Number(e.amount).toFixed(2)}</span>
+                  <span className={`px-1.5 py-0.5 rounded-full ${pill.cls}`}>{pill.label}</span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A distinct van allocated to the job, for the "Vehicles on this job" strip. */
+interface JobAssignedVehicle {
+  vehicle_id: string;
+  reg: string;
+  type: string | null;
+  /** Most-progressed assignment status across all rows on this van. */
+  status: string;
+  /** Fleet prep-readiness projection (`fleet_vehicles.hire_status`). */
+  hire_status: string | null;
+}
+
+/**
+ * Normalise any van label (fleet `simple_type`, a full `vehicleType` string,
+ * or a HireHop line-item name) to one of the canonical Ooosh van types, so
+ * "detected" slots and "assigned" vehicles can be reconciled to show how many
+ * of each type are still unallocated. Panel is checked first so "Panel Van …"
+ * doesn't fall through to Premium.
+ */
+function normVanType(s: string | null | undefined): string {
+  const t = (s || '').toLowerCase();
+  if (t.includes('panel')) return 'Panel';
+  if (t.includes('basic') || t.includes('mwb')) return 'Basic';
+  if (t.includes('vito')) return 'Vito';
+  if (t.includes('premium') || t.includes('lwb')) return 'Premium';
+  return (s || 'Van').trim() || 'Van';
+}
+
+/** Rank assignment statuses so a van's chip reflects its most-progressed row. */
+const ASSIGNMENT_STATUS_RANK: Record<string, number> = {
+  active: 5, booked_out: 4, confirmed: 3, soft: 2, returned: 1, swapped: 0, cancelled: -1,
+};
 
 interface VehicleAssignment {
   id: string;
@@ -248,6 +381,14 @@ interface VehicleAssignment {
   driver_email: string | null;
   driver_phone: string | null;
   driver_points: number | null;
+  /**
+   * Driver's insurance-referral state (from the drivers row). Drives the
+   * Phase D2b "held back" card state: a driver with requires_referral=true and
+   * referral_status NOT IN (approved, waived) is on the job but NOT authorised
+   * to drive — no agreement/condition report until staff authorise them.
+   */
+  requires_referral?: boolean | null;
+  referral_status?: string | null;
   freelancer_name: string | null;
   freelancer_person_id: string | null;
   assignment_type: string;
@@ -265,12 +406,19 @@ interface VehicleAssignment {
   ve103b_ref: string | null;
   hire_form_pdf_key?: string | null;
   hire_form_generated_at?: string | null;
+  /**
+   * Set the moment the agreement send is CLAIMED, ~0.5s before the PDF key
+   * lands. That gap is why "Authorise & send agreement" is keyed off this and
+   * not the key — see the note on `needsAuthorise` below.
+   */
+  hire_form_emailed_at?: string | null;
   excess?: {
     id: string;
     excess_status: string;
     excess_amount_required: number | null;
     excess_amount_taken: number | null;
     dispute_status?: 'open' | 'won' | 'lost' | null;
+    auto_covered?: boolean;
   } | null;
   /**
    * Driver's personal insurance liability — source of truth for "what is
@@ -326,6 +474,148 @@ const SWAP_REASONS = [
 
 interface OpenIssueLite { id: string; summary: string; category: string; severity: string; status: string }
 
+/**
+ * ChangeVanButton — re-point ONE driver to a different van on a multi-van
+ * job, pre-book-out. The Job Detail counterpart of the Allocations page
+ * "Change van" picker (PR #829): lets staff distribute drivers across the
+ * job's vans (e.g. 5 drivers / 2 vans) without leaving Job Detail. Plain
+ * PATCH /api/hire-forms/:id { vehicle_id } — no cascade, no swap/breakdown
+ * machinery (that's SwapVehicleButton's job, post-book-out).
+ *
+ * Mirrors the Allocations picker's smarts: offers same-type vans only
+ * (Premium → Premium), drops vans busy on another job in this hire window
+ * (via /assignments/availability), and shows each van's prep status with
+ * the prepped ("Available") ones first. Only rendered on multi-van
+ * self-drive cards that aren't booked out.
+ */
+function ChangeVanButton({ assignmentId, vehicleId, currentVehicleReg, jobStart, jobEnd, excludeHhJobId, onChanged }: {
+  assignmentId: string;
+  vehicleId: string;
+  currentVehicleReg: string;
+  jobStart: string | null;
+  jobEnd: string | null;
+  excludeHhJobId: number | null;
+  onChanged: () => void;
+}) {
+  const [showPicker, setShowPicker] = useState(false);
+  const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string; hireStatus: string }[]>([]);
+  const [unavailableIds, setUnavailableIds] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!showPicker) return;
+    setLoading(true);
+    const fleetP = api.get<{ data: { id: string; reg: string; simple_type: string; hire_status: string }[] }>('/vehicles/fleet')
+      .then(r => setVehicles((r.data || []).map(v => ({
+        id: v.id, reg: v.reg, simpleType: v.simple_type, hireStatus: v.hire_status || '',
+      }))))
+      .catch(() => setError('Could not load vehicles'));
+    // Availability — exclude THIS job so its own vans don't self-conflict.
+    // Advisory: if the call fails we just don't grey anything out (fail open).
+    const availP = (jobStart && jobEnd)
+      ? api.get<{ data: { unavailable: { vehicleId: string }[] } }>(
+          `/assignments/availability?start=${encodeURIComponent(jobStart)}&end=${encodeURIComponent(jobEnd)}${excludeHhJobId ? `&exclude_hh_job_id=${excludeHhJobId}` : ''}`,
+        )
+          .then(r => setUnavailableIds(new Set((r.data?.unavailable || []).map(u => u.vehicleId))))
+          .catch(() => { /* fail open */ })
+      : Promise.resolve();
+    Promise.all([fleetP, availP]).finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPicker]);
+
+  // Same type as the current van, minus vans busy on another job in this hire
+  // window. Prepped ("Available") vans sort first. currentType derived from
+  // the loaded fleet so the caller doesn't have to thread the type through.
+  const currentType = vehicles.find(v => v.id === vehicleId)?.simpleType;
+  const options = vehicles
+    .filter(v => v.id !== vehicleId && (!currentType || v.simpleType === currentType) && !unavailableIds.has(v.id))
+    .sort((a, b) => {
+      const rank = (s: string) => (s === 'Available' ? 0 : 1);
+      return rank(a.hireStatus) - rank(b.hireStatus) || a.reg.localeCompare(b.reg);
+    });
+  const readyCount = options.filter(v => v.hireStatus === 'Available').length;
+
+  const handlePick = async (newVehicleId: string) => {
+    setSubmitting(true);
+    setError('');
+    try {
+      await api.patch(`/hire-forms/${assignmentId}`, { vehicle_id: newVehicleId });
+      setShowPicker(false);
+      onChanged();
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || 'Failed to change van');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!showPicker) {
+    return (
+      <button
+        onClick={() => setShowPicker(true)}
+        className="text-xs font-medium text-ooosh-navy underline hover:text-ooosh-700"
+        title="Move this driver to a different van on this job"
+      >
+        🔀 Change van
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2 w-full max-w-xs space-y-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
+      <p className="text-xs font-medium text-gray-700">
+        Move from <strong>{currentVehicleReg}</strong> to:
+        {!loading && (
+          <span className="ml-1 font-normal text-gray-400">
+            ({options.length} matching{readyCount < options.length ? `, ${readyCount} ready` : ''})
+          </span>
+        )}
+      </p>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {loading ? (
+        <p className="text-xs text-gray-500">Loading vans…</p>
+      ) : options.length === 0 ? (
+        <p className="text-xs text-gray-500">No other matching vans available.</p>
+      ) : (
+        <div className="flex max-h-48 flex-col gap-1 overflow-y-auto">
+          {options.map(v => {
+            const ready = v.hireStatus === 'Available';
+            return (
+              <button
+                key={v.id}
+                disabled={submitting}
+                onClick={() => handlePick(v.id)}
+                className="flex items-center justify-between gap-2 rounded border border-gray-200 bg-white px-2 py-1.5 text-left text-xs hover:bg-gray-100 disabled:opacity-50"
+              >
+                <span>
+                  <span className="font-mono font-bold text-ooosh-navy">{v.reg}</span>
+                  <span className="ml-1 text-gray-400">{v.simpleType}</span>
+                </span>
+                <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                  ready ? 'bg-green-100 text-green-700'
+                    : v.hireStatus === 'On Hire' ? 'bg-blue-100 text-blue-700'
+                      : v.hireStatus === 'Not Ready' ? 'bg-red-100 text-red-700'
+                        : 'bg-amber-100 text-amber-700'
+                }`}>
+                  {v.hireStatus || 'Unknown'}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <button
+        onClick={() => { setShowPicker(false); setError(''); }}
+        className="text-xs text-gray-500 hover:text-gray-700"
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapped }: {
   assignmentId: string;
   vehicleId: string | null;
@@ -336,6 +626,11 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
   const [showForm, setShowForm] = useState(false);
   const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string }[]>([]);
   const [selectedVehicle, setSelectedVehicle] = useState('');
+  // 'breakdown' = van out of service (→ Not Ready + Problems issue + interim
+  // assessment). 'planned' = deliberate change (e.g. client upgrading vans);
+  // the outgoing van is fine and just gets a normal check-in when it's back.
+  const [swapKind, setSwapKind] = useState<'breakdown' | 'planned'>('breakdown');
+  const planned = swapKind === 'planned';
   const [reasonCode, setReasonCode] = useState('breakdown');
   const [reasonDetails, setReasonDetails] = useState('');
   // Soft check-in of the van being swapped out
@@ -375,7 +670,8 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
 
   const handleSwap = async () => {
     if (!selectedVehicle || !reasonDetails.trim()) return;
-    if (issueChoice === 'new' && !newIssueSummary.trim()) {
+    // Issue is only required for a breakdown swap. Planned swaps don't log one.
+    if (!planned && issueChoice === 'new' && !newIssueSummary.trim()) {
       setError('Give the new issue a short summary, or link an existing one.');
       return;
     }
@@ -385,6 +681,7 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       const reasonLabel = SWAP_REASONS.find(r => r.code === reasonCode)?.label || reasonCode;
       const payload: any = {
         new_vehicle_id: selectedVehicle,
+        swap_kind: swapKind,
         swap_reason: `${reasonLabel}: ${reasonDetails.trim()}`,
       };
       const softCheckin: any = {};
@@ -394,20 +691,23 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       if (checkinNotes.trim()) softCheckin.notes = checkinNotes.trim();
       if (Object.keys(softCheckin).length > 0) payload.soft_checkin = softCheckin;
 
-      if (issueChoice === 'new') {
-        payload.issue_link = {
-          new_issue: {
-            category: reasonCode === 'accident' ? 'damaged' : reasonCode === 'client_request' ? 'other' : 'breakdown',
-            severity: 'urgent',
-            summary: newIssueSummary.trim(),
-            description: reasonDetails.trim() || null,
-          },
-        };
-      } else if (issueChoice !== 'none') {
-        payload.issue_link = { existing_issue_id: issueChoice };
+      // Problem record is breakdown-only. A planned change isn't a fault.
+      if (!planned) {
+        if (issueChoice === 'new') {
+          payload.issue_link = {
+            new_issue: {
+              category: reasonCode === 'accident' ? 'damaged' : reasonCode === 'client_request' ? 'other' : 'breakdown',
+              severity: 'urgent',
+              summary: newIssueSummary.trim(),
+              description: reasonDetails.trim() || null,
+            },
+          };
+        } else if (issueChoice !== 'none') {
+          payload.issue_link = { existing_issue_id: issueChoice };
+        }
       }
 
-      const resp = await api.post<{ data: { redirect_to?: string; ve103b_regen_needed?: boolean; ve103b_reg?: string | null; swapped_count?: number } }>(
+      const resp = await api.post<{ data: { redirect_to?: string; ve103b_regen_needed?: boolean; ve103b_reg?: string | null; swapped_count?: number; outgoing_check_in_needed?: boolean; outgoing_reg?: string } }>(
         `/assignments/${assignmentId}/swap-vehicle`, payload,
       );
       const data = resp.data;
@@ -417,6 +717,14 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
           `Vehicle swapped. NOTE: the original had a VE103B certificate — ` +
           `generate a new VE103B for ${data.ve103b_reg || 'the replacement'} from the VE103B page ` +
           `(a new certificate number is required, so this can't be done automatically).`
+        );
+      }
+
+      if (data?.outgoing_check_in_needed) {
+        alert(
+          `Planned swap done. When ${data.outgoing_reg || currentVehicleReg} is back, ` +
+          `check it in as normal (Drivers & Vehicles tab → Check In) to capture its ` +
+          `return mileage and condition and free it for the next hire.`
         );
       }
 
@@ -452,6 +760,32 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
       <p className="text-xs font-medium text-orange-800">
         Swap <strong>{currentVehicleReg}</strong> — moves every driver on this van to the replacement.
       </p>
+
+      {/* Swap kind — breakdown (out of service) vs planned (van's fine) */}
+      <div className="space-y-1">
+        <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Type of swap</label>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => { setSwapKind('breakdown'); if (reasonCode === 'client_request') { setReasonCode('breakdown'); setNewIssueSummary(`${currentVehicleReg}: Breakdown`); } }}
+            className={`flex-1 rounded px-2 py-1.5 text-xs font-medium border ${!planned ? 'bg-orange-600 text-white border-orange-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >
+            🛠 Breakdown / fault
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSwapKind('planned'); setReasonCode('client_request'); }}
+            className={`flex-1 rounded px-2 py-1.5 text-xs font-medium border ${planned ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >
+            📋 Planned change
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-500">
+          {planned
+            ? `${currentVehicleReg} is fine — it'll take a normal check-in to Available when it's back. No fault logged.`
+            : `${currentVehicleReg} goes out of service (Not Ready) with a problem record.`}
+        </p>
+      </div>
 
       {/* Reason */}
       <div className="space-y-1">
@@ -501,10 +835,15 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
         </div>
         <input type="text" value={location} onChange={e => setLocation(e.target.value)} placeholder="Where is it? (garage / tow truck / venue)" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
         <input type="text" value={checkinNotes} onChange={e => setCheckinNotes(e.target.value)} placeholder="Condition notes" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
-        <p className="text-[11px] text-gray-500">{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</p>
+        <p className="text-[11px] text-gray-500">
+          {planned
+            ? <>Optional — if you have the mileage and fuel at handover, they become the client's end reading at the final check-in (otherwise it shows "not recorded"). A freelancer collecting it on the portal records them instead.</>
+            : <>{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</>}
+        </p>
       </div>
 
-      {/* Issue link/create */}
+      {/* Issue link/create — breakdown only; a planned change isn't a fault */}
+      {!planned && (
       <div className="space-y-1">
         <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Problem record</label>
         <select
@@ -528,6 +867,7 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
           />
         )}
       </div>
+      )}
 
       {error && <p className="text-xs text-red-600">{error}</p>}
       <div className="flex gap-2 pt-1">
@@ -558,6 +898,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
 }) {
   const [generating, setGenerating] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
 
   // Can only generate a meaningful PDF once a vehicle is linked — the PDF
   // needs the reg + model. Before book-out, these buttons are dimmed and
@@ -596,11 +937,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
     setGenerating(true);
     setMessage(null);
     try {
-      const { blob } = await api.blob(`/hire-forms/${assignmentId}/download`);
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank', 'noopener,noreferrer');
-      // Revoke after a delay so the new tab has time to load the PDF.
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      await openAuthedFile(`/hire-forms/${assignmentId}/download`, 'hire-agreement.pdf');
     } catch (err) {
       setMessage(`Error: ${err instanceof Error ? err.message : 'Failed to open PDF'}`);
     } finally {
@@ -625,52 +962,71 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
     }
   }
 
+  // Lesser-used hire-form actions collapsed into a single "Hire form ▾" menu
+  // so the card actions row stays uncluttered (the primary Book Out / Check In
+  // / Allocate button is what staff reach for most). A small green dot on the
+  // trigger signals the PDF already exists.
   return (
-    <div className="mt-3 pt-3 border-t border-gray-100">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-xs text-gray-500">
-          <span className="font-medium text-gray-700">Hire Form</span>
-          {pdfGeneratedAt && <span className="text-green-600">PDF ready</span>}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => generatePdf(false)}
-            disabled={generating || !hasVehicle}
-            title={disabledReason || undefined}
-            className="text-xs px-2.5 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {generating ? '...' : pdfKey ? 'Regenerate PDF' : 'Generate PDF'}
-          </button>
-          <button
-            onClick={() => generatePdf(true)}
-            disabled={generating || !hasVehicle}
-            title={disabledReason || undefined}
-            className="text-xs px-2.5 py-1.5 bg-ooosh-100 text-ooosh-700 rounded hover:bg-ooosh-200 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {generating ? '...' : 'Generate + Email'}
-          </button>
-          {pdfKey && (
-            <>
-              <button
-                onClick={viewPdf}
-                disabled={generating}
-                className="text-xs px-2.5 py-1.5 bg-blue-50 text-blue-700 rounded hover:bg-blue-100 disabled:opacity-50"
-              >
-                View PDF
-              </button>
-              <button
-                onClick={resendEmail}
-                disabled={generating}
-                className="text-xs px-2.5 py-1.5 bg-amber-50 text-amber-700 rounded hover:bg-amber-100 disabled:opacity-50"
-              >
-                Re-send
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+    <div className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={generating}
+        className="inline-flex items-center gap-1.5 text-sm px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50 font-medium"
+      >
+        {generating ? '…' : 'Hire form'}
+        {pdfGeneratedAt && !generating && <span className="w-1.5 h-1.5 rounded-full bg-green-500" title="PDF ready" />}
+        <span className="text-gray-400">▾</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 mt-1 z-20 w-52 bg-white rounded-lg shadow-lg border border-gray-200 py-1 text-sm">
+            <button
+              type="button"
+              onClick={() => { setOpen(false); generatePdf(false); }}
+              disabled={!hasVehicle}
+              title={disabledReason || undefined}
+              className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {pdfKey ? 'Regenerate PDF' : 'Generate PDF'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setOpen(false); generatePdf(true); }}
+              disabled={!hasVehicle}
+              title={disabledReason || undefined}
+              className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Generate + Email
+            </button>
+            {pdfKey && (
+              <>
+                <div className="my-1 border-t border-gray-100" />
+                <button
+                  type="button"
+                  onClick={() => { setOpen(false); viewPdf(); }}
+                  className="w-full text-left px-3 py-2 hover:bg-gray-50 text-blue-700"
+                >
+                  View PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setOpen(false); resendEmail(); }}
+                  className="w-full text-left px-3 py-2 hover:bg-gray-50 text-amber-700"
+                >
+                  Re-send email
+                </button>
+              </>
+            )}
+            {!hasVehicle && (
+              <p className="px-3 py-2 text-[11px] text-gray-400 border-t border-gray-100">{disabledReason}</p>
+            )}
+          </div>
+        </>
+      )}
       {message && (
-        <div className={`text-xs px-2 py-1.5 rounded mt-2 ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+        <div className={`absolute right-0 top-full mt-1 z-20 w-64 max-w-[80vw] text-xs px-2 py-1.5 rounded shadow-sm ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
           {message}
         </div>
       )}
@@ -717,8 +1073,25 @@ function computeDriverValidity(d: {
   today.setHours(0, 0, 0, 0);
   const ms30 = 30 * 24 * 60 * 60 * 1000;
 
-  function check(label: string, raw: string | null | undefined): 'green' | 'amber' | 'red' {
-    if (!raw) return 'amber';
+  /**
+   * `missingIsRed` makes an absent date a hard fail rather than a warning.
+   *
+   * Used for the proofs of address, where "no date on record" means we cannot
+   * evidence the address at all. Licence expiry stays amber-on-missing because
+   * iDenfy frequently fails to extract it, and reding that would block drivers
+   * over an extraction gap rather than a real problem.
+   */
+  function check(
+    label: string,
+    raw: string | null | undefined,
+    missingIsRed = false,
+  ): 'green' | 'amber' | 'red' {
+    if (!raw) {
+      if (!missingIsRed) return 'amber';
+      reasons.push(`${label} not on record`);
+      expiredDocs.push(label);
+      return 'red';
+    }
     const exp = new Date(raw);
     const ms = exp.getTime() - today.getTime();
     if (ms < 0) {
@@ -742,26 +1115,14 @@ function computeDriverValidity(d: {
   bump(check('Licence', d.licence_valid_to));
   bump(check('DVLA check', d.dvla_valid_until));
 
-  // POA: at least one must be valid. Both expired → red.
-  const poa1 = d.poa1_valid_until ? new Date(d.poa1_valid_until) : null;
-  const poa2 = d.poa2_valid_until ? new Date(d.poa2_valid_until) : null;
-  const poa1Expired = poa1 && poa1 < today;
-  const poa2Expired = poa2 && poa2 < today;
-  if ((!poa1 && !poa2) || (poa1Expired && poa2Expired) || (!poa1 && poa2Expired) || (poa1Expired && !poa2)) {
-    reasons.push('Proof of address expired');
-    expiredDocs.push('Proof of address');
-    bump('red');
-  } else {
-    // Use the latest-expiring POA for the amber check
-    const latest = poa1 && poa2 ? (poa1 > poa2 ? poa1 : poa2) : (poa1 || poa2);
-    if (latest) {
-      const ms = latest.getTime() - today.getTime();
-      if (ms <= ms30) {
-        reasons.push(`POA expires ${latest.toLocaleDateString('en-GB')}`);
-        bump('amber');
-      }
-    }
-  }
+  // BOTH proofs of address must be valid, independently (jon, Aug 2026).
+  //
+  // This used to red-flag only when BOTH had lapsed, so a driver with one dead
+  // POA looked assignable here while the hire-form router — reading the same
+  // policy correctly — was sending them off to re-upload it. Named separately
+  // so staff ask for the one that's actually gone, not both.
+  bump(check('Proof of address 1', d.poa1_valid_until ?? null, true));
+  bump(check('Proof of address 2', d.poa2_valid_until ?? null, true));
 
   if (d.requires_referral && d.referral_status !== 'approved') {
     reasons.push(`Insurance referral ${d.referral_status || 'pending'}`);
@@ -790,10 +1151,16 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
   const [driverId, setDriverId] = useState('');
   const [driverSearch, setDriverSearch] = useState('');
   const [driverFocus, setDriverFocus] = useState(false);
+  // Manager override of the document gate. Offered only after the gate has
+  // actually refused AND the backend has confirmed this user may override —
+  // there is no point showing staff a door they can't open.
+  const [canOverride, setCanOverride] = useState(false);
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideReason, setOverrideReason] = useState('');
   const [vehicleId, setVehicleId] = useState('');
   const [vehicleSearch, setVehicleSearch] = useState('');
   const [vehicleFocus, setVehicleFocus] = useState(false);
-  const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : new Date().toISOString().substring(0, 10));
+  const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : ukToday());
   // Hire end defaults to JOB END (the real end of charge), NOT return_date
   // (the +1-day warehouse turnaround buffer). Per the CLAUDE.md "Hire Date
   // Resolution" rule — return_date is for warehouse scheduling, never for
@@ -815,10 +1182,15 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
   function resetForm() {
     setDriverId(''); setDriverSearch('');
     setVehicleId(''); setVehicleSearch('');
+    setCanOverride(false); setOverrideOpen(false); setOverrideReason('');
   }
 
   async function handleSubmit() {
     if (!driverId) { setError('Select a driver'); return; }
+    if (overrideOpen && overrideReason.trim().length < 10) {
+      setError('Give a reason for the override — at least a few words, it goes in the audit log.');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -828,11 +1200,18 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
         job_id: jobId,
         hire_start: hireStart || undefined,
         hire_end: hireEnd || undefined,
+        override_reason: overrideOpen ? overrideReason.trim() : undefined,
       });
       setOpen(false);
       resetForm();
       onCreated();
     } catch (err) {
+      // A document-gate refusal tells us whether this user may override it, so
+      // the escape hatch is offered exactly when it can actually be opened.
+      const detail = (err as { body?: { code?: string; can_override?: boolean } })?.body;
+      if (detail?.code === 'driver_documents_expired' && detail.can_override) {
+        setCanOverride(true);
+      }
       setError(err instanceof Error ? err.message : 'Failed');
     } finally {
       setSaving(false);
@@ -894,6 +1273,46 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
             <p className="text-xs text-gray-500 mb-4">Vehicle is optional — assign a driver now and pick the vehicle during prep.</p>
 
             {error && <div className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded mb-3">{error}</div>}
+
+            {/* The escape hatch. It exists because the gate previously had no
+                route past it at all — a driver whose paperwork was genuinely in
+                order but whose stored dates said otherwise simply could not be
+                assigned, and the hire went out under someone else's name
+                instead (job 16291). Manager-tier, reason mandatory, audited. */}
+            {canOverride && (
+              <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+                {!overrideOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setOverrideOpen(true)}
+                    className="text-xs font-medium text-amber-900 underline"
+                  >
+                    Assign anyway (manager override)
+                  </button>
+                ) : (
+                  <>
+                    <p className="text-xs text-amber-900 mb-2">
+                      You&rsquo;re assigning a driver whose documents Ooosh considers out of date.
+                      Say why &mdash; it goes in the audit log against this driver and hire.
+                    </p>
+                    <textarea
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      rows={2}
+                      placeholder="e.g. seen paper DVLA summary in person, dated today — updating record after"
+                      className="w-full rounded border border-amber-300 px-2 py-1.5 text-xs focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => { setOverrideOpen(false); setOverrideReason(''); }}
+                      className="mt-1 text-xs text-amber-800 underline"
+                    >
+                      Cancel override
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
             <div className="space-y-3">
               {/* Driver picker — searchable, with traffic-light validity */}
@@ -1141,14 +1560,37 @@ function JobAlertBanner({
   );
 }
 
+// React Router reuses ONE component instance across /jobs/A → /jobs/B — only the
+// `id` param changes. That left the previous job's state sitting on the new job's
+// page (HireHop derivation flags, client history, open inline-edit drafts: ~86 of
+// this page's ~100 state slots were never cleared), and let a slow reply for job A
+// resolve into job B's page — the auto HireHop sync ends by calling loadJob(),
+// which would setJob(A) seconds after B had already rendered.
+//
+// Keying the page by `id` makes a job→job navigation a genuine unmount/remount:
+// every state slot starts empty, and a late reply for the old job lands on a dead
+// instance (React discards the update) instead of overwriting the new one. It also
+// removes the one-frame flash of the old job, because the remount happens during
+// the render pass the route change triggers — the first paint is the new instance.
+//
+// Key on `id` ONLY. Keying on the pathname or location.key would remount on every
+// ?tab= click and close any open modal under the user.
 export default function JobDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <JobDetailContent key={id} />;
+}
+
+function JobDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const user = useAuthStore(s => s.user);
+  // `backTo` is retained only as a fallback destination if the job fails to load
+  // (see loadJob's catch). The top-of-page "Back to …" breadcrumb was removed
+  // (Jul 2026) — it was usually wrong, since only Pipeline/Lost&Cancelled passed
+  // `state.from`; every other entry point silently defaulted to "Back to Jobs".
   const backTo = (location.state as { from?: string })?.from || '/jobs';
-  const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo.includes('/lost-cancelled') ? 'Back to Lost & Cancelled' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
@@ -1157,12 +1599,47 @@ export default function JobDetailPage() {
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  // The Money tab's dot: the close-out's colour once a hire is back (amber = something
+  // to do, blue = waiting on the client, green = done, red = needs sorting). Read only
+  // for returned jobs — the plan is a live HireHop read, shared (30 s) with the panel
+  // and the Invoice card, so this costs nothing extra when either is on screen.
+  const [closeOutPlan, setCloseOutPlan] = useState<CloseOutPlan | null>(null);
+  // The read failed — the cancelled banner falls back to the figure saved at cancellation.
+  const [closeOutFailed, setCloseOutFailed] = useState(false);
+  const closeOutRelevant = !!id && !!job?.hh_job_number && !job?.is_internal
+    && (job?.pipeline_status === 'returned' || job?.pipeline_status === 'returned_incomplete'
+      || job?.pipeline_status === 'cancelled');   // a cancellation's fee and refund (CANCELLATION-SPEC.md)
+  useEffect(() => {
+    if (!closeOutRelevant || !id) { setCloseOutPlan(null); return; }
+    const unsub = subscribeCloseOutPlan(id, setCloseOutPlan);
+    setCloseOutFailed(false);
+    loadCloseOutPlan(id).then(setCloseOutPlan).catch(() => setCloseOutFailed(true));
+    return unsub;
+  }, [id, closeOutRelevant]);
+  const moneyDot = (() => {
+    if (!closeOutPlan) return null;
+    const v = closeOutView(closeOutPlan, { isManager: false });
+    return v.stage === 'pre' ? null : TONE[v.tone].dot;
+  })();
+  // Staging Calculator — modal launch; created plans surface as an Overview card.
+  const [showStagingModal, setShowStagingModal] = useState(false);
+  const [showRackPlanModal, setShowRackPlanModal] = useState(false);
+  const [showBacklineMatcher, setShowBacklineMatcher] = useState(false);
+  const [showCombineModal, setShowCombineModal] = useState(false);
+  // Quote options — "+ Add an option" modal, and a signal the bar reloads on.
+  const [showAddOptionModal, setShowAddOptionModal] = useState(false);
+  const [optionsRefresh, setOptionsRefresh] = useState(0);
+  const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
+  const [stagingRefreshKey, setStagingRefreshKey] = useState(0);
 
   // Reset tab when navigating to a different job. React Router reuses the
   // JobDetailPage component instance across /jobs/A → /jobs/B, so without
   // this the active tab "drags across" — e.g. you were on Money on job A,
   // click through to job B and you're still on Money. Re-reads the URL
   // tab param so deep-links still land where they should.
+  // NOTE: the `key={id}` wrapper above now remounts the page on a job change, so
+  // this runs once per mount and the tab can no longer drag across on its own.
+  // Kept as belt-and-braces (and it still handles a tab param that changes).
   useEffect(() => {
     const urlTab = searchParams.get('tab');
     setActiveTab((validTabs as readonly string[]).includes(urlTab || '') ? (urlTab as TabType) : 'overview');
@@ -1192,7 +1669,14 @@ export default function JobDetailPage() {
   const [reqSummary, setReqSummary] = useState<{
     hireFormsStatus: string | null;
     postHireOpenCount: number;
-  }>({ hireFormsStatus: null, postHireOpenCount: 0 });
+    // True when the job has vehicles but every slot is Van & Driver (or the
+    // hire-form chain is suspended). Used to suppress the "no hire form sent"
+    // banner, which only applies to self-drive hires.
+    allVanAndDriver: boolean;
+    // Studio-sitter cover gap — unassigned sitter-needed evenings + the earliest
+    // one's date (for the pre-hire amber banner). Null when fully covered / n/a.
+    rehearsalGap: { unassigned: number; firstDate: string } | null;
+  }>({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
   const [peopleSearch, setPeopleSearch] = useState('');
@@ -1208,13 +1692,11 @@ export default function JobDetailPage() {
     venueName: '',
     jobDate: '',
     arrivalTime: '',
+    freelancerNotes: '',
     notes: '',
     pushToHirehop: true,
   });
   const [localSubmitting, setLocalSubmitting] = useState(false);
-  const [venueSearch, setVenueSearch] = useState('');
-  const [venueOptions, setVenueOptions] = useState<{ id: string; name: string; city: string | null }[]>([]);
-  const [showVenueDropdown, setShowVenueDropdown] = useState(false);
 
   // Job organisations (band, promoter, etc.)
   const [jobOrgs, setJobOrgs] = useState<Array<{
@@ -1227,6 +1709,7 @@ export default function JobDetailPage() {
   const [jobOrgSelectedOrg, setJobOrgSelectedOrg] = useState<{ id: string; name: string; type: string } | null>(null);
   const [jobOrgRole, setJobOrgRole] = useState('band');
   const [jobOrgSaving, setJobOrgSaving] = useState(false);
+  const [jobOrgCreating, setJobOrgCreating] = useState(false);
   const [orgSuggestions, setOrgSuggestions] = useState<Array<{
     org_id: string; org_name: string; org_type: string;
     relationship_type: string; suggested_role: string;
@@ -1234,6 +1717,13 @@ export default function JobDetailPage() {
 
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
+  // Distinct vehicles allocated to this job, deduped across ALL assignment
+  // rows — including driverless staff-allocation rows that are hidden from the
+  // per-driver card list (e.g. a Panel van picked on Allocations before any
+  // driver is bucketed onto its slot). Powers the "Vehicles on this job"
+  // header strip so every allocated van is visible in one place rather than
+  // repeated on (or missing from) individual driver cards.
+  const [jobAssignedVehicles, setJobAssignedVehicles] = useState<JobAssignedVehicle[]>([]);
   const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
   const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | 'reimburse' | undefined>(undefined);
   const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
@@ -1245,7 +1735,17 @@ export default function JobDetailPage() {
   // driver's hire-form assignment has no van but other vans on the job
   // are already booked out.
   const [addToHireAssignmentId, setAddToHireAssignmentId] = useState<string | null>(null);
+  // Phase D2b: assignment currently being authorised after a referral resolve.
+  const [authorisingAssignmentId, setAuthorisingAssignmentId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
+  // Drivers who STARTED the hire form for this hire but haven't signed — no
+  // assignment row exists yet, so nothing else on this tab knows they're
+  // there. Rendered as greyed "not signed" cards above the assignments.
+  const [unsignedDrivers, setUnsignedDrivers] = useState<Array<{
+    id: string; full_name: string; email: string | null; phone: string | null;
+    signature_date: string | null; current_job_started_at: string | null; updated_at: string | null;
+  }>>([]);
+  const [copiedHireFormLink, setCopiedHireFormLink] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
   // Cross-job allocation conflicts — van also booked on another job over
   // overlapping dates. Populated from /assignments/allocation-conflicts/:jobId
@@ -1314,6 +1814,7 @@ export default function JobDetailPage() {
   const [editingClient, setEditingClient] = useState(false);
   const [clientSearch, setClientSearch] = useState('');
   const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [creatingClient, setCreatingClient] = useState(false);
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
   const [hhClientOutOfSync, setHhClientOutOfSync] = useState(false);
@@ -1415,6 +1916,10 @@ export default function JobDetailPage() {
   const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const [internalToggling, setInternalToggling] = useState(false);
+  // Band rehearsal desk files used to be fetched here and rendered as their own
+  // read-only card. They now live in organisations.files (migration 204) and reach
+  // the Files tab through the ordinary org → job surfacing, so there is nothing
+  // rehearsal-specific left to fetch. See docs/CROSS-ENTITY-FILES-SPEC.md Phase 3.
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
@@ -1426,44 +1931,8 @@ export default function JobDetailPage() {
     return dateStr;
   }
 
-  // Validate ordering of out/start/end/return datetimes. Returns a friendly
-  // error string if invalid, or null if OK / insufficient data to check.
-  // Mirrors backend validateJobDateTimes — same rules, same messages.
-  function validateDateTimeOrdering(v: {
-    out_date: string; job_date: string; job_end: string; return_date: string;
-    out_time: string; start_time: string; end_time: string; return_time: string;
-  }): string | null {
-    const ms = (date: string, time: string): number => {
-      if (!date) return NaN;
-      const t = (time || '09:00').slice(0, 5);
-      return Date.parse(`${date}T${t}:00Z`);
-    };
-    const oMs = ms(v.out_date, v.out_time);
-    const sMs = ms(v.job_date, v.start_time);
-    const eMs = ms(v.job_end, v.end_time);
-    const rMs = ms(v.return_date, v.return_time);
-    // Out > Start is allowed on the same calendar day (e.g. charge starts 09:00,
-    // client collects at 15:00 — Outgoing here means the physical handover time).
-    // Cross-day Out-after-Start stays blocked: the inbound HH sync would clobber
-    // out_date back to job_date on the next pull (HH never sees the user's
-    // intended later date because we clamp on push), so we don't expose that case.
-    if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs && v.out_date !== v.job_date) {
-      return 'Outgoing date must be on or before Job Start date.';
-    }
-    if (!isNaN(sMs) && !isNaN(eMs) && sMs > eMs) {
-      return 'Job Start date/time must be on or before Job End date/time.';
-    }
-    if (!isNaN(eMs) && !isNaN(rMs) && eMs > rMs) {
-      return 'Job End date/time must be on or before Returning date/time.';
-    }
-    return null;
-  }
-
-  function addDays(dateStr: string, days: number): string {
-    const d = new Date(dateStr);
-    d.setDate(d.getDate() + days);
-    return d.toISOString().split('T')[0];
-  }
+  // validateDateTimeOrdering + addDays live in lib/jobDates.ts (shared with the
+  // Quote-another-option modal so the two editors can't drift).
 
   async function saveInlineField(patch: Record<string, unknown>) {
     if (!job) return;
@@ -1661,6 +2130,25 @@ export default function JobDetailPage() {
     }
   }
 
+  // Create a brand-new client organisation from the picker (mirrors the New
+  // Enquiry form's inline create) when the search finds no matching org.
+  async function createAndSelectClient(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || creatingClient) return;
+    setCreatingClient(true);
+    try {
+      const newOrg = await api.post<{ id: string }>('/organisations', {
+        name: trimmed,
+        type: 'client',
+      });
+      await selectClient({ id: newOrg.id, name: trimmed });
+    } catch (err: any) {
+      alert(err?.message || 'Failed to create organisation');
+    } finally {
+      setCreatingClient(false);
+    }
+  }
+
   async function syncClientToHH() {
     if (!job) return;
     setSyncingClientToHH(true);
@@ -1747,6 +2235,9 @@ export default function JobDetailPage() {
   const [showTransitionModal, setShowTransitionModal] = useState(false);
   const [transitionTarget, setTransitionTarget] = useState<PipelineStatus | null>(null);
   const [transitionSaving, setTransitionSaving] = useState(false);
+
+  // Dismiss enquiry (dud/spam/orphan) state
+  const [showDismissModal, setShowDismissModal] = useState(false);
   const statusDropdownRef = useRef<HTMLDivElement>(null);
 
   // Close status dropdown on outside click
@@ -1804,6 +2295,18 @@ export default function JobDetailPage() {
     }
   }
 
+  async function handleUndismiss() {
+    if (!job) return;
+    if (!window.confirm('Restore this enquiry? It will return to the pipeline board.')) return;
+    try {
+      await api.post(`/pipeline/${job.id}/undismiss`, {});
+      await loadJob();
+    } catch (err) {
+      console.error('Undismiss failed:', err);
+      alert('Failed to restore enquiry');
+    }
+  }
+
   // Client trading history for sidebar
   const [clientNotesExpanded, setClientNotesExpanded] = useState(false);
   const [clientHistoryData, setClientHistoryData] = useState<{
@@ -1831,6 +2334,7 @@ export default function JobDetailPage() {
       stats: { total_jobs: string; confirmed_jobs: string; lost_jobs: string; total_confirmed_value: string; total_value: string };
       band_info?: { id: string; name: string; do_not_hire: boolean; do_not_hire_reason: string | null; internal_notes: string | null } | null;
     } | null;
+    endorsements?: Endorsement[];
   } | null>(null);
 
   useEffect(() => {
@@ -1841,15 +2345,20 @@ export default function JobDetailPage() {
       // resolve and overwrite B's state. Worse: loadVehicleAssignments reads
       // job.hh_job_number from state to build its second query, so without
       // this reset it would query A's HH number while displaying B's page.
+      // NOTE: the `key={id}` wrapper means this now runs once on a fresh mount,
+      // where the state is already empty. Kept as belt-and-braces — it is the
+      // only reset path if the keyed wrapper is ever removed.
       setJob(null);
       setInteractions([]);
       setQuotes([]);
       setVehicleAssignments([]);
+      setJobAssignedVehicles([]);
+      setUnsignedDrivers([]);
       setDispatchCheck(null);
       setAllocationConflicts([]);
       setDateMismatches([]);
       setJobOrgs([]);
-      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0 });
+      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
       setLoading(true);
 
       loadJob();
@@ -1896,15 +2405,38 @@ export default function JobDetailPage() {
   async function loadRequirementsSummary() {
     if (!id) return;
     try {
-      const [pre, post] = await Promise.all([
+      const [pre, post, flagsRes] = await Promise.all([
         api.get<{ data: JobRequirement[] }>(`/requirements/job/${id}?phase=pre_hire`),
         api.get<{ data: JobRequirement[] }>(`/requirements/job/${id}?phase=post_hire`),
+        api.get<{ flags?: { has_vehicle?: boolean; self_drive_count?: number } }>(
+          `/hirehop/jobs/${id}/derived-flags`
+        ).catch(() => ({ flags: undefined })),
       ]);
       const hf = pre.data.find(r => r.requirement_type === 'hire_forms');
       const openPost = post.data.filter(r => r.status !== 'done').length;
+      // Rehearsal studio-sitter cover gap — only when the job has a rehearsal
+      // requirement. Coverage is per-evening; gap = any sitter-needed night
+      // without an assignee. firstDate = earliest such night (drives the banner).
+      let rehearsalGap: { unassigned: number; firstDate: string } | null = null;
+      if (pre.data.some(r => r.requirement_type === 'rehearsal')) {
+        try {
+          const cov = await api.get<{ data: { date: string; assignee: { id: string } | null }[] }>(`/studio-sitters/job/${id}/coverage`);
+          const unassignedDates = (cov.data ?? []).filter(e => !e.assignee).map(e => e.date).sort();
+          if (unassignedDates.length > 0) rehearsalGap = { unassigned: unassignedDates.length, firstDate: unassignedDates[0] };
+        } catch { /* non-fatal */ }
+      }
+      // Suppress the self-drive hire-form banner when the job is wholly V&D —
+      // either the live derived flags say so (vehicles present, zero self-drive
+      // slots) or the hire-form requirement is suspended (notes marker). Reading
+      // the flags keeps the banner honest even if the requirement state lags.
+      const flags = flagsRes?.flags;
+      const flagsVD = !!(flags?.has_vehicle && (flags?.self_drive_count ?? 1) === 0);
+      const reqSuspended = typeof hf?.notes === 'string' && hf.notes.includes('[Suspended:');
       setReqSummary({
         hireFormsStatus: hf?.status || null,
         postHireOpenCount: openPost,
+        allVanAndDriver: flagsVD || reqSuspended,
+        rehearsalGap,
       });
     } catch {
       // non-fatal — alerts just won't fire
@@ -1983,15 +2515,67 @@ export default function JobDetailPage() {
     }
   }
 
-  async function searchVenues(search: string) {
+  // Cycle the operational arrangement status (ops_status) through the same six
+  // states as the Transport Ops dropdown, so staff can drive a quote from
+  // "To Be Arranged" to "Completed" without leaving the job page.
+  async function cycleOpsStatus(quoteId: string, current: string) {
+    const order = ['todo', 'arranging', 'arranged', 'dispatched', 'completed', 'cancelled'];
+    const idx = order.indexOf(current);
+    const next = order[(idx + 1) % order.length];
     try {
-      const data = await api.get<{ data: { id: string; name: string; city: string | null }[] }>(
-        `/venues?search=${encodeURIComponent(search)}&limit=10`
-      );
-      setVenueOptions(data.data);
-    } catch {
-      console.error('Failed to search venues');
+      await api.patch(`/quotes/${quoteId}/ops-status`, { ops_status: next });
+      await loadQuotes();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update arrangement status');
     }
+  }
+
+  // Distinct venues already carried by this job's OTHER transport legs — the
+  // ones of the opposite type to what's being added. A collection is nearly
+  // always from the place we delivered to, and the DELIVERY QUOTE's venue is
+  // the one a human actually chose; `jobs.venue_name` is whatever HireHop
+  // happened to carry and is often blank or unlinked.
+  //
+  // Cancelled legs are excluded — a venue we decided not to go to is not a
+  // sensible default. Deduped on venue_id, falling back to the trimmed name so
+  // two free-text legs to the same place collapse to one entry.
+  function otherJobVenues(
+    forType: 'delivery' | 'collection'
+  ): Array<{ venueId: string | null; venueName: string }> {
+    const oppositeType = forType === 'delivery' ? 'collection' : 'delivery';
+    const seen = new Set<string>();
+    const out: Array<{ venueId: string | null; venueName: string }> = [];
+    for (const q of quotes) {
+      if (q.job_type !== oppositeType) continue;
+      if (q.status === 'cancelled') continue;
+      const name = (q.venue_name || '').trim();
+      if (!name) continue;
+      const key = q.venue_id || name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ venueId: q.venue_id || null, venueName: name });
+    }
+    // A leg linked to a real venue record is the more useful default (it's the
+    // one that carries an address through to the freelancer portal).
+    return out.sort((a, b) => Number(!!b.venueId) - Number(!!a.venueId));
+  }
+
+  // The venue to pre-fill when adding a leg of `forType`.
+  //
+  // Exactly one distinct opposite-type venue → use it. MORE than one → return
+  // nothing: on a multi-drop job "the venue we're delivering to" is ambiguous,
+  // and confidently pre-filling the wrong one of three is worse than leaving it
+  // blank. Those candidates surface as click-to-fill chips under the field
+  // instead. No opposite-type legs at all → fall back to the job's own venue.
+  function deriveSiblingVenue(
+    forType: 'delivery' | 'collection'
+  ): { venueId: string; venueName: string } {
+    const candidates = otherJobVenues(forType);
+    if (candidates.length === 1) {
+      return { venueId: candidates[0].venueId || '', venueName: candidates[0].venueName };
+    }
+    if (candidates.length > 1) return { venueId: '', venueName: '' };
+    return { venueId: job?.venue_id || '', venueName: job?.venue_name || '' };
   }
 
   function getDefaultDate(jobType: 'delivery' | 'collection'): string {
@@ -2007,24 +2591,23 @@ export default function JobDetailPage() {
   function openLocalForm() {
     if (!job) return;
     const defaultDate = getDefaultDate('delivery');
+    const venue = deriveSiblingVenue('delivery');
     setLocalFormData({
       jobType: 'delivery',
-      venueId: job.venue_id || '',
-      venueName: job.venue_name || '',
+      venueId: venue.venueId,
+      venueName: venue.venueName,
       jobDate: defaultDate,
       arrivalTime: '',
+      freelancerNotes: '',
       notes: '',
       pushToHirehop: true,
     });
-    setVenueSearch(job.venue_name || '');
-    setVenueOptions([]);
-    setShowVenueDropdown(false);
     setShowLocalForm(true);
   }
 
   async function searchPeople(search: string) {
     try {
-      const data = await api.get<{ data: PersonOption[] }>(`/people?search=${encodeURIComponent(search)}&limit=10&is_freelancer=true&is_approved=true`);
+      const data = await api.get<{ data: PersonOption[] }>(`/people?search=${encodeURIComponent(search)}&limit=10&is_freelancer=true&is_approved=true&include_pending=true`);
       setPeopleOptions(data.data);
     } catch {
       console.error('Failed to search people');
@@ -2183,6 +2766,45 @@ export default function JobDetailPage() {
     }
   }
 
+  // Inline-create a new organisation from the additional-orgs search box, then
+  // select it (staff pick a role + Add). Mirrors createAndSelectClient on the
+  // headline picker. New orgs default to type 'band' — the per-job role is what
+  // matters here, and band is the most common thing you'd add on the fly.
+  async function createAndSelectJobOrg(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || jobOrgCreating) return;
+    setJobOrgCreating(true);
+    try {
+      const newOrg = await api.post<{ id: string }>('/organisations', { name: trimmed, type: 'band' });
+      setJobOrgSelectedOrg({ id: newOrg.id, name: trimmed, type: 'band' });
+      setJobOrgResults([]);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to create organisation');
+    } finally {
+      setJobOrgCreating(false);
+    }
+  }
+
+  // Set (or clear) which organisation headlines this job. Passing null clears
+  // the flag so the headline falls back to the client. Purely a display flag —
+  // `client_id` stays authoritative for accounting either way, so swapping the
+  // lead leaves nothing to unpick.
+  async function handleSetLeadOrg(organisationId: string | null) {
+    if (!id || jobOrgSaving) return;
+    setJobOrgSaving(true);
+    try {
+      const data = await api.put<{ data: typeof jobOrgs }>(
+        `/pipeline/${id}/organisations/lead`,
+        { organisation_id: organisationId }
+      );
+      setJobOrgs(data.data);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to set lead organisation');
+    } finally {
+      setJobOrgSaving(false);
+    }
+  }
+
   async function handleAddJobOrg() {
     if (!jobOrgSelectedOrg || !id) return;
     setJobOrgSaving(true);
@@ -2227,8 +2849,13 @@ export default function JobDetailPage() {
     }
   }
 
-  async function handleRemoveJobOrg(linkId: string) {
+  // The × sits right next to the ☆ on a small chip, so confirm before removing —
+  // a fat-fingered tap otherwise silently drops an org off the job.
+  async function handleRemoveJobOrg(linkId: string, orgName: string) {
     if (!id) return;
+    if (!confirm(`Remove "${orgName}" from this job?\n\nThis only unlinks it from this hire — the organisation itself is untouched.`)) {
+      return;
+    }
     try {
       await api.delete(`/pipeline/${id}/organisations/${linkId}`);
       loadJobOrgs();
@@ -2246,6 +2873,33 @@ export default function JobDetailPage() {
     }
   }
 
+  // Phase D2b: authorise a held-back driver whose referral has now resolved —
+  // stamps hire_start, fires their withheld hire agreement, notifies the team,
+  // and surfaces the recomputed top-N excess vs held as a heads-up (no auto-bump).
+  async function authoriseAgreement(assignmentId: string) {
+    if (authorisingAssignmentId) return;
+    setAuthorisingAssignmentId(assignmentId);
+    try {
+      const res = await api.post<{ success: boolean; results?: { excess?: { requiredTotal: number; heldTotal: number; outstanding: number } } }>(
+        `/hire-forms/${assignmentId}/authorise-agreement`, {}
+      );
+      const ex = res?.results?.excess;
+      if (ex && ex.outstanding > 0.005) {
+        alert(
+          `Agreement sent and driver authorised.\n\n` +
+          `Heads-up: this job's insurance excess is £${ex.requiredTotal.toLocaleString()} required, ` +
+          `£${ex.heldTotal.toLocaleString()} held — £${ex.outstanding.toLocaleString()} outstanding. ` +
+          `Collect the top-up on the Money tab if needed (nothing has been auto-charged).`
+        );
+      }
+      await loadVehicleAssignments();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to authorise agreement');
+    } finally {
+      setAuthorisingAssignmentId(null);
+    }
+  }
+
   async function loadVehicleAssignments() {
     if (!id) return;
     setVehicleAssignmentsLoading(true);
@@ -2255,12 +2909,16 @@ export default function JobDetailPage() {
       // Fetch both so we can see staff allocations for sibling-vehicle
       // inference, then dedupe by id.
       const hhJobNum = job?.hh_job_number ?? null;
-      const [byJobId, byHhJob] = await Promise.all([
+      const [byJobId, byHhJob, unsigned] = await Promise.all([
         api.get<{ data: any[] }>(`/assignments?job_id=${id}`),
         hhJobNum
           ? api.get<{ data: any[] }>(`/assignments?hirehop_job_id=${hhJobNum}`)
           : Promise.resolve({ data: [] }),
+        hhJobNum
+          ? api.get<{ data: any[] }>(`/drivers/unsigned-for-job/${hhJobNum}`).catch(() => ({ data: [] }))
+          : Promise.resolve({ data: [] }),
       ]);
+      setUnsignedDrivers(unsigned.data || []);
       const merged = new Map<string, any>();
       for (const r of (byJobId.data || [])) merged.set(r.id, r);
       for (const r of (byHhJob.data || [])) {
@@ -2268,14 +2926,18 @@ export default function JobDetailPage() {
       }
       const allRows = Array.from(merged.values());
 
-      // Build slot → vehicle_id map from staff allocations (no driver_id,
+      // Build slot → vehicle map from staff allocations (no driver_id,
       // no freelancer_person_id, has vehicle_id). Used to infer the van
-      // for hire-form rows that haven't been cascade-linked yet.
-      const slotVehicleByIndex = new Map<number, string>();
+      // for hire-form rows that haven't been cascade-linked yet. We keep the
+      // reg + type alongside the id so the card header can DISPLAY the van
+      // even before the hire-form row is cascade-linked (otherwise the card
+      // shows a bare 🚐 with no reg — the button knows the van but the
+      // header can't).
+      const slotVehicleByIndex = new Map<number, { id: string; reg: string | null; type: string | null }>();
       for (const r of allRows) {
         const idx = r.van_requirement_index ?? 0;
         if (!r.driver_id && !r.freelancer_person_id && r.vehicle_id && !slotVehicleByIndex.has(idx)) {
-          slotVehicleByIndex.set(idx, r.vehicle_id);
+          slotVehicleByIndex.set(idx, { id: r.vehicle_id, reg: r.vehicle_reg ?? null, type: r.vehicle_type ?? null });
         }
       }
 
@@ -2329,11 +2991,42 @@ export default function JobDetailPage() {
             excess_amount_required: r.excess_amount_required,
             excess_amount_taken: r.excess_amount_taken,
             dispute_status: r.dispute_status ?? null,
+            auto_covered: r.excess_auto_covered ?? false,
           } : null,
-          effective_vehicle_id: r.vehicle_id || inferred,
+          effective_vehicle_id: r.vehicle_id || inferred?.id || null,
+          // Referral state (aliased driver_* on the API row) → the card fields
+          // the Phase D2b held-back state reads.
+          requires_referral: r.driver_requires_referral ?? null,
+          referral_status: r.driver_referral_status ?? null,
+          // Backfill reg/type from the inferred sibling so the card header
+          // shows the van whenever we know it, not just when this row's own
+          // vehicle_id is set. No-op when the row is already linked.
+          vehicle_reg: r.vehicle_reg || inferred?.reg || null,
+          vehicle_type: r.vehicle_type || inferred?.type || null,
         };
       });
       setVehicleAssignments(shaped);
+
+      // Deduped assigned vehicles across ALL rows (incl. driverless staff
+      // allocations that never surface as a driver card) → the header strip.
+      // Keeps the most-progressed status per van so its chip reads right.
+      const vanMap = new Map<string, JobAssignedVehicle>();
+      for (const r of allRows) {
+        if (!r.vehicle_id || r.status === 'cancelled') continue;
+        const existing = vanMap.get(r.vehicle_id);
+        if (!existing) {
+          vanMap.set(r.vehicle_id, {
+            vehicle_id: r.vehicle_id,
+            reg: r.vehicle_reg || '',
+            type: r.vehicle_type ?? null,
+            status: r.status,
+            hire_status: r.vehicle_hire_status ?? null,
+          });
+        } else if ((ASSIGNMENT_STATUS_RANK[r.status] ?? -1) > (ASSIGNMENT_STATUS_RANK[existing.status] ?? -1)) {
+          existing.status = r.status;
+        }
+      }
+      setJobAssignedVehicles(Array.from(vanMap.values()));
 
       // Also load dispatch check
       const check = await api.get<DispatchCheckResult>(`/assignments/dispatch-check/${id}`);
@@ -2491,6 +3184,7 @@ export default function JobDetailPage() {
   const hireFormMissing: { daysToOut: number } | null = (() => {
     if (!['confirmed', 'prepped'].includes(job.pipeline_status || '')) return null;
     if (!outDay) return null;
+    if (reqSummary.allVanAndDriver) return null; // V&D hire — no customer hire form needed
     if (reqSummary.hireFormsStatus !== 'not_started') return null;
     const daysToOut = daysBetween(outDay, todayLocalISO);
     if (daysToOut < 0 || daysToOut > 5) return null;
@@ -2506,6 +3200,17 @@ export default function JobDetailPage() {
     const daysSinceReturn = daysBetween(todayLocalISO, returnDay);
     if (daysSinceReturn < 7 || reqSummary.postHireOpenCount === 0) return null;
     return { daysSinceReturn, openCount: reqSummary.postHireOpenCount };
+  })();
+
+  // Rehearsal studio-sitter gap — sitter-needed evenings unassigned within the
+  // warning window (7 days) of the earliest such night. Amber, non-blocking.
+  const rehearsalSitterGap: { unassigned: number; daysToFirst: number } | null = (() => {
+    const g = reqSummary.rehearsalGap;
+    if (!g) return null;
+    if (['lost', 'cancelled'].includes(job.pipeline_status || '')) return null;
+    const daysToFirst = daysBetween(g.firstDate, todayLocalISO);
+    if (daysToFirst < 0 || daysToFirst > 7) return null;
+    return { unassigned: g.unassigned, daysToFirst };
   })();
 
   // Crew unassigned + Crew not introduced — gate on EACH QUOTE'S OWN date,
@@ -2597,13 +3302,48 @@ export default function JobDetailPage() {
   return (
     <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
       <div className={showClientHistory ? 'flex-1 min-w-0' : ''}>
-      {/* Back link */}
-      <Link to={backTo} className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; {backLabel}
-      </Link>
+      {/* Quote options bar — only renders once the enquiry has two or more options.
+          At the TOP of the page (jon, 13 Oct 2026): which option you are looking at
+          has to be the first thing you see. */}
+      {job.group_id && (
+        <QuoteOptionsBar
+          jobId={job.id}
+          groupId={job.group_id}
+          refreshSignal={`${optionsRefresh}:${job.pipeline_status}`}
+          onAdd={() => setShowAddOptionModal(true)}
+          onRemoved={() => loadJob()}
+        />
+      )}
+
+      {/* Combined banner — absorbed booking folded into another. Replaces the
+          red cancelled banner (it's a merge, not a real cancellation). */}
+      {job.combined_into_job_id && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1">
+              <p className="text-sm font-bold text-indigo-700">
+                🔀 This booking was combined into another booking
+                {job.cancelled_at ? ` on ${new Date(job.cancelled_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}
+              </p>
+              <p className="text-xs text-indigo-600 mt-1">
+                Retired with no cancellation fee — its deposit was reallocated to the kept booking.
+              </p>
+              {job.cancellation_notes && (
+                <p className="text-xs text-indigo-600/80 mt-1">{job.cancellation_notes}</p>
+              )}
+            </div>
+            <Link
+              to={`/jobs/${job.combined_into_job_id}`}
+              className="text-xs px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 whitespace-nowrap text-center shrink-0"
+            >
+              View combined booking &rarr;
+            </Link>
+          </div>
+        </div>
+      )}
 
       {/* Cancelled banner */}
-      {job.pipeline_status === 'cancelled' && (
+      {job.pipeline_status === 'cancelled' && !job.combined_into_job_id && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4">
           <div className="flex items-start gap-3">
             <div className="flex-1">
@@ -2616,12 +3356,28 @@ export default function JobDetailPage() {
                   {job.cancellation_fee != null && (
                     <span className="text-red-600">
                       Fee retained (ex-VAT): <strong>£{Number(job.cancellation_fee).toFixed(2)}</strong>
-                      <span className="text-red-500/80 ml-1">(inc-VAT £{(Number(job.cancellation_fee) * 1.2).toFixed(2)})</span>
+                      <span className="text-red-500/80 ml-1">(inc-VAT £{cancellationFeeGross(Number(job.cancellation_fee)).toFixed(2)})</span>
                     </span>
                   )}
-                  {job.cancellation_refund != null && Number(job.cancellation_refund) > 0 && (
-                    <span className="text-green-700">Refund due to client: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
-                  )}
+                  {(() => {
+                    // Where the money stands NOW, from the same plan as the Money tab's panel —
+                    // the figure saved at cancellation is only an estimate and never changes.
+                    // Until HireHop has answered, say so — never show the old estimate and then
+                    // change it while someone is on the phone to the client (jon, 14 Oct 2026).
+                    if (!closeOutPlan && !closeOutFailed && job.hh_job_number && !job.is_internal) {
+                      return <span className="text-gray-500 italic">Reading HireHop…</span>;
+                    }
+                    const c = closeOutPlan?.cancellation;
+                    if (c && c.invoiced) {
+                      const v = closeOutView(closeOutPlan!, { isManager: false });
+                      if (v.credit >= 0.005) return <span className="text-green-700">Refund due to client: <strong>£{v.credit.toFixed(2)}</strong></span>;
+                      if (v.owing >= 0.005) return <span className="text-red-700">Fee still owing: <strong>£{v.owing.toFixed(2)}</strong></span>;
+                      if (c.settled) return <span className="text-green-700 font-semibold">Settled — fee paid, nothing left to refund</span>;
+                    }
+                    return job.cancellation_refund != null && Number(job.cancellation_refund) > 0
+                      ? <span className="text-green-700">Refund due to client: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
+                      : null;
+                  })()}
                 </div>
               )}
               {/* One-click into the reimburse modal for any excess still
@@ -2657,7 +3413,7 @@ export default function JobDetailPage() {
                 >
                   Already reopened &rarr; View new booking
                 </Link>
-              ) : (user?.role === 'admin' || user?.role === 'manager') ? (
+              ) : hasManagerRole(user?.role) ? (
                 <button
                   onClick={async () => {
                     if (!window.confirm('Re-open this cancelled job as a new booking? The original job will stay cancelled for audit purposes.')) return;
@@ -2707,12 +3463,45 @@ export default function JobDetailPage() {
                 <p className="text-xs text-orange-600 mt-1">{job.lost_detail}</p>
               )}
             </div>
-            <Link
-              to={`/operations/fill-gap/${job.id}`}
-              className="text-xs px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 whitespace-nowrap text-center shrink-0"
+            {/* Quote options: an option the client didn't pick freed no slot —
+                its sibling is using it. No Fill-a-Gap (spec §8). */}
+            {job.lost_reason === ALTERNATIVE_QUOTE_LOST_REASON ? (
+              <p className="text-xs text-orange-600 max-w-xs">{OPTION_COPY.lostAltBanner}</p>
+            ) : (
+              <Link
+                to={`/operations/fill-gap/${job.id}`}
+                className="text-xs px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 whitespace-nowrap text-center shrink-0"
+              >
+                Find replacement booking &rarr;
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Dismissed banner — dud/spam/orphan enquiry. Grey (not red/orange):
+          this isn't a commercial outcome, it's noise removed from the board.
+          Restore returns it to the pipeline. */}
+      {job.dismissed_at && (
+        <div className="bg-gray-100 border border-gray-300 rounded-xl p-4 mb-4">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-gray-700">
+                🗑️ Enquiry dismissed
+                {` on ${new Date(job.dismissed_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                {job.dismissal_reason ? ` — ${DISMISSAL_REASON_LABELS[job.dismissal_reason] || job.dismissal_reason}` : ''}
+              </p>
+              {job.dismissal_notes && (
+                <p className="text-xs text-gray-600 mt-1">{job.dismissal_notes}</p>
+              )}
+              <p className="text-xs text-gray-500 mt-1">Hidden from the pipeline board and analytics. Not counted as Lost.</p>
+            </div>
+            <button
+              onClick={handleUndismiss}
+              className="text-xs px-3 py-1.5 bg-gray-700 text-white rounded-lg hover:bg-gray-800 whitespace-nowrap text-center shrink-0"
             >
-              Find replacement booking &rarr;
-            </Link>
+              ↩️ Restore enquiry
+            </button>
           </div>
         </div>
       )}
@@ -2838,6 +3627,21 @@ export default function JobDetailPage() {
                           </button>
                         );
                       })}
+                      {/* Dismiss — dud/spam/orphan enquiry. Enquiry-stage only;
+                          distinct from Lost (a real commercial outcome). */}
+                      {['new_enquiry', 'quoting', 'paused'].includes(job.pipeline_status || '') && (
+                        <>
+                          <div className="my-1 border-t border-gray-100" />
+                          <button
+                            onClick={() => { setShowStatusDropdown(false); setShowDismissModal(true); }}
+                            className="w-full text-left px-3 py-1.5 text-sm text-gray-500 hover:bg-gray-50 flex items-center gap-2"
+                            title="Dud / spam / not a real enquiry — hides it from the pipeline without counting as Lost"
+                          >
+                            <span className="w-2 h-2 rounded-full bg-gray-400" />
+                            Dismiss enquiry…
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2868,121 +3672,28 @@ export default function JobDetailPage() {
                 onClick={startEditName}
                 title="Click to edit job name"
               >
-                {job.job_name || 'Untitled Job'}
+                {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled Job') : (job.job_name || 'Untitled Job')}
+                {job.option_no && (
+                  <span
+                    className="inline-flex items-center align-middle ml-2 px-2 py-0.5 rounded-full text-xs font-semibold bg-ooosh-100 text-ooosh-700"
+                    title={job.option_label ? `Option ${job.option_no} · ${job.option_label}` : `Option ${job.option_no}`}
+                  >
+                    Option {job.option_no}
+                  </span>
+                )}
                 <svg className="w-4 h-4 inline-block ml-2 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                 </svg>
               </h1>
             )}
 
-            {/* Client, Venue, Dates summary row */}
+            {/* Venue, Dates summary row.
+                NO organisation here — every org on the job (client included) lives
+                in the ORGANISATIONS row below, which is the single place they're
+                shown and managed. This line used to repeat the client/lead org,
+                so the same name appeared twice in the header with two different
+                edit affordances. Don't re-add it. */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
-              {/* Client headline — prefer band → linked client org → company → client_name
-                  Contact person surfaced separately when HH CONTACT differs from HH COMPANY */}
-              <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
-                {(() => {
-                  const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                  const hasClient = !!(job.client_name || job.company_name);
-                  if (!bandOrg && !hasClient) {
-                    return (
-                      <button
-                        onClick={startEditClient}
-                        className="text-gray-400 hover:text-ooosh-600 transition-colors text-xs border border-dashed border-gray-300 px-2 py-0.5 rounded"
-                      >
-                        + Add client
-                      </button>
-                    );
-                  }
-                  const headlineText = bandOrg?.organisation_name
-                    || job.company_name
-                    || job.client_name;
-                  const headlineLinkId = bandOrg?.organisation_id || job.client_id;
-                  return (
-                    <>
-                      {headlineLinkId ? (
-                        <Link to={`/organisations/${headlineLinkId}`} className="text-ooosh-600 hover:text-ooosh-700">
-                          {headlineText}
-                        </Link>
-                      ) : (
-                        <span>{headlineText}</span>
-                      )}
-                      {bandOrg && (
-                        <span className="text-xs text-purple-500 font-medium">(Band)</span>
-                      )}
-                      <button
-                        onClick={startEditClient}
-                        className="text-gray-300 hover:text-gray-500 transition-colors"
-                        title="Change client"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                        </svg>
-                      </button>
-                    </>
-                  );
-                })()}
-                {editingClient && (
-                  <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64">
-                    <input
-                      type="text"
-                      value={clientSearch}
-                      onChange={(e) => setClientSearch(e.target.value)}
-                      placeholder="Search organisations..."
-                      className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
-                      autoFocus
-                    />
-                    {clientSearchResults.length > 0 && (
-                      <div className="max-h-48 overflow-y-auto">
-                        {clientSearchResults.map((o) => (
-                          <button
-                            key={o.id}
-                            onClick={() => selectClient(o)}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
-                          >
-                            <span className="font-medium">{o.name}</span>
-                            <span className="text-gray-400 text-xs">{o.type}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {clientSearch.length >= 2 && clientSearchResults.length === 0 && (
-                      <div className="px-3 py-2 text-sm text-gray-400">No results</div>
-                    )}
-                  </div>
-                )}
-              </div>
-              {/* Billed to sub-line (when Band takes top slot) */}
-              {(() => {
-                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                if (!bandOrg) return null;
-                const billedToText = job.company_name || job.client_name;
-                if (!billedToText) return null;
-                return (
-                  <span className="text-xs text-gray-500">
-                    Billed to:{' '}
-                    {job.client_id ? (
-                      <Link to={`/organisations/${job.client_id}`} className="text-gray-600 hover:text-ooosh-600 underline decoration-dotted">
-                        {billedToText}
-                      </Link>
-                    ) : (
-                      <span className="text-gray-600">{billedToText}</span>
-                    )}
-                  </span>
-                );
-              })()}
-              {/* Contact pill (HH CONTACT differs from HH COMPANY → person contact) */}
-              {(() => {
-                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
-                if (bandOrg) return null;
-                if (!job.company_name || !job.client_name) return null;
-                if (job.client_name === job.company_name) return null;
-                return (
-                  <span className="text-xs text-gray-500">
-                    Contact: <span className="text-gray-700">{job.client_name}</span>
-                  </span>
-                );
-              })()}
-
               {/* Venue */}
               {job.venue_name && (
                 <span>
@@ -3157,6 +3868,21 @@ export default function JobDetailPage() {
                 }}
               />
             )}
+            {rehearsalSitterGap && (
+              <JobAlertBanner
+                severity="amber"
+                message={
+                  (rehearsalSitterGap.daysToFirst === 0
+                    ? 'Rehearsal starts today'
+                    : `Rehearsal starts in ${rehearsalSitterGap.daysToFirst} ${rehearsalSitterGap.daysToFirst === 1 ? 'day' : 'days'}`)
+                  + ` — ${rehearsalSitterGap.unassigned} evening${rehearsalSitterGap.unassigned === 1 ? '' : 's'} still without a studio sitter.`
+                }
+                action={{
+                  label: 'View Job Requirements',
+                  onClick: () => setActiveTab('overview'),
+                }}
+              />
+            )}
 
             {/* HireHop status mismatch banner */}
             {hhStatusMismatch && (
@@ -3224,7 +3950,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Outgoing</label>
                     <DatePicker
                       value={editOutDate}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       onChange={(val) => handleEditOutDate(val)}
                     />
                   </div>
@@ -3232,7 +3958,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Job Start</label>
                     <DatePicker
                       value={editJobDate}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       onChange={(val) => handleEditJobDate(val)}
                     />
                     <button
@@ -3251,7 +3977,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Job End</label>
                     <DatePicker
                       value={editJobEnd}
-                      min={editJobDate || new Date().toISOString().split('T')[0]}
+                      min={editJobDate || ukToday()}
                       onChange={(val) => handleEditJobEnd(val)}
                     />
                   </div>
@@ -3259,7 +3985,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Returning</label>
                     <DatePicker
                       value={editReturnDate}
-                      min={editJobEnd || new Date().toISOString().split('T')[0]}
+                      min={editJobEnd || ukToday()}
                       onChange={(val) => handleEditReturnDate(val)}
                     />
                     <button
@@ -3362,9 +4088,17 @@ export default function JobDetailPage() {
                   </div>
                 </div>
                 {editJobDate && editJobEnd && (() => {
-                  const start = new Date(editJobDate);
-                  const end = new Date(editJobEnd);
-                  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+                  // Match HireHop's charge-period rule (and the OP→HH push in
+                  // pipeline.ts calcHHDuration): days = ceil(elapsed hours / 24)
+                  // computed from the full start/end DATETIMES. Ceiling counts
+                  // any part-day past a whole 24h block as a new day. For a
+                  // 9am→9am van the hours are exact multiples so this is a plain
+                  // day difference; for a rehearsal finishing on the last day
+                  // (e.g. 10:00–22:00) it correctly reports the final part-day.
+                  const startMs = Date.parse(`${editJobDate}T${editStartTime || '09:00'}:00Z`);
+                  const endMs = Date.parse(`${editJobEnd}T${editEndTime || '09:00'}:00Z`);
+                  if (isNaN(startMs) || isNaN(endMs)) return null;
+                  const days = Math.ceil(Math.max(0, (endMs - startMs) / (1000 * 60 * 60 * 24)));
                   return days > 0 ? <p className="text-xs text-gray-500 font-medium mt-1">{days} day{days !== 1 ? 's' : ''}</p> : null;
                 })()}
                 <div className="flex items-center gap-2 mt-3">
@@ -3434,67 +4168,28 @@ export default function JobDetailPage() {
               </div>
             )}
           </div>
-          <div className="flex flex-col items-end gap-2 flex-shrink-0 max-w-full">
-            <div className="flex items-center gap-2">
-              {/* Internal job toggle — mutes hire forms / excess / money
-                  tracking for garage visits, MOTs and our own vehicle
-                  movements. Crew & Transport stays live. */}
+          {/* Right-side controls — 2×2 grid so they stack neatly instead of
+              crowding the job title. Top row: Sync HH / Pre-Hire Review.
+              Bottom row: Combine / Mark Internal. (Open in HireHop dropped —
+              the #job-number on the left already links there.) Hidden cells
+              just reflow; grid stays tidy with 1–4 buttons. */}
+          <div className="grid grid-cols-2 gap-2 flex-shrink-0 w-full sm:w-[300px]">
+            {job.hh_job_number && (
               <button
-                onClick={toggleInternal}
-                disabled={internalToggling}
-                className={
-                  job.is_internal
-                    ? 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-slate-400 bg-slate-100 rounded-lg hover:bg-slate-200 text-slate-700 font-medium disabled:opacity-50 transition-colors'
-                    : 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
-                }
-                title={
-                  job.is_internal
-                    ? 'Internal job — hire forms, excess and money tracking are muted (crew & transport unaffected). Click to revert to a normal client job.'
-                    : 'Mark as internal (garage visit, MOT, our own vehicle movement) — mutes hire form emails, excess and money tracking'
-                }
+                onClick={() => syncFromHireHop(true)}
+                disabled={hhSyncing}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
+                title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
               >
-                <span>🔧</span>
-                <span className="hidden sm:inline">
-                  {internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}
-                </span>
+                <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                <span>{hhSyncing ? 'Syncing…' : 'Sync HH'}</span>
               </button>
-              {job.hh_job_number && (
-                <button
-                  onClick={() => syncFromHireHop(true)}
-                  disabled={hhSyncing}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
-                  title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
-                >
-                  <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  <span className="hidden sm:inline">{hhSyncing ? 'Syncing...' : 'Sync HH'}</span>
-                </button>
-              )}
-              {hhJobUrl && (
-                <a
-                  href={hhJobUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
-                >
-                  Open in HireHop &rarr;
-                </a>
-              )}
-            </div>
-            {/* Pre-Hire Review — manual send to info@. Admin/manager only.
-                 Visibility whitelist: confirmed / prepping / prepped only.
-                 Provisional and earlier: review isn't meaningful yet.
-                 Dispatched (on hire) onwards: the hire's gone, review's done.
-                 The same content goes out automatically via the daily
-                 09:55 cron for confirmed jobs at T-3d / T-5d / T-1d.
-                 Visual state: faded grey when a recent send exists (within
-                 the last 24h) so staff can see at-a-glance it's been
-                 actioned. Still clickable — sometimes you want to resend.
-                 Sits on its own row beneath Sync HH / Open in HireHop so
-                 the optional "· last sent X" subtitle can't squash the
-                 job title on the left. */}
-            {(user?.role === 'admin' || user?.role === 'manager')
+            )}
+            {/* Pre-Hire Review — admin/manager only, confirmed/prepping/prepped.
+                Faded grey when sent within the last 24h (still clickable). */}
+            {hasManagerRole(user?.role)
               && (job.pipeline_status === 'confirmed'
                   || job.pipeline_status === 'prepping'
                   || job.pipeline_status === 'prepped') && (() => {
@@ -3506,8 +4201,8 @@ export default function JobDetailPage() {
                     disabled={briefingSending}
                     className={
                       sentRecently
-                        ? "hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-gray-100 text-gray-500 disabled:opacity-50 transition-colors"
-                        : "hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
+                        ? "w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-gray-100 text-gray-500 disabled:opacity-50 transition-colors"
+                        : "w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
                     }
                     title={
                       briefingLastSent
@@ -3518,13 +4213,56 @@ export default function JobDetailPage() {
                     {briefingSending
                       ? 'Sending…'
                       : sentRecently
-                        ? <>✓ Pre-Hire Review <span className="text-gray-400 text-xs ml-1">· sent {formatBriefingLastSent()}</span></>
-                        : briefingLastSent
-                          ? <>✉ Pre-Hire Review <span className="text-purple-400 text-xs ml-1">· last sent {formatBriefingLastSent()}</span></>
-                          : '✉ Pre-Hire Review'}
+                        ? '✓ Pre-Hire Review'
+                        : '✉ Pre-Hire Review'}
                   </button>
                 );
               })()}
+            {['admin', 'manager', 'weekend_manager'].includes(user?.role || '')
+              && !job.combined_into_job_id
+              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'].includes(job.pipeline_status || '') && (
+              <button
+                onClick={() => setShowCombineModal(true)}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
+                title="Combine this booking with another pre-hire booking for the same client"
+              >
+                <span>🔀</span>
+                <span>Combine</span>
+              </button>
+            )}
+            {/* Internal job toggle — mutes hire forms / excess / money tracking
+                for garage visits, MOTs, own vehicle movements. Crew stays live. */}
+            <button
+              onClick={toggleInternal}
+              disabled={internalToggling}
+              className={
+                job.is_internal
+                  ? 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-slate-400 bg-slate-100 rounded-lg hover:bg-slate-200 text-slate-700 font-medium disabled:opacity-50 transition-colors'
+                  : 'w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 disabled:opacity-50 transition-colors'
+              }
+              title={
+                job.is_internal
+                  ? 'Internal job — hire forms, excess and money tracking are muted (crew & transport unaffected). Click to revert to a normal client job.'
+                  : 'Mark as internal (garage visit, MOT, our own vehicle movement) — mutes hire form emails, excess and money tracking'
+              }
+            >
+              <span>🔧</span>
+              <span>{internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}</span>
+            </button>
+            {/* Quote options — a subtle link on a lone pre-confirmation enquiry.
+                Once the job is in a group the bar below the header carries "+ Add". */}
+            {!job.group_id && isOptionOpen(job.pipeline_status) && !job.dismissed_at && !job.combined_into_job_id && (
+              <div className="col-span-2 text-right">
+                <button
+                  type="button"
+                  onClick={() => setShowAddOptionModal(true)}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-800 font-medium"
+                  title={OPTION_COPY.addLinkTitle}
+                >
+                  {OPTION_COPY.addLink}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -3539,15 +4277,123 @@ export default function JobDetailPage() {
           </div>
         )}
 
-        {/* Linked Organisations (Band, Promoter, etc.) */}
+        {/* Associated organisations — the SINGLE place every org on this job is
+            shown and managed. Nothing above repeats them.
+            The ★ picks which one represents the job on job lists / pipeline cards
+            (job_organisations.is_primary → `lead_org_name` on the list query).
+            The client chip comes from `client_id` rather than a job_organisations
+            row, so it's always present; its ★ clears the flag (lists fall back to
+            the client) and it's CHANGED via its pencil, never removed. */}
         <div className="mt-3 pt-3 border-t border-gray-100">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Organisations:</span>
+            {(() => {
+              const hasExplicitLead = jobOrgs.some(jo => jo.is_primary);
+              const clientName = jobClientName(job);
+              return (
+                <span
+                  ref={clientSearchRef}
+                  className={`relative inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
+                    clientName
+                      ? 'bg-blue-100 text-blue-700 border-blue-200'
+                      : 'border-dashed border-gray-300 text-gray-500'
+                  }`}
+                >
+                  {clientName ? (
+                    <>
+                      <button
+                        onClick={() => handleSetLeadOrg(null)}
+                        disabled={jobOrgSaving || !hasExplicitLead}
+                        className={`transition-opacity ${!hasExplicitLead ? 'opacity-100 cursor-default' : 'opacity-30 hover:opacity-100'}`}
+                        title={!hasExplicitLead ? 'Represents this job on job lists and pipeline cards' : 'Show this org on job lists and pipeline cards instead'}
+                      >
+                        {!hasExplicitLead ? '★' : '☆'}
+                      </button>
+                      <span className="opacity-70">Client:</span>
+                      {job.client_id ? (
+                        <Link to={`/organisations/${job.client_id}`} className="hover:underline font-semibold">
+                          {clientName}
+                        </Link>
+                      ) : (
+                        <span className="font-semibold">{clientName}</span>
+                      )}
+                    </>
+                  ) : (
+                    <button onClick={startEditClient} className="hover:text-ooosh-600 transition-colors">
+                      + Add client
+                    </button>
+                  )}
+                  {/* The client is CHANGED, never removed — it's a single FK driving
+                      the excess ledger / Xero bucketing / cross-job credit boundary,
+                      so it gets a pencil where the other chips get an ×. This is the
+                      ONLY client-edit affordance; the summary line above no longer
+                      repeats the client at all. */}
+                  {clientName && (
+                    <button
+                      onClick={startEditClient}
+                      className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                      title="Change client"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                    </button>
+                  )}
+                  {editingClient && (
+                    <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64 font-normal text-gray-900">
+                      <input
+                        type="text"
+                        value={clientSearch}
+                        onChange={(e) => setClientSearch(e.target.value)}
+                        placeholder="Search organisations..."
+                        className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
+                        autoFocus
+                      />
+                      {clientSearchResults.length > 0 && (
+                        <div className="max-h-48 overflow-y-auto">
+                          {clientSearchResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => selectClient(o)}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-gray-400 text-xs">{o.type}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {(() => {
+                        const trimmed = clientSearch.trim();
+                        if (trimmed.length < 2) return null;
+                        const exactMatch = clientSearchResults.some(
+                          (o) => o.name.toLowerCase() === trimmed.toLowerCase()
+                        );
+                        if (exactMatch) return null;
+                        return (
+                          <button
+                            onClick={() => createAndSelectClient(trimmed)}
+                            disabled={creatingClient}
+                            className="w-full text-left px-3 py-2 hover:bg-green-50 text-sm flex items-center gap-2 border-t border-gray-100 disabled:opacity-60"
+                          >
+                            <span className="text-xs font-medium bg-green-100 text-green-700 px-1.5 py-0.5 rounded">+ New</span>
+                            <span className="text-gray-900 truncate">
+                              {creatingClient ? 'Creating…' : <>Create &ldquo;{trimmed}&rdquo; as new client</>}
+                            </span>
+                          </button>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </span>
+              );
+            })()}
             {jobOrgs.map((jo) => {
               const roleColors: Record<string, string> = {
                 band: 'bg-purple-100 text-purple-700 border-purple-200',
                 client: 'bg-blue-100 text-blue-700 border-blue-200',
                 promoter: 'bg-red-100 text-red-700 border-red-200',
+                festival: 'bg-orange-100 text-orange-700 border-orange-200',
                 management: 'bg-sky-100 text-sky-700 border-sky-200',
                 label: 'bg-green-100 text-green-700 border-green-200',
                 venue_operator: 'bg-teal-100 text-teal-700 border-teal-200',
@@ -3555,14 +4401,22 @@ export default function JobDetailPage() {
               };
               return (
                 <span key={jo.id} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${roleColors[jo.role] || 'bg-gray-100 text-gray-700 border-gray-200'}`}>
+                  <button
+                    onClick={() => handleSetLeadOrg(jo.is_primary ? null : jo.organisation_id)}
+                    disabled={jobOrgSaving}
+                    className={`transition-opacity ${jo.is_primary ? 'opacity-100' : 'opacity-30 hover:opacity-100'}`}
+                    title={jo.is_primary ? 'Represents this job on job lists and pipeline cards — click to hand that back to the client' : 'Show this org on job lists and pipeline cards instead'}
+                  >
+                    {jo.is_primary ? '★' : '☆'}
+                  </button>
                   <span className="opacity-70 capitalize">{jo.role.replace('_', ' ')}:</span>
                   <Link to={`/organisations/${jo.organisation_id}`} className="hover:underline font-semibold">
                     {jo.organisation_name}
                   </Link>
                   <button
-                    onClick={() => handleRemoveJobOrg(jo.id)}
+                    onClick={() => handleRemoveJobOrg(jo.id, jo.organisation_name)}
                     className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
-                    title="Remove"
+                    title="Remove from this job"
                   >
                     &times;
                   </button>
@@ -3588,20 +4442,35 @@ export default function JobDetailPage() {
                       className="border border-gray-300 rounded px-2 py-1 text-xs w-48 focus:ring-ooosh-500 focus:border-ooosh-500"
                       autoFocus
                     />
-                    {jobOrgResults.length > 0 && (
-                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
-                        {jobOrgResults.map((o) => (
-                          <button
-                            key={o.id}
-                            onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
-                          >
-                            <span className="font-medium">{o.name}</span>
-                            <span className="text-gray-400">{o.type}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    {(() => {
+                      const trimmed = jobOrgSearch.trim();
+                      const hasExact = jobOrgResults.some(o => o.name.toLowerCase() === trimmed.toLowerCase());
+                      const showCreate = trimmed.length >= 2 && !hasExact;
+                      if (jobOrgResults.length === 0 && !showCreate) return null;
+                      return (
+                        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
+                          {jobOrgResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-gray-400">{o.type}</span>
+                            </button>
+                          ))}
+                          {showCreate && (
+                            <button
+                              onClick={() => createAndSelectJobOrg(trimmed)}
+                              disabled={jobOrgCreating}
+                              className="w-full text-left px-3 py-2 hover:bg-ooosh-50 text-xs text-ooosh-700 font-medium border-t border-gray-100 disabled:opacity-50"
+                            >
+                              {jobOrgCreating ? 'Creating…' : <>+ Create "<span className="font-semibold">{trimmed}</span>" as new organisation</>}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 ) : (
                   <>
@@ -3616,6 +4485,7 @@ export default function JobDetailPage() {
                       <option value="band">Band</option>
                       <option value="client">Client</option>
                       <option value="promoter">Promoter</option>
+                      <option value="festival">Festival</option>
                       <option value="management">Management</option>
                       <option value="label">Label</option>
                       <option value="venue_operator">Venue Operator</option>
@@ -3719,7 +4589,8 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6 -mx-4 px-4 sm:mx-0 sm:px-0 overflow-x-auto scrollbar-hide">
         <nav className="flex gap-4 sm:gap-6 min-w-max">
-          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files'] as const).map((tab) => {
+            return (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -3733,10 +4604,11 @@ export default function JobDetailPage() {
                tab === 'timeline' ? (<><span className="sm:hidden">Timeline</span><span className="hidden sm:inline">Activity Timeline</span></>) :
                tab === 'transport' ? (<><span className="sm:hidden">Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span><span className="hidden sm:inline">Crew & Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span></>) :
                tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
-               tab === 'money' ? 'Money' :
+               tab === 'money' ? (<>Money{moneyDot && <i className={`inline-block w-1.5 h-1.5 rounded-full ml-1.5 align-middle ${moneyDot}`} />}</>) :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
-          ))}
+            );
+          })}
         </nav>
       </div>
 
@@ -3751,6 +4623,33 @@ export default function JobDetailPage() {
               doesn't clutter clean jobs; "+ Log Problem" button sits inside. */}
           {id && <JobProblemsPanel jobId={id} />}
 
+          {/* Rack Plan — surfaces once a plan exists (created from Tools → Rack Planner) */}
+          {id && <RackPlanOverviewCard jobId={id} onEdit={() => setShowRackPlanModal(true)} refreshKey={rackPlanRefreshKey} onDeleted={() => setRackPlanRefreshKey((k) => k + 1)} />}
+
+          {/* Staging — surfaces once a plan exists (created from Tools → Staging Calculator) */}
+          {id && <StagingOverviewCard jobId={id} refreshKey={stagingRefreshKey} />}
+
+          {/* Rehearsal details — intake + band preferences + info pack (rehearsal jobs only) */}
+          {id && (
+            <RehearsalDetailsCard
+              jobId={id}
+              hasRehearsal={!!hhSyncResult?.derivation?.flags?.has_rehearsal}
+              backlinePrepMins={hhSyncResult?.derivation?.flags?.prep_time_by_category?.backline}
+            />
+          )}
+
+          {/* Studio sitter handover — surfaces on rehearsal jobs (self-hides otherwise) */}
+          {id && <StudioHandoverCard jobId={id} />}
+
+          {/* PCNs — penalty charge notices on this job. Renders only when rows
+              exist (a PCN isn't a per-job prep gate); one row per notice. */}
+          {id && (
+            <PcnHistorySection entityType="job" entityId={id} hideWhenEmpty heading="🅿️ Penalty Charge Notices" />
+          )}
+
+          {/* Insurance claims on this job — renders only when a case exists. */}
+          {id && <ClaimsSection entityType="job" entityId={id} hideWhenEmpty />}
+
           {/* Holding for this client (incoming deliveries) now lives inside the
               prep checklist's "Held for Clients" block — rolled in with the merch
               requirement so there's one surface. Temp storage + lost property
@@ -3761,11 +4660,18 @@ export default function JobDetailPage() {
             jobId={id || ''}
             hhJobNumber={job.hh_job_number}
             pipelineStatus={job.pipeline_status}
+            clientOrgId={job.client_id}
+            clientOrgName={jobClientName(job) ?? undefined}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
+            assignedVehicleRegs={jobAssignedVehicles.map(v => v.reg).filter(Boolean)}
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
             hasCrewOnHH={hhSyncResult?.derivation?.flags?.has_crew_items || false}
             onOpenCrewCalculator={() => { setShowCalculator(true); setActiveTab('transport'); }}
+            onLaunchStaging={() => setShowStagingModal(true)}
+            onLaunchRackPlan={() => setShowRackPlanModal(true)}
+            onLaunchBacklineMatcher={() => setShowBacklineMatcher(true)}
+            onOpenMoney={() => setActiveTab('money')}
           />
 
         </div>
@@ -3777,6 +4683,7 @@ export default function JobDetailPage() {
           entityType="job_id"
           entityId={id}
           interactions={interactions}
+          pipelineStatus={job.pipeline_status}
           onInteractionAdded={() => { loadInteractions(); setPrepChecklistKey(k => k + 1); }}
         />
       )}
@@ -3908,6 +4815,145 @@ export default function JobDetailPage() {
             />
           )}
 
+          {/* Out-of-hours returns — flag/un-flag badly-parked OOH returns per van */}
+          <JobOohReturns jobId={job.id} />
+
+          {/* Vehicles on this job — single place all allocated vans are shown
+              (deduped, incl. driverless staff allocations), plus a dashed chip
+              for each HH-detected van type still unallocated. Rare to have >2
+              vans, so no scroll/space concern. */}
+          {(() => {
+            const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+            // Detected van types minus what's already assigned → "unassigned".
+            const detected = new Map<string, number>();
+            for (const s of slots) detected.set(normVanType(s.item_name), (detected.get(normVanType(s.item_name)) || 0) + 1);
+            const assignedCounts = new Map<string, number>();
+            for (const v of jobAssignedVehicles) assignedCounts.set(normVanType(v.type), (assignedCounts.get(normVanType(v.type)) || 0) + 1);
+            const unassigned: string[] = [];
+            for (const [t, n] of detected) {
+              for (let i = 0; i < n - (assignedCounts.get(t) || 0); i++) unassigned.push(t);
+            }
+            if (jobAssignedVehicles.length === 0 && unassigned.length === 0) return null;
+            const statusChip: Record<string, { label: string; cls: string }> = {
+              active: { label: 'On Hire', cls: 'bg-green-100 text-green-700' },
+              booked_out: { label: 'Booked Out', cls: 'bg-indigo-100 text-indigo-700' },
+              confirmed: { label: 'Allocated', cls: 'bg-blue-100 text-blue-700' },
+              soft: { label: 'Soft', cls: 'bg-gray-100 text-gray-600' },
+              returned: { label: 'Returned', cls: 'bg-teal-100 text-teal-700' },
+              swapped: { label: 'Swapped', cls: 'bg-orange-100 text-orange-700' },
+            };
+            return (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">
+                    Vehicles on this job
+                  </span>
+                  {/* Assigned chip → Vehicle Detail (view the van). */}
+                  {jobAssignedVehicles.map((v) => {
+                    const s = statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
+                    const prep = vehiclePrepPill(v.hire_status);
+                    return (
+                      <Link
+                        key={v.vehicle_id}
+                        to={`/vehicles/fleet/${v.vehicle_id}`}
+                        title={`View ${v.reg || 'vehicle'}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-ooosh-50 border border-ooosh-200 hover:bg-ooosh-100"
+                      >
+                        <span aria-hidden>🚐</span>
+                        <span className="font-semibold text-gray-900 text-sm">{v.reg || '—'}</span>
+                        {v.type && <span className="text-xs text-gray-500">{normVanType(v.type)}</span>}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${s.cls}`}>{s.label}</span>
+                        {prep && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${prep.cls}`}>{prep.label}</span>
+                        )}
+                      </Link>
+                    );
+                  })}
+                  {/* Unassigned chip → Allocations page for this job (pick a van).
+                      Can't one-click assign from here — allocation is per
+                      driver-slot — so it's a shortcut to the allocations screen,
+                      same destination as the card's "Allocate Van" button. */}
+                  {unassigned.map((t, i) => (
+                    job.hh_job_number ? (
+                      <Link
+                        key={`u-${i}`}
+                        to={`/vehicles/allocations?job=${job.hh_job_number}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium hover:bg-amber-100"
+                        title="No van allocated yet — click to allocate on the Allocations page"
+                      >
+                        <span aria-hidden>🚐</span>
+                        {t} — unassigned <span aria-hidden>→</span>
+                      </Link>
+                    ) : (
+                      <span
+                        key={`u-${i}`}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-sm font-medium"
+                        title="Detected on HireHop but no van allocated yet"
+                      >
+                        <span aria-hidden>🚐</span>
+                        {t} — unassigned
+                      </span>
+                    )
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Started-but-not-signed drivers. A driver who verified every
+              document and closed the tab one screen short of signing has no
+              assignment row, so without this they are invisible here — the
+              "hey, Cameron hasn't finished his hire form" reminder. Greyed
+              and dashed so it can't be mistaken for a live assignment. */}
+          {unsignedDrivers.length > 0 && (
+            <div className="space-y-2 mb-3">
+              {unsignedDrivers.map((d) => {
+                const fmt = (iso: string | null) => iso
+                  ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                  : '—';
+                const link = `https://hireforms.oooshtours.co.uk/?job=${job.hh_job_number}`;
+                return (
+                  <div key={d.id} className="bg-gray-50 rounded-xl border border-dashed border-gray-300 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-gray-200 text-gray-600">
+                          ⏳ Started hire form — not signed
+                        </span>
+                        <Link to={`/drivers/${d.id}`} className="font-semibold text-gray-700 hover:underline">
+                          {d.full_name}
+                        </Link>
+                        {d.email && <span className="text-sm text-gray-400">{d.email}</span>}
+                      </div>
+                      <span className="text-xs text-gray-400">
+                        last activity {fmt(d.updated_at)}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-xs text-gray-500">
+                      Nothing links them to this hire until they sign.
+                      {d.signature_date
+                        ? ` They signed for a previous hire on ${fmt(d.signature_date)}, but not this one.`
+                        : ''}
+                      {' '}If they've gone quiet, send them the hire form link again.
+                      {' '}
+                      <button
+                        type="button"
+                        className="text-ooosh-600 hover:underline"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(link).then(() => {
+                            setCopiedHireFormLink(true);
+                            setTimeout(() => setCopiedHireFormLink(false), 2000);
+                          }).catch(() => undefined);
+                        }}
+                      >
+                        {copiedHireFormLink ? 'Link copied' : 'Copy hire form link'}
+                      </button>
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {vehicleAssignmentsLoading ? (
             <div className="flex justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
@@ -3977,9 +5023,13 @@ export default function JobDetailPage() {
                   } p-5`}>
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex items-center gap-2 flex-wrap">
+                        {/* No per-card reg: the "Vehicles on this job" strip up
+                            top is the single source for which vans are on the job.
+                            Every driver can drive any van on the job, so a per-card
+                            reg told you nothing meaningful (and repeated on every
+                            card). Book Out / Check In read the van off the row
+                            internally (effective_vehicle_id), not from here. */}
                         <span className="text-lg">🚐</span>
-                        <span className="font-semibold text-gray-900">{a.vehicle_reg}</span>
-                        {a.vehicle_type && <span className="text-sm text-gray-500">({a.vehicle_type})</span>}
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
                           {sc.label}
                         </span>
@@ -4010,14 +5060,21 @@ export default function JobDetailPage() {
                       </div>
                     </div>
 
-                    {/* Driver info */}
+                    {/* Driver info — name + contact on the left; driver flags
+                        and the excess fold inline on the right, wrapping below
+                        on mobile. The "DRIVER" label is dropped (the name is
+                        self-evidently the driver) and the excess no longer needs
+                        its own full-width row. */}
                     {a.assignment_type === 'self_drive' && (
                       <div className={`rounded-lg p-3 mb-3 ${
                         hasReferralBlocker ? 'bg-orange-50' : 'bg-gray-50'
                       }`}>
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <span className="text-xs font-medium text-gray-500 uppercase">Driver</span>
+                        {/* Stack on mobile, inline on ≥sm. Stacking (rather than
+                            flex-wrap) gives the name its own full-width row on a
+                            phone, so a long name doesn't get squeezed against the
+                            excess block and break mid-word. */}
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-x-3 gap-y-1">
+                          <div className="min-w-0">
                             {a.driver_name ? (
                               <p className="text-sm font-medium text-gray-900">
                                 {a.driver_id ? (
@@ -4034,14 +5091,29 @@ export default function JobDetailPage() {
                               <p className="text-sm text-gray-400 italic">No driver assigned</p>
                             )}
                           </div>
-                          <div className="flex gap-2">
+                          <div className="flex items-center flex-wrap gap-2 text-xs">
                             {hasReferralBlocker && (
-                              <span className="text-xs px-2 py-1 rounded-full bg-orange-100 text-orange-700 font-medium">
+                              <span className="px-2 py-1 rounded-full bg-orange-100 text-orange-700 font-medium">
                                 Referral Pending
                               </span>
                             )}
+                            {/* A RESOLVED referral used to vanish from this row
+                                entirely, so the only hint was an unexplained
+                                "Authorise" button. Unresolved ones are already
+                                shouted by the pill above and the held-back pill. */}
+                            {(() => {
+                              const rb = referralBadge(a.requires_referral, a.referral_status);
+                              return rb && !rb.unresolved ? (
+                                <span
+                                  className={`px-2 py-1 rounded-full border font-medium ${rb.className}`}
+                                  title="Insurer referral resolved — a standing approval for this driver. Details on the driver's page."
+                                >
+                                  {rb.label}
+                                </span>
+                              ) : null;
+                            })()}
                             {a.driver_points != null && a.driver_points > 0 && (
-                              <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                              <span className={`px-2 py-1 rounded-full font-medium ${
                                 a.driver_points >= 10 ? 'bg-red-100 text-red-700' :
                                 a.driver_points >= 7 ? 'bg-orange-100 text-orange-700' :
                                 a.driver_points >= 4 ? 'bg-amber-100 text-amber-700' :
@@ -4050,97 +5122,95 @@ export default function JobDetailPage() {
                                 {a.driver_points} pts
                               </span>
                             )}
+                            {/* Excess — folded inline. Display rule: prefer the
+                                driver's personal liability
+                                (drivers.calculated_excess_amount); the per-job
+                                excess_amount_required is £0 for a driver covered
+                                by a sibling in the top-N slot (correct accounting
+                                but misleading — the person is still liable for
+                                £1,200+ if they damage the van). Falls back to the
+                                per-job amount, then the £1,200 floor. */}
+                            {a.excess && (() => {
+                              const personalLiability = a.driver_calculated_excess
+                                ? Number(a.driver_calculated_excess)
+                                : null;
+                              const perJobRequired = a.excess?.excess_amount_required != null
+                                ? Number(a.excess.excess_amount_required)
+                                : null;
+                              /* An unassessed driver shows "—", not "£1,200".
+                                 calculated_excess_amount is only written once a
+                                 hire form is submitted (or staff set it), so a
+                                 driver mid-flow genuinely has no known liability
+                                 — printing the floor dressed a guess up as a
+                                 fact. Matches how /drivers already renders them. */
+                              const displayAmount = personalLiability && personalLiability >= 1200
+                                ? personalLiability
+                                : (perJobRequired && perJobRequired > 0 ? perJobRequired : null);
+                              /* Name who actually carries the hire's excess, so
+                                 a "Covered" driver doesn't leave staff asking
+                                 "why them and not this one?" — the top-N rule
+                                 that picked the bearer is otherwise invisible. */
+                              const bearer = a.excess.excess_status === 'not_required'
+                                ? vehicleAssignments.find((o) => o.excess
+                                    && o.excess.excess_status !== 'not_required'
+                                    && Number(o.excess.excess_amount_required || 0) > 0)?.driver_name || null
+                                : null;
+                              return (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span className="text-gray-400">Excess</span>
+                                  <span className="font-medium text-gray-700">
+                                    {displayAmount != null ? `£${displayAmount.toFixed(2)}` : '—'}
+                                  </span>
+                                  {/* Shared pill helpers — this block used to
+                                      hand-write its own label + colour maps, and
+                                      they had already drifted from the Money
+                                      tab's (same record read "£1,200 / Covered"
+                                      here and "Required: £0.00 / Covered"
+                                      there). Route every excess pill through
+                                      excessStatusLabel/excessStatusColor so the
+                                      two surfaces cannot disagree again. */}
+                                  <span className={`px-2 py-0.5 rounded-full font-medium ${excessStatusColor(a.excess.excess_status, a.excess.auto_covered)}`}>
+                                    {excessStatusLabel(a.excess.excess_status, a.excess.auto_covered)}
+                                  </span>
+                                  {bearer && (
+                                    <span className="text-gray-400" title="This hire's excess is charged to the highest-liability driver">
+                                      on {bearer}
+                                    </span>
+                                  )}
+                                  {a.excess.dispute_status && (
+                                    <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>
+                                      {a.excess.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${a.excess.dispute_status}`}
+                                    </span>
+                                  )}
+                                  {/* "Covered" (not_required) rows are the top-N
+                                      losers — £0 sibling of another driver's excess.
+                                      Nothing actionable, so no Edit/Manage. */}
+                                  {a.excess.excess_status !== 'not_required' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
+                                        disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                        title="Edit required excess amount"
+                                        className="font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
+                                      >
+                                        {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => a.excess && openExcessModal(a.excess.id)}
+                                        disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                        className="font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
+                                      >
+                                        Manage
+                                      </button>
+                                    </>
+                                  )}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
-
-                        {/* Excess status */}
-                        {a.excess && (() => {
-                          // Display rule: prefer the driver's personal
-                          // liability (drivers.calculated_excess_amount).
-                          // The per-job excess_amount_required is the
-                          // REALISATION — it's £0 for drivers covered by a
-                          // sibling in the top-N slot, which is correct
-                          // accounting but misleading on the card (the
-                          // person IS liable for £1,200+ if they damage the
-                          // van; another driver's payment just satisfies it).
-                          // Same fix shape as the /drivers page got in
-                          // migration 065. Falls back to per-job amount for
-                          // pre-fix data, then to the £1,200 floor.
-                          const personalLiability = a.driver_calculated_excess
-                            ? Number(a.driver_calculated_excess)
-                            : null;
-                          const perJobRequired = a.excess?.excess_amount_required != null
-                            ? Number(a.excess.excess_amount_required)
-                            : null;
-                          const displayAmount = personalLiability && personalLiability >= 1200
-                            ? personalLiability
-                            : (perJobRequired && perJobRequired > 0 ? perJobRequired : 1200);
-                          return (
-                          <div className="mt-2 pt-2 border-t border-gray-200">
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-gray-500">Insurance Excess</span>
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-700">
-                                  £{displayAmount.toFixed(2)}
-                                </span>
-                                <span className={`px-2 py-0.5 rounded-full font-medium ${
-                                  a.excess.excess_status === 'taken' ? 'bg-green-100 text-green-700' :
-                                  a.excess.excess_status === 'pre_auth' ? 'bg-sky-100 text-sky-700' :
-                                  a.excess.excess_status === 'waived' ? 'bg-blue-100 text-blue-700' :
-                                  a.excess.excess_status === 'reimbursed' ? 'bg-emerald-100 text-emerald-700' :
-                                  a.excess.excess_status === 'partially_reimbursed' ? 'bg-orange-100 text-orange-700' :
-                                  a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
-                                  ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
-                                  a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
-                                  a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
-                                  'bg-gray-100 text-gray-600'
-                                }`}>
-                                  {a.excess.excess_status === 'taken' ? 'Taken' :
-                                   a.excess.excess_status === 'pre_auth' ? 'Pre-auth' :
-                                   a.excess.excess_status === 'waived' ? 'Waived' :
-                                   a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :
-                                   a.excess.excess_status === 'partially_reimbursed' ? 'Part Reimbursed' :
-                                   a.excess.excess_status === 'fully_claimed' ? 'Claimed' :
-                                   ['needed', 'pending'].includes(a.excess.excess_status) ? 'Required' :
-                                   a.excess.excess_status === 'partially_paid' ? 'Part Paid' :
-                                   a.excess.excess_status === 'not_required' ? 'Covered' :
-                                   a.excess.excess_status}
-                                </span>
-                                {a.excess.dispute_status && (
-                                  <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>
-                                    {a.excess.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${a.excess.dispute_status}`}
-                                  </span>
-                                )}
-                                {/* "Covered" (not_required) rows are the top-N
-                                    losers — £0 sibling of another driver's excess
-                                    on the same hire. Nothing actionable, so no
-                                    Edit/Manage (only dead-end actions would show). */}
-                                {a.excess.excess_status !== 'not_required' && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
-                                      disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
-                                      title="Edit required excess amount"
-                                      className="text-xs font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
-                                    >
-                                      {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => a.excess && openExcessModal(a.excess.id)}
-                                      disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
-                                      className="text-xs font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
-                                    >
-                                      Manage
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                          );
-                        })()}
                       </div>
                     )}
 
@@ -4177,6 +5247,98 @@ export default function JobDetailPage() {
 
                     {/* Actions row */}
                     <div className="mt-3 flex flex-wrap items-center gap-2">
+                      {/* Swapped-out van still needs its physical check-in when
+                          it comes back (planned upgrade → returns to base;
+                          breakdown → returns from the garage later). The swap
+                          moved the live hire to the replacement, so this card
+                          otherwise shows a badge only — but the check-in is a
+                          real, supported action (check-in-eligibility recognises
+                          status='swapped' + checked_in_at IS NULL). Hidden once
+                          checked in. */}
+                      {a.status === 'swapped' && !a.checked_in_at && a.vehicle_id && (
+                        <Link
+                          to={`/vehicles/check-in?vehicle=${a.vehicle_id}`}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
+                          title="This van was swapped out mid-hire — check it in when it's back at base"
+                        >
+                          ↩️ Check In
+                        </Link>
+                      )}
+
+                      {/* Phase D2b — per-driver referral gate. A held-back driver
+                          (referral pending) is ON the job but NOT authorised to
+                          drive: show the pending badge, suppress the book-out /
+                          allocate CTAs (below). Once resolved (approved/waived)
+                          and the agreement hasn't gone out yet, show the one-click
+                          "Authorise & send agreement" (mid-tour rails). */}
+                      {a.driver_id && (() => {
+                        const heldBack = !!a.requires_referral
+                          && a.referral_status !== 'approved'
+                          && a.referral_status !== 'waived';
+                        if (heldBack) {
+                          return (
+                            <span
+                              className="inline-flex items-center gap-1.5 px-3 py-2 bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-sm font-medium"
+                              title="Insurance referral not yet resolved — this driver is on the job but not authorised to drive. Resolve the referral on the driver's page, then authorise here."
+                            >
+                              ⏳ Referral pending — not authorised to drive
+                            </span>
+                          );
+                        }
+                        const wasReferred = a.referral_status === 'approved' || a.referral_status === 'waived';
+                        // Keyed on hire_form_emailed_at, NOT hire_form_pdf_key.
+                        // The book-out agreement is generated asynchronously
+                        // (setImmediate → generateAndEmailHireFormPdf), so for
+                        // the half-second between the send being claimed and the
+                        // PDF landing, the key is still null on a driver who has
+                        // just been booked out and emailed — and this button
+                        // reappeared on them until the next manual refresh
+                        // (Thomas Coyne / 16116, Sep 2026: emailed_at 09:19:57.777,
+                        // generated_at 09:19:57.251, with loadVehicleAssignments()
+                        // firing in between). The email timestamp is claimed
+                        // atomically at the start of the send, so it is the
+                        // honest "has the agreement gone out?" signal.
+                        //
+                        // Gated on a.vehicle_id, NOT effectiveVehicleId. The
+                        // endpoint requires the van to be linked to THIS row
+                        // (it generates the agreement against it) and 400s with
+                        // "No vehicle linked to this assignment" otherwise — so
+                        // keying the button on a sibling allocation offered an
+                        // action that could only fail. With no vehicle_id the
+                        // Allocate Van / Book Out CTA below is the correct next
+                        // step and appears in its place.
+                        //
+                        // Only once the van is OUT (booked_out / active). That is
+                        // the only time an agreement can have been withheld: the
+                        // book-out flips every driver on the van to booked_out,
+                        // held ones included, and the mid-tour add lands them
+                        // there too. Before book-out, the normal book-out hooks
+                        // send it — so a soft/confirmed row offered a button on
+                        // every driver with a standing approval, which would
+                        // have emailed the agreement before the van inspection
+                        // and pinged the team "referral resolved" (Tyler
+                        // Meadham, Oct 2026).
+                        const needsAuthorise = wasReferred
+                          && !a.hire_form_emailed_at
+                          && !a.hire_form_pdf_key
+                          && !!a.vehicle_id
+                          && ['booked_out', 'active'].includes(a.status);
+                        if (needsAuthorise) {
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => authoriseAgreement(a.id)}
+                              disabled={authorisingAssignmentId === a.id}
+                              className="inline-flex items-center gap-1.5 px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium disabled:opacity-50"
+                              title="Referral resolved — stamp hire start now, email this driver their hire agreement, and notify the team."
+                            >
+                              {authorisingAssignmentId === a.id ? 'Authorising…' : '✅ Authorise & send agreement'}
+                            </button>
+                          );
+                        }
+                        return null;
+                      })()}
+
                       {/* Primary next-action — Allocate Van / Book Out / Check In.
                           State-aware: drives the staff cockpit workflow from
                           this card so they don't have to leave Job Detail to
@@ -4197,6 +5359,8 @@ export default function JobDetailPage() {
                           the job has V&D slots and this assignment isn't yet booked-out
                           self-drive. Routes to BookOutPage with ?mode=van_and_driver. */}
                       {(() => {
+                        // Phase D2b: held-back driver → no book-out/allocate CTA.
+                        if (a.requires_referral && a.referral_status !== 'approved' && a.referral_status !== 'waived') return null;
                         const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
                         const matchedSlot = slots.find(s => s.slot_index === (a.van_requirement_index ?? 0));
                         const slotIsVand = matchedSlot?.mode === 'van_and_driver';
@@ -4249,6 +5413,8 @@ export default function JobDetailPage() {
                       })()}
 
                       {a.assignment_type === 'self_drive' && (() => {
+                        // Phase D2b: held-back driver → no book-out/allocate CTA.
+                        if (a.requires_referral && a.referral_status !== 'approved' && a.referral_status !== 'waived') return null;
                         // If the matching slot is in V&D mode the V&D button above
                         // owns this card — hide the customer self-drive button to
                         // keep the UX unambiguous (one path per slot mode).
@@ -4260,16 +5426,26 @@ export default function JobDetailPage() {
                         const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium';
                         const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
                         if (a.status === 'soft' || a.status === 'confirmed') {
-                          // Mid-tour Add-to-Hire: this driver has signed a hire form
-                          // but isn't linked to a van, AND at least one van on the
-                          // job is already physically out (booked_out / active).
+                          // Mid-tour Add-to-Hire: the van this driver would go out
+                          // on is ALREADY physically out (booked_out / active).
                           // Takes precedence over Allocate Van / Book Out — those
                           // assume the van is still in the warehouse.
-                          if (!a.vehicle_id) {
+                          //
+                          // Keyed on "is the van already out?", NOT on "has this
+                          // driver got a van?". Quick-assign offers a vehicle
+                          // picker, so a late driver added to a van that has
+                          // already left arrives here WITH a vehicle_id — and the
+                          // old `!a.vehicle_id` test skipped straight past this
+                          // branch to "Book Out", inviting a walkaround on a van
+                          // that was 200 miles away (job 16291, Aug 2026).
+                          {
                             const bookedOutSiblings = vehicleAssignments.filter(other =>
                               other.id !== a.id &&
                               other.vehicle_id &&
-                              (other.status === 'booked_out' || other.status === 'active')
+                              (other.status === 'booked_out' || other.status === 'active') &&
+                              // Once this driver has a van, only THAT van counts —
+                              // another van being out doesn't make theirs out.
+                              (!effectiveVehicleId || other.vehicle_id === effectiveVehicleId)
                             );
                             if (bookedOutSiblings.length > 0) {
                               return (
@@ -4319,6 +5495,45 @@ export default function JobDetailPage() {
                         return null;
                       })()}
 
+                      {/* Change van — distribute this driver across the job's
+                          vans on a multi-van hire, pre-book-out. Job Detail
+                          counterpart of the Allocations "Change van" (PR #829).
+                          Self-drive, soft/confirmed, van linked, multi-van
+                          (>1 vehicle slot) only; the post-book-out move is the
+                          Swap Vehicle flow below. */}
+                      {a.assignment_type === 'self_drive' &&
+                       (a.status === 'soft' || a.status === 'confirmed') &&
+                       a.vehicle_id &&
+                       (hhSyncResult?.derivation?.flags?.vehicle_slots?.length ?? 0) > 1 && (
+                        <ChangeVanButton
+                          assignmentId={a.id}
+                          vehicleId={a.vehicle_id}
+                          currentVehicleReg={a.vehicle_reg}
+                          jobStart={toDateInputValue(job.job_date || job.out_date || null)}
+                          jobEnd={toDateInputValue(job.job_end || job.return_date || null)}
+                          excludeHhJobId={job.hh_job_number ?? null}
+                          onChanged={loadVehicleAssignments}
+                        />
+                      )}
+
+                      {/* Report incident — opens the Problem form on the
+                          Overview pre-filled with this van + driver and the
+                          possible-claim box ticked. Problem-first, always
+                          (docs/INCIDENT-CLAIMS-SPEC.md §3). */}
+                      {a.driver_id && (a.effective_vehicle_id || a.vehicle_id) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveTab('overview');
+                            navigate(`?tab=overview&report_incident=${a.effective_vehicle_id || a.vehicle_id}&incident_driver=${a.driver_id}`);
+                          }}
+                          className="text-xs font-medium text-indigo-700 hover:text-indigo-900"
+                          title="Log an incident (accident, damage) as a Problem and open a possible insurance claim"
+                        >
+                          🛡️ Report incident
+                        </button>
+                      )}
+
                       {/* Hire Form PDF actions */}
                       {a.assignment_type === 'self_drive' && (
                         <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} vehicleId={a.vehicle_id} />
@@ -4349,10 +5564,11 @@ export default function JobDetailPage() {
 
       {/* Files Tab */}
       {activeTab === 'files' && id && (
-        <JobFilesSection
-          jobId={id}
+        <EntityFilesSection
+          entityType="jobs"
+          entityId={id}
           files={job.files || []}
-          onFilesChanged={loadJob}
+          onChanged={loadJob}
         />
       )}
 
@@ -4493,9 +5709,37 @@ export default function JobDetailPage() {
                         }`}>
                           {q.calculation_mode === 'dayrate' ? 'Day Rate' : 'Hourly'}
                         </span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
-                          {sc.label}
-                        </span>
+                        {/* Commercial booking status. Hidden for draft — the
+                            interactive arrangement pill below already reads "To Be
+                            Arranged", and the Confirm/Cancel buttons cover draft. */}
+                        {quoteStatus !== 'draft' && (
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
+                            {sc.label}
+                          </span>
+                        )}
+                        {/* Arrangement (ops) status pill — clickable, cycles through the
+                            same six states as the Transport Ops dropdown. */}
+                        {!isCancelled && (() => {
+                          const ops = (q as { ops_status?: string }).ops_status || 'todo';
+                          const cfg: Record<string, { label: string; cls: string }> = {
+                            todo:       { label: 'To Be Arranged', cls: 'bg-red-100 text-red-700' },
+                            arranging:  { label: 'Arranging',      cls: 'bg-amber-100 text-amber-700' },
+                            arranged:   { label: 'Arranged',       cls: 'bg-blue-100 text-blue-700' },
+                            dispatched: { label: 'Dispatched',     cls: 'bg-indigo-100 text-indigo-700' },
+                            completed:  { label: 'Completed',      cls: 'bg-green-100 text-green-700' },
+                            cancelled:  { label: 'Cancelled',      cls: 'bg-gray-100 text-gray-500' },
+                          };
+                          const c = cfg[ops] || cfg.todo;
+                          return (
+                            <button
+                              onClick={() => cycleOpsStatus(q.id, ops)}
+                              className={`text-xs px-2 py-0.5 rounded-full font-medium cursor-pointer hover:opacity-80 transition-opacity ${c.cls}`}
+                              title="Click to cycle arrangement status: To Be Arranged → Arranging → Arranged → Dispatched → Completed → Cancelled"
+                            >
+                              {c.label}
+                            </button>
+                          );
+                        })()}
                         {q.run_group && (
                           <span
                             className="text-xs px-2 py-0.5 rounded-full font-medium bg-violet-100 text-violet-700"
@@ -4616,6 +5860,9 @@ export default function JobDetailPage() {
                           <p className="text-gray-500 font-medium">Total cost: &pound;{totalCost.toFixed(2)}</p>
                         </div>
                       </div>
+
+                      {/* Per-line expense breakdown (what staff picked in the calculator) */}
+                      <QuoteExpensesBreakdown expenses={q.expenses} />
 
 
                       {/* Crew assignments */}
@@ -4906,7 +6153,32 @@ export default function JobDetailPage() {
 
       {/* Money Tab */}
       {activeTab === 'money' && id && (
-        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} />
+        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} onRequestComplete={() => initiateStatusChange('completed' as PipelineStatus)} />
+      )}
+
+      {/* Rack Planner — launched from the Job Requirements "Tools" menu (modal) */}
+      {showRackPlanModal && id && (
+        <RackPlanModal jobId={id} onClose={() => { setShowRackPlanModal(false); setRackPlanRefreshKey((k) => k + 1); }} />
+      )}
+
+      {/* Staging Calculator Modal — launched from the Job Requirements tools menu */}
+      {showStagingModal && (
+        <StagingCalculatorModal
+          hhJobNumber={job.hh_job_number}
+          onClose={() => setShowStagingModal(false)}
+          onComplete={() => {
+            setStagingRefreshKey((k) => k + 1);
+            setShowStagingModal(false);
+          }}
+        />
+      )}
+
+      {/* Backline Matcher — launched from the Job Requirements tools menu, job pre-filled */}
+      {showBacklineMatcher && (
+        <BacklineMatcherModal
+          hhJobNumber={job.hh_job_number}
+          onClose={() => setShowBacklineMatcher(false)}
+        />
       )}
 
       {/* Chase Modal */}
@@ -4915,6 +6187,7 @@ export default function JobDetailPage() {
         <ExcessPaymentModal
           excess={excessModalRecord}
           initialAction={excessModalInitialAction}
+          hireDays={computeHireDays(job)}
           onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
           onUpdated={() => { loadVehicleAssignments(); loadCancelledExcessHeld(); }}
         />
@@ -4992,6 +6265,7 @@ export default function JobDetailPage() {
           next_chase_date: job.next_chase_date,
           chase_alert_user_id: (job as unknown as { chase_alert_user_id?: string | null }).chase_alert_user_id || null,
           chase_alert_delivery: (job as unknown as { chase_alert_delivery?: 'bell' | 'bell_email' | null }).chase_alert_delivery || null,
+          auto_chase_mode: (job as unknown as { auto_chase_mode?: 'off' | 'draft' | 'send' | null }).auto_chase_mode || null,
         } : null}
         onClose={() => setShowChaseModal(false)}
         onChaseLogged={() => { loadJob(); loadInteractions(); }}
@@ -5004,7 +6278,7 @@ export default function JobDetailPage() {
         onSaved={() => { loadJob(); loadQuotes(); }}
         jobId={job.id}
         jobName={job.job_name || undefined}
-        clientName={job.client_name || job.company_name || undefined}
+        clientName={jobClientName(job) ?? undefined}
         venueName={job.venue_name || undefined}
         venueId={job.venue_id || undefined}
         jobDate={job.job_date || undefined}
@@ -5032,7 +6306,20 @@ export default function JobDetailPage() {
                         key={t}
                         onClick={() => {
                           const newDefault = getDefaultDate(t);
-                          setLocalFormData({ ...localFormData, jobType: t, jobDate: newDefault });
+                          // Re-derive the venue for the new type, but only while
+                          // the field still holds whatever we last suggested —
+                          // never overwrite a venue the user chose themselves.
+                          const suggested = deriveSiblingVenue(localFormData.jobType);
+                          const untouched =
+                            localFormData.venueName === suggested.venueName &&
+                            localFormData.venueId === suggested.venueId;
+                          const next = untouched ? deriveSiblingVenue(t) : null;
+                          setLocalFormData({
+                            ...localFormData,
+                            jobType: t,
+                            jobDate: newDefault,
+                            ...(next ? { venueId: next.venueId, venueName: next.venueName } : {}),
+                          });
                         }}
                         className={`flex-1 px-3 py-2 rounded-lg border text-sm font-medium ${
                           localFormData.jobType === t
@@ -5046,50 +6333,45 @@ export default function JobDetailPage() {
                   </div>
                 </div>
 
-                {/* Venue search */}
-                <div className="relative">
+                {/* Venue — shared picker, so search / link / create-on-no-match
+                    and the "not linked, freelancer sees no address" warning all
+                    behave identically here and in the Edit Quote modal. */}
+                <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
-                  <input
-                    type="text"
-                    value={venueSearch}
-                    onChange={(e) => {
-                      setVenueSearch(e.target.value);
-                      if (e.target.value.length >= 2) {
-                        searchVenues(e.target.value);
-                        setShowVenueDropdown(true);
-                      } else {
-                        setVenueOptions([]);
-                        setShowVenueDropdown(false);
-                      }
-                      // Clear venue selection if text changed
-                      if (e.target.value !== localFormData.venueName) {
-                        setLocalFormData({ ...localFormData, venueId: '', venueName: e.target.value });
-                      }
-                    }}
-                    onFocus={() => {
-                      if (venueOptions.length > 0) setShowVenueDropdown(true);
-                    }}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                    placeholder="Search venues..."
+                  <VenuePicker
+                    value={{ venueId: localFormData.venueId || null, venueName: localFormData.venueName }}
+                    onChange={({ venueId, venueName }) =>
+                      setLocalFormData({ ...localFormData, venueId: venueId || '', venueName })
+                    }
                   />
-                  {showVenueDropdown && venueOptions.length > 0 && (
-                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                      {venueOptions.map((v) => (
-                        <button
-                          key={v.id}
-                          onClick={() => {
-                            setLocalFormData({ ...localFormData, venueId: v.id, venueName: v.name });
-                            setVenueSearch(v.name);
-                            setShowVenueDropdown(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-ooosh-50 flex justify-between"
-                        >
-                          <span className="font-medium text-gray-900">{v.name}</span>
-                          {v.city && <span className="text-xs text-gray-400">{v.city}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  {/* Other venues already on this job — one click to reuse. Shown
+                      when the field is empty or points somewhere else, which is
+                      exactly the multi-drop case where auto-defaulting would be
+                      a guess (see deriveSiblingVenue). */}
+                  {(() => {
+                    const others = otherJobVenues(localFormData.jobType)
+                      .filter((v) => v.venueId !== (localFormData.venueId || null));
+                    if (others.length === 0) return null;
+                    return (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs text-gray-500">Also on this job:</span>
+                        {others.map((v) => (
+                          <button
+                            key={v.venueId ?? v.venueName}
+                            type="button"
+                            onClick={() => setLocalFormData({
+                              ...localFormData,
+                              venueId: v.venueId || '',
+                              venueName: v.venueName,
+                            })}
+                            className="px-2 py-0.5 rounded-full border border-gray-300 text-xs text-gray-600 hover:bg-ooosh-50 hover:border-ooosh-300"
+                          >
+                            {v.venueName}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Date & Time */}
@@ -5099,7 +6381,7 @@ export default function JobDetailPage() {
                     <DatePicker
                       value={localFormData.jobDate}
                       onChange={(val) => setLocalFormData({ ...localFormData, jobDate: val })}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       className={dateChanged ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
                     />
                     {dateChanged && (
@@ -5152,15 +6434,32 @@ export default function JobDetailPage() {
                   </div>
                 </div>
 
-                {/* Notes */}
+                {/* Notes — two fields matching the full calculator convention.
+                    The old single "Notes" field saved to internal_notes, which
+                    the freelancer portal never shows — staff notes meant for
+                    the driver were silently invisible (Jul 2026 bug). */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Freelancer Notes <span className="font-normal text-gray-400">(shown to the freelancer in the portal)</span>
+                  </label>
+                  <textarea
+                    value={localFormData.freelancerNotes}
+                    onChange={(e) => setLocalFormData({ ...localFormData, freelancerNotes: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    rows={2}
+                    placeholder="What's included, access info, who to ask for..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Internal Notes <span className="font-normal text-gray-400">(staff only)</span>
+                  </label>
                   <textarea
                     value={localFormData.notes}
                     onChange={(e) => setLocalFormData({ ...localFormData, notes: e.target.value })}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                     rows={2}
-                    placeholder="Optional notes..."
+                    placeholder="Margins, commercial notes..."
                   />
                 </div>
 
@@ -5200,11 +6499,24 @@ export default function JobDetailPage() {
                       const localResult = await api.post<{ id: string }>('/quotes/local', {
                         jobId: job.id,
                         jobType: localFormData.jobType,
-                        venueId: localFormData.venueId || job.venue_id || undefined,
-                        venueName: localFormData.venueName || job.venue_name || undefined,
+                        // Send exactly what the picker holds — no job-level
+                        // fallback. The two used to fall back independently
+                        // (`venueId || job.venue_id`, `venueName ||
+                        // job.venue_name`), so typing a free-text venue after
+                        // clearing the link saved the TYPED NAME against the
+                        // JOB'S venue_id — a quote linked to one venue while
+                        // displaying another. It also silently re-filled a
+                        // field the user had deliberately emptied, which now
+                        // matters because a blank field is how a multi-drop
+                        // job says "don't guess" (see deriveSiblingVenue).
+                        // The picker is already pre-filled with the job venue
+                        // when there's nothing better, so nothing is lost.
+                        venueId: localFormData.venueId || undefined,
+                        venueName: localFormData.venueName || undefined,
                         jobDate: dateStr,
                         arrivalTime: localFormData.arrivalTime || undefined,
                         notes: localFormData.notes || undefined,
+                        freelancerNotes: localFormData.freelancerNotes || undefined,
                       });
                       // Push to HireHop if toggled on
                       if (localFormData.pushToHirehop && job.hh_job_number && localResult?.id) {
@@ -5215,7 +6527,7 @@ export default function JobDetailPage() {
                         }
                       }
                       setShowLocalForm(false);
-                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '', pushToHirehop: true });
+                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', freelancerNotes: '', notes: '', pushToHirehop: true });
                       loadQuotes();
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Failed to create');
@@ -5277,13 +6589,16 @@ export default function JobDetailPage() {
                   {peopleOptions.map(p => {
                     const currentQuote = quotes.find(q => q.id === assignModalQuoteId);
                     const alreadyAssigned = currentQuote?.assignments?.some(a => a.person_id === p.id);
+                    const pending = !p.is_approved;   // surfaced by include_pending — not yet cleared to book
+                    const disabled = alreadyAssigned || pending;
                     return (
                       <button
                         key={p.id}
-                        disabled={alreadyAssigned}
+                        disabled={disabled}
+                        title={pending ? 'Pending approval — a manager needs to approve this freelancer before they can be assigned' : undefined}
                         onClick={() => assignPerson(assignModalQuoteId!, p.id, assignRole)}
                         className={`w-full text-left px-3 py-2.5 text-sm flex items-center justify-between ${
-                          alreadyAssigned ? 'opacity-40 cursor-not-allowed' : 'hover:bg-ooosh-50'
+                          disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-ooosh-50'
                         }`}
                       >
                         <div>
@@ -5300,7 +6615,9 @@ export default function JobDetailPage() {
                           {p.is_insured_on_vehicles && (
                             <span className="text-xs bg-green-100 text-green-700 rounded px-1.5 py-0.5">Insured</span>
                           )}
-                          {p.is_approved && (
+                          {pending ? (
+                            <span className="text-xs bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">Pending approval</span>
+                          ) : (
                             <span className="text-xs bg-blue-100 text-blue-700 rounded px-1.5 py-0.5">Approved</span>
                           )}
                           {alreadyAssigned && (
@@ -5337,9 +6654,43 @@ export default function JobDetailPage() {
           saving={transitionSaving}
           jobId={id}
           clientId={job?.client_id}
-          clientName={job?.client_name || job?.company_name}
+          clientName={jobClientName(job) ?? undefined}
+          hireStart={job?.job_date || job?.out_date}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
+        />
+      )}
+
+      {/* Quote another option / link an existing quote */}
+      {showAddOptionModal && job && (
+        <AddQuoteOptionModal
+          job={job}
+          onClose={() => setShowAddOptionModal(false)}
+          onDone={(newJobId) => {
+            setShowAddOptionModal(false);
+            if (newJobId) {
+              navigate(`/jobs/${newJobId}`);
+            } else {
+              setOptionsRefresh((n) => n + 1);
+              loadJob();
+            }
+          }}
+        />
+      )}
+
+      {/* Combine bookings modal */}
+      {showCombineModal && job && (
+        <CombineBookingsModal
+          jobId={job.id}
+          onClose={() => setShowCombineModal(false)}
+          onCombined={(survivorId) => {
+            setShowCombineModal(false);
+            if (survivorId && survivorId !== job.id) {
+              navigate(`/jobs/${survivorId}`);
+            } else {
+              loadJob();
+            }
+          }}
         />
       )}
 
@@ -5373,22 +6724,52 @@ export default function JobDetailPage() {
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
       )}
+
+      {showDismissModal && job && (
+        <DismissEnquiryModal
+          jobName={job.job_name || 'this enquiry'}
+          onClose={() => setShowDismissModal(false)}
+          onDismissed={async () => {
+            setShowDismissModal(false);
+            await loadJob();
+            await loadInteractions();
+          }}
+          submit={(payload) => api.post(`/pipeline/${job.id}/dismiss`, payload)}
+        />
+      )}
+
+      {/* Quote options — on the CONFIRMED option the group has done its job:
+          its siblings live here at the bottom, collapsed and read-only. */}
+      {job.group_id && (
+        <QuoteOptionsBar
+          variant="bottom"
+          jobId={job.id}
+          groupId={job.group_id}
+          refreshSignal={`${optionsRefresh}:${job.pipeline_status}`}
+          onAdd={() => setShowAddOptionModal(true)}
+          onRemoved={() => loadJob()}
+        />
+      )}
       </div>
 
       {/* Client trading history sidebar (desktop only) */}
       {showClientHistory && (
         <div className="hidden lg:block w-72 shrink-0">
-          {/* Holding FYI — temp storage + lost property we hold for this client.
+          {/* Holding FYI — anything we're still holding for this client that
+              arrived for a DIFFERENT job (incoming/merch held for a future
+              hire, temp storage, lost property). excludeJobId drops items tied
+              to THIS job — those already show in the merch card on Overview.
               Informational only (not on the prep ticker). Hidden when empty. */}
           {job.client_id && (
-            <div className="mb-4">
-              <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['temp_storage', 'lost_property']}
+            <div className="empty:hidden mb-4">
+              <HeldItemsSection entityType="organisation" entityId={job.client_id}
+                kinds={HELD_KINDS} excludeJobId={job.id}
                 openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
             </div>
           )}
           <div className="sticky top-4 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
             <h3 className="text-sm font-semibold text-gray-700 mb-3">
-              Client History — {job.client_name || job.company_name}
+              Client History — {jobClientNameOr(job, '')}
             </h3>
 
             {/* Do Not Hire warning */}
@@ -5404,10 +6785,14 @@ export default function JobDetailPage() {
               </div>
             )}
 
+            {/* Endorsed artists — only when there are any */}
+            <EndorsementsNote endorsements={clientHistoryData!.endorsements} />
+
             {/* Working Terms */}
             {clientHistoryData!.client_info?.working_terms_type && (
-              <div className="mb-3 p-2.5 bg-gray-50 rounded-lg">
-                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
+              // Faded while Do Not Hire (the red box above leads) — kept, not hidden, in case a manager hires them anyway
+              <div className={`mb-3 p-2.5 bg-gray-50 rounded-lg ${clientHistoryData!.client_info.do_not_hire ? 'opacity-50' : ''}`}>
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms{clientHistoryData!.client_info.do_not_hire && <span className="normal-case font-normal italic"> — on hold while Do Not Hire</span>}</div>
                 <div className="flex items-center gap-2">
                   <span className={`inline-block px-2.5 py-1 rounded text-sm font-semibold text-white ${
                     { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[clientHistoryData!.client_info.working_terms_type] || 'bg-gray-500'
@@ -5650,135 +7035,7 @@ export default function JobDetailPage() {
   );
 }
 
-// ── File Viewer Modal ─────────────────────────────────────────────────────
-
-function FileViewerModal({
-  file,
-  onClose,
-}: {
-  file: FileAttachment | null;
-  onClose: () => void;
-}) {
-  const [objectUrl, setObjectUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const loadFile = useCallback(async () => {
-    if (!file) return;
-    setLoading(true);
-    setError('');
-    try {
-      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-      const url = URL.createObjectURL(blob);
-      setObjectUrl(url);
-    } catch {
-      setError('Failed to load file');
-    } finally {
-      setLoading(false);
-    }
-  }, [file]);
-
-  useEffect(() => {
-    loadFile();
-    return () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [file]);
-
-  if (!file) return null;
-
-  const previewType = isPreviewable(file.name);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-4xl mx-4 max-h-[90vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <div className="flex items-center gap-3 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-900 truncate">{file.name}</h3>
-            {file.label && (
-              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${fileTagColour(file.label)}`}>
-                {file.label}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {objectUrl && (
-              <a
-                href={objectUrl}
-                download={file.name}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
-                Download
-              </a>
-            )}
-            <button
-              onClick={onClose}
-              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-
-        {/* Comment */}
-        {file.comment && (
-          <div className="px-4 py-2 bg-gray-50 border-b border-gray-200">
-            <p className="text-sm text-gray-600">{file.comment}</p>
-          </div>
-        )}
-
-        {/* Content */}
-        <div className="flex-1 overflow-auto p-4 flex items-center justify-center min-h-[300px]">
-          {loading && (
-            <div className="animate-spin h-8 w-8 border-4 border-ooosh-600 border-t-transparent rounded-full" />
-          )}
-          {error && <p className="text-sm text-red-600">{error}</p>}
-          {objectUrl && previewType === 'image' && (
-            <img src={objectUrl} alt={file.name} className="max-w-full max-h-[70vh] object-contain" />
-          )}
-          {objectUrl && previewType === 'pdf' && (
-            <iframe
-              src={objectUrl}
-              title={file.name}
-              className="w-full h-[70vh] border-0"
-            />
-          )}
-          {objectUrl && !previewType && (
-            <div className="text-center">
-              <p className="text-sm text-gray-500 mb-3">Preview not available for this file type.</p>
-              <a
-                href={objectUrl}
-                download={file.name}
-                className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700"
-              >
-                Download File
-              </a>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Overview / Prep Checklist (API-backed) ───────────────────────────────
-
-interface RequirementTypeDef {
-  type: string;
-  label: string;
-  icon: string;
-  steps: string[] | null;
-  sort_order: number;
-}
-
-interface RequirementTemplate {
-  id: string;
-  name: string;
-  description: string | null;
-  requirement_types: string[];
-}
 
 // JobRequirement, DerivedFlags, SeatAvailability, PREP_STATUS_CONFIG, PREP_STATUS_ORDER
 // now imported from '../components/RequirementCard'
@@ -5787,6 +7044,14 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   const [data, setData] = useState<{
     hire_value_inc_vat: number; total_hire_deposits: number;
     balance_outstanding: number; deposit_percent: number; deposit_paid: boolean;
+    /** Money the client has OVERPAID and is owed back. This strip reads the
+     *  same endpoint as the Money tab but copied only the five fields above,
+     *  so an overpaid job read "Paid in full" here while the Money tab said
+     *  "Client is owed £120" (job 15187). Two surfaces, one source, opposite
+     *  conclusions — and the Overview is the one people glance at. */
+    client_overpaid?: number;
+    /** A cancelled job: it owes the fee, not the hire (CANCELLATION-SPEC.md) — same as the Money tab. */
+    cancellation?: { charge_inc_vat: number; invoiced: boolean } | null;
   } | null>(null);
 
   useEffect(() => {
@@ -5794,13 +7059,15 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
     api.get<{ data: { financial: any } }>(`/money/${jobId}/summary`)
       .then(res => {
         const f = res.data.financial;
-        if (f.hire_value_inc_vat > 0) {
+        if (f.hire_value_inc_vat > 0 || f.cancellation) {
           setData({
             hire_value_inc_vat: f.hire_value_inc_vat,
             total_hire_deposits: f.total_hire_deposits,
             balance_outstanding: f.balance_outstanding,
             deposit_percent: f.deposit_percent,
             deposit_paid: f.deposit_paid,
+            client_overpaid: f.client_overpaid,
+            cancellation: f.cancellation ?? null,
           });
         }
       })
@@ -5808,6 +7075,21 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   }, [jobId]);
 
   if (!data) return null;
+
+  if (data.cancellation) {
+    const c = data.cancellation;
+    const b = cancellationBalance(c.charge_inc_vat, data.total_hire_deposits);
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="text-gray-500">
+          Cancelled · fee £{c.charge_inc_vat.toFixed(2)}{c.invoiced ? '' : ' (not invoiced yet)'} · paid £{data.total_hire_deposits.toFixed(2)}
+        </span>
+        <span className={`font-semibold whitespace-nowrap ${b.refundDue ? 'text-amber-700' : b.feeOwing ? 'text-red-600' : 'text-green-700'}`}>
+          {b.refundDue ? `£${b.refundDue.toFixed(2)} refund due` : b.feeOwing ? `£${b.feeOwing.toFixed(2)} fee owing` : 'All square'}
+        </span>
+      </div>
+    );
+  }
 
   const state = getPaymentState(data);
   const stateClass = PAYMENT_STATE_CLASSES[state].text;
@@ -5836,16 +7118,30 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
             £{data.balance_outstanding.toFixed(2)} outstanding
           </span>
         )}
+        {/* The mirror image of "outstanding": money owed the other way. The
+            "Paid in full" label stays true — they paid it all and then some —
+            but on its own it reads as "nothing to do here", which is wrong when
+            we're sitting on a client's money. */}
+        {(data.client_overpaid ?? 0) > 0.009 && (
+          <span
+            className="text-xs font-semibold text-amber-700 whitespace-nowrap"
+            title="HireHop shows this much overpaid on the invoice — see the Money tab to refund it."
+          >
+            £{(data.client_overpaid as number).toFixed(2)} owed to client
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher, onOpenMoney }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
+  clientOrgId?: string | null;
+  clientOrgName?: string | null;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
     vehicle_slots?: Array<{ item_id: number; slot_index: number; item_name: string; mode: 'self_drive' | 'van_and_driver' }>;
@@ -5863,16 +7159,24 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
     nonMatchingVans: Array<{ reg: string; seat_layout: string | null }>;
     unknownVans: Array<{ reg: string }>;
   } | null;
+  /** Regs allocated to this job — shown on the vehicle requirement headline. */
+  assignedVehicleRegs?: string[];
   hasCrewQuotes?: boolean;
   hasCrewOnHH?: boolean;
   onOpenCrewCalculator?: () => void;
+  onLaunchStaging?: () => void;
+  onLaunchRackPlan?: () => void;
+  onLaunchBacklineMatcher?: () => void;
+  /** The Invoice card's "Open in Money →" (the close-out lives on the Money tab). */
+  onOpenMoney?: () => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
-  const [types, setTypes] = useState<RequirementTypeDef[]>([]);
-  const [templates, setTemplates] = useState<RequirementTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
+  // Sequential-swap override: staff-declared real simultaneous self-drive van
+  // count (null = HH-derived). Drives the structure control on the vehicle card.
+  const [selfDriveVanOverride, setSelfDriveVanOverride] = useState<number | null>(null);
   // Local copy of derived flags so per-slot toggles can update the UI without a page refresh.
   // Seeded from the parent prop; refreshed from the PATCH response on every slot/toggle change.
   const [localFlags, setLocalFlags] = useState<typeof derivedFlags>(derivedFlags);
@@ -5909,22 +7213,16 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   useEffect(() => {
     loadAll();
     // Load van & driver flag
-    api.get<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/derived-flags`)
-      .then(d => setIsVanAndDriver(d.isVanAndDriver || false))
+    api.get<{ isVanAndDriver: boolean; selfDriveVanOverride: number | null }>(`/hirehop/jobs/${jobId}/derived-flags`)
+      .then(d => { setIsVanAndDriver(d.isVanAndDriver || false); setSelfDriveVanOverride(d.selfDriveVanOverride ?? null); })
       .catch(() => {});
   }, [jobId, phase]);
 
   async function loadAll() {
     setLoading(true);
     try {
-      const [reqRes, typesRes, tmplRes] = await Promise.all([
-        api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}?phase=${phase}`),
-        api.get<{ data: RequirementTypeDef[] }>('/requirements/types'),
-        api.get<{ data: RequirementTemplate[] }>('/requirements/templates'),
-      ]);
+      const reqRes = await api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}?phase=${phase}`);
       setRequirements(reqRes.data);
-      setTypes(typesRes.data);
-      setTemplates(tmplRes.data);
     } catch (err) {
       console.error('Failed to load requirements:', err);
     } finally {
@@ -5973,30 +7271,75 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
     }
   }
 
+  async function changeVehicleCountOverride(count: number | null) {
+    try {
+      const data = await api.patch<{ selfDriveVanOverride: number | null; derivation?: { flags?: typeof derivedFlags } }>(
+        `/hirehop/jobs/${jobId}/vehicle-count-override`,
+        { count }
+      );
+      setSelfDriveVanOverride(data.selfDriveVanOverride ?? null);
+      await applyDerivationResult(data.derivation);
+    } catch (err) {
+      console.error('Failed to set vehicle count override:', err);
+    }
+  }
+
   // Reminder form state
   const [showReminderForm, setShowReminderForm] = useState(false);
+  // When set, the reminder modal is in edit mode against this requirement id
+  // (assignees are locked in edit — changing who's notified is delete-and-re-add,
+  // since each assignee is a separate job_requirements row).
+  const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
+  const [heldItemsRefreshKey, setHeldItemsRefreshKey] = useState(0);
   const [reminderText, setReminderText] = useState('');
   const [reminderDate, setReminderDate] = useState('');
   const [reminderDelivery, setReminderDelivery] = useState<'both' | 'notification' | 'email'>('both');
   const [reminderAssignees, setReminderAssignees] = useState<string[]>(['']);
   const [reminderEventTrigger, setReminderEventTrigger] = useState('');
-  const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string }>>([]);
+  // `preferred_name` is fetched so the picker shows what people actually go by
+  // (displayFullName is THE definition — see lib/displayName.ts). The list also
+  // drops the current user: "Me" already covers them, and having both meant the
+  // same person appeared twice under two different labels.
+  const currentUser = useAuthStore(s => s.user);
+  const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string; preferred_name?: string | null }>>([]);
+  const otherReminderUsers = useMemo(
+    () => reminderUsers.filter(u => u.id !== currentUser?.id),
+    [reminderUsers, currentUser?.id]
+  );
+
+  function ensureReminderUsersLoaded() {
+    if (reminderUsers.length === 0) {
+      // ?assignable=true drops service / shared / test logins (System Service,
+      // Front Desk, TEST Wood) — nobody reads those inboxes. See routes/users.ts.
+      api.get<{ data: Array<{ id: string; first_name: string; last_name: string; preferred_name?: string | null }> }>('/users?assignable=true')
+        .then(res => setReminderUsers(res.data))
+        .catch(() => {});
+    }
+  }
+
+  function openEditReminder(req: JobRequirement) {
+    setEditingReminderId(req.id);
+    setReminderText(req.custom_label || req.notes || '');
+    setReminderDate(req.due_date ? String(req.due_date).split('T')[0] : '');
+    setReminderDelivery((req.delivery_method as 'both' | 'notification' | 'email') || 'both');
+    setReminderEventTrigger(req.event_trigger || '');
+    setReminderAssignees(['']); // not used in edit mode
+    ensureReminderUsersLoaded();
+    setShowReminderForm(true);
+  }
 
   async function addRequirement(typeKey: string) {
     if (typeKey === 'reminder') {
       // Show form instead of creating immediately
       setShowAddMenu(false);
+      setEditingReminderId(null);
       setShowReminderForm(true);
       setReminderText('');
       setReminderDate('');
       setReminderDelivery('both');
       setReminderAssignees(['']);
       setReminderEventTrigger('');
-      if (reminderUsers.length === 0) {
-        api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
-          .then(res => setReminderUsers(res.data))
-          .catch(() => {});
-      }
+      ensureReminderUsersLoaded();
       return;
     }
     try {
@@ -6012,36 +7355,39 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   async function createReminder() {
     if (!reminderText.trim()) return;
     try {
-      const validAssignees = reminderAssignees.filter(id => id);
-
-      // Create one requirement per assignee (or one for self if none selected)
-      const targets = validAssignees.length > 0 ? validAssignees : [null];
-      for (const assignee of targets) {
-        await api.post(`/requirements/job/${jobId}`, {
-          requirement_type: 'reminder',
-          phase,
+      if (editingReminderId) {
+        // Edit mode — update text / date / delivery / trigger on the single
+        // row. Assignees are deliberately not editable here (see openEditReminder).
+        await api.patch(`/requirements/${editingReminderId}`, {
           custom_label: reminderText.trim(),
-          due_date: reminderDate || null,
-          assigned_to: assignee,
           notes: reminderText.trim(),
+          due_date: reminderDate || null,
           event_trigger: reminderEventTrigger || null,
           delivery_method: reminderDelivery,
         });
+      } else {
+        const validAssignees = reminderAssignees.filter(id => id);
+
+        // Create one requirement per assignee (or one for self if none selected)
+        const targets = validAssignees.length > 0 ? validAssignees : [null];
+        for (const assignee of targets) {
+          await api.post(`/requirements/job/${jobId}`, {
+            requirement_type: 'reminder',
+            phase,
+            custom_label: reminderText.trim(),
+            due_date: reminderDate || null,
+            assigned_to: assignee,
+            notes: reminderText.trim(),
+            event_trigger: reminderEventTrigger || null,
+            delivery_method: reminderDelivery,
+          });
+        }
       }
       await loadAll();
       setShowReminderForm(false);
+      setEditingReminderId(null);
     } catch (err) {
-      console.error('Failed to create reminder:', err);
-    }
-  }
-
-  async function applyTemplate(templateId: string) {
-    try {
-      await api.post(`/requirements/job/${jobId}/template/${templateId}`, {});
-      await loadAll();
-      setShowAddMenu(false);
-    } catch (err) {
-      console.error('Failed to apply template:', err);
+      console.error('Failed to save reminder:', err);
     }
   }
 
@@ -6098,8 +7444,6 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
   const blockedCount = countableReqs.filter(r => r.status === 'blocked').length;
   const totalCount = countableReqs.length;
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
-
-  const availableTypes = types.filter(t => t.type === 'custom' || !requirements.some(r => r.requirement_type === t.type));
 
   if (loading) {
     return <div className="text-center text-sm text-gray-500 py-8">Loading prep checklist...</div>;
@@ -6158,49 +7502,41 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
             onClick={() => setShowAddMenu(!showAddMenu)}
             className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700"
           >
-            + Add Job Requirement
+            🛠 Tools
           </button>
           {showAddMenu && (
             <div className="absolute right-0 mt-1 w-72 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1 max-h-96 overflow-y-auto">
-              {/* Templates section */}
-              {templates.length > 0 && (
-                <>
-                  <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Quick Add (Templates)</div>
-                  {templates.map((tmpl) => (
-                    <button
-                      key={`tmpl-${tmpl.id}`}
-                      onClick={() => applyTemplate(tmpl.id)}
-                      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <span className="text-base">📋</span>
-                      <div>
-                        <span className="font-medium">{tmpl.name}</span>
-                        <span className="text-xs text-gray-400 ml-2">{tmpl.requirement_types.length} items</span>
-                      </div>
-                    </button>
-                  ))}
-                  {availableTypes.length > 0 && (
-                    <div className="border-t border-gray-100 my-1" />
-                  )}
-                </>
-              )}
-              {/* Individual requirement types */}
-              {availableTypes.length > 0 && (
-                <>
-                  <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Individual</div>
-                  {availableTypes.map((t) => (
-                    <button
-                      key={t.type}
-                      onClick={() => addRequirement(t.type)}
-                      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
-                    >
-                      <span>{t.icon}</span>
-                      <span>{t.label}</span>
-                      {t.steps && <span className="text-xs text-gray-400 ml-auto">{t.steps.length} steps</span>}
-                    </button>
-                  ))}
-                </>
-              )}
+              <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Utilities</div>
+              <button
+                onClick={() => { setShowAddMenu(false); onLaunchStaging?.(); }}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+              >
+                <span className="text-base">🏗️</span>
+                <div>
+                  <span className="font-medium">Staging Calculator</span>
+                  <span className="block text-xs text-gray-400">Calculate deck/leg/hardware parts &amp; push to HireHop</span>
+                </div>
+              </button>
+              <button
+                onClick={() => { setShowAddMenu(false); onLaunchRackPlan?.(); }}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+              >
+                <span className="text-base">🎚️</span>
+                <div>
+                  <span className="font-medium">Rack Planner</span>
+                  <span className="block text-xs text-gray-400">Lay out how racks/systems are supplied &amp; interconnected</span>
+                </div>
+              </button>
+              <button
+                onClick={() => { setShowAddMenu(false); onLaunchBacklineMatcher?.(); }}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+              >
+                <span className="text-base">🎸</span>
+                <div>
+                  <span className="font-medium">Backline Matcher</span>
+                  <span className="block text-xs text-gray-400">Find alternatives for kit a client asked for that we may not stock</span>
+                </div>
+              </button>
             </div>
           )}
         </div>
@@ -6210,8 +7546,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
       {/* Requirements list */}
       {requirements.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-          <p className="text-gray-500 text-sm">No requirements added yet.</p>
-          <p className="text-gray-400 text-xs mt-1">Click "+ Add Job Requirement" to get started, or sync from HireHop.</p>
+          <p className="text-gray-500 text-sm">No requirements yet.</p>
+          <p className="text-gray-400 text-xs mt-1">Requirements are derived from HireHop — click "Sync HH" to pull them in, or add a "+ Reminder".</p>
         </div>
       ) : (
         <div className="space-y-2">
@@ -6227,6 +7563,10 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
               // Merch renders in the dedicated Held-for-Clients block below (card
               // + nested items panel), not as a plain inline card.
               if (req.requirement_type === 'merch') continue;
+              // The payments requirement rides on the Invoice card as its second pill
+              // (one card for the hire close-out, Oct 2026). It still exists — the
+              // derivation engine and the Returns page count it — it just isn't drawn.
+              if (req.requirement_type === 'payment_reconcile' && requirements.some(r => r.requirement_type === 'invoice')) continue;
 
               cards.push(
                 <RequirementCard
@@ -6234,15 +7574,20 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
                   req={req}
                   derivedFlags={effectiveFlags}
                   seatAvailability={seatAvailability}
+                  assignedVehicleRegs={assignedVehicleRegs}
                   jobId={jobId}
                   hhJobNumber={hhJobNumber}
                   isVanAndDriver={isVanAndDriver}
                   onStatusChange={changeStatus}
                   onAdvanceStep={advanceStep}
                   onRemove={removeRequirement}
+                  onEdit={req.requirement_type === 'reminder' ? openEditReminder : undefined}
                   onVanAndDriverToggle={req.requirement_type === 'vehicle' ? toggleVanAndDriver : undefined}
                   onSlotModeChange={req.requirement_type === 'vehicle' ? changeSlotMode : undefined}
+                  selfDriveVanOverride={selfDriveVanOverride}
+                  onVehicleCountOverride={req.requirement_type === 'vehicle' ? changeVehicleCountOverride : undefined}
                   onReload={loadAll}
+                  onOpenMoney={req.requirement_type === 'invoice' ? onOpenMoney : undefined}
                 />
               );
 
@@ -6288,9 +7633,22 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
           <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-gray-800">📦 Held for Clients</h3>
-              {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
+              <div className="flex items-center gap-3">
+                <AddHeldItemButton
+                  hhJobNumber={hhJobNumber}
+                  clientOrgId={clientOrgId}
+                  clientOrgName={clientOrgName}
+                  onSaved={() => { setHeldItemsRefreshKey(k => k + 1); loadAll(); }}
+                />
+                {hhJobNumber && <SendMerchFormButton jobId={jobId} hhJobNumber={hhJobNumber} />}
+              </div>
             </div>
-            <HeldItemsSection entityType="job" entityId={jobId} kinds={['incoming']} bare emptyHint="Nothing held for this job yet." />
+            {/* actions: the two physical steps (receive / hand over) inline, so
+                the job screen doesn't bounce to /holding for them. onChanged
+                reloads the job so the derived merch pip re-reads the items. */}
+            <HeldItemsSection key={heldItemsRefreshKey} entityType="job" entityId={jobId}
+              kinds={HELD_KINDS} bare actions onChanged={loadAll}
+              emptyHint="Nothing held for this job yet." />
           </div>
         );
         if (!merchReq) return <div className="mt-2">{panel}</div>;
@@ -6311,11 +7669,11 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
         );
       })()}
 
-      {/* Reminder creation form modal */}
+      {/* Reminder creation / edit form modal */}
       {showReminderForm && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowReminderForm(false)}>
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => { setShowReminderForm(false); setEditingReminderId(null); }}>
           <div className="bg-white rounded-xl shadow-xl p-6 w-[420px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-900 mb-3">Add Reminder</h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-3">{editingReminderId ? 'Edit Reminder' : 'Add Reminder'}</h3>
             <div className="space-y-3">
               <input
                 type="text"
@@ -6374,441 +7732,159 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, se
                 </select>
               </div>
 
-              {/* Assignees (multi-user) */}
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Notify</label>
-                {reminderAssignees.map((assignee, idx) => (
-                  <div key={idx} className="flex items-center gap-1 mb-1">
-                    <select
-                      value={assignee}
-                      onChange={e => {
-                        const updated = [...reminderAssignees];
-                        updated[idx] = e.target.value;
-                        setReminderAssignees(updated);
-                      }}
-                      className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
-                    >
-                      <option value="">Me</option>
-                      {reminderUsers.map(u => (
-                        <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
-                      ))}
-                    </select>
-                    {reminderAssignees.length > 1 && (
-                      <button type="button" onClick={() => setReminderAssignees(reminderAssignees.filter((_, i) => i !== idx))}
-                        className="text-red-400 hover:text-red-600 text-xs px-1">&times;</button>
-                    )}
-                  </div>
-                ))}
-                <button type="button"
-                  onClick={() => setReminderAssignees([...reminderAssignees, ''])}
-                  className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
-                >+ Add person</button>
-              </div>
+              {/* Assignees (multi-user) — create only. In edit mode the
+                  reminder is a single row per person, so changing who's
+                  notified is delete-and-re-add rather than edit. */}
+              {!editingReminderId && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Notify</label>
+                  {reminderAssignees.map((assignee, idx) => (
+                    <div key={idx} className="flex items-center gap-1 mb-1">
+                      <select
+                        value={assignee}
+                        onChange={e => {
+                          const updated = [...reminderAssignees];
+                          updated[idx] = e.target.value;
+                          setReminderAssignees(updated);
+                        }}
+                        className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
+                      >
+                        <option value="">Me</option>
+                        {otherReminderUsers.map(u => (
+                          <option key={u.id} value={u.id}>{displayFullName(u)}</option>
+                        ))}
+                      </select>
+                      {reminderAssignees.length > 1 && (
+                        <button type="button" onClick={() => setReminderAssignees(reminderAssignees.filter((_, i) => i !== idx))}
+                          className="text-red-400 hover:text-red-600 text-xs px-1">&times;</button>
+                      )}
+                    </div>
+                  ))}
+                  <button type="button"
+                    onClick={() => setReminderAssignees([...reminderAssignees, ''])}
+                    className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                  >+ Add person</button>
+                </div>
+              )}
+              {editingReminderId && (
+                <p className="text-[11px] text-gray-400">
+                  To change who's notified, delete this reminder and add a new one.
+                </p>
+              )}
             </div>
             <div className="flex justify-end gap-2 mt-4">
-              <button onClick={() => setShowReminderForm(false)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={() => { setShowReminderForm(false); setEditingReminderId(null); }} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
               <button
                 onClick={createReminder}
                 disabled={!reminderText.trim()}
                 className="px-4 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
-              >Add Reminder</button>
+              >{editingReminderId ? 'Save Changes' : 'Add Reminder'}</button>
             </div>
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-// ── Files Section ─────────────────────────────────────────────────────────
-
-function JobFilesSection({
-  jobId,
-  files,
-  onFilesChanged,
-}: {
-  jobId: string;
-  files: FileAttachment[];
-  onFilesChanged: () => void;
-}) {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
-  const [selectedTag, setSelectedTag] = useState('');
-  const [fileComment, setFileComment] = useState('');
-  const [deleting, setDeleting] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const [filterTag, setFilterTag] = useState('');
-  const [viewingFile, setViewingFile] = useState<FileAttachment | null>(null);
-  const [emailingFile, setEmailingFile] = useState<FileAttachment | null>(null);
-
-  // Post-save metadata edit — keyed on file URL because that's stable
-  // across re-renders (label/comment shift around as users edit).
-  const [editingFileUrl, setEditingFileUrl] = useState<string | null>(null);
-  const [editLabel, setEditLabel] = useState('');
-  const [editComment, setEditComment] = useState('');
-  const [savingEdit, setSavingEdit] = useState(false);
-
-  const startEdit = (file: FileAttachment) => {
-    setEditingFileUrl(file.url);
-    setEditLabel(file.label || '');
-    setEditComment(file.comment || '');
-  };
-  const cancelEdit = () => {
-    setEditingFileUrl(null);
-    setEditLabel('');
-    setEditComment('');
-  };
-  const saveEdit = async (file: FileAttachment) => {
-    setSavingEdit(true);
-    setError('');
-    try {
-      await api.patch('/files/update-metadata', {
-        entity_type: 'jobs',
-        entity_id: jobId,
-        file_url: file.url,
-        updates: {
-          label: editLabel.trim() || null,
-          comment: editComment.trim() || null,
-        },
-      });
-      cancelEdit();
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update file');
-    } finally {
-      setSavingEdit(false);
-    }
-  };
-
-  const handleToggleShare = async (file: FileAttachment) => {
-    try {
-      await api.patch('/files/update-metadata', {
-        entity_type: 'jobs',
-        entity_id: jobId,
-        file_url: file.url,
-        updates: { share_with_freelancer: !file.share_with_freelancer },
-      });
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update share status');
-    }
-  };
-
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setUploading(true);
-    setError('');
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('entity_type', 'jobs');
-      formData.append('entity_id', jobId);
-      if (selectedTag) formData.append('label', selectedTag);
-      if (fileComment.trim()) formData.append('comment', fileComment.trim());
-
-      await api.upload('/files/upload', formData);
-      setSelectedTag('');
-      setFileComment('');
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed');
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
-  const handleDelete = async (fileUrl: string) => {
-    if (!confirm('Delete this file?')) return;
-    setDeleting(fileUrl);
-    try {
-      await api.deleteWithBody('/files/delete', {
-        key: fileUrl,
-        entity_type: 'jobs',
-        entity_id: jobId,
-      });
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Delete failed');
-    } finally {
-      setDeleting(null);
-    }
-  };
-
-  const existingTags = [...new Set(files.map(f => f.label).filter(Boolean))] as string[];
-  const filteredFiles = filterTag
-    ? files.filter(f => f.label === filterTag)
-    : files;
-
-  return (
-    <div className="space-y-6">
-      {/* Upload section */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-sm font-semibold text-gray-700 mb-4">Upload File</h3>
-
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
-        )}
-
-        <div className="space-y-3">
-          <div className="flex items-end gap-3 flex-wrap">
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Tag</label>
-              <select
-                value={selectedTag}
-                onChange={(e) => setSelectedTag(e.target.value)}
-                className="border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              >
-                <option value="">No tag</option>
-                {FILE_TAGS.map(tag => (
-                  <option key={tag} value={tag}>{tag}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex-1 min-w-[200px]">
-              <label className="block text-xs font-medium text-gray-500 mb-1">Comment</label>
-              <input
-                type="text"
-                value={fileComment}
-                onChange={(e) => setFileComment(e.target.value)}
-                placeholder="Optional note about this file..."
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              />
-            </div>
-            <div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                onChange={handleUpload}
-                accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.jpg,.jpeg,.png,.gif,.webp,.svg,.zip,.rar"
-                className="hidden"
-                id="file-upload"
-              />
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
-                className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
-              >
-                {uploading ? 'Uploading...' : 'Choose File'}
-              </button>
-            </div>
-          </div>
-          <p className="text-xs text-gray-400">PDF, images, docs, spreadsheets. Max 10MB. Images and PDFs can be viewed inline.</p>
-        </div>
-      </div>
-
-      {/* File list */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-gray-700">
-            Files {files.length > 0 && `(${files.length})`}
-          </h3>
-          {existingTags.length > 0 && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-gray-400">Filter:</span>
-              <button
-                onClick={() => setFilterTag('')}
-                className={`text-xs px-2 py-0.5 rounded ${
-                  !filterTag ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:bg-gray-100'
-                }`}
-              >
-                All
-              </button>
-              {existingTags.map(tag => (
-                <button
-                  key={tag}
-                  onClick={() => setFilterTag(tag === filterTag ? '' : tag)}
-                  className={`text-xs px-2 py-0.5 rounded ${
-                    filterTag === tag ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:bg-gray-100'
-                  }`}
-                >
-                  {tag}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {filteredFiles.length === 0 ? (
-          <p className="text-sm text-gray-400 py-8 text-center">
-            {files.length === 0 ? 'No files uploaded yet' : 'No files match this filter'}
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {filteredFiles.map((file, idx) => {
-              const canPreview = isPreviewable(file.name);
-              const isEditing = editingFileUrl === file.url;
-              return (
-                <div
-                  key={file.url || idx}
-                  className="flex items-start justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
-                >
-                  <div className="flex items-start gap-3 min-w-0 flex-1">
-                    <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
-                      file.type === 'image' ? 'bg-purple-100 text-purple-600' :
-                      file.type === 'document' ? 'bg-blue-100 text-blue-600' :
-                      'bg-gray-100 text-gray-500'
-                    }`}>
-                      {file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setViewingFile(file)}
-                          className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate text-left"
-                        >
-                          {file.name}
-                          {canPreview && (
-                            <span className="text-xs text-gray-400 ml-1">(click to view)</span>
-                          )}
-                        </button>
-                        {!isEditing && file.label && (
-                          <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${fileTagColour(file.label)}`}>
-                            {file.label}
-                          </span>
-                        )}
-                      </div>
-                      {isEditing ? (
-                        <div className="mt-2 space-y-2">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <label className="text-xs text-gray-500">Tag:</label>
-                            <select
-                              value={editLabel}
-                              onChange={(e) => setEditLabel(e.target.value)}
-                              className="text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                            >
-                              <option value="">No tag</option>
-                              {FILE_TAGS.map(tag => (
-                                <option key={tag} value={tag}>{tag}</option>
-                              ))}
-                              {/* Preserve a custom value not in the standard list */}
-                              {editLabel && !FILE_TAGS.includes(editLabel as typeof FILE_TAGS[number]) && (
-                                <option value={editLabel}>{editLabel}</option>
-                              )}
-                            </select>
-                          </div>
-                          <input
-                            type="text"
-                            value={editComment}
-                            onChange={(e) => setEditComment(e.target.value)}
-                            placeholder="Comment / note about this file"
-                            className="w-full text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                          />
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => saveEdit(file)}
-                              disabled={savingEdit}
-                              className="text-xs px-3 py-1 bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
-                            >
-                              {savingEdit ? 'Saving…' : 'Save'}
-                            </button>
-                            <button
-                              onClick={cancelEdit}
-                              disabled={savingEdit}
-                              className="text-xs px-3 py-1 text-gray-600 hover:bg-gray-100 rounded"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          {file.comment && (
-                            <p className="text-xs text-gray-500 mt-0.5 truncate">{file.comment}</p>
-                          )}
-                          <p className="text-xs text-gray-400">
-                            {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
-                              day: 'numeric', month: 'short', year: 'numeric',
-                            })}
-                          </p>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  {!isEditing && (
-                    <div className="flex items-center gap-2 flex-shrink-0 ml-2">
-                      <button
-                        onClick={() => handleToggleShare(file)}
-                        className={`text-xs px-2 py-0.5 rounded border transition-colors ${
-                          file.share_with_freelancer
-                            ? 'bg-green-50 border-green-200 text-green-700'
-                            : 'bg-gray-50 border-gray-200 text-gray-400 opacity-0 group-hover:opacity-100'
-                        }`}
-                        title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
-                      >
-                        {file.share_with_freelancer ? 'Shared' : 'Share'}
-                      </button>
-                      <button
-                        onClick={() => setEmailingFile(file)}
-                        className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Email this file"
-                      >
-                        Email
-                      </button>
-                      <button
-                        onClick={() => startEdit(file)}
-                        className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Edit tag / comment"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => setViewingFile(file)}
-                        className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        View
-                      </button>
-                      <button
-                        onClick={() => handleDelete(file.url)}
-                        disabled={deleting === file.url}
-                        className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        {deleting === file.url ? '...' : 'Delete'}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* File viewer modal */}
-      {viewingFile && (
-        <FileViewerModal
-          file={viewingFile}
-          onClose={() => setViewingFile(null)}
-        />
-      )}
-
-      {/* File email modal */}
-      {emailingFile && (
-        <FileEmailModal
-          file={{
-            name: emailingFile.name,
-            url: emailingFile.url,
-            label: emailingFile.label,
-            comment: emailingFile.comment,
-          }}
-          entityType="jobs"
-          entityId={jobId}
-          contextLabel="Send this file from the job to one or more recipients"
-          onClose={() => setEmailingFile(null)}
-          onSent={() => {
-            setEmailingFile(null);
-            onFilesChanged();
-          }}
-        />
-      )}
-
     </div>
   );
 }
 
 // ── Helper Components ─────────────────────────────────────────────────────
+
+function DismissEnquiryModal({
+  jobName,
+  onClose,
+  onDismissed,
+  submit,
+}: {
+  jobName: string;
+  onClose: () => void;
+  onDismissed: () => void;
+  submit: (payload: { reason: string; notes: string | null; cleanup_orphans: boolean }) => Promise<{ cleaned?: { orgs: string[]; people: string[] } }>;
+}) {
+  const [reason, setReason] = useState('spam');
+  const [notes, setNotes] = useState('');
+  const [cleanupOrphans, setCleanupOrphans] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await submit({ reason, notes: notes.trim() || null, cleanup_orphans: cleanupOrphans });
+      onDismissed();
+    } catch (err: unknown) {
+      const body = (err as { body?: { error?: string } })?.body;
+      setError(body?.error || 'Failed to dismiss enquiry');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-bold text-gray-900">Dismiss enquiry</h3>
+        <p className="text-sm text-gray-500 mt-1">
+          Removes <strong>{jobName}</strong> from the pipeline board and analytics.
+          This is for duds — it does <strong>not</strong> count as a Lost enquiry, and you can restore it later.
+        </p>
+
+        <label className="block mt-4 text-xs font-semibold text-gray-600 uppercase tracking-wide">Reason</label>
+        <div className="mt-2 space-y-1.5">
+          {DISMISSAL_REASON_OPTIONS.map((o) => (
+            <label key={o.value} className="flex items-start gap-2 cursor-pointer p-1.5 rounded hover:bg-gray-50">
+              <input
+                type="radio"
+                name="dismiss-reason"
+                value={o.value}
+                checked={reason === o.value}
+                onChange={() => setReason(o.value)}
+                className="mt-0.5"
+              />
+              <span className="text-sm text-gray-800">
+                {o.label}
+                <span className="block text-xs text-gray-400">{o.hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <label className="block mt-3 text-xs font-semibold text-gray-600 uppercase tracking-wide">Notes (optional)</label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          className="mt-1 w-full border border-gray-300 rounded-md px-2.5 py-1.5 text-sm resize-y"
+          placeholder="Anything worth recording…"
+        />
+
+        <label className="flex items-start gap-2 mt-3 cursor-pointer">
+          <input type="checkbox" checked={cleanupOrphans} onChange={(e) => setCleanupOrphans(e.target.checked)} className="mt-0.5" />
+          <span className="text-sm text-gray-700">
+            Tidy up orphan records
+            <span className="block text-xs text-gray-400">
+              Delete the client/contact that this enquiry created, if nothing else uses them. Records linked to other jobs are always left alone.
+            </span>
+          </span>
+        </label>
+
+        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} disabled={saving} className="px-3.5 py-1.5 text-sm text-gray-600 hover:text-gray-800 disabled:opacity-50">
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="px-3.5 py-1.5 text-sm font-semibold bg-gray-700 text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+          >
+            {saving ? 'Dismissing…' : 'Dismiss enquiry'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function StatusTransitionModal({
   targetStatus,
@@ -6818,6 +7894,7 @@ function StatusTransitionModal({
   jobId,
   clientId,
   clientName,
+  hireStart,
 }: {
   targetStatus: PipelineStatus | 'completed';
   saving: boolean;
@@ -6826,11 +7903,14 @@ function StatusTransitionModal({
   jobId?: string;
   clientId?: string | null;
   clientName?: string | null;
+  hireStart?: string | null;
 }) {
   const [holdReason, setHoldReason] = useState<HoldReason>('fully_booked');
   const [holdDetail, setHoldDetail] = useState('');
   const [setRevisit, setSetRevisit] = useState(false);
   const [revisitDate, setRevisitDate] = useState('');
+  // Staff has taken manual control of the revisit fields — stop re-defaulting them.
+  const [revisitTouched, setRevisitTouched] = useState(false);
   const [confirmedMethod, setConfirmedMethod] = useState<ConfirmedMethod>('deposit');
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
@@ -6850,24 +7930,59 @@ function StatusTransitionModal({
   const [reminders, setReminders] = useState<Reminder[]>([
     { text: '', date: '', delivery: 'both', priority: 'normal', userId: '' },
   ]);
-  const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string }>>([]);
+  const [showReminders, setShowReminders] = useState(false);
+  const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }>>([]);
+  // Same rule as the reminder modal: "Remind me" already covers the current
+  // user, so they must not also appear by name.
+  const currentUser = useAuthStore(s => s.user);
+  const otherTeamUsers = useMemo(
+    () => teamUsers.filter(u => u.id !== currentUser?.id),
+    [teamUsers, currentUser?.id]
+  );
+
+  // "Under 4-day window" pauses get a pre-filled revisit date — the hire is worth
+  // another swing once the diary loosens, so default it to a fortnight before the
+  // hire starts rather than making staff work it out. Any other reason is a
+  // judgement call and stays opt-in. Re-running on reason change also CLEARS the
+  // default when staff switch away, so a stale date can't be submitted by accident.
+  const autoRevisit = defaultRevisitDate(hireStart);
+  useEffect(() => {
+    if (targetStatus !== 'paused' || revisitTouched) return;
+    if (holdReason === 'under_minimum' && autoRevisit) {
+      setSetRevisit(true);
+      setRevisitDate(autoRevisit);
+    } else {
+      setSetRevisit(false);
+      setRevisitDate('');
+    }
+  }, [targetStatus, holdReason, autoRevisit, revisitTouched]);
 
   // Load team users for "remind someone else"
   useEffect(() => {
     if (targetStatus !== 'completed') return;
-    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string }> }>('/users')
+    // Same real-people filter as the reminder modal — see routes/users.ts.
+    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }> }>('/users?assignable=true')
       .then(res => setTeamUsers(res.data))
       .catch(() => {});
   }, [targetStatus]);
   const [outstandingItems, setOutstandingItems] = useState<string[]>([]);
+  // Open Problems (job_issues not resolved / written off / cancelled). Firmer
+  // than the close-out items: only a manager may complete over them, with a
+  // reason — the server enforces the same (routes/pipeline.ts).
+  const [openProblems, setOpenProblems] = useState<Array<{ id: string; summary: string; severity: string; status: string }>>([]);
+  const isManagerUser = hasManagerRole(currentUser?.role);
   const [upcomingJobs, setUpcomingJobs] = useState<Array<{
     id: string; hh_job_number: number | null; job_name: string | null;
     job_date: string | null; pipeline_status: string | null;
   }>>([]);
 
-  // Fetch outstanding close-out items + upcoming client jobs when completing
+  // Fetch outstanding close-out items + open Problems + upcoming client jobs when completing
   useEffect(() => {
     if (targetStatus !== 'completed' || !jobId) return;
+
+    api.get<{ data: Array<{ id: string; summary: string; severity: string; status: string }> }>(`/problems/job/${jobId}`)
+      .then(res => setOpenProblems((res.data || []).filter(p => !['resolved', 'written_off', 'cancelled'].includes(p.status))))
+      .catch(() => {});
 
     // Close-out progress
     api.post<{ data: Record<string, { items: Array<{ label: string; status: string }> }> }>(
@@ -6947,11 +8062,15 @@ function StatusTransitionModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/30" onClick={onCancel} />
-      <div className="relative bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
-        <h3 className="text-lg font-semibold mb-4">
+      {/* Capped at 90% of the window: the title and the buttons stay put and
+          the middle scrolls, so a long completion (open Problems, outstanding
+          items, reminders) can never push Confirm off the screen. */}
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 max-h-[90vh] flex flex-col">
+        <h3 className="text-lg font-semibold px-6 pt-6 pb-4 shrink-0">
           Move to <span style={{ color: config.colour }}>{config.label}</span>
         </h3>
 
+        <div className="flex-1 min-h-0 overflow-y-auto px-6">
         {targetStatus === 'paused' && (
           <div className="space-y-3 mb-4">
             <label className="block text-sm font-medium text-gray-700">Reason for pausing</label>
@@ -6978,7 +8097,7 @@ function StatusTransitionModal({
                 <input
                   type="checkbox"
                   checked={setRevisit}
-                  onChange={(e) => setSetRevisit(e.target.checked)}
+                  onChange={(e) => { setRevisitTouched(true); setSetRevisit(e.target.checked); }}
                   className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
                 />
                 Set a revisit date?
@@ -6990,10 +8109,15 @@ function StatusTransitionModal({
                 <input
                   type="date"
                   value={revisitDate}
-                  onChange={(e) => setRevisitDate(e.target.value)}
-                  min={new Date().toISOString().split('T')[0]}
+                  onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
+                  min={ukToday()}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm"
                 />
+              )}
+              {setRevisit && !revisitTouched && revisitDate === autoRevisit && autoRevisit && (
+                <p className="text-xs text-ooosh-600 mt-1">
+                  Defaulted to {REVISIT_LEAD_DAYS_UNDER_MINIMUM} days before the hire starts — change it if you'd rather come back sooner or later.
+                </p>
               )}
             </div>
           </div>
@@ -7047,6 +8171,37 @@ function StatusTransitionModal({
 
         {targetStatus === 'completed' && (
           <div className="space-y-3 mb-4">
+            {openProblems.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm">
+                <div className="font-medium text-red-800 mb-1">
+                  {openProblems.length === 1 ? 'A Problem is still open on this job:' : `${openProblems.length} Problems are still open on this job:`}
+                </div>
+                <ul className="text-red-700 text-xs space-y-0.5">
+                  {openProblems.map(p => (
+                    <li key={p.id} className="flex items-center gap-1.5">
+                      <span className={`w-1.5 h-1.5 rounded-full ${p.severity === 'urgent' ? 'bg-red-600' : 'bg-red-400'}`} />
+                      {p.summary} <span className="text-red-400">({p.status.replace(/_/g, ' ')})</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-red-700 mt-2">
+                  {isManagerUser
+                    ? 'A manager can complete the job anyway — say why below. It goes on the timeline.'
+                    : 'Resolve them first, or ask a manager to complete the job with a reason.'}
+                </p>
+                {/* The reason sits with the warning it answers, rather than at
+                    the foot of the modal (the general note below is hidden
+                    while this one is showing — they share `note`). */}
+                <label className="block text-xs font-medium text-red-800 mt-3 mb-1">Reason (required — Problems still open)</label>
+                <input
+                  type="text"
+                  placeholder="Why is this job being completed with Problems open?"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  className={`w-full border rounded px-3 py-2 text-sm bg-white ${!note.trim() ? 'border-red-300' : 'border-gray-300'}`}
+                />
+              </div>
+            )}
             {outstandingItems.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm">
                 <div className="font-medium text-amber-800 mb-1">Outstanding close-out items:</div>
@@ -7084,10 +8239,19 @@ function StatusTransitionModal({
               placeholder="Anything to note? Lessons learned, client feedback, things to improve..."
               value={retroNotes}
               onChange={(e) => setRetroNotes(e.target.value)}
-              rows={3}
+              rows={2}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
-            {/* Reminders */}
+            {/* Reminders — folded away until asked for; most completions don't set one */}
+            {!showReminders ? (
+              <button
+                type="button"
+                onClick={() => setShowReminders(true)}
+                className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+              >
+                + Add a follow-up reminder
+              </button>
+            ) : (
             <div className="space-y-2">
               <label className="block text-xs font-medium text-gray-600">Follow-up reminders</label>
               {reminders.map((rem, idx) => {
@@ -7171,9 +8335,9 @@ function StatusTransitionModal({
                         className="border border-gray-300 rounded px-2 py-1 text-xs flex-1 min-w-[100px]"
                       >
                         <option value="">Remind me</option>
-                        {teamUsers.map(u => (
+                        {otherTeamUsers.map(u => (
                           <option key={u.id} value={u.id}>
-                            {u.first_name} {u.last_name}
+                            {displayFullName(u)}
                           </option>
                         ))}
                       </select>
@@ -7200,6 +8364,7 @@ function StatusTransitionModal({
                 </button>
               )}
             </div>
+            )}
           </div>
         )}
 
@@ -7224,18 +8389,23 @@ function StatusTransitionModal({
           </div>
         )}
 
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
-          <input
-            type="text"
-            placeholder="Why are you changing the status?"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-          />
+        {/* With open Problems on a completion, the (required) reason lives in
+            the red box above instead. */}
+        {!(targetStatus === 'completed' && openProblems.length > 0) && (
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
+            <input
+              type="text"
+              placeholder="Why are you changing the status?"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+          </div>
+        )}
         </div>
 
-        <div className="flex gap-3 justify-end">
+        <div className="flex gap-3 justify-end px-6 py-4 border-t border-gray-100 shrink-0">
           <button
             onClick={onCancel}
             className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
@@ -7244,7 +8414,8 @@ function StatusTransitionModal({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={saving}
+            disabled={saving || (targetStatus === 'completed' && openProblems.length > 0 && (!isManagerUser || !note.trim()))}
+            title={targetStatus === 'completed' && openProblems.length > 0 && !isManagerUser ? 'Only a manager can complete a job with open Problems' : undefined}
             className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
           >
             {saving ? 'Saving...' : 'Confirm'}

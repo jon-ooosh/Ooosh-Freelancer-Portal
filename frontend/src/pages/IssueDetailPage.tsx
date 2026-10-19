@@ -8,12 +8,14 @@
  *        watchers, due date, surface_on, dangerous-zone (resolve, cancel).
  */
 import { useState, useEffect, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import ThreadView from '../components/messaging/ThreadView';
+import CostCaptureModal from '../components/CostCaptureModal';
 import { useAttachments, type InteractionAttachment } from '../components/messaging/Attachments';
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import ImageLightbox from '../components/ImageLightbox';
+import { useOpenClaimsFor, ExistingClaimChoice } from '../components/claims/format';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -56,6 +58,7 @@ interface IssueComment {
 
 interface Issue {
   id: string;
+  claim_id?: string | null;
   job_id: string | null;
   vehicle_id: string | null;
   vehicle_reg: string | null;
@@ -134,9 +137,24 @@ const RESOLUTION_LABELS: Record<ResolutionPath, string> = {
 
 interface User { id: string; first_name: string; last_name: string }
 
+// Keyed by the route id so /operations/problems/A → …/B is a genuine
+// unmount/remount. React Router otherwise reuses ONE instance and only swaps
+// the param, leaving the previous issue's state on the new page and letting a
+// slow reply for the old id resolve into it (no fetch here is cancellable).
+// See `.claude/rules/frontend.md` → Detail pages; JobDetailPage has the long
+// version.
+//
+// Key on `id` ONLY — never the pathname or a query param, or a same-page link
+// that changes only the query string would remount the page.
 export default function IssueDetailPage() {
   const { id } = useParams<{ id: string }>();
+  return <IssueDetailContent key={id} />;
+}
+
+function IssueDetailContent() {
+  const { id } = useParams<{ id: string }>();
   const [issue, setIssue] = useState<Issue | null>(null);
+  const [showAddCost, setShowAddCost] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [comment, setComment] = useState('');
@@ -148,6 +166,37 @@ export default function IssueDetailPage() {
     text: string;
   } | null>(null);
   const attach = useAttachments();
+  const navigate = useNavigate();
+  const [openingClaim, setOpeningClaim] = useState(false);
+  const [choosingClaim, setChoosingClaim] = useState(false);
+  const [claimTarget, setClaimTarget] = useState('');
+  const openClaims = useOpenClaimsFor(issue?.job_id, issue?.vehicle_id, !!issue && !issue.claim_id);
+
+  // A Problem is where every possible insurance claim starts
+  // (docs/INCIDENT-CLAIMS-SPEC.md D1). Idempotent server-side. An open case
+  // already on the job (or van) is offered first — a flag, not a gate.
+  async function openClaim() {
+    if (!id) return;
+    if (openClaims && openClaims.length > 0 && !choosingClaim) {
+      setClaimTarget(openClaims[0].id);
+      setChoosingClaim(true);
+      return;
+    }
+    if (!choosingClaim && !confirm('Open a possible insurance claim for this Problem?')) return;
+    setOpeningClaim(true);
+    try {
+      if (choosingClaim && claimTarget !== 'new') {
+        await api.post(`/claims/${claimTarget}/problems`, { issue_id: id });
+        navigate(`/vehicles/claims/${claimTarget}`);
+        return;
+      }
+      const res = await api.post<{ data: { id: string } }>(`/claims/from-problem/${id}`, {});
+      navigate(`/vehicles/claims/${res.data.id}`);
+    } catch (err) {
+      console.error('Open claim failed:', err);
+      setOpeningClaim(false);
+    }
+  }
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -249,17 +298,59 @@ export default function IssueDetailPage() {
   return (
     <div className="max-w-5xl mx-auto">
       {/* ── Header ── */}
-      <div className="mb-3 text-xs">
-        <Link to="/operations/problems" className="text-ooosh-600 hover:underline">← Problems</Link>
-        {issue.job_id && (
-          <>
-            {' · '}
-            <Link to={`/jobs/${issue.job_id}`} className="text-ooosh-600 hover:underline">
-              Back to job {issue.hh_job_number ? `#${issue.hh_job_number}` : ''}
+      <div className="mb-3 text-xs flex items-center justify-between gap-3">
+        <div>
+          <Link to="/operations/problems" className="text-ooosh-600 hover:underline">← Problems</Link>
+          {issue.job_id && (
+            <>
+              {' · '}
+              <Link to={`/jobs/${issue.job_id}`} className="text-ooosh-600 hover:underline">
+                Back to job {issue.hh_job_number ? `#${issue.hh_job_number}` : ''}
+              </Link>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {issue.claim_id ? (
+            <Link to={`/vehicles/claims/${issue.claim_id}`}
+              className="text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 rounded-md px-3 py-1.5 whitespace-nowrap">
+              🛡️ Insurance claim →
             </Link>
-          </>
-        )}
+          ) : (
+            <button onClick={openClaim} disabled={openingClaim}
+              className="text-sm font-medium text-indigo-700 border border-indigo-300 hover:bg-indigo-50 rounded-md px-3 py-1.5 whitespace-nowrap disabled:opacity-50">
+              {openingClaim ? 'Opening…' : '🛡️ Possible insurance claim'}
+            </button>
+          )}
+          <button onClick={() => setShowAddCost(true)}
+            className="text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md px-3 py-1.5 whitespace-nowrap">
+            + Add cost
+          </button>
+        </div>
       </div>
+
+      {choosingClaim && openClaims && openClaims.length > 0 && !issue.claim_id && (
+        <div className="mb-4 space-y-2">
+          <ExistingClaimChoice claims={openClaims} value={claimTarget} onChange={setClaimTarget} />
+          <div className="flex gap-2 justify-end">
+            <button type="button" onClick={() => setChoosingClaim(false)} className="px-3 py-1.5 text-xs border rounded">Cancel</button>
+            <button type="button" onClick={openClaim} disabled={openingClaim}
+              className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white disabled:opacity-50">
+              {openingClaim ? 'Saving…' : claimTarget === 'new' ? 'Open a separate case' : 'Add to that case'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showAddCost && (
+        <CostCaptureModal
+          presetIssueId={issue.id}
+          presetVehicleId={issue.vehicle_id || null}
+          presetJobId={issue.job_id || null}
+          onClose={() => setShowAddCost(false)}
+          onSaved={() => setShowAddCost(false)}
+        />
+      )}
 
       <div className={`rounded-xl border p-4 mb-4 ${
         issue.severity === 'urgent' && !isResolved ? 'border-red-300 bg-red-50/40' : 'border-gray-200 bg-white'

@@ -8,7 +8,13 @@ import { usePrepAutosave } from '../hooks/usePrepAutosave'
 import { useSettings } from '../hooks/useSettings'
 import { getPrepSections as getPrepSectionsFromSettings } from '../lib/settings-api'
 import type { ChecklistItem, DetailPrompt } from '../lib/settings-api'
-import { DEFAULT_CHECKLIST_SETTINGS } from '../config/default-checklist-settings'
+import { DEFAULT_CHECKLIST_SETTINGS, ensureTyreChecklistContent } from '../config/default-checklist-settings'
+import {
+  checkTyreTreadPlausibility,
+  checkTyreTreadCap,
+  TYRE_TREAD_RED_MM,
+  TYRE_TREAD_AMBER_MM,
+} from '../lib/tyre-sanity'
 import { createVehicleEvent } from '../lib/events-api'
 import { fetchLastEventForVehicle } from '../lib/events-query'
 import { checkMileagePlausibility, resolveMileageFloor } from '../lib/mileage-sanity'
@@ -28,11 +34,13 @@ import { buildConsumptionTransactions } from '../lib/stock-consumption'
 import { VehicleIssuesBanner } from '../components/issues/VehicleIssuesBanner'
 import { TurnaroundSchedule } from '../components/dashboard/TurnaroundSchedule'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
+import GiveToFreelancer from '../../../components/GiveToFreelancer'
 import type { SignatureCaptureHandle } from '../components/book-out/SignatureCapture'
 import type { Vehicle } from '../types/vehicle'
 import type { CapturedPhoto } from '../types/vehicle-event'
 import { FUEL_LEVELS } from '../types/vehicle-event'
 import type { FuelLevel } from '../types/vehicle-event'
+import { ukToday } from '../../../lib/ukDate'
 
 // ── Types ──
 
@@ -65,7 +73,15 @@ const OVERALL_STATUS_OPTIONS = [
 
 type Phase = 'queue' | 'prepping' | 'complete'
 
-export function PrepPage() {
+/**
+ * `freelancerPrep` — opened from a freelancer's van-prep task on the portal
+ * (STAFF-CALENDAR-SPEC §21.6). The page starts straight on that van, hides the
+ * staff-only dashboard pieces, and the finish screen points back to the portal.
+ * The server holds the session to that one van whatever the page does.
+ */
+export function PrepPage({ freelancerPrep }: {
+  freelancerPrep?: { vehicleReg: string; returnUrl: string | null }
+} = {}) {
   const queryClient = useQueryClient()
   const { data: allVehicles, isLoading: vehiclesLoading } = useVehicles()
   const { data: settings } = useSettings()
@@ -126,12 +142,27 @@ export function PrepPage() {
     [activeVehicles],
   )
 
+  // Freelancer mode: open straight on the task's van, once.
+  const autoStarted = useRef(false)
+  useEffect(() => {
+    if (!freelancerPrep || autoStarted.current || phase !== 'queue' || !allVehicles) return
+    const want = freelancerPrep.vehicleReg.toUpperCase().replace(/\s+/g, '')
+    const v = allVehicles.find(x => x.reg.toUpperCase().replace(/\s+/g, '') === want)
+    if (!v) return
+    autoStarted.current = true
+    void handleStartPrep(v)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [freelancerPrep, allVehicles, phase])
+
   // Get prep checklist sections from R2 settings (fallback to defaults)
   const sections: PrepSection[] = useMemo(() => {
     if (!selectedVehicle) return []
-    const prepMap = settings?.prepItems && Object.keys(settings.prepItems).length > 0
+    const rawMap = settings?.prepItems && Object.keys(settings.prepItems).length > 0
       ? settings.prepItems
       : DEFAULT_CHECKLIST_SETTINGS.prepItems
+    // Guarantee the safety-critical tyre content (tread wording + wall
+    // tickboxes) is present even when the live R2 checklist predates it.
+    const prepMap = ensureTyreChecklistContent(rawMap)
     return getPrepSectionsFromSettings(prepMap, selectedVehicle.simpleType)
   }, [selectedVehicle, settings])
 
@@ -447,6 +478,9 @@ export function PrepPage() {
       let createdCount = 0
       let reflaggedCount = 0
       let failedCount = 0
+      // Freelancer prep: Problems are staff-only (403). The flags are saved
+      // with the prep and the office is belled to raise them (§21.6).
+      let forOfficeCount = 0
       const mileageInt = mileage ? parseInt(mileage, 10) : null
 
       for (const flagged of flaggedItems) {
@@ -471,6 +505,7 @@ export function PrepPage() {
             }),
           })
           if (!resp.ok) {
+            if (freelancerPrep && (resp.status === 401 || resp.status === 403)) { forOfficeCount++; continue }
             failedCount++
             console.warn(`[prep] auto-create failed for ${flagged.itemName}:`, resp.status)
             continue
@@ -487,6 +522,7 @@ export function PrepPage() {
       const parts: string[] = []
       if (createdCount) parts.push(`${createdCount} new`)
       if (reflaggedCount) parts.push(`${reflaggedCount} re-flagged`)
+      if (forOfficeCount) parts.push(`${forOfficeCount} sent to the office to review`)
       if (failedCount) parts.push(`${failedCount} failed`)
       results.push({
         label: 'Issues logged',
@@ -505,7 +541,7 @@ export function PrepPage() {
         preparedBy,
         mileage: isNaN(parsedMileage) ? null : parsedMileage,
         fuelLevel,
-        date: new Date().toISOString().slice(0, 10),
+        date: ukToday(),
         startedAt: actualStartedAt,
         completedAt,
         durationMinutes,
@@ -523,12 +559,22 @@ export function PrepPage() {
           })),
           notes: sectionNotes[sec.name] || '',
         })),
+        // Opened from a freelancer task: the server bells the office about any
+        // flags, whichever login sent the save (§21.10).
+        ...(freelancerPrep ? { freelancerTaskPrep: true } : {}),
         flaggedItems: flaggedItems.map(f => ({
           checklistItem: f.itemName,
           selectedOption: f.selectedOption,
           severity: f.severity,
           description: f.description,
-          photoKeys: f.photos.map(p => `events/${eventId}/${selectedVehicle.reg}/${p.angle}_${p.timestamp}.jpg`),
+          // MUST mirror uploadPhoto()'s key derivation exactly:
+          // events/{eventId}/{SAFE-REG}/{angle}.jpg — safeReg uppercases +
+          // hyphenates whitespace, and there is NO timestamp suffix. The old
+          // `${reg}/${angle}_${timestamp}.jpg` form never matched what was
+          // actually uploaded, so stored photoKeys were unretrievable.
+          photoKeys: f.photos.map(
+            p => `events/${eventId}/${selectedVehicle.reg.replace(/\s+/g, '-').toUpperCase()}/${p.angle}.jpg`,
+          ),
         })),
       }
 
@@ -688,6 +734,16 @@ export function PrepPage() {
           </div>
         )}
 
+        {freelancerPrep ? (
+          <div className="flex gap-3">
+            <a
+              href={freelancerPrep.returnUrl || '#'}
+              className="flex-1 rounded-lg bg-ooosh-navy py-3 text-center text-sm font-medium text-white"
+            >
+              Back to the freelancer portal
+            </a>
+          </div>
+        ) : (
         <div className="flex gap-3">
           <button
             onClick={handleReset}
@@ -702,6 +758,7 @@ export function PrepPage() {
             View Fleet
           </Link>
         </div>
+        )}
       </div>
     )
   }
@@ -766,7 +823,8 @@ export function PrepPage() {
 
         {/* Open issues banner */}
         <div className="px-4 pt-3">
-          <VehicleIssuesBanner vehicleId={selectedVehicle.id} />
+          {/* Known issues come from /api/problems — staff-only, so not in freelancer mode. */}
+          {!freelancerPrep && <VehicleIssuesBanner vehicleId={selectedVehicle.id} />}
         </div>
 
         {/* Validation toast */}
@@ -975,6 +1033,7 @@ export function PrepPage() {
       {/* Forward-facing fleet turnaround view. The "Prep this van" CTAs fire
           handleStartPrep directly — same behaviour as the Start Prep button
           on a queue card below. */}
+      {!freelancerPrep && (
       <TurnaroundSchedule
         onStartPrep={(reg) => {
           const v = (allVehicles || []).find(
@@ -983,6 +1042,7 @@ export function PrepPage() {
           if (v) handleStartPrep(v)
         }}
       />
+      )}
 
       <div className="flex items-center justify-between">
         <div>
@@ -1010,7 +1070,7 @@ export function PrepPage() {
           <p className="text-xs font-semibold text-amber-600 uppercase tracking-wide">Prep Needed</p>
           {prepQueue.map(v => (
             <div key={v.id} id={`prep-card-${v.reg}`} className="scroll-mt-4">
-              <VehiclePrepCard vehicle={v} onStartPrep={handleStartPrep} />
+              <VehiclePrepCard vehicle={v} onStartPrep={handleStartPrep} showGive={!freelancerPrep} />
             </div>
           ))}
         </div>
@@ -1145,12 +1205,13 @@ function PrepSectionComponent({
               showValidation={showValidation}
               onResponse={(value) => {
                 onResponse(item.name, value)
-                // Flag logic: option-based flagValues + auto-flag tyre depth ≤ 3mm
+                // Flag logic: option-based flagValues + auto-flag low tyre tread.
+                // Red threshold (≤ TYRE_TREAD_RED_MM) raised from 3 → 4 Jun 2026.
                 if (item.flagValues.includes(value)) {
                   onFlag(item.name, value)
                 } else if (item.unit === 'mm') {
                   const num = parseFloat(value)
-                  if (!isNaN(num) && num > 0 && num <= 3) {
+                  if (!isNaN(num) && num > 0 && num <= TYRE_TREAD_RED_MM) {
                     onFlag(item.name, `${value}mm — below safe minimum`)
                   } else {
                     onRemoveFlag(item.name)
@@ -1216,6 +1277,7 @@ function PrepItemRow({
   onUpdateFlag: (updates: Partial<FlaggedItem>) => void
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [capError, setCapError] = useState<string | null>(null)
   const isIncomplete = showValidation && !value
   const gridCols = item.options.length <= 3 ? 'grid-cols-2' : 'grid-cols-3'
 
@@ -1226,12 +1288,17 @@ function PrepItemRow({
       const { compressImage } = await import('../lib/image-utils')
       const compressed = await compressImage(file, 1024, 0.7)
       const blobUrl = URL.createObjectURL(compressed)
+      const ts = Date.now()
       const newPhoto: CapturedPhoto = {
-        angle: 'other',
+        // Unique angle per flag photo so multiple photos don't overwrite each
+        // other in R2 (they previously all shared `'other'` →
+        // events/{eventId}/{reg}/other.jpg collision). The angle IS the R2
+        // key segment, so it must be globally unique within the event.
+        angle: `flag_${ts}`,
         label: `Flag photo - ${item.name}`,
         blobUrl,
         blob: compressed,
-        timestamp: Date.now(),
+        timestamp: ts,
       }
       onUpdateFlag({ photos: [...flagged.photos, newPhoto] })
     } catch (err) {
@@ -1301,7 +1368,18 @@ function PrepItemRow({
               type="number"
               inputMode="decimal"
               value={value}
-              onChange={e => onResponse(e.target.value)}
+              onChange={e => {
+                const next = e.target.value
+                // Hard cap on tyre tread — reject a missing-decimal entry
+                // (e.g. 82 meaning 8.2mm) outright so staff are forced to
+                // enter the decimal. No real tyre exceeds ~9mm.
+                if (item.unit === 'mm' && checkTyreTreadCap(next)) {
+                  setCapError(checkTyreTreadCap(next))
+                  return
+                }
+                setCapError(null)
+                onResponse(next)
+              }}
               placeholder={previousValue ? `Prev: ${previousValue}` : `Enter ${item.unit || 'value'}`}
               className="w-32 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-700 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
             />
@@ -1309,6 +1387,11 @@ function PrepItemRow({
               <span className="text-xs font-medium text-gray-500">{item.unit}</span>
             )}
           </div>
+          {capError && (
+            <p className="mt-1 text-xs font-bold text-red-600 bg-red-50 rounded px-2 py-0.5">
+              {capError}
+            </p>
+          )}
           {item.unit === 'PSI' && recommendedTyrePsi != null && (
             <p className="mt-1 text-xs text-blue-500">Recommended: {recommendedTyrePsi} PSI</p>
           )}
@@ -1326,17 +1409,17 @@ function PrepItemRow({
               Pressure adjusted
             </button>
           )}
-          {/* Tyre depth: yellow warning at ≤5mm, red at ≤3mm */}
+          {/* Tyre depth: red at ≤TYRE_TREAD_RED_MM, amber up to TYRE_TREAD_AMBER_MM */}
           {item.unit === 'mm' && value && (() => {
             const depth = parseFloat(value)
-            if (!isNaN(depth) && depth > 0 && depth <= 3) {
+            if (!isNaN(depth) && depth > 0 && depth <= TYRE_TREAD_RED_MM) {
               return (
                 <p className="mt-1 text-xs font-bold text-red-600 bg-red-50 rounded px-2 py-0.5">
-                  Below legal minimum (1.6mm) — replace urgently
+                  Below safe minimum — replace urgently (legal limit 1.6mm)
                 </p>
               )
             }
-            if (!isNaN(depth) && depth > 3 && depth <= 5) {
+            if (!isNaN(depth) && depth > TYRE_TREAD_RED_MM && depth <= TYRE_TREAD_AMBER_MM) {
               return (
                 <p className="mt-1 text-xs font-semibold text-amber-600 bg-amber-50 rounded px-2 py-0.5">
                   Getting low — plan replacement soon
@@ -1344,6 +1427,20 @@ function PrepItemRow({
               )
             }
             return null
+          })()}
+          {/* Tyre tread sanity nudge — compares against the last recorded depth
+              for this corner. Non-blocking. */}
+          {item.unit === 'mm' && value && (() => {
+            const check = checkTyreTreadPlausibility({
+              newReading: parseFloat(value),
+              lastReading: previousValue ? parseFloat(previousValue) : null,
+            })
+            if (check.level === 'ok' || !check.message) return null
+            return (
+              <p className="mt-1 text-xs text-amber-700 bg-amber-50 rounded px-2 py-0.5">
+                {check.message}
+              </p>
+            )
           })()}
           {previousValue && !value && (
             <p className="mt-1 text-xs text-gray-400">Previous: {previousValue} {item.unit}</p>
@@ -1568,9 +1665,11 @@ function DetailInput({
 function VehiclePrepCard({
   vehicle,
   onStartPrep,
+  showGive = false,
 }: {
   vehicle: Vehicle
   onStartPrep: (v: Vehicle) => void
+  showGive?: boolean
 }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -1602,6 +1701,8 @@ function VehiclePrepCard({
       </div>
 
       <div className="mt-2 flex items-center justify-end gap-2">
+        {/* Staff only, and only when somebody is in today/tomorrow (§21.4). */}
+        {showGive && <GiveToFreelancer vehicleId={vehicle.id} reg={vehicle.reg} className="mr-auto" />}
         <Link
           to={vmPath(`/vehicles/${vehicle.id}?tab=preps`)}
           className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-100"

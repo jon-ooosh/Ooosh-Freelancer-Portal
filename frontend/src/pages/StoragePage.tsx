@@ -1,8 +1,11 @@
 import { useEffect, useState, useCallback, ReactNode } from 'react';
+import { hasManagerRole } from '../lib/roles';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { HeldItemsSection } from '../components/HeldItemsSection';
+import { openR2Key } from '../lib/openAuthedFile';
+import { ukToday } from '../lib/ukDate';
 
 // ── Types ───────────────────────────────────────────────────────────────
 type SizeCat = 'small' | 'medium' | 'large' | 'xl';
@@ -22,18 +25,21 @@ interface Room {
   dimensions: string | null; area_sqft: number | null; description: string | null;
   photos?: { name: string; url: string; type?: string }[];
   status: string; notes: string | null; occupant_name?: string | null; tenancy_id?: string | null;
+  sort_order?: number | null;
 }
 interface Tenancy {
   id: string; room_id: string; room_name: string; size_category: SizeCat; location_type?: string | null;
   organisation_id: string | null;
-  organisation_name: string | null; lead_contact_name: string | null; status: string;
+  organisation_name: string | null; lead_contact_name: string | null; lead_contact_person_id: string | null; status: string;
   move_in_date: string | null; move_out_date: string | null; weekly_rate: number; billing_mode: string;
   billing_cadence: string; next_bill_date: string | null; next_rate_review_date: string | null;
-  last_rate_change_date: string | null; previous_weekly_rate: number | null; tcs_accepted_at: string | null;
+  billing_custom_interval_value?: number | null; billing_custom_interval_unit?: string | null;
+  bill_reminder_lead_days?: number | null; bill_overdue_grace_days?: number | null;
+  last_rate_change_date: string | null; previous_weekly_rate: number | null; tcs_accepted_at: string | null; tcs_pdf_key?: string | null;
   notes: string | null; access_type?: string | null; access_code?: string | null; key_location?: string | null;
   rate_history?: { id: string; effective_date: string; old_rate: number | null; new_rate: number; notes: string | null }[];
   access_list?: { id: string; person_name: string | null; name: string | null; phone: string | null; relationship: string | null }[];
-  invoices?: { id: string; due_date: string; amount: number | null; sent_at: string }[];
+  invoices?: { id: string; due_date: string; amount: number | null; sent_at: string; invoice_number?: string | null; period_start?: string | null; period_end?: string | null }[];
 }
 interface AccessEvent {
   id: string; type: string; description: string | null; method: string; requested_date: string | null;
@@ -53,6 +59,25 @@ const TAB_LABELS: Record<Tab, string> = { rooms: 'Rooms', tenancies: 'Tenancies'
 
 const money = (n: number | null | undefined) => `£${Number(n || 0).toFixed(2)}`;
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString('en-GB') : '—');
+
+// Add N cadence periods to an ISO date, returning ISO (yyyy-mm-dd). Used to
+// pre-fill the "next invoice due" field in the Mark-invoiced modal from a
+// tenancy's cadence (or its custom every-N-unit interval).
+function addToIso(iso: string, cadence: string, customValue?: number | null, customUnit?: string | null): string {
+  const d = new Date(iso + 'T00:00:00');
+  if (cadence === 'monthly') d.setMonth(d.getMonth() + 1);
+  else if (cadence === 'quarterly') d.setMonth(d.getMonth() + 3);
+  else if (cadence === 'annual') d.setFullYear(d.getFullYear() + 1);
+  else if (cadence === 'custom' && customValue && customUnit) {
+    const n = Number(customValue);
+    if (customUnit === 'day') d.setDate(d.getDate() + n);
+    else if (customUnit === 'week') d.setDate(d.getDate() + n * 7);
+    else if (customUnit === 'month') d.setMonth(d.getMonth() + n);
+    else if (customUnit === 'year') d.setFullYear(d.getFullYear() + n);
+  } else return iso; // custom with no interval → nothing to add
+  return d.toISOString().slice(0, 10);
+}
+const todayIso = () => ukToday();
 const ROOM_STATUS_COLOUR: Record<string, string> = {
   available: 'bg-green-100 text-green-800', occupied: 'bg-blue-100 text-blue-800',
   reserved: 'bg-amber-100 text-amber-800', out_of_use: 'bg-slate-200 text-slate-600',
@@ -79,7 +104,7 @@ function EntitySearch({ kind, value, label, onPick }: {
   }, [q, kind]);
   return (
     <div className="relative">
-      <label className="block text-xs font-medium text-slate-500 mb-1">{label}</label>
+      {label && <label className="block text-xs font-medium text-slate-500 mb-1">{label}</label>}
       {value ? (
         <div className="flex items-center gap-2 border border-slate-300 rounded-lg px-3 py-2 bg-slate-50">
           <span className="text-sm flex-1">{value}</span>
@@ -97,6 +122,51 @@ function EntitySearch({ kind, value, label, onPick }: {
               ))}
             </div>
           )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Lead-contact picker scoped to the selected org (global search fallback) ──
+// Uses the org-scoped cascade (active roles on the org + related orgs via
+// organisation_relationships) — same Org>Org & Org>person logic as the New
+// Enquiry contact picker. Ended/historical roles never surface.
+interface OrgContact { person_id: string; name: string; role: string | null; source_org_name: string | null; own_org: boolean }
+function ContactPicker({ orgId, value, onPick }: { orgId: string | null; value: string; onPick: (id: string | null, name: string) => void }) {
+  const [candidates, setCandidates] = useState<OrgContact[]>([]);
+  const [searchAll, setSearchAll] = useState(false);
+  useEffect(() => {
+    setSearchAll(false);
+    if (!orgId) { setCandidates([]); return; }
+    api.get<{ data: OrgContact[] }>(`/organisations/${orgId}/contact-candidates`)
+      .then((r) => setCandidates(r.data || []))
+      .catch(() => setCandidates([]));
+  }, [orgId]);
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-500 mb-1">Lead contact</label>
+      {value ? (
+        <div className="flex items-center gap-2 border border-slate-300 rounded-lg px-3 py-2 bg-slate-50">
+          <span className="text-sm flex-1">{value}</span>
+          <button type="button" onClick={() => onPick(null, '')} className="text-xs text-red-500">clear</button>
+        </div>
+      ) : orgId && candidates.length > 0 && !searchAll ? (
+        <div className="space-y-1">
+          {candidates.map((p) => (
+            <button type="button" key={p.person_id} onClick={() => onPick(p.person_id, p.name)}
+              className="block w-full text-left px-3 py-2 text-sm border border-slate-200 rounded-lg hover:bg-slate-50">
+              {p.name}
+              {p.role ? <span className="text-slate-400"> · {p.role}</span> : ''}
+              {!p.own_org && p.source_org_name ? <span className="text-slate-400"> · via {p.source_org_name}</span> : ''}
+            </button>
+          ))}
+          <button type="button" onClick={() => setSearchAll(true)} className="text-xs text-[#7B5EA7]">search all people instead</button>
+        </div>
+      ) : (
+        <>
+          <EntitySearch kind="people" label="" value="" onPick={onPick} />
+          {orgId && candidates.length > 0 && <button type="button" onClick={() => setSearchAll(false)} className="text-xs text-[#7B5EA7] mt-1">back to {`${candidates.length}`} org contact{candidates.length !== 1 ? 's' : ''}</button>}
         </>
       )}
     </div>
@@ -127,7 +197,9 @@ const inputCls = 'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm';
 // ════════════════════════════════════════════════════════════════════════
 export default function StoragePage() {
   const role = useAuthStore((s) => s.user?.role) || '';
-  const isAdminManager = role === 'admin' || role === 'manager';
+  // Manager tier (admin + manager + weekend_manager) can manage rooms,
+  // tenancies, rates and T&Cs — mirrors MANAGER_ROLES on the backend.
+  const isAdminManager = hasManagerRole(role);
   const [params, setParams] = useSearchParams();
   const tab = (TABS.includes(params.get('tab') as Tab) ? params.get('tab') : 'tenancies') as Tab;
   const setTab = (t: Tab) => setParams({ tab: t });
@@ -184,13 +256,62 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
   const [editing, setEditing] = useState<Room | null>(null);
   const [creating, setCreating] = useState(false);
   const [vacancySize, setVacancySize] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
+  const [order, setOrder] = useState<Room[]>([]);
+  const [savingOrder, setSavingOrder] = useState(false);
   const load = useCallback(async () => { setRooms((await api.get<{ data: Room[] }>('/storage/rooms')).data); }, []);
   useEffect(() => { load(); }, [load]);
+
+  function startReorder() { setOrder(rooms); setReordering(true); }
+  function move(idx: number, dir: -1 | 1) {
+    setOrder((cur) => {
+      const next = [...cur];
+      const j = idx + dir;
+      if (j < 0 || j >= next.length) return cur;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
+  }
+  async function saveOrder() {
+    setSavingOrder(true);
+    try { await api.post('/storage/rooms/reorder', { ordered_ids: order.map((r) => r.id) }); setReordering(false); await load(); onChange(); }
+    finally { setSavingOrder(false); }
+  }
+
+  if (reordering) {
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <p className="text-sm text-slate-500">Use the arrows to set the order. This applies to both the Rooms and Tenancies tabs.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setReordering(false)} className="px-4 py-2 text-sm text-slate-600">Cancel</button>
+            <button onClick={saveOrder} disabled={savingOrder} className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{savingOrder ? 'Saving…' : 'Done'}</button>
+          </div>
+        </div>
+        <div className="border border-slate-200 rounded-xl bg-white divide-y">
+          {order.map((r, idx) => (
+            <div key={r.id} className="flex items-center gap-3 px-3 py-2">
+              <div className="flex flex-col">
+                <button onClick={() => move(idx, -1)} disabled={idx === 0} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▲</button>
+                <button onClick={() => move(idx, 1)} disabled={idx === order.length - 1} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▼</button>
+              </div>
+              <span className="font-medium text-slate-800 flex-1">{r.name}</span>
+              <span className="text-xs text-slate-500 capitalize">{r.size_category}{r.location_type ? ` · ${r.location_type}` : ''}</span>
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${ROOM_STATUS_COLOUR[r.status] || 'bg-slate-100'}`}>{r.status.replace('_', ' ')}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
       {isAdminManager && (
-        <button onClick={() => setCreating(true)} className="mb-4 bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Add Room</button>
+        <div className="mb-4 flex gap-2">
+          <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Add Room</button>
+          {rooms.length > 1 && <button onClick={startReorder} className="px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 text-slate-600">↕ Reorder</button>}
+        </div>
       )}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {rooms.map((r) => (
@@ -205,6 +326,7 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
             {r.occupant_name && <p className="text-sm text-slate-700 mb-1">📦 {r.occupant_name}</p>}
             {r.default_weekly_rate != null && <p className="text-xs text-slate-500">Default {money(r.default_weekly_rate)}/wk</p>}
             {(r.photos?.length ?? 0) > 0 && <p className="text-xs text-slate-400">📷 {r.photos!.length} photo{r.photos!.length !== 1 ? 's' : ''}</p>}
+            {r.notes && <p className="text-xs text-slate-500 mt-1 whitespace-pre-wrap">📝 {r.notes}</p>}
             <div className="flex items-center gap-3 mt-2">
               {isAdminManager && <button onClick={() => setEditing(r)} className="text-xs text-[#7B5EA7]">Edit</button>}
               {r.status === 'available' && <button onClick={() => setVacancySize(r.size_category)} className="text-xs text-[#7B5EA7]">Find tenant →</button>}
@@ -315,27 +437,73 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
   const [creating, setCreating] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [vacancySize, setVacancySize] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
+  const [order, setOrder] = useState<Tenancy[]>([]);
+  const [savingOrder, setSavingOrder] = useState(false);
   const load = useCallback(async () => {
     setRows((await api.get<{ data: Tenancy[] }>(`/storage/tenancies?status=${showEnded ? 'all' : 'live'}`)).data);
   }, [showEnded]);
   useEffect(() => { load(); }, [load]);
 
+  const view = reordering ? order : rows;
+  function startReorder() { setOrder(rows); setReordering(true); }
+  function move(idx: number, dir: -1 | 1) {
+    setOrder((cur) => {
+      const next = [...cur];
+      const j = idx + dir;
+      if (j < 0 || j >= next.length) return cur;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
+  }
+  async function saveOrder() {
+    setSavingOrder(true);
+    try { await api.post('/storage/tenancies/reorder', { ordered_ids: order.map((t) => t.id) }); setReordering(false); await load(); onChange(); }
+    finally { setSavingOrder(false); }
+  }
+
   return (
     <div>
-      <div className="flex items-center justify-end mb-3">
-        <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showEnded} onChange={(e) => setShowEnded(e.target.checked)} /> Show ended</label>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="flex items-center gap-2">
+          {!reordering && (
+            <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
+          )}
+          {isAdminManager && rows.length > 1 && !reordering && (
+            <button onClick={startReorder} className="px-3 py-1.5 rounded-lg text-sm font-medium border border-slate-300 text-slate-600">↕ Reorder</button>
+          )}
+          {reordering && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-500">Drag-free reorder — use the arrows.</span>
+              <button onClick={() => setReordering(false)} className="px-3 py-1.5 text-sm text-slate-600">Cancel</button>
+              <button onClick={saveOrder} disabled={savingOrder} className="px-3 py-1.5 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{savingOrder ? 'Saving…' : 'Done'}</button>
+            </div>
+          )}
+        </div>
+        {!reordering && (
+          <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showEnded} onChange={(e) => setShowEnded(e.target.checked)} /> Show ended</label>
+        )}
       </div>
       <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-500 text-xs"><tr>
+            {reordering && <th className="px-2 py-2 w-10"></th>}
             <th className="text-left px-3 py-2">Room</th><th className="text-left px-3 py-2">Client</th>
             <th className="text-left px-3 py-2">Rate/wk</th><th className="text-left px-3 py-2">Billing</th>
             <th className="text-left px-3 py-2">Next bill</th><th className="text-left px-3 py-2">Review</th>
             <th className="text-left px-3 py-2">T&Cs</th><th className="text-left px-3 py-2">Status</th>
           </tr></thead>
           <tbody>
-            {rows.map((t) => (
-              <tr key={t.id} onClick={() => setDetailId(t.id)} className="border-t hover:bg-slate-50 cursor-pointer">
+            {view.map((t, idx) => (
+              <tr key={t.id} onClick={reordering ? undefined : () => setDetailId(t.id)} className={`border-t ${reordering ? '' : 'hover:bg-slate-50 cursor-pointer'}`}>
+                {reordering && (
+                  <td className="px-2 py-2">
+                    <div className="flex flex-col items-center">
+                      <button onClick={() => move(idx, -1)} disabled={idx === 0} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▲</button>
+                      <button onClick={() => move(idx, 1)} disabled={idx === view.length - 1} className="text-slate-400 hover:text-[#7B5EA7] disabled:opacity-30 leading-none text-sm">▼</button>
+                    </div>
+                  </td>
+                )}
                 <td className="px-3 py-2 font-medium">{t.room_name}</td>
                 <td className="px-3 py-2">{t.organisation_name || t.lead_contact_name || '—'}</td>
                 <td className="px-3 py-2">{money(t.weekly_rate)}</td>
@@ -346,12 +514,9 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
                 <td className="px-3 py-2 capitalize">{t.status}</td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={8} className="px-3 py-6 text-center text-slate-400">No tenancies.</td></tr>}
+            {view.length === 0 && <tr><td colSpan={reordering ? 9 : 8} className="px-3 py-6 text-center text-slate-400">No tenancies.</td></tr>}
           </tbody>
         </table>
-      </div>
-      <div className="mt-4">
-        <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
       </div>
       {creating && <MoveInModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); onChange(); }} />}
       {detailId && <TenancyDetailModal id={detailId} isAdminManager={isAdminManager} onClose={() => setDetailId(null)} onChange={() => { load(); onChange(); }} onMovedOut={(size) => setVacancySize(size)} />}
@@ -362,7 +527,7 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
 
 function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [f, setF] = useState({ room_id: '', organisation_id: null as string | null, org_name: '', lead_contact_person_id: null as string | null, contact_name: '', weekly_rate: '', access_type: 'door_code', access_code: '', key_location: '', billing_mode: 'manual', billing_cadence: 'monthly', next_bill_date: '', next_rate_review_date: '', move_in_date: new Date().toISOString().slice(0, 10), notes: '' });
+  const [f, setF] = useState({ room_id: '', organisation_id: null as string | null, org_name: '', lead_contact_person_id: null as string | null, contact_name: '', weekly_rate: '', access_type: 'door_code', access_code: '', key_location: '', billing_mode: 'manual', billing_cadence: 'monthly', custom_interval_value: '', custom_interval_unit: 'month', next_bill_date: '', next_rate_review_date: '', move_in_date: ukToday(), notes: '' });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   useEffect(() => { api.get<{ data: Room[] }>('/storage/rooms?status=available').then((r) => setRooms(r.data)); }, []);
@@ -379,6 +544,8 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
         room_id: f.room_id, organisation_id: f.organisation_id, lead_contact_person_id: f.lead_contact_person_id,
         weekly_rate: Number(f.weekly_rate) || 0, access_type: f.access_type, access_code: f.access_code || null, key_location: f.key_location || null,
         billing_mode: f.billing_mode, billing_cadence: f.billing_cadence,
+        billing_custom_interval_value: f.billing_cadence === 'custom' && f.custom_interval_value ? Number(f.custom_interval_value) : null,
+        billing_custom_interval_unit: f.billing_cadence === 'custom' && f.custom_interval_value ? f.custom_interval_unit : null,
         next_bill_date: f.next_bill_date || null, next_rate_review_date: f.next_rate_review_date || null,
         move_in_date: f.move_in_date || null, notes: f.notes || null,
       });
@@ -393,8 +560,8 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
             <option value="">Select a room…</option>
             {rooms.map((r) => <option key={r.id} value={r.id}>{r.name} ({r.size_category}){r.default_weekly_rate != null ? ` · ${money(r.default_weekly_rate)}/wk` : ''}</option>)}
           </select></div>
-        <EntitySearch kind="organisations" label="Client organisation" value={f.org_name} onPick={(id, name) => setF({ ...f, organisation_id: id, org_name: name })} />
-        <EntitySearch kind="people" label="Lead contact" value={f.contact_name} onPick={(id, name) => setF({ ...f, lead_contact_person_id: id, contact_name: name })} />
+        <EntitySearch kind="organisations" label="Client organisation" value={f.org_name} onPick={(id, name) => setF({ ...f, organisation_id: id, org_name: name, lead_contact_person_id: null, contact_name: '' })} />
+        <ContactPicker orgId={f.organisation_id} value={f.contact_name} onPick={(id, name) => setF({ ...f, lead_contact_person_id: id, contact_name: name })} />
         <div className="grid grid-cols-2 gap-3">
           <div><label className="block text-xs text-slate-500 mb-1">Weekly rate £</label><input className={inputCls} type="number" value={f.weekly_rate} onChange={(e) => setF({ ...f, weekly_rate: e.target.value })} /></div>
           <div><label className="block text-xs text-slate-500 mb-1">Move-in date</label><input className={inputCls} type="date" value={f.move_in_date} onChange={(e) => setF({ ...f, move_in_date: e.target.value })} /></div>
@@ -417,8 +584,20 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
               <option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option><option value="custom">Custom</option>
             </select></div>}
         </div>
+        {f.billing_mode === 'manual' && f.billing_cadence === 'custom' && (
+          <div><label className="block text-xs text-slate-500 mb-1">Invoice every</label>
+            <div className="flex gap-2">
+              <input className={`${inputCls} w-24`} type="number" min={1} value={f.custom_interval_value} onChange={(e) => setF({ ...f, custom_interval_value: e.target.value })} placeholder="e.g. 6" />
+              <select className={inputCls} value={f.custom_interval_unit} onChange={(e) => setF({ ...f, custom_interval_unit: e.target.value })}>
+                <option value="day">days</option><option value="week">weeks</option><option value="month">months</option><option value="year">years</option>
+              </select>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">Used to auto-advance the next invoice due date each time you mark one sent.</p>
+          </div>
+        )}
         {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Next invoice due</label><input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} /></div>}
         <div><label className="block text-xs text-slate-500 mb-1">Next rate review</label><input className={inputCls} type="date" value={f.next_rate_review_date} onChange={(e) => setF({ ...f, next_rate_review_date: e.target.value })} /></div>
+        <div><label className="block text-xs text-slate-500 mb-1">Notes</label><textarea className={inputCls} rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} placeholder="Anything worth recording about this client / tenancy" /></div>
         {err && <p className="text-red-600 text-sm">{err}</p>}
         <div className="flex justify-end gap-2"><button onClick={onClose} className="px-4 py-2 text-sm text-slate-600">Cancel</button><button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{saving ? 'Saving…' : 'Move in'}</button></div>
       </div>
@@ -426,10 +605,117 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
   );
 }
 
+// Full edit of a tenancy's mutable fields (everything except weekly rate, which
+// goes through Change rate so it keeps history, and the room, which is fixed for
+// the life of the tenancy — a room change is a move-out + move-in).
+function EditTenancyForm({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () => void; onSaved: () => void }) {
+  const [f, setF] = useState({
+    organisation_id: t.organisation_id, org_name: t.organisation_name || '',
+    lead_contact_person_id: t.lead_contact_person_id, contact_name: t.lead_contact_name || '',
+    access_type: t.access_type || 'door_code', access_code: t.access_code || '', key_location: t.key_location || '',
+    billing_mode: t.billing_mode, billing_cadence: t.billing_cadence,
+    custom_interval_value: t.billing_custom_interval_value != null ? String(t.billing_custom_interval_value) : '',
+    custom_interval_unit: t.billing_custom_interval_unit || 'month',
+    bill_reminder_lead_days: t.bill_reminder_lead_days != null ? String(t.bill_reminder_lead_days) : '7',
+    bill_overdue_grace_days: t.bill_overdue_grace_days != null ? String(t.bill_overdue_grace_days) : '5',
+    next_bill_date: (t.next_bill_date || '').slice(0, 10),
+    next_rate_review_date: (t.next_rate_review_date || '').slice(0, 10),
+    move_in_date: (t.move_in_date || '').slice(0, 10),
+    status: t.status, notes: t.notes || '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  async function save() {
+    setSaving(true); setErr('');
+    try {
+      await api.put(`/storage/tenancies/${t.id}`, {
+        organisation_id: f.organisation_id, lead_contact_person_id: f.lead_contact_person_id,
+        status: f.status, move_in_date: f.move_in_date || null,
+        access_type: f.access_type, access_code: f.access_code || null, key_location: f.key_location || null,
+        billing_mode: f.billing_mode, billing_cadence: f.billing_cadence,
+        billing_custom_interval_value: f.billing_cadence === 'custom' && f.custom_interval_value ? Number(f.custom_interval_value) : null,
+        billing_custom_interval_unit: f.billing_cadence === 'custom' && f.custom_interval_value ? f.custom_interval_unit : null,
+        bill_reminder_lead_days: f.bill_reminder_lead_days !== '' ? Number(f.bill_reminder_lead_days) : undefined,
+        bill_overdue_grace_days: f.bill_overdue_grace_days !== '' ? Number(f.bill_overdue_grace_days) : undefined,
+        next_bill_date: f.next_bill_date || null, next_rate_review_date: f.next_rate_review_date || null,
+        notes: f.notes || null,
+      });
+      onSaved();
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
+  }
+  return (
+    <div className="space-y-3">
+      <EntitySearch kind="organisations" label="Client organisation" value={f.org_name}
+        onPick={(id, name) => setF({ ...f, organisation_id: id, org_name: name, lead_contact_person_id: null, contact_name: '' })} />
+      <ContactPicker orgId={f.organisation_id} value={f.contact_name}
+        onPick={(id, name) => setF({ ...f, lead_contact_person_id: id, contact_name: name })} />
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="block text-xs text-slate-500 mb-1">Access</label>
+          <select className={inputCls} value={f.access_type} onChange={(e) => setF({ ...f, access_type: e.target.value })}>
+            <option value="door_code">Door code</option><option value="we_hold_key">We hold a key</option><option value="client_key">Client key / padlock</option>
+          </select></div>
+        {f.access_type === 'door_code' && <div><label className="block text-xs text-slate-500 mb-1">Door code</label><input className={inputCls} value={f.access_code} onChange={(e) => setF({ ...f, access_code: e.target.value })} /></div>}
+        {f.access_type === 'we_hold_key' && <div><label className="block text-xs text-slate-500 mb-1">Key location</label><input className={inputCls} value={f.key_location} onChange={(e) => setF({ ...f, key_location: e.target.value })} /></div>}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="block text-xs text-slate-500 mb-1">Billing</label>
+          <select className={inputCls} value={f.billing_mode} onChange={(e) => setF({ ...f, billing_mode: e.target.value })}>
+            <option value="manual">We invoice</option><option value="recurring">Recurring (Xero)</option>
+          </select></div>
+        {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Cadence</label>
+          <select className={inputCls} value={f.billing_cadence} onChange={(e) => setF({ ...f, billing_cadence: e.target.value })}>
+            <option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option><option value="custom">Custom</option>
+          </select></div>}
+      </div>
+      {f.billing_mode === 'manual' && f.billing_cadence === 'custom' && (
+        <div><label className="block text-xs text-slate-500 mb-1">Invoice every</label>
+          <div className="flex gap-2">
+            <input className={`${inputCls} w-24`} type="number" min={1} value={f.custom_interval_value} onChange={(e) => setF({ ...f, custom_interval_value: e.target.value })} placeholder="e.g. 6" />
+            <select className={inputCls} value={f.custom_interval_unit} onChange={(e) => setF({ ...f, custom_interval_unit: e.target.value })}>
+              <option value="day">days</option><option value="week">weeks</option><option value="month">months</option><option value="year">years</option>
+            </select>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">Used to auto-advance the next invoice due date each time you mark one sent.</p>
+        </div>
+      )}
+      {f.billing_mode === 'manual' && <div><label className="block text-xs text-slate-500 mb-1">Next invoice due</label><input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} /></div>}
+      {f.billing_mode === 'manual' && (
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-xs text-slate-500 mb-1">Remind me before (days)</label>
+            <input className={inputCls} type="number" min={0} value={f.bill_reminder_lead_days} onChange={(e) => setF({ ...f, bill_reminder_lead_days: e.target.value })} />
+            <p className="text-[11px] text-slate-400 mt-1">"Due soon" nudge this many days before.</p></div>
+          <div><label className="block text-xs text-slate-500 mb-1">Overdue after (days)</label>
+            <input className={inputCls} type="number" min={0} value={f.bill_overdue_grace_days} onChange={(e) => setF({ ...f, bill_overdue_grace_days: e.target.value })} />
+            <p className="text-[11px] text-slate-400 mt-1">Grace period before the "overdue" nudge.</p></div>
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="block text-xs text-slate-500 mb-1">Next rate review</label><input className={inputCls} type="date" value={f.next_rate_review_date} onChange={(e) => setF({ ...f, next_rate_review_date: e.target.value })} /></div>
+        <div><label className="block text-xs text-slate-500 mb-1">Move-in date</label><input className={inputCls} type="date" value={f.move_in_date} onChange={(e) => setF({ ...f, move_in_date: e.target.value })} /></div>
+      </div>
+      <div><label className="block text-xs text-slate-500 mb-1">Status</label>
+        <select className={inputCls} value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>
+          <option value="reserved">Reserved</option><option value="active">Active</option><option value="notice">Notice</option>
+        </select></div>
+      <div><label className="block text-xs text-slate-500 mb-1">Notes</label><textarea className={inputCls} rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></div>
+      {err && <p className="text-red-600 text-sm">{err}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-slate-400">Weekly rate is changed via “Change rate” (keeps history).</p>
+        <div className="flex gap-2">
+          <button onClick={onCancel} className="px-4 py-2 text-sm text-slate-600">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{saving ? 'Saving…' : 'Save changes'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut }: { id: string; isAdminManager: boolean; onClose: () => void; onChange: () => void; onMovedOut?: (size: string) => void }) {
   const [t, setT] = useState<Tenancy | null>(null);
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
+  const [editing, setEditing] = useState(false);
+  const [invoicing, setInvoicing] = useState(false);
   const load = useCallback(async () => { setT((await api.get<{ data: Tenancy }>(`/storage/tenancies/${id}`)).data); }, [id]);
   useEffect(() => { load(); }, [load]);
 
@@ -439,31 +725,85 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
   }
   if (!t) return <Modal title="Tenancy" onClose={onClose}><p className="text-slate-400">Loading…</p></Modal>;
 
+  if (editing) {
+    return (
+      <Modal title={`Edit — ${t.room_name}`} onClose={() => setEditing(false)}>
+        <EditTenancyForm t={t} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); load(); onChange(); }} />
+      </Modal>
+    );
+  }
+
+  if (invoicing) {
+    return (
+      <MarkInvoicedModal t={t} onCancel={() => setInvoicing(false)} onSaved={() => { setInvoicing(false); load(); onChange(); }} />
+    );
+  }
+
   return (
     <Modal title={`${t.room_name} — ${t.organisation_name || t.lead_contact_name || 'Tenancy'}`} onClose={onClose}>
       <div className="space-y-4 text-sm">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Weekly rate" value={money(t.weekly_rate)} />
+          <div>
+            <p className="text-xs text-slate-400">Weekly rate</p>
+            <p className="text-slate-800">{money(t.weekly_rate)}</p>
+            {t.previous_weekly_rate != null && (
+              <p className="text-xs text-slate-400">was {money(t.previous_weekly_rate)}{t.last_rate_change_date ? ` · since ${fmtDate(t.last_rate_change_date)}` : ''}</p>
+            )}
+          </div>
           <Field label="Status" value={t.status} />
-          <Field label="Billing" value={t.billing_mode === 'recurring' ? 'Recurring (Xero)' : `We invoice (${t.billing_cadence})`} />
-          {t.billing_mode === 'manual' && <Field label="Next invoice due" value={fmtDate(t.next_bill_date)} />}
+          <Field label="Billing" value={t.billing_mode === 'recurring' ? 'Recurring (Xero)'
+            : `We invoice (${t.billing_cadence}${t.billing_cadence === 'custom' && t.billing_custom_interval_value ? ` · every ${t.billing_custom_interval_value} ${t.billing_custom_interval_unit}${t.billing_custom_interval_value > 1 ? 's' : ''}` : ''})`} />
+          {t.billing_mode === 'manual' && (
+            <div>
+              <p className="text-xs text-slate-400">Next invoice due</p>
+              <p className="text-slate-800">
+                {fmtDate(t.next_bill_date)}
+                {t.next_bill_date && t.next_bill_date.slice(0, 10) <= todayIso() && (
+                  <span className="ml-1.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[11px] align-middle">due now</span>
+                )}
+              </p>
+            </div>
+          )}
+          {t.billing_mode === 'manual' && t.invoices && t.invoices.length > 0 && (
+            <Field label="Last invoice" value={`${t.invoices[0].invoice_number ? `#${t.invoices[0].invoice_number} · ` : ''}${fmtDate(t.invoices[0].sent_at)}`} />
+          )}
           <Field label="Next rate review" value={fmtDate(t.next_rate_review_date)} />
           <Field label="T&Cs" value={t.tcs_accepted_at ? `Accepted ${fmtDate(t.tcs_accepted_at)}` : 'Not accepted'} />
-          {t.access_type === 'door_code' && t.access_code && <Field label="Door code" value={t.access_code} />}
-          {t.access_type === 'we_hold_key' && <Field label="Access" value={`We hold a key${t.key_location ? ` · ${t.key_location}` : ''}`} />}
-          {t.access_type === 'client_key' && <Field label="Access" value="Client key / padlock" />}
+          <Field label="Access" value={
+            t.access_type === 'door_code' ? `Door code: ${t.access_code || '— not set'}`
+            : t.access_type === 'we_hold_key' ? `We hold a key${t.key_location ? ` · ${t.key_location}` : ''}`
+            : t.access_type === 'client_key' ? 'Client key / padlock'
+            : '—'
+          } />
         </div>
+
+        {t.tcs_pdf_key && (
+          <button
+            onClick={async () => {
+              try {
+                await openR2Key(t.tcs_pdf_key as string);
+              } catch { setMsg('Could not open the signed T&Cs PDF.'); }
+            }}
+            className="text-xs text-[#7B5EA7] underline"
+          >📄 Download signed T&Cs</button>
+        )}
+
+        <TenancyNotes id={id} notes={t.notes} editable={t.status !== 'ended'} onSaved={() => { load(); onChange(); }} />
 
         {msg && <p className="text-red-600">{msg}</p>}
 
         <div className="flex flex-wrap gap-2">
           {t.billing_mode === 'manual' && t.status !== 'ended' && (
-            <button disabled={!!busy} onClick={() => action('invoiced', async () => { await api.post(`/storage/tenancies/${id}/mark-invoiced`, {}); })}
+            <button disabled={!!busy} onClick={() => setInvoicing(true)}
               className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs">✓ Mark invoice sent</button>
           )}
           {!t.tcs_accepted_at && t.status !== 'ended' && (
             <button disabled={!!busy} onClick={() => action('tcs', async () => { await api.post(`/storage/tenancies/${id}/send-tcs`, {}); setMsg('T&Cs link sent.'); })}
               className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">✉ Send T&Cs</button>
+          )}
+          {t.status !== 'ended' && (
+            <button disabled={!!busy} onClick={() => setEditing(true)}
+              className="px-3 py-1.5 bg-[#7B5EA7] text-white rounded-lg text-xs">✏️ Edit details</button>
           )}
           {isAdminManager && t.status !== 'ended' && <RateButton id={id} current={t.weekly_rate} onDone={() => { load(); onChange(); }} />}
           {t.status !== 'ended' && (
@@ -505,7 +845,11 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange, onMovedOut 
           <div>
             <h4 className="font-medium text-slate-700 mb-1">Invoices sent</h4>
             {(t.invoices || []).map((iv) => (
-              <p key={iv.id} className="text-xs text-slate-500">{fmtDate(iv.sent_at)} — {money(iv.amount)} (cycle {fmtDate(iv.due_date)})</p>
+              <p key={iv.id} className="text-xs text-slate-500">
+                {fmtDate(iv.sent_at)} — {money(iv.amount)}
+                {iv.invoice_number ? ` · #${iv.invoice_number}` : ''}
+                {iv.period_start ? ` · covers ${fmtDate(iv.period_start)}${iv.period_end ? `–${fmtDate(iv.period_end)}` : ''}` : ` · cycle ${fmtDate(iv.due_date)}`}
+              </p>
             ))}
           </div>
         )}
@@ -518,13 +862,132 @@ function Field({ label, value }: { label: string; value: string }) {
   return <div><p className="text-xs text-slate-400">{label}</p><p className="text-slate-800 capitalize">{value}</p></div>;
 }
 
+// Records an invoice as sent AND sets when the next one is due — the two are
+// decoupled: "next invoice due" is just the reminder trigger, while the number,
+// amount and (optional) covered period go onto the invoice log. Pre-filled from
+// the tenancy's cadence / custom interval; everything is overridable.
+function MarkInvoicedModal({ t, onCancel, onSaved }: { t: Tenancy; onCancel: () => void; onSaved: () => void }) {
+  // The cycle being invoiced now (what "next invoice due" currently points at).
+  const cycleBase = (t.next_bill_date || '').slice(0, 10) || todayIso();
+  const suggestedAmount = t.billing_cadence === 'monthly' ? Number(t.weekly_rate) * 52 / 12
+    : t.billing_cadence === 'quarterly' ? Number(t.weekly_rate) * 13
+    : t.billing_cadence === 'annual' ? Number(t.weekly_rate) * 52
+    : null; // custom → no reliable per-cycle amount, staff types it
+  const [f, setF] = useState({
+    amount: suggestedAmount != null ? String(Math.round(suggestedAmount * 100) / 100) : '',
+    invoice_number: '',
+    period_start: cycleBase,
+    period_end: '',
+    next_bill_date: addToIso(cycleBase, t.billing_cadence, t.billing_custom_interval_value, t.billing_custom_interval_unit),
+    notes: '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  // Quick-set the next-due date by adding N to the cycle being invoiced.
+  function bump(unit: 'month' | 'year', n: number) {
+    setF((cur) => ({ ...cur, next_bill_date: addToIso(cycleBase, 'custom', n, unit) }));
+  }
+
+  async function save() {
+    setSaving(true); setErr('');
+    try {
+      await api.post(`/storage/tenancies/${t.id}/mark-invoiced`, {
+        amount: f.amount !== '' ? Number(f.amount) : null,
+        invoice_number: f.invoice_number.trim() || null,
+        period_start: f.period_start || null,
+        period_end: f.period_end || null,
+        next_bill_date: f.next_bill_date || null,
+        notes: f.notes.trim() || null,
+      });
+      onSaved();
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
+  }
+
+  return (
+    <Modal title={`Mark invoice sent — ${t.room_name}`} onClose={onCancel}>
+      <div className="space-y-3 text-sm">
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-xs text-slate-500 mb-1">Amount £</label>
+            <input className={inputCls} type="number" step="0.01" value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} placeholder="e.g. 65.00" /></div>
+          <div><label className="block text-xs text-slate-500 mb-1">Invoice # <span className="text-slate-400">(optional)</span></label>
+            <input className={inputCls} value={f.invoice_number} onChange={(e) => setF({ ...f, invoice_number: e.target.value })} placeholder="e.g. OT-1234" /></div>
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Period covered <span className="text-slate-400">(optional)</span></label>
+          <div className="grid grid-cols-2 gap-3">
+            <input className={inputCls} type="date" value={f.period_start} onChange={(e) => setF({ ...f, period_start: e.target.value })} />
+            <input className={inputCls} type="date" value={f.period_end} onChange={(e) => setF({ ...f, period_end: e.target.value })} />
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">The invoice itself is the real record — this is just for at-a-glance history.</p>
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Next invoice due</label>
+          <input className={inputCls} type="date" value={f.next_bill_date} onChange={(e) => setF({ ...f, next_bill_date: e.target.value })} />
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {([['+1 month', 'month', 1], ['+3 months', 'month', 3], ['+6 months', 'month', 6], ['+1 year', 'year', 1]] as const).map(([label, unit, n]) => (
+              <button key={label} type="button" onClick={() => bump(unit, n)}
+                className="px-2 py-0.5 rounded border border-slate-300 text-xs text-slate-600 hover:bg-slate-50">{label}</button>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">When you'll be reminded to send the next one. Independent of the period above.</p>
+        </div>
+
+        <div><label className="block text-xs text-slate-500 mb-1">Notes <span className="text-slate-400">(optional)</span></label>
+          <textarea className={inputCls} rows={2} value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></div>
+
+        {err && <p className="text-red-600 text-sm">{err}</p>}
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel} className="px-4 py-2 text-sm text-slate-600">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg disabled:opacity-50">{saving ? 'Saving…' : '✓ Mark sent'}</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Notes shown on the tenancy detail pop-up, editable inline so staff don't have
+// to open the full "Edit details" form just to jot something down.
+function TenancyNotes({ id, notes, editable, onSaved }: { id: string; notes: string | null; editable: boolean; onSaved: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(notes || '');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setDraft(notes || ''); }, [notes]);
+  async function save() {
+    setSaving(true);
+    try { await api.put(`/storage/tenancies/${id}`, { notes: draft.trim() || null }); setEditing(false); onSaved(); }
+    finally { setSaving(false); }
+  }
+  return (
+    <div className="border border-slate-200 rounded-lg p-3 bg-amber-50/40">
+      <div className="flex items-center justify-between mb-1">
+        <h4 className="font-medium text-slate-700">Notes</h4>
+        {editable && !editing && <button onClick={() => setEditing(true)} className="text-xs text-[#7B5EA7]">{notes ? 'Edit' : '+ Add note'}</button>}
+      </div>
+      {editing ? (
+        <div className="space-y-2">
+          <textarea className={inputCls} rows={3} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Anything worth recording about this client / tenancy" autoFocus />
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => { setDraft(notes || ''); setEditing(false); }} className="text-xs text-slate-500">Cancel</button>
+            <button disabled={saving} onClick={save} className="text-xs bg-[#7B5EA7] text-white px-3 py-1.5 rounded-lg disabled:opacity-50">{saving ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+      ) : (
+        <p className="text-sm text-slate-600 whitespace-pre-wrap">{notes || <span className="text-slate-400">No notes yet.</span>}</p>
+      )}
+    </div>
+  );
+}
+
 function RateButton({ id, current, onDone }: { id: string; current: number; onDone: () => void }) {
   const [open, setOpen] = useState(false);
   const [rate, setRate] = useState(String(current));
   const [review, setReview] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
-  if (!open) return <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-[#7B5EA7] text-white rounded-lg text-xs">Change rate</button>;
+  if (!open) return <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-[#7B5EA7] text-white rounded-lg text-xs">💷 Change rate</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-3 space-y-2">
       <div className="grid grid-cols-2 gap-2">

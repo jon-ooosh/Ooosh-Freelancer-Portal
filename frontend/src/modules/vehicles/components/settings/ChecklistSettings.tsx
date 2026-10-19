@@ -319,11 +319,16 @@ export function ChecklistSettings() {
   const [hasChanges, setHasChanges] = useState(false)
 
   // Initialize local settings from fetched data or defaults
+  // Did R2 actually have a saved checklist, or are we editing the built-in
+  // defaults? Drives the one-way-door warning above the save bar.
+  const [hasSavedSettings, setHasSavedSettings] = useState(true)
+
   useEffect(() => {
     if (settings && !localSettings) {
       const hasData = Object.keys(settings.briefingItems).length > 0 ||
                       Object.keys(settings.prepItems).length > 0
       setLocalSettings(hasData ? settings : DEFAULT_CHECKLIST_SETTINGS)
+      setHasSavedSettings(hasData)
     }
   }, [settings, localSettings])
 
@@ -403,6 +408,7 @@ export function ChecklistSettings() {
     setSaving(false)
     if (result.success) {
       setHasChanges(false)
+      setHasSavedSettings(true)
       setSaveMessage('Saved!')
       queryClient.invalidateQueries({ queryKey: ['settings'] })
       setTimeout(() => setSaveMessage(''), 2000)
@@ -536,6 +542,22 @@ export function ChecklistSettings() {
       >
         + Add {category === 'briefing' ? 'Briefing' : 'Prep'} Item
       </button>
+
+      {/* One-way-door warning. While R2 holds no saved checklist the live form
+          runs on the built-in defaults, so improvements shipped in a release
+          reach the form on deploy. The first save here writes an R2 copy that
+          takes over permanently, and from then on those updates stop arriving.
+          Staff can't be expected to know that, and it isn't undoable from this
+          screen — so say it before the click, not after. */}
+      {!hasSavedSettings && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+          <strong>Heads up:</strong> this checklist is currently running on the
+          built-in defaults, so improvements we ship reach the form automatically.
+          Saving here takes your own copy — after that, future built-in changes
+          won't appear and items need editing on this page instead. Fine to do;
+          just worth knowing it's a one-way door.
+        </div>
+      )}
 
       {/* Save bar */}
       <div className="flex items-center gap-2">

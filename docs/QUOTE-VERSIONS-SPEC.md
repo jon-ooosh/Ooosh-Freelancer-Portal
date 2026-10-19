@@ -1,0 +1,557 @@
+# QUOTE VERSIONS SPEC — alternative quotes for one enquiry, as a group of jobs
+
+**Status:** ✅ PRs 1–4 BUILT (13 Oct 2026) — the whole alternative-options build: model,
+"Quote another option", link an existing quote, remove from group, the option bar, Compare, pin,
+the Kanban/list collapse, the headline-count dedup, confirm-one-lose-others, the §8 guards and the
+payment portal (OP flags + the portal repo's two screens). Phase 2 (`part_of`) is not built. §1 is the settled decisions; §1.1 the build-session decisions; §13 is the
+handover note.
+
+**Naming (jon, 12 Oct 2026): "version" in this spec is "option" in code and in the UI.** OP
+already has "quote versions" — the quote-PDF revisions of ONE job on the Activity Timeline
+(`services/quote-versions.ts`, `job_quote_versions`) — and two features called "versions" would
+drift. So: `jobs.option_no` / `option_label`, "(Option 2)" as the HireHop job-name suffix,
+"Quote another option" as the modal, `services/job-groups.ts` for the group. A client reading a
+quote headed "Option 2" knows what it is; "v2" reads as a revision. The spec text below keeps
+"version" — read it as "option". `job_groups` and `group_id` are as written.
+
+**Mockups (approved by jon, "wording to tighten, otherwise great"):**
+https://claude.ai/artifact/RaKVKF9jE4vnUVfgxRUeQB — boards: Main (single version, the subtle
+"+ Add a version" link), Versions (the tab bar), Compare (slide-over), AddVersion (modal),
+Confirm (one version confirmed → tick siblings → Mark lost), Kanban (one collapsed group card),
+Portal (state A "you're paying for v2 — we sent you 4", state B dead link). Private to jon —
+ask him to open it if the build session can't.
+
+**Read first:** `.claude/rules/jobs-pipeline-dashboard.md`, `.claude/rules/hirehop.md`,
+`docs/reference/PIPELINE-AND-ORGS.md`, `docs/reference/RETURNS-AND-CANCELLATIONS.md` (the
+Combine Bookings section — the closest existing sibling of this feature),
+`routes/pipeline.ts` (status PATCH at ~463, combine at ~1930), `routes/cancellations.ts`
+(~615–665, the HireHop `job_duplicate.php` call this reuses), `services/requirement-close-sweep.ts`,
+`services/job-close-cascade.ts`, `routes/money.ts` `job-lookup` (~778),
+`services/payment-portal-link.ts`.
+
+---
+
+## 0. One-line summary
+
+> One client, one enquiry, several alternative quotes (three date spans; van only vs van +
+> driver; with or without a Fender Twin). Each alternative is **its own OP job AND its own
+> HireHop job** — because every one has to go out to the client as a HireHop quote. OP adds a
+> **thin group layer** on top so the versions read as one enquiry: a version tab bar on Job
+> Detail, a Compare slide-over, one collapsed card on the Kanban, and — when the client confirms
+> one — a prompt to mark the rest lost as *Confirmed Alternative Quote (from us)*. Nothing is
+> amended in place; the "which one did they actually want" problem is solved by never having
+> one job try to be several things.
+
+## 1. Decisions (settled — don't re-litigate without jon)
+
+1. **One version = one OP job + one HireHop job.** Always. jon rejected "versions stay OP-only
+   until they get serious": the root problem is *organising the HireHop jobs*, and a quote can
+   only be sent from a HireHop job. "Add a version" therefore ALWAYS duplicates the HireHop job
+   too (`job_duplicate.php`, the re-open path's mechanism — §5).
+2. **Never amend a job in place to become a different alternative.** jon's view: letting a
+   client confirm a quote that doesn't carry the things they want is the riskier way. A new
+   alternative is a new version. Revisions *within* an alternative (drop a snare stand, change
+   the price) are already tracked by the quote-PDF version diff on the Activity Timeline
+   (`AUTO-CHASE-SPEC.md` §7.3) and are NOT what this spec means by "version".
+3. **The group is a thin layer.** It adds a tab bar, a compare view, a Kanban collapse and a
+   confirm-one-lose-others prompt. It does not own money, status, requirements or sync — every
+   version keeps being an ordinary job that every existing surface already understands.
+4. **Single-version jobs look exactly as they do today** — one job with no group shows no bar,
+   no badge, nothing new except a subtle "+ Add a version" link in the header. jon: "no need to
+   clutter up the view".
+5. **Version numbers are the alternative's identity, not a revision counter.** v1 is the
+   original, v2 the first alternative added, and so on. **They never auto-bump** when HireHop
+   changes a job — a `v2` stays `v2` through ten price tweaks. jon considered auto-amending on
+   every HireHop change and ruled it "feels complicated"; the PDF diff already answers "what
+   changed on this quote, when".
+6. **Confirm one → the others are marked lost, by a human.** The prompt pre-ticks the siblings;
+   staff confirm. Never auto-lose on a portal payment or an inbound HireHop webhook —
+   those fire a bell + the same prompt next time the job is opened (§7).
+7. **The lost reason is the existing `'Confirmed Alternative Quote (from us)'`** (migration 191
+   renamed it so "Competitor" keeps meaning the alternative came from someone else). Versions
+   lost this way are NOT lost revenue and must be excluded from win/loss and Fill-a-Gap (§8).
+8. **Lead version = most progressed, with a pin override.** Auto: the version furthest along
+   the pipeline (confirmed beats provisional beats quoting…), tie → lowest version number. Staff
+   can pin a different one. The lead is what the Kanban card and any roll-up read.
+9. **Any staff can add a version and manage a group** (`STAFF_ROLES`). Marking siblings lost
+   goes through the existing lost transition and inherits its permissions.
+10. **"Items" not "Backline"** on the Compare view — an item count across everything on the
+    HireHop job (the Twin counts, so does a splitter cable), because "Backline yes/no" hides the
+    thing the versions actually differ on.
+11. **Payment = choosing.** The portal link carries the HireHop job number, so three versions on
+    the same dates get three different links — the client picks a version by paying its link.
+    The hash is a lightweight tamper check (`buildPaymentPortalHash` = USER + DURATION_HRS +
+    job number), not an identity. No per-document links.
+12. **Festival-style grouping ("Main stage" + "Band A" + "Band B" are one thing) is Phase 2**
+    (`kind = 'part_of'`), designed on the same table so it costs a flag, not a model. Roll-ups
+    are the stretch goal there; "see that these belong together" is the core.
+
+### 1.1 Build-session decisions (jon, 12 Oct 2026)
+
+- **Pre-confirmation only.** "Add an option" is refused on anything past `provisional`
+  (`optionRefusalReason()` in `job-groups.ts` — also dismissed and combined jobs). The module is
+  for a client choosing between quotes for ONE hire; once something confirms there is one
+  version and the group is history. §5.1's "not lost/cancelled/completed" is superseded.
+- **A group has at most one confirmed member.** §7's "a second confirmation is legitimate"
+  is reversed: if the client "wants both vans", a human loses one option and adds the kit to
+  the other. The portal (§9) refuses a live option whose sibling is confirmed.
+- **HireHop duplicate FIRST, then the OP row with its number** (the Re-open order), not
+  §5.3's OP-then-HH. Otherwise the 30-min sync can import the new HireHop job as an unrelated
+  enquiry in the gap and the write-back trips the `hh_job_number` unique index. A HireHop
+  failure still never rolls the OP option back (`hh_error` in the response). If the OP
+  transaction fails AFTER the duplicate, the HireHop job arrives via the sync as an ungrouped
+  enquiry — link it with "Link an existing quote".
+- **Four confirmation entry points, not three:** `services/record-payment.ts` (staff click,
+  Wise matcher) also moves a job to confirmed. PR 3's hook goes there too, on the unattended path.
+- **"Link an existing quote" warns on a different client rather than refusing** (§5.4) —
+  the sync leaves duplicate client shells now and then; warnings, not gates.
+- **No right-click / long-press pin** (§6.1) — undiscoverable. The pin lives in Compare (PR 2).
+- **Copy lives in `frontend/src/lib/optionCopy.ts`** (§12's `versionCopy.ts`) — every
+  user-facing string, for jon to tune.
+- **`job_duplicate.php` answers with the NEW job's data, number under `ID`** (proven live,
+  13 Oct 2026 — `{ ID: '16843', JOB_NAME, JOB_DATE, … }`). Re-open had read `data.job` and
+  so never got a number back; both paths now use `readDuplicatedJobNumber()` in
+  `job-groups.ts`. The 30-min sync WILL import an unread duplicate as an ordinary enquiry —
+  "Link an existing quote" is the repair.
+- **The bar is at the TOP of Job Detail**, above the banners (jon: which option you're on
+  must be the first thing you see). The modal's four dates use the Job Detail editor's rules
+  (`lib/jobDates.ts`, shared). `new_enquiry` and `quoting` share a rank in the lead rule.
+
+## 2. The problem, in jon's words
+
+A client asks for a few quotes for what is really one enquiry: one self-drive van across three
+sets of close-together dates; then one quote for the van across the whole stretch; then the same
+with a driver; then one with a Fender Twin added. Today that's four unrelated HireHop jobs and
+four unrelated OP enquiries. Nobody can see they belong together. The Kanban shows four cards.
+Chasing happens four times or not at all. When the client confirms one, the other three sit in
+Enquiries until someone notices, and when they're finally marked lost they pollute the loss
+figures as if we'd lost £2k of business rather than moved it sideways. On Job Detail there is no
+answer to "is this hire self-drive or with a driver? backline or not? when does it actually
+start?" because the honest answer is "depends which one they pick".
+
+The alternative — one job that staff keep amending as the client changes their mind — is how
+clients end up confirming a quote that doesn't have the right things on it.
+
+## 3. The model
+
+```
+job_groups (one row per enquiry-with-alternatives)
+  └── jobs.group_id ──► v1  (original, OP job + HH job)
+                        v2  (alternative, OP job + HH job)
+                        v3  …
+```
+
+- A **group** exists only once a second version exists. Adding the first alternative to a
+  lone job creates the group and makes the lone job v1 (its name gains " (v1)" — §5.3).
+- A **version** is an ordinary `jobs` row. Status, money, requirements, contacts, sync,
+  chase — all unchanged. `group_id`, `version_no`, `version_label` are the only additions.
+- A version that goes **lost** stays in the group (struck-through in the bar — §6.1). A version
+  that is **cancelled** after confirmation likewise stays. Nothing is ever removed from a group
+  automatically; "Remove from group" is an explicit staff action that just nulls the columns.
+- **One group, one `kind`.** `alternative` (this spec) or `part_of` (Phase 2). Mixing is refused.
+
+## 4. Data model
+
+Migration: take the next free number at build time (`run.ts` is at 281 as of 9 Oct 2026) and
+**add it to the `migrations` array in `run.ts`**.
+
+```sql
+CREATE TABLE job_groups (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind            VARCHAR(20) NOT NULL DEFAULT 'alternative'
+                  CHECK (kind IN ('alternative', 'part_of')),
+  label           TEXT,                       -- optional: "Katatonia Nov options"; default = client name
+  lead_job_id     UUID REFERENCES jobs(id),   -- NULL = auto (most progressed); set = pinned
+  created_by      UUID REFERENCES users(id),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE jobs
+  ADD COLUMN group_id       UUID REFERENCES job_groups(id) ON DELETE SET NULL,
+  ADD COLUMN version_no     INTEGER,            -- 1, 2, 3… within the group; NULL when ungrouped
+  ADD COLUMN version_label  TEXT;               -- the differentiator: "Van + driver", "whole stretch + Twin"
+
+CREATE INDEX idx_jobs_group ON jobs(group_id) WHERE group_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_jobs_group_version ON jobs(group_id, version_no) WHERE group_id IS NOT NULL;
+```
+
+- `version_no` is assigned as `MAX(version_no) + 1` within the group at add time and **never
+  reused or renumbered**, even if a middle version is removed. v4 after a removed v3 is still v4.
+- `version_label` is staff-typed at add time (the modal's "What's different?" field — §5.2),
+  editable later inline. It is the human name of the alternative; `version_no` is the handle.
+- `lead_job_id` NULL means "derive it" (§6.3). Setting it is the pin.
+- No `hh_group` anything — HireHop has no concept of this and we do not try to give it one
+  beyond the " (vN)" in the job name.
+
+**Shared types** (`shared/types/index.ts`): add `group_id`, `version_no`, `version_label` to
+`Job`; add `JobGroup` + `JobGroupMember` (the Compare row shape, §6.2).
+
+## 5. Add a version
+
+### 5.1 Entry point
+
+- Job Detail header, every job that is not lost/cancelled/completed: a subtle text link
+  **"+ Add a version"** (mockup: Main). When the job is already in a group the same action lives
+  at the right-hand end of the version bar as **"+"**.
+- Also available from the Kanban group card's menu (Phase 1 if cheap, else PR 2).
+
+### 5.2 The modal (mockup: AddVersion)
+
+Fields:
+- **What's different?** (required, becomes `version_label`) — free text, with quick-pick chips
+  that pre-fill it: *Different dates* · *Van + driver* · *Self-drive* · *Add backline* ·
+  *Whole stretch* · *Other*. Chips only fill the text; they change nothing on the job.
+- **Dates** — pre-filled from the source version, editable (the four-date editor, same component
+  as Job Detail). This is the one piece of job data the modal lets you change up front because
+  "different dates" is the most common alternative and saves an immediate second edit.
+- **Create the HireHop job now** — a checkbox, **ticked by default and normally left ticked**
+  (decision 1). Unticked only when the source has no HireHop number yet (then the new version
+  can't be duplicated from anything — it is created OP-only and gets the existing "Create in
+  HireHop" button like any OP-native enquiry).
+- Footer copy: "This creates a new job (vN) for the same client. Items, notes and contacts are
+  copied; you then adjust them in HireHop as usual."
+
+### 5.3 What `POST /api/pipeline/:id/add-version` does (one transaction for the OP part)
+
+1. **Group:** if the source has no `group_id`, INSERT `job_groups` (`kind='alternative'`,
+   `label = client name`), set the source's `group_id` and `version_no = 1`, and rename the
+   source `"<name> (v1)"` (push the rename to HireHop with `no_webhook=1`, like the existing
+   job-name edit path). If the source already has a group, reuse it; `version_no = MAX + 1`.
+2. **OP copy:** INSERT a new `jobs` row copying from the source: client (`client_id`,
+   `client_name`, `company_name`), venue, managers, `is_van_and_driver` and the other staff
+   overrides, dates (from the modal), `likelihood`, `chase_interval_days`, `is_internal`,
+   `job_organisations` rows (band, promoter…), `job_contacts` rows (incl. primary + the
+   `email_routing` JSONB). **Not copied:** `pipeline_status` (new version starts `quoting`),
+   `next_chase_date` (set to the source's so they chase together), `line_items` /
+   `hh_derived_flags` / requirements (HireHop owns those — the next sync fills them in),
+   anything money-related (`job_value`, excess, payments, `job_financials`), files, interactions,
+   `dismissed_at`.
+3. **HireHop copy** (after commit, when ticked and the source has `hh_job_number`): the exact
+   `job_duplicate.php` call from `cancellations.ts` ~634 (`id, supplying:1, notes:1,
+   transport:1, reserved:1, job_name: "<name> (vN)", local`), then `save_job.php` with the
+   modal's dates (`out/start/end/to`, `duration_days` via `calcHHDuration`, `no_webhook:1`).
+   Write the returned job number onto the new OP row. If HireHop fails, the OP version still
+   exists (with `hh_job_number NULL`) and the response carries `hh_error` so the modal shows the
+   amber "Created in OP — HireHop duplicate failed, use Create in HireHop" line. Never roll back
+   the OP version for a HireHop failure.
+4. **Timeline:** one `note` interaction on each side — on the source "Added version v2 (Van +
+   driver) → #16412", on the new version "Created as v2 of this enquiry from #16398".
+5. Response: `{ data: { job, group } }`; the frontend navigates to the new version.
+
+### 5.4 Add an EXISTING job to a group
+
+`POST /api/pipeline/:id/group-with` `{ other_job_id }` — for the case where staff already made
+two separate enquiries by hand. Refused unless both are the same `client_id`, neither is
+already in a different group, and neither is completed. Numbering: the older job (by
+`created_at`) is v1 if a new group is being created. Names gain " (vN)" and the rename pushes
+to HireHop. Surfaced as **"Link to another quote…"** in the "+ Add a version" dropdown
+(search the client's other open jobs — reuse the Combine candidate picker shape).
+
+### 5.5 Remove from group
+
+`DELETE /api/pipeline/:id/group` — nulls the three columns, strips " (vN)" from the name (push
+to HH). If the group drops to one member, that member is ungrouped too and the `job_groups`
+row deleted. Timeline note both sides. Nothing else changes.
+
+## 6. Reading a group
+
+### 6.1 Version bar on Job Detail (mockup: Versions)
+
+Rendered **only when the job's group has ≥ 2 members**, directly under the job header, above
+the tabs. One pill per version, in `version_no` order:
+
+```
+[ v1 · 10–12 Nov · Self-drive ] [ v2 ★ · 10–12 Nov · Van + driver ] [ v3 · 10–17 Nov · + Twin ] [ v4 ~~lost~~ ] [ Compare ] [ + ]
+```
+
+- Pill = `vN` · short dates · `version_label`. Status colour on the pill border (the pipeline
+  pill colours). The current page's version is solid; others are outlined links.
+- ★ marks the lead (§6.3). Right-click / long-press → "Pin as lead" / "Unpin".
+- Lost versions render struck-through and dimmed but stay in the bar — the record that the
+  option existed is part of the story. Cancelled likewise.
+- **Compare** opens the slide-over (§6.2). **+** opens Add a version (§5).
+- Also show the group's label as a small caption ("Katatonia Nov options · 4 versions") and
+  an inline edit for it.
+
+### 6.2 Compare slide-over (mockup: Compare)
+
+`GET /api/pipeline/groups/:groupId` returns the group + one row per member:
+
+| Column | Source |
+|---|---|
+| Version | `version_no`, `version_label`, is-lead |
+| Config | from `hh_derived_flags`: `self_drive_count` / `van_and_driver_count` → "Self-drive ×1" / "Van + driver ×1"; `has_rehearsal` → "+ rehearsal"; `crew_item_count` → "+ crew" |
+| Dates | `job_date`–`job_end` (inside dates) + day count via the same ceil rule as the Job Detail header |
+| Items | count of `kind = 2` non-virtual lines in `jobs.line_items` (decision 10) |
+| Client £ | `job_value` (ex-VAT accrued, as the Money tab caches it) — "—" when unknown |
+| Status | pipeline pill; `is_chasing` flag; `next_chase_date` |
+| Portal link | from `getPaymentPortalLink(hh_job_number)` — shown as a copy icon (decision 11) |
+
+Row actions: open · pin as lead · mark lost (opens the existing Lost modal) · remove from
+group. The slide-over is also where "Mark the others lost" lives after a confirmation (§7).
+
+### 6.3 Lead version
+
+`lead = group.lead_job_id ?? most progressed member`. Progression order for the auto rule
+(highest wins): `completed > returned > returned_incomplete > dispatched > prepped > prepping >
+confirmed > provisional > quoting > new_enquiry > paused`; `lost`/`cancelled` never lead while a
+live member exists. Tie → lowest `version_no`. Implement once, in a `services/job-groups.ts`
+`resolveLeadJob(members)`, and use it from the list route, the Compare endpoint and the Kanban.
+
+### 6.4 Kanban (mockup: Kanban)
+
+`GET /api/pipeline` (the list route at ~48) returns `group_id`, `version_no`, `version_label`
+and a per-group `group_summary { label, member_count, lead_job_id, statuses[] }` on each member.
+`PipelinePage` collapses members **of the same group in the same column** into one card: the
+lead's details, a "4 versions" badge, a chevron to expand in place into the individual cards.
+Members in different columns (v2 confirmed, v1 still quoting) each render in their own column
+— the badge on each says "1 of 4 · others: quoting ×2, lost ×1" so the split is visible.
+
+Dedup everywhere a count is a headline: open-enquiry stat card, pipeline value totals and the
+"Open enquiries" dashboard number count a **group once** (by lead) — a client asking for four
+options is one enquiry, not four. Lists that are per-job (Jobs page, Returns) stay per-job.
+
+### 6.5 Elsewhere
+
+- **Global search:** a grouped job's result row shows "v2 of 4" after the name.
+- **Client/org Hire History:** grouped versions render nested under the lead with the same
+  "v2 of 4" tag; lost-as-alternative versions are shown but excluded from the stats cards.
+- **Job header name:** the " (vN)" suffix lives in the real `job_name` (so HireHop and every
+  email agree). The header renders it as a pill rather than literal text — `stripVersionSuffix`
+  helper in `lib/jobOrgName.ts`'s neighbourhood, used for display only.
+
+## 7. Confirm one, lose the others (mockup: Confirm)
+
+The three confirmation entry points are `routes/pipeline.ts` status PATCH (~463),
+`routes/money.ts` payment-event (~3314) and `routes/webhooks.ts` inbound HireHop status (~275).
+Each already fires the confirmation hooks (`services/confirmation-hooks.ts`). Add one more
+hook there: `noteAlternativeVersionsOnConfirm(jobId)`.
+
+- **Staff-driven (pipeline PATCH):** the response carries `group_prompt { siblings: [...] }`
+  when the newly-confirmed job has live siblings (`pipeline_status` in a pre-confirmed stage).
+  The frontend opens the Confirm panel: "v2 is confirmed. These other versions are still open —
+  mark them lost?" with each sibling pre-ticked and the reason fixed to **Confirmed Alternative
+  Quote (from us)**. "Mark lost" → one call per sibling to the existing lost transition
+  (`PATCH /:id/status` with `lost_reason`, `keep_requirement_ids: []`) so the Lost/Cancelled
+  cleanup pattern (`closeJobRequirements`, `job-close-cascade`, chase-date clearing, HH status
+  10 write-back) runs exactly as for any lost job. Untick to keep one open (the client is still
+  deciding between v2 and a possible add-on).
+- **Unattended (payment-event, webhook):** no UI to prompt, so: bell notification to the job's
+  managers + the confirmer-of-record (`priority='normal'`, `action_url` = the confirmed job with
+  `?group_prompt=1`), and the Job Detail page opens the same Confirm panel when it sees that
+  param and live siblings still exist. The bell self-retires: it is acknowledged automatically
+  when the siblings are no longer live.
+- **Never auto-lose.** Decision 6. A second confirmation in the same group (client genuinely
+  books two options) is legitimate and must not be fought — the panel simply doesn't offer the
+  other confirmed one.
+- The confirmed version's timeline gets "Confirmed — v1, v3 marked lost (Confirmed Alternative
+  Quote) by <staff>"; each lost sibling gets the standard lost note plus "→ client took v2
+  (#16412)".
+
+## 8. Exclusions and guards
+
+- **Win/loss, cancellation analytics, lost counts:** exclude `lost_reason = 'Confirmed
+  Alternative Quote (from us)'` wherever a loss is counted as lost revenue. Same rule as
+  `combined_into_job_id IS NOT NULL` in the Combine spec. The Lost & Cancelled page keeps
+  showing them (filterable by that reason) — it's a list, not a metric.
+- **Fill-a-Gap** (`routes/fill-gap.ts`): a version lost this way did not free a slot — the slot
+  is being used by its sibling. Skip the "Find replacement booking →" banner when
+  `lost_reason` is the alternative reason, and never surface sibling versions as *candidates*
+  for each other's gaps.
+- **Stale-enquiry auto-loser (09:00):** when it loses a version whose sibling is confirmed, use
+  the alternative reason rather than the default — the data is already there, use it.
+- **Combine Bookings:** refuse combining two members of the same `alternative` group (they are
+  options, not two hires to merge). Members of a `part_of` group may combine as today.
+- **Chase model:** nothing changes. Each version keeps its own `next_chase_date`; the Kanban
+  group card is "chasing" if its lead is. Logging a contact-type interaction on ANY member bumps
+  **every live member's** chase date (sacred-future rule intact) — one phone call covers the
+  whole enquiry. This is the one place the group touches chase state; do it in
+  `interactions.ts` next to the existing bump, keyed on `group_id`.
+- **Auto-chase drafts (Gmail):** draft for the lead only; mention the other versions by number
+  in the draft context so Claude doesn't write four "just checking in" emails for one client.
+- **HireHop sync:** a webhook or sync renaming a job must preserve the " (vN)" suffix if HireHop
+  dropped it (staff edited the name in HH). `stripProjectPrefix` lives in the same spot;
+  add `ensureVersionSuffix`.
+- **Dismissal (`dismissed_at`):** dismissing one version dismisses only that version.
+
+## 9. Payment portal (Phase 4 — needs the portal repo)
+
+OP side (`routes/money.ts`):
+- `GET /job-lookup/:hhJobNumber` and `GET /:jobId/summary` gain:
+  ```
+  payable: boolean,
+  not_payable_reason: 'lost' | 'cancelled' | 'completed' | 'confirmed_sibling' | null,
+  confirmed_sibling: { hh_job_number, version_label } | null,
+  version_group: { label, this: { version_no, version_label },
+                   siblings: [{ hh_job_number, version_no, version_label, pipeline_status }] } | null
+  ```
+  `payable` is false for `lost` / `cancelled` / `completed`, and for a live version whose
+  sibling is already confirmed (`confirmed_sibling` set) — the client has chosen, this link is
+  stale. **Verify first** what the portal already does on a Lost/Cancelled job (jon is 99% sure
+  it already locks); the OP flag makes that explicit and extends it to the sibling case.
+
+Portal side (the other repo):
+- **State A (mockup Portal-A):** a live version in a group shows a quiet banner above the
+  amount: "This is **v2 — Van + driver** of the 4 options we sent you (10–12 Nov). Paying here
+  books this option." with the sibling labels listed, no links (they have their own emails).
+- **State B (mockup Portal-B):** `payable: false` → the existing "this link is no longer valid"
+  screen, with the reason copy: lost/cancelled → as today; `confirmed_sibling` → "You've
+  already booked **v2 — Van + driver** (#16412). Nothing more to pay on this option."
+- A payment on a `payable: false` job must be refused server-side in the portal before the
+  Stripe session is created, not just hidden in the UI.
+
+## 10. Build order
+
+**PR 1 — model + add an option + bar. BUILT 12 Oct 2026.** Migration `286_job_groups.sql`
+(`job_groups`; `jobs.group_id / option_no / option_label`); `services/job-groups.ts` (suffix
+helpers, `resolveLeadJob`, `getGroupById`, `optionRefusalReason`, `insertOptionCopy`); in
+`routes/pipeline.ts` "QUOTE OPTIONS": `GET/PATCH /groups/:groupId` (read; rename / pin),
+`GET /:id/group-candidates`, `POST /:id/add-option`, `POST /:id/group-with`,
+`DELETE /:id/group`; `option_label` is editable through `PATCH /:id/edit`. After a HireHop
+duplicate the route calls `syncSingleHireHopJob()` so the new option has its items and
+derived requirements straight away. Frontend: `components/QuoteOptionsBar.tsx` (pills, group
+name inline-edit, "+ Add", "Remove from group"), `components/AddQuoteOptionModal.tsx` (label +
+chips, four dates, HireHop checkbox, "Link an existing quote" mode), `lib/quoteOptions.ts`
+(`stripOptionSuffix`, pill helpers), `lib/optionCopy.ts`; Job Detail header renders the
+"(Option N)" suffix as a pill and shows "+ Add an option" on a lone open enquiry.
+**Live check:** add an option to a real enquiry → two OP jobs, two HH jobs named
+"(Option 1)"/"(Option 2)", items copied, dates as entered, bar shows both, portal links differ.
+
+**PR 2 — Compare + Kanban + lead. BUILT 13 Oct 2026.** `GET /api/pipeline` returns
+`group_summary` per member with the lead resolved; `services/job-groups.ts`
+`nonLeadMemberIds()` is the "count a group once" helper, used by `/pipeline/stats` (by-status
+counts, chase counts, active pipeline value) and the dashboard's `open_enquiries_count`.
+`PipelinePage` collapses a group's members in the same column onto its lead's card ("3 options ▾"
+badge, chevron expands in place; "1 of 3 options" when the rest sit elsewhere) — board AND list;
+column counts, section counts and the "needs attention" banner count entries, not jobs.
+`components/CompareOptionsPanel.tsx` (from the bar's Compare button): config from
+`hh_derived_flags`, dates + ceil'd day count, physical item count (hover for names), client £,
+status, pin (★), inline label edit (`PATCH /:id/edit option_label`), Open. The ★ on the bar's
+pills pins too. **Not done:** §6.5 global-search and Hire History "Option 2 of 4" tags (small,
+PR 3 or later); "Mark lost" from a Compare row (PR 3's confirm panel covers the real case).
+**Live check:** options in different columns render sensibly; open-enquiry count moves by one,
+not three.
+
+**PR 3 — confirm-one-lose-others + guards. BUILT 13 Oct 2026.** `services/option-confirm.ts`
+`afterOptionConfirmed()` on all FOUR confirmation paths (pipeline status PATCH, portal
+payment-event, HireHop webhook, record-payment): a timeline note on the confirmed job naming the
+still-open options; on the unattended paths a `quote_option_confirmed` bell to the job's managers
+(admins + managers as fallback), one unread bell per user per job, deep-linked to
+`/jobs/:id?group_prompt=1`. **The Confirm panel lives in the options bar** (not a response-driven
+modal): it shows on a confirmed option's page while live, open siblings exist, pre-ticked; "Mark
+the N ticked as Lost" calls the existing lost transition per sibling (reason
+`Confirmed Alternative Quote (from us)`, `lost_detail` "Client took Option 2 (#16842)",
+`keep_requirement_ids: []` so the full cleanup runs), posts a note on the winner, then
+`POST /groups/:id/prompt-handled` retires the bells. "Keep them open for now" hides it for that
+exact sibling set (localStorage); the bell's `?group_prompt=1` overrides. §8 guards built:
+org Hire History + client-history stats exclude the alt-quote reason (`notAltQuoteLossSql`);
+Fill-a-Gap never offers an option's siblings and the "Find replacement" button is replaced on an
+alt-lost option; the 09:00 auto-loser uses the alt reason when a sibling has confirmed; Combine
+refuses two options of one enquiry; a contact or chase logged on any option bumps every live
+sibling (`bumpSiblingChaseDates`, sacred-future); the auto-chase runner drafts for the lead only
+and the draft is told about the other options; inbound HireHop names keep the "(Option N)"
+suffix (`jobNameKeepingOptionSuffixSql`, sync + webhook). Also: a linked existing quote takes the
+group's chase date when it has none, and a new option always gets one (the source's, else its
+interval from today) — jon, 13 Oct 2026. **Not built:** §6.5 search / Hire History tags.
+**Live check:** confirm Option 2 via the portal on a test group → bell arrives, opening the job
+shows the panel, marking lost runs the full cleanup, Lost & Cancelled shows them under the
+reason, the org's Hire History lost count is unchanged.
+
+**PR 4 — portal. BUILT 13 Oct 2026.** 4A (this repo): `GET /api/money/job-lookup/:hh` carries
+`payable`, `not_payable_reason` (`lost` / `cancelled` / `confirmed_sibling`), `confirmed_sibling`
+and `version_group` (`services/job-groups.ts` `portalOptionsFor()`). **Completed jobs stay
+payable** (post-completion charges are paid through the portal) — a deliberate change from the
+draft above. 4B (`netlify-functions`): `get-job-details-v2.js` validates the hash FIRST (so a
+bare job number never reveals a client's other quotes), then asks OP, best-effort (a failed OP
+call falls through to the HireHop status check — a missed refusal is recoverable, a portal that
+dies with OP is not), and returns 403 `not_payable` with the sibling info; `create-stripe-session`
+passes that refusal through, so no Stripe session can exist for a refused option.
+`payment.html`: state A is an amber note under the title ("This is Option 2 - Van + driver of the
+3 options we sent you… Paying here books this option"), no links; state B is the error screen
+with the "You've already booked Option 2" wording. **Verified on the portal already locking a
+Lost job:** yes — HireHop status 9/10 was refused before this (and still is, after the OP check).
+Also in 4A: on the CONFIRMED option the group has done its job — the bar shows only the Confirm
+panel at the top and a collapsed, read-only record of the siblings at the bottom of the page;
+Compare / Remove / Add / pin disappear across the group once an option confirms (jon, 13 Oct).
+**Live check:** pay Option 2 on a test group through the portal → OP bells the managers, Option 1's
+link shows state B naming Option 2.
+
+**Phase 2 (not in this build) — `part_of` groups.** Same table, `kind='part_of'`: a festival's
+"Main stage" + per-artist jobs. Differences from `alternative`: no confirm-one-lose-others, no
+headline dedup (they are all real jobs), Compare becomes a **Group view** with roll-ups (total
+value, vans, crew across members, dates span), Kanban shows a "part of <label>" chip rather
+than collapsing. Add-a-version becomes "Add a related job" (duplicate OR link existing). Also
+parked: swapping a confirmation from one version to another after payment (deposit moves via
+the Combine deposit mechanics — `pushDepositToHH` + `reverseDepositOnHH`).
+
+## 11. Things this deliberately does NOT do
+
+- Does not try to represent a group in HireHop beyond the job name. No HH Projects.
+- Does not merge versions into one job. Combine Bookings is for two real hires becoming one
+  continuous hire; it is refused inside an alternative group.
+- Does not track revisions of a quote (price change, item dropped) — the Activity Timeline's
+  quote-PDF diff does.
+- Does not auto-renumber, auto-bump or auto-lose anything.
+- Does not create per-document payment links.
+- Does not move money when a confirmation lands on the "wrong" version — a human swaps it.
+
+## 12. Wording to tighten at build (jon's note)
+
+The mockup copy is draft. Specific phrases jon will want to see: the modal title ("Add a
+version" vs "Quote another option"), the bar's pill format, the Confirm panel's question, the
+portal banner. Keep them short; the build session should put the final strings in one
+`frontend/src/lib/versionCopy.ts` so jon can tweak them in one place.
+
+## 13. Handover note for the build session
+
+- Have **both repos** open: this one and the payment portal (Phase 4B is there; also verify
+  §9's "already locks on Lost" assumption against its code, not memory).
+- Start with `.claude/rules/jobs-pipeline-dashboard.md` and `hirehop.md` — the lost-cleanup,
+  sacred-future and `no_webhook=1` rules all apply here.
+- Reuse, don't re-implement: `job_duplicate.php` call (`cancellations.ts` ~634), the lost
+  transition (`pipeline.ts` status PATCH), `closeJobRequirements`, `job-close-cascade`,
+  `calcHHDuration`, `getPaymentPortalLink`, the Combine candidate picker, the four-date editor.
+- Migration number: next free at build time; add to `run.ts`. Never edit 191.
+- The mockups artifact is private to jon — ask him to open it or paste screenshots.
+- Each PR: jon merges and deploys by hand; give deploy commands + the live checks in §10.
+
+## 14. State at close of the build session (13 Oct 2026) — read this first in a fresh session
+
+**Everything in §10 PRs 1–4 is live** (OP PRs #1433, #1438, #1441, #1443, #1445; portal PRs
+netlify-functions #34 and the note-position follow-up). Test group on the live system: #16842
+(Option 1, lost), **#16843 (Option 2, confirmed)**, #16844 (Option 3, lost), client "TESTING 123 Ltd".
+
+**What is left, and where it is specified:**
+
+1. **Phase 2 — `part_of` groups (festival-style "these belong together").** §10 "Phase 2 (not in
+   this build)" is the brief: same `job_groups` table with `kind = 'part_of'`; no
+   confirm-one-lose-others, no headline dedup; Compare becomes a Group view with roll-ups; the
+   Kanban shows a "part of <label>" chip instead of collapsing; "Add a related job" (duplicate OR
+   link existing). Everything in `job-groups.ts` that assumes `kind = 'alternative'` is gated by
+   `OPTION_GROUP_KIND` — grep for it. Also parked there: swapping a confirmation from one option
+   to another after payment (deposit moves via the Combine deposit mechanics).
+2. **§6.5 tags** — global search "Option 2 of 4" after a grouped job's name; org Hire History
+   nests options under the lead and the lost-as-alternative ones stay out of the stats cards
+   (the stats part IS done — `notAltQuoteLossSql`; the nesting and the search tag are not).
+3. **"Mark lost" from a Compare row** (§6.2 row actions) — not built; the Confirm panel covers the
+   real case, so this is a nicety.
+4. **The bell path has not been exercised live.** `services/option-confirm.ts` bells the job's
+   managers when an option confirms with nobody on the page (portal payment → payment-event,
+   HireHop status → webhook, Wise matcher → record-payment). To test: on a fresh test group set an
+   option to Booked IN HIREHOP and watch the bell; the link opens the job with `?group_prompt=1`.
+
+**Known artefacts of the build, not bugs to chase:**
+- #16843's HireHop dates/times are 13–14 Oct 11:20 — the HireHop duplicate was created by the
+  FIRST live attempt, before `readDuplicatedJobNumber()` existed, so our date push never ran and
+  the duplicate kept HireHop's "now". Every option created since (e.g. #16844) got its dates
+  from the same push path the Job Detail editor uses (`buildHHJobDateTimes` → `save_job.php`,
+  `no_webhook: 1`, `calcHHDuration`). Fix #16843 by editing its dates on Job Detail and pushing.
+- The payment portal already refused Lost jobs (HireHop status 10) before PR 4; PR 4's
+  `payable` flag adds the sibling-confirmed case and a belt-and-braces refusal when the HH
+  write-back of the lost status failed.
+
+**Conventions a fresh session must keep:** "option" not "version" in code and UI; the four
+confirmation paths all call `afterOptionConfirmed()`; every user-facing string in
+`frontend/src/lib/optionCopy.ts`; the date rules in `frontend/src/lib/jobDates.ts` are shared
+with the Job Detail editor — never a second copy.

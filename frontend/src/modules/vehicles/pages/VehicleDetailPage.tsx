@@ -1,14 +1,22 @@
 import { useState, useRef, useEffect } from 'react'
+import { hasManagerRole } from '../../../lib/roles'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
 import { apiFetch } from '../config/api-config'
-import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrackerAssignments'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
+import { VehicleTrackerRow } from '../components/tracking/VehicleTrackerRow'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
+import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
+import { MotHistoryTab, MotDvsaNote } from '../components/mot/MotHistoryTab'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import GiveToFreelancer from '../../../components/GiveToFreelancer'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
+import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
+import { ClaimListRow, ClaimStagePill, fmtClaimDate } from '../../../components/claims/format'
 import { updateVehicle, correctCurrentMileage, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile, markVehicleWashed } from '../lib/fleet-api'
 import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { getRossettsStatus, URGENCY_DOT, URGENCY_TEXT } from '../lib/service-status'
@@ -229,8 +237,6 @@ function CurrentMileageRow({
 export function VehicleDetailPage() {
   const { id } = useParams()
   const { data: vehicle, isLoading, isError } = useVehicle(id)
-  const { trackerNumber } = useVehicleTracker(vehicle?.reg)
-  const { assign: assignTracker, isSaving: isAssigningTracker } = useUpdateTrackerAssignment()
   const { data: complianceSettings } = useQuery({
     queryKey: ['compliance-settings'],
     queryFn: fetchComplianceSettings,
@@ -238,28 +244,50 @@ export function VehicleDetailPage() {
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [searchParams] = useSearchParams()
-  const validTabs = ['details', 'service', 'issues', 'history', 'location', 'preps'] as const
-  type TabName = typeof validTabs[number]
-  const initialTab = validTabs.includes(searchParams.get('tab') as TabName) ? (searchParams.get('tab') as TabName) : 'details'
-  const [activeTab, setActiveTab] = useState<TabName>(initialTab)
+  // Top-level tabs. Service / MOT / Events / Preps / Issues / PCNs are grouped under
+  // a single "History" parent with its own sub-tab bar; Details + Location
+  // stay top-level. `?tab=` deep-links still accept the child names (and the
+  // legacy `history` = Events alias) and resolve to History + the right sub-tab.
+  const TOP_TABS = ['details', 'history', 'forecast', 'location'] as const
+  type TopTab = typeof TOP_TABS[number]
+  const HISTORY_SUBS = ['service', 'mot', 'events', 'preps', 'issues', 'pcns', 'claims'] as const
+  type HistorySub = typeof HISTORY_SUBS[number]
+
+  function parseTabParam(raw: string | null): { top: TopTab; sub?: HistorySub } {
+    if (raw === 'location') return { top: 'location' }
+    if (raw === 'forecast') return { top: 'forecast' }
+    if (raw === 'history') return { top: 'history', sub: 'events' } // legacy: history = Events
+    if (raw && (HISTORY_SUBS as readonly string[]).includes(raw)) return { top: 'history', sub: raw as HistorySub }
+    return { top: 'details' }
+  }
+
+  const parsed = parseTabParam(searchParams.get('tab'))
+  const [activeTab, setActiveTab] = useState<TopTab>(parsed.top)
+  const [historySub, setHistorySub] = useState<HistorySub>(parsed.sub ?? 'service')
+  // Set by the "View prep →" deep-link on a Prep Completed row in the Events
+  // sub-tab; hands the Preps sub-tab the prep to open straight into.
+  const [focusPrepEventId, setFocusPrepEventId] = useState<string | null>(null)
 
   // Reset tab when switching vehicles — component instance is reused
   // across /vehicles/fleet/A → /B so without this the active tab
   // "drags across".
   useEffect(() => {
-    const urlTab = searchParams.get('tab')
-    setActiveTab(validTabs.includes(urlTab as TabName) ? (urlTab as TabName) : 'details')
+    const p = parseTabParam(searchParams.get('tab'))
+    setActiveTab(p.top)
+    setHistorySub(p.sub ?? 'service')
+    setFocusPrepEventId(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
-  const [editingTracker, setEditingTracker] = useState(false)
-  const [trackerInput, setTrackerInput] = useState('')
   const [washing, setWashing] = useState(false)
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
-  const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  const isAdmin = hasManagerRole(opAuth?.userRole)
   const canEditMileage = isAdmin || opAuth?.userRole === 'weekend_manager'
   // Finance is stricter than the page's admin/manager gate — admin only.
   const isStrictAdmin = opAuth?.userRole === 'admin'
+  // Open sale (if any) — the header pill links to the sale page.
+  const openSales = useOpenSalesByVehicle()
+  const openSale = vehicle ? openSales.get(vehicle.id) : undefined
 
   const saveField = async (field: string, value: string | number | boolean | null) => {
     if (!vehicle) return
@@ -325,11 +353,6 @@ export function VehicleDetailPage() {
 
   return (
     <div className="space-y-4">
-      {/* Back link */}
-      <Link to={vmPath('/vehicles')} className="inline-flex items-center text-sm text-ooosh-blue hover:underline">
-        &larr; Back to vehicles
-      </Link>
-
       {/* Header card */}
       <div className={`rounded-lg border bg-white p-4 ${vehicle.isOldSold ? 'border-orange-200' : 'border-gray-200'}`}>
         {vehicle.isOldSold && (
@@ -340,6 +363,13 @@ export function VehicleDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-2xl font-bold text-ooosh-navy">{vehicle.reg}</h2>
+            {/* Only once a sale exists (jon, 1 Oct 2026) — starting one lives in
+                Vehicle Settings, away from an accidental click. */}
+            {openSale && (
+              <Link to={vmPath(`/vehicles/${vehicle.id}/sale`)} className="inline-block hover:opacity-80">
+                <ForSalePill sale={openSale} />
+              </Link>
+            )}
             <p className="mt-0.5 text-sm text-gray-500">{vehicle.model || vehicle.vehicleType}</p>
             <p className="text-sm text-gray-400">{vehicle.make} · {vehicle.colour}</p>
           </div>
@@ -350,6 +380,8 @@ export function VehicleDetailPage() {
             {vehicle.seats && (
               <span className="text-xs text-gray-400">{vehicle.seats} seats</span>
             )}
+            {/* Only appears when a freelancer or sitter is in today/tomorrow (§21.4). */}
+            {!vehicle.isOldSold && <GiveToFreelancer vehicleId={vehicle.id} reg={vehicle.reg} />}
           </div>
         </div>
 
@@ -456,9 +488,9 @@ export function VehicleDetailPage() {
         </div>
       )}
 
-      {/* Tab bar */}
+      {/* Tab bar — Details | History | Location */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
-        {(['details', 'service', 'issues', 'history', 'preps', 'location'] as const).map(tab => (
+        {TOP_TABS.map(tab => (
           <button
             key={tab}
             type="button"
@@ -469,35 +501,76 @@ export function VehicleDetailPage() {
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'issues' ? 'Issues' : tab === 'history' ? 'Events' : tab === 'preps' ? 'Preps' : 'Location'}
+            {tab === 'details' ? 'Details' : tab === 'history' ? 'History' : tab === 'forecast' ? 'Forecast' : 'Location'}
           </button>
         ))}
       </div>
+
+      {/* Forecast tab — forward-looking health + AI assessment */}
+      {activeTab === 'forecast' && (
+        <ForecastTab vehicleId={vehicle.id} />
+      )}
 
       {/* Location tab */}
       {activeTab === 'location' && (
         <VehicleLocationTab reg={vehicle.reg} />
       )}
 
-      {/* Service History tab */}
-      {activeTab === 'service' && (
-        <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
-      )}
-
-      {/* Issues tab — OP job_issues backed, open issues surfaced by default */}
-      {activeTab === 'issues' && (
-        <VehicleIssuesSectionOp vehicleId={vehicle.id} />
-      )}
-
-      {/* Events tab — book-outs, check-ins, preps. Book-out/check-in rows
-          link through to the full "life of a hire" comparison page. */}
+      {/* History tab — sub-tab bar (Service / MOT / Events / Preps / Issues / PCNs) */}
       {activeTab === 'history' && (
-        <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
-      )}
+        <div className="space-y-4">
+          <div className="flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 scrollbar-hide">
+            {HISTORY_SUBS.map(sub => (
+              <button
+                key={sub}
+                type="button"
+                onClick={() => setHistorySub(sub)}
+                className={`shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  historySub === sub
+                    ? 'bg-white text-ooosh-navy shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {sub === 'service' ? 'Service' : sub === 'mot' ? 'MOT' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : sub === 'pcns' ? 'PCNs' : 'Claims'}
+              </button>
+            ))}
+          </div>
 
-      {/* Prep History tab */}
-      {activeTab === 'preps' && (
-        <PrepHistoryTab vehicleReg={vehicle.reg} />
+          {historySub === 'service' && (
+            <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
+          )}
+          {/* DVSA MOT history — every test, advisories, refresh from DVSA */}
+          {historySub === 'mot' && (
+            <MotHistoryTab vehicleId={vehicle.id} />
+          )}
+          {/* Events — book-outs, check-ins, preps. Rows link through to the
+              full "life of a hire" comparison page. */}
+          {historySub === 'events' && (
+            <VehicleEventsHistory
+              vehicleReg={vehicle.reg}
+              vehicleId={vehicle.id}
+              onOpenPrep={eventId => {
+                setFocusPrepEventId(eventId)
+                setHistorySub('preps')
+              }}
+            />
+          )}
+          {historySub === 'preps' && (
+            <PrepHistoryTab vehicleReg={vehicle.reg} focusEventId={focusPrepEventId} />
+          )}
+          {/* OP job_issues backed, open issues surfaced by default */}
+          {historySub === 'issues' && (
+            <VehicleIssuesSectionOp vehicleId={vehicle.id} />
+          )}
+          {/* OP pcns backed, penalty charge notices against this reg */}
+          {historySub === 'pcns' && (
+            <VehiclePcnsSectionOp vehicleId={vehicle.id} />
+          )}
+          {/* OP incident_claims backed — possible insurance claims on this van */}
+          {historySub === 'claims' && (
+            <VehicleClaimsSectionOp vehicleId={vehicle.id} />
+          )}
+        </div>
       )}
 
       {/* Details tab */}
@@ -529,6 +602,7 @@ export function VehicleDetailPage() {
           onSaveDate={v => saveField('mot_due', v)}
           onSaveBooked={v => saveField('mot_booked_in_date', v)}
         />
+        <MotDvsaNote vehicle={vehicle} />
         <ComplianceDateRow
           label="Tax Due" date={vehicle.taxDue} warningDays={cs.tax_warning_days}
           bookedIn={vehicle.taxBookedInDate}
@@ -608,6 +682,16 @@ export function VehicleDetailPage() {
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">V5 / Registration</h3>
         <EditableRow label="VIN / Chassis #" value={vehicle.vin} type="text" onSave={v => saveField('vin', v)} />
         <EditableRow label="Date of First Reg" value={vehicle.dateFirstReg} type="date" onSave={v => saveField('date_first_reg', v)} />
+        <VehicleValueRow vehicleId={vehicle.id} />
+        {/* Which drawing insurance-claim damage is marked on. Blank (—) = guessed from the model. */}
+        <EditableRow
+          label="Claims damage drawing"
+          value={vehicle.outlineType ?? null}
+          type="select"
+          options={['vito', 'sprinter_mwb', 'sprinter_lwb', 'generic']}
+          displayMap={{ vito: 'Vito', sprinter_mwb: 'Sprinter MWB', sprinter_lwb: 'Sprinter LWB', generic: 'Generic van' }}
+          onSave={v => saveField('outline_type', v)}
+        />
         <EditableRow label="D.1: Make" value={vehicle.make} type="text" onSave={v => saveField('make', v)} />
         <EditableRow label="D.2: Type" value={vehicle.v5Type} type="text" onSave={v => saveField('v5_type', v)} />
         <EditableRow label="D.3: Model" value={vehicle.model} type="text" onSave={v => saveField('model', v)} />
@@ -651,58 +735,8 @@ export function VehicleDetailPage() {
       {/* Other Info */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Other Info</h3>
-        {/* Tracker number — inline editable */}
-        <div className="flex items-center justify-between py-2 border-b border-gray-100">
-          <span className="text-sm text-gray-500">GPS Tracker</span>
-          {editingTracker ? (
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={trackerInput}
-                onChange={e => setTrackerInput(e.target.value)}
-                placeholder="Tracker #"
-                className="w-20 rounded border border-gray-200 px-2 py-1 text-sm text-right focus:border-blue-300 focus:outline-none"
-                autoFocus
-              />
-              <button
-                type="button"
-                disabled={isAssigningTracker}
-                onClick={async () => {
-                  if (vehicle) {
-                    await assignTracker(vehicle.reg, trackerInput.trim() || null)
-                    setEditingTracker(false)
-                  }
-                }}
-                className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
-              >
-                {isAssigningTracker ? '...' : 'Save'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setEditingTracker(false)}
-                className="rounded px-2 py-1 text-xs text-gray-400 hover:text-gray-600"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-gray-900">
-                {trackerNumber ? `#${trackerNumber}` : 'Not fitted'}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setTrackerInput(trackerNumber || '')
-                  setEditingTracker(true)
-                }}
-                className="rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-              >
-                Edit
-              </button>
-            </div>
-          )}
-        </div>
+        {/* Tracker — from the register (Fleet Map › Trackers) */}
+        <VehicleTrackerRow vehicleId={vehicle.id} />
         <EditableRow label="Wifi Network" value={vehicle.wifiNetwork} type="text" onSave={v => saveField('wifi_network', v)} />
         {/* Finance With moved to the admin-only Finance & Lifecycle section */}
         <EditableRow label="ULEZ Compliant" value={vehicle.ulezCompliant} type="toggle" onSave={v => saveField('ulez_compliant', v)} />
@@ -1467,6 +1501,168 @@ function OpIssueRowCard({ issue }: { issue: OpIssueRow }) {
             {new Date(issue.updated_at).toLocaleDateString('en-GB')}
           </div>
         </div>
+      </div>
+    </Link>
+  )
+}
+
+// ── Estimated value (docs/INCIDENT-CLAIMS-SPEC.md §6.6) ──────────────────
+// Rough replacement value from the purchase price + first registration on the
+// settings curve. Rounded server-side (£500 for non-admins) so it can't be
+// used to back out the admin-only purchase price.
+function VehicleValueRow({ vehicleId }: { vehicleId: string }) {
+  const { data } = useQuery({
+    queryKey: ['op-vehicle-value', vehicleId],
+    enabled: Boolean(vehicleId),
+    queryFn: async (): Promise<{ value_ex_vat: number; rounded_to: number } | null> => {
+      const resp = await apiFetch(`/api/claims/meta/vehicle-value/${vehicleId}`)
+      if (!resp.ok) return null
+      const body = await resp.json() as { data: { value_ex_vat: number; rounded_to: number } | null }
+      return body.data
+    },
+    staleTime: 5 * 60_000,
+  })
+  return (
+    <div className="flex items-center justify-between border-b border-gray-100 py-2 text-sm">
+      <span className="text-gray-500">Estimated value (ex-VAT)</span>
+      <span className="text-gray-800" title="From purchase price and first registration, on the curve in Settings › Claims">
+        {data ? `£${data.value_ex_vat.toLocaleString('en-GB')}` : <span className="text-gray-400">needs purchase price + first reg</span>}
+      </span>
+    </div>
+  )
+}
+
+// ── Claims (OP incident_claims-backed, mirrors the PCNs section below) ──
+function VehicleClaimsSectionOp({ vehicleId }: { vehicleId: string }) {
+  const { data: claims = [], isLoading } = useQuery({
+    queryKey: ['op-vehicle-claims', vehicleId],
+    enabled: Boolean(vehicleId),
+    queryFn: async (): Promise<ClaimListRow[]> => {
+      const resp = await apiFetch(`/api/claims/by-vehicle/${vehicleId}`)
+      if (!resp.ok) throw new Error(`Failed to fetch claims: ${resp.status}`)
+      const body = await resp.json() as { data: ClaimListRow[] }
+      return body.data || []
+    },
+    staleTime: 60_000,
+  })
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+          Insurance claims {claims.length > 0 && <span className="normal-case text-gray-400">({claims.length})</span>}
+        </h3>
+        <Link to="/vehicles/claims" className="text-xs font-medium text-blue-600">All claims →</Link>
+      </div>
+      {isLoading ? (
+        <p className="text-sm text-gray-400 text-center py-4">Loading…</p>
+      ) : claims.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-4">No insurance claims</p>
+      ) : (
+        <div className="space-y-2">
+          {claims.map(c => (
+            <Link
+              key={c.id}
+              to={`/vehicles/claims/${c.id}`}
+              className="flex items-center justify-between gap-2 rounded border border-gray-200 bg-white px-2.5 py-2 text-sm hover:border-ooosh-300 hover:bg-ooosh-50/40"
+            >
+              <span className="min-w-0 truncate">
+                {c.incident_at ? fmtClaimDate(c.incident_at) : 'Date unknown'}
+                {c.hh_job_number ? ` · J-${c.hh_job_number}` : ''}
+                {c.driver_name ? ` · ${c.driver_name}` : ''}
+              </span>
+              <ClaimStagePill stage={c.stage} outcome={c.outcome} />
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── PCNs (OP pcns-backed, mirrors the Issues section above) ──────────────
+const PCN_RESOLVED = new Set(['paid_by_driver', 'paid_recharged', 'internal_ooosh', 'internal_freelancer', 'closed'])
+
+function VehiclePcnsSectionOp({ vehicleId }: { vehicleId: string }) {
+  const [showResolved, setShowResolved] = useState(false)
+
+  const { data: pcns = [], isLoading } = useQuery({
+    queryKey: ['op-vehicle-pcns', vehicleId],
+    enabled: Boolean(vehicleId),
+    queryFn: async (): Promise<Pcn[]> => {
+      const resp = await apiFetch(`/api/pcns/by-vehicle/${vehicleId}`)
+      if (!resp.ok) throw new Error(`Failed to fetch PCNs: ${resp.status}`)
+      const body = await resp.json() as { data: Pcn[] }
+      return body.data || []
+    },
+    staleTime: 60_000,
+  })
+
+  const open = pcns.filter(p => !PCN_RESOLVED.has(p.status))
+  const resolved = pcns.filter(p => PCN_RESOLVED.has(p.status))
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+          PCNs {pcns.length > 0 && <span className="normal-case text-gray-400">({pcns.length})</span>}
+        </h3>
+        <Link to="/vehicles/pcns" className="text-xs font-medium text-blue-600">All PCNs →</Link>
+      </div>
+
+      {isLoading ? (
+        <p className="text-sm text-gray-400 text-center py-4">Loading…</p>
+      ) : pcns.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-4">No penalty charge notices</p>
+      ) : (
+        <div className="space-y-2">
+          {open.length > 0 && (
+            <>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-amber-600">In flight ({open.length})</p>
+              {open.map(p => <OpPcnRowCard key={p.id} pcn={p} />)}
+            </>
+          )}
+          {resolved.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowResolved(!showResolved)}
+                className="mt-1 flex w-full items-center justify-between text-[11px] font-medium uppercase tracking-wide text-green-600"
+              >
+                <span>Resolved ({resolved.length})</span>
+                <span className="text-gray-400">{showResolved ? 'Hide' : 'Show'}</span>
+              </button>
+              {showResolved && resolved.map(p => <OpPcnRowCard key={p.id} pcn={p} />)}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OpPcnRowCard({ pcn }: { pcn: Pcn }) {
+  const light = pcnTrafficLight(pcn)
+  const sub = [
+    pcn.offence_at ? `${fmtPcnDate(pcn.offence_at)}${pcn.offence_time_text ? ` ${pcn.offence_time_text}` : ''}` : null,
+    pcn.hh_job_number ? `J-${pcn.hh_job_number}` : null,
+    pcn.client_organisation_name || null,
+    pcn.fine_amount != null ? fmtPcnMoney(pcn.fine_amount) : null,
+  ].filter(Boolean).join(' · ')
+  return (
+    <Link
+      to={`/vehicles/pcns/${pcn.id}`}
+      className="block rounded border border-gray-200 bg-white px-2.5 py-2 text-sm hover:border-ooosh-300 hover:bg-ooosh-50/40"
+    >
+      <div className="flex items-start gap-2">
+        <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${PCN_LIGHT_DOT[light]}`} title={light} />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-gray-900 truncate">
+            {pcn.reference || '(no reference)'}
+            <span className="ml-1.5 text-[10px] text-gray-400">{FINE_TYPE_LABEL[pcn.fine_type] || pcn.fine_type}</span>
+          </div>
+          {sub && <div className="text-[10px] text-gray-500 mt-0.5">{sub}</div>}
+        </div>
+        <PcnStatusPill status={pcn.status} />
       </div>
     </Link>
   )

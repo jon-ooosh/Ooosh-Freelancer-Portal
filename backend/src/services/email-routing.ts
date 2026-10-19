@@ -24,13 +24,16 @@
  *     resolution is used (primary job_contact, etc.).
  */
 import { query } from '../config/database';
+import { greetingName } from './display-name';
 
 export type EmailBucket =
   | 'bookings_payments'
   | 'send_invoice'
   | 'hire_forms'
+  | 'carnet'
   | 'excess'
-  | 'delivery_on_day';
+  | 'delivery_on_day'
+  | 'rehearsal_info';
 
 /** Canonical bucket list — render order on the picker UI follows this array. */
 export const EMAIL_BUCKETS: ReadonlyArray<{
@@ -54,6 +57,11 @@ export const EMAIL_BUCKETS: ReadonlyArray<{
     description: 'Hire form send/chase emails to drivers.',
   },
   {
+    id: 'carnet',
+    label: 'Carnet',
+    description: 'ATA Carnet request form send/chase emails.',
+  },
+  {
     id: 'excess',
     label: 'Insurance excess',
     description: 'Excess payment confirmations, pre-auth holds, reimbursements, claims.',
@@ -62,6 +70,11 @@ export const EMAIL_BUCKETS: ReadonlyArray<{
     id: 'delivery_on_day',
     label: 'Delivery / on-the-day',
     description: 'Delivery notes, collection confirmations, check-in summaries.',
+  },
+  {
+    id: 'rehearsal_info',
+    label: 'Rehearsal info pack',
+    description: 'Pre-hire studio info pack (how to get here, parking, wifi, session times).',
   },
 ];
 
@@ -79,6 +92,10 @@ export const TEMPLATE_BUCKETS: Readonly<Record<string, EmailBucket>> = {
   // Bookings & payments
   booking_confirmed_deposit: 'bookings_payments',
   payment_received: 'bookings_payments',
+  // A hire refund is the same money conversation with the same person as the
+  // receipt that preceded it, so it belongs in this bucket rather than a new
+  // one. (Excess reimbursements stay in `excess` — different money.)
+  hire_refund_processed: 'bookings_payments',
   last_minute_booking: 'bookings_payments',
   job_cancelled_client: 'bookings_payments',
 
@@ -90,6 +107,10 @@ export const TEMPLATE_BUCKETS: Readonly<Record<string, EmailBucket>> = {
   // Hire forms & driver-facing client emails
   hire_form_request: 'hire_forms',
   hire_form_chase: 'hire_forms',
+
+  // Carnet request form
+  carnet_request: 'carnet',
+  carnet_request_chase: 'carnet',
 
   // Insurance excess (every active lifecycle template)
   excess_payment_confirmed: 'excess',
@@ -105,6 +126,10 @@ export const TEMPLATE_BUCKETS: Readonly<Record<string, EmailBucket>> = {
   delivery_note: 'delivery_on_day',
   collection_confirmation: 'delivery_on_day',
   vehicle_checked_in: 'delivery_on_day',
+  vehicle_swapped: 'delivery_on_day',
+
+  // Rehearsal info pack
+  rehearsal_info_pack: 'rehearsal_info',
 };
 
 /**
@@ -123,6 +148,8 @@ export async function resolveRoutingOverride(
   primaryEmail: string;
   primaryFirstName: string | null;
   ccEmails: string[];
+  /** Greeting name per recipient, primary first ('' = no usable name). */
+  recipientNames: string[];
 } | null> {
   const bucket = TEMPLATE_BUCKETS[templateId];
   if (!bucket) return null;
@@ -140,7 +167,7 @@ export async function resolveRoutingOverride(
   // Look up the configured people, preserving the picker's order.
   // Skip emailless / deleted rows silently.
   const peopleRows = await query(
-    `SELECT id, first_name, email
+    `SELECT id, first_name, preferred_name, email
      FROM people
      WHERE id = ANY($1::uuid[])
        AND is_deleted = false
@@ -150,16 +177,18 @@ export async function resolveRoutingOverride(
   if (peopleRows.rows.length === 0) return null;
 
   // Restore picker order (Postgres ANY doesn't preserve it).
-  const byId = new Map<string, { first_name: string | null; email: string }>(
-    peopleRows.rows.map((r: any) => [r.id, { first_name: r.first_name, email: r.email }])
+  type Routed = { first_name: string | null; preferred_name: string | null; email: string };
+  const byId = new Map<string, Routed>(
+    peopleRows.rows.map((r: any) => [r.id, { first_name: r.first_name, preferred_name: r.preferred_name, email: r.email }])
   );
-  const ordered = personIds.map(id => byId.get(id)).filter((x): x is { first_name: string | null; email: string } => !!x);
+  const ordered = personIds.map(id => byId.get(id)).filter((x): x is Routed => !!x);
   if (ordered.length === 0) return null;
 
   const primary = ordered[0];
   return {
     primaryEmail: primary.email,
-    primaryFirstName: primary.first_name || primary.email.split('@')[0] || null,
+    primaryFirstName: greetingName(primary, '') || primary.email.split('@')[0] || null,
     ccEmails: ordered.slice(1).map(p => p.email),
+    recipientNames: ordered.map(p => greetingName(p, '')),
   };
 }

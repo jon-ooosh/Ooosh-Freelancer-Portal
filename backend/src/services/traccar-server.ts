@@ -3,6 +3,8 @@
  * staff-auth /api/vehicles/traccar proxy (e.g. the public OOH parking form).
  */
 
+import { imeiForReg, isRealFix, normaliseReg } from './gps-trackers';
+
 const TRACCAR_URL = process.env.TRACCAR_URL || 'https://tracking.oooshtours.co.uk';
 const TRACCAR_EMAIL = process.env.TRACCAR_EMAIL || '';
 const TRACCAR_PASSWORD = process.env.TRACCAR_PASSWORD || '';
@@ -10,6 +12,8 @@ const TRACCAR_PASSWORD = process.env.TRACCAR_PASSWORD || '';
 interface TraccarDeviceRow {
   id: number;
   name: string;
+  /** The tracker's IMEI. */
+  uniqueId?: string;
   status?: string;
   lastUpdate?: string;
 }
@@ -20,6 +24,10 @@ interface TraccarPositionRow {
   longitude: number;
   fixTime: string;
   serverTime: string;
+  /** Knots (Traccar's unit). */
+  speed?: number;
+  course?: number;
+  address?: string | null;
 }
 
 let deviceCache: { rows: TraccarDeviceRow[]; expiresAt: number } | null = null;
@@ -43,8 +51,62 @@ async function traccarFetch<T>(endpoint: string, params?: Record<string, string>
   return res.json() as Promise<T>;
 }
 
-function normaliseReg(s: string): string {
-  return s.replace(/\s+/g, '').toUpperCase();
+/**
+ * The Traccar device for this van: the tracker fitted to it on the register
+ * (by IMEI, services/gps-trackers.ts), else a device named after the reg.
+ */
+async function findDeviceForReg(reg: string): Promise<TraccarDeviceRow | null> {
+  const now = Date.now();
+  if (!deviceCache || deviceCache.expiresAt < now) {
+    const rows = await traccarFetch<TraccarDeviceRow[]>('/devices');
+    deviceCache = { rows, expiresAt: now + DEVICE_CACHE_MS };
+  }
+  const imei = await imeiForReg(reg);
+  if (imei) {
+    const byImei = deviceCache.rows.find(d => d.uniqueId === imei);
+    if (byImei) return byImei;
+  }
+  const target = normaliseReg(reg);
+  return deviceCache.rows.find(d => normaliseReg(d.name || '') === target) || null;
+}
+
+export interface RoutePoint {
+  /** ISO fix time (UTC). */
+  time: string;
+  lat: number;
+  lng: number;
+  speedKph: number;
+  course: number | null;
+  address: string | null;
+}
+
+/**
+ * A van's recorded positions between two times (docs/INCIDENT-CLAIMS-SPEC.md §14).
+ * null = Traccar isn't configured or has no device for this reg; [] = the
+ * device exists but has no positions then (not moving, or already purged).
+ * Throws on a Traccar error so the caller can tell "nothing" from "failed".
+ */
+export async function getRouteForReg(reg: string, from: Date, to: Date): Promise<RoutePoint[] | null> {
+  if (!TRACCAR_EMAIL || !TRACCAR_PASSWORD) return null;
+  const device = await findDeviceForReg(reg);
+  if (!device) return null;
+  const rows = await traccarFetch<TraccarPositionRow[]>('/positions', {
+    deviceId: String(device.id),
+    from: from.toISOString(),
+    to: to.toISOString(),
+  });
+  return rows
+    // 0,0 = no satellite fix, not a place (gps-trackers.ts isRealFix).
+    .filter((p) => isRealFix(p.latitude, p.longitude))
+    .map((p) => ({
+      time: p.fixTime,
+      lat: p.latitude,
+      lng: p.longitude,
+      speedKph: Math.round((p.speed || 0) * 1.852 * 10) / 10,
+      course: typeof p.course === 'number' ? p.course : null,
+      address: p.address || null,
+    }))
+    .sort((a, b) => a.time.localeCompare(b.time));
 }
 
 /**
@@ -60,21 +122,15 @@ export async function getLatestPositionForReg(reg: string): Promise<{
   try {
     if (!TRACCAR_EMAIL || !TRACCAR_PASSWORD) return null;
 
-    const now = Date.now();
-    if (!deviceCache || deviceCache.expiresAt < now) {
-      const rows = await traccarFetch<TraccarDeviceRow[]>('/devices');
-      deviceCache = { rows, expiresAt: now + DEVICE_CACHE_MS };
-    }
-
-    const target = normaliseReg(reg);
-    const device = deviceCache.rows.find(d => normaliseReg(d.name || '') === target);
+    const device = await findDeviceForReg(reg);
     if (!device) return null;
 
     const positions = await traccarFetch<TraccarPositionRow[]>('/positions', {
       deviceId: String(device.id),
     });
     const pos = positions[0];
-    if (!pos) return null;
+    // A latest position with no satellite fix (0,0) is no position at all.
+    if (!pos || !isRealFix(pos.latitude, pos.longitude)) return null;
 
     const fixTimeMs = new Date(pos.fixTime).getTime();
     const ageSeconds = Math.max(0, Math.round((Date.now() - fixTimeMs) / 1000));

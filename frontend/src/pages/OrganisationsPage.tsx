@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import { useUrlSearch } from '../hooks/useUrlSearch';
 import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
 
@@ -42,10 +43,14 @@ const typeColors: Record<string, string> = {
 
 export default function OrganisationsPage() {
   const [orgs, setOrgs] = useState<Organisation[]>([]);
-  const [search, setSearch] = useState('');
+  const { search, setSearch, debouncedSearch } = useUrlSearch();
+  // Bumped per request; a reply only lands if it is still the newest (a slow
+  // reply for "1" must not overwrite the answer for "1000mods").
+  const requestSeq = useRef(0);
   const [typeFilter, setTypeFilter] = useState('');
   const [filterMissingEmail, setFilterMissingEmail] = useState(false);
   const [filterMissingPhone, setFilterMissingPhone] = useState(false);
+  const [filterMine, setFilterMine] = useState(false);
   const [sortBy, setSortBy] = useState('name');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
@@ -54,25 +59,30 @@ export default function OrganisationsPage() {
 
   useEffect(() => {
     loadOrgs();
-  }, [search, typeFilter, filterMissingEmail, filterMissingPhone, sortBy]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, typeFilter, filterMissingEmail, filterMissingPhone, filterMine, sortBy]);
 
   async function loadOrgs(page = 1) {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: String(page), limit: '50' });
-      if (search) params.set('search', search);
+      if (debouncedSearch) params.set('search', debouncedSearch);
       if (typeFilter) params.set('type', typeFilter);
       if (filterMissingEmail) params.set('missing_email', 'true');
       if (filterMissingPhone) params.set('missing_phone', 'true');
+      if (filterMine) params.set('owner', 'me');
       if (sortBy !== 'name') params.set('sort', sortBy);
 
       const data = await api.get<OrgsResponse>(`/organisations?${params}`);
+      if (seq !== requestSeq.current) return; // superseded by a newer search
       setOrgs(data.data);
       setPagination(data.pagination);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       console.error('Failed to load organisations:', err);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }
 
@@ -94,7 +104,7 @@ export default function OrganisationsPage() {
       <div className="mt-6 flex flex-wrap items-center gap-4">
         <input
           type="text"
-          placeholder="Search organisations..."
+          placeholder="Search by name, email, phone or member..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-md rounded border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
@@ -136,6 +146,15 @@ export default function OrganisationsPage() {
           />
           Missing phone
         </label>
+        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600" title="Organisations where you're set as 'Looked after by'">
+          <input
+            type="checkbox"
+            checked={filterMine}
+            onChange={(e) => setFilterMine(e.target.checked)}
+            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+          />
+          My clients
+        </label>
         <select
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value)}
@@ -145,6 +164,7 @@ export default function OrganisationsPage() {
           <option value="recently_added">Sort: Recently added</option>
           <option value="recently_updated">Sort: Recently updated</option>
           <option value="last_contacted">Sort: Last contacted</option>
+          <option value="recently_viewed">Sort: Recently viewed (me)</option>
         </select>
       </div>
 
@@ -159,8 +179,10 @@ export default function OrganisationsPage() {
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Contact</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-200">
-            {loading ? (
+          {/* While a new search loads, keep the previous results up (faded) rather
+              than blanking to "Loading..." on every keystroke */}
+          <tbody className={`divide-y divide-gray-200 transition-opacity ${loading && orgs.length > 0 ? 'opacity-50' : ''}`}>
+            {loading && orgs.length === 0 ? (
               <tr><td colSpan={5} className="px-6 py-8 text-center text-sm text-gray-500">Loading...</td></tr>
             ) : orgs.length === 0 ? (
               <tr><td colSpan={5} className="px-6 py-8 text-center text-sm text-gray-500">No organisations found.</td></tr>

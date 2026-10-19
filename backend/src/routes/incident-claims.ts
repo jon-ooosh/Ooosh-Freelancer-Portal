@@ -1,0 +1,1454 @@
+/**
+ * Incident & possible insurance claims — the case file (Vehicles › Claims).
+ * docs/INCIDENT-CLAIMS-SPEC.md, Phase 1.
+ *
+ * A case is ALWAYS opened from a Problem (spec D1): POST /from-problem/:issueId,
+ * or /out-of-the-blue, which logs the Problem first and then opens the case.
+ * The broker is never contacted automatically (D4); review, policyholder
+ * signing, the broker PDF and sending are MANAGER_ROLES only (D5).
+ *
+ * Files live under the claims/ R2 prefix, which GET /api/files/download
+ * role-gates (never files/, which any freelancer can read).
+ *
+ * One PUBLIC route, mounted before the auth gate: the broker PDF's
+ * "View full size" photo links (§11) — an unguessable per-case token.
+ */
+import { Router, Request, Response } from 'express';
+import multer from 'multer';
+import path from 'path';
+import crypto from 'crypto';
+import rateLimit from 'express-rate-limit';
+import { v4 as uuid } from 'uuid';
+import { z } from 'zod';
+import { query } from '../config/database';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
+import { validate } from '../middleware/validate';
+import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
+import {
+  CLAIM_STAGES, CLAIM_OUTCOMES, STAGE_LABEL, NOTIFIED_VIA, SHARED_BY_DEFAULT,
+  createClaimFromIssue, logClaimEvent, notifyClaimFollowers, claimLabel, notifyClaimMentions,
+  nextWorkingDay, ukDatePlus, stageNeedsCheckDate, getDefaultClaimWatchers,
+} from '../services/incident-claims';
+import {
+  logIssueEvent, getDefaultVehicleIssueWatchers, notifyIssueRecipients,
+} from '../services/job-issues';
+import { estimateVehicleValue } from '../services/vehicle-value';
+import { notifyVehicleSaleOfIssue } from '../services/vehicle-sales';
+import { resolveOutlineType, CLAIM_SECTIONS } from '../services/claim-form-fields';
+import { getRouteForReg } from '../services/traccar-server';
+import { incidentWindow, saveGpsTrace, csvToPoints, MAX_WINDOW_HOURS } from '../services/claim-gps';
+import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
+import { resolveJobContactCandidates } from '../services/job-contact-candidates';
+
+const router = Router();
+
+export const CLAIMS_PREFIX = 'claims/';
+
+const isManager = (role: string | undefined) =>
+  (MANAGER_ROLES as readonly string[]).includes(role || '');
+
+// ─────────────────────────────────────────────────────────────────────────
+// PUBLIC — full-size photo behind the broker PDF's "View full size" links.
+// The token is minted when a PDF is first built; it dies 90 days after the
+// case closes. Nothing mutates on GET.
+// ─────────────────────────────────────────────────────────────────────────
+
+const photoLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  message: { error: 'Too many requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.get('/photo/:token/:fileId', photoLimiter, async (req: Request, res: Response) => {
+  try {
+    const token = String(req.params.token || '');
+    const fileId = String(req.params.fileId || '');
+    if (token.length < 16 || token.length > 128 || !/^[0-9a-f-]{36}$/i.test(fileId)) {
+      res.status(404).send('Not found');
+      return;
+    }
+    const r = await query(
+      `SELECT f.r2_key, f.content_type, f.filename
+       FROM incident_claims c
+       JOIN incident_claim_files f ON f.claim_id = c.id
+       WHERE c.photo_link_token = $1 AND f.id = $2
+         AND c.is_deleted = false
+         AND f.file_type = 'photo'
+         AND f.share_with_insurer = true
+         AND (c.stage <> 'closed' OR c.closed_at IS NULL OR c.closed_at > NOW() - INTERVAL '90 days')`,
+      [token, fileId],
+    );
+    if (r.rowCount === 0) {
+      res.status(404).send('This link has expired or is not valid.');
+      return;
+    }
+    const object = await getFromR2(r.rows[0].r2_key);
+    if (!object.Body) { res.status(404).send('Not found'); return; }
+    res.setHeader('Content-Type', r.rows[0].content_type || 'image/jpeg');
+    res.setHeader('Content-Disposition', `inline; filename="${String(r.rows[0].filename).replace(/"/g, '')}"`);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('X-Robots-Tag', 'noindex');
+    const stream = object.Body as NodeJS.ReadableStream & { destroy?: (err?: Error) => void };
+    res.on('close', () => { if (!res.writableEnded) stream.destroy?.(); });
+    stream.on('error', () => res.destroy());
+    stream.pipe(res);
+  } catch (err) {
+    console.error('Claim photo link error:', err);
+    res.status(500).send('Error');
+  }
+});
+
+router.use(authenticate);
+router.use(authorize(...STAFF_ROLES));
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shared SELECTs
+// ─────────────────────────────────────────────────────────────────────────
+
+const LIST_SELECT = `
+  c.id, c.stage, c.outcome, c.closed_at,
+  c.origin_issue_id, c.job_id, c.vehicle_id, c.driver_id, c.assignment_id,
+  c.hh_job_number, COALESCE(fv.reg, c.vehicle_reg) AS vehicle_reg,
+  c.incident_at, c.incident_time_text, c.incident_location, c.notified_on, c.notified_via,
+  c.broker_ref, c.insurer_ref, c.broker_sent_at,
+  c.third_party_claim, c.liability_dispute,
+  c.owner_user_id, c.next_check_on, c.chase_level, c.chase_paused_at,
+  c.created_at, c.updated_at,
+  j.job_name, j.client_name,
+  d.full_name AS driver_name,
+  NULLIF(TRIM(CONCAT(op.first_name, ' ', op.last_name)), '') AS owner_name,
+  (SELECT COUNT(*)::int FROM job_issues ji WHERE ji.claim_id = c.id) AS problem_count
+`;
+
+const LIST_JOIN = `
+  FROM incident_claims c
+  LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+  LEFT JOIN jobs j ON j.id = c.job_id
+  LEFT JOIN drivers d ON d.id = c.driver_id
+  LEFT JOIN users ou ON ou.id = c.owner_user_id
+  LEFT JOIN people op ON op.id = ou.person_id
+`;
+
+// Dates leave as YYYY-MM-DD strings, never Date objects (a DATE through
+// node-postgres becomes local midnight and can shift a day on the way out).
+function normaliseDates<T extends Record<string, unknown>>(row: T): T {
+  for (const k of ['notified_on', 'next_check_on', 'next_check_sent_for'] as const) {
+    const v = row[k];
+    if (v instanceof Date) (row as Record<string, unknown>)[k] = v.toISOString().slice(0, 10);
+  }
+  return row;
+}
+
+async function loadClaimRow(id: string) {
+  const r = await query(`SELECT * FROM incident_claims WHERE id = $1 AND is_deleted = false`, [id]);
+  return r.rows[0] || null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Open a case
+// ─────────────────────────────────────────────────────────────────────────
+
+const fromProblemSchema = z.object({
+  third_party_claim: z.boolean().optional(),
+});
+
+router.post('/from-problem/:issueId', validate(fromProblemSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const issueId = String(req.params.issueId);
+    const body = req.body as z.infer<typeof fromProblemSchema>;
+    const result = await createClaimFromIssue(issueId, req.user!.id, { thirdPartyClaim: body.third_party_claim });
+    if (!result.existing) {
+      const c = await loadClaimRow(result.claimId);
+      await notifyClaimFollowers(result.claimId, req.user!.id,
+        `Possible insurance claim opened — ${claimLabel(c || {})}`,
+        'A Problem has been flagged as a possible insurance claim.');
+    }
+    res.status(result.existing ? 200 : 201).json({ data: { id: result.claimId, existing: result.existing } });
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 404) { res.status(404).json({ error: 'Problem not found' }); return; }
+    console.error('Open claim from problem error:', err);
+    res.status(500).json({ error: 'Failed to open claim' });
+  }
+});
+
+// A claim out of the blue, after the hire (§3.1). Still Problem-first: logs a
+// `dispute` Problem on the van (and the hire, if staff picked one from the
+// /pcns/match lookup), then opens the case with third_party_claim set.
+const outOfTheBlueSchema = z.object({
+  vehicle_id: z.string().uuid(),
+  alleged_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  job_id: z.string().uuid().optional().nullable(),
+  driver_id: z.string().uuid().optional().nullable(),
+  summary: z.string().trim().min(2).max(255),
+  description: z.string().trim().max(10000).optional().nullable(),
+});
+
+router.post('/out-of-the-blue', validate(outOfTheBlueSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = req.body as z.infer<typeof outOfTheBlueSchema>;
+    const userId = req.user!.id;
+
+    let clientOrgId: string | null = null;
+    if (body.job_id) {
+      const job = await query(`SELECT client_id FROM jobs WHERE id = $1 AND is_deleted = false`, [body.job_id]);
+      if (job.rowCount === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+      clientOrgId = job.rows[0].client_id ?? null;
+    }
+    const watchers = await getDefaultVehicleIssueWatchers();
+    const ins = await query(
+      `INSERT INTO job_issues (
+         job_id, vehicle_id, driver_id, client_organisation_id,
+         category, source_module, severity, summary, description, reported_by, watchers
+       ) VALUES ($1, $2, $3, $4, 'dispute', 'manual', 'normal', $5, $6, $7, $8::uuid[])
+       RETURNING id`,
+      [body.job_id ?? null, body.vehicle_id, body.driver_id ?? null, clientOrgId,
+       body.summary, body.description ?? null, userId, watchers],
+    );
+    const issueId: string = ins.rows[0].id;
+    await logIssueEvent(issueId, userId, 'created', body.summary, {
+      category: 'dispute', severity: 'normal', source_module: 'manual', alleged_date: body.alleged_date,
+    });
+    await notifyIssueRecipients(issueId, userId, 'normal', `New issue: ${body.summary.slice(0, 80)}`, 'dispute — third-party claim');
+    await notifyVehicleSaleOfIssue(issueId, userId);
+    if (body.job_id) {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [`⚠️ Third-party claim logged (${body.alleged_date}): ${body.summary}`, body.job_id, userId],
+      );
+    }
+
+    const result = await createClaimFromIssue(issueId, userId, {
+      thirdPartyClaim: true, incidentDate: body.alleged_date,
+    });
+    const c = await loadClaimRow(result.claimId);
+    await notifyClaimFollowers(result.claimId, userId,
+      `Third-party claim logged — ${claimLabel(c || {})}`,
+      `Alleged incident on ${body.alleged_date}.`);
+    res.status(201).json({ data: { id: result.claimId, issue_id: issueId } });
+  } catch (err) {
+    console.error('Out-of-the-blue claim error:', err);
+    res.status(500).json({ error: 'Failed to log the claim' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Lists
+// ─────────────────────────────────────────────────────────────────────────
+
+router.get('/', async (req: AuthRequest, res: Response) => {
+  try {
+    const { stage = 'active', search, vehicle_id } = req.query as Record<string, string | undefined>;
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
+
+    const conds: string[] = ['c.is_deleted = false'];
+    const params: unknown[] = [];
+    if (stage === 'active') conds.push(`c.stage <> 'closed'`);
+    else if (stage !== 'all') {
+      if (!(CLAIM_STAGES as readonly string[]).includes(stage)) { res.status(400).json({ error: 'Invalid stage' }); return; }
+      params.push(stage);
+      conds.push(`c.stage = $${params.length}`);
+    }
+    if (vehicle_id) { params.push(vehicle_id); conds.push(`c.vehicle_id = $${params.length}`); }
+    if (search && search.trim()) {
+      params.push(`%${search.trim()}%`);
+      const p = `$${params.length}`;
+      conds.push(`(COALESCE(fv.reg, c.vehicle_reg) ILIKE ${p} OR REPLACE(COALESCE(fv.reg, c.vehicle_reg), ' ', '') ILIKE REPLACE(${p}, ' ', '')
+                  OR CAST(c.hh_job_number AS TEXT) ILIKE ${p} OR c.broker_ref ILIKE ${p} OR c.insurer_ref ILIKE ${p}
+                  OR c.incident_location ILIKE ${p} OR d.full_name ILIKE ${p} OR j.job_name ILIKE ${p})`);
+    }
+    const where = `WHERE ${conds.join(' AND ')}`;
+
+    const count = await query(`SELECT COUNT(*)::int AS n ${LIST_JOIN} ${where}`, params);
+    params.push(limit, (page - 1) * limit);
+    const rows = await query(
+      `SELECT ${LIST_SELECT} ${LIST_JOIN} ${where}
+       ORDER BY CASE WHEN c.stage = 'closed' THEN 1 ELSE 0 END,
+                c.next_check_on NULLS FIRST,
+                c.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    const total = count.rows[0].n as number;
+    res.json({
+      data: rows.rows.map(normaliseDates),
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (err) {
+    console.error('List claims error:', err);
+    res.status(500).json({ error: 'Failed to fetch claims' });
+  }
+});
+
+const byEntity = (column: 'vehicle_id' | 'job_id' | 'driver_id') =>
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const r = await query(
+        `SELECT ${LIST_SELECT} ${LIST_JOIN}
+         WHERE c.is_deleted = false AND c.${column} = $1
+         ORDER BY CASE WHEN c.stage = 'closed' THEN 1 ELSE 0 END, c.created_at DESC`,
+        [String(req.params.id)],
+      );
+      res.json({ data: r.rows.map(normaliseDates) });
+    } catch (err) {
+      console.error(`Claims by ${column} error:`, err);
+      res.status(500).json({ error: 'Failed to fetch claims' });
+    }
+  };
+
+router.get('/by-vehicle/:id', byEntity('vehicle_id'));
+router.get('/by-job/:id', byEntity('job_id'));
+router.get('/by-driver/:id', byEntity('driver_id'));
+
+// ─────────────────────────────────────────────────────────────────────────
+// One case
+// ─────────────────────────────────────────────────────────────────────────
+
+router.get('/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const r = await query(
+      `SELECT c.*, COALESCE(fv.reg, c.vehicle_reg) AS vehicle_reg,
+              fv.make AS vehicle_make, fv.model AS vehicle_model, fv.cylinder_capacity_cc AS vehicle_cc,
+              fv.cash_price, fv.deposit_paid, fv.amount_financed, fv.date_first_reg,
+              fv.outline_type, fv.vehicle_type AS fleet_vehicle_type, fv.simple_type AS fleet_simple_type,
+              j.job_name, j.client_name, j.job_date, j.job_end,
+              d.full_name AS driver_name,
+              NULLIF(TRIM(CONCAT(op.first_name, ' ', op.last_name)), '') AS owner_name,
+              NULLIF(TRIM(CONCAT(pp.first_name, ' ', pp.last_name)), '') AS policyholder_user_name
+       FROM incident_claims c
+       LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+       LEFT JOIN jobs j ON j.id = c.job_id
+       LEFT JOIN drivers d ON d.id = c.driver_id
+       LEFT JOIN users ou ON ou.id = c.owner_user_id
+       LEFT JOIN people op ON op.id = ou.person_id
+       LEFT JOIN users pu ON pu.id = c.policyholder_user_id
+       LEFT JOIN people pp ON pp.id = pu.person_id
+       WHERE c.id = $1 AND c.is_deleted = false`,
+      [id],
+    );
+    if (r.rowCount === 0) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const claim = r.rows[0];
+
+    // Value estimate — admins get £100 rounding, everyone else £500 (§6.6).
+    const estimate = await estimateVehicleValue(claim, { isAdmin: req.user!.role === 'admin' });
+    const outline = resolveOutlineType({
+      outline_type: claim.outline_type, make: claim.vehicle_make, model: claim.vehicle_model,
+      vehicle_type: claim.fleet_vehicle_type, simple_type: claim.fleet_simple_type,
+    });
+    delete claim.cash_price; delete claim.deposit_paid; delete claim.amount_financed;
+    delete claim.photo_link_token;
+    const links = await query(
+      `SELECT id, recipient_name, recipient_email, role, status, filled_as, filled_by_name,
+              sent_at, first_opened_at, last_opened_at, created_at, handed_off_from
+       FROM incident_claim_links WHERE claim_id = $1 ORDER BY created_at`,
+      [id],
+    );
+
+    const [problems, events, files, drivers] = await Promise.all([
+      query(
+        `SELECT ji.id, ji.summary, ji.category, ji.status, ji.severity, ji.created_at, ji.component_key
+         FROM job_issues ji WHERE ji.claim_id = $1 ORDER BY ji.created_at`,
+        [id],
+      ),
+      query(
+        `SELECT e.id, e.event_type, to_char(e.event_date, 'YYYY-MM-DD') AS event_date,
+                e.body, e.metadata, e.created_at,
+                NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), '') AS created_by_name
+         FROM incident_claim_events e
+         LEFT JOIN users u ON u.id = e.created_by
+         LEFT JOIN people p ON p.id = u.person_id
+         WHERE e.claim_id = $1
+         ORDER BY e.created_at DESC`,
+        [id],
+      ),
+      query(
+        `SELECT f.id, f.r2_key, f.thumb_r2_key, f.filename, f.file_type, f.content_type, f.size_bytes,
+                f.caption, f.taken_at, f.uploaded_at, f.share_with_insurer,
+                NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), '') AS uploaded_by_name
+         FROM incident_claim_files f
+         LEFT JOIN users u ON u.id = f.uploaded_by
+         LEFT JOIN people p ON p.id = u.person_id
+         WHERE f.claim_id = $1
+         ORDER BY f.uploaded_at`,
+        [id],
+      ),
+      // Everyone who could have been driving: drivers on this van on this hire
+      // (or on the whole hire when the case has no van yet). Names only here —
+      // the identified driver's declarations are fetched separately below.
+      claim.job_id || claim.hh_job_number
+        ? query(
+          `SELECT DISTINCT ON (d.id)
+                  d.id AS driver_id, d.full_name, vha.id AS assignment_id, vha.vehicle_id,
+                  (vha.hire_form_pdf_key IS NOT NULL) AS has_hire_form
+           FROM vehicle_hire_assignments vha
+           JOIN drivers d ON d.id = vha.driver_id
+           WHERE vha.status <> 'cancelled'
+             AND ($1::uuid IS NULL OR vha.vehicle_id = $1)
+             AND ((vha.job_id IS NOT NULL AND vha.job_id = $2)
+                  OR (vha.job_id IS NULL AND $3::int IS NOT NULL AND vha.hirehop_job_id = $3))
+           ORDER BY d.id, (vha.hire_form_pdf_key IS NOT NULL) DESC`,
+          [claim.vehicle_id, claim.job_id, claim.hh_job_number],
+        )
+        : Promise.resolve({ rows: [] as unknown[] }),
+    ]);
+
+    // The identified driver's hire-form declarations (§7.3) — for the staff
+    // form's "from the hire form" hints and the broker PDF. Staff-only page.
+    let hireFormDeclarations: Record<string, unknown> | null = null;
+    if (claim.driver_id) {
+      const dr = await query(
+        `SELECT has_accidents, has_convictions, has_prosecution, has_disability,
+                licence_points, licence_endorsements, additional_details
+         FROM drivers WHERE id = $1`,
+        [claim.driver_id],
+      );
+      if (dr.rows[0]) {
+        const x = dr.rows[0];
+        const endorsements = Array.isArray(x.licence_endorsements) ? x.licence_endorsements : [];
+        hireFormDeclarations = {
+          accidents: !!x.has_accidents,
+          // (b) combined: serious convictions OR pending prosecution OR any points / endorsements.
+          convictions: !!x.has_convictions || !!x.has_prosecution || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
+          disability: !!x.has_disability,
+          licence_points: x.licence_points ?? null,
+          endorsements,
+          additional_details: x.additional_details ?? null,
+        };
+      }
+    }
+
+    res.json({
+      data: {
+        ...normaliseDates(claim),
+        date_first_reg: claim.date_first_reg instanceof Date ? claim.date_first_reg.toISOString().slice(0, 10) : claim.date_first_reg,
+        value_estimate: estimate,
+        outline,
+        links: links.rows,
+        hire_form_declarations: hireFormDeclarations,
+        problems: problems.rows,
+        events: events.rows,
+        files: files.rows,
+        drivers: drivers.rows,
+        stage_label: STAGE_LABEL[claim.stage as keyof typeof STAGE_LABEL] || claim.stage,
+      },
+    });
+  } catch (err) {
+    console.error('Get claim error:', err);
+    res.status(500).json({ error: 'Failed to fetch claim' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Edit
+// ─────────────────────────────────────────────────────────────────────────
+
+const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const NOTIFIED_VIA_LABEL: Record<string, string> = {
+  client: 'client (direct)',
+  tts360: 'TTS360 (24-hour line)',
+  third_party: 'third party / their insurer',
+  check_in: 'found at check-in',
+  other: 'other',
+};
+/** 2026-10-20 → 20/10/2026 for timeline text. */
+const ukd = (ymd: string) => ymd.split('-').reverse().join('/');
+
+const patchSchema = z.object({
+  vehicle_id: z.string().uuid().nullable().optional(),
+  driver_id: z.string().uuid().nullable().optional(),
+  notified_on: dateStr.optional(),
+  notified_via: z.enum(NOTIFIED_VIA).nullable().optional(),
+  broker_ref: z.string().trim().max(100).nullable().optional(),
+  insurer_ref: z.string().trim().max(100).nullable().optional(),
+  broker_sent_on: dateStr.nullable().optional(),
+  third_party_claim: z.boolean().optional(),
+  third_party_claim_notes: z.string().trim().max(5000).nullable().optional(),
+  liability_dispute: z.boolean().optional(),
+  liability_dispute_notes: z.string().trim().max(5000).nullable().optional(),
+  owner_user_id: z.string().uuid().nullable().optional(),
+  next_check_on: dateStr.nullable().optional(),
+  next_check_note: z.string().trim().max(2000).optional(),
+  form_data: z.record(z.unknown()).optional(),
+});
+
+router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const body = req.body as z.infer<typeof patchSchema>;
+    const before = await loadClaimRow(id);
+    if (!before) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const userId = req.user!.id;
+
+    const sets: string[] = [];
+    const params: unknown[] = [id];
+    const set = (col: string, val: unknown, cast = '') => {
+      params.push(val);
+      sets.push(`${col} = $${params.length}${cast}`);
+    };
+
+    if ('vehicle_id' in body) {
+      set('vehicle_id', body.vehicle_id ?? null);
+      let reg: string | null = null;
+      if (body.vehicle_id) {
+        const v = await query(`SELECT reg FROM fleet_vehicles WHERE id = $1`, [body.vehicle_id]);
+        if (v.rowCount === 0) { res.status(404).json({ error: 'Vehicle not found' }); return; }
+        reg = v.rows[0].reg;
+      }
+      set('vehicle_reg', reg);
+    }
+    if ('driver_id' in body) {
+      set('driver_id', body.driver_id ?? null);
+      // Keep the assignment in step when the driver is on this hire.
+      let assignmentId: string | null = null;
+      if (body.driver_id) {
+        const a = await query(
+          `SELECT id FROM vehicle_hire_assignments
+           WHERE driver_id = $1 AND status <> 'cancelled'
+             AND ($2::uuid IS NULL OR vehicle_id = $2)
+             AND (($3::uuid IS NOT NULL AND job_id = $3) OR ($4::int IS NOT NULL AND job_id IS NULL AND hirehop_job_id = $4))
+           ORDER BY created_at DESC LIMIT 1`,
+          [body.driver_id, body.vehicle_id ?? before.vehicle_id, before.job_id, before.hh_job_number],
+        );
+        assignmentId = a.rows[0]?.id ?? null;
+      }
+      set('assignment_id', assignmentId);
+    }
+    if (body.notified_on !== undefined) set('notified_on', body.notified_on, '::date');
+    if ('notified_via' in body) set('notified_via', body.notified_via ?? null);
+    if ('broker_ref' in body) set('broker_ref', body.broker_ref || null);
+    if ('insurer_ref' in body) set('insurer_ref', body.insurer_ref || null);
+    if ('broker_sent_on' in body) set('broker_sent_at', body.broker_sent_on ? `${body.broker_sent_on}T12:00:00Z` : null, '::timestamptz');
+    if (body.third_party_claim !== undefined) set('third_party_claim', body.third_party_claim);
+    if ('third_party_claim_notes' in body) set('third_party_claim_notes', body.third_party_claim_notes || null);
+    if (body.liability_dispute !== undefined) set('liability_dispute', body.liability_dispute);
+    if ('liability_dispute_notes' in body) set('liability_dispute_notes', body.liability_dispute_notes || null);
+    if ('owner_user_id' in body) set('owner_user_id', body.owner_user_id ?? null);
+    if ('next_check_on' in body) set('next_check_on', body.next_check_on ?? null, '::date');
+    if (body.form_data) {
+      // Only the sections sent are replaced — the page sends just the ones staff
+      // edited, so a client filling in the same form through their link at the
+      // same time keeps everything else. Derive the list/filter columns from it.
+      const fd = body.form_data as Record<string, Record<string, unknown> | unknown>;
+      params.push(JSON.stringify(fd));
+      sets.push(`form_data = form_data || $${params.length}::jsonb`);
+      if (fd.incident && typeof fd.incident === 'object') {
+        const inc = fd.incident as Record<string, unknown>;
+        const date = typeof inc.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(inc.date) ? inc.date : null;
+        set('incident_at', date ? `${date}T12:00:00Z` : null, '::timestamptz');
+        set('incident_time_text', typeof inc.time === 'string' && inc.time.trim() ? inc.time.trim() : null);
+        set('incident_location', typeof inc.place === 'string' && inc.place.trim() ? inc.place.trim() : null);
+      }
+    }
+    if (sets.length === 0) { res.status(400).json({ error: 'Nothing to update' }); return; }
+    sets.push('updated_at = NOW()');
+    await query(`UPDATE incident_claims SET ${sets.join(', ')} WHERE id = $1`, params);
+
+    // Timeline — one event per meaningful change.
+    if ('notified_via' in body && (body.notified_via ?? null) !== before.notified_via) {
+      await logClaimEvent(id, userId, 'notified_via', `How we heard: ${NOTIFIED_VIA_LABEL[body.notified_via ?? ''] || 'not set'}`);
+    }
+    if ('broker_ref' in body && (body.broker_ref || null) !== before.broker_ref) {
+      await logClaimEvent(id, userId, 'ref_recorded', `Boswell ref: ${body.broker_ref || '(cleared)'}`);
+    }
+    if ('insurer_ref' in body && (body.insurer_ref || null) !== before.insurer_ref) {
+      await logClaimEvent(id, userId, 'ref_recorded', `Markerstudy ref: ${body.insurer_ref || '(cleared)'}`);
+    }
+    if (body.third_party_claim !== undefined && body.third_party_claim !== before.third_party_claim) {
+      await logClaimEvent(id, userId, 'complication', body.third_party_claim ? 'Third-party claim against our policy flagged' : 'Third-party claim flag cleared');
+    }
+    if (body.liability_dispute !== undefined && body.liability_dispute !== before.liability_dispute) {
+      await logClaimEvent(id, userId, 'complication', body.liability_dispute ? 'Liability dispute with the hirer flagged' : 'Liability dispute flag cleared');
+    }
+    if ('owner_user_id' in body && (body.owner_user_id ?? null) !== before.owner_user_id) {
+      await logClaimEvent(id, userId, 'owner_change', null, { from: before.owner_user_id, to: body.owner_user_id ?? null });
+      if (body.owner_user_id && body.owner_user_id !== userId) {
+        await notifyClaimFollowers(id, userId, `You now own claim — ${claimLabel(before)}`,
+          'You\'ll get a bell on its next check date.', { onlyUserIds: [body.owner_user_id] });
+      }
+    }
+    if ('next_check_on' in body) {
+      const beforeDate = before.next_check_on instanceof Date ? before.next_check_on.toISOString().slice(0, 10) : before.next_check_on;
+      if ((body.next_check_on ?? null) !== (beforeDate ?? null) || body.next_check_note) {
+        await logClaimEvent(id, userId, 'next_check',
+          [body.next_check_on ? `Next check ${ukd(body.next_check_on)}` : 'Next check date cleared', body.next_check_note].filter(Boolean).join(' — '),
+          { from: beforeDate ?? null, to: body.next_check_on ?? null });
+      }
+    }
+    if ('driver_id' in body && (body.driver_id ?? null) !== before.driver_id) {
+      let name: string | null = null;
+      if (body.driver_id) {
+        const d = await query(`SELECT full_name FROM drivers WHERE id = $1`, [body.driver_id]);
+        name = d.rows[0]?.full_name ?? null;
+      }
+      await logClaimEvent(id, userId, 'driver_set', name ? `Driver at the time: ${name}` : 'Driver cleared', { driver_id: body.driver_id ?? null });
+    }
+    if ('broker_sent_on' in body) {
+      await logClaimEvent(id, userId, 'milestone', 'Docs sent to broker', { kind: 'broker_sent' }, { eventDate: body.broker_sent_on ?? null });
+    }
+    if (body.notified_on !== undefined) {
+      const beforeNotified = before.notified_on instanceof Date ? before.notified_on.toISOString().slice(0, 10) : before.notified_on;
+      if (body.notified_on !== beforeNotified) {
+        await logClaimEvent(id, userId, 'milestone', 'Date we were notified corrected', { kind: 'notified' }, { eventDate: body.notified_on });
+      }
+    }
+    if (body.form_data) {
+      const titles = Object.keys(body.form_data)
+        .map((k) => CLAIM_SECTIONS.find((s) => s.key === k.replace(/_involved$/, ''))?.title)
+        .filter((t, i, a): t is string => !!t && a.indexOf(t) === i);
+      await logClaimEvent(id, userId, 'form_saved', `Form answers updated${titles.length ? ` — ${titles.join(', ')}` : ''}`);
+    }
+
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Update claim error:', err);
+    res.status(500).json({ error: 'Failed to update claim' });
+  }
+});
+
+// Log an update + set the next check date in one go (§9.2 — "logging any
+// update asks when to next check").
+const updateSchema = z.object({
+  note: z.string().trim().min(1).max(10000),
+  next_check_on: dateStr.nullable().optional(),
+  mentioned_user_ids: z.array(z.string().uuid()).max(50).optional(),
+});
+
+router.post('/:id/updates', validate(updateSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const body = req.body as z.infer<typeof updateSchema>;
+    const c = await loadClaimRow(id);
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const mentioned = body.mentioned_user_ids ?? [];
+    await logClaimEvent(id, req.user!.id, 'comment', body.note, mentioned.length ? { mentioned_user_ids: mentioned } : null);
+    if (mentioned.length) await notifyClaimMentions(id, req.user!.id, mentioned, body.note);
+    if (body.next_check_on !== undefined) {
+      await query(`UPDATE incident_claims SET next_check_on = $2::date, updated_at = NOW() WHERE id = $1`, [id, body.next_check_on]);
+      await logClaimEvent(id, req.user!.id, 'next_check',
+        body.next_check_on ? `Next check ${ukd(body.next_check_on)}` : 'Next check date cleared',
+        { to: body.next_check_on });
+    } else {
+      await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
+    }
+    // Followers get the low-priority "update logged" bell — minus anyone just
+    // @mentioned, who already has the louder one.
+    const r = await query(`SELECT watchers, owner_user_id FROM incident_claims WHERE id = $1`, [id]);
+    const followers = new Set<string>([...((r.rows[0]?.watchers as string[]) || []), ...(r.rows[0]?.owner_user_id ? [r.rows[0].owner_user_id] : [])]);
+    for (const m of mentioned) followers.delete(m);
+    await notifyClaimFollowers(id, req.user!.id, `Claim update — ${claimLabel(c)}`, 'A new update was logged on the case.',
+      { priority: 'low', onlyUserIds: Array.from(followers) });
+    res.status(201).json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim update error:', err);
+    res.status(500).json({ error: 'Failed to log update' });
+  }
+});
+
+// Milestones with a date that's often logged after the fact (§4).
+const milestoneSchema = z.object({
+  kind: z.enum(['processed', 'repair_booked', 'other']),
+  date: dateStr,
+  note: z.string().trim().max(2000).optional(),
+});
+const MILESTONE_LABEL: Record<string, string> = {
+  processed: 'Claim processed / approved',
+  repair_booked: 'Repair booked',
+  other: 'Milestone',
+};
+
+router.post('/:id/milestones', validate(milestoneSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const body = req.body as z.infer<typeof milestoneSchema>;
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+    await logClaimEvent(id, req.user!.id, 'milestone',
+      [MILESTONE_LABEL[body.kind], body.note].filter(Boolean).join(' — '),
+      { kind: body.kind }, { eventDate: body.date });
+    await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
+    res.status(201).json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim milestone error:', err);
+    res.status(500).json({ error: 'Failed to add milestone' });
+  }
+});
+
+router.patch('/:id/milestones/:eventId', validate(z.object({ date: dateStr })), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `UPDATE incident_claim_events SET event_date = $3::date
+       WHERE id = $2 AND claim_id = $1 AND event_type = 'milestone'
+       RETURNING id`,
+      [String(req.params.id), String(req.params.eventId), (req.body as { date: string }).date],
+    );
+    if (!r.rowCount) { res.status(404).json({ error: 'Milestone not found' }); return; }
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim milestone edit error:', err);
+    res.status(500).json({ error: 'Failed to edit milestone' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stage
+// ─────────────────────────────────────────────────────────────────────────
+
+const stageSchema = z.object({
+  stage: z.enum(CLAIM_STAGES),
+  outcome: z.enum(CLAIM_OUTCOMES).optional(),
+  note: z.string().trim().max(5000).optional(),
+});
+
+// Moves that are a manager's decision (spec D5): reviewing, sending, closing,
+// and re-opening a closed case.
+const MANAGER_TARGETS: ReadonlySet<string> = new Set(['reviewed', 'with_broker', 'closed']);
+
+router.post('/:id/stage', validate(stageSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const body = req.body as z.infer<typeof stageSchema>;
+    const c = await loadClaimRow(id);
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    if (body.stage === c.stage) { res.status(400).json({ error: 'Already at that stage' }); return; }
+    if ((MANAGER_TARGETS.has(body.stage) || c.stage === 'closed') && !isManager(req.user!.role)) {
+      res.status(403).json({ error: 'Only a manager or admin can do that' });
+      return;
+    }
+    if (body.stage === 'form_out') {
+      // Phase 2 builds the client form + links; until then nothing would chase.
+      res.status(400).json({ error: 'Use "Send form" to send the form to someone — the case moves to Form out when it goes.' });
+      return;
+    }
+    if (body.stage === 'closed' && !body.outcome) {
+      res.status(400).json({ error: 'Pick an outcome to close the case' });
+      return;
+    }
+
+    const sets = ['stage = $2', 'updated_at = NOW()'];
+    const params: unknown[] = [id, body.stage];
+    if (body.stage === 'closed') {
+      params.push(body.outcome);
+      sets.push(`outcome = $${params.length}`, 'closed_at = NOW()', 'next_check_on = NULL');
+    } else {
+      if (c.stage === 'closed') sets.push('outcome = NULL', 'closed_at = NULL');
+      let next: string | null = null;
+      if (body.stage === 'submitted') next = nextWorkingDay();            // "waiting for review"
+      else if (stageNeedsCheckDate(body.stage) && (c.stage === 'closed' || !c.next_check_on)) next = ukDatePlus(14);
+      if (next) { params.push(next); sets.push(`next_check_on = $${params.length}::date`); }
+      if (body.stage === 'with_broker' && !c.broker_sent_at) sets.push('broker_sent_at = NOW()');
+    }
+    await query(`UPDATE incident_claims SET ${sets.join(', ')} WHERE id = $1`, params);
+
+    const label = STAGE_LABEL[body.stage];
+    await logClaimEvent(id, req.user!.id, 'stage_change',
+      [body.stage === 'closed' ? `Closed — ${body.outcome!.replace('_', ' ')}` : label, body.note].filter(Boolean).join(' — '),
+      { from: c.stage, to: body.stage, outcome: body.outcome ?? null });
+    if (body.stage === 'with_broker' && !c.broker_sent_at) {
+      await logClaimEvent(id, req.user!.id, 'milestone', 'Docs sent to broker (marked by hand)', { kind: 'broker_sent' }, { eventDate: ukDatePlus(0) });
+    }
+    await notifyClaimFollowers(id, req.user!.id, `Claim ${body.stage === 'closed' ? 'closed' : 'moved on'} — ${claimLabel(c)}`, label);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim stage error:', err);
+    res.status(500).json({ error: 'Failed to change stage' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Problems on the case
+// ─────────────────────────────────────────────────────────────────────────
+
+router.post('/:id/problems', validate(z.object({ issue_id: z.string().uuid() })), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const issueId = (req.body as { issue_id: string }).issue_id;
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const r = await query(
+      `UPDATE job_issues SET claim_id = $2, updated_at = NOW()
+       WHERE id = $1 AND (claim_id IS NULL OR claim_id = $2)
+       RETURNING summary`,
+      [issueId, id],
+    );
+    if (!r.rowCount) { res.status(409).json({ error: 'That Problem is already on another claim' }); return; }
+    await logClaimEvent(id, req.user!.id, 'problem_linked', r.rows[0].summary, { issue_id: issueId });
+    await logIssueEvent(issueId, req.user!.id, 'claim_linked', 'Linked to an insurance claim', { claim_id: id });
+    await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
+    res.status(201).json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Link problem error:', err);
+    res.status(500).json({ error: 'Failed to link Problem' });
+  }
+});
+
+router.delete('/:id/problems/:issueId', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const issueId = String(req.params.issueId);
+    const c = await loadClaimRow(id);
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    if (c.origin_issue_id === issueId) {
+      res.status(400).json({ error: 'The Problem the case was opened from stays linked' });
+      return;
+    }
+    const r = await query(
+      `UPDATE job_issues SET claim_id = NULL, updated_at = NOW() WHERE id = $1 AND claim_id = $2 RETURNING summary`,
+      [issueId, id],
+    );
+    if (!r.rowCount) { res.status(404).json({ error: 'Not linked' }); return; }
+    await logClaimEvent(id, req.user!.id, 'problem_unlinked', r.rows[0].summary, { issue_id: issueId });
+    await logIssueEvent(issueId, req.user!.id, 'claim_unlinked', 'Removed from the insurance claim', { claim_id: id });
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Unlink problem error:', err);
+    res.status(500).json({ error: 'Failed to unlink Problem' });
+  }
+});
+
+// Open Problems on the same van that could be linked (the picker).
+router.get('/:id/linkable-problems', async (req: AuthRequest, res: Response) => {
+  try {
+    const c = await loadClaimRow(String(req.params.id));
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const r = await query(
+      `SELECT ji.id, ji.summary, ji.category, ji.status, ji.created_at, j.hh_job_number
+       FROM job_issues ji LEFT JOIN jobs j ON j.id = ji.job_id
+       WHERE ji.claim_id IS NULL
+         AND (($1::uuid IS NOT NULL AND ji.vehicle_id = $1) OR ($2::uuid IS NOT NULL AND ji.job_id = $2))
+       ORDER BY ji.created_at DESC
+       LIMIT 50`,
+      [c.vehicle_id, c.job_id],
+    );
+    res.json({ data: r.rows });
+  } catch (err) {
+    console.error('Linkable problems error:', err);
+    res.status(500).json({ error: 'Failed to fetch Problems' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Files — claims/ prefix (role-gated in files.ts). Photos arrive already
+// compressed client-side, with an optional small `thumb` for the broker PDF.
+// ─────────────────────────────────────────────────────────────────────────
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 2 } });
+const FILE_TYPES = ['photo', 'police_report', 'broker_correspondence', 'repair_quote', 'tts360_notice', 'other'] as const;
+
+router.post('/:id/files', upload.fields([{ name: 'file', maxCount: 1 }, { name: 'thumb', maxCount: 1 }]), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isR2Configured()) { res.status(503).json({ error: 'File storage not configured' }); return; }
+    const id = String(req.params.id);
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    const file = files?.file?.[0];
+    if (!file) { res.status(400).json({ error: 'No file provided' }); return; }
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+
+    const ext = (path.extname(file.originalname) || '').toLowerCase().replace(/[^.a-z0-9]/g, '').slice(0, 10);
+    const isImage = (file.mimetype || '').startsWith('image/');
+    const requested = String(req.body.file_type || '');
+    const fileType = (FILE_TYPES as readonly string[]).includes(requested) ? requested : (isImage ? 'photo' : 'other');
+    const fileId = uuid();
+    const key = `${CLAIMS_PREFIX}${id}/${fileId}${ext}`;
+    await uploadToR2(key, file.buffer, file.mimetype || 'application/octet-stream');
+
+    let thumbKey: string | null = null;
+    const thumb = files?.thumb?.[0];
+    if (thumb && (thumb.mimetype || '').startsWith('image/')) {
+      thumbKey = `${CLAIMS_PREFIX}${id}/${fileId}_thumb.jpg`;
+      await uploadToR2(thumbKey, thumb.buffer, 'image/jpeg');
+    }
+
+    const takenRaw = typeof req.body.taken_at === 'string' ? req.body.taken_at : '';
+    const takenAt = takenRaw && !Number.isNaN(new Date(takenRaw).getTime()) ? new Date(takenRaw).toISOString() : null;
+    const caption = typeof req.body.caption === 'string' && req.body.caption.trim() ? req.body.caption.trim().slice(0, 500) : null;
+    // Not everything on the case goes to the insurer (jon). Default by type;
+    // an explicit 'true' / 'false' from the uploader wins.
+    const shareRaw = String(req.body.share_with_insurer ?? '');
+    const share = shareRaw === 'true' ? true : shareRaw === 'false' ? false : SHARED_BY_DEFAULT.has(fileType);
+
+    await query(
+      `INSERT INTO incident_claim_files
+         (id, claim_id, r2_key, thumb_r2_key, filename, file_type, content_type, size_bytes, caption, taken_at, uploaded_by, share_with_insurer)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [fileId, id, key, thumbKey, file.originalname.slice(0, 255), fileType, file.mimetype, file.size, caption, takenAt, req.user!.id, share],
+    );
+    await logClaimEvent(id, req.user!.id, 'file_added', file.originalname.slice(0, 255), { file_id: fileId, file_type: fileType });
+    await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
+    res.status(201).json({ data: { id: fileId } });
+  } catch (err) {
+    console.error('Claim file upload error:', err);
+    res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+router.patch('/:id/files/:fileId', validate(z.object({
+  caption: z.string().trim().max(500).nullable().optional(),
+  file_type: z.enum(FILE_TYPES).optional(),
+  share_with_insurer: z.boolean().optional(),
+})), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = req.body as { caption?: string | null; file_type?: string; share_with_insurer?: boolean };
+    const sets: string[] = [];
+    const params: unknown[] = [String(req.params.fileId), String(req.params.id)];
+    if ('caption' in body) { params.push(body.caption || null); sets.push(`caption = $${params.length}`); }
+    if (body.file_type) { params.push(body.file_type); sets.push(`file_type = $${params.length}`); }
+    if (body.share_with_insurer !== undefined) { params.push(body.share_with_insurer); sets.push(`share_with_insurer = $${params.length}`); }
+    if (!sets.length) { res.status(400).json({ error: 'Nothing to update' }); return; }
+    const r = await query(`UPDATE incident_claim_files SET ${sets.join(', ')} WHERE id = $1 AND claim_id = $2 RETURNING id, filename`, params);
+    if (!r.rowCount) { res.status(404).json({ error: 'File not found' }); return; }
+    if (body.share_with_insurer !== undefined) {
+      await logClaimEvent(String(req.params.id), req.user!.id, 'file_sharing',
+        `${r.rows[0].filename}: ${body.share_with_insurer ? 'shared with insurers' : 'not shared with insurers'}`);
+    }
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim file edit error:', err);
+    res.status(500).json({ error: 'Failed to update file' });
+  }
+});
+
+// Removing evidence from an insurance case file is a manager's call.
+router.delete('/:id/files/:fileId', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const fileId = String(req.params.fileId);
+    const r = await query(
+      `DELETE FROM incident_claim_files WHERE id = $1 AND claim_id = $2 RETURNING r2_key, thumb_r2_key, filename`,
+      [fileId, id],
+    );
+    if (!r.rowCount) { res.status(404).json({ error: 'File not found' }); return; }
+    for (const k of [r.rows[0].r2_key, r.rows[0].thumb_r2_key]) {
+      if (k) await deleteFromR2(k).catch((e) => console.error('R2 delete failed (continuing):', e));
+    }
+    await logClaimEvent(id, req.user!.id, 'file_removed', r.rows[0].filename, { file_id: fileId });
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim file delete error:', err);
+    res.status(500).json({ error: 'Failed to delete file' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Watch
+// ─────────────────────────────────────────────────────────────────────────
+
+router.post('/:id/watch', async (req: AuthRequest, res: Response) => {
+  try {
+    await query(
+      `UPDATE incident_claims SET watchers = array_append(watchers, $2::uuid)
+       WHERE id = $1 AND NOT (watchers && ARRAY[$2::uuid])`,
+      [String(req.params.id), req.user!.id],
+    );
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim watch error:', err);
+    res.status(500).json({ error: 'Failed to watch' });
+  }
+});
+
+router.post('/:id/unwatch', async (req: AuthRequest, res: Response) => {
+  try {
+    await query(`UPDATE incident_claims SET watchers = array_remove(watchers, $2::uuid) WHERE id = $1`, [String(req.params.id), req.user!.id]);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim unwatch error:', err);
+    res.status(500).json({ error: 'Failed to unwatch' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Broker PDF (§11) — MANAGER_ROLES only
+// ─────────────────────────────────────────────────────────────────────────
+
+/** The case's photo-link token, minted on first use. */
+async function ensurePhotoLinkToken(claimId: string): Promise<string> {
+  const token = crypto.randomBytes(24).toString('base64url');
+  const r = await query(
+    `UPDATE incident_claims SET photo_link_token = COALESCE(photo_link_token, $2)
+     WHERE id = $1 RETURNING photo_link_token`,
+    [claimId, token],
+  );
+  return r.rows[0].photo_link_token as string;
+}
+
+// Preview — built fresh, not stored, not sent.
+router.get('/:id/pdf', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const token = await ensurePhotoLinkToken(id);
+    const { buildClaimPdf } = await import('../services/claim-pdf');
+    const { bytes, filename } = await buildClaimPdf(id, { photoLinkToken: token });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.send(Buffer.from(bytes));
+  } catch (err) {
+    console.error('Claim PDF preview error:', err);
+    res.status(500).json({ error: 'Failed to build the PDF' });
+  }
+});
+
+// Policyholder signature — the logged-in manager signs for Ooosh.
+const signSchema = z.object({
+  signature_png_base64: z.string().min(100).max(2_000_000),
+  print_name: z.string().trim().min(2).max(120),
+});
+
+router.post('/:id/sign', authorize(...MANAGER_ROLES), validate(signSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const body = req.body as z.infer<typeof signSchema>;
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const png = Buffer.from(body.signature_png_base64.replace(/^data:image\/png;base64,/, ''), 'base64');
+    if (png.length < 100 || png.subarray(1, 4).toString('ascii') !== 'PNG') {
+      res.status(400).json({ error: 'Signature is not a PNG' });
+      return;
+    }
+    const key = `${CLAIMS_PREFIX}${id}/policyholder-signature-${Date.now()}.png`;
+    await uploadToR2(key, png, 'image/png');
+    await query(
+      `UPDATE incident_claims SET policyholder_user_id = $2, policyholder_signature_key = $3,
+              policyholder_signed_name = $4, policyholder_signed_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [id, req.user!.id, key, body.print_name],
+    );
+    await logClaimEvent(id, req.user!.id, 'policyholder_signed', `Signed for Ooosh by ${body.print_name}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Claim sign error:', err);
+    res.status(500).json({ error: 'Failed to save the signature' });
+  }
+});
+
+// Send to the broker — builds the PDF, freezes it to R2, emails it, moves the
+// case to with_broker. The single point where anything leaves for the broker.
+const sendSchema = z.object({
+  note: z.string().trim().max(5000).optional(),
+});
+
+router.post('/:id/send-to-broker', authorize(...MANAGER_ROLES), validate(sendSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const body = req.body as z.infer<typeof sendSchema>;
+    const c = await loadClaimRow(id);
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    // Only a case whose answers are in (submitted / reviewed) or already with the
+    // broker (an updated PDF) can go — never an open or closed one.
+    if (!['submitted', 'reviewed', 'with_broker'].includes(c.stage)) {
+      res.status(400).json({ error: 'Only a completed case can be sent — mark the form complete first' });
+      return;
+    }
+    if (!c.policyholder_signed_at) {
+      res.status(400).json({ error: 'Sign as policyholder before sending to the broker' });
+      return;
+    }
+    const { getSystemSetting } = await import('./system-settings');
+    const to = (await getSystemSetting('claims_broker_email'))?.trim();
+    if (!to) { res.status(400).json({ error: 'No broker email set (Settings › Claims)' }); return; }
+
+    const token = await ensurePhotoLinkToken(id);
+    const { buildClaimPdf } = await import('../services/claim-pdf');
+    const { bytes, filename } = await buildClaimPdf(id, { photoLinkToken: token });
+    const pdfKey = `${CLAIMS_PREFIX}${id}/broker-${Date.now()}.pdf`;
+    await uploadToR2(pdfKey, Buffer.from(bytes), 'application/pdf');
+
+    // Ticked documents (not photos — those are in the PDF) ride along as
+    // attachments, up to a total size that mail servers reliably accept.
+    const MAX_ATTACH_BYTES = 15 * 1024 * 1024;
+    const docs = await query(
+      `SELECT id, r2_key, filename, content_type, size_bytes FROM incident_claim_files
+       WHERE claim_id = $1 AND share_with_insurer = true AND file_type <> 'photo'
+       ORDER BY uploaded_at`,
+      [id],
+    );
+    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = [
+      { filename, content: Buffer.from(bytes), contentType: 'application/pdf' },
+    ];
+    let total = bytes.length;
+    const attached: string[] = [];
+    const tooBig: string[] = [];
+    for (const d of docs.rows) {
+      if (total + Number(d.size_bytes || 0) > MAX_ATTACH_BYTES) { tooBig.push(d.filename); continue; }
+      try {
+        const obj = await getFromR2(d.r2_key);
+        const chunks: Buffer[] = [];
+        for await (const chunk of obj.Body as NodeJS.ReadableStream) chunks.push(Buffer.from(chunk as Uint8Array));
+        const buf = Buffer.concat(chunks);
+        if (total + buf.length > MAX_ATTACH_BYTES) { tooBig.push(d.filename); continue; }
+        attachments.push({ filename: d.filename, content: buf, contentType: d.content_type || 'application/octet-stream' });
+        total += buf.length;
+        attached.push(d.filename);
+      } catch (e) {
+        console.error(`[claims] could not read ${d.r2_key} for the broker email:`, e);
+        tooBig.push(d.filename);
+      }
+    }
+
+    const { emailService } = await import('../services/email-service');
+    const reg = c.vehicle_reg || 'vehicle';
+    const subject = `Motor claim — Ooosh! Tours — ${reg}${c.incident_at ? ` — ${new Date(c.incident_at).toLocaleDateString('en-GB')}` : ''}${c.hh_job_number ? ` (#${c.hh_job_number})` : ''}`;
+    const esc = (s: string) => s.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch] as string));
+    const html = `
+      <p>Hello,</p>
+      <p>Please find attached our completed motor claim form for vehicle <strong>${esc(reg)}</strong>${c.hh_job_number ? ` (our job #${c.hh_job_number})` : ''}.</p>
+      ${body.note ? `<p>${esc(body.note).replace(/\n/g, '<br>')}</p>` : ''}
+      <p>Photographs are shown as thumbnails in the PDF; each has a "View full size" link.</p>
+      ${attached.length ? `<p>Also attached: ${attached.map(esc).join(', ')}.</p>` : ''}
+      ${tooBig.length ? `<p>Too large to attach (available on request): ${tooBig.map(esc).join(', ')}.</p>` : ''}
+      <p>Kind regards,<br>Ooosh! Tours Ltd</p>`;
+    const result = await emailService.sendRaw({
+      to,
+      subject,
+      html,
+      variant: 'client',
+      attachments,
+    });
+    if (!result.success) {
+      await logClaimEvent(id, req.user!.id, 'broker_send_failed', result.error || 'Email failed', { pdf_key: pdfKey });
+      res.status(502).json({ error: result.error || 'The email could not be sent — nothing was marked as sent' });
+      return;
+    }
+
+    await query(
+      `UPDATE incident_claims SET broker_pdf_key = $2, broker_sent_at = NOW(), stage = 'with_broker',
+              next_check_on = $3::date, updated_at = NOW()
+       WHERE id = $1`,
+      [id, pdfKey, ukDatePlus(14)],
+    );
+    await logClaimEvent(id, req.user!.id, 'broker_sent',
+      `Sent to ${to}${attached.length ? ` with ${attached.length} document${attached.length === 1 ? '' : 's'}` : ''}${tooBig.length ? ` (${tooBig.length} too large to attach)` : ''}`,
+      { pdf_key: pdfKey, from_stage: c.stage, attached, too_big: tooBig });
+    await logClaimEvent(id, req.user!.id, 'milestone', 'Docs sent to broker', { kind: 'broker_sent' }, { eventDate: ukDatePlus(0) });
+    await notifyClaimFollowers(id, req.user!.id, `Claim sent to broker — ${claimLabel(c)}`, `Sent to ${to}.`);
+    res.json({ data: { ok: true, pdf_key: pdfKey } });
+  } catch (err) {
+    console.error('Send claim to broker error:', err);
+    res.status(500).json({ error: 'Failed to send to the broker' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Client links (Phase 2) — who can we send the form to, send, resend, revoke
+// ─────────────────────────────────────────────────────────────────────────
+
+// Candidates: every driver on the van on this hire, plus the job's contacts
+// (services/job-contact-candidates.ts — THE "who could we contact" list).
+router.get('/:id/recipients', async (req: AuthRequest, res: Response) => {
+  try {
+    const c = await loadClaimRow(String(req.params.id));
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const drivers = await driversOnVan(c);
+    const contacts = c.job_id ? await resolveJobContactCandidates(c.job_id) : [];
+    res.json({
+      data: {
+        drivers: drivers.map((d) => ({ driver_id: d.id, name: d.name, email: d.email })),
+        contacts: contacts.filter((p) => p.email).map((p) => ({
+          person_id: p.person_id, name: p.name, email: p.email, role: p.role, org: p.source_org_name, is_primary: p.is_org_primary,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error('Claim recipients error:', err);
+    res.status(500).json({ error: 'Failed to load recipients' });
+  }
+});
+
+const sendLinksSchema = z.object({
+  recipients: z.array(z.object({
+    driver_id: z.string().uuid().optional(),
+    person_id: z.string().uuid().optional(),
+    name: z.string().trim().max(120).optional(),
+    email: z.string().trim().email().max(200).optional(),
+  })).min(1).max(20),
+});
+
+router.post('/:id/links', validate(sendLinksSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const c = await loadClaimRow(id);
+    if (!c) { res.status(404).json({ error: 'Claim not found' }); return; }
+    if (!['open', 'form_out'].includes(c.stage)) {
+      res.status(400).json({ error: 'The form can only go out while the case is open' });
+      return;
+    }
+    const body = req.body as z.infer<typeof sendLinksSchema>;
+    const drivers = await driversOnVan(c);
+    const results: Array<{ name: string; email: string; sent: boolean; reused: boolean; error?: string }> = [];
+    for (const r of body.recipients) {
+      let name = r.name || null;
+      let email = r.email || null;
+      let role: 'driver' | 'contact' = 'contact';
+      if (r.driver_id) {
+        const d = drivers.find((x) => x.id === r.driver_id);
+        if (!d?.email) { results.push({ name: d?.name || 'Driver', email: '', sent: false, reused: false, error: 'No email on file' }); continue; }
+        name = d.name; email = d.email; role = 'driver';
+      } else if (r.person_id) {
+        const p = await query(`SELECT first_name, last_name, email FROM people WHERE id = $1`, [r.person_id]);
+        if (!p.rows[0]?.email) { results.push({ name: name || 'Contact', email: '', sent: false, reused: false, error: 'No email on file' }); continue; }
+        name = `${p.rows[0].first_name || ''} ${p.rows[0].last_name || ''}`.trim(); email = p.rows[0].email;
+      }
+      if (!email) continue;
+      const out = await createAndSendLink({
+        claimId: id, name, email, driverId: r.driver_id ?? null, personId: r.person_id ?? null, role, createdBy: req.user!.id,
+      });
+      results.push({ name: name || email, email, sent: out.sent, reused: out.reused, error: out.error });
+    }
+    const sent = results.filter((r) => r.sent);
+    if (sent.length) {
+      // A new recipient gets the full run of reminders (§9.1) — restart the chase.
+      const fresh = sent.some((r) => !r.reused);
+      await query(
+        `UPDATE incident_claims
+            SET stage = CASE WHEN stage = 'open' THEN 'form_out' ELSE stage END,
+                next_check_on = COALESCE(next_check_on, $2::date),
+                chase_level = CASE WHEN $3::boolean THEN 0 ELSE chase_level END,
+                updated_at = NOW()
+          WHERE id = $1`,
+        [id, ukDatePlus(3), fresh],
+      );
+      await logClaimEvent(id, req.user!.id, 'form_sent', `Form sent to ${sent.map((r) => r.name).join(', ')}`,
+        { recipients: sent.map((r) => r.email) });
+      if (c.stage === 'open') {
+        await logClaimEvent(id, req.user!.id, 'stage_change', STAGE_LABEL.form_out, { from: 'open', to: 'form_out' });
+      }
+    }
+    res.json({ data: { results } });
+  } catch (err) {
+    console.error('Send claim links error:', err);
+    res.status(500).json({ error: 'Failed to send the form' });
+  }
+});
+
+// ── GPS trace (§14, §21) ──────────────────────────────────────────────────
+
+const gpsWindowSchema = z.object({ from: z.string().datetime({ offset: true }), to: z.string().datetime({ offset: true }) });
+
+/** The van's reg + the default window for a case (±30 min of the time, else the whole day). */
+async function gpsContext(id: string) {
+  const r = await query(
+    `SELECT COALESCE(fv.reg, c.vehicle_reg) AS reg, c.incident_time_text,
+            to_char(c.incident_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS incident_date
+     FROM incident_claims c LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+     WHERE c.id = $1 AND c.is_deleted = false`,
+    [id],
+  );
+  return r.rows[0] || null;
+}
+
+function checkWindow(from: Date, to: Date): string | null {
+  if (!(to > from)) return 'The end must be after the start';
+  if (to.getTime() - from.getTime() > MAX_WINDOW_HOURS * 3600_000) return `At most ${MAX_WINDOW_HOURS} hours at a time`;
+  return null;
+}
+
+router.get('/:id/gps', async (req: AuthRequest, res: Response) => {
+  try {
+    const ctx = await gpsContext(String(req.params.id));
+    if (!ctx) { res.status(404).json({ error: 'Claim not found' }); return; }
+    if (!ctx.reg) { res.status(409).json({ error: 'Set the van on the case first' }); return; }
+    const q = req.query as Record<string, string | undefined>;
+    let from: Date; let to: Date;
+    if (q.from && q.to) {
+      from = new Date(q.from); to = new Date(q.to);
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) { res.status(400).json({ error: 'Bad dates' }); return; }
+    } else if (ctx.incident_date) {
+      ({ from, to } = incidentWindow(ctx.incident_date, ctx.incident_time_text, 30));
+    } else {
+      res.json({ data: { reg: ctx.reg, from: null, to: null, points: [], gps: true, needs_date: true } });
+      return;
+    }
+    const bad = checkWindow(from, to);
+    if (bad) { res.status(400).json({ error: bad }); return; }
+    const points = await getRouteForReg(ctx.reg, from, to);
+    res.json({ data: { reg: ctx.reg, from: from.toISOString(), to: to.toISOString(), points: points || [], gps: points !== null } });
+  } catch (err) {
+    console.error('Claim GPS error:', err);
+    res.status(502).json({ error: 'Could not reach the tracking server' });
+  }
+});
+
+router.post('/:id/gps/attach', validate(gpsWindowSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const ctx = await gpsContext(id);
+    if (!ctx?.reg) { res.status(ctx ? 409 : 404).json({ error: ctx ? 'Set the van on the case first' : 'Claim not found' }); return; }
+    const from = new Date(req.body.from); const to = new Date(req.body.to);
+    const bad = checkWindow(from, to);
+    if (bad) { res.status(400).json({ error: bad }); return; }
+    const r = await saveGpsTrace(id, ctx.reg, from, to, { userId: req.user!.id, auto: false });
+    if (r === null) { res.status(409).json({ error: 'No GPS tracker found for this van' }); return; }
+    if (!r.fileId) { res.status(409).json({ error: 'No GPS positions in that window — nothing saved' }); return; }
+    await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
+    res.status(201).json({ data: r });
+  } catch (err) {
+    console.error('Claim GPS attach error:', err);
+    res.status(502).json({ error: 'Could not save the trace' });
+  }
+});
+
+/** A saved trace's points, read back from its CSV (the page redraws the route from it). */
+router.get('/:id/gps/files/:fileId', async (req: AuthRequest, res: Response) => {
+  try {
+    const f = await query(
+      `SELECT r2_key FROM incident_claim_files WHERE id = $1 AND claim_id = $2 AND file_type = 'gps_trace'`,
+      [String(req.params.fileId), String(req.params.id)],
+    );
+    if (!f.rows[0]) { res.status(404).json({ error: 'Trace not found' }); return; }
+    const obj = await getFromR2(f.rows[0].r2_key);
+    // Read the stream generically (works whatever stream type the S3 client hands back).
+    const chunks: Buffer[] = [];
+    if (obj.Body) for await (const chunk of obj.Body as AsyncIterable<Uint8Array>) chunks.push(Buffer.from(chunk));
+    const text = Buffer.concat(chunks).toString('utf8');
+    res.json({ data: { points: csvToPoints(text) } });
+  } catch (err) {
+    console.error('Claim GPS file error:', err);
+    res.status(500).json({ error: 'Could not read the trace' });
+  }
+});
+
+// ── Client chase controls (§9.1) — pause needs a reason; restart goes back to reminder 1 ──
+
+router.post('/:id/chase/pause', validate(z.object({ reason: z.string().trim().min(2).max(1000) })), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const reason = (req.body as { reason: string }).reason;
+    // Paused = back on the owner's check date, so make sure there is one.
+    const r = await query(
+      `UPDATE incident_claims
+          SET chase_paused_at = NOW(), chase_paused_reason = $2,
+              next_check_on = COALESCE(next_check_on, $3::date), updated_at = NOW()
+        WHERE id = $1 AND is_deleted = false AND stage = 'form_out' AND chase_paused_at IS NULL
+        RETURNING id`,
+      [id, reason, ukDatePlus(7)],
+    );
+    if (!r.rowCount) { res.status(409).json({ error: 'Chasing is not running on this case' }); return; }
+    await logClaimEvent(id, req.user!.id, 'chase_paused', `Reminders paused — ${reason}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Pause claim chase error:', err);
+    res.status(500).json({ error: 'Failed to pause reminders' });
+  }
+});
+
+router.post('/:id/chase/restart', validate(z.object({ reason: z.string().trim().max(1000).optional() })), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const reason = (req.body as { reason?: string }).reason;
+    const r = await query(
+      `UPDATE incident_claims
+          SET chase_level = 0, chase_paused_at = NULL, chase_paused_reason = NULL, updated_at = NOW()
+        WHERE id = $1 AND is_deleted = false AND stage = 'form_out'
+        RETURNING id`,
+      [id],
+    );
+    if (!r.rowCount) { res.status(409).json({ error: 'The form is not out on this case' }); return; }
+    await logClaimEvent(id, req.user!.id, 'chase_restarted', `Reminders restarted from 1${reason ? ` — ${reason}` : ''}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Restart claim chase error:', err);
+    res.status(500).json({ error: 'Failed to restart reminders' });
+  }
+});
+
+router.post('/:id/links/:linkId/resend', async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT l.token, l.recipient_email, l.recipient_name, c.stage
+       FROM incident_claim_links l JOIN incident_claims c ON c.id = l.claim_id
+       WHERE l.id = $2 AND l.claim_id = $1 AND l.status <> 'revoked'`,
+      [String(req.params.id), String(req.params.linkId)],
+    );
+    const l = r.rows[0];
+    if (!l || !l.recipient_email) { res.status(404).json({ error: 'Link not found' }); return; }
+    if (!['open', 'form_out'].includes(l.stage)) { res.status(400).json({ error: 'The case is past the form stage' }); return; }
+    const out = await sendLinkEmail(String(req.params.id), l.token, l.recipient_email, l.recipient_name, null);
+    if (!out.success) { res.status(502).json({ error: out.error || 'Email failed' }); return; }
+    await query(`UPDATE incident_claim_links SET sent_at = NOW() WHERE id = $1`, [String(req.params.linkId)]);
+    await logClaimEvent(String(req.params.id), req.user!.id, 'form_sent', `Form re-sent to ${l.recipient_name || l.recipient_email}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Resend claim link error:', err);
+    res.status(500).json({ error: 'Failed to resend' });
+  }
+});
+
+router.post('/:id/links/:linkId/revoke', async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `UPDATE incident_claim_links SET status = 'revoked' WHERE id = $2 AND claim_id = $1 AND status <> 'revoked'
+       RETURNING recipient_name, recipient_email`,
+      [String(req.params.id), String(req.params.linkId)],
+    );
+    if (!r.rowCount) { res.status(404).json({ error: 'Link not found' }); return; }
+    await logClaimEvent(String(req.params.id), req.user!.id, 'link_revoked', `Link for ${r.rows[0].recipient_name || r.rows[0].recipient_email} switched off`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Revoke claim link error:', err);
+    res.status(500).json({ error: 'Failed to revoke' });
+  }
+});
+
+// Staff marking damage / adding a sketch on the case page — same storage as the client form.
+router.put('/:id/damage', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const marks = await saveDamageMarks(id, req.body?.marks, req.body?.png_base64, { userId: req.user!.id, label: 'staff' });
+    res.json({ data: { marks } });
+  } catch (err) {
+    console.error('Claim damage marks error:', err);
+    res.status(500).json({ error: 'Failed to save damage marks' });
+  }
+});
+
+router.post('/:id/sketch', upload.single('file'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!(await loadClaimRow(id))) { res.status(404).json({ error: 'Claim not found' }); return; }
+    const file = req.file;
+    if (!file || !(file.mimetype || '').startsWith('image/')) { res.status(400).json({ error: 'An image is needed' }); return; }
+    const key = await saveSketch(id, file, { userId: req.user!.id, label: 'staff' });
+    res.json({ data: { sketch_key: key } });
+  } catch (err) {
+    console.error('Claim sketch error:', err);
+    res.status(500).json({ error: 'Failed to save the sketch' });
+  }
+});
+
+// Estimated vehicle value for the vehicle page (§6.6). Rounded by role inside
+// estimateVehicleValue — the raw purchase price never leaves the server here.
+router.get('/meta/vehicle-value/:vehicleId', async (req: AuthRequest, res: Response) => {
+  try {
+    const v = await query(
+      `SELECT cash_price, deposit_paid, amount_financed, date_first_reg FROM fleet_vehicles WHERE id = $1`,
+      [String(req.params.vehicleId)],
+    );
+    if (v.rowCount === 0) { res.status(404).json({ error: 'Vehicle not found' }); return; }
+    const estimate = await estimateVehicleValue(v.rows[0], { isAdmin: req.user!.role === 'admin' });
+    res.json({ data: estimate });
+  } catch (err) {
+    console.error('Vehicle value error:', err);
+    res.status(500).json({ error: 'Failed to estimate value' });
+  }
+});
+
+// Staff pick lists for owner + watchers.
+router.get('/meta/users', async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT u.id, NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), '') AS name, u.email, u.role
+       FROM users u LEFT JOIN people p ON p.id = u.person_id
+       WHERE u.is_active = true AND u.role <> 'freelancer'
+       ORDER BY p.first_name NULLS LAST, u.email`,
+    );
+    res.json({ data: r.rows, default_watchers: await getDefaultClaimWatchers() });
+  } catch (err) {
+    console.error('Claim users error:', err);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+export default router;

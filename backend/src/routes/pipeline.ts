@@ -1,20 +1,47 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { query, getClient } from '../config/database';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { writeBackStatusToHireHop, writeBackJobNameToHireHop } from '../services/hirehop-writeback';
 import { hhBroker } from '../services/hirehop-broker';
 import { sendLastMinuteAlert } from '../services/money-emails';
+import { isBookingWonTransition, isUnwonTransition } from '../services/pipeline-stage';
 import emailService from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import {
   triggerHireFormEmailOnConfirmation,
+  triggerCarnetFormOnConfirmation,
   hireFormResultIsAnomaly,
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
+import { resolveJobContactCandidates } from '../services/job-contact-candidates';
+import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
+import { closeJobRequirements, fireEventTriggeredReminders } from '../services/requirement-close-sweep';
+import { pushDepositToHH, reverseDepositOnHH, getMethodForBankId } from '../services/hh-deposit';
+import { getJobBillingFacts, getNetHireDepositTotal, HireDeposit } from '../services/hh-billing-deposits';
+import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
+import { syncSingleHireHopJob } from '../services/hirehop-job-sync';
+import { afterOptionConfirmed, markOptionPromptHandled } from '../services/option-confirm';
+import {
+  OPTION_GROUP_KIND,
+  notAltQuoteLossSql,
+  getGroupById,
+  insertOptionCopy,
+  nonLeadMemberIds,
+  resolveLeadJob,
+  jobRef,
+  nextOptionNo,
+  noteOnTimeline,
+  optionRefusalReason,
+  readDuplicatedJobNumber,
+  stripOptionSuffix,
+  withOptionSuffix,
+} from '../services/job-groups';
+import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
+import { forClientContext } from '../services/endorsements';
 
 const router = Router();
 router.use(authenticate);
@@ -46,12 +73,23 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       value_min, value_max,    // Job value bucket bounds (£)
       chase_count_min,         // e.g. "3" for "chased 3+ times"
       chase_count_max,         // e.g. "0" for "never chased"
+      dismissed,               // '1' = ONLY dismissed enquiries (review view); default hides them
       page = '1', limit = '50', sort = 'next_chase_date', order = 'asc',
     } = req.query;
 
     const params: unknown[] = [];
     let paramIndex = 1;
     const conditions: string[] = ['j.is_deleted = false'];
+
+    // Dismissal overlay filter (migration 196). Dud/spam/orphan enquiries keep
+    // their pipeline_status but carry a dismissed_at stamp — hidden from the
+    // board + analytics by default, surfaced only via ?dismissed=1 for review
+    // + undismiss. See CLAUDE.md → Enquiry dismissal.
+    if (dismissed === '1') {
+      conditions.push(`j.dismissed_at IS NOT NULL`);
+    } else {
+      conditions.push(`j.dismissed_at IS NULL`);
+    }
 
     // Pipeline status filter (comma-separated)
     if (status) {
@@ -144,7 +182,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // Search
     if (search) {
-      conditions.push(`(j.job_name ILIKE $${paramIndex} OR j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex} OR CAST(j.hh_job_number AS TEXT) ILIKE $${paramIndex})`);
+      conditions.push(`(j.job_name ILIKE $${paramIndex} OR j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex} OR CAST(j.hh_job_number AS TEXT) ILIKE $${paramIndex}
+        OR EXISTS (SELECT 1 FROM organisations co WHERE co.id = j.client_id AND co.is_deleted = false AND co.name ILIKE $${paramIndex})
+        OR EXISTS (SELECT 1 FROM job_organisations sjo JOIN organisations so ON so.id = sjo.organisation_id
+                    WHERE sjo.job_id = j.id AND so.is_deleted = false AND so.name ILIKE $${paramIndex}))`);
       params.push(`%${search}%`);
       paramIndex++;
     }
@@ -176,24 +217,58 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       `SELECT j.*,
         m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name,
         m2p.first_name as manager2_first_name, m2p.last_name as manager2_last_name,
-        (SELECT o.name FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
-         WHERE jo.job_id = j.id AND jo.role = 'band' LIMIT 1) as band_name,
-        (SELECT json_agg(json_build_object('id', jo.id, 'role', jo.role, 'organisation_name', o.name, 'organisation_type', o.type, 'organisation_id', jo.organisation_id))
-         FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
+        -- Lead organisation: the org explicitly flagged to headline this job.
+        -- NULL means no explicit lead, so the card falls back to the client.
+        -- (Was band_name -- a band automatically took the headline and pushed
+        -- the client into a "Billed to:" sub-line, which asserted a billing
+        -- split that often was not true. The lead is now chosen, not inferred.)
+        (SELECT lo.name FROM job_organisations jo JOIN organisations lo ON lo.id = jo.organisation_id
+         WHERE jo.job_id = j.id AND jo.is_primary = true LIMIT 1) as lead_org_name,
+        -- Canonical client name. Without it the card fell back to HireHop's raw
+        -- company_name/client_name when no lead was set, so a job whose client
+        -- had been changed showed the old name on the card.
+        o.name as client_org_name,
+        -- NB alias xo, not o: the outer query now joins organisations AS o
+        -- for client_org_name. An inner o would shadow it -- legal, but a trap
+        -- for the next person editing this subquery.
+        (SELECT json_agg(json_build_object('id', jo.id, 'role', jo.role, 'organisation_name', xo.name, 'organisation_type', xo.type, 'organisation_id', jo.organisation_id))
+         FROM job_organisations jo JOIN organisations xo ON xo.id = jo.organisation_id
          WHERE jo.job_id = j.id) as linked_organisations,
         (j.next_chase_date IS NOT NULL
          AND j.next_chase_date <= CURRENT_DATE
          AND j.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')) as is_chasing,
-        jf.hire_value_inc_vat::float8 as hire_value_inc_vat
+        jf.hire_value_inc_vat::float8 as hire_value_inc_vat,
+        (SELECT json_build_object(
+           'label', g.label,
+           'pinned_lead_id', g.lead_job_id,
+           'members', (SELECT json_agg(json_build_object(
+                         'id', m.id, 'option_no', m.option_no, 'option_label', m.option_label,
+                         'pipeline_status', m.pipeline_status, 'hh_job_number', m.hh_job_number,
+                         'is_chasing', (m.next_chase_date IS NOT NULL AND m.next_chase_date <= CURRENT_DATE
+                                        AND m.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional'))
+                       ) ORDER BY m.option_no)
+                       FROM jobs m WHERE m.group_id = g.id AND m.is_deleted = false)
+         ) FROM job_groups g WHERE g.id = j.group_id) AS group_summary
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id
       LEFT JOIN job_financials jf ON jf.job_id = j.id
+      LEFT JOIN organisations o ON o.id = j.client_id AND o.is_deleted = false
       WHERE ${where}
       ORDER BY ${sortCol} ${sortOrder} NULLS LAST, j.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
       [...params, limitNum, offset]
     );
+
+    // Quote options: resolve each group's lead once (pinned or most progressed)
+    // so the board can collapse members onto one card without re-deriving it.
+    for (const row of jobsResult.rows) {
+      const gs = row.group_summary as { pinned_lead_id: string | null; members: Array<{ id: string; option_no: number | null; pipeline_status: string | null }> | null } | null;
+      if (!gs) continue;
+      const members = gs.members ?? [];
+      const lead = resolveLeadJob(members, gs.pinned_lead_id);
+      row.group_summary = { ...gs, lead_job_id: lead?.id ?? null, member_count: members.length };
+    }
 
     res.json({
       data: jobsResult.rows,
@@ -214,6 +289,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
 router.get('/stats', async (_req: AuthRequest, res: Response) => {
   try {
+    // Quote options: a group of alternative quotes is ONE enquiry — only its
+    // lead counts towards the headline numbers and the pipeline value.
+    const nonLeads = await nonLeadMemberIds();
+
     // Counts and values by pipeline status
     const byStatus = await query(`
       SELECT
@@ -222,10 +301,12 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
         COALESCE(SUM(job_value), 0) as total_value
       FROM jobs
       WHERE is_deleted = false
+        AND dismissed_at IS NULL
         AND pipeline_status IS NOT NULL
+        AND NOT (id = ANY($1::uuid[]))
       GROUP BY pipeline_status
       ORDER BY pipeline_status
-    `);
+    `, [nonLeads]);
 
     // Chase stats
     const chaseStats = await query(`
@@ -235,17 +316,21 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
         COUNT(*) FILTER (WHERE next_chase_date BETWEEN CURRENT_DATE + 1 AND CURRENT_DATE + 7) as due_this_week
       FROM jobs
       WHERE is_deleted = false
+        AND dismissed_at IS NULL
         AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
         AND next_chase_date IS NOT NULL
-    `);
+        AND NOT (id = ANY($1::uuid[]))
+    `, [nonLeads]);
 
     // Total active pipeline value (excl. confirmed and lost)
     const activeValue = await query(`
       SELECT COALESCE(SUM(job_value), 0) as total
       FROM jobs
       WHERE is_deleted = false
+        AND dismissed_at IS NULL
         AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
-    `);
+        AND NOT (id = ANY($1::uuid[]))
+    `, [nonLeads]);
 
     res.json({
       by_status: byStatus.rows,
@@ -269,11 +354,12 @@ router.get('/managers', async (_req: AuthRequest, res: Response) => {
     const result = await query(`
       SELECT DISTINCT p.id, p.first_name, p.last_name
       FROM people p
-      WHERE p.id IN (
-        SELECT manager1_person_id FROM jobs WHERE is_deleted = false AND manager1_person_id IS NOT NULL
-        UNION
-        SELECT manager2_person_id FROM jobs WHERE is_deleted = false AND manager2_person_id IS NOT NULL
-      )
+      WHERE p.is_deleted = false
+        AND p.id IN (
+          SELECT manager1_person_id FROM jobs WHERE is_deleted = false AND manager1_person_id IS NOT NULL
+          UNION
+          SELECT manager2_person_id FROM jobs WHERE is_deleted = false AND manager2_person_id IS NOT NULL
+        )
       ORDER BY p.first_name, p.last_name
     `);
     res.json({ data: result.rows });
@@ -349,17 +435,14 @@ const createEnquirySchema = z.object({
 router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
-      client_name, out_date, job_date, job_end, return_date, job_name,
-      client_id, venue_id, venue_name, enquiry_source,
-      job_value, likelihood, notes, manager1_person_id,
-      next_chase_date, chase_interval_days, chase_alert_user_id,
-      service_types, band_name,
-      contact_person_ids, primary_contact_person_id,
+      out_date, job_date, job_end, return_date,
       out_time, start_time, return_time, end_time,
     } = req.body;
-    let { details } = req.body;
 
-    // Sanity-check the date/time ordering before we persist
+    // Sanity-check the date/time ordering before we persist. This lives here
+    // (not in createPipelineEnquiry) because validateJobDateTimes is woven into
+    // the HireHop-push helpers in this file. The intake route does its own
+    // light start<=end check before calling the shared helper.
     const dateTimeError = validateJobDateTimes({
       out_date: out_date ?? null,
       job_date: job_date ?? null,
@@ -375,193 +458,13 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       return;
     }
 
-    // Service type labels
-    const serviceLabels: Record<string, string> = {
-      self_drive_van: 'Self-drive van',
-      backline: 'Backline',
-      rehearsal: 'Rehearsal',
-    };
-    const selectionPart = service_types && service_types.length > 0
-      ? service_types.map((t: string) => serviceLabels[t] || t).join(' + ')
-      : null;
-
-    // Require either details or service_types
-    if (!details && !selectionPart) {
-      res.status(400).json({ error: 'Please provide a description or select a service type' });
+    const job = await createPipelineEnquiry(req.body, req.user!.id);
+    res.status(201).json(job);
+  } catch (error) {
+    if (error instanceof EnquiryValidationError) {
+      res.status(400).json({ error: error.message });
       return;
     }
-
-    // If no details text, use service type labels
-    if (!details && selectionPart) {
-      details = selectionPart;
-    }
-
-    // Auto-generate job name: "Band - Client - Selection" (with regular dashes)
-    let finalJobName = job_name;
-    if (!finalJobName) {
-      const parts: string[] = [];
-      if (band_name) parts.push(band_name);
-      parts.push(client_name);
-      if (selectionPart) parts.push(selectionPart);
-      finalJobName = parts.join(' - ');
-    }
-
-    // Server-side fallback: if the form sent only client_name (no client_id)
-    // and an existing organisation has that exact name, auto-link it. Catches
-    // cases where the user typed a known client but didn't click the
-    // dropdown row, leaving the job stranded as text-only.
-    let resolvedClientId = client_id || null;
-    if (!resolvedClientId && client_name) {
-      const lookup = await query(
-        `SELECT id FROM organisations
-         WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND is_deleted = false
-         LIMIT 2`,
-        [client_name]
-      );
-      if (lookup.rows.length === 1) {
-        resolvedClientId = lookup.rows[0].id;
-      }
-      // 0 matches → leave null (text only — possibly a new client). 2+ matches
-      // → ambiguous, also leave null and let staff link manually.
-    }
-
-    // Resolve manager: use provided person_id, or look up the current user's person_id
-    let managerId = manager1_person_id || null;
-    if (!managerId) {
-      const userResult = await query(
-        `SELECT person_id FROM users WHERE id = $1`,
-        [req.user!.id]
-      );
-      managerId = userResult.rows[0]?.person_id || null;
-    }
-
-    const chaseIntervalDays = chase_interval_days || 3;
-    const chaseDate = next_chase_date || null;
-    // If no chase date given, default to interval from today
-    const chaseDateSql = chaseDate
-      ? `$17::date`
-      : `CURRENT_DATE + ($17 || ' days')::interval`;
-
-    const result = await query(
-      `INSERT INTO jobs (
-        job_name, details, out_date, job_date, job_end, return_date,
-        out_time, start_time, return_time, end_time,
-        client_id, client_name, company_name,
-        venue_id, venue_name,
-        enquiry_source, job_value, likelihood, notes,
-        manager1_person_id,
-        status, status_name,
-        pipeline_status, pipeline_status_changed_at,
-        chase_interval_days, next_chase_date,
-        created_by
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6,
-        $19, $20, $21, $22,
-        $7, $8, $8,
-        $9, $10,
-        $11, $12, $13, $14,
-        $15,
-        0, 'Enquiry',
-        'new_enquiry', NOW(),
-        $18, ${chaseDateSql},
-        $16
-      ) RETURNING *`,
-      [
-        finalJobName, details, out_date || null, job_date || null, job_end || null, return_date || null,
-        resolvedClientId, client_name,
-        venue_id || null, venue_name || null,
-        enquiry_source || null, job_value || null, likelihood || 'warm', notes || null,
-        managerId,
-        req.user!.id,
-        chaseDate || String(chaseIntervalDays),
-        chaseIntervalDays,
-        out_time || '09:00', start_time || out_time || '09:00', return_time || '09:00', end_time || '09:00',
-      ]
-    );
-
-    // Log creation as an interaction on the job timeline
-    await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, $3, 'new_enquiry')`,
-      [`New enquiry created: ${finalJobName}`, result.rows[0].id, req.user!.id]
-    );
-
-    await logAudit(req.user!.id, 'jobs', result.rows[0].id, 'create', null, result.rows[0]);
-
-    // Create chase alert notification if requested
-    if (chase_alert_user_id) {
-      await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, source_user_id)
-         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, 'normal', $5, $6)`,
-        [
-          chase_alert_user_id,
-          `Chase reminder: ${finalJobName}`,
-          `Chase due for ${client_name} — ${finalJobName}`,
-          result.rows[0].id,
-          `/jobs/${result.rows[0].id}`,
-          req.user!.id,
-        ]
-      );
-    }
-
-    // Auto-create job requirements based on service type selections
-    if (service_types && service_types.length > 0) {
-      const jobId = result.rows[0].id;
-      // Map service types to requirement types
-      const requirementMap: Record<string, string[]> = {
-        self_drive_van: ['vehicle', 'hire_forms', 'excess'],
-        backline: ['backline'],
-        rehearsal: ['rehearsal'],
-      };
-      const reqTypes = new Set<string>();
-      for (const st of service_types) {
-        const mapped = requirementMap[st];
-        if (mapped) mapped.forEach(t => reqTypes.add(t));
-      }
-      for (const reqType of reqTypes) {
-        try {
-          // Check if already exists (unique constraint is deferred so ON CONFLICT won't work)
-          const exists = await query(
-            `SELECT 1 FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 LIMIT 1`,
-            [jobId, reqType]
-          );
-          if (exists.rows.length === 0) {
-            await query(
-              `INSERT INTO job_requirements (job_id, requirement_type, status, created_by, source)
-               VALUES ($1, $2, 'not_started', $3, 'enquiry_form')`,
-              [jobId, reqType, req.user!.id]
-            );
-          }
-        } catch (reqErr) {
-          console.error(`Failed to create requirement ${reqType} for job ${jobId}:`, reqErr);
-        }
-      }
-    }
-
-    // Per-job contact selection (migration 086). Stores which of the
-    // client org's people are actually on THIS hire. Routing graduation
-    // (Phase C) will read this; for now it's just the audit + display
-    // signal so the cascade picker in the modal has somewhere to land
-    // its ticks.
-    if (contact_person_ids && contact_person_ids.length > 0) {
-      const createdJobId = result.rows[0].id;
-      for (const personId of contact_person_ids) {
-        try {
-          const isPrimary = primary_contact_person_id === personId;
-          await query(
-            `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (job_id, person_id) DO NOTHING`,
-            [createdJobId, personId, isPrimary, req.user!.id]
-          );
-        } catch (contactErr) {
-          console.error(`Failed to link contact ${personId} to job ${createdJobId}:`, contactErr);
-        }
-      }
-    }
-
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
     console.error('Create enquiry error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -627,6 +530,37 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     const currentJob = current.rows[0];
     const fromStatus = currentJob.pipeline_status;
 
+    // Completing a job with Problems still open (jon, Oct 2026: staff kept
+    // completing jobs with unresolved Problems). Close-out cards stay a warning;
+    // an open Problem is firmer: only a manager may complete over it, and only
+    // with a reason, which goes on the timeline with the transition.
+    if (pipeline_status === 'completed' && fromStatus !== 'completed') {
+      const open = await query(
+        `SELECT id, summary, severity, status FROM job_issues
+          WHERE job_id = $1 AND status NOT IN ('resolved', 'written_off', 'cancelled')
+          ORDER BY severity DESC, created_at`,
+        [jobId]
+      );
+      if (open.rows.length > 0) {
+        const n = open.rows.length;
+        const isManager = (MANAGER_ROLES as readonly string[]).includes(req.user?.role || '');
+        if (!isManager) {
+          res.status(403).json({
+            error: `This job has ${n} open Problem${n === 1 ? '' : 's'}. Resolve ${n === 1 ? 'it' : 'them'}, or ask a manager to complete the job with a reason.`,
+            code: 'open_problems', problems: open.rows,
+          });
+          return;
+        }
+        if (!String(transition_note || '').trim()) {
+          res.status(400).json({
+            error: `This job has ${n} open Problem${n === 1 ? '' : 's'} — say why it is being completed anyway.`,
+            code: 'open_problems_reason_required', problems: open.rows,
+          });
+          return;
+        }
+      }
+    }
+
     // Build update fields
     const updates: string[] = [
       `pipeline_status = $1`,
@@ -659,10 +593,22 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
         updates.push(`next_chase_date = NULL`);
       }
     } else if (pipeline_status === 'confirmed') {
-      updates.push(`confirmed_method = $${pIdx}`);
-      updateParams.push(confirmed_method || null);
-      pIdx++;
-      updates.push(`confirmed_at = NOW()`);
+      // Only write the method when one was actually supplied. A wind-back to
+      // confirmed (prepped → confirmed) opens the same modal, and an
+      // unconditional write nulled out how the booking was originally won.
+      if (confirmed_method) {
+        updates.push(`confirmed_method = $${pIdx}`);
+        updateParams.push(confirmed_method);
+        pIdx++;
+      }
+      // COALESCE, not NOW(): this route is also how a job gets moved BACK to
+      // confirmed from prepped/dispatched when someone corrects a status, and
+      // a bare NOW() rewrote the original confirmation date every time. Job
+      // 15912 was confirmed in early June and its confirmed_at read 20 August
+      // because of a prepped → confirmed correction that morning.
+      // The stamp is cleared when a job is wound back BELOW confirmed (below),
+      // so a later genuine re-confirmation still records its own date.
+      updates.push(`confirmed_at = COALESCE(confirmed_at, NOW())`);
       // Clear chase date — once confirmed, chasing belongs to the reminders
       // system, not the enquiry chase pipeline.
       updates.push(`next_chase_date = NULL`);
@@ -676,12 +622,17 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updates.push(`lost_at = NOW()`);
       // Clear chase date — lost jobs don't need chasing
       updates.push(`next_chase_date = NULL`);
+      // Drop the one-shot last-minute marker (migration 226) — if this job ever
+      // comes back to life at short notice, that IS a last-minute booking.
+      updates.push(`last_minute_alerted_at = NULL`);
     } else if (pipeline_status === 'cancelled') {
       // Cancellation fields are populated by the cancellations route (POST /api/cancellations/:id/process)
       // The pipeline status change here just sets the status; the cancellation route handles the full workflow.
       // Clear chase date — cancelled jobs don't need chasing
       updates.push(`next_chase_date = NULL`);
       updates.push(`cancelled_at = NOW()`);
+      // Same as the lost branch — see migration 226.
+      updates.push(`last_minute_alerted_at = NULL`);
     } else if (pipeline_status === 'provisional') {
       // Auto-bump chase: moving INTO provisional from a pre-confirmed enquiry
       // stage signals "we have movement, expect a deposit/decision soon".
@@ -712,6 +663,17 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     }
     if (fromStatus === 'returned' && pipeline_status !== 'returned') {
       updates.push(`returned_bookedout_warned_at = NULL`);
+    }
+
+    // Un-winning: a job wound back to a pre-confirmed stage has, as far as the
+    // record goes, not been won. Drop the confirmation stamp so the COALESCE
+    // above can't make a later genuine re-confirmation inherit the first date,
+    // and drop the one-shot last-minute marker (migration 226) so a genuine
+    // re-confirmation at short notice is still allowed to alert.
+    if (isUnwonTransition(fromStatus, pipeline_status)) {
+      updates.push(`confirmed_at = NULL`);
+      updates.push(`confirmed_method = NULL`);
+      updates.push(`last_minute_alerted_at = NULL`);
     }
 
     // Clear lost fields when moving out of lost (re-opening)
@@ -756,6 +718,19 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       } catch (reactivateErr) {
         console.warn('[Pipeline] Failed to reactivate auto-cancelled requirements:', reactivateErr);
       }
+      // Same for the transport/crew quotes the close cascade cancelled. They
+      // come back as draft/todo and WITHOUT their crew — see
+      // reactivateAutoCancelledQuotes for why re-offering stays manual.
+      try {
+        const revived = await reactivateAutoCancelledQuotes(jobId);
+        if (revived.reactivatedCount > 0) {
+          console.log(
+            `[Pipeline] Reactivated ${revived.reactivatedCount} auto-cancelled quote(s) on resurrection (${fromStatus} → ${pipeline_status}) for job ${jobId}`
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Pipeline] Failed to reactivate auto-cancelled quotes:', reactivateErr);
+      }
     }
 
     // Log the transition as an interaction
@@ -766,8 +741,8 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       : `Status changed: ${fromLabel} → ${toLabel}`;
 
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, $3, $4)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('status_transition', $1, $2, $3, $4, 'system')`,
       [transitionContent, jobId, req.user!.id, fromStatus]
     );
 
@@ -826,122 +801,41 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     // van), and stamps `returned_bookedout_warned_at` so at most one
     // email fires per transition.
 
-    // Lost cleanup — flag the items the user opted to keep alive past close-out.
-    // The actual auto-cancellation pass runs AFTER the event-trigger pass below
-    // so triggered reminders get to fire & self-mark-done first.
-    // (Cancelled transitions go through cancellations.ts, which has its own
-    // equivalent pass — see CLAUDE.md → "Lost / Cancelled cleanup pattern".)
-    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
-      const keepIds = Array.isArray(keep_requirement_ids) ? keep_requirement_ids : [];
-      if (keepIds.length > 0) {
-        try {
-          await query(
-            `UPDATE job_requirements
-             SET keep_after_close = true,
-                 notes = COALESCE(notes, '') ||
-                         E'\n[Kept alive after job marked lost]',
-                 updated_at = NOW()
-             WHERE id = ANY($1::uuid[])
-               AND job_id = $2
-               AND status NOT IN ('done', 'cancelled')`,
-            [keepIds, jobId]
-          );
-        } catch (cancelErr) {
-          console.warn('[Pipeline] Failed to flag kept requirements on lost:', cancelErr);
-        }
-      }
+    // Requirement cleanup. Flag the keeps, fire any reminder whose
+    // event_trigger matches this status, then sweep the rest — in that order,
+    // or a reminder set to fire on `lost` is cancelled before it fires.
+    // Shared with the cancellation flow, the stale-enquiry auto-loser and the
+    // HH webhook via services/requirement-close-sweep.ts.
+    if ((pipeline_status === 'lost' && fromStatus !== 'lost')
+        || (pipeline_status === 'cancelled' && fromStatus !== 'cancelled')) {
+      await closeJobRequirements({
+        jobId,
+        reason: pipeline_status as 'lost' | 'cancelled',
+        keepRequirementIds: keep_requirement_ids,
+        actorUserId: req.user!.id,
+      });
+    } else if (pipeline_status === 'confirmed' && isBookingWonTransition(fromStatus)) {
+      // Confirmation fires triggers but NEVER sweeps — a confirmed job's
+      // requirements are the work, not litter.
+      //
+      // Gated on the booking actually being WON, not merely on arriving at
+      // 'confirmed'. A `prepped → confirmed` correction re-fired every
+      // confirmation reminder that wasn't yet done, days after the real
+      // confirmation.
+      await fireEventTriggeredReminders(jobId, 'confirmed', req.user!.id);
+      // Quote options: note the still-open siblings (the bar on the reloaded
+      // page shows the Confirm panel; a staff click needs no bell).
+      void afterOptionConfirmed(jobId, { actorUserId: req.user!.id, source: 'pipeline' });
     }
 
-    // Fire event-triggered reminders (reminder requirements with matching event_trigger)
-    if (['confirmed', 'cancelled', 'lost'].includes(pipeline_status)) {
-      try {
-        const triggered = await query(
-          `SELECT jr.id, jr.custom_label, jr.assigned_to, jr.notes, jr.delivery_method, jr.job_id
-           FROM job_requirements jr
-           WHERE jr.job_id = $1
-             AND jr.requirement_type = 'reminder'
-             AND jr.event_trigger = $2
-             AND jr.status NOT IN ('done', 'cancelled')`,
-          [jobId, pipeline_status]
-        );
-
-        const jobName = currentJob.job_name || currentJob.client_name || `Job ${currentJob.hh_job_number || ''}`;
-        for (const rem of triggered.rows) {
-          const targetUserId = rem.assigned_to || req.user!.id;
-          const title = `Reminder triggered: ${rem.custom_label || 'Reminder'}`;
-          const content = `Job ${pipeline_status} — ${rem.custom_label || 'Reminder'} (${jobName})`;
-          const deliveryMethod = rem.delivery_method || 'both';
-
-          // Respect delivery_method: 'notification' → low priority (no email escalation),
-          // 'email' → send email immediately + mark as emailed, 'both' → normal escalation
-          const priority = deliveryMethod === 'notification' ? 'low' : 'high';
-          const emailSentClause = deliveryMethod === 'email' ? `, email_sent_at = NOW()` : '';
-
-          await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, $6, $7)`,
-            [targetUserId, title, content, rem.job_id, `/jobs/${rem.job_id}?tab=overview`, priority, req.user!.id]
-          );
-
-          // If email-only or both, send email immediately for event triggers (they're time-sensitive)
-          if (deliveryMethod === 'email' || deliveryMethod === 'both') {
-            try {
-              const userResult = await query('SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1', [targetUserId]);
-              if (userResult.rows.length > 0 && userResult.rows[0].email) {
-                await emailService.sendRaw({
-                  to: userResult.rows[0].email,
-                  subject: title,
-                  html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
-                         <p>Your reminder "<strong>${rem.custom_label || 'Reminder'}</strong>" has been triggered because the job <strong>${jobName}</strong> is now <strong>${pipeline_status}</strong>.</p>
-                         ${rem.notes ? `<p>Notes: ${rem.notes}</p>` : ''}
-                         <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
-                });
-              }
-            } catch (emailErr) {
-              console.warn('[Pipeline] Event trigger email failed:', emailErr);
-            }
-          }
-
-          // Mark the reminder as done
-          await query(`UPDATE job_requirements SET status = 'done', updated_at = NOW() WHERE id = $1`, [rem.id]);
-        }
-
-        if (triggered.rows.length > 0) {
-          console.log(`[Pipeline] Fired ${triggered.rows.length} event-triggered reminder(s) for job ${jobId} → ${pipeline_status}`);
-        }
-      } catch (triggerErr) {
-        console.warn('[Pipeline] Event trigger check failed:', triggerErr);
-      }
-    }
-
-    // Lost cleanup — second half. After the event-trigger pass has fired (and
-    // self-marked-done) any reminders set to trigger on 'lost', sweep up
-    // everything else still open and not explicitly kept.
-    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
-      try {
-        const swept = await query(
-          `UPDATE job_requirements
-           SET status = 'cancelled',
-               notes = COALESCE(notes, '') ||
-                       E'\n[Auto-cancelled: job marked lost]',
-               updated_at = NOW()
-           WHERE job_id = $1
-             AND status NOT IN ('done', 'cancelled')
-             AND keep_after_close = false
-           RETURNING id`,
-          [jobId]
-        );
-        if (swept.rows.length > 0) {
-          console.log(`[Pipeline] Auto-cancelled ${swept.rows.length} open requirement(s) on lost transition for job ${jobId}`);
-        }
-      } catch (cancelErr) {
-        console.warn('[Pipeline] Failed to sweep open requirements on lost:', cancelErr);
-      }
-    }
-
-    // Last-minute booking alert (any route to confirmed, job starts within 3 days)
+    // Last-minute booking alert + hire form email. `fromStatus` is what decides
+    // whether this was the booking being WON — sendLastMinuteAlert() owns that
+    // judgement (BOOKING_WON_FROM_STATUSES) so every caller applies it the same
+    // way. Firing on "pipeline_status === 'confirmed'" alone is what alerted
+    // info@ about jobs booked weeks earlier: a `prepped → confirmed` status
+    // correction the morning the van went out looked identical to a new booking.
     if (pipeline_status === 'confirmed') {
-      sendLastMinuteAlert(jobId).catch(e => console.error('[Pipeline] Last-minute alert failed:', e));
+      sendLastMinuteAlert(jobId, fromStatus).catch(e => console.error('[Pipeline] Last-minute alert failed:', e));
 
       // Hire form email: runs HH-derivation inline (covers HH-synced jobs whose
       // requirements hadn't yet been derived) and fires the hire form request
@@ -950,6 +844,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       (async () => {
         try {
           const hfResult = await triggerHireFormEmailOnConfirmation(jobId);
+          triggerCarnetFormOnConfirmation(jobId).catch(() => {}); // best-effort, gated internally
           const anomaly = hireFormResultIsAnomaly(hfResult);
           if (anomaly) {
             const jobRow = await query(
@@ -972,109 +867,17 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       })();
     }
 
-    // Lost cascade — mirror the cancellation flow. Without this the
-    // transport/crew quotes + assignments keep showing as active work on
-    // Transport Ops even though the parent job is dead. We skip the
-    // freelancer email for past-dated jobs (backfill / historical data
-    // import) so cleaning up old records doesn't spam anyone.
-    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
-      try {
-        // Pull crew before we cancel assignments so we still have the data
-        const crewResult = await query(
-          `SELECT qa.role, p.first_name, p.last_name, p.email
-             FROM quote_assignments qa
-             JOIN people p ON p.id = qa.person_id
-             WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-               AND qa.status NOT IN ('cancelled', 'declined')
-               AND qa.is_ooosh_crew = false
-               AND p.email IS NOT NULL`,
-          [jobId]
-        );
-
-        await query(
-          `UPDATE quotes
-             SET status = 'cancelled',
-                 ops_status = 'cancelled',
-                 status_changed_at = NOW(),
-                 status_changed_by = $2,
-                 cancelled_reason = COALESCE(cancelled_reason, 'Parent job marked lost'),
-                 updated_at = NOW()
-           WHERE job_id = $1
-             AND is_deleted = false
-             AND status NOT IN ('cancelled', 'completed')`,
-          [jobId, req.user!.id]
-        );
-
-        await query(
-          `UPDATE quote_assignments SET status = 'cancelled', updated_at = NOW()
-           WHERE quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-             AND status NOT IN ('cancelled', 'declined')`,
-          [jobId]
-        );
-
-        // Vehicle hire assignment sweep. Without this, speculative/orphan
-        // rows (derivation-engine pre-allocations, quick-assign, even stray
-        // booked_out rows on test jobs) get left behind on a lost job and
-        // keep blocking syncFleetHireStatus from transitioning the van to
-        // 'Prep Needed'. Mirrors the cancellations.ts /process flow.
-        // Dual job match catches V&D-style rows (job_id IS NULL).
-        const hhJobNumber = currentJob.hh_job_number ?? null;
-        const sweptVha = await query(
-          `UPDATE vehicle_hire_assignments
-             SET status = 'cancelled',
-                 status_changed_at = NOW(),
-                 notes = COALESCE(notes, '') ||
-                         E'\n[Auto-cancelled: job marked lost]',
-                 updated_at = NOW()
-           WHERE (job_id = $1
-                  OR (job_id IS NULL AND hirehop_job_id = $2::integer))
-             AND status NOT IN ('cancelled', 'returned', 'swapped')
-           RETURNING id, vehicle_id`,
-          [jobId, hhJobNumber]
-        );
-        if (sweptVha.rows.length > 0) {
-          console.log(`[Pipeline lost cascade] Cancelled ${sweptVha.rows.length} open vehicle_hire_assignment(s) for job ${jobId}`);
-          // Recompute fleet hire_status for each affected vehicle so the
-          // cached projection catches up immediately.
-          const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
-          const seen = new Set<string>();
-          for (const r of sweptVha.rows) {
-            if (r.vehicle_id && !seen.has(r.vehicle_id)) {
-              seen.add(r.vehicle_id);
-              try { await syncFleetHireStatus(r.vehicle_id); }
-              catch (e) { console.warn('[Pipeline lost cascade] syncFleetHireStatus failed:', e); }
-            }
-          }
-        }
-
-        // Email only for future-dated jobs. currentJob.job_date is a Date
-        // or ISO string; compare on calendar-day to be friendly to TZ.
-        const rawJobDate = currentJob.job_date ? new Date(currentJob.job_date as string | Date) : null;
-        const today = new Date(); today.setHours(0, 0, 0, 0);
-        const isFuture = !!rawJobDate && !Number.isNaN(rawJobDate.getTime()) && rawJobDate >= today;
-
-        if (isFuture && crewResult.rows.length > 0) {
-          const jobNumber = currentJob.hh_job_number ? `J-${currentJob.hh_job_number}` : 'NEW';
-          const jobName = currentJob.job_name || 'Untitled';
-          const jobDates = [currentJob.job_date, currentJob.job_end].filter(Boolean).map(
-            (d: string | Date) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-          ).join(' — ');
-          for (const crew of crewResult.rows) {
-            emailService.send('job_cancelled_crew', {
-              to: crew.email,
-              variables: {
-                crewName: `${crew.first_name || ''} ${crew.last_name || ''}`.trim() || 'there',
-                jobName,
-                jobNumber,
-                jobDates,
-                crewRole: crew.role || 'Crew',
-              },
-            }).catch(err => console.error(`[Pipeline lost cascade] Email failed for ${crew.email}:`, err));
-          }
-        }
-      } catch (cascadeErr) {
-        console.error('[Pipeline] Lost cascade failed:', cascadeErr);
-      }
+    // Lost cascade — transport/crew/vehicle cleanup. Shared with the
+    // cancellation flow, the stale-enquiry auto-loser and the HH webhook via
+    // services/job-close-cascade.ts, so all four doors out of a live job do
+    // the same thing. Never throws; logs its own counts.
+    if ((pipeline_status === 'lost' && fromStatus !== 'lost')
+        || (pipeline_status === 'cancelled' && fromStatus !== 'cancelled')) {
+      await cascadeJobClose({
+        jobId,
+        reason: pipeline_status as 'lost' | 'cancelled',
+        actorUserId: req.user!.id,
+      });
     }
 
     // Write back to HireHop (async, non-blocking — don't fail the response if HH is down)
@@ -1102,6 +905,7 @@ const updatePipelineSchema = z.object({
   job_value: z.number().optional().nullable(),
   quote_status: z.enum(['not_quoted', 'quoted', 'revised', 'accepted']).optional().nullable(),
   enquiry_source: z.enum(['phone', 'email', 'web_form', 'referral', 'cold_lead', 'forum', 'repeat', 'other']).optional().nullable(),
+  auto_chase_mode: z.enum(['off', 'draft', 'send']).optional(),
   notes: z.string().optional().nullable(),
 });
 
@@ -1128,7 +932,7 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
     const allowedFields = [
       'likelihood', 'next_chase_date', 'chase_interval_days',
       'chase_alert_user_id', 'chase_alert_delivery',
-      'job_value', 'quote_status', 'enquiry_source', 'notes',
+      'job_value', 'quote_status', 'enquiry_source', 'auto_chase_mode', 'notes',
     ];
 
     for (const field of allowedFields) {
@@ -1137,6 +941,14 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
         params.push(fields[field]);
         pIdx++;
       }
+    }
+
+    // Stamp who set the auto-chase, so automated chases can sign off with them
+    // (same logic as a manual "Draft chase"). Only when turning it on.
+    if ('auto_chase_mode' in fields && (fields.auto_chase_mode === 'draft' || fields.auto_chase_mode === 'send')) {
+      updates.push(`auto_chase_set_by = $${pIdx}`);
+      params.push(req.user!.id);
+      pIdx++;
     }
 
     if (params.length === 0) {
@@ -1218,9 +1030,9 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
     }
     const statsResult = await query(
       `SELECT
-        COUNT(*) as total_jobs,
+        COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('j')}) as total_jobs,
         COUNT(*) FILTER (WHERE pipeline_status = 'confirmed' OR status = 2) as confirmed_jobs,
-        COUNT(*) FILTER (WHERE pipeline_status = 'lost' OR status IN (9, 10)) as lost_jobs,
+        COUNT(*) FILTER (WHERE (pipeline_status = 'lost' OR status IN (9, 10)) AND ${notAltQuoteLossSql('j')}) as lost_jobs,
         COALESCE(SUM(job_value) FILTER (WHERE pipeline_status = 'confirmed' OR status = 2), 0) as total_confirmed_value,
         COALESCE(SUM(job_value), 0) as total_value,
         MIN(job_date) as first_job_date,
@@ -1267,9 +1079,9 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
 
       const bandStats = await query(
         `SELECT
-          COUNT(*) as total_jobs,
+          COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('j')}) as total_jobs,
           COUNT(*) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2) as confirmed_jobs,
-          COUNT(*) FILTER (WHERE j.pipeline_status = 'lost' OR j.status IN (9, 10)) as lost_jobs,
+          COUNT(*) FILTER (WHERE (j.pipeline_status = 'lost' OR j.status IN (9, 10)) AND ${notAltQuoteLossSql('j')}) as lost_jobs,
           COALESCE(SUM(j.job_value) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2), 0) as total_confirmed_value,
           COALESCE(SUM(j.job_value), 0) as total_value
         FROM jobs j
@@ -1293,11 +1105,18 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
       };
     }
 
+    // Artist endorsements for the client / band and their current members —
+    // shown on New Enquiry and Job view only when there are any.
+    const endorsements = await forClientContext(
+      [client_id, band_id].filter((v): v is string => typeof v === 'string' && /^[0-9a-f-]{36}$/i.test(v))
+    );
+
     res.json({
       jobs: result.rows,
       stats: statsResult.rows[0],
       client_info,
       band_history,
+      endorsements,
     });
   } catch (error) {
     console.error('Client history error:', error);
@@ -1311,7 +1130,7 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
 
 const createJobOrgSchema = z.object({
   organisation_id: z.string().uuid(),
-  role: z.enum(['band', 'client', 'promoter', 'venue_operator', 'management', 'label', 'supplier', 'other']),
+  role: z.enum(['band', 'client', 'promoter', 'festival', 'management', 'label', 'venue_operator', 'supplier', 'other']),
   is_primary: z.boolean().optional().default(false),
   notes: z.string().optional().nullable(),
 });
@@ -1324,7 +1143,7 @@ router.get('/:jobId/organisations', async (req: AuthRequest, res: Response) => {
        FROM job_organisations jo
        JOIN organisations o ON o.id = jo.organisation_id AND o.is_deleted = false
        WHERE jo.job_id = $1
-       ORDER BY jo.role, o.name`,
+       ORDER BY jo.is_primary DESC, jo.role, o.name`,
       [req.params.jobId]
     );
     res.json({ data: result.rows });
@@ -1370,6 +1189,79 @@ router.post('/:jobId/organisations', validate(createJobOrgSchema), async (req: A
     }
     console.error('Create job organisation error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/pipeline/:jobId/organisations/lead
+//
+// Sets which organisation headlines the job. `organisation_id: null` clears the
+// flag, which falls the headline back to the job's `client_id` (the accounting
+// client) — the default lead for every job, so nothing needs backfilling.
+//
+// This is deliberately a flag flip, not a data move: `client_id` stays
+// authoritative for accounting (excess ledger, Xero bucketing, cross-job credit)
+// no matter which org leads the display. Swapping the lead leaves no trail to
+// unpick — flip it back and you're exactly where you started.
+const setLeadOrgSchema = z.object({
+  organisation_id: z.string().uuid().nullable(),
+});
+
+router.put('/:jobId/organisations/lead', validate(setLeadOrgSchema), async (req: AuthRequest, res: Response) => {
+  const client = await getClient();
+  try {
+    const jobId = req.params.jobId as string;
+    const { organisation_id } = req.body;
+
+    await client.query('BEGIN');
+
+    const job = await client.query(
+      'SELECT id FROM jobs WHERE id = $1 AND is_deleted = false',
+      [jobId]
+    );
+    if (job.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    // Clear first — the partial unique index (migration 190) allows exactly
+    // one lead per job, so the old one has to go before the new one lands.
+    await client.query(
+      'UPDATE job_organisations SET is_primary = false, updated_at = NOW() WHERE job_id = $1 AND is_primary = true',
+      [jobId]
+    );
+
+    if (organisation_id) {
+      const set = await client.query(
+        `UPDATE job_organisations SET is_primary = true, updated_at = NOW()
+         WHERE job_id = $1 AND organisation_id = $2
+         RETURNING id`,
+        [jobId, organisation_id]
+      );
+      if (set.rows.length === 0) {
+        await client.query('ROLLBACK');
+        res.status(404).json({ error: 'That organisation is not linked to this job' });
+        return;
+      }
+    }
+
+    const rows = await client.query(
+      `SELECT jo.*, o.name as organisation_name, o.type as organisation_type
+       FROM job_organisations jo
+       JOIN organisations o ON o.id = jo.organisation_id AND o.is_deleted = false
+       WHERE jo.job_id = $1
+       ORDER BY jo.is_primary DESC, jo.role, o.name`,
+      [jobId]
+    );
+
+    await client.query('COMMIT');
+    res.json({ data: rows.rows });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Set lead organisation error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -1420,28 +1312,10 @@ router.get('/:jobId/contacts', async (req: AuthRequest, res: Response) => {
       [jobId]
     );
 
-    // All candidate people from client org + any linked org. DISTINCT ON
-    // person_id keeps the first source per person (sorted so client wins
-    // over linked orgs, primary contacts surface ahead of generals).
-    const candidatesResult = await query(
-      `SELECT DISTINCT ON (p.id)
-              p.id AS person_id,
-              p.first_name, p.last_name, p.email, p.phone,
-              por.role, por.is_primary AS is_org_primary,
-              o.id AS source_org_id, o.name AS source_org_name,
-              CASE WHEN o.id = j.client_id THEN 0 ELSE 1 END AS source_priority
-       FROM jobs j
-       JOIN person_organisation_roles por ON por.status = 'active'
-       JOIN organisations o ON o.id = por.organisation_id AND o.is_deleted = false
-       JOIN people p ON p.id = por.person_id AND p.is_deleted = false
-       WHERE j.id = $1
-         AND (
-           o.id = j.client_id
-           OR o.id IN (SELECT organisation_id FROM job_organisations WHERE job_id = j.id)
-         )
-       ORDER BY p.id, source_priority, por.is_primary DESC`,
-      [jobId]
-    );
+    // All candidate people from client org + any linked org. Shared with the
+    // transport-leg contact picker via services/job-contact-candidates.ts, so
+    // the two can't drift as sources are added.
+    const candidates = await resolveJobContactCandidates(jobId);
 
     const ticked = tickedResult.rows.map((r: any) => ({
       person_id: r.person_id,
@@ -1452,16 +1326,6 @@ router.get('/:jobId/contacts', async (req: AuthRequest, res: Response) => {
       role_override: r.role_override,
     }));
 
-    const candidates = candidatesResult.rows.map((r: any) => ({
-      person_id: r.person_id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email,
-      phone: r.phone,
-      role: r.role,
-      is_org_primary: r.is_org_primary,
-      source_org_id: r.source_org_id,
-      source_org_name: r.source_org_name,
-    }));
 
     res.json({ ticked, candidates });
   } catch (error) {
@@ -1734,6 +1598,7 @@ const editJobSchema = z.object({
   likelihood: z.enum(['hot', 'warm', 'cold']).optional().nullable(),
   next_chase_date: z.string().optional().nullable(),
   details: z.string().optional().nullable(),
+  option_label: z.string().max(120).optional().nullable(),
   notes: z.string().optional().nullable(),
 });
 
@@ -1796,7 +1661,7 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
       'job_name', 'out_date', 'job_date', 'job_end', 'return_date',
       'out_time', 'start_time', 'return_time', 'end_time',
       'client_id', 'client_name', 'hh_job_number', 'job_value',
-      'likelihood', 'next_chase_date', 'details', 'notes',
+      'likelihood', 'next_chase_date', 'details', 'notes', 'option_label',
     ];
 
     const changedFields: string[] = [];
@@ -1807,6 +1672,7 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
       client_name: 'Client',
       hh_job_number: 'HH job #', job_value: 'Job value', likelihood: 'Likelihood',
       next_chase_date: 'Next chase', details: 'Details', notes: 'Notes',
+      option_label: 'Option label',
     };
     const dateFields = new Set(['out_date', 'job_date', 'job_end', 'return_date', 'next_chase_date']);
     const timeFields = new Set(['out_time', 'start_time', 'return_time', 'end_time']);
@@ -1829,9 +1695,22 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
       if (field in fields) {
         const oldVal = currentJob[field];
         const newVal = fields[field];
-        // Track what actually changed for the interaction log
-        if (String(oldVal ?? '') !== String(newVal ?? '')) {
-          changedFields.push(`${fieldLabels[field] || field}: ${formatLogValue(field, oldVal)} → ${formatLogValue(field, newVal)}`);
+        // Track what actually changed for the interaction log. For date/time
+        // fields compare the DISPLAY value, not the raw DB representation: the
+        // DB stores dates as full timestamps (2026-06-26T00:00:00.000Z) and
+        // times as HH:MM:SS, while the edit form sends '2026-06-26' / 'HH:MM'.
+        // A naive string compare flags an unchanged date as changed and floods
+        // the timeline with "26 Jun 2026 → 26 Jun 2026" lines. Other fields
+        // keep the raw compare. (Only the LOG is affected — the UPDATE below
+        // still writes every provided field, and HireHop write-back has its
+        // own separate check, so nothing downstream changes.)
+        const isDateTime = dateFields.has(field) || timeFields.has(field);
+        const changedForLog = isDateTime
+          ? formatLogValue(field, oldVal) !== formatLogValue(field, newVal)
+          : String(oldVal ?? '') !== String(newVal ?? '');
+        if (changedForLog) {
+          // Tighter phrasing — just the new value (e.g. "Job end → 12 Jul 2026").
+          changedFields.push(`${fieldLabels[field] || field} → ${formatLogValue(field, newVal)}`);
         }
         updates.push(`${field} = $${pIdx}`);
         params.push(newVal ?? null);
@@ -1844,6 +1723,17 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
       return;
     }
 
+    // Changing the client here is a deliberate human decision — stamp the lock
+    // so the 30-minute HireHop job sync stops overwriting it with HireHop's
+    // COMPANY string (which only reflects whatever HH was last told). The sync
+    // queues a `client_mismatch` review instead of reverting silently.
+    if ('client_id' in fields && String(currentJob.client_id ?? '') !== String(fields.client_id ?? '')) {
+      updates.push('client_locked_at = NOW()');
+      updates.push(`client_locked_by = $${pIdx}`);
+      params.push(req.user!.id);
+      pIdx++;
+    }
+
     params.push(jobId);
     const result = await query(
       `UPDATE jobs SET ${updates.join(', ')} WHERE id = $${pIdx} RETURNING *`,
@@ -1854,8 +1744,8 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
     if (changedFields.length > 0) {
       const content = `Job details updated: ${changedFields.join('; ')}`;
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('note', $1, $2, $3, $4)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, $3, $4, 'system')`,
         [content, jobId, req.user!.id, currentJob.pipeline_status]
       );
     }
@@ -1935,8 +1825,18 @@ function buildHHDateTime(
  * days=N makes the HH UI display "N days (1 hours)" — confirmed via job
  * 15833 (4 days/96 hrs) and 15335 (6 days/144 hrs).
  *
+ * Days are CEILED, not floored: HireHop's own charge-period rule counts any
+ * fraction of a day past a whole 24h block as a new chargeable day. Confirmed
+ * via job 16390: finish 22:00 (132h) → 6 days, finish 09:00 next morning
+ * (143h) → 6 days, finish 10:05 (145h) → 7 days = ceil(hours/24) in every
+ * case. Flooring under-counted whenever a hire wasn't entered on a whole-day
+ * (9am→9am) boundary — most visibly rehearsals, which finish on the last day
+ * (e.g. 10:00–22:00) with no morning rollover, so a genuine 6-day rehearsal
+ * was pushed as 5. For 9am→9am van entries the hours are exact 24h multiples,
+ * so ceil == floor and their duration is unchanged.
+ *
  * duration_locked=0 keeps HH auto-recalculating duration on subsequent date
- * edits.
+ * edits (its own recalculation also ceils, so our pushed value stays in sync).
  */
 function calcHHDuration(
   startDateTime: string | undefined,
@@ -1948,8 +1848,8 @@ function calcHHDuration(
   if (isNaN(startMs) || isNaN(endMs)) return null;
   const totalHours = Math.max(0, (endMs - startMs) / (1000 * 60 * 60));
   return {
-    duration_days: Math.floor(totalHours / 24),
-    duration_hrs: Math.round(totalHours),
+    duration_days: Math.ceil(totalHours / 24),
+    duration_hrs: Math.ceil(totalHours),
     duration_locked: 0,
   };
 }
@@ -2113,6 +2013,951 @@ router.post('/:id/push-dates-to-hh', async (req: AuthRequest, res: Response) => 
     res.status(500).json({ error: 'Failed to update dates on HireHop' });
   }
 });
+
+// ============================================================================
+// QUOTE OPTIONS — alternative quotes for one enquiry as a GROUP of jobs
+//
+// docs/QUOTE-VERSIONS-SPEC.md ("version" there = "option" here). One option =
+// one OP job + one HireHop job: "Add an option" duplicates the HireHop job
+// (job_duplicate.php — the Re-open mechanism in cancellations.ts) and names the
+// pair "(Option 1)" / "(Option 2)" so HireHop, the quote PDFs and the emails
+// agree. Pre-confirmation only. The numbering, the suffix, the lead rule and
+// the OP copy live in services/job-groups.ts; this block owns the HireHop
+// calls and the transactions.
+//
+// Ordering (jon, 12 Oct 2026): HireHop duplicate FIRST, then the OP row is
+// born with its number. The other way round leaves a window in which the
+// 30-min sync imports the new HireHop job as an unrelated enquiry and the
+// write-back then hits the hh_job_number unique index. A HireHop failure
+// never rolls the OP option back — the row is created unlinked and the
+// response says so (hh_error), like Re-open.
+// ============================================================================
+
+const addOptionSchema = z.object({
+  option_label: z.string().trim().min(1).max(120),
+  out_date: z.string().optional().nullable(),
+  job_date: z.string().optional().nullable(),
+  job_end: z.string().optional().nullable(),
+  return_date: z.string().optional().nullable(),
+  create_in_hirehop: z.boolean().optional(),
+});
+
+const groupWithSchema = z.object({
+  other_job_id: z.string().uuid(),
+});
+
+const patchGroupSchema = z.object({
+  label: z.string().trim().max(120).optional().nullable(),
+  lead_job_id: z.string().uuid().optional().nullable(),
+});
+
+/** The client's display name for a new group's default label. */
+async function clientLabelFor(job: { client_id: string | null; client_name: string | null; company_name: string | null }): Promise<string | null> {
+  if (job.client_id) {
+    const o = await query(`SELECT name FROM organisations WHERE id = $1 AND is_deleted = false`, [job.client_id]);
+    if (o.rows[0]?.name) return o.rows[0].name;
+  }
+  return job.client_name || job.company_name || null;
+}
+
+/** Push a rename to HireHop, gated on the broker's result (a 327 RESOLVES false — never throws). */
+async function pushOptionRename(jobId: string, hhJobNumber: number | null, newName: string, email: string, warnings: string[]): Promise<void> {
+  if (!hhJobNumber) return;
+  const wb = await writeBackJobNameToHireHop(jobId, newName, email);
+  if (!wb.success) warnings.push(`#${hhJobNumber}: renamed in OP, but HireHop rename failed (${wb.message}) — the next sync may undo it.`);
+}
+
+// GET /api/pipeline/groups/:groupId — the group + one row per option, lead resolved.
+router.get('/groups/:groupId', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await getGroupById(req.params.groupId as string);
+    if (!result) { res.status(404).json({ error: 'Group not found' }); return; }
+    res.json({ data: result });
+  } catch (error: any) {
+    console.error('[options] group read error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to load the group' });
+  }
+});
+
+// PATCH /api/pipeline/groups/:groupId — rename the group / pin or unpin the lead.
+router.patch('/groups/:groupId', validate(patchGroupSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const groupId = req.params.groupId as string;
+    const { label, lead_job_id } = req.body as z.infer<typeof patchGroupSchema>;
+    const existing = await getGroupById(groupId);
+    if (!existing) { res.status(404).json({ error: 'Group not found' }); return; }
+    if (lead_job_id && !existing.members.some((m) => m.id === lead_job_id)) {
+      res.status(400).json({ error: 'The lead must be one of the options in this group' });
+      return;
+    }
+    const updates: string[] = ['updated_at = NOW()'];
+    const params: unknown[] = [];
+    if (label !== undefined) { params.push(label || null); updates.push(`label = $${params.length}`); }
+    if (lead_job_id !== undefined) { params.push(lead_job_id || null); updates.push(`lead_job_id = $${params.length}`); }
+    params.push(groupId);
+    await query(`UPDATE job_groups SET ${updates.join(', ')} WHERE id = $${params.length}`, params);
+    res.json({ data: await getGroupById(groupId) });
+  } catch (error: any) {
+    console.error('[options] group patch error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to update the group' });
+  }
+});
+
+// POST /api/pipeline/groups/:groupId/prompt-handled — the Confirm panel has been
+// dealt with (siblings marked lost, or none left): retire the bells.
+router.post('/groups/:groupId/prompt-handled', async (req: AuthRequest, res: Response) => {
+  try {
+    const n = await markOptionPromptHandled(req.params.groupId as string);
+    res.json({ data: { retired: n } });
+  } catch (error: any) {
+    console.error('[options] prompt-handled error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to retire the prompt' });
+  }
+});
+
+// GET /api/pipeline/:id/group-candidates?q= — open, ungrouped, pre-confirmation
+// jobs that could be linked as an option of this one. Without `q`: the same
+// client's. With `q`: any, by job number or name, flagged same_client so the
+// picker can WARN about a different client rather than refuse (warnings, not
+// gates — HireHop sync leaves duplicate client shells now and then).
+router.get('/:id/group-candidates', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+    const q = String(req.query.q ?? '').trim();
+    const cur = await query(
+      `SELECT id, client_id, client_name, company_name FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId],
+    );
+    if (cur.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const me = cur.rows[0];
+
+    const params: unknown[] = [jobId, me.client_id, PRE_CONFIRMED_STATUSES];
+    let where = `j.is_deleted = false AND j.id <> $1 AND j.group_id IS NULL
+                 AND j.dismissed_at IS NULL AND j.combined_into_job_id IS NULL
+                 AND j.pipeline_status = ANY($3::text[])`;
+    if (q) {
+      params.push(`${q}%`, `%${q}%`);
+      where += ` AND (CAST(j.hh_job_number AS TEXT) LIKE $4::text OR j.job_name ILIKE $5::text)`;
+    } else {
+      if (!me.client_id) { res.json({ data: [], client_name: me.client_name }); return; }
+      where += ` AND j.client_id = $2::uuid`;
+    }
+    const rows = await query(
+      `SELECT j.id, j.hh_job_number, j.job_name, j.pipeline_status,
+              j.out_date, j.job_date, j.job_end, j.return_date, j.job_value,
+              j.client_name, j.company_name,
+              (j.client_id IS NOT DISTINCT FROM $2::uuid) AS same_client
+         FROM jobs j
+        WHERE ${where}
+        ORDER BY same_client DESC, j.job_date ASC NULLS LAST
+        LIMIT 25`,
+      params,
+    );
+    res.json({ data: rows.rows, client_name: me.client_name });
+  } catch (error: any) {
+    console.error('[options] candidates error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to load candidates' });
+  }
+});
+
+// POST /api/pipeline/:id/add-option — duplicate this job (OP + HireHop) as the
+// next option of its group, creating the group (and making this job Option 1)
+// when it has none. Spec §5.3.
+router.post('/:id/add-option', validate(addOptionSchema), async (req: AuthRequest, res: Response) => {
+  const warnings: string[] = [];
+  try {
+    const sourceId = req.params.id as string;
+    const body = req.body as z.infer<typeof addOptionSchema>;
+    const createInHH = body.create_in_hirehop !== false;
+
+    const src = await query(`SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`, [sourceId]);
+    if (src.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const source = src.rows[0];
+    const refusal = optionRefusalReason(source);
+    if (refusal) { res.status(400).json({ error: refusal }); return; }
+
+    if (source.group_id) {
+      const g = await query(`SELECT kind FROM job_groups WHERE id = $1`, [source.group_id]);
+      if (g.rows[0]?.kind && g.rows[0].kind !== OPTION_GROUP_KIND) {
+        res.status(400).json({ error: 'This job is in a related-jobs group, not an options group' });
+        return;
+      }
+    }
+
+    // Dates: the modal's values, else the source's. Times always ride from the source.
+    const dates = {
+      out_date: body.out_date !== undefined ? body.out_date : source.out_date,
+      job_date: body.job_date !== undefined ? body.job_date : source.job_date,
+      job_end: body.job_end !== undefined ? body.job_end : source.job_end,
+      return_date: body.return_date !== undefined ? body.return_date : source.return_date,
+    };
+    const dateShape = {
+      ...dates,
+      out_time: source.out_time, start_time: source.start_time,
+      return_time: source.return_time, end_time: source.end_time,
+    };
+    const dateTimeError = validateJobDateTimes(dateShape);
+    if (dateTimeError) { res.status(400).json({ error: dateTimeError }); return; }
+
+    // Numbering is decided up front so the HireHop duplicate carries its name.
+    // A lone job becomes Option 1 and the new one Option 2.
+    let optionNo = 2;
+    if (source.group_id) {
+      const n = await query(`SELECT COALESCE(MAX(option_no), 0) + 1 AS n FROM jobs WHERE group_id = $1`, [source.group_id]);
+      optionNo = Number(n.rows[0].n);
+    }
+    const newName = withOptionSuffix(source.job_name, optionNo);
+
+    // 1. HireHop first — the Re-open call, then the chosen dates (+ the ceil'd
+    //    charge period) with no_webhook so the duplicate doesn't echo back.
+    let newHhJobNumber: number | null = null;
+    let hhError: string | undefined;
+    if (createInHH && source.hh_job_number) {
+      const dup = await hhBroker.post('/php_functions/job_duplicate.php', {
+        id: source.hh_job_number,
+        supplying: 1,       // items
+        notes: 1,
+        transport: 1,
+        reserved: 1,        // reserved items (conflicts omitted)
+        job_name: newName,
+        local: new Date().toISOString().replace('T', ' ').substring(0, 16),
+      }, { priority: 'high' });
+      // job_duplicate.php answers with the NEW job's data (`ID` is the number —
+      // readDuplicatedJobNumber). Log the raw reply so a change in shape is
+      // visible the day it happens.
+      console.log(`[options] job_duplicate.php reply for #${source.hh_job_number}:`, JSON.stringify(dup).slice(0, 600));
+      const newHhFromReply = readDuplicatedJobNumber(dup?.data);
+      if (dup.success && newHhFromReply) {
+        newHhJobNumber = newHhFromReply;
+        console.log(`[options] HH duplicate of #${source.hh_job_number} → #${newHhJobNumber} (${newName})`);
+        const { out, start, end, to, duration } = buildHHJobDateTimes(dateShape);
+        const dateParams: Record<string, unknown> = { job: newHhJobNumber, no_webhook: 1 };
+        if (out) dateParams.out = out;
+        if (start) dateParams.start = start;
+        if (end) dateParams.end = end;
+        if (to) dateParams.to = to;
+        if (duration) {
+          dateParams.duration_days = duration.duration_days;
+          dateParams.duration_hrs = duration.duration_hrs;
+          dateParams.duration_locked = duration.duration_locked;
+        }
+        const saved = await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
+        if (!saved.success) {
+          warnings.push(`HireHop #${newHhJobNumber} was created but its dates could not be set (${saved.error || 'unknown error'}) — check them in HireHop.`);
+        }
+      } else {
+        hhError = `HireHop duplicate failed: ${dup?.error || 'no job number returned'}`;
+        console.error(`[options] ${hhError} (source #${source.hh_job_number})`, dup);
+      }
+    } else if (createInHH && !source.hh_job_number) {
+      warnings.push('This job is not linked to HireHop yet, so the option was created in OP only — use "Create in HireHop" on it.');
+    }
+
+    // 2. OP, in one transaction: the group (if new), Option 1 on the source, the copy.
+    const client = await getClient();
+    let groupId: string = source.group_id;
+    let sourceRenamedTo: string | null = null;
+    let newJob: Record<string, any>;
+    try {
+      await client.query('BEGIN');
+      if (!groupId) {
+        const label = await clientLabelFor(source);
+        const g = await client.query(
+          `INSERT INTO job_groups (kind, label, created_by) VALUES ($1, $2, $3) RETURNING id`,
+          [OPTION_GROUP_KIND, label, req.user!.id],
+        );
+        groupId = g.rows[0].id;
+        sourceRenamedTo = withOptionSuffix(source.job_name, 1);
+        await client.query(
+          `UPDATE jobs SET group_id = $1, option_no = 1, job_name = $2, updated_at = NOW() WHERE id = $3`,
+          [groupId, sourceRenamedTo, source.id],
+        );
+      } else {
+        // Re-check inside the transaction; the unique index is the backstop.
+        optionNo = Math.max(optionNo, await nextOptionNo(client, groupId));
+      }
+      newJob = await insertOptionCopy(client, source, {
+        groupId,
+        optionNo,
+        optionLabel: body.option_label,
+        hhJobNumber: newHhJobNumber,
+        dates,
+        actorId: req.user!.id,
+      });
+      await noteOnTimeline(client, source.id,
+        `Added Option ${optionNo} (${body.option_label}) → ${jobRef(newJob as any)}`,
+        req.user!.id, source.pipeline_status);
+      await noteOnTimeline(client, newJob.id,
+        `Created as Option ${optionNo} of this enquiry from ${jobRef(source)}${sourceRenamedTo ? ' (now Option 1)' : ''}`,
+        req.user!.id, 'quoting');
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (newHhJobNumber) {
+        // The HireHop job exists and nothing in OP points at it: the 30-min sync
+        // will import it as an ordinary enquiry; link it with "Link an existing quote".
+        console.error(`[options] OP insert failed AFTER HireHop duplicate #${newHhJobNumber} was created — it will arrive via the sync as an ungrouped enquiry`, err);
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // 3. After commit: the source's "(Option 1)" rename goes to HireHop too.
+    if (sourceRenamedTo) {
+      await pushOptionRename(source.id, source.hh_job_number, sourceRenamedTo, req.user!.email, warnings);
+    }
+    // 4. Pull the new HireHop job's items + derived requirements now rather than
+    //    waiting for the next sync. Best-effort: the option exists either way.
+    if (newHhJobNumber) {
+      try {
+        await syncSingleHireHopJob(newHhJobNumber, req.user!.id);
+      } catch (syncErr) {
+        console.warn(`[options] post-create sync of #${newHhJobNumber} failed (the 30-min sync will catch up):`, syncErr);
+      }
+    }
+
+    await logAudit(req.user!.id, 'jobs', newJob.id, 'create', null, newJob);
+    const refreshed = await query(`SELECT * FROM jobs WHERE id = $1`, [newJob.id]);
+    res.json({
+      data: {
+        job: refreshed.rows[0] ?? newJob,
+        group: await getGroupById(groupId),
+        ...(hhError ? { hh_error: hhError } : {}),
+        warnings,
+      },
+    });
+  } catch (error: any) {
+    console.error('[options] add-option error:', error);
+    if (error?.code === '23505') {
+      res.status(409).json({ error: 'Someone added an option to this enquiry at the same moment — refresh and try again.' });
+      return;
+    }
+    res.status(500).json({ error: error?.message || 'Failed to add the option' });
+  }
+});
+
+// POST /api/pipeline/:id/group-with — link an EXISTING job as an option of this
+// one (staff already made two enquiries by hand). Spec §5.4. The older job is
+// Option 1 when a new group is made; a different client is a warning, not a
+// refusal.
+router.post('/:id/group-with', validate(groupWithSchema), async (req: AuthRequest, res: Response) => {
+  const warnings: string[] = [];
+  try {
+    const aId = req.params.id as string;
+    const { other_job_id: bId } = req.body as z.infer<typeof groupWithSchema>;
+    if (aId === bId) { res.status(400).json({ error: 'Pick a different job' }); return; }
+
+    const rows = await query(`SELECT * FROM jobs WHERE id = ANY($1::uuid[]) AND is_deleted = false`, [[aId, bId]]);
+    const a = rows.rows.find((r) => r.id === aId);
+    const b = rows.rows.find((r) => r.id === bId);
+    if (!a || !b) { res.status(404).json({ error: 'Job not found' }); return; }
+    for (const j of [a, b]) {
+      const refusal = optionRefusalReason(j);
+      if (refusal) { res.status(400).json({ error: `${jobRef(j)}: ${refusal}` }); return; }
+    }
+    if (a.group_id && b.group_id) {
+      res.status(400).json({ error: a.group_id === b.group_id ? 'These two are already options of the same enquiry' : 'Both jobs are already in groups — remove one from its group first' });
+      return;
+    }
+    const sameClient = a.client_id && b.client_id
+      ? a.client_id === b.client_id
+      : String(a.client_name || '').trim().toLowerCase() === String(b.client_name || '').trim().toLowerCase();
+    if (!sameClient) warnings.push('These jobs have different clients in OP — linked anyway; check that is right.');
+
+    const existingGroupId: string | null = a.group_id || b.group_id || null;
+    if (existingGroupId) {
+      const g = await query(`SELECT kind FROM job_groups WHERE id = $1`, [existingGroupId]);
+      if (g.rows[0]?.kind && g.rows[0].kind !== OPTION_GROUP_KIND) {
+        res.status(400).json({ error: 'That job is in a related-jobs group, not an options group' });
+        return;
+      }
+    }
+
+    const client = await getClient();
+    const renames: Array<{ id: string; hh: number | null; name: string }> = [];
+    let groupId = existingGroupId;
+    try {
+      await client.query('BEGIN');
+      if (!groupId) {
+        const label = await clientLabelFor(a);
+        const g = await client.query(
+          `INSERT INTO job_groups (kind, label, created_by) VALUES ($1, $2, $3) RETURNING id`,
+          [OPTION_GROUP_KIND, label, req.user!.id],
+        );
+        groupId = g.rows[0].id as string;
+        const [first, second] = new Date(a.created_at) <= new Date(b.created_at) ? [a, b] : [b, a];
+        for (const [j, n] of [[first, 1], [second, 2]] as Array<[Record<string, any>, number]>) {
+          const name = withOptionSuffix(j.job_name, n);
+          await client.query(
+            `UPDATE jobs SET group_id = $1, option_no = $2, job_name = $3, updated_at = NOW() WHERE id = $4`,
+            [groupId, n, name, j.id],
+          );
+          renames.push({ id: j.id, hh: j.hh_job_number, name });
+        }
+        // Options chase together: a member without a chase date takes the other's.
+        await client.query(
+          `UPDATE jobs SET next_chase_date = (SELECT next_chase_date FROM jobs WHERE id = $2), updated_at = NOW()
+            WHERE id = $1 AND next_chase_date IS NULL`,
+          [second.id, first.id],
+        );
+      } else {
+        const joiner = a.group_id ? b : a;
+        const n = await nextOptionNo(client, groupId);
+        const name = withOptionSuffix(joiner.job_name, n);
+        await client.query(
+          `UPDATE jobs SET group_id = $1, option_no = $2, job_name = $3, updated_at = NOW() WHERE id = $4`,
+          [groupId, n, name, joiner.id],
+        );
+        renames.push({ id: joiner.id, hh: joiner.hh_job_number, name });
+        // Options chase together: the joiner takes the group's earliest open chase date when it has none.
+        await client.query(
+          `UPDATE jobs SET next_chase_date = (
+              SELECT MIN(next_chase_date) FROM jobs m
+               WHERE m.group_id = $2 AND m.id <> $1 AND m.is_deleted = false AND m.next_chase_date IS NOT NULL),
+             updated_at = NOW()
+            WHERE id = $1 AND next_chase_date IS NULL`,
+          [joiner.id, groupId],
+        );
+      }
+      await noteOnTimeline(client, a.id, `Linked ${jobRef(b)} as an option of this enquiry`, req.user!.id, a.pipeline_status);
+      await noteOnTimeline(client, b.id, `Linked ${jobRef(a)} as an option of this enquiry`, req.user!.id, b.pipeline_status);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    for (const r of renames) await pushOptionRename(r.id, r.hh, r.name, req.user!.email, warnings);
+    res.json({ data: { group: await getGroupById(groupId!), warnings } });
+  } catch (error: any) {
+    console.error('[options] group-with error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to link the jobs' });
+  }
+});
+
+// DELETE /api/pipeline/:id/group — take this job out of its group. Nothing else
+// changes. A group left with one member dissolves. Spec §5.5.
+router.delete('/:id/group', async (req: AuthRequest, res: Response) => {
+  const warnings: string[] = [];
+  try {
+    const jobId = req.params.id as string;
+    const cur = await query(`SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`, [jobId]);
+    if (cur.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = cur.rows[0];
+    if (!job.group_id) { res.status(400).json({ error: 'This job is not in a group' }); return; }
+    const groupId: string = job.group_id;
+
+    const client = await getClient();
+    const renames: Array<{ id: string; hh: number | null; name: string }> = [];
+    let dissolved = false;
+    try {
+      await client.query('BEGIN');
+      const ungroup = async (j: Record<string, any>) => {
+        const name = stripOptionSuffix(j.job_name) || j.job_name;
+        await client.query(
+          `UPDATE jobs SET group_id = NULL, option_no = NULL, option_label = NULL, job_name = $1, updated_at = NOW() WHERE id = $2`,
+          [name, j.id],
+        );
+        renames.push({ id: j.id, hh: j.hh_job_number, name });
+      };
+      await ungroup(job);
+      await client.query(`UPDATE job_groups SET lead_job_id = NULL, updated_at = NOW() WHERE id = $1 AND lead_job_id = $2`, [groupId, job.id]);
+      const rest = await client.query(`SELECT * FROM jobs WHERE group_id = $1 AND is_deleted = false`, [groupId]);
+      if (rest.rows.length <= 1) {
+        for (const r of rest.rows) {
+          await ungroup(r);
+          await noteOnTimeline(client, r.id, `Group dissolved — ${jobRef(job)} was removed and this was the last other option`, req.user!.id, r.pipeline_status);
+        }
+        await client.query(`DELETE FROM job_groups WHERE id = $1`, [groupId]);
+        dissolved = true;
+      }
+      await noteOnTimeline(client, job.id, `Removed from its options group${dissolved ? ' (group dissolved)' : ''}`, req.user!.id, job.pipeline_status);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    for (const r of renames) await pushOptionRename(r.id, r.hh, r.name, req.user!.email, warnings);
+    res.json({ data: { dissolved, group: dissolved ? null : await getGroupById(groupId), warnings } });
+  } catch (error: any) {
+    console.error('[options] remove-from-group error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to remove the job from its group' });
+  }
+});
+
+// ============================================================================
+// COMBINE BOOKINGS — merge two same-client pre-hire bookings into one
+//
+// The survivor keeps its identity (and gains the combined date range); the
+// other booking is retired as `cancelled` (combined_into_job_id set, £0 fee,
+// £0 refund) and its deposit(s) are re-attributed to the survivor in HireHop
+// (reverse on the absorbed job + recreate on the survivor, same bank — a clean
+// Xero wash). No client emails fire. See CLAUDE.md "Combine bookings".
+// ============================================================================
+
+const COMBINABLE_STATUSES = ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'];
+
+// Survivor preference: the more-committed booking continues. Excess money is the
+// strongest pull (we never want to move it), then status progression (a confirmed
+// booking outranks a provisional outranks an enquiry), then holding a deposit
+// (minimise what has to move), then earlier start as the final tiebreak.
+function combineStatusRank(s: string): number {
+  if (['confirmed', 'prepped', 'prepping'].includes(s)) return 3;
+  if (s === 'provisional') return 2;
+  return 1; // new_enquiry / quoting / paused
+}
+function survivorScore(c: CombineCandidateFacts): number {
+  return (c.excessHeld ? 1000 : 0)
+    + combineStatusRank(c.job.pipeline_status) * 10
+    + (c.hireDepositTotal > 0 ? 1 : 0);
+}
+
+interface CombineCandidateFacts {
+  job: any;
+  hireDeposits: HireDeposit[];
+  hireDepositTotal: number;
+  hasInvoices: boolean;
+  excessHeld: boolean;        // real excess money taken/held on this job
+  activeQuotes: number;       // live transport/crew quotes
+}
+
+async function loadCombineCandidate(jobId: string): Promise<CombineCandidateFacts | null> {
+  const jr = await query(`SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`, [jobId]);
+  if (jr.rows.length === 0) return null;
+  const job = jr.rows[0];
+
+  let hireDeposits: HireDeposit[] = [];
+  let hireDepositTotal = 0;
+  let hasInvoices = false;
+  if (job.hh_job_number) {
+    const facts = await getJobBillingFacts(Number(job.hh_job_number));
+    hireDeposits = facts.hireDeposits;
+    hireDepositTotal = facts.hireDepositTotal;
+    hasInvoices = facts.hasInvoices;
+  }
+
+  // Real excess money on the job (a `needed`/`pending` derivation stub is fine —
+  // it just gets cleaned up; only collected/held money blocks the merge).
+  const xs = await query(
+    `SELECT COALESCE(SUM(COALESCE(excess_amount_taken,0) + COALESCE(amount_held,0)),0) AS held
+       FROM job_excess WHERE job_id = $1`,
+    [jobId]
+  );
+  const excessHeld = Number(xs.rows[0]?.held || 0) > 0;
+
+  const q = await query(
+    `SELECT COUNT(*)::int AS n FROM quotes
+      WHERE job_id = $1 AND is_deleted = false AND status NOT IN ('cancelled', 'completed')`,
+    [jobId]
+  );
+  const activeQuotes = Number(q.rows[0]?.n || 0);
+
+  return { job, hireDeposits, hireDepositTotal, hasInvoices, excessHeld, activeQuotes };
+}
+
+/**
+ * Decide which job should survive (default earlier start) and surface blocks.
+ * The survivor MUST be the excess-holder when exactly one side holds excess —
+ * combining onto it means no excess has to move. Returns the recommended
+ * survivor/absorbed split plus any hard blocks (combine refused if non-empty).
+ */
+function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
+  survivor: CombineCandidateFacts;
+  absorbed: CombineCandidateFacts;
+  blocks: string[];
+} {
+  const blocks: string[] = [];
+
+  // Same client.
+  if (!a.job.client_id || !b.job.client_id || a.job.client_id !== b.job.client_id) {
+    blocks.push('The two bookings are for different clients — combine only works within one client.');
+  }
+  // Two options of ONE enquiry are alternatives, not two hires: the client picks one
+  // and the rest go lost (docs/QUOTE-VERSIONS-SPEC.md §8).
+  if (a.job.group_id && a.job.group_id === b.job.group_id) {
+    blocks.push('These are two options of the same enquiry — the client picks one and the others are marked lost; combining is for two real hires.');
+  }
+  // Both pre-on-hire.
+  for (const c of [a, b]) {
+    if (!COMBINABLE_STATUSES.includes(c.job.pipeline_status)) {
+      blocks.push(`"${c.job.job_name || c.job.id}" is "${c.job.pipeline_status}" — only pre-hire bookings (enquiry up to prepped) can be combined.`);
+    }
+  }
+
+  // Survivor = the more-committed booking (see survivorScore); earlier start
+  // breaks a tie. So an enquiry folds INTO a confirmed booking, not vice versa.
+  let survivor: CombineCandidateFacts;
+  let absorbed: CombineCandidateFacts;
+  const sa = survivorScore(a), sb = survivorScore(b);
+  if (sa !== sb) {
+    if (sa > sb) { survivor = a; absorbed = b; } else { survivor = b; absorbed = a; }
+  } else {
+    const aStart = new Date(a.job.job_date || a.job.out_date || 0).getTime();
+    const bStart = new Date(b.job.job_date || b.job.out_date || 0).getTime();
+    if (bStart < aStart) { survivor = b; absorbed = a; } else { survivor = a; absorbed = b; }
+  }
+
+  if (a.excessHeld && b.excessHeld) {
+    blocks.push('Both bookings hold insurance excess money — resolve one before combining so the excess doesn\'t need moving.');
+  }
+
+  // Only the SURVIVOR must be HH-linked (dates + reattributed deposit are pushed
+  // there). An un-pushed enquiry being absorbed has no deposit to move anyway —
+  // deposits are read from HireHop — so it can fold in without an HH number.
+  if (!survivor.job.hh_job_number) {
+    blocks.push(`The booking being kept ("${survivor.job.job_name || survivor.job.id}") isn't linked to HireHop — link it to HireHop first so the dates and deposit can be pushed.`);
+  }
+  // Absorbed-side blocks (the side being retired).
+  if (absorbed.hasInvoices) {
+    blocks.push(`Job #${absorbed.job.hh_job_number} has an invoice raised — combine doesn't unwind invoiced money. Resolve the invoice first.`);
+  }
+  if (absorbed.activeQuotes > 0) {
+    blocks.push(`Job #${absorbed.job.hh_job_number || absorbed.job.job_name} has transport/crew quotes — move or cancel those before combining (this tool only moves the deposit).`);
+  }
+
+  return { survivor, absorbed, blocks };
+}
+
+// Combined date range = earliest out/start, latest end/return across both.
+function combinedDates(survivor: any, absorbed: any) {
+  const min = (x: any, y: any) => {
+    const xt = x ? new Date(x).getTime() : Infinity;
+    const yt = y ? new Date(y).getTime() : Infinity;
+    return xt <= yt ? x : y;
+  };
+  const max = (x: any, y: any) => {
+    const xt = x ? new Date(x).getTime() : -Infinity;
+    const yt = y ? new Date(y).getTime() : -Infinity;
+    return xt >= yt ? x : y;
+  };
+  return {
+    out_date: min(survivor.out_date, absorbed.out_date),
+    job_date: min(survivor.job_date, absorbed.job_date),
+    job_end: max(survivor.job_end, absorbed.job_end),
+    return_date: max(survivor.return_date, absorbed.return_date),
+  };
+}
+
+// GET candidates — same-client pre-on-hire bookings to combine THIS job with.
+// Drives the modal's default picker list (search fallback handled client-side).
+router.get('/:id/combine-candidates', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+    const cur = await query(
+      `SELECT id, client_id, client_name FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (cur.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const clientId = cur.rows[0].client_id;
+    if (!clientId) { res.json({ data: [], client_name: cur.rows[0].client_name }); return; }
+
+    const rows = await query(
+      `SELECT id, hh_job_number, job_name, pipeline_status,
+              out_date, job_date, job_end, return_date, job_value
+         FROM jobs
+        WHERE client_id = $1
+          AND id <> $2
+          AND is_deleted = false
+          AND combined_into_job_id IS NULL
+          AND pipeline_status = ANY($3::text[])
+        ORDER BY job_date ASC NULLS LAST`,
+      [clientId, jobId, COMBINABLE_STATUSES]
+    );
+    res.json({ data: rows.rows, client_name: cur.rows[0].client_name });
+  } catch (error: any) {
+    console.error('Combine candidates error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to load candidates' });
+  }
+});
+
+// GET preview — eligibility + figures for the modal. ?with=<otherJobId>
+router.get('/:id/combine-preview', async (req: AuthRequest, res: Response) => {
+  try {
+    const aId = req.params.id as string;
+    const bId = String(req.query.with || '');
+    if (!bId) { res.status(400).json({ error: 'Missing ?with=<jobId>' }); return; }
+    if (aId === bId) { res.status(400).json({ error: 'Cannot combine a booking with itself' }); return; }
+
+    const [a, b] = await Promise.all([loadCombineCandidate(aId), loadCombineCandidate(bId)]);
+    if (!a || !b) { res.status(404).json({ error: 'One or both jobs not found' }); return; }
+
+    const { survivor, absorbed, blocks } = assessCombine(a, b);
+    const dates = combinedDates(survivor.job, absorbed.job);
+
+    const summarise = (c: CombineCandidateFacts) => ({
+      id: c.job.id,
+      hh_job_number: c.job.hh_job_number,
+      job_name: c.job.job_name,
+      client_name: c.job.client_name,
+      pipeline_status: c.job.pipeline_status,
+      out_date: c.job.out_date, job_date: c.job.job_date,
+      job_end: c.job.job_end, return_date: c.job.return_date,
+      deposit_total: c.hireDepositTotal,
+      deposits: c.hireDeposits.map(d => ({ amount: d.amount, bank: d.bankName, date: d.date })),
+    });
+
+    res.json({
+      can_combine: blocks.length === 0,
+      blocks,
+      survivor: summarise(survivor),
+      absorbed: summarise(absorbed),
+      combined_dates: dates,
+      deposit_to_move: absorbed.hireDepositTotal,
+    });
+  } catch (error: any) {
+    console.error('Combine preview error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to build combine preview' });
+  }
+});
+
+const combineSchema = z.object({
+  absorb_job_id: z.string().uuid(),
+  out_date: z.string(),
+  job_date: z.string(),
+  job_end: z.string(),
+  return_date: z.string(),
+});
+
+// POST combine — survivor = :id, absorb_job_id retired into it.
+router.post(
+  '/:id/combine',
+  authorize(...MANAGER_ROLES),
+  validate(combineSchema),
+  async (req: AuthRequest, res: Response) => {
+    const survivorId = req.params.id as string;
+    const { absorb_job_id, out_date, job_date, job_end, return_date } = req.body;
+    const userId = req.user!.id;
+    const userEmail = req.user!.email || userId;
+
+    if (survivorId === absorb_job_id) {
+      res.status(400).json({ error: 'Cannot combine a booking with itself' });
+      return;
+    }
+
+    try {
+      // Re-load + re-assess server-side (never trust the client's eligibility).
+      const [sCand, aCand] = await Promise.all([
+        loadCombineCandidate(survivorId),
+        loadCombineCandidate(absorb_job_id),
+      ]);
+      if (!sCand || !aCand) { res.status(404).json({ error: 'One or both jobs not found' }); return; }
+
+      const assessment = assessCombine(sCand, aCand);
+      if (assessment.blocks.length > 0) {
+        res.status(400).json({ error: 'Cannot combine these bookings', blocks: assessment.blocks });
+        return;
+      }
+      // The endpoint's :id MUST be the assessed survivor — the frontend resolves
+      // this from the preview, but guard against a stale/forced call.
+      if (assessment.survivor.job.id !== survivorId) {
+        res.status(400).json({
+          error: `Survivor mismatch — booking #${assessment.survivor.job.hh_job_number} must be the one kept (it holds the excess or starts first). Re-open the combine dialog from that booking.`,
+        });
+        return;
+      }
+
+      const survivor = sCand.job;
+      const absorbed = aCand.job;
+      const hhWarnings: string[] = [];
+
+      // ── 1. Re-attribute each deposit: recreate on survivor FIRST, then reverse
+      // on the absorbed job. This order means a mid-failure leaves money
+      // double-counted (visible, recoverable) rather than vanished.
+      let depositMoved = 0;
+      for (const dep of aCand.hireDeposits) {
+        const method = getMethodForBankId(dep.bankId);
+        const recreate = await pushDepositToHH({
+          hhJobNumber: Number(survivor.hh_job_number),
+          amount: dep.amount,
+          paymentMethod: method,
+          bankId: dep.bankId,
+          paymentType: 'deposit',
+          notes: `reallocated from job #${absorbed.hh_job_number} (bookings combined)`,
+        });
+        if (recreate.error) {
+          // Nothing reversed yet for this leg — abort cleanly.
+          res.status(502).json({
+            error: `Couldn't recreate the £${dep.amount.toFixed(2)} deposit on HireHop job #${survivor.hh_job_number}: ${recreate.error}. No money moved — nothing changed.`,
+            deposit_moved: depositMoved,
+          });
+          return;
+        }
+        const reverse = await reverseDepositOnHH({
+          hhJobNumber: Number(absorbed.hh_job_number),
+          hhDepositId: dep.id,
+          amount: dep.amount,
+          bankId: dep.bankId,
+          movedToHhJob: Number(survivor.hh_job_number),
+          notes: dep.description || null,
+        });
+        if (reverse.error) {
+          // Recreate succeeded but reversal failed → double-counted. Loud warning,
+          // keep going (the survivor has the money; staff must remove the stray
+          // positive on the absorbed job manually).
+          hhWarnings.push(`Deposit £${dep.amount.toFixed(2)} was added to #${survivor.hh_job_number} but the reversal on #${absorbed.hh_job_number} failed (${reverse.error}). Remove £${dep.amount.toFixed(2)} from #${absorbed.hh_job_number} in HireHop manually.`);
+        }
+        depositMoved += dep.amount;
+
+        // Audit both legs in job_payments (write-path log, not display source).
+        await query(
+          `INSERT INTO job_payments (job_id, payment_type, amount, payment_method, payment_status, hirehop_deposit_id, notes, recorded_by)
+           VALUES ($1, 'deposit', $2, $3, 'completed', $4, $5, $6)`,
+          [survivorId, dep.amount, method, recreate.hhDepositId || null,
+           `Reallocated from job #${absorbed.hh_job_number} (bookings combined)`, userId]
+        ).catch(e => console.warn('[Combine] survivor job_payments log failed:', e));
+      }
+
+      // ── 1b. Sanity read-back: re-read the absorbed job's NET hire deposits.
+      // If anything still shows there, a reversal silently didn't apply — turn
+      // that into a loud warning (money insurance) rather than trusting the
+      // per-leg success flags alone.
+      if (aCand.hireDeposits.length > 0) {
+        try {
+          const residual = await getNetHireDepositTotal(Number(absorbed.hh_job_number));
+          if (residual > 0.01) {
+            hhWarnings.push(`Verify: HireHop job #${absorbed.hh_job_number} still shows £${residual.toFixed(2)} of hire deposits after the move — a reversal may not have applied. Remove the residual on #${absorbed.hh_job_number} in HireHop manually.`);
+          }
+        } catch (e) {
+          hhWarnings.push(`Couldn't verify the deposit move on #${absorbed.hh_job_number} (HireHop read-back failed) — please double-check the deposit cleared there.`);
+        }
+      }
+
+      // ── 2. Extend the survivor's dates to the combined range, push to HH.
+      const datedJob = {
+        ...survivor,
+        out_date, job_date, job_end, return_date,
+      };
+      const dtError = validateJobDateTimes(datedJob);
+      if (dtError) {
+        hhWarnings.push(`Combined dates not pushed to HireHop (${dtError}) — set them manually on #${survivor.hh_job_number}.`);
+      } else {
+        await query(
+          `UPDATE jobs SET out_date = $1, job_date = $2, job_end = $3, return_date = $4, updated_at = NOW()
+            WHERE id = $5`,
+          [out_date, job_date, job_end, return_date, survivorId]
+        );
+        if (survivor.hh_job_number) {
+          const { out, start, end, to, duration } = buildHHJobDateTimes(datedJob);
+          const dateParams: Record<string, unknown> = { job: survivor.hh_job_number, no_webhook: 1 };
+          if (out) dateParams.out = out;
+          if (start) dateParams.start = start;
+          if (end) dateParams.end = end;
+          if (to) dateParams.to = to;
+          if (duration) {
+            dateParams.duration_days = duration.duration_days;
+            dateParams.duration_hrs = duration.duration_hrs;
+            dateParams.duration_locked = duration.duration_locked;
+          }
+          const dr = await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
+          if (!dr.success) {
+            hhWarnings.push(`Combined dates saved in OP but the HireHop push failed — set them manually on #${survivor.hh_job_number}.`);
+          }
+        }
+      }
+
+      // ── 3. Retire the absorbed booking (cancelled, but a merge — £0/£0).
+      await query(
+        `UPDATE jobs SET
+           pipeline_status = 'cancelled',
+           pipeline_status_changed_at = NOW(),
+           combined_into_job_id = $2,
+           cancelled_at = NOW(),
+           cancelled_by = $3,
+           cancellation_reason = 'Combined into another booking',
+           cancellation_notes = $4,
+           cancellation_fee = 0,
+           cancellation_refund = 0,
+           next_chase_date = NULL,
+           updated_at = NOW()
+         WHERE id = $1`,
+        [absorb_job_id, survivorId, userId,
+         `Combined into job #${survivor.hh_job_number}. Deposit £${depositMoved.toFixed(2)} reallocated.`]
+      );
+
+      // Cancel open requirements on the absorbed job (lost/cancelled pattern).
+      await query(
+        `UPDATE job_requirements
+            SET status = 'cancelled',
+                notes = COALESCE(notes, '') || ' [Cancelled — combined into another booking]',
+                updated_at = NOW()
+          WHERE job_id = $1 AND status NOT IN ('done', 'cancelled') AND keep_after_close = false`,
+        [absorb_job_id]
+      );
+
+      // Soft-cancel vehicle assignments on the absorbed job + resync fleet status.
+      const sweptVha = await query(
+        `UPDATE vehicle_hire_assignments
+            SET status = 'cancelled', status_changed_at = NOW(),
+                notes = COALESCE(notes, '') || E'\n[Auto-cancelled: combined into another booking]',
+                updated_at = NOW()
+          WHERE (job_id = $1 OR (job_id IS NULL AND hirehop_job_id = $2::integer))
+            AND status NOT IN ('cancelled', 'returned', 'swapped')
+          RETURNING id, vehicle_id`,
+        [absorb_job_id, absorbed.hh_job_number ?? null]
+      );
+      if (sweptVha.rows.length > 0) {
+        const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
+        const seen = new Set<string>();
+        for (const r of sweptVha.rows) {
+          if (r.vehicle_id && !seen.has(r.vehicle_id)) {
+            seen.add(r.vehicle_id);
+            await syncFleetHireStatus(r.vehicle_id).catch(e => console.warn('[Combine] fleet status resync failed:', e));
+          }
+        }
+      }
+
+      // Waive derivation excess stubs on the absorbed job (no money — guarded above).
+      await query(
+        `UPDATE job_excess
+            SET excess_status = 'waived', excess_amount_required = 0,
+                notes = COALESCE(notes, '') || ' [Waived — combined into another booking]',
+                updated_at = NOW()
+          WHERE job_id = $1
+            AND excess_status IN ('needed', 'pending')
+            AND COALESCE(excess_amount_taken,0) = 0 AND COALESCE(amount_held,0) = 0`,
+        [absorb_job_id]
+      );
+
+      // HH write-back: absorbed → Cancelled (9).
+      writeBackStatusToHireHop(absorb_job_id, 'cancelled', userEmail)
+        .catch(err => console.error('[Combine] HH write-back error:', err));
+
+      // ── 4. Timeline interactions both sides.
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('note', $1, $2, $3, $4, 'system')`,
+        [`🔀 Combined booking #${absorbed.hh_job_number} into this one. Dates extended; deposit £${depositMoved.toFixed(2)} reallocated from #${absorbed.hh_job_number}.`,
+         survivorId, userId, survivor.pipeline_status]
+      ).catch(e => console.warn('[Combine] survivor interaction failed:', e));
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+         VALUES ('status_transition', $1, $2, $3, 'cancelled', 'system')`,
+        [`🔀 Combined into booking #${survivor.hh_job_number} by ${userEmail}. No cancellation fee — bookings merged. Deposit £${depositMoved.toFixed(2)} reallocated to #${survivor.hh_job_number}.`,
+         absorb_job_id, userId]
+      ).catch(e => console.warn('[Combine] absorbed interaction failed:', e));
+
+      await logAudit(userId, 'jobs', absorb_job_id, 'update', aCand.job, { combined_into_job_id: survivorId, action: 'combined_into_booking' });
+
+      res.json({
+        success: true,
+        survivor_id: survivorId,
+        absorbed_id: absorb_job_id,
+        deposit_moved: depositMoved,
+        deposit_count: aCand.hireDeposits.length,
+        hh_warnings: hhWarnings,
+      });
+    } catch (error: any) {
+      console.error('Combine bookings error:', error);
+      res.status(500).json({ error: error?.message || 'Failed to combine bookings' });
+    }
+  }
+);
 
 // ============================================================================
 // PUSH TO HIREHOP — Create a new HireHop job from an Ooosh-native enquiry
@@ -2447,8 +3292,8 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
 
     // Log as interaction
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('note', $1, $2, $3, $4)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('note', $1, $2, $3, $4, 'system')`,
       [`Created HireHop job #${hhJobNumber}${contactSyncNote}`, jobId, req.user!.id, job.pipeline_status]
     );
 
@@ -2540,10 +3385,65 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
 
     const { hhBroker } = await import('../services/hirehop-broker');
 
-    // Step 1: Create/update contact in HireHop address book via job_save_contact.php
+    // Resolve the values we want on the HH contact.
     const orgName = orgDetails?.name || job.client_name || job.company_name || '';
     const nameForHh = primaryContact?.name || orgName;
     const companyForHh = orgName || primaryContact?.name || '';
+    const emailForHh = primaryContact?.email || orgDetails?.email;
+    const phoneForHh = primaryContact?.phone || orgDetails?.phone;
+
+    // ── Step 1: establish/link the client on the HH job via save_job.php ──
+    // MUST run before job_save_contact.php. This mirrors the working "Create in
+    // HireHop" flow: save_job.php creates (or links) the HH client from
+    // company/name/email and returns its client_id. job_save_contact.php below is
+    // an UPDATE-oriented endpoint — calling it WITHOUT a CLIENT_ID (e.g. for a
+    // freshly-created OP org that has no external_id_map entry yet, like a client
+    // just added via the headline picker) makes HireHop reject with
+    // "Save error. 154" because there's no contact to save against. Running
+    // save_job first hands us a client_id to enrich with.
+    const jobBody: Record<string, unknown> = {
+      job: job.hh_job_number,
+      name: nameForHh,
+      company: companyForHh,
+      no_webhook: 1,
+    };
+    if (hhClientId) jobBody.client_id = hhClientId;
+    if (emailForHh) jobBody.email = emailForHh;
+    if (phoneForHh) jobBody.telephone = phoneForHh;
+
+    const jobSaveResp = await hhBroker.post<Record<string, unknown>>(
+      '/api/save_job.php',
+      jobBody,
+      { priority: 'high' }
+    );
+    if (!jobSaveResp.success) {
+      console.error('[Pipeline] HireHop job client link failed:', jobSaveResp.error);
+      res.status(502).json({ error: `HireHop API error: ${jobSaveResp.error || 'Unknown error'}` });
+      return;
+    }
+
+    // Pick up the client_id save_job created/linked. Fall back to reading the
+    // job if save_job didn't echo it (mirrors push-hirehop).
+    const savedData = (jobSaveResp.data || {}) as Record<string, unknown>;
+    const autoClientId = savedData.client_id ?? savedData.CLIENT_ID ?? savedData.clientId;
+    if (autoClientId && Number(autoClientId) > 0) {
+      hhClientId = Number(autoClientId);
+    }
+    if (!hhClientId) {
+      const jobDataResp = await hhBroker.get<Record<string, unknown>>(
+        '/api/job_data.php',
+        { job: Number(job.hh_job_number) },
+        { priority: 'high', cacheTTL: 0 }
+      );
+      if (jobDataResp.success && jobDataResp.data) {
+        const jd = jobDataResp.data;
+        const fetched = jd.CLIENT_ID ?? jd.client_id ?? jd.clientId;
+        if (fetched && Number(fetched) > 0) hhClientId = Number(fetched);
+      }
+    }
+
+    // ── Step 2: enrich the contact (name/company/address/email/phone) via
+    // job_save_contact.php. Now we always have a CLIENT_ID to update in place. ──
     const contactPayload: Record<string, unknown> = {
       JOB_ID: job.hh_job_number,
       NAME: nameForHh,
@@ -2551,43 +3451,31 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
       CLIENT: 1,
       no_webhook: 1,
     };
-
-    // Include existing HH client ID to update rather than create a duplicate
-    if (hhClientId) {
-      contactPayload.CLIENT_ID = hhClientId;
-    }
-
-    // Add address, email, phone — primary contact's email/phone wins when set.
+    if (hhClientId) contactPayload.CLIENT_ID = hhClientId;
     if (orgDetails) {
       // Build full address from address + location fields
       const addressParts = [orgDetails.address, orgDetails.location].filter(Boolean);
-      if (addressParts.length > 0) {
-        contactPayload.ADDRESS = addressParts.join(', ');
-      }
+      if (addressParts.length > 0) contactPayload.ADDRESS = addressParts.join(', ');
     }
-    const emailForHh = primaryContact?.email || orgDetails?.email;
-    const phoneForHh = primaryContact?.phone || orgDetails?.phone;
-    if (emailForHh) {
-      contactPayload.EMAIL = emailForHh;
-    }
-    if (phoneForHh) {
-      contactPayload.TELEPHONE = phoneForHh;
-    }
+    if (emailForHh) contactPayload.EMAIL = emailForHh;
+    if (phoneForHh) contactPayload.TELEPHONE = phoneForHh;
 
     const contactResponse = await hhBroker.post(
       '/php_functions/job_save_contact.php',
       contactPayload,
       { priority: 'high' }
     );
-
     if (!contactResponse.success) {
-      console.error('[Pipeline] HireHop contact sync failed:', contactResponse.error);
-      res.status(502).json({ error: `HireHop contact API error: ${contactResponse.error || 'Unknown error'}` });
-      return;
+      // Step 1 already linked the client on the job, so the rename itself landed.
+      // Warn rather than hard-fail (address/phone enrich is best-effort).
+      console.warn('[Pipeline] Contact enrich failed for HH job #' + job.hh_job_number + ':', contactResponse.error);
     }
 
-    // Extract the returned HH contact ID and store in external_id_map
-    const returnedHhClientId = (contactResponse.data as any)?.id;
+    // Store/refresh the HH contact ID mapping for this org.
+    const returnedHhClientId = (contactResponse.data as any)?.id
+      || (contactResponse.data as any)?.ID
+      || (contactResponse.data as any)?.CLIENT_ID
+      || hhClientId;
     if (returnedHhClientId && job.client_id) {
       await query(
         `INSERT INTO external_id_map (entity_type, entity_id, external_system, external_id)
@@ -2595,30 +3483,7 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
          ON CONFLICT (entity_type, entity_id, external_system) DO UPDATE SET external_id = $2, synced_at = NOW()`,
         [job.client_id, String(returnedHhClientId)]
       );
-      hhClientId = returnedHhClientId;
-      console.log('[Pipeline] HireHop contact created/updated, ID:', returnedHhClientId);
-    }
-
-    // Step 2: Update the job's client link via save_job.php
-    const jobBody: Record<string, unknown> = {
-      job: job.hh_job_number,
-      name: job.client_name || '',
-      company: job.company_name || job.client_name || '',
-      no_webhook: 1,
-    };
-
-    if (hhClientId) jobBody.client_id = hhClientId;
-
-    const hhResponse = await hhBroker.post(
-      '/api/save_job.php',
-      jobBody,
-      { priority: 'high' }
-    );
-
-    if (!hhResponse.success) {
-      console.error('[Pipeline] HireHop job client link failed:', hhResponse.error);
-      // Contact was already synced, so we warn but don't fully fail
-      console.warn('[Pipeline] Contact was synced but job client link failed for HH job #' + job.hh_job_number);
+      console.log('[Pipeline] HireHop contact synced, ID:', returnedHhClientId);
     }
 
     // Build a summary of what was synced
@@ -2632,8 +3497,8 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
 
     // Log as interaction on the job
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('note', $1, $2, $3, $4)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('note', $1, $2, $3, $4, 'system')`,
       [
         `Synced client "${nameForHh}" to HireHop job #${job.hh_job_number} (contact details: ${syncedFields.join(', ')})`,
         jobId,
@@ -2649,6 +3514,259 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
     const msg = error?.message || String(error);
     console.error('Sync client to HireHop error:', msg, error);
     res.status(500).json({ error: `Failed to sync client to HireHop: ${msg}` });
+  }
+});
+
+// ── Dismiss / undismiss enquiry (migration 196) ────────────────────────────
+//
+// A dismissal marks a dud/spam/orphaned enquiry as "never a genuine enquiry".
+// It is distinct from Lost/Cancelled (real commercial outcomes that belong in
+// analytics). Overlay-flag model: the job keeps its pipeline_status, gains a
+// dismissed_at stamp, and drops out of the pipeline board + analytics (default
+// `dismissed_at IS NULL` filter). Undismiss is a one-column clear.
+//
+// Enquiry-stage only — you can't dismiss a job that's progressed past an
+// enquiry (that's what Lost/Cancelled are for). See CLAUDE.md → Enquiry
+// dismissal.
+
+const DISMISSABLE_STAGES = ['new_enquiry', 'quoting', 'paused'];
+const DISMISSAL_REASONS = ['spam', 'not_an_enquiry', 'about_an_existing_job', 'duplicate', 'other'];
+
+// The exact note the website enquiry intake writes on org/person records it
+// auto-creates (services/routes/enquiry-intake.ts). Used as the strong signal
+// that a record is an intake-created orphan safe to soft-delete on dismissal.
+const WEB_FORM_CREATED_NOTE = 'Created from website enquiry form.';
+
+const dismissSchema = z.object({
+  reason: z.enum(['spam', 'not_an_enquiry', 'about_an_existing_job', 'duplicate', 'other']),
+  notes: z.string().max(2000).optional().nullable(),
+  cleanup_orphans: z.boolean().optional(),
+});
+
+router.post('/:id/dismiss', validate(dismissSchema), async (req: AuthRequest, res: Response) => {
+  const client = await getClient();
+  try {
+    const jobId = req.params.id as string;
+    const { reason, notes, cleanup_orphans = true } = req.body as {
+      reason: string; notes?: string | null; cleanup_orphans?: boolean;
+    };
+
+    await client.query('BEGIN');
+
+    const current = await client.query(
+      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false FOR UPDATE`,
+      [jobId]
+    );
+    if (current.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const job = current.rows[0];
+
+    if (job.dismissed_at) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ error: 'Enquiry is already dismissed' });
+      return;
+    }
+    if (!DISMISSABLE_STAGES.includes(job.pipeline_status)) {
+      await client.query('ROLLBACK');
+      res.status(400).json({
+        error: 'Only enquiry-stage jobs can be dismissed. Use Lost or Cancelled for jobs that have progressed further.',
+      });
+      return;
+    }
+
+    // Flag dismissed + clear anything that would keep a scanner poking at it.
+    const dismissalNote = notes?.trim() || null;
+    const updated = await client.query(
+      `UPDATE jobs
+         SET dismissed_at = NOW(),
+             dismissed_by = $2,
+             dismissal_reason = $3,
+             dismissal_notes = $4,
+             next_chase_date = NULL,
+             chase_alert_user_id = NULL,
+             updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [jobId, req.user!.id, reason, dismissalNote]
+    );
+
+    // Sweep open requirements to cancelled so scanners (reminders, hire-form
+    // chase, excess) never fire on a dismissed enquiry. Mirrors the lost sweep.
+    await client.query(
+      `UPDATE job_requirements
+         SET status = 'cancelled',
+             notes = COALESCE(notes, '') || E'\n[Auto-cancelled: enquiry dismissed]',
+             updated_at = NOW()
+       WHERE job_id = $1
+         AND status NOT IN ('done', 'cancelled')`,
+      [jobId]
+    );
+
+    // ── Conditional orphan cleanup ─────────────────────────────────────────
+    // Soft-delete the client org + primary contact person(s) ONLY when they
+    // were auto-created by the web-form intake (exact note marker) AND are
+    // referenced by nothing except this now-dismissed enquiry. Conservative by
+    // design — a record touched by anything else is left alone.
+    const cleaned: { orgs: string[]; people: string[] } = { orgs: [], people: [] };
+
+    if (cleanup_orphans) {
+      // Person(s): every job_contact on this job that looks like an intake orphan.
+      const contactPeople = await client.query(
+        `SELECT p.id, p.first_name, p.last_name
+           FROM job_contacts jc
+           JOIN people p ON p.id = jc.person_id
+          WHERE jc.job_id = $1
+            AND p.is_deleted = false
+            AND p.notes = $2
+            AND COALESCE(p.is_freelancer, false) = false
+            AND COALESCE(p.is_approved, false) = false
+            -- not a platform user
+            AND NOT EXISTS (SELECT 1 FROM users u WHERE u.person_id = p.id)
+            -- not a driver record
+            AND NOT EXISTS (SELECT 1 FROM drivers d WHERE d.person_id = p.id)
+            -- not crew on any quote
+            AND NOT EXISTS (SELECT 1 FROM quote_assignments qa WHERE qa.person_id = p.id)
+            -- not a manager on any job
+            AND NOT EXISTS (SELECT 1 FROM jobs j2 WHERE j2.manager1_person_id = p.id OR j2.manager2_person_id = p.id)
+            -- not a contact on any OTHER job
+            AND NOT EXISTS (SELECT 1 FROM job_contacts jc2 WHERE jc2.person_id = p.id AND jc2.job_id <> $1)`,
+        [jobId, WEB_FORM_CREATED_NOTE]
+      );
+
+      for (const p of contactPeople.rows) {
+        await client.query(
+          `UPDATE people SET is_deleted = true, updated_at = NOW() WHERE id = $1`,
+          [p.id]
+        );
+        // End their active org roles so they don't linger as "active" contacts.
+        await client.query(
+          `UPDATE person_organisation_roles
+             SET status = 'historical', updated_at = NOW()
+           WHERE person_id = $1 AND status = 'active'`,
+          [p.id]
+        );
+        cleaned.people.push(`${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unnamed');
+      }
+
+      // Client org: intake-created AND not referenced by any other job.
+      if (job.client_id) {
+        const org = await client.query(
+          `SELECT o.id, o.name
+             FROM organisations o
+            WHERE o.id = $1
+              AND o.is_deleted = false
+              AND o.notes = $2
+              AND o.xero_contact_id IS NULL
+              -- not the client on any OTHER job
+              AND NOT EXISTS (SELECT 1 FROM jobs j2 WHERE j2.client_id = o.id AND j2.id <> $3)
+              -- not linked to any OTHER job
+              AND NOT EXISTS (SELECT 1 FROM job_organisations jo WHERE jo.organisation_id = o.id AND jo.job_id <> $3)
+              -- no external system ids (never synced to HH/Xero)
+              AND NOT EXISTS (SELECT 1 FROM external_id_map em WHERE em.entity_type = 'organisations' AND em.entity_id = o.id)`,
+          [job.client_id, WEB_FORM_CREATED_NOTE, jobId]
+        );
+        if (org.rows.length > 0) {
+          await client.query(
+            `UPDATE organisations SET is_deleted = true, updated_at = NOW() WHERE id = $1`,
+            [org.rows[0].id]
+          );
+          cleaned.orgs.push(org.rows[0].name || 'Unnamed');
+        }
+      }
+    }
+
+    // Timeline interaction + audit
+    const reasonLabel: Record<string, string> = {
+      spam: 'Spam',
+      not_an_enquiry: 'Not an enquiry',
+      about_an_existing_job: 'About an existing job',
+      duplicate: 'Duplicate',
+      other: 'Other',
+    };
+    const cleanupSummary =
+      cleaned.orgs.length || cleaned.people.length
+        ? ` Removed orphan records: ${[...cleaned.orgs, ...cleaned.people].join(', ')}.`
+        : '';
+    const content =
+      `🗑️ Enquiry dismissed — ${reasonLabel[reason] || reason}` +
+      (dismissalNote ? ` — ${dismissalNote}` : '') +
+      cleanupSummary;
+
+    await client.query(
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('note', $1, $2, $3, $4, 'system')`,
+      [content, jobId, req.user!.id, job.pipeline_status]
+    );
+
+    await client.query('COMMIT');
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', job, updated.rows[0]);
+
+    res.json({
+      success: true,
+      message: 'Enquiry dismissed',
+      cleaned,
+    });
+  } catch (error: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Dismiss enquiry error:', error?.message || error);
+    res.status(500).json({ error: 'Failed to dismiss enquiry' });
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:id/undismiss', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+    const current = await query(
+      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const job = current.rows[0];
+    if (!job.dismissed_at) {
+      res.status(409).json({ error: 'Enquiry is not dismissed' });
+      return;
+    }
+
+    const updated = await query(
+      `UPDATE jobs
+         SET dismissed_at = NULL, dismissed_by = NULL,
+             dismissal_reason = NULL, dismissal_notes = NULL,
+             updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [jobId]
+    );
+
+    // Reverse the requirement sweep (marker-gated), so anything auto-cancelled
+    // on dismissal comes back. Reuses the lost/cancelled resurrection helper —
+    // it re-activates rows carrying an auto-cancel marker in notes.
+    try {
+      await reactivateAutoCancelledRequirements(jobId);
+    } catch (e) {
+      console.warn('[Pipeline] undismiss requirement reactivation failed:', e);
+    }
+
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+       VALUES ('note', $1, $2, $3, $4, 'system')`,
+      ['↩️ Enquiry restored from dismissed', jobId, req.user!.id, job.pipeline_status]
+    );
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', job, updated.rows[0]);
+
+    res.json({ success: true, message: 'Enquiry restored' });
+  } catch (error: any) {
+    console.error('Undismiss enquiry error:', error?.message || error);
+    res.status(500).json({ error: 'Failed to restore enquiry' });
   }
 });
 

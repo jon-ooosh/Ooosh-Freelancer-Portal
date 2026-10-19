@@ -1,0 +1,421 @@
+/**
+ * PCN action paths — the "what next" after a PCN is logged.
+ *
+ * One entry point (`applyPcnAction`) drives status + action_path, the optional
+ * client/driver email (branded, attaches the notice), and the optional HireHop
+ * £35+VAT handling charge. Replaces the legacy Netlify send-email.js +
+ * hirehop-charge.js action handlers.
+ *
+ * Recipient resolution lives in services/pcn-recipient.ts — do NOT re-derive it
+ * here. That helper is shared with the chase ladder and the pre-send preview so
+ * the address staff are shown on the confirm panel is provably the one that
+ * gets used. It reads BOTH driver identities (drivers + people); the bare
+ * `drivers` join this file used to carry is what silently emailed a client
+ * about a freelancer's PCN (job 16373, Sep 2026).
+ */
+import { query } from '../config/database';
+import { emailService } from '../services/email-service';
+import { hhBroker } from '../services/hirehop-broker';
+import { collectNoticeAttachments } from './pcn-documents';
+import { addPcnFineLine } from './pcn-recharge';
+import { raiseChargeInvoice, ChargeLine } from './completed-charges';
+import { readJobStatus } from './hh-invoice-close';
+import {
+  loadPcnWithDrivers,
+  resolvePcnRecipient,
+  type PcnRow,
+  type PcnAudience,
+  type PcnRecipientKind,
+} from './pcn-recipient';
+import { getSystemSettings } from '../routes/system-settings';
+import { getFrontendUrl } from '../config/app-urls';
+import crypto from 'crypto';
+
+const OOOSH_EMAIL = 'info@oooshtours.co.uk';
+const OOOSH_PHONE = '+44 1273 911382';
+
+export type PcnAction =
+  | 'transfer_liability'
+  | 'pay_direct'
+  | 'pay_recharge'
+  | 'request_driver_id'
+  | 'internal_ooosh'
+  | 'internal_freelancer'
+  | 'query';
+
+// action → (status, action_path, who it's addressed to, charges-by-default?)
+//
+// `audience` drives resolvePcnRecipient. 'freelancer_only' NEVER falls through
+// to a client contact or info@ — an internal-freelancer notice is our business,
+// not the client's, so "no freelancer on file" must mean "no email sent".
+export const ACTION_MAP: Record<PcnAction, {
+  status: string; action_path: string | null; audience: PcnAudience; chargesByDefault: boolean;
+}> = {
+  transfer_liability:  { status: 'liability_transferred', action_path: 'transfer_liability',  audience: 'driver',           chargesByDefault: true },
+  pay_direct:          { status: 'driver_notified_pay',   action_path: 'pay_direct',          audience: 'driver',           chargesByDefault: false },
+  pay_recharge:        { status: 'paid_recharged',        action_path: 'pay_recharge',        audience: 'client',           chargesByDefault: true },
+  request_driver_id:   { status: 'awaiting_driver_id',    action_path: null,                  audience: 'client',           chargesByDefault: false },
+  internal_ooosh:      { status: 'internal_ooosh',        action_path: 'internal_ooosh',      audience: 'client',           chargesByDefault: false },
+  internal_freelancer: { status: 'internal_freelancer',   action_path: 'internal_freelancer', audience: 'freelancer_only',  chargesByDefault: false },
+  query:               { status: 'under_query',           action_path: 'query',               audience: 'client',           chargesByDefault: false },
+};
+
+// Which template each action sends, if any. `internal_freelancer` is opt-in:
+// it only mails when staff tick "notify the freelancer" on the confirm panel.
+export function templateForAction(action: PcnAction, fineType?: string | null): string | null {
+  switch (action) {
+    case 'transfer_liability':  return 'pcn_transfer_liability';
+    case 'pay_direct':          return 'pcn_pay_direct';
+    case 'pay_recharge':        return 'pcn_pay_recharge';
+    case 'request_driver_id':   return fineType === 'police_nip' ? 'pcn_police_nip_urgent' : 'pcn_request_driver_id';
+    case 'internal_freelancer': return 'pcn_internal_freelancer';
+    default:                    return null;
+  }
+}
+
+const fmtDate = (d: string | Date | null | undefined) =>
+  d ? new Date(d).toLocaleDateString('en-GB') : '—';
+const money = (n: number | string | null | undefined) =>
+  n == null ? null : `£${Number(n).toFixed(2)}`;
+
+interface ApplyOptions {
+  action: PcnAction;
+  send_email: boolean;
+  add_charge?: boolean;       // override the default for the action
+  email_override?: string | null;
+  resolution_note?: string | null;  // "they paid direct / deduct from next invoice" — posterity
+  notify_freelancer?: boolean;      // internal_freelancer only — opt-in heads-up to the freelancer
+  freelancer_message?: string | null; // optional line added to that email (kept separate from
+                                      // resolution_note, which is internal and must not leak out)
+}
+
+interface ActionResult {
+  status: string;
+  emailed: {
+    sent: boolean; to: string | null; fallback: boolean; error: string | null;
+    kind: PcnRecipientKind | null;      // where the address came from
+    clientFallback: boolean;            // a driver-facing action that landed on the client
+    label: string | null;               // human summary, e.g. "Lewis Hoadley (freelancer)"
+    skippedReason: string | null;       // set when there was nobody to email
+  };
+  charge: { attempted: boolean; applied: boolean; message: string | null };
+  fineRecharge: { attempted: boolean; applied: boolean; amount: number | null; message: string | null };
+}
+
+/**
+ * Add the £35+VAT PCN handling charge to the linked HireHop job. Ports the
+ * legacy hirehop-charge.js logic: check status, skip if locked/closed, else add
+ * the configured charge item via save_job.php + drop a note. Best-effort.
+ */
+async function addHandlingCharge(
+  hhJobNumber: number,
+  chargeItem: string,
+  pcn: { reference: string | null; vehicle_reg: string | null; offence_at: string | null }
+): Promise<{ applied: boolean; message: string }> {
+  try {
+    const status = await hhBroker.get<Record<string, unknown>>(
+      '/php_functions/job_refresh.php', { job: hhJobNumber }, { priority: 'high' }
+    );
+    const locked = Number((status as { LOCKED?: unknown }).LOCKED) === 1;
+    const st = parseFloat(String((status as { STATUS?: unknown }).STATUS ?? ''));
+    const closed = [7, 9, 10, 11].includes(st);
+    if (locked) return { applied: false, message: 'HireHop job is locked — charge not added, add manually.' };
+    if (closed) return { applied: false, message: `HireHop job is closed (status ${st}) — charge not added, add manually.` };
+
+    const items = { [chargeItem]: 1 };
+    const res = await hhBroker.post('/api/save_job.php', {
+      job: hhJobNumber,
+      items: JSON.stringify(items),
+      no_webhook: 1,
+    }, { priority: 'high' });
+
+    if ((res as { error?: unknown }).error) {
+      return { applied: false, message: `HireHop rejected the charge: ${(res as { error?: unknown }).error}` };
+    }
+
+    // Best-effort job note
+    try {
+      const note = [
+        '📋 PCN handling charge added (£35+VAT)',
+        pcn.vehicle_reg ? `Vehicle: ${pcn.vehicle_reg}` : '',
+        pcn.reference ? `PCN ref: ${pcn.reference}` : '',
+        pcn.offence_at ? `Offence: ${fmtDate(pcn.offence_at)}` : '',
+      ].filter(Boolean).join('\n');
+      await hhBroker.post('/php_functions/notes_save.php', { main_id: hhJobNumber, type: 1, note }, { priority: 'low' });
+    } catch { /* note is non-critical */ }
+
+    return { applied: true, message: 'PCN handling charge (£35+VAT) added to the HireHop job.' };
+  } catch (err) {
+    return { applied: false, message: `HireHop charge failed: ${(err as Error).message}` };
+  }
+}
+
+export async function applyPcnAction(
+  pcnId: string,
+  opts: ApplyOptions,
+  userId: string
+): Promise<ActionResult> {
+  const pcn = await loadPcnWithDrivers(pcnId);
+  if (!pcn) throw new Error('PCN not found');
+
+  const map = ACTION_MAP[opts.action];
+  const addCharge = (opts.add_charge ?? map.chargesByDefault) === true;
+
+  const settings = await getSystemSettings(['pcn_handling_charge', 'pcn_hh_charge_item']);
+  const handlingFee = money(parseFloat(settings.pcn_handling_charge || '35')) || '£35';
+  const chargeItem = settings.pcn_hh_charge_item || 'b1744';
+
+  const result: ActionResult = {
+    status: map.status,
+    emailed: { sent: false, to: null, fallback: false, error: null, kind: null, clientFallback: false, label: null, skippedReason: null },
+    charge: { attempted: false, applied: false, message: null },
+    fineRecharge: { attempted: false, applied: false, amount: null, message: null },
+  };
+
+  // ── 0. A COMPLETED HireHop job takes no new lines, so the handling fee and the
+  // fine go on one charge invoice instead (HIRE-CLOSE-OUT-SPEC §4.6, jon 13 Oct 2026):
+  // the fee at 20%, the fine zero-rated (code 33). Same idempotency flags as the line path. ──
+  let viaChargeInvoice = false;
+  if ((opts.action === 'transfer_liability' || opts.action === 'pay_recharge') && pcn.hh_job_number
+      && (await readJobStatus(Number(pcn.hh_job_number))) === 11) {
+    viaChargeInvoice = true;
+    const label = [pcn.reference ? `PCN ${pcn.reference}` : 'PCN', pcn.vehicle_reg].filter(Boolean).join(' · ');
+    const handlingNet = parseFloat(settings.pcn_handling_charge || '35');
+    const fineAmt = Number(pcn.fine_amount ?? pcn.reduced_amount ?? 0);
+    const wantHandling = addCharge && !pcn.handling_charge_applied && handlingNet > 0;
+    const wantFine = opts.action === 'pay_recharge' && !pcn.fine_recharged_at && fineAmt > 0;
+    const lines: ChargeLine[] = [];
+    if (wantHandling) lines.push({ type: 'pcn_handling', description: `${label} — handling fee`, amount: handlingNet });
+    if (wantFine) lines.push({ type: 'pcn_fine', description: `${label} — fine`, amount: fineAmt });
+    if (addCharge) result.charge.attempted = wantHandling;
+    if (opts.action === 'pay_recharge') result.fineRecharge.attempted = wantFine;
+    if (!lines.length) {
+      if (addCharge) result.charge.message = pcn.handling_charge_applied ? 'Handling charge already applied.' : null;
+      if (opts.action === 'pay_recharge') result.fineRecharge.message = pcn.fine_recharged_at ? 'Fine already recharged.' : 'No fine amount on the PCN — nothing to recharge.';
+    } else {
+      const r = await raiseChargeInvoice(String(pcn.hh_job_number), userId, { lines, reason: `${label} (${opts.action === 'pay_recharge' ? 'pay & recharge' : 'transfer of liability'})` });
+      const msg = r.done ? `${r.message} (the job is Completed, so it went on its own invoice).` : `Charge invoice not raised: ${r.message}`;
+      if (wantHandling) {
+        result.charge.applied = r.done;
+        result.charge.message = msg;
+        if (r.done) {
+          await query(`UPDATE pcns SET handling_charge_applied = true, handling_amount = $2, hh_charge_pushed_at = NOW() WHERE id = $1`, [pcnId, handlingNet]);
+        }
+      }
+      if (wantFine) {
+        result.fineRecharge.applied = r.done;
+        result.fineRecharge.amount = r.done ? fineAmt : null;
+        result.fineRecharge.message = msg;
+        if (r.done) {
+          await query(`UPDATE pcns SET fine_recharge_amount = $2, fine_recharged_at = NOW() WHERE id = $1`, [pcnId, fineAmt]);
+        }
+      }
+    }
+  }
+
+  // ── 1. HireHop handling charge (transfer / recharge, when not waived) ──
+  if (!viaChargeInvoice && addCharge && (opts.action === 'transfer_liability' || opts.action === 'pay_recharge')) {
+    result.charge.attempted = true;
+    if (!pcn.hh_job_number) {
+      result.charge.message = 'No HireHop job linked — charge not added.';
+    } else {
+      const c = await addHandlingCharge(Number(pcn.hh_job_number), chargeItem, pcn);
+      result.charge.applied = c.applied;
+      result.charge.message = c.message;
+      if (c.applied) {
+        await query(
+          `UPDATE pcns SET handling_charge_applied = true, handling_amount = $2, hh_charge_pushed_at = NOW() WHERE id = $1`,
+          [pcnId, parseFloat(settings.pcn_handling_charge || '35')]
+        );
+      }
+    }
+  }
+
+  // ── 1b. Fine recharge (pay_recharge only) — bill the actual fine to the
+  // client as a custom-priced HH line (auto-surfaces on the Money tab). The
+  // £35 admin fee above is separate. Idempotent via fine_recharged_at. ──
+  if (!viaChargeInvoice && opts.action === 'pay_recharge') {
+    const fineAmt = Number(pcn.fine_amount ?? pcn.reduced_amount ?? 0);
+    if (pcn.fine_recharged_at) {
+      result.fineRecharge.message = 'Fine already recharged to HireHop.';
+    } else if (!pcn.hh_job_number) {
+      result.fineRecharge.message = 'No HireHop job linked — fine not recharged.';
+    } else if (!(fineAmt > 0)) {
+      result.fineRecharge.message = 'No fine amount on the PCN — nothing to recharge.';
+    } else {
+      result.fineRecharge.attempted = true;
+      const f = await addPcnFineLine(Number(pcn.hh_job_number), fineAmt, pcn);
+      result.fineRecharge.applied = f.applied;
+      result.fineRecharge.amount = f.applied ? (f.amount ?? fineAmt) : null;
+      result.fineRecharge.message = f.message;
+      if (f.applied) {
+        await query(
+          `UPDATE pcns SET fine_recharge_amount = $2, fine_recharged_at = NOW(), fine_recharge_hh_item_id = $3 WHERE id = $1`,
+          [pcnId, fineAmt, f.lineId ?? null]
+        );
+      }
+    }
+  }
+
+  // ── 2. Client / driver email ──
+  // internal_freelancer is the one opt-in template: it only mails when staff
+  // ticked "notify the freelancer" on the confirm panel.
+  const wantsEmail = opts.action === 'internal_freelancer'
+    ? opts.notify_freelancer === true
+    : opts.send_email;
+  const templateId = wantsEmail ? templateForAction(opts.action, pcn.fine_type as string | null) : null;
+
+  // Pay-direct closed loop: mint a status-bound receipt-upload token so the
+  // email carries a private "upload your proof" link. Reused by the chase
+  // ladder's re-sends, so it lives on the row (not a short-lived token).
+  let receiptUploadUrl = '';
+  if (opts.action === 'pay_direct') {
+    const token = crypto.randomBytes(24).toString('hex');
+    await query(`UPDATE pcns SET receipt_upload_token = $2 WHERE id = $1`, [pcnId, token]);
+    receiptUploadUrl = `${getFrontendUrl()}/pcn-receipt/${token}`;
+  }
+
+  if (templateId) {
+    // Resolve ONCE, via the shared helper — the same call the preview endpoint
+    // makes, so what staff confirmed on screen is what actually gets used.
+    const rcpt = await resolvePcnRecipient(pcn, {
+      audience: map.audience,
+      templateId,
+      emailOverride: opts.email_override,
+    });
+
+    if (!rcpt.to) {
+      // Only reachable on the freelancer-only path, which deliberately has no
+      // client / info@ fallback. Say so rather than sending it somewhere else.
+      result.emailed.skippedReason = rcpt.reason || 'No recipient could be resolved.';
+    } else {
+      try {
+        const to = rcpt.to;
+        const cc = rcpt.cc;
+
+        // Notice attachments (front + back, best-effort) — the back page usually
+        // carries the issuer's payment options, which the client templates point to.
+        const attachments = await collectNoticeAttachments(pcn);
+
+        const reduced = money(pcn.reduced_amount);
+        const fineLine = money(pcn.fine_amount)
+          ? `${money(pcn.fine_amount)}${reduced ? ` (${reduced} if paid by ${fmtDate(pcn.reduced_deadline)})` : ''}`
+          : '—';
+        // Reflect what actually landed on the client's account (don't over-claim
+        // the fine if the recharge couldn't push to a locked/closed HH job).
+        let handlingSentence: string;
+        if (opts.action === 'pay_recharge') {
+          const fineBilled = result.fineRecharge.applied;
+          const adminBilled = result.charge.applied;
+          const fineStr = fineBilled && result.fineRecharge.amount != null
+            ? `the fine of ${money(result.fineRecharge.amount)}`
+            : 'the fine';
+          if (fineBilled && adminBilled) handlingSentence = `We've added ${fineStr} plus an administration fee of ${handlingFee}+VAT to your account.`;
+          else if (fineBilled) handlingSentence = `We've added ${fineStr} to your account.`;
+          else if (adminBilled) handlingSentence = `We've added an administration fee of ${handlingFee}+VAT to your account; the fine will be added separately.`;
+          else handlingSentence = `The fine and any administration fee will be added to your account.`;
+        } else {
+          handlingSentence = addCharge ? `As per our hire terms, an administration fee of ${handlingFee}+VAT applies for processing this notice.` : '';
+        }
+        // A freelancer in one of our vans wasn't "hired" the vehicle — say what
+        // actually happened, or the driver-facing templates read as nonsense to
+        // the very people this fix routes them to.
+        const noticeContext = rcpt.kind === 'freelancer'
+          ? 'for one of our vehicles you were driving at the time of the alleged offence'
+          : 'for a vehicle hired to you at the time of the alleged offence';
+        const jobRef = pcn.hh_job_number ? `#${pcn.hh_job_number}` : '';
+        const jobRefSentence = pcn.hh_job_number ? ` (our ref #${pcn.hh_job_number})` : '';
+
+        await emailService.send(templateId, {
+          to,
+          cc: cc.length ? cc : undefined,
+          attachments: attachments.length ? attachments : undefined,
+          variables: {
+            // {{driverName}} greets the driver-facing templates, {{clientName}}
+            // the client-facing ones — not interchangeable, so resolve each.
+            driverName: rcpt.name,
+            clientName: rcpt.clientName || 'Sir/Madam',
+            recipientName: rcpt.name,
+            vehicleReg: pcn.vehicle_reg || '—',
+            pcnReference: pcn.reference || '—',
+            issuer: pcn.issuing_authority || '—',
+            offenceDateTime: `${fmtDate(pcn.offence_at)}${pcn.offence_time_text ? ` ${pcn.offence_time_text}` : ''}`,
+            offenceDate: fmtDate(pcn.offence_at),
+            location: pcn.location || '—',
+            fineLine,
+            finalDeadline: fmtDate(pcn.final_deadline),
+            handlingFee,
+            handlingSentence,
+            noticeContext,
+            staffMessage: opts.freelancer_message?.trim() || '',
+            driverListSentence: '',
+            jobRef,
+            jobRefSentence,
+            receiptUploadUrl,
+            oooshEmail: OOOSH_EMAIL,
+            oooshPhone: OOOSH_PHONE,
+          },
+        });
+        result.emailed = {
+          sent: true, to, fallback: rcpt.isInfoFallback, error: null,
+          kind: rcpt.kind, clientFallback: rcpt.isClientFallback,
+          label: rcpt.label, skippedReason: null,
+        };
+      } catch (err) {
+        result.emailed = {
+          sent: false, to: null, fallback: false, error: (err as Error).message,
+          kind: rcpt.kind, clientFallback: rcpt.isClientFallback,
+          label: rcpt.label, skippedReason: null,
+        };
+      }
+    }
+  }
+
+  // ── 3. Status + action_path + pay-direct deadline ──
+  const payDirectDeadline = opts.action === 'pay_direct' ? `NOW() + INTERVAL '48 hours'` : null;
+  await query(
+    `UPDATE pcns SET status = $2, action_path = $3,
+       ${payDirectDeadline ? `pay_direct_deadline = ${payDirectDeadline},` : ''}
+       updated_at = NOW()
+     WHERE id = $1`,
+    [pcnId, map.status, map.action_path]
+  );
+
+  // ── 4. Resolution note (posterity — "they paid direct / deduct from next invoice") ──
+  const resNote = opts.resolution_note?.trim();
+  if (resNote) {
+    await query(
+      `UPDATE pcns SET notes = CASE WHEN notes IS NULL OR notes = '' THEN $2 ELSE notes || E'\\n' || $2 END WHERE id = $1`,
+      [pcnId, `[${new Date().toLocaleDateString('en-GB')}] ${resNote}`]
+    );
+  }
+
+  // ── 5. Event timeline ──
+  const bits: string[] = [`Action: ${opts.action.replace(/_/g, ' ')}`];
+  // Name WHO was emailed, not just the address. The old line read "emailed
+  // <address>" even when a driver-facing action had quietly fallen through to
+  // the client — the timeline looked like it had done exactly what was asked.
+  if (result.emailed.sent) {
+    const who = result.emailed.clientFallback
+      ? ' (CLIENT — no driver contact on file)'
+      : result.emailed.fallback
+        ? ' (fallback — no contact on file)'
+        : result.emailed.kind === 'freelancer' ? ' (freelancer)'
+        : result.emailed.kind === 'driver' ? ' (hire driver)'
+        : result.emailed.kind === 'override' ? ' (manually entered)'
+        : result.emailed.kind === 'client' ? ' (client)'
+        : '';
+    bits.push(`emailed ${result.emailed.to}${who}`);
+  }
+  if (result.emailed.skippedReason) bits.push(`no email sent — ${result.emailed.skippedReason}`);
+  if (result.charge.applied) bits.push('£35+VAT charge added to HH');
+  if (result.fineRecharge.applied && result.fineRecharge.amount != null) bits.push(`fine ${money(result.fineRecharge.amount)} recharged to HH`);
+  if (resNote) bits.push(`note: ${resNote}`);
+  await query(
+    `INSERT INTO pcn_events (pcn_id, event_type, body, metadata, created_by)
+     VALUES ($1, 'status_change', $2, $3, $4)`,
+    [pcnId, bits.join(' · '), JSON.stringify({ action: opts.action, ...result }), userId]
+  );
+
+  return result;
+}

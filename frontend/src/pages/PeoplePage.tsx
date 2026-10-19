@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { useUrlSearch } from '../hooks/useUrlSearch';
 import SlidePanel from '../components/SlidePanel';
 import PersonForm from '../components/PersonForm';
+import InviteFreelancerModal from '../components/InviteFreelancerModal';
 
 interface Person {
   id: string;
@@ -14,6 +16,7 @@ interface Person {
   last_interaction_at: string | null;
   // Freelancer-specific (always returned by SELECT p.*, may be null/false)
   is_freelancer: boolean;
+  freelancer_status: string | null;
   is_approved: boolean;
   is_insured_on_vehicles: boolean;
   has_tshirt: boolean;
@@ -73,10 +76,14 @@ interface PeopleResponse {
 
 export default function PeoplePage() {
   const [people, setPeople] = useState<Person[]>([]);
-  const [search, setSearch] = useState('');
+  const { search, setSearch, debouncedSearch } = useUrlSearch();
+  // Bumped per request; a reply only lands if it is still the newest (a slow
+  // reply for "1" must not overwrite the answer for "1000mods").
+  const requestSeq = useRef(0);
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
   const [showForm, setShowForm] = useState(false);
+  const [showInviteFreelancer, setShowInviteFreelancer] = useState(false);
   const [filterFreelancer, setFilterFreelancer] = useState(false);
   const [filterApproved, setFilterApproved] = useState(false);
   const [filterMissingEmail, setFilterMissingEmail] = useState(false);
@@ -96,7 +103,7 @@ export default function PeoplePage() {
   useEffect(() => {
     loadPeople();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, filterFreelancer, filterApproved, filterMissingEmail, filterMissingPhone,
+  }, [debouncedSearch, filterFreelancer, filterApproved, filterMissingEmail, filterMissingPhone,
       filterInsured, filterTshirt, reviewFilter, selectedSkills, sortBy, groupByReview]);
 
   // Load skills list when freelancer filter turns on (once per session is enough)
@@ -134,12 +141,13 @@ export default function PeoplePage() {
   }, [filterFreelancer]);
 
   async function loadPeople(page = 1) {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
       // When grouping by review, fetch all (limit 200 — well above the freelancer count)
       const limit = groupByReview ? '200' : '50';
       const params = new URLSearchParams({ page: String(page), limit });
-      if (search) params.set('search', search);
+      if (debouncedSearch) params.set('search', debouncedSearch);
       if (filterFreelancer) params.set('is_freelancer', 'true');
       if (filterApproved) params.set('is_approved', 'true');
       if (filterInsured) params.set('is_insured', 'true');
@@ -151,12 +159,14 @@ export default function PeoplePage() {
       if (sortBy !== 'name') params.set('sort', sortBy);
 
       const data = await api.get<PeopleResponse>(`/people?${params}`);
+      if (seq !== requestSeq.current) return; // superseded by a newer search
       setPeople(data.data);
       setPagination(data.pagination);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       console.error('Failed to load people:', err);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }
 
@@ -194,6 +204,12 @@ export default function PeoplePage() {
             Duplicates
           </Link>
           <button
+            onClick={() => setShowInviteFreelancer(true)}
+            className="px-4 py-2 text-sm border border-purple-300 text-purple-700 rounded hover:bg-purple-50 transition-colors font-medium"
+          >
+            + New Freelancer
+          </button>
+          <button
             onClick={() => setShowForm(true)}
             className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
           >
@@ -206,7 +222,7 @@ export default function PeoplePage() {
       <div className="mt-6 flex flex-wrap items-center gap-4">
         <input
           type="text"
-          placeholder="Search people by name or email..."
+          placeholder="Search by name, email, phone or organisation..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-md rounded border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
@@ -256,6 +272,7 @@ export default function PeoplePage() {
           <option value="recently_added">Sort: Recently added</option>
           <option value="recently_updated">Sort: Recently updated</option>
           <option value="last_contacted">Sort: Last contacted</option>
+          <option value="recently_viewed">Sort: Recently viewed (me)</option>
           {filterFreelancer && <option value="review_due">Sort: Review due soonest</option>}
         </select>
       </div>
@@ -360,8 +377,10 @@ export default function PeoplePage() {
       )}
 
       {/* Table(s) */}
-      <div className="mt-6 space-y-6">
-        {loading ? (
+      {/* While a new search loads, keep the previous results up (faded) rather than
+          blanking to "Loading..." on every keystroke */}
+      <div className={`mt-6 space-y-6 transition-opacity ${loading && people.length > 0 ? 'opacity-50' : ''}`}>
+        {loading && people.length === 0 ? (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center text-sm text-gray-500">
             Loading...
           </div>
@@ -421,6 +440,13 @@ export default function PeoplePage() {
           onCancel={() => setShowForm(false)}
         />
       </SlidePanel>
+
+      {showInviteFreelancer && (
+        <InviteFreelancerModal
+          onClose={() => setShowInviteFreelancer(false)}
+          onInvited={(personId) => { setShowInviteFreelancer(false); navigate(`/people/${personId}`); }}
+        />
+      )}
     </div>
   );
 }
@@ -479,6 +505,22 @@ function PeopleTable({
                   )}
                   {freelancerMode && person.is_approved && (
                     <span title="Approved" className="text-[10px] px-1 rounded bg-green-100 text-green-700">✓</span>
+                  )}
+                  {freelancerMode && !person.is_approved && person.freelancer_status && person.freelancer_status !== 'approved' && (
+                    <span
+                      title={`Freelancer status: ${person.freelancer_status.replace('_', ' ')}`}
+                      className={`text-[10px] px-1 rounded ${
+                        person.freelancer_status === 'applied' ? 'bg-amber-100 text-amber-700'
+                        : person.freelancer_status === 'more_info' ? 'bg-amber-100 text-amber-700'
+                        : person.freelancer_status === 'declined' ? 'bg-red-100 text-red-700'
+                        : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {person.freelancer_status === 'applied' ? 'applied'
+                        : person.freelancer_status === 'more_info' ? 'info req'
+                        : person.freelancer_status === 'declined' ? 'declined'
+                        : 'invited'}
+                    </span>
                   )}
                   {freelancerMode && person.is_insured_on_vehicles && (
                     <span title="Insured on vehicles" className="text-[10px]">🛡</span>

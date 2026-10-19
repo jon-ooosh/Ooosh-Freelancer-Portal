@@ -1,9 +1,16 @@
-# HOLDING MODULE SPEC — "Held for Clients" + "Lost Property" + Temp Storage
+# HOLDING MODULE SPEC — "Held for Clients" + "Lost Property"
 
-**Status:** SPEC / DISCUSSION ONLY — nothing built yet. This is the shaped design to refer
-to before implementation. £/billing is noted but deferred for v1.
+**Status: BUILT AND LIVE.** This document is the *design rationale* — why the module is shaped the
+way it is (one engine not three, the unknown→backfill cascade, the human-gated chase ladder, the two
+distinct QRs, the count vocabulary, the one-page/next-action model). Keep it for the "why".
 
-**Last shaped:** Jun 2026 (jon + Claude design session)
+⚠️ **For what the code currently does, and the conventions you must not break, read
+`CLAUDE.md` → "Step 10: Holding Module" — that is authoritative.** This file deliberately no longer
+carries a build log; it drifted out of date once and duplicating one here is how that happens.
+
+**Originally shaped:** Jun 2026 (jon + Claude design session). **Reconciled:** Sep 2026.
+Temp storage was folded into `incoming` (migration 195) — where this document still says
+"temp storage", read it as "held for a client".
 
 ---
 
@@ -359,75 +366,94 @@ for linked items; for unknown/unlinked items, capture a recipient at notify time
 
 ---
 
-## 12. Deferred for v1 (noted, not built)
+## 11a. Count vocabulary + the two physical actions (Aug 2026)
 
-- **£ / billing.** `chargeable` flag + `storage_started_at` + `charge_notes` captured; surface
-  "here N days — chargeable" so staff raise it manually via the Money tab. No automated billing.
-- **Long-term temp storage → tenancy promotion.** The USA-band-merch-for-months case starts in
-  `held_items`; "promote" to a real Storage Clients tenancy only if it goes genuinely long-term.
-  Don't try to draw the line up front.
-- **Signed one-click chase-send from email** — review-page gate only for now.
-- **Book Out on the mobile quick page.**
+**Three words, one helper.** `frontend/src/components/holding/counts.ts` `describeHeldCounts()`:
+
+| Term | Column | Meaning |
+|---|---|---|
+| Expected | `box_count` | what the client said they'd send |
+| Here | `received_count` | what actually turned up |
+| Outstanding | derived | expected − here |
+
+Renders `3 of 5 here · 2 outstanding` on the Holding list, the detail modal, the picker and the
+Job-View panel. `services/holding-requirement-sync.ts` mirrors the wording for the merch pip notes
+(backend can't import `shared/` at runtime). **The `description` says WHAT it is, never HOW MANY** —
+the merch form baked the count in (`"5 box(es) of merch/equipment"`), which froze at declaration
+time and stayed wrong once a partial arrival was booked in. Any new quantity surface calls the
+helper; nothing parses the description.
+
+**Expected vs here.** `HeldItemForm` has an "It's already here" toggle (+ how many arrived) — without
+it every item logged from `/holding` was born `expected`, so an arrived-but-unlogged delivery could
+only be backfilled via `/quick`.
+
+**Receive + hand over on both surfaces.** `components/holding/HeldItemPicker.tsx` exports
+`HeldItemPicker` + `HandoverFlow`, shared by `/quick` and the `/holding` header. Same
+don't-let-them-drift convention as `HeldItemForm`.
+
+**Job View panel** takes `actions` + `onChanged`: rows deep-link (`/holding?item=<id>`) and carry the
+one next physical step. Everything else stays on the Holding pages.
+
+**Short delivery** → "📦 Nothing more coming" corrects `box_count` down to `received_count` (an
+update); "✕ Won't arrive" (cancel) is now reserved for nothing-arrived-at-all.
 
 ---
 
-## 13. Build status (Jun 2026)
+## 11b. One page, organised by next action (Aug 2026)
 
-✅ **Done + deployed:**
-1. Migrations 113 (held_items + held_item_locations), 115 (contact_email/phone), 116 (received_by),
-   **119 (expected_collection_date + hold_until + hold_until_reminder_sent_for)**.
-2. Backend `routes/holding.ts`: CRUD, link cascade, notify (real email), collected/ship-back/dispose,
-   by-person/org/job reads, job-number search, label re-download.
-   **NB: staff names join `people` via `users.person_id` — `users` has no name columns.**
-3. Module pages "Held for Clients" + "Lost Property" (`/holding`, `/holding/lost-property`).
-4. Mobile quick-action page `/quick` (PWA-installable). "Package arrived" is search-first
-   (receive-existing-or-create) to avoid duplicates.
-5. Public inbound merch form `/merch-form` + label PDF (QR, printer-friendly) + staff-auth
-   acknowledge-receipt page `/holding/receipt/:id` + client-picker "Send merch form" on Job View.
-6. Address-book "Held Items" tab (Person + Org). Job Overview "Held for Clients" panel (incoming).
-7. **Derived merch pip** (`services/holding-requirement-sync.ts`, status-reactive — see §5) +
-   "Won't arrive" cancel action + temp/lost FYI in Job View right sidebar. The pip is **read-only**
-   (like the Vehicle card) — `merch` is in `RequirementCard`'s `isContextualStatus`; never hand-set.
-8. **Smart linking (PRs #690/#692/#695):** HH job number is the primary capture field —
-   `POST /holding` + `/link` derive `job_id` + client org from it (`resolveJobContext`); live
-   `GET /holding/job-lookup/:n` confirms the client in the form; `GET /holding/org-jobs/:orgId`
-   reverse-links when staff know the band but not the job. Shared FE components under
-   `components/holding/`: EntitySearch, JobNumberField, OrgJobSuggestions, NotifyClientModal,
-   ChaseReviewPanel, DuplicateNudge, compress, photo-upload, format (`locationLabel` surfaces the
-   "Somewhere else" typed text).
-9. **Notify (multi-recipient picker)** — `/:id/notify` takes `recipients[]`, branches template by
-   kind, **attaches item photos** (both kinds), enriches the incoming email with the description.
-   `GET /:id/notify-contacts` gathers job + owner + record candidates. Photos compressed client-side
-   (~1600px) before upload so emails stay small. Fires post-save on the Quick Log for incoming + lost.
-10. **Ship-back** forwards the postage method + tracking to the client (`holding_shipped_back`).
-11. **Lost-property chase ladder (Stage 8, PR #698)** — human-gated, NEVER auto-fires to clients.
-    `POST /:id/chase` sends the gradient email for the current tier (`holding_chase_1/2/3`, wk1
-    friendly → wk2 firm → wk3 final; job # in subject, staff signature) then bumps the level — only
-    if the send succeeded (422 no email / 502 send-fail, record untouched). `ChaseReviewPanel` on the
-    Lost Property page (Send / Snooze / Skip), opened from the digest deep-link `?review=1`. Two
-    timers (Last contacted / Next chase due) + chases-sent on the detail card.
-12. **Defer + temp hold-until (PR #698)** — `expected_collection_date` (future = chases paused;
-    doubles as the snooze; excluded from the review queue + scan). `hold_until` on temp storage, staff
-    reminded 3 days before. `services/holding-reminders.ts` runs daily **09:25 Europe/London** —
-    assembles the chase digest (staff bell + info@ email to the review queue, no client emails fired
-    here) + the hold-until reminders. Per-cycle dedup via `hold_until_reminder_sent_for`.
-13. **Pre-hire briefing heads-up (PR #700)** — `buildBriefing` computes a `holding` summary (incoming
-    here-to-give vs awaited on this job + client-wide temp/lost aide-mémoire); rendered as a "Things
-    we're holding for this client" block. try/catch-guarded (degrades to no block).
-14. **Stage 9 — Storage "Packages held" (PR #701)** — tenancy detail modal shows the client's held
-    items via `HeldItemsSection entityType=organisation`.
-15. **Merch dashboard strip slot (PR #701)** — `merch` category in `job-progress-strip.ts` (+ FE
-    mirror + briefing strip), so the pip shows on the dashboard Today strip + briefing.
-16. **Merch card + "Held for Clients" panel combined (PR #703)** — the standalone Overview panel was
-    duplicating the inert merch checklist pip. Now ONE surface: the merch requirement card in the prep
-    checklist carries its incoming-items detail + Send Merch Form rolled in beneath it (nested, like
-    the vehicle card nests hire_forms/excess). The requirement row is untouched so the prep counter /
-    dashboard strip / briefing roll-ups still work. When nothing's logged there's no merch requirement
-    (it's item-gated), so a plain "Held for Clients" entry card renders instead — preserving the
-    proactive Send-Merch-Form entry point + empty state. Pre-hire only. Lives in `JobPrepChecklist`;
-    the standalone panel was removed from the Overview tab.
+`/holding` is the single page. Kind is a filter + a row icon, never a separate page.
 
-🔲 **Remaining / open:**
-- IRL feedback from the chase + hold-until flows (staff trialling over the following weeks).
+**Derived, server-side, once** (`routes/holding.ts` `SELECT_WITH_JOINS`): `next_action` +
+`action_due`. The chase expressions moved into a `LEFT JOIN LATERAL` so the action CASE can
+reference `next_chase_due` without restating the logic. Precedence is by urgency, not kind:
 
-Streams independent.
+| next_action | When | action_due |
+|---|---|---|
+| `link_owner` | `owner_unknown` | found/logged date — rendered as an AGE, never overdue |
+| `decide` | `hold_until` / `dispose_after` passed | that date |
+| `chase_owner` | lost property, owner known | `next_chase_due` (⏸ when paused) |
+| `receive` | `expected` | `expected_date` → `needed_by` |
+| `hand_over` | here, owner known | `needed_by` → `hold_until` |
+| `none` | terminal | null |
+
+Default order: `action_due` ascending, resolved rows last. **Any new "what does this need" surface
+reads these two columns rather than re-deriving.**
+
+**Layout:** clickable action strip (counts) over a flat sortable table — the `/money/overview`
+pattern. Buckets were rejected: ~17 open rows, 20–30 max. One fetch, client-side filtering, so strip
+counts stay stable under a filter. `?kind=` / `?action=` / `?item=` / `?review=1` round-trip.
+
+**Route rule — never remove, only add.** `/holding/lost-property` mounts the same page pre-filtered
+and stays permanently: the chase digest's `?review=1` link is in sent inboxes and on historical
+`notifications.action_url` rows, and `/holding/receipt/:id` is printed on box labels in the post.
+
+**`temp_storage` folded into `incoming`** (migration 195). It only ever gated the visibility of the
+"hold until" field — `holding-reminders.ts` and the `needed_by` derivation already treated the two
+kinds identically. The CHECK constraint still permits the value; the UI never offers it. Two kinds
+remain, split on *does the client know we've got it?*
+
+---
+
+## 12. Still deferred (checked Sep 2026)
+
+- **£ / billing.** `chargeable` flag + `storage_started_at` + `charge_notes` captured; surface
+  "here N days — chargeable" so staff raise it manually via the Money tab. No automated billing.
+- **Long-term hold → storage tenancy promotion.** The USA-band-merch-for-months case starts in
+  `held_items`; "promote" to a real Storage Clients tenancy only if it goes genuinely long-term.
+  Don't try to draw the line up front.
+- **Signed one-click chase-send from email** — the review-page gate is deliberate and stays until
+  someone actually asks for one-click.
+- **Book Out on the mobile quick page.** (Receive + hand over ARE on `/quick`; book-out isn't.)
+
+---
+
+## 13. Build status
+
+Built and deployed across Jun–Sep 2026. **The build log that used to live here has been removed** —
+it duplicated `CLAUDE.md` → "Step 10: Holding Module" and fell behind it. Go there for the as-built
+state, the live conventions, and the open items.
+
+The short version: everything in §§1–11b above is built, including the one-page/next-action
+unification (§11b) and the count vocabulary (§11a). Dashboard surfacing landed Sep 2026 — dated
+actions (`decide` / `receive`) feed "On Today", undated `link_owner` gets a self-hiding
+NeedsAttention card, both reading the same `HELD_ITEM_SELECT` derivation.

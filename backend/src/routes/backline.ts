@@ -14,6 +14,11 @@
  * jobs via ?include_provisional=true and/or ?include_enquiry=true. These come back
  * in a separate `unconfirmed` block so warehouse staff can input on capacity without
  * mixing speculative work into the headline stats.
+ *
+ * Going Out is windowed + displayed on the OUTGOING date (COALESCE(out_date,
+ * job_date)) — that's when kit physically leaves, which is what the warehouse
+ * plans against (often the same as job start, sometimes a day earlier).
+ * Coming Back is windowed on return_date and reads the POST-HIRE (de-prep) card.
  */
 
 import { Router, Response } from 'express';
@@ -48,6 +53,24 @@ const ENQUIRY_GOING_OUT_SQL = `
   AND j.pipeline_status NOT IN ('lost', 'cancelled', 'provisional')
 `;
 
+// Band name for a job (searchable) — first org linked with role='band'.
+const BAND_NAME_SQL = `
+  (SELECT o.name FROM job_organisations jo
+     JOIN organisations o ON o.id = jo.organisation_id
+   WHERE jo.job_id = j.id AND jo.role = 'band' LIMIT 1) AS band_name`;
+
+// Shared row shape. Going-out lists key on the outgoing date; returning lists
+// key on return_date. Location joins from the pre-hire card (returning cards
+// won't usually have one, which is fine — location is a pre-hire concept).
+const ROW_COLS = `
+  j.id, j.job_name, j.hh_job_number, j.job_date, j.out_date, j.return_date,
+  j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
+  jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
+  jr.hh_mismatch, jr.hh_mismatch_detail,
+  j.hh_derived_flags,
+  ${BAND_NAME_SQL},
+  bl.location_type, bl.vehicle_reg AS location_reg, bl.detail AS location_detail`;
+
 router.get('/overview', async (req: AuthRequest, res: Response) => {
   try {
     const days = Math.min(Math.max(parseInt(req.query.days as string) || 7, 1), 30);
@@ -60,82 +83,73 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
     const endStr = endDate.toISOString().slice(0, 10);
 
     // Operational "going out" — actually-booked work the warehouse needs to prep.
+    // Windowed + ordered on the outgoing date (COALESCE(out_date, job_date)).
     const goingOutResult = await query(
-      `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
-              j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
-              jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
-              jr.hh_mismatch, jr.hh_mismatch_detail,
-              j.hh_derived_flags
+      `SELECT ${ROW_COLS}
        FROM jobs j
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
+       LEFT JOIN backline_locations bl ON bl.job_requirement_id = jr.id
        WHERE j.is_deleted = false
-         AND j.job_date >= $1
-         AND j.job_date <= $2
+         AND COALESCE(j.out_date, j.job_date) >= $1
+         AND COALESCE(j.out_date, j.job_date) <= $2
          AND ${OPERATIONAL_GOING_OUT_SQL}
-       ORDER BY j.job_date ASC`,
+       ORDER BY COALESCE(j.out_date, j.job_date) ASC`,
       [nowStr, endStr]
     );
 
     // Jobs returning: only jobs that have actually gone out (HH status >= 5 Dispatched)
     // OR OP pipeline confirms they're out/returning. Excludes jobs still being prepped.
     // HH status 8 (Requires Attention) is included — represents "returned with problems".
+    // DISTINCT ON prefers the POST-HIRE (de-prep) card so "Coming Back" reflects de-prep,
+    // not the already-done prep card.
     const returningResult = await query(
-      `SELECT DISTINCT ON (j.id) j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
-              j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
-              jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
-              jr.hh_mismatch, jr.hh_mismatch_detail,
-              j.hh_derived_flags, jr.phase
+      `SELECT DISTINCT ON (j.id) ${ROW_COLS}, jr.phase
        FROM jobs j
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline'
+       LEFT JOIN backline_locations bl ON bl.job_requirement_id = jr.id
        WHERE j.is_deleted = false
          AND j.return_date >= $1
          AND j.return_date <= $2
          AND (j.status IN (5, 6, 7, 8)
               OR j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned'))
-       ORDER BY j.id, jr.phase DESC`,
+       ORDER BY j.id, CASE WHEN jr.phase = 'post_hire' THEN 0 ELSE 1 END`,
       [nowStr, endStr]
     );
 
-    // Overdue going out: job_date < today AND operationally booked but not yet
+    // Overdue going out: outgoing date < today AND operationally booked but not yet
     // dispatched (matches "going out" rule, restricted to past dates). Caps lookback
     // at 30 days. The auto-lose scheduler at 09:00 sweeps stale enquiries/provisional
     // separately — those don't surface here.
     const overdueOutResult = await query(
-      `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
-              j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
-              jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
-              jr.hh_mismatch, jr.hh_mismatch_detail,
-              j.hh_derived_flags,
-              (CURRENT_DATE - j.job_date::date) AS days_overdue
+      `SELECT ${ROW_COLS},
+              (CURRENT_DATE - COALESCE(j.out_date, j.job_date)::date) AS days_overdue
        FROM jobs j
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
+       LEFT JOIN backline_locations bl ON bl.job_requirement_id = jr.id
        WHERE j.is_deleted = false
-         AND j.job_date < $1
-         AND j.job_date >= $1::date - INTERVAL '30 days'
+         AND COALESCE(j.out_date, j.job_date) < $1
+         AND COALESCE(j.out_date, j.job_date) >= $1::date - INTERVAL '30 days'
          AND ${OPERATIONAL_GOING_OUT_SQL}
          AND jr.status != 'done'
-       ORDER BY j.job_date ASC`,
+       ORDER BY COALESCE(j.out_date, j.job_date) ASC`,
       [nowStr]
     );
 
     // Overdue returning: return_date < today AND not yet returned (HH < 7).
     // Tightened to require the van to have actually gone out — a job stuck in
     // enquiry/provisional with a stale return_date isn't "overdue back", it's
-    // stale data that the auto-lose scheduler will clear.
+    // stale data that the auto-lose scheduler will clear. Prefers post-hire card.
     const overdueReturnResult = await query(
-      `SELECT DISTINCT ON (j.id) j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
-              j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
-              jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
-              jr.hh_mismatch, jr.hh_mismatch_detail,
-              j.hh_derived_flags, jr.phase,
+      `SELECT DISTINCT ON (j.id) ${ROW_COLS}, jr.phase,
               (CURRENT_DATE - j.return_date::date) AS days_overdue
        FROM jobs j
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline'
+       LEFT JOIN backline_locations bl ON bl.job_requirement_id = jr.id
        WHERE j.is_deleted = false
          AND j.return_date < $1
          AND j.return_date >= $1::date - INTERVAL '30 days'
          AND (j.status IN (5, 6) OR j.pipeline_status IN ('dispatched', 'returned_incomplete'))
-       ORDER BY j.id, jr.phase DESC`,
+       ORDER BY j.id, CASE WHEN jr.phase = 'post_hire' THEN 0 ELSE 1 END`,
       [nowStr]
     );
 
@@ -144,66 +158,61 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
     // by the caller. Same date window as operational; same per-row data shape.
     const provisionalGoingOut = includeProvisional
       ? await query(
-          `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
-                  j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
-                  jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
-                  jr.hh_mismatch, jr.hh_mismatch_detail,
-                  j.hh_derived_flags
+          `SELECT ${ROW_COLS}
            FROM jobs j
            JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
+           LEFT JOIN backline_locations bl ON bl.job_requirement_id = jr.id
            WHERE j.is_deleted = false
-             AND j.job_date >= $1
-             AND j.job_date <= $2
+             AND COALESCE(j.out_date, j.job_date) >= $1
+             AND COALESCE(j.out_date, j.job_date) <= $2
              AND ${PROVISIONAL_GOING_OUT_SQL}
-           ORDER BY j.job_date ASC`,
+           ORDER BY COALESCE(j.out_date, j.job_date) ASC`,
           [nowStr, endStr]
         )
       : null;
 
     const enquiryGoingOut = includeEnquiry
       ? await query(
-          `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
-                  j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
-                  jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
-                  jr.hh_mismatch, jr.hh_mismatch_detail,
-                  j.hh_derived_flags
+          `SELECT ${ROW_COLS}
            FROM jobs j
            JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
+           LEFT JOIN backline_locations bl ON bl.job_requirement_id = jr.id
            WHERE j.is_deleted = false
-             AND j.job_date >= $1
-             AND j.job_date <= $2
+             AND COALESCE(j.out_date, j.job_date) >= $1
+             AND COALESCE(j.out_date, j.job_date) <= $2
              AND ${ENQUIRY_GOING_OUT_SQL}
-           ORDER BY j.job_date ASC`,
+           ORDER BY COALESCE(j.out_date, j.job_date) ASC`,
           [nowStr, endStr]
         )
       : null;
 
     // Build job rows — sort returning by return_date (DISTINCT ON breaks ordering)
-    const goingOut = goingOutResult.rows.map(row => mapJobRow(row, 'out'));
+    const goingOut = goingOutResult.rows.map(row => mapJobRow(row));
     const returning = returningResult.rows
-      .map(row => mapJobRow(row, 'return'))
+      .map(row => mapJobRow(row))
       .sort((a, b) => {
         const da = a.returnDate ? new Date(a.returnDate).getTime() : 0;
         const db = b.returnDate ? new Date(b.returnDate).getTime() : 0;
         return da - db;
       });
-    const overdueOut = overdueOutResult.rows.map(row => mapJobRow(row, 'out'));
+    const overdueOut = overdueOutResult.rows.map(row => mapJobRow(row));
     const overdueReturning = overdueReturnResult.rows
-      .map(row => mapJobRow(row, 'return'))
+      .map(row => mapJobRow(row))
       .sort((a, b) => {
         const da = a.returnDate ? new Date(a.returnDate).getTime() : 0;
         const db = b.returnDate ? new Date(b.returnDate).getTime() : 0;
         return da - db;
       });
-    const provisionalJobs = provisionalGoingOut?.rows.map(row => mapJobRow(row, 'out')) ?? null;
-    const enquiryJobs = enquiryGoingOut?.rows.map(row => mapJobRow(row, 'out')) ?? null;
+    const provisionalJobs = provisionalGoingOut?.rows.map(row => mapJobRow(row)) ?? null;
+    const enquiryJobs = enquiryGoingOut?.rows.map(row => mapJobRow(row)) ?? null;
 
     // Aggregate stats — operational only. The unconfirmed buckets carry their
     // own counts but deliberately don't roll up into the headline figures.
-    const goingOutStats = buildStats(goingOut);
-    const returningStats = buildStats(returning);
-    const overdueOutStats = buildStats(overdueOut);
-    const overdueReturnStats = buildStats(overdueReturning);
+    // Going-out lists measure prep; returning lists measure de-prep.
+    const goingOutStats = buildStats(goingOut, 'prep');
+    const returningStats = buildStats(returning, 'deprep');
+    const overdueOutStats = buildStats(overdueOut, 'prep');
+    const overdueReturnStats = buildStats(overdueReturning, 'deprep');
 
     res.json({
       data: {
@@ -213,10 +222,10 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
         overdueReturning: { stats: overdueReturnStats, jobs: overdueReturning },
         unconfirmed: {
           provisional: provisionalJobs
-            ? { stats: buildStats(provisionalJobs), jobs: provisionalJobs }
+            ? { stats: buildStats(provisionalJobs, 'prep'), jobs: provisionalJobs }
             : null,
           enquiry: enquiryJobs
-            ? { stats: buildStats(enquiryJobs), jobs: enquiryJobs }
+            ? { stats: buildStats(enquiryJobs, 'prep'), jobs: enquiryJobs }
             : null,
         },
       },
@@ -268,11 +277,154 @@ router.patch('/status/:requirementId', async (req: AuthRequest, res: Response) =
   }
 });
 
+// ── "Where is it?" location tracking ────────────────────────────────────
+
+const LOCATION_TYPES = ['van', 'loading_bay', 'rehearsal', 'other'];
+
+/**
+ * Context for the location modal: current location, vans allocated to this job
+ * (to pre-fill the reg picker), and the active fleet regs (suggestions).
+ */
+router.get('/location-context/:requirementId', async (req: AuthRequest, res: Response) => {
+  try {
+    const { requirementId } = req.params;
+    const reqRow = await query(
+      `SELECT jr.id, jr.job_id, j.hh_job_number
+       FROM job_requirements jr
+       JOIN jobs j ON j.id = jr.job_id
+       WHERE jr.id = $1 AND jr.requirement_type = 'backline'`,
+      [requirementId]
+    );
+    if (reqRow.rows.length === 0) {
+      return res.status(404).json({ error: 'Backline requirement not found' });
+    }
+    const { job_id, hh_job_number } = reqRow.rows[0];
+
+    const [locResult, allocResult, fleetResult] = await Promise.all([
+      query(
+        `SELECT location_type, vehicle_reg, detail FROM backline_locations
+         WHERE job_requirement_id = $1`,
+        [requirementId]
+      ),
+      // Vans allocated to this job (dual-match: hire-form rows carry job_id,
+      // staff-allocation rows carry only hirehop_job_id). Soft-cancelled rows
+      // excluded.
+      query(
+        `SELECT DISTINCT fv.reg
+         FROM vehicle_hire_assignments vha
+         JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+         WHERE (vha.job_id = $1 OR ($2::int IS NOT NULL AND vha.hirehop_job_id = $2))
+           AND vha.vehicle_id IS NOT NULL
+           AND vha.status != 'cancelled'
+         ORDER BY fv.reg`,
+        [job_id, hh_job_number ?? null]
+      ),
+      query(
+        `SELECT reg FROM fleet_vehicles WHERE is_active = true AND reg IS NOT NULL ORDER BY reg`,
+        []
+      ),
+    ]);
+
+    const loc = locResult.rows[0]
+      ? {
+          type: locResult.rows[0].location_type,
+          reg: locResult.rows[0].vehicle_reg,
+          detail: locResult.rows[0].detail,
+        }
+      : null;
+
+    res.json({
+      data: {
+        location: loc,
+        allocatedRegs: allocResult.rows.map(r => r.reg).filter(Boolean),
+        fleetRegs: fleetResult.rows.map(r => r.reg).filter(Boolean),
+      },
+    });
+  } catch (err) {
+    console.error('Error fetching backline location context:', err);
+    res.status(500).json({ error: 'Failed to fetch location context' });
+  }
+});
+
+/** Upsert the current location for a backline card. */
+router.put('/location/:requirementId', async (req: AuthRequest, res: Response) => {
+  try {
+    const { requirementId } = req.params;
+    const { location_type, vehicle_reg, detail } = req.body;
+
+    if (!LOCATION_TYPES.includes(location_type)) {
+      return res.status(400).json({ error: `Invalid location_type: ${location_type}` });
+    }
+
+    const reqRow = await query(
+      `SELECT id, job_id, status FROM job_requirements
+       WHERE id = $1 AND requirement_type = 'backline'`,
+      [requirementId]
+    );
+    if (reqRow.rows.length === 0) {
+      return res.status(404).json({ error: 'Backline requirement not found' });
+    }
+    // Gate: can't stage kit that's still "to do" — it has to be at least being
+    // worked on before it can physically be somewhere.
+    if (reqRow.rows[0].status === 'not_started') {
+      return res.status(400).json({
+        error: 'Mark the backline as Working On It or Done before recording where it is.',
+      });
+    }
+
+    const reg = location_type === 'van' ? (vehicle_reg?.trim() || null) : null;
+    const det = typeof detail === 'string' ? detail.trim().slice(0, 500) || null : null;
+
+    const result = await query(
+      `INSERT INTO backline_locations
+         (job_requirement_id, job_id, location_type, vehicle_reg, detail, updated_by, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (job_requirement_id) DO UPDATE
+         SET location_type = EXCLUDED.location_type,
+             vehicle_reg = EXCLUDED.vehicle_reg,
+             detail = EXCLUDED.detail,
+             updated_by = EXCLUDED.updated_by,
+             updated_at = NOW()
+       RETURNING location_type, vehicle_reg, detail`,
+      [requirementId, reqRow.rows[0].job_id, location_type, reg, det, req.user!.id]
+    );
+
+    res.json({
+      data: {
+        type: result.rows[0].location_type,
+        reg: result.rows[0].vehicle_reg,
+        detail: result.rows[0].detail,
+      },
+    });
+  } catch (err) {
+    console.error('Error saving backline location:', err);
+    res.status(500).json({ error: 'Failed to save location' });
+  }
+});
+
+/** Clear the recorded location for a backline card. */
+router.delete('/location/:requirementId', async (req: AuthRequest, res: Response) => {
+  try {
+    const { requirementId } = req.params;
+    await query('DELETE FROM backline_locations WHERE job_requirement_id = $1', [requirementId]);
+    res.json({ data: { cleared: true } });
+  } catch (err) {
+    console.error('Error clearing backline location:', err);
+    res.status(500).json({ error: 'Failed to clear location' });
+  }
+});
+
 // ── Helpers ────────────────────────────────────────────────────────────
 
 interface DerivedFlags {
   backline_item_count?: number;
   prep_time_by_category?: { backline?: number };
+}
+
+interface BacklineLocation {
+  type: 'van' | 'loading_bay' | 'rehearsal' | 'other';
+  reg: string | null;
+  detail: string | null;
 }
 
 interface BacklineJob {
@@ -281,8 +433,10 @@ interface BacklineJob {
   jobName: string;
   hhJobNumber: number | null;
   jobDate: string | null;
+  outDate: string | null;
   returnDate: string | null;
   client: string;
+  bandName: string | null;
   pipelineStatus: string;
   hhStatus: number;
   backlineStatus: string;
@@ -292,10 +446,11 @@ interface BacklineJob {
   effectivelyDone: boolean; // true if backline_status=done OR HH status >= prepped
   hasMismatch: boolean;     // true if HH items changed since last action
   mismatchDetail: string | null;
+  location: BacklineLocation | null;
   daysOverdue?: number;     // populated for overdue lists only
 }
 
-function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
+function mapJobRow(row: any): BacklineJob {
   const flags = row.hh_derived_flags as DerivedFlags | null;
   const hhStatus = row.hh_status || 0;
   // Consider effectively done if: explicitly marked done, OR HH shows dispatched+ (5+).
@@ -310,8 +465,10 @@ function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
     jobName: row.job_name,
     hhJobNumber: row.hh_job_number,
     jobDate: row.job_date,
+    outDate: row.out_date || row.job_date,
     returnDate: row.return_date,
     client: row.company_name || row.client_name,
+    bandName: row.band_name || null,
     pipelineStatus: row.pipeline_status,
     hhStatus,
     backlineStatus: row.backline_status,
@@ -321,18 +478,28 @@ function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
     effectivelyDone,
     hasMismatch: row.hh_mismatch === true,
     mismatchDetail: row.hh_mismatch_detail || null,
+    location: row.location_type
+      ? { type: row.location_type, reg: row.location_reg || null, detail: row.location_detail || null }
+      : null,
     daysOverdue: row.days_overdue !== undefined && row.days_overdue !== null
       ? Math.max(0, parseInt(String(row.days_overdue), 10) || 0)
       : undefined,
   };
 }
 
-function buildStats(jobs: BacklineJob[]) {
+/**
+ * Aggregate stats. `mode` decides what "done" means:
+ *  - 'prep'   → prep done (effectivelyDone: card done OR HH prepped/dispatched)
+ *  - 'deprep' → de-prep card done (backlineStatus === 'done'); HH status is
+ *               irrelevant because a returning job is always HH-dispatched+.
+ */
+function buildStats(jobs: BacklineJob[], mode: 'prep' | 'deprep') {
+  const isDone = (j: BacklineJob) => (mode === 'deprep' ? j.backlineStatus === 'done' : j.effectivelyDone);
   return {
     jobCount: jobs.length,
-    notStarted: jobs.filter(j => j.backlineStatus === 'not_started' && !j.effectivelyDone).length,
+    notStarted: jobs.filter(j => j.backlineStatus === 'not_started' && !isDone(j)).length,
     inProgress: jobs.filter(j => j.backlineStatus === 'in_progress').length,
-    done: jobs.filter(j => j.effectivelyDone).length,
+    done: jobs.filter(j => isDone(j)).length,
     problem: jobs.filter(j => j.backlineStatus === 'blocked').length,
     totalItems: jobs.reduce((sum, j) => sum + j.itemCount, 0),
     totalPrepMins: jobs.reduce((sum, j) => sum + j.prepTimeMins, 0),
@@ -340,9 +507,7 @@ function buildStats(jobs: BacklineJob[]) {
     remainingPrepMins: jobs
       .filter(j => !j.effectivelyDone)
       .reduce((sum, j) => sum + j.prepTimeMins, 0),
-    // For de-prep: "effectively done" for prep doesn't mean de-prep is done.
-    // De-prep remaining = all returning jobs that haven't been marked 'done' on their post_hire card
-    // (or pre_hire card if no post_hire exists). Don't use effectivelyDone here.
+    // De-prep remaining = returning jobs whose de-prep card isn't 'done'.
     remainingDeprepMins: jobs
       .filter(j => j.backlineStatus !== 'done')
       .reduce((sum, j) => sum + j.deprepTimeMins, 0),

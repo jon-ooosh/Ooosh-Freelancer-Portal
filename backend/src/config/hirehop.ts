@@ -6,7 +6,7 @@
  */
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
 

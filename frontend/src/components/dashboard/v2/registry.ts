@@ -1,6 +1,8 @@
 import type { DashboardSection } from './sections';
 import NeedsAttention from './sections/NeedsAttention';
 import OnToday from './sections/OnToday';
+import WhosIn from './sections/WhosIn';
+import OohReturns from './sections/OohReturns';
 import Today from './sections/Today';
 import ComingUp from './sections/ComingUp';
 import OpsRow from './sections/Operations';
@@ -14,11 +16,13 @@ import ActivityBlock from './sections/Activity';
  *   3. (Optional) tag it as pinnable: false if it must stay at top (like Needs).
  */
 export const SECTIONS: DashboardSection[] = [
-  { id: 'needs',    title: 'Needs Attention', component: NeedsAttention, defaultOrder: 0, pinnable: false, width: 'full' },
-  { id: 'ontoday',  title: 'On Today',        component: OnToday,        defaultOrder: 1, pinnable: true,  width: 'full' },
-  { id: 'today',    title: 'Today',           component: Today,          defaultOrder: 2, pinnable: true,  width: 'full' },
-  { id: 'up',       title: 'Coming Up',       component: ComingUp,       defaultOrder: 3, pinnable: true,  width: 'full' },
-  { id: 'ops',      title: 'Operations',      component: OpsRow,         defaultOrder: 4, pinnable: true,  width: 'full' },
-  { id: 'pipeline', title: 'Pipeline',        component: PipelineBlock,  defaultOrder: 5, pinnable: true,  width: 'full' },
-  { id: 'activity', title: 'Activity',        component: ActivityBlock,  defaultOrder: 6, pinnable: true,  width: 'full' },
+  { id: 'needs',      title: 'Needs Attention',   component: NeedsAttention, defaultOrder: 0, pinnable: false, width: 'full' },
+  { id: 'ontoday',    title: 'On Today',          component: OnToday,        defaultOrder: 1, pinnable: true,  width: 'full' },
+  { id: 'whosin',     title: "Who's in",         component: WhosIn,         defaultOrder: 2, pinnable: true,  width: 'full' },
+  { id: 'oohreturns', title: 'Recent OOH returns', component: OohReturns,     defaultOrder: 3, pinnable: true,  width: 'full' },
+  { id: 'today',      title: 'Today',             component: Today,          defaultOrder: 4, pinnable: true,  width: 'full' },
+  { id: 'up',         title: 'Coming Up',         component: ComingUp,       defaultOrder: 5, pinnable: true,  width: 'full' },
+  { id: 'ops',        title: 'Operations',        component: OpsRow,         defaultOrder: 6, pinnable: true,  width: 'full' },
+  { id: 'pipeline',   title: 'Pipeline',          component: PipelineBlock,  defaultOrder: 7, pinnable: true,  width: 'full' },
+  { id: 'activity',   title: 'Activity',          component: ActivityBlock,  defaultOrder: 8, pinnable: true,  width: 'full' },
 ];

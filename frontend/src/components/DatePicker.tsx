@@ -130,6 +130,9 @@ export default function DatePicker({
   };
 
   const handleDayClick = (day: Date) => {
+    // Clicking a leading/trailing day from an adjacent month selects it and
+    // rolls the view to that month (so a reopen lands on the right page).
+    if (!isSameMonth(day, viewMonth)) setViewMonth(startOfMonth(day));
     onChange(toISO(day));
     setOpen(false);
   };
@@ -228,18 +231,18 @@ export default function DatePicker({
                 <button
                   key={day.toISOString()}
                   type="button"
-                  disabled={isDisabled || !inMonth}
+                  disabled={isDisabled}
                   onClick={() => handleDayClick(day)}
                   className={`w-9 h-8 text-xs rounded flex items-center justify-center transition-colors ${
-                    !inMonth
-                      ? 'text-gray-200 cursor-default'
-                      : isDisabled
+                    isDisabled
                       ? 'text-gray-300 cursor-not-allowed'
                       : isSelected
                       ? 'bg-ooosh-600 text-white font-semibold'
                       : isToday
                       ? 'bg-ooosh-50 text-ooosh-700 font-semibold hover:bg-ooosh-100'
-                      : 'text-gray-700 hover:bg-gray-100'
+                      : inMonth
+                      ? 'text-gray-700 hover:bg-gray-100'
+                      : 'text-gray-400 hover:bg-gray-100'
                   }`}
                 >
                   {format(day, 'd')}

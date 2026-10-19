@@ -4,8 +4,8 @@
  * Two flows, picked by payment_method:
  *
  *   Paid-now (cot_card / amex / lloyds_cc / petty_cash / paypal / wise /
- *   lloyds_transfer) → a Spend Money on the mapped bank account + receipt
- *   attach. Codat's bank-feed line auto-suggests it for one-click reconcile.
+ *   lloyds_transfer) → a Spend Money on the mapped bank account + the
+ *   document set attached. Codat's bank-feed line auto-suggests it for one-click reconcile.
  *
  *   Pay-later (not_yet_paid / reimburse_me) → an AUTHORISED ACCPAY bill, created
  *   when the cost is APPROVED in OP (so it lands in Xero's "Bills to pay"). When
@@ -22,7 +22,7 @@
  * State machine (costs.xero_sync_state):
  *   pending      → fresh / unpushed / awaiting approval
  *   bill_created → Spend Money OR bill created in Xero
- *   attached     → + receipt attached
+ *   attached     → + receipt (and any supporting documents) attached
  *   reconciled   → bank line matched in Xero (future, set by reconcile sync)
  *   error        → push failed; xero_error has the message; manual retry surfaces
  *
@@ -37,14 +37,52 @@ import { getFromR2, isR2Configured } from '../config/r2';
 import { isXeroConfigured } from '../config/xero';
 import { xeroBroker, XeroApiError, XeroLineItem } from './xero-broker';
 import { getSystemSetting } from '../routes/system-settings';
+import { collectDocuments, hasDocuments, type CostDocumentRow } from './cost-documents';
+import { fetchCostLines, grossesWithResidue } from './cost-lines';
 
 // Paid-now methods → Spend Money on the mapped bank/card account.
 // (Exported for the reconcile sync — cost-xero-reconcile-sync.ts.)
 export const SPEND_MONEY_METHODS = ['cot_card', 'amex', 'lloyds_cc', 'petty_cash', 'paypal', 'wise', 'lloyds_transfer'] as const;
 // Pay-later methods → authorised ACCPAY bill on approval, payment recorded when paid.
-const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
+// (Exported for the payment pull-back sync — cost-xero-payment-sync.ts.)
+export const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
 
 const PUSHED_STATES = ['bill_created', 'attached', 'reconciled'];
+
+/**
+ * Does this cost already have an object in Xero?
+ *
+ * `xero_object_id` ALONE answers this, and nothing else may be added to it.
+ *
+ * The guards here used to read `xero_object_id && PUSHED_STATES.includes(state)`,
+ * which conflates two different questions. `xero_object_id` says whether the
+ * thing EXISTS in Xero. `xero_sync_state` says whether the LAST OPERATION on it
+ * succeeded. `recordError()` sets state='error' and leaves the id in place — so
+ * a cost with a live, perfectly good bill whose attach step hit a 429 read as
+ * "not in Xero", and the next push created a SECOND bill. Re-sync was worst: it
+ * fell through to the create path on any non-pushed state, so pressing
+ * "Re-sync to Xero" on an errored cost is what duplicated it.
+ *
+ * An errored cost is not an unsynced cost. It is a synced cost that is unhappy.
+ */
+export function existsInXero(cost: { xero_object_id?: string | null }): boolean {
+  return Boolean(cost.xero_object_id);
+}
+
+/**
+ * Which Xero entity `xero_object_id` refers to.
+ *
+ * Recorded at creation (migration 209). Legacy rows fall back to the guess the
+ * code used to make — the CURRENT payment method — which is right unless that
+ * method changed after the push, the case that produced today's "specified
+ * BankTransactionID does not match a known bank transaction" errors.
+ */
+function xeroEntity(cost: CostRow): 'Invoices' | 'BankTransactions' {
+  if (cost.xero_object_type === 'invoice') return 'Invoices';
+  if (cost.xero_object_type === 'banktransaction') return 'BankTransactions';
+  const isBill = Boolean(cost.payment_method) && (BILL_METHODS as readonly string[]).includes(cost.payment_method!);
+  return isBill ? 'Invoices' : 'BankTransactions';
+}
 
 async function streamToBuffer(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -52,19 +90,6 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
     chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
-}
-
-function guessContentType(filename: string): string {
-  const ext = filename.toLowerCase().split('.').pop() || '';
-  return {
-    pdf: 'application/pdf',
-    png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    gif: 'image/gif',
-    webp: 'image/webp',
-    heic: 'image/heic',
-  }[ext] || 'application/octet-stream';
 }
 
 async function recordError(costId: string, message: string): Promise<void> {
@@ -113,12 +138,15 @@ interface CostRow {
   payment_method: string | null;
   payment_status: string;
   approval_state: string | null;
+  approved_at: string | null;
+  cost_type: string | null;
   amount_gross: string | number | null;
   amount_vat: string | number | null;
   amount_net: string | number | null;
   vat_treatment: string | null;
   xero_account_code: string | null;
   xero_object_id: string | null;
+  xero_object_type: 'invoice' | 'banktransaction' | null;
   xero_payment_id: string | null;
   xero_sync_state: string;
   supplier_name: string | null;
@@ -126,11 +154,17 @@ interface CostRow {
   description: string | null;
   category: string | null;
   cost_date: string | null;
+  due_date_override: string | null;
+  xero_contact_id: string | null;
   paid_method: string | null;
   paid_value_date: string | null;
   paid_at: string | null;
+  settled_externally: boolean | null;
+  is_credit: boolean | null;
+  refund_of_cost_id: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
+  supporting_documents: CostDocumentRow[] | null;
   uploaded_by_name: string | null;
 }
 
@@ -150,22 +184,30 @@ function dateOnly(v: string | null | undefined): string | undefined {
   return v ? new Date(v).toISOString().slice(0, 10) : undefined;
 }
 
-// Xero requires a DueDate on an ACCPAY bill. Default to invoice date + 30 days
-// (no per-supplier terms tracked yet); staff set the real payment date at
-// "Mark paid" anyway, so this just drives the Bills-to-pay aging.
+// Xero requires a DueDate on an ACCPAY bill. We derive it from the supplier's
+// payment terms (computeDueDate), falling back to invoice + 30 when there's no
+// invoice date. Staff set the real payment date at "Mark paid" anyway, so this
+// just drives the Bills-to-pay aging.
 function addDaysISO(iso: string | undefined, days: number): string {
   const base = iso ? new Date(`${iso}T00:00:00Z`) : new Date();
   base.setUTCDate(base.getUTCDate() + days);
   return base.toISOString().slice(0, 10);
 }
 
-// Resolve the Xero TaxType for a cost's line. No VAT recorded → 'NONE' (so a
+// Resolve the Xero TaxType for a line. No VAT recorded → 'NONE' (so a
 // freelancer's no-VAT invoice doesn't inherit the account's 20% default). VAT
 // recorded → the org's purchase tax type for the implied rate (fallback: leave
 // undefined so Xero applies the account default, which is correct for 20%).
-async function resolveLineTaxType(cost: CostRow): Promise<string | undefined> {
-  const vat = Number(cost.amount_vat || 0);
-  const net = Number(cost.amount_net || 0);
+//
+// Takes the two figures rather than a whole CostRow so it serves a cost LINE as
+// well as the header. That matters: the rate is DERIVED, so a header covering
+// mixed rates yields a blend that is not a real rate at all — £250 no-VAT labour
+// + £60 fuel (£10 VAT) + £15 zero-rated travel implies round(10/315*100) = 3%,
+// nothing matches, and the whole £325 falls through to the account default.
+// Only a homogeneous line produces a true rate. See docs/COST-LINES-SPEC.md §5.
+async function resolveLineTaxType(amounts: { amount_vat?: unknown; amount_net?: unknown }): Promise<string | undefined> {
+  const vat = Number(amounts.amount_vat || 0);
+  const net = Number(amounts.amount_net || 0);
   if (vat <= 0) return 'NONE';
   const rate = net > 0 ? Math.round((vat / net) * 100) : 20;
   return (await xeroBroker.getPurchaseTaxType(rate)) || undefined;
@@ -173,12 +215,45 @@ async function resolveLineTaxType(cost: CostRow): Promise<string | undefined> {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+/**
+ * A credit's amounts as POSITIVE magnitudes.
+ *
+ * OP stores money-coming-back as a negative row (migration 229), but Xero
+ * carries the direction in the transaction TYPE and wants positive lines. The
+ * sign flip happens exactly here, at the boundary — and it matters for more
+ * than the total: `resolveLineTaxType` reads `vat <= 0` as "no VAT", so a
+ * credit's -£2.10 of VAT would otherwise push as TaxType NONE and quietly cost
+ * us the VAT reclaim on the refund.
+ */
+function asMagnitudes(cost: CostRow): CostRow {
+  if (!cost.is_credit) return cost;
+  return {
+    ...cost,
+    amount_gross: Math.abs(Number(cost.amount_gross) || 0),
+    amount_vat: Math.abs(Number(cost.amount_vat) || 0),
+    amount_net: Math.abs(Number(cost.amount_net) || 0),
+  };
+}
+
 // Xero Reference field: the supplier's invoice number when we have one (so the
 // bill/transaction is findable by the number printed on the paperwork),
 // falling back to the supplier name. Max 255 chars per Xero.
+// NOTE: some suppliers use a UUID-shaped invoice number verbatim (e.g. Spotify's
+// printed "Invoice ID" is a real GUID) — do NOT filter those out, they're genuine.
+// On SPEND-MONEY this is the field the Xero UI labels "Reference" (visible). On a
+// BILL it's stored but hidden — the visible box there is InvoiceNumber (below).
 function xeroReference(cost: CostRow): string | undefined {
   const ref = (cost.invoice_number || cost.supplier_name || '').toString().trim().slice(0, 255);
   return ref || undefined;
+}
+
+// Xero InvoiceNumber = the "Reference" box the Xero UI shows on a BILL (ACCPAY).
+// So the supplier's invoice number must go here to actually appear on the bill.
+// The invoice number ONLY — no supplier-name fallback (the Contact already names
+// the supplier; a name in this box would be wrong/ugly). Undefined = leave blank.
+function xeroInvoiceNumber(cost: CostRow): string | undefined {
+  const n = (cost.invoice_number || '').toString().trim().slice(0, 255);
+  return n || undefined;
 }
 
 // Build the Xero line items + lineAmountTypes for a cost.
@@ -217,6 +292,28 @@ async function buildCostLineItems(
     };
   }
 
+  // Split into lines? One Xero line each, with its OWN account code and its own
+  // derived tax rate — the whole point of lines (see resolveLineTaxType above).
+  // A line with no code of its own inherits the cost's.
+  const lines = await fetchCostLines(String(cost.id));
+  if (lines.length) {
+    const grosses = grossesWithResidue(lines, cost.amount_gross);
+
+    const items: XeroLineItem[] = [];
+    for (const [i, l] of lines.entries()) {
+      const lineVat = round2(Number(l.amount_vat || 0));
+      const lineTax = await resolveLineTaxType({ amount_vat: lineVat, amount_net: round2(grosses[i] - lineVat) });
+      items.push({
+        Description: (l.description || description || '').toString().slice(0, 4000) || description,
+        Quantity: 1,
+        UnitAmount: grosses[i],
+        AccountCode: String(l.xero_account_code || account),
+        ...(lineTax ? { TaxType: lineTax } : {}),
+      });
+    }
+    return { lineAmountTypes: 'Inclusive', lineItems: items };
+  }
+
   const taxType = await resolveLineTaxType(cost);
   return {
     lineAmountTypes: 'Inclusive',
@@ -226,30 +323,50 @@ async function buildCostLineItems(
   };
 }
 
-async function attachReceipt(
+/**
+ * Attach the receipt + every supporting document to the Xero object.
+ *
+ * The set (and its collision-safe filenames) comes from collectDocuments — see
+ * services/cost-documents.ts for why the renaming matters.
+ *
+ * Throws on the FIRST failure so the caller can surface it. The part of the set
+ * that did land stays attached (Xero attachments are independent) and a re-sync
+ * re-attaches the lot idempotently by filename.
+ */
+async function attachDocuments(
   cost: CostRow,
   entity: 'Invoices' | 'BankTransactions',
   entityId: string,
-): Promise<string | null> {
-  if (!(cost.receipt_r2_key && cost.receipt_filename && isR2Configured())) return null;
-  const r2obj = await getFromR2(cost.receipt_r2_key);
-  const body = r2obj.Body as Readable | undefined;
-  if (!body) throw new Error('Receipt body unavailable from R2');
-  const buffer = await streamToBuffer(body);
-  await xeroBroker.attachReceipt(entity, entityId, cost.receipt_filename, buffer, guessContentType(cost.receipt_filename));
-  return entityId;
+): Promise<number> {
+  if (!isR2Configured()) return 0;
+  const docs = collectDocuments(cost);
+  let attached = 0;
+  for (const doc of docs) {
+    const r2obj = await getFromR2(doc.r2Key);
+    const body = r2obj.Body as Readable | undefined;
+    if (!body) throw new Error(`Document body unavailable from R2: ${doc.filename}`);
+    const buffer = await streamToBuffer(body);
+    await xeroBroker.attachReceipt(entity, entityId, doc.filename, buffer, doc.contentType);
+    attached += 1;
+  }
+  return attached;
 }
 
 // ── Spend Money flow (paid-now methods) ──────────────────────────────────────
 
 async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
-  if (cost.xero_object_id && PUSHED_STATES.includes(cost.xero_sync_state)) {
-    return { pushed: false, skipped: `Already at state ${cost.xero_sync_state}` };
+  // Already in Xero → never create a second one, whatever state we're in.
+  if (existsInXero(cost)) {
+    return { pushed: false, skipped: `Already in Xero (${cost.xero_sync_state})` };
   }
   if (cost.payment_status !== 'paid') {
     return { pushed: false, skipped: `Payment status is ${cost.payment_status} — not yet pushable` };
   }
-  if (!cost.amount_gross || Number(cost.amount_gross) <= 0) {
+  // A credit is a legitimately NEGATIVE row, so the "has an amount" check reads
+  // the magnitude. Everything below works from `amounts`, which is the same
+  // cost with its figures made positive for Xero. See asMagnitudes().
+  const amounts = asMagnitudes(cost);
+  if (!amounts.amount_gross || Number(amounts.amount_gross) <= 0) {
     await recordError(cost.id, 'Gross amount required to push');
     return { pushed: false, error: 'Gross amount required' };
   }
@@ -265,7 +382,7 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
   }
 
   const description = (cost.description || cost.category || cost.supplier_name || 'Cost').toString().slice(0, 4000);
-  const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
+  const { lineItems, lineAmountTypes } = await buildCostLineItems(amounts, description);
 
   let bankTransactionID: string;
   try {
@@ -277,6 +394,9 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
       reference: xeroReference(cost),
       lineItems,
       lineAmountTypes,
+      // Money coming back lands on the same card as a RECEIVE, which is what
+      // the bank feed will show and what the bookkeeper reconciles against.
+      ...(cost.is_credit ? { type: 'RECEIVE' as const } : {}),
     });
     bankTransactionID = txn.BankTransactionID;
   } catch (err) {
@@ -286,14 +406,15 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
   }
 
   await query(
-    `UPDATE costs SET xero_object_id=$1, xero_sync_state='bill_created', xero_synced_at=NOW(), xero_error=NULL WHERE id=$2`,
+    `UPDATE costs SET xero_object_id=$1, xero_object_type='banktransaction',
+            xero_sync_state='bill_created', xero_synced_at=NOW(), xero_error=NULL WHERE id=$2`,
     [bankTransactionID, cost.id]
   );
 
-  // Receipt attach is non-fatal — the Spend Money is the important leg.
-  if (cost.receipt_r2_key) {
+  // Document attach is non-fatal — the Spend Money is the important leg.
+  if (hasDocuments(cost)) {
     try {
-      await attachReceipt(cost, 'BankTransactions', bankTransactionID);
+      await attachDocuments(cost, 'BankTransactions', bankTransactionID);
       await query(`UPDATE costs SET xero_sync_state='attached', xero_synced_at=NOW() WHERE id=$1`, [cost.id]);
     } catch (err) {
       const msg = err instanceof XeroApiError ? `Receipt attach: ${err.message}` : err instanceof Error ? err.message : String(err);
@@ -309,7 +430,7 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
 // payment against it. The push picks up whichever step is outstanding.
 
 async function pushBill(cost: CostRow): Promise<PushResult> {
-  const billExists = Boolean(cost.xero_object_id) && PUSHED_STATES.includes(cost.xero_sync_state);
+  const billExists = existsInXero(cost);
 
   // ── Step 1: ensure the bill is in Xero ──────────────────────────────────
   if (!billExists) {
@@ -337,13 +458,44 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
 
     const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
+    const { seedTermsFromXeroIfMissing, resolveDueDateForCost } = await import('./supplier-terms');
+
+    // Resolve the Xero contact FIRST so we can (a) persist its id back on the
+    // cost — which is what lets Xero supplier terms seed + pull through on this
+    // and future bills (the link was previously never saved) — and (b) create
+    // the bill against the contact id directly. Skipped for reimburse_me, where
+    // the "contact" is the staff member, not a supplier whose terms we'd want.
+    let contactId: string | undefined;
+    if (!isReimburse) {
+      try {
+        const contact = await xeroBroker.getOrCreateContact(contactName);
+        contactId = contact.ContactID;
+        if (contactId && contactId !== cost.xero_contact_id) {
+          await query(`UPDATE costs SET xero_contact_id=$1 WHERE id=$2`, [contactId, cost.id]);
+          cost.xero_contact_id = contactId;
+        }
+        await seedTermsFromXeroIfMissing(contactId, cost.supplier_name);
+      } catch (err) {
+        if (isScopeError(err)) { await recordAdvisory(cost.id, SCOPE_ADVISORY); return { pushed: false, skipped: 'Contacts scope not granted' }; }
+        // Non-fatal — fall back to creating the bill by contact name.
+        console.warn('[cost-xero-push] contact resolve failed, using name:', (err as Error).message);
+      }
+    }
+
+    // Staff override → freelancer Friday terms → supplier/Xero terms. Same
+    // engine as the costs list, so what staff saw is what Xero gets.
+    const billDueDate = (await resolveDueDateForCost(cost)).dueDate
+      ?? addDaysISO(dateOnly(cost.cost_date), 30);
+
     let invoiceID: string;
     try {
       const bill = await xeroBroker.createBill({
         contactName,
+        contactId,
         date: dateOnly(cost.cost_date),
-        dueDate: addDaysISO(dateOnly(cost.cost_date), 30),
+        dueDate: billDueDate,
         reference: xeroReference(cost),
+        invoiceNumber: xeroInvoiceNumber(cost),
         status: 'AUTHORISED',
         lineAmountTypes,
         lineItems,
@@ -360,15 +512,16 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     }
 
     await query(
-      `UPDATE costs SET xero_object_id=$1, xero_sync_state='bill_created', xero_synced_at=NOW(), xero_error=NULL WHERE id=$2`,
+      `UPDATE costs SET xero_object_id=$1, xero_object_type='invoice',
+              xero_sync_state='bill_created', xero_synced_at=NOW(), xero_error=NULL WHERE id=$2`,
       [invoiceID, cost.id]
     );
     cost.xero_object_id = invoiceID;
     cost.xero_sync_state = 'bill_created';
 
-    if (cost.receipt_r2_key) {
+    if (hasDocuments(cost)) {
       try {
-        await attachReceipt(cost, 'Invoices', invoiceID);
+        await attachDocuments(cost, 'Invoices', invoiceID);
         await query(`UPDATE costs SET xero_sync_state='attached', xero_synced_at=NOW() WHERE id=$1`, [cost.id]);
         cost.xero_sync_state = 'attached';
       } catch (err) {
@@ -380,7 +533,10 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
   }
 
   // ── Step 2: if paid, record the payment against the bill ─────────────────
-  if (cost.payment_status === 'paid' && !cost.xero_payment_id && cost.xero_object_id) {
+  // `settled_externally` is what stops this paying a supplier twice: the bill
+  // was cleared in OP precisely BECAUSE the money already moved elsewhere, so
+  // there is no payment for us to record. See migration 224.
+  if (cost.payment_status === 'paid' && !cost.settled_externally && !cost.xero_payment_id && cost.xero_object_id) {
     const payResult = await recordBillPayment(cost);
     if (payResult.error) return { pushed: true, invoiceID: cost.xero_object_id, error: payResult.error };
     if (payResult.skipped) return { pushed: true, invoiceID: cost.xero_object_id, skipped: payResult.skipped };
@@ -395,6 +551,10 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
 async function recordBillPayment(cost: CostRow): Promise<{ paymentID?: string; skipped?: string; error?: string }> {
   if (!cost.xero_object_id) return { skipped: 'Bill not in Xero yet' };
   if (cost.xero_payment_id) return { skipped: 'Payment already recorded' };
+  // Belt and braces alongside the caller's guard — this function is the only
+  // place OP creates a supplier payment, so the "don't pay it" flag is checked
+  // here too rather than trusting every future call site to remember.
+  if (cost.settled_externally) return { skipped: 'Settled outside OP' };
 
   const payMethod = cost.paid_method;
   if (!payMethod) {
@@ -430,27 +590,27 @@ async function recordBillPayment(cost: CostRow): Promise<{ paymentID?: string; s
 }
 
 /**
- * Push a single cost to Xero. Idempotent and resumable: a fully-pushed cost is a
- * no-op; a part-done one continues from where it stopped.
+ * Run `fn` holding THE per-cost advisory lock.
+ *
+ * Serialize all Xero work for ONE cost. The push is triggered from five places
+ * (create / update / approve / pay / Push-Now), most fire-and-forget, so two can
+ * overlap — e.g. approve's background push racing the Push-Now button. Each
+ * reads xero_object_id as null, passes the billExists guard, and creates its own
+ * Xero bill → DUPLICATE BILLS (seen live on T.Reeve repair invoices). The lock
+ * makes the second wait for the first to commit xero_object_id, after which
+ * loadCost + the billExists / PUSHED_STATES guard short-circuit it. Different
+ * costs hash to different keys so unrelated costs never contend.
+ *
+ * Exported so the payment pull-back sync (cost-xero-payment-sync.ts) can mark a
+ * cost paid under the same lock — otherwise it could land between a push's
+ * "is there a payment yet?" read and its write.
  */
-export async function pushCostToXero(costId: string): Promise<PushResult> {
-  if (!isXeroConfigured()) return { pushed: false, skipped: 'Xero not configured' };
-
-  // Serialize all pushes for THIS cost behind a Postgres advisory lock. The push
-  // is triggered from five places (create / update / approve / pay / Push-Now),
-  // most fire-and-forget, so two can overlap — e.g. approve's background push
-  // racing the Push-Now button. Each reads xero_object_id as null, passes the
-  // billExists guard, and creates its own Xero bill → DUPLICATE BILLS (seen live
-  // on T.Reeve repair invoices). The lock makes the second push wait for the
-  // first to commit xero_object_id, after which loadCost + the billExists /
-  // PUSHED_STATES guard short-circuit it. Different costs hash to different keys
-  // so unrelated pushes never contend.
+export async function withCostPushLock<T>(costId: string, fn: () => Promise<T>): Promise<T> {
   const client = await getClient();
-  const lockSql = 'pg_advisory_lock(hashtext($1)::bigint)';
   const key = `cost-push:${costId}`;
   try {
-    await client.query(`SELECT ${lockSql}`, [key]);
-    return await pushCostToXeroLocked(costId);
+    await client.query('SELECT pg_advisory_lock(hashtext($1)::bigint)', [key]);
+    return await fn();
   } finally {
     try { await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [key]); }
     catch (err) { console.error('[cost-xero-push] advisory unlock failed:', costId, err); }
@@ -458,9 +618,28 @@ export async function pushCostToXero(costId: string): Promise<PushResult> {
   }
 }
 
+/**
+ * Push a single cost to Xero. Idempotent and resumable: a fully-pushed cost is a
+ * no-op; a part-done one continues from where it stopped.
+ */
+export async function pushCostToXero(costId: string): Promise<PushResult> {
+  if (!isXeroConfigured()) return { pushed: false, skipped: 'Xero not configured' };
+
+  return withCostPushLock(costId, () => pushCostToXeroLocked(costId));
+}
+
 async function pushCostToXeroLocked(costId: string): Promise<PushResult> {
   const cost = await loadCost(costId);
   if (!cost) return { pushed: false, skipped: 'Cost not found' };
+
+  // A credit against a BILL is a credit note in Xero (ACCPAYCREDIT) with its own
+  // allocation rules, which OP deliberately doesn't write yet. Pushing it down
+  // the bill path would raise a negative ACCPAY bill — a second thing to pay.
+  // So: record it here, say plainly that Xero needs doing by hand, and stop.
+  if (cost.is_credit && cost.payment_method && (BILL_METHODS as readonly string[]).includes(cost.payment_method)) {
+    await recordAdvisory(cost.id, 'Recorded in OP only — raise the credit note against the bill in Xero yourself');
+    return { pushed: false, skipped: 'Credit on a bill — Xero credit note is manual' };
+  }
 
   if (cost.payment_method && (BILL_METHODS as readonly string[]).includes(cost.payment_method)) {
     return pushBill(cost);
@@ -481,4 +660,143 @@ export function pushCostToXeroBackground(costId: string): void {
       console.error('[cost-xero-push] background push failed:', costId, err);
     });
   });
+}
+
+/**
+ * Re-sync an already-pushed cost to Xero IN PLACE after it was edited (the
+ * "Re-sync to Xero" button behind the xero_stale flag). Updates the existing
+ * Xero object rather than creating a new one — so it never duplicates.
+ *
+ * Hard refusals (returned as { locked: true }) — Xero won't let us mutate these,
+ * and we must not try: a PAID bill (amounts locked once a payment exists) and a
+ * RECONCILED spend-money. Staff fix those directly in Xero. Anything else
+ * (AUTHORISED unpaid bill, unreconciled spend-money) is updated and xero_stale
+ * cleared. Shares the per-cost advisory lock with pushCostToXero.
+ */
+export async function resyncCostToXero(costId: string): Promise<PushResult & { locked?: boolean }> {
+  if (!isXeroConfigured()) return { pushed: false, skipped: 'Xero not configured' };
+  return withCostPushLock(costId, () => resyncCostToXeroLocked(costId));
+}
+
+async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { locked?: boolean }> {
+  const cost = await loadCost(costId);
+  if (!cost) return { pushed: false, skipped: 'Cost not found' };
+
+  // Not in Xero yet → there's nothing to update; fall back to a normal push.
+  // Keyed on the id ALONE: an errored cost still HAS its object, and falling
+  // through to the create path here is what produced duplicate bills.
+  if (!existsInXero(cost)) {
+    return pushCostToXeroLocked(costId);
+  }
+  // Non-null past the guard; existsInXero() is exactly this check.
+  const objectId = cost.xero_object_id as string;
+  if (!cost.amount_gross || Number(cost.amount_gross) <= 0) {
+    return { pushed: false, error: 'Gross amount required' };
+  }
+  if (!cost.xero_account_code) {
+    return { pushed: false, error: MISSING_CATEGORY_MSG };
+  }
+
+  // What we CREATED, not what the current payment method implies — see
+  // xeroEntity(). Changing the method after a push used to re-point the update
+  // at the wrong Xero endpoint.
+  const isBill = xeroEntity(cost) === 'Invoices';
+
+  // Paid-now → pay-later after the push. Xero holds a Spend Money (already
+  // paid), and no update can turn that into a Bill — carrying on only fails
+  // with a baffling "No Xero bank account mapped for not_yet_paid". Say what's
+  // actually wrong. (The reverse switch is harmless: the bill updates in place
+  // and its payment is recorded the normal way.)
+  if (!isBill && cost.payment_method && (BILL_METHODS as readonly string[]).includes(cost.payment_method)) {
+    return {
+      pushed: false,
+      locked: true,
+      error: 'This cost is in Xero as a paid Spend Money, but is now marked pay-later — a re-sync can\'t turn it into a bill. '
+        + 'Delete the Spend Money in Xero, then ask an admin to point this cost at the bill.',
+    };
+  }
+
+  try {
+    if (isBill) {
+      // Settled outside OP: whatever state our bill is in over there, OP is no
+      // longer the thing that changes it. Refused with its OWN message — the
+      // "paid in Xero" one below would be a guess, and often a wrong one (the
+      // money may have been recorded against a different bill entirely).
+      if (cost.settled_externally) {
+        return { pushed: false, locked: true, error: 'This bill was settled outside OP — change or void it in Xero directly.' };
+      }
+      // A bill with a recorded payment / marked paid has locked amounts in Xero.
+      if (cost.xero_payment_id || cost.payment_status === 'paid') {
+        return { pushed: false, locked: true, error: 'This bill is paid in Xero — its amounts are locked. Edit it directly in Xero.' };
+      }
+      const isReimburse = cost.payment_method === 'reimburse_me';
+      const contactName = isReimburse
+        ? (cost.uploaded_by_name?.trim() || 'Staff reimbursement')
+        : (cost.supplier_name || 'Unknown supplier').toString().slice(0, 500);
+      const baseDesc = (cost.description || cost.category || 'Cost').toString();
+      const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
+      const { lineItems, lineAmountTypes } = await buildCostLineItems(cost, description);
+      const { resolveDueDateForCost } = await import('./supplier-terms');
+      const billDueDate = (await resolveDueDateForCost(cost)).dueDate
+        ?? addDaysISO(dateOnly(cost.cost_date), 30);
+      await xeroBroker.updateBill(objectId, {
+        contactName,
+        date: dateOnly(cost.cost_date),
+        dueDate: billDueDate,
+        reference: xeroReference(cost),
+        invoiceNumber: xeroInvoiceNumber(cost),
+        status: 'AUTHORISED',
+        lineAmountTypes,
+        lineItems,
+      });
+    } else {
+      // Spend-money: Xero blocks edits once reconciled.
+      if (cost.xero_sync_state === 'reconciled') {
+        return { pushed: false, locked: true, error: 'This transaction is reconciled in Xero — it can no longer be changed here. Update it directly in Xero.' };
+      }
+      const bankAccountId = await getSystemSetting(`xero_bank_${cost.payment_method}`);
+      if (!bankAccountId) {
+        return { pushed: false, error: `No Xero bank account mapped for "${cost.payment_method}".` };
+      }
+      const description = (cost.description || cost.category || cost.supplier_name || 'Cost').toString().slice(0, 4000);
+      const { lineItems, lineAmountTypes } = await buildCostLineItems(asMagnitudes(cost), description);
+      await xeroBroker.updateSpendMoney(objectId, {
+        bankAccountId,
+        contactName: (cost.supplier_name || 'Unknown supplier').toString().slice(0, 500),
+        date: dateOnly(cost.cost_date),
+        reference: xeroReference(cost),
+        lineItems,
+        lineAmountTypes,
+        // Never re-type an existing transaction: a credit stays a RECEIVE.
+        ...(cost.is_credit ? { type: 'RECEIVE' as const } : {}),
+      });
+    }
+  } catch (err) {
+    if (isScopeError(err)) {
+      await recordAdvisory(cost.id, SCOPE_ADVISORY);
+      return { pushed: false, skipped: 'Bills scope not granted' };
+    }
+    const msg = err instanceof XeroApiError ? `Xero: ${err.message}` : err instanceof Error ? err.message : String(err);
+    await recordError(cost.id, msg);
+    return { pushed: false, error: msg };
+  }
+
+  // Re-attach the document set. A supporting doc added after the original push
+  // has no other route to Xero, and re-attaching is idempotent (same filenames
+  // overwrite in place). Non-fatal — the figures are the important leg.
+  let attachError: string | undefined;
+  if (hasDocuments(cost)) {
+    try {
+      await attachDocuments(cost, isBill ? 'Invoices' : 'BankTransactions', objectId);
+    } catch (err) {
+      attachError = err instanceof XeroApiError ? `Document attach: ${err.message}`
+        : err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  await query(
+    `UPDATE costs SET xero_stale=FALSE, xero_synced_at=NOW(), xero_error=$2 WHERE id=$1`,
+    [cost.id, attachError ? attachError.slice(0, 500) : null]
+  );
+  return { pushed: true, invoiceID: objectId, ...(attachError ? { error: attachError } : {}) };
 }

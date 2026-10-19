@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { hasManagerRole } from '../lib/roles';
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import SlidePanel from '../components/SlidePanel';
@@ -8,9 +9,17 @@ import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import HireHistoryTab from '../components/HireHistoryTab';
+import FreelancerPanel, { freelancerStatusPill } from '../components/FreelancerPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
+import InviteFreelancerModal from '../components/InviteFreelancerModal';
 import StorageHistorySection from '../components/StorageHistorySection';
+import { PcnHistorySection } from '../components/PcnHistorySection';
 import { PERSON_ORG_ROLES } from '@shared/index';
+import { useTabPresence } from '../hooks/useTabPresence';
+import EntityTabs from '../components/EntityTabs';
+import RecordActionsMenu from '../components/RecordActionsMenu';
+import WorkingTermsSummary from '../components/WorkingTermsSummary';
+import EndorsementsPanel from '../components/EndorsementsPanel';
 
 interface FileAttachment {
   name: string;
@@ -35,12 +44,14 @@ interface PersonDetail {
   home_address: string | null;
   date_of_birth: string | null;
   is_freelancer: boolean;
+  freelancer_status: string | null;
   freelancer_joined_date: string | null;
   freelancer_next_review_date: string | null;
   skills: string[];
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
   has_tshirt: boolean;
+  onboarding: Record<string, unknown> | null;
   emergency_contact_name: string | null;
   emergency_contact_phone: string | null;
   licence_details: string | null;
@@ -81,22 +92,46 @@ interface Interaction {
   mentioned_user_ids: string[];
 }
 
+// Keyed by the route id so /people/A → /people/B is a genuine
+// unmount/remount. React Router otherwise reuses ONE instance and only swaps
+// the param, leaving the previous person's state on the new page and letting a
+// slow reply for the old id resolve into it (no fetch here is cancellable).
+// See `.claude/rules/frontend.md` → Detail pages; JobDetailPage has the long
+// version.
+//
+// Key on `id` ONLY — never the pathname or a ?tab= param, or every tab click
+// would remount the page. The hand-written tab/cache resets below are kept as
+// belt-and-braces, and the tab effect still handles same-page ?tab= changes.
+const VALID_PERSON_TABS = [
+  'timeline', 'hire_history', 'freelancer', 'details', 'relationships', 'excess', 'held', 'storage', 'pcn',
+] as const;
+type PersonTab = (typeof VALID_PERSON_TABS)[number];
+
 export default function PersonDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <PersonDetailContent key={id} />;
+}
+
+function PersonDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
-  const isAdmin = user?.role === 'admin' || user?.role === 'manager';
+  const isAdmin = hasManagerRole(user?.role);
 
   const [person, setPerson] = useState<PersonDetail | null>(null);
-  const [dnoReason, setDnoReason] = useState('');
-  const [showDnoForm, setShowDnoForm] = useState(false);
+  const [showInvite, setShowInvite] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess' | 'held' | 'storage'>('timeline');
+  const [activeTab, setActiveTab] = useState<PersonTab>('timeline');
+  // The tab lives in ?tab= (like the Organisation page) so a link can open on it
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const [heldCount, setHeldCount] = useState<number | null>(null);
+  // Which secondary tabs have content — decides main row vs "More"
+  const tabPresence = useTabPresence('person', id, { pcn: !!person?.is_freelancer });
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Add relationship
   const [showAddRole, setShowAddRole] = useState(false);
@@ -130,15 +165,28 @@ export default function PersonDetailPage() {
     }
   }, [id]);
 
-  // Reset tab when switching people — component instance is reused across
-  // /people/A → /people/B so without this the active tab "drags across".
+  // Land on the tab named in ?tab=, else the timeline. Keyed on the ?tab= VALUE
+  // too, so a same-page link that only changes the query string still switches
+  // (same reasoning as OrganisationDetailPage).
   useEffect(() => {
-    setActiveTab('timeline');
+    setActiveTab(VALID_PERSON_TABS.includes(tabParam as PersonTab) ? (tabParam as PersonTab) : 'timeline');
+  }, [id, tabParam]);
+
+  // Counts belong to the person, not the tab — reset only on a person switch
+  useEffect(() => {
+    setHeldCount(null);
   }, [id]);
+
+  function selectTab(tab: PersonTab) {
+    setActiveTab(tab);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', tab);
+    setSearchParams(next, { replace: true });
+  }
 
   async function loadPerson() {
     try {
-      const data = await api.get<PersonDetail>(`/people/${id}`);
+      const data = await api.get<PersonDetail>(`/people/${id}?track_view=1`);
       setPerson(data);
     } catch {
       navigate('/people');
@@ -304,14 +352,9 @@ export default function PersonDetailPage() {
 
   return (
     <div>
-      {/* Back link */}
-      <Link to="/people" className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; Back to People
-      </Link>
-
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-        <div className="flex items-start justify-between">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex items-center gap-4">
             <div className="w-14 h-14 bg-ooosh-100 text-ooosh-700 rounded-full flex items-center justify-center text-xl font-bold">
               {person.first_name[0]}{person.last_name[0]}
@@ -336,11 +379,18 @@ export default function PersonDetailPage() {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {isFreelancer && (
-              <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${person.is_approved ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                {person.is_approved ? 'Approved Freelancer' : 'Pending Approval'}
-              </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {isFreelancer && (() => {
+              const fp = freelancerStatusPill(person.freelancer_status, person.is_approved);
+              return <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${fp.cls}`}>{fp.label}</span>;
+            })()}
+            {!person.is_approved && (
+              <button
+                onClick={() => setShowInvite(true)}
+                className="px-3 py-1.5 text-sm border border-purple-300 text-purple-700 rounded hover:bg-purple-50 transition-colors"
+              >
+                {isFreelancer ? 'Re-send sign-up' : 'Invite to freelance'}
+              </button>
             )}
             <button
               onClick={() => {
@@ -364,32 +414,12 @@ export default function PersonDetailPage() {
             >
               Edit
             </button>
-            {!person.do_not_hire && isAdmin && (
-              <button
-                onClick={() => setShowDnoForm(true)}
-                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
-                title="Flag as Do Not Hire"
-              >
-                DNH
-              </button>
-            )}
-            <div className="relative">
-              <button
-                onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
-                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
-              >
-                Delete
-              </button>
-              {showDeleteConfirm && (
-                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded shadow-lg p-3 z-10 w-56">
-                  <p className="text-sm text-gray-700 mb-2">Delete this person?</p>
-                  <div className="flex gap-2">
-                    <button onClick={handleDelete} className="flex-1 bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Yes, delete</button>
-                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 border border-gray-300 px-3 py-1 rounded text-sm hover:bg-gray-50">Cancel</button>
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* Do Not Hire is set in Edit → Working Terms; Delete is rare, so it lives in ⋯ */}
+            <RecordActionsMenu
+              actions={[
+                { label: 'Delete', danger: true, onClick: () => { if (confirm(`Delete ${person.first_name} ${person.last_name}?`)) handleDelete(); } },
+              ]}
+            />
           </div>
         </div>
 
@@ -446,59 +476,22 @@ export default function PersonDetailPage() {
           )}
         </div>
       )}
-      {/* DNH reason form (shown when DNH button clicked) */}
-      {showDnoForm && !person.do_not_hire && (
-        <div className="mb-4 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
-          <input
-            value={dnoReason}
-            onChange={e => setDnoReason(e.target.value)}
-            placeholder="Reason for Do Not Hire (optional)..."
-            className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm"
-            autoFocus
-          />
-          <button
-            onClick={async () => {
-              await api.post(`/people/${id}/do-not-hire`, { do_not_hire: true, reason: dnoReason || null });
-              setShowDnoForm(false);
-              setDnoReason('');
-              loadPerson();
-            }}
-            className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700"
-          >
-            Confirm
-          </button>
-          <button onClick={() => { setShowDnoForm(false); setDnoReason(''); }} className="text-xs px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
-        </div>
-      )}
-
-      {/* Tabs */}
-      <div className="border-b border-gray-200 mb-6">
-        <nav className="flex gap-6">
-          {(['timeline', 'hire_history', 'details', 'relationships', 'excess', 'held', 'storage'] as const).map((tab) => {
-            const totalOrgs = (person.organisations || []).length;
-            const label = tab === 'timeline' ? 'Activity Timeline'
-              : tab === 'hire_history' ? 'Hire History'
-              : tab === 'details' ? 'Details'
-              : tab === 'excess' ? 'Excess History'
-              : tab === 'held' ? 'Held Items'
-              : tab === 'storage' ? 'Storage'
-              : `Relationships${totalOrgs ? ` (${totalOrgs})` : ''}`;
-            return (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === tab
-                    ? 'border-ooosh-600 text-ooosh-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </nav>
-      </div>
+      {/* Tabs — main tabs always; the rest only when they have something, else under "More" */}
+      <EntityTabs<PersonTab>
+        active={activeTab}
+        onSelect={selectTab}
+        tabs={[
+          { key: 'timeline', label: 'Activity Timeline' },
+          ...(isFreelancer ? [{ key: 'freelancer' as const, label: 'Freelancer' }] : []),
+          { key: 'hire_history', label: 'Hire History' },
+          { key: 'details', label: 'Details' },
+          { key: 'relationships', label: `Relationships${(person.organisations || []).length ? ` (${(person.organisations || []).length})` : ''}` },
+          { key: 'excess', label: 'Excess History', secondary: true, hasContent: tabPresence.excess },
+          { key: 'held', label: heldCount ? `Held Items (${heldCount})` : 'Held Items', secondary: true, hasContent: tabPresence.held },
+          { key: 'storage', label: 'Storage', secondary: true, hasContent: tabPresence.storage },
+          ...(isFreelancer ? [{ key: 'pcn' as const, label: 'PCNs', secondary: true, hasContent: tabPresence.pcn }] : []),
+        ]}
+      />
 
       {/* Tab Content */}
       {activeTab === 'timeline' && id && (
@@ -521,67 +514,34 @@ export default function PersonDetailPage() {
             <DetailField label="Home Address" value={person.home_address} />
             <DetailField label="Date of Birth" value={person.date_of_birth ? formatDate(person.date_of_birth) : null} />
             <DetailField label="Member Since" value={formatDate(person.created_at)} />
-
-            {isFreelancer && (
-              <>
-                <div className="col-span-full border-t pt-4 mt-2">
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Freelancer Details</h3>
-                  {(() => {
-                    const pausedUntil = person.portal_notifications_paused_until
-                      ? new Date(person.portal_notifications_paused_until)
-                      : null;
-                    if (!pausedUntil || pausedUntil <= new Date()) return null;
-                    const yearsAhead = (pausedUntil.getTime() - Date.now()) / (365 * 24 * 60 * 60 * 1000);
-                    const label = yearsAhead > 5
-                      ? 'Portal notifications paused indefinitely'
-                      : `Portal notifications paused until ${pausedUntil.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
-                    return (
-                      <div className="mb-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
-                        <span aria-hidden="true">🔕</span>
-                        <span>{label}</span>
-                      </div>
-                    );
-                  })()}
-                </div>
-                <DetailField label="Joined Date" value={person.freelancer_joined_date ? formatDate(person.freelancer_joined_date) : null} />
-                <DetailField label="Next Review Date" value={person.freelancer_next_review_date ? formatDate(person.freelancer_next_review_date) : null} />
-                <DetailField label="Skills" value={person.skills?.join(', ')} />
-                <DetailField label="Licence" value={person.licence_details} />
-                <DetailField label="Insured on Vehicles" value={person.is_insured_on_vehicles ? 'Yes' : 'No'} />
-                <DetailField label="Approved" value={person.is_approved ? 'Yes' : 'No'} />
-                <DetailField label="Has T-Shirt" value={person.has_tshirt ? 'Yes' : 'No'} />
-                <DetailField label="Emergency Contact" value={person.emergency_contact_name} />
-                <DetailField label="Emergency Phone" value={person.emergency_contact_phone} />
-                {person.freelancer_references && (
-                  <div className="col-span-full">
-                    <DetailField label="References" value={person.freelancer_references} />
-                  </div>
-                )}
-              </>
-            )}
           </div>
 
-          {/* Working Terms */}
+          {isFreelancer && (
+            <div className="mt-4 pt-4 border-t">
+              <p className="text-sm text-gray-500">
+                Freelancer details, approval, review dates and documents now live on the{' '}
+                <button
+                  onClick={() => selectTab('freelancer')}
+                  className="text-ooosh-600 font-medium hover:underline"
+                >
+                  Freelancer tab
+                </button>.
+              </p>
+            </div>
+          )}
+
+          <WorkingTermsSummary
+            type={person.working_terms_type}
+            creditDays={person.working_terms_credit_days}
+            notes={person.working_terms_notes}
+            doNotHire={person.do_not_hire}
+            doNotHireReason={person.do_not_hire_reason}
+          />
+
+          {/* Artist endorsements — also listed on Operations › Backline – Endorsements */}
           <div className="mt-6 pt-4 border-t">
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">Working Terms</h3>
-            {person.working_terms_type ? (
-              <div className="text-sm">
-                <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold text-white ${
-                  { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[person.working_terms_type] || 'bg-gray-500'
-                }`}>{
-                  { usual: 'USUAL', flex_balance: 'FLEX BALANCE', no_deposit: 'NO DEPOSIT', credit: 'CREDIT', custom: 'CUSTOM' }[person.working_terms_type] || person.working_terms_type
-                }</span>
-                <span className="ml-2 text-gray-500 text-xs">{
-                  { usual: '25% deposit, full balance before hire', flex_balance: '25% deposit, flexible balance', no_deposit: 'Balance by start of hire', credit: 'No deposit, flexible balance', custom: '' }[person.working_terms_type]
-                }</span>
-                {(person.working_terms_type === 'flex_balance' || person.working_terms_type === 'credit') && person.working_terms_credit_days && (
-                  <span className="ml-1 text-gray-500 text-xs">({person.working_terms_credit_days} day credit)</span>
-                )}
-                {person.working_terms_notes && <p className="mt-1 text-gray-500 text-xs">{person.working_terms_notes}</p>}
-              </div>
-            ) : (
-              <p className="text-sm text-gray-400 italic">Not set — edit to configure</p>
-            )}
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Endorsements</h3>
+            <EndorsementsPanel personId={id!} />
           </div>
 
           {/* Internal Notes */}
@@ -613,17 +573,6 @@ export default function PersonDetailPage() {
               <p className="text-sm text-gray-400 italic">No AI research yet — this will show discovered context from external sources</p>
             )}
           </div>
-
-          {isFreelancer && (
-            <div className="mt-6 pt-4 border-t">
-              <FreelancerDocuments
-                personId={person.id}
-                files={person.files || []}
-                onFilesChanged={(files) => setPerson(prev => prev ? { ...prev, files } : prev)}
-                onActivityCreated={loadInteractions}
-              />
-            </div>
-          )}
 
           <div className="mt-6 pt-4 border-t">
             <FileUpload
@@ -945,17 +894,33 @@ export default function PersonDetailPage() {
         <HireHistoryTab entityType="person" entityId={id} />
       )}
 
+      {/* Freelancer Tab (freelancers only) — single home for freelancer data,
+          approval, review dates, documents and assignment history. */}
+      {activeTab === 'freelancer' && isFreelancer && (
+        <FreelancerPanel
+          person={person}
+          onChanged={loadPerson}
+          onFilesChanged={(files) => setPerson(prev => prev ? { ...prev, files } : prev)}
+          onActivityCreated={loadInteractions}
+          onInvite={() => setShowInvite(true)}
+        />
+      )}
+
       {/* Excess History Tab */}
       {activeTab === 'excess' && id && (
         <ExcessHistorySection entityType="person" entityId={id} />
       )}
 
       {activeTab === 'held' && id && (
-        <HeldItemsSection entityType="person" entityId={id} />
+        <HeldItemsSection entityType="person" entityId={id} onCount={setHeldCount} />
       )}
 
       {activeTab === 'storage' && id && (
         <StorageHistorySection entityType="person" entityId={id} />
+      )}
+
+      {activeTab === 'pcn' && id && (
+        <PcnHistorySection entityType="person" entityId={id} heading="🅿️ Penalty Charge Notices" />
       )}
 
       {/* Edit Panel */}
@@ -966,213 +931,15 @@ export default function PersonDetailPage() {
           onCancel={() => setShowEdit(false)}
         />
       </SlidePanel>
-    </div>
-  );
-}
 
-const REQUIRED_DOCS = [
-  { label: 'DVLA Check', description: 'DVLA licence check result' },
-  { label: 'Licence Front', description: 'Front of driving licence' },
-  { label: 'Licence Back', description: 'Back of driving licence' },
-  { label: 'Passport', description: 'Passport photo page' },
-];
-
-function FreelancerDocuments({ personId, files, onFilesChanged, onActivityCreated }: {
-  personId: string;
-  files: FileAttachment[];
-  onFilesChanged: (files: FileAttachment[]) => void;
-  onActivityCreated: () => void;
-}) {
-  const [uploading, setUploading] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadingLabel, setUploadingLabel] = useState('');
-
-  function getDocFile(docLabel: string): FileAttachment | undefined {
-    return files.find(f => f.label?.toLowerCase() === docLabel.toLowerCase());
-  }
-
-  function handleUploadClick(docLabel: string) {
-    setUploadingLabel(docLabel);
-    fileInputRef.current?.click();
-  }
-
-  async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file || !uploadingLabel) return;
-    if (fileInputRef.current) fileInputRef.current.value = '';
-
-    setUploading(uploadingLabel);
-    setError('');
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('entity_type', 'people');
-      formData.append('entity_id', personId);
-      formData.append('label', uploadingLabel);
-
-      const result = await api.upload<FileAttachment>('/files/upload', formData);
-      onFilesChanged([...files, result]);
-      onActivityCreated();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed');
-    } finally {
-      setUploading(null);
-      setUploadingLabel('');
-    }
-  }
-
-  async function handleReplace(docLabel: string, existingFile: FileAttachment) {
-    // Delete old then upload new
-    try {
-      await api.deleteWithBody('/files/delete', {
-        key: existingFile.url,
-        entity_type: 'people',
-        entity_id: personId,
-      });
-      onFilesChanged(files.filter(f => f.url !== existingFile.url));
-      onActivityCreated();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Delete failed');
-      return;
-    }
-    handleUploadClick(docLabel);
-  }
-
-  async function handleDownload(file: FileAttachment) {
-    try {
-      const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-      const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
-      window.open(blobUrl, '_blank');
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-    } catch {
-      setError('Download failed');
-    }
-  }
-
-  function formatDate(dateStr: string) {
-    return new Date(dateStr).toLocaleDateString('en-GB', {
-      day: 'numeric', month: 'short', year: 'numeric',
-    });
-  }
-
-  const presentCount = REQUIRED_DOCS.filter(d => getDocFile(d.label)).length;
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-gray-700">Required Documents</h3>
-        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-          presentCount === REQUIRED_DOCS.length
-            ? 'bg-green-100 text-green-700'
-            : 'bg-amber-100 text-amber-700'
-        }`}>
-          {presentCount}/{REQUIRED_DOCS.length} uploaded
-        </span>
-      </div>
-
-      {error && (
-        <div className="bg-red-50 text-red-700 px-3 py-1.5 rounded text-xs mb-2">{error}</div>
+      {showInvite && (
+        <InviteFreelancerModal
+          personId={person.id}
+          personName={`${person.first_name} ${person.last_name}`}
+          onClose={() => setShowInvite(false)}
+          onInvited={() => { setShowInvite(false); loadPerson(); }}
+        />
       )}
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        onChange={handleFileSelected}
-        className="hidden"
-        accept=".pdf,.jpg,.jpeg,.png,.gif,.webp"
-      />
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        {REQUIRED_DOCS.map((doc) => {
-          const file = getDocFile(doc.label);
-          const isUploading = uploading === doc.label;
-
-          return (
-            <div
-              key={doc.label}
-              className={`flex items-center gap-3 p-3 rounded-lg border ${
-                file
-                  ? 'border-green-200 bg-green-50'
-                  : 'border-amber-200 bg-amber-50'
-              }`}
-            >
-              {/* Status icon */}
-              {file ? (
-                <svg className="w-5 h-5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              ) : (
-                <svg className="w-5 h-5 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                </svg>
-              )}
-
-              {/* Info */}
-              <div className="flex-1 min-w-0">
-                <p className={`text-sm font-medium ${file ? 'text-green-800' : 'text-amber-800'}`}>
-                  {doc.label}
-                </p>
-                {file ? (
-                  <p className="text-xs text-green-600 truncate">
-                    Uploaded {formatDate(file.uploaded_at)}
-                  </p>
-                ) : (
-                  <p className="text-xs text-amber-600">Missing</p>
-                )}
-              </div>
-
-              {/* Actions */}
-              <div className="flex items-center gap-1 flex-shrink-0">
-                {file ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => handleDownload(file)}
-                      className="p-1 text-green-600 hover:text-green-800 rounded hover:bg-green-100"
-                      title="View / Download"
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleReplace(doc.label, file)}
-                      className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100"
-                      title="Replace"
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => handleUploadClick(doc.label)}
-                    disabled={isUploading}
-                    className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-amber-700 bg-amber-100 rounded hover:bg-amber-200 disabled:opacity-50"
-                  >
-                    {isUploading ? (
-                      <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                    ) : (
-                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                      </svg>
-                    )}
-                    Upload
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }

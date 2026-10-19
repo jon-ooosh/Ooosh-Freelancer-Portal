@@ -1,6 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFirstName, displayFullName, nameSearchText } from '../lib/displayName';
+import { CHASE_STAGES } from '../lib/pipelineStatus';
 import {
   AttachmentList,
   PendingAttachmentStrip,
@@ -8,12 +10,15 @@ import {
   type InteractionAttachment,
 } from './messaging/Attachments';
 import Reactions, { type ReactionsMap } from './messaging/Reactions';
+import ConversationSummary from './ConversationSummary';
+import QuoteVersions from './QuoteVersions';
 
 interface Interaction {
   id: string;
   type: string;
   content: string;
   created_at: string;
+  created_by?: string | null;
   created_by_name: string | null;
   mentioned_user_ids: string[];
   job_status_at_creation?: number | null;
@@ -24,6 +29,22 @@ interface Interaction {
   files?: InteractionAttachment[];
   // Lightweight emoji reactions (migration 077)
   reactions?: ReactionsMap;
+  // Human ('user') vs auto-generated ('system') entry (migration 160).
+  source?: 'user' | 'system' | null;
+  // Note editing (migration 160)
+  edited_at?: string | null;
+  // Ingested-email attribution + confidentiality controls (migration 213).
+  job_id?: string | null;
+  gmail_message_id?: string | null;
+  email_direction?: 'inbound' | 'outbound' | null;
+  email_from?: string | null;
+  email_to?: string | null;
+  email_subject?: string | null;
+  email_snippet?: string | null;
+  match_method?: string | null;
+  match_confidence?: string | null;
+  hidden_at?: string | null;
+  detached_at?: string | null;
 }
 
 const JOB_STATUS_MAP: Record<number, string> = {
@@ -53,6 +74,8 @@ interface UserOption {
   email: string;
   first_name: string | null;
   last_name: string | null;
+  /** What they go by. Everything user-facing here reads this first. */
+  preferred_name?: string | null;
 }
 
 interface SearchResult {
@@ -62,11 +85,19 @@ interface SearchResult {
   entityLabel: string;
 }
 
+// Job picker result for the ingested-email "Move to job" control.
+interface JobSearchResult {
+  id: string;
+  label: string;
+}
+
 interface ActivityTimelineProps {
   entityType: 'person_id' | 'organisation_id' | 'venue_id' | 'job_id';
   entityId: string;
   interactions: Interaction[];
   onInteractionAdded: () => void;
+  /** The job's pipeline_status — decides whether the chase-date opt-out is shown. */
+  pipelineStatus?: string | null;
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -95,11 +126,70 @@ function formatDateTime(dateStr: string) {
   });
 }
 
-export default function ActivityTimeline({ entityType, entityId, interactions, onInteractionAdded }: ActivityTimelineProps) {
+// Compact timestamp for receded system rows — day + time, no year.
+function formatCompact(dateStr: string) {
+  return new Date(dateStr).toLocaleString('en-GB', {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+// Day-bucket a timestamp for the section headers (mirrors the Inbox).
+function dayBucket(dateStr: string): { key: string; label: string } {
+  const d = new Date(dateStr);
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+  if (diff <= 0) return { key: 'today', label: 'Today' };
+  if (diff === 1) return { key: 'yesterday', label: 'Yesterday' };
+  if (diff <= 7) return { key: 'week', label: 'Earlier this week' };
+  if (diff <= 31) return { key: 'month', label: 'Earlier this month' };
+  return { key: `m${d.getFullYear()}-${d.getMonth()}`, label: d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }) };
+}
+
+// Icon for an automated/system row, keyed loosely off the first glyph of the
+// content (many system notes are emoji-prefixed) then interaction type.
+function systemIcon(i: Interaction): string {
+  const c = (i.content || '').trim();
+  const first = Array.from(c)[0] || '';
+  if (/[\u{1F000}-\u{1FAFF}☀-➿ℹ]/u.test(first)) return first;
+  if (i.type === 'status_transition') return '⚙';
+  if (i.type === 'email') return '✉';
+  return '⚙';
+}
+
+// Display name for one party of an ingested email. Raw headers look like
+// `Shane Haase <shane@…>` or `"Ooosh Tours" <info@…>` or a bare `shane@…`;
+// we show the name (quotes stripped), falling back to the address.
+function emailPartyName(header: string | null | undefined): string {
+  if (!header) return '—';
+  const first = header.split(',')[0].trim();
+  const angle = /^(.*?)<([^>]+)>/.exec(first);
+  if (angle) {
+    const name = angle[1].replace(/["']/g, '').trim();
+    return name || angle[2].trim();
+  }
+  return first.replace(/["']/g, '').trim() || '—';
+}
+
+// "To" label: first recipient's name + "+N" when a header carries several.
+function emailToLabel(header: string | null | undefined): string {
+  if (!header) return '—';
+  const parts = header.split(',').map((p) => p.trim()).filter(Boolean);
+  const name = emailPartyName(parts[0]);
+  return parts.length > 1 ? `${name} +${parts.length - 1}` : name;
+}
+
+export default function ActivityTimeline({ entityType, entityId, interactions, onInteractionAdded, pipelineStatus }: ActivityTimelineProps) {
   const user = useAuthStore((s) => s.user);
 
   const [content, setContent] = useState('');
   const [interactionType, setInteractionType] = useState<string>('note');
+
+  // The chase date only moves while the job is still an enquiry (CHASE_STAGES —
+  // the backend ignores the bump past that), so the opt-out is only offered then.
+  // Past confirmation the box was a dead control: ticking it changed nothing.
+  const chaseBumpApplies = entityType === 'job_id'
+    && ['call', 'email', 'meeting'].includes(interactionType)
+    && (CHASE_STAGES as readonly string[]).includes(pipelineStatus ?? '');
   const [submitting, setSubmitting] = useState(false);
 
   // Chase-specific fields
@@ -145,6 +235,21 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       const next = new Set(prev);
       if (next.has(rootId)) next.delete(rootId);
       else next.add(rootId);
+      return next;
+    });
+  }
+
+  // ── Timeline filters (migration 160) ─────────────────────────────────────
+  // viewMode 'all' shows everything with automated entries receded/collapsed;
+  // 'conversation' hides automated (source='system') entries entirely.
+  // typeFilter narrows to one conversation type and always hides automated.
+  const [viewMode, setViewMode] = useState<'all' | 'conversation'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'note' | 'call' | 'meeting' | 'chase'>('all');
+  const [expandedSysGroups, setExpandedSysGroups] = useState<Set<string>>(new Set());
+  function toggleSysGroup(key: string) {
+    setExpandedSysGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
   }
@@ -210,6 +315,30 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     }, 300);
   }
 
+  // Ingested-email backstops (Auto-Chase filtering foundation): detach (tombstone,
+  // re-attachable) or move a mis-attached email to the right job, and hide/unhide a
+  // sensitive one. All re-fetch the timeline afterwards so the row reflects the new
+  // state.
+  const isAdmin = user?.role === 'admin';
+  async function emailAction(interactionId: string, action: 'hide' | 'unhide' | 'detach' | 'reattach') {
+    if (action === 'detach' && !window.confirm('Remove this email from this job? It stays as a greyed line you can re-attach later.')) return;
+    try {
+      await api.post(`/auto-chase/emails/${interactionId}/${action}`, {});
+      onInteractionAdded();
+    } catch (err) {
+      console.error(`Email ${action} failed:`, err);
+    }
+  }
+
+  async function emailMoveToJob(interactionId: string, jobId: string) {
+    try {
+      await api.post(`/auto-chase/emails/${interactionId}/move`, { job_id: jobId });
+      onInteractionAdded();
+    } catch (err) {
+      console.error('Email move-to-job failed:', err);
+    }
+  }
+
   async function confirmMove(interactionId: string, target: SearchResult) {
     try {
       await api.put(`/interactions/${interactionId}/move`, {
@@ -238,8 +367,11 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       .catch(() => {});
   }, []);
 
+  // Searchable by EITHER name: "@will" should find him whether the record says
+  // William or Will, and someone who only knows the legal name should still
+  // find him after he sets a preferred one.
   const filteredUsers = users.filter((u) => {
-    const name = `${u.first_name || ''} ${u.last_name || ''}`.toLowerCase();
+    const name = nameSearchText(u);
     return name.includes(mentionFilter.toLowerCase()) || u.email.toLowerCase().includes(mentionFilter.toLowerCase());
   });
 
@@ -268,7 +400,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     const cursorPos = textarea.selectionStart;
     const textUpToCursor = content.slice(0, cursorPos);
     const atPos = textUpToCursor.lastIndexOf('@');
-    const displayName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email;
+    const displayName = displayFullName(u, u.email);
 
     const newContent = content.slice(0, atPos) + `@${displayName} ` + content.slice(cursorPos);
     setContent(newContent);
@@ -308,7 +440,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
   // composers can be open simultaneously: top-level for a new note, reply
   // open on an old thread.
   const replyFilteredUsers = users.filter((u) => {
-    const name = `${u.first_name || ''} ${u.last_name || ''}`.toLowerCase();
+    const name = nameSearchText(u);
     return name.includes(replyMentionFilter.toLowerCase()) || u.email.toLowerCase().includes(replyMentionFilter.toLowerCase());
   });
 
@@ -333,7 +465,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     const cursorPos = ta.selectionStart;
     const upToCursor = replyContent.slice(0, cursorPos);
     const atPos = upToCursor.lastIndexOf('@');
-    const displayName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email;
+    const displayName = displayFullName(u, u.email);
     const newContent = replyContent.slice(0, atPos) + `@${displayName} ` + replyContent.slice(cursorPos);
     setReplyContent(newContent);
     setReplyShowMentions(false);
@@ -381,8 +513,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         if (nextChaseDate) payload.next_chase_date = nextChaseDate;
         if (chaseAlertUserId) payload.chase_alert_user_id = chaseAlertUserId;
       }
-      // Pass through skip_chase_bump only when relevant (job + contact type)
-      if (entityType === 'job_id' && ['call', 'email', 'meeting'].includes(interactionType) && skipChaseBump) {
+      // Pass through skip_chase_bump only when relevant (job + contact type + enquiry stage)
+      if (chaseBumpApplies && skipChaseBump) {
         payload.skip_chase_bump = true;
       }
       const attachments = topAttach.payload();
@@ -515,8 +647,233 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     }));
   }
 
+  // Turn filtered thread groups into a render list: date-section headers,
+  // full cards for human entries, and receded lines for automated ones — with
+  // runs of 3+ consecutive automated entries collapsed into one expander.
+  type RenderNode =
+    | { kind: 'day'; key: string; label: string }
+    | { kind: 'user'; group: ThreadGroup }
+    | { kind: 'sys'; item: Interaction }
+    | { kind: 'sysgroup'; key: string; items: Interaction[] };
+
+  function buildRenderNodes(groups: ThreadGroup[]): RenderNode[] {
+    const nodes: RenderNode[] = [];
+    let curDay = '';
+    let sysRun: Interaction[] = [];
+    const flushSys = () => {
+      if (sysRun.length === 0) return;
+      if (sysRun.length >= 3) nodes.push({ kind: 'sysgroup', key: sysRun[0].id, items: sysRun });
+      else for (const it of sysRun) nodes.push({ kind: 'sys', item: it });
+      sysRun = [];
+    };
+    for (const g of groups) {
+      const b = dayBucket(g.root.created_at);
+      if (b.key !== curDay) { flushSys(); nodes.push({ kind: 'day', key: b.key, label: b.label }); curDay = b.key; }
+      if (g.root.source === 'system') sysRun.push(g.root);
+      else { flushSys(); nodes.push({ kind: 'user', group: g }); }
+    }
+    flushSys();
+    return nodes;
+  }
+
+  // A single automated/system row — receded, one line, not a card.
+  function SystemRow({ item }: { item: Interaction }) {
+    return (
+      <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-gray-50 border border-gray-100 text-gray-500">
+        <span className="w-5 h-5 grid place-items-center text-gray-400 text-xs flex-shrink-0">{systemIcon(item)}</span>
+        <span className="flex-1 min-w-0 text-xs truncate" title={item.content}>{renderContent(item.content)}</span>
+        <span className="text-[11px] text-gray-400 whitespace-nowrap flex-shrink-0">{formatCompact(item.created_at)}</span>
+      </div>
+    );
+  }
+
+  // Filter, then build the render list.
+  const filteredGroups = groupIntoThreads(interactions).filter((g) => {
+    const isSys = g.root.source === 'system';
+    if (viewMode === 'conversation' && isSys) return false;
+    if (typeFilter !== 'all') {
+      if (isSys) return false;
+      if (typeFilter === 'call') return g.root.type === 'call' || g.root.type === 'email';
+      return g.root.type === typeFilter;
+    }
+    return true;
+  });
+  const renderNodes = buildRenderNodes(filteredGroups);
+
+  // Full-card render for a human thread (root + replies + reply composer).
+  // Extracted so the node walker can call it; closes over component state.
+  function renderUserGroup(group: ThreadGroup) {
+    const interaction = group.root;
+    const replies = group.replies;
+    const replyCount = replies.length;
+    const expanded = expandedThreads.has(interaction.id);
+    const COLLAPSE_THRESHOLD = 2;
+    const visibleReplies = (replyCount > COLLAPSE_THRESHOLD && !expanded) ? replies.slice(-1) : replies;
+
+    return (
+      <div key={interaction.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+        <InteractionRow
+          interaction={interaction}
+          isReply={false}
+          currentUserId={user?.id}
+          onEdited={onInteractionAdded}
+          movingId={movingId}
+          onStartMove={() => startMove(interaction.id)}
+          onCancelMove={() => setMovingId(null)}
+          moveSearch={moveSearch}
+          moveResults={moveResults}
+          moveLoading={moveLoading}
+          onSearchEntities={searchEntities}
+          onConfirmMove={(target) => confirmMove(interaction.id, target)}
+          renderContent={renderContent}
+          isAdmin={isAdmin}
+          onEmailAction={emailAction}
+          onMoveToJob={emailMoveToJob}
+        />
+
+        {replyCount > 0 && (
+          <div className="mt-3 ml-11 border-l-2 border-gray-100 pl-3 space-y-3">
+            {replyCount > COLLAPSE_THRESHOLD && !expanded && (
+              <button type="button" onClick={() => toggleThread(interaction.id)} className="text-xs text-ooosh-600 hover:text-ooosh-800">
+                Show {replyCount - 1} earlier {replyCount - 1 === 1 ? 'reply' : 'replies'}
+              </button>
+            )}
+            {visibleReplies.map((r) => (
+              <InteractionRow
+                key={r.id}
+                interaction={r}
+                isReply
+                currentUserId={user?.id}
+                onEdited={onInteractionAdded}
+                movingId={null}
+                onStartMove={() => {}}
+                onCancelMove={() => {}}
+                moveSearch=""
+                moveResults={[]}
+                moveLoading={false}
+                onSearchEntities={() => {}}
+                onConfirmMove={() => {}}
+                renderContent={renderContent}
+                isAdmin={isAdmin}
+                onEmailAction={emailAction}
+                onMoveToJob={emailMoveToJob}
+              />
+            ))}
+            {expanded && replyCount > COLLAPSE_THRESHOLD && (
+              <button type="button" onClick={() => toggleThread(interaction.id)} className="text-xs text-gray-400 hover:text-gray-600">
+                Collapse thread
+              </button>
+            )}
+          </div>
+        )}
+
+        {replyParentId === interaction.id ? (
+          <form
+            onSubmit={handleReplySubmit}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files && e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files, 'reply'); }}
+            className="mt-3 ml-11 bg-gray-50 rounded-lg border border-gray-200 p-3"
+          >
+            <div className="relative">
+              <textarea
+                ref={replyTextareaRef}
+                value={replyContent}
+                onChange={handleReplyContentChange}
+                onKeyDown={handleReplyKeyDown}
+                onPaste={(e) => handlePaste(e, 'reply')}
+                placeholder="Write a reply… (type @ to mention, paste a screenshot, or drop a file)"
+                rows={2}
+                autoFocus
+                className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
+              />
+              {replyShowMentions && replyFilteredUsers.length > 0 && (
+                <div className="absolute left-0 right-0 bottom-full mb-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
+                  {replyFilteredUsers.map((u, i) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onClick={() => insertReplyMention(u)}
+                      className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 ${i === replyMentionIndex ? 'bg-ooosh-50 text-ooosh-700' : 'hover:bg-gray-50'}`}
+                    >
+                      <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
+                        {(displayFirstName(u, u.email)[0] ?? '?').toUpperCase()}
+                      </span>
+                      <span>
+                        <span className="font-medium">{displayFullName(u, u.email)}</span>
+                        {u.preferred_name && u.first_name
+                          && u.preferred_name.trim() !== u.first_name.trim() && (
+                          <span className="text-gray-400 text-xs ml-1.5">({u.first_name})</span>
+                        )}
+                        {(u.first_name || u.preferred_name) && (<span className="text-gray-400 text-xs ml-1.5">{u.email}</span>)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {replyMentionedIds.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                {replyMentionedIds.map((uid) => {
+                  const u = users.find((x) => x.id === uid);
+                  if (!u) return null;
+                  return (
+                    <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
+                      @{displayFirstName(u, u.email)}
+                      <button type="button" onClick={() => setReplyMentionedIds(replyMentionedIds.filter((id) => id !== uid))} className="hover:text-pink-900">&times;</button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            <PendingAttachmentStrip items={replyAttach.pending} onRemove={(id) => removeAttachment(id, 'reply')} />
+            <div className="flex justify-between items-center mt-2">
+              <label className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-ooosh-700 cursor-pointer">
+                📎 Attach
+                <input type="file" multiple className="hidden" onChange={(e) => { if (e.target.files) handleFiles(e.target.files, 'reply'); e.target.value = ''; }} />
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { replyAttach.clear(); setReplyContent(''); setReplyMentionedIds([]); setReplyShowMentions(false); setReplyParentId(null); }}
+                  className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1"
+                >Cancel</button>
+                <button type="submit" disabled={!replyContent.trim() || replySubmitting || replyAttach.hasInFlight} className="bg-ooosh-600 text-white px-3 py-1 rounded text-xs font-medium hover:bg-ooosh-700 disabled:opacity-50">
+                  {replySubmitting ? 'Posting…' : 'Reply'}
+                </button>
+              </div>
+            </div>
+          </form>
+        ) : (
+          ['note', 'mention', 'email', 'call', 'meeting', 'chase'].includes(interaction.type) && (
+            <button type="button" onClick={() => setReplyParentId(interaction.id)} className="mt-2 ml-11 text-xs text-gray-400 hover:text-ooosh-700">
+              ↩ Reply
+            </button>
+          )
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
+      {/* AI digest of the ingested email conversation (jobs only). Renders
+          nothing when there are no ingested emails / Anthropic is off. */}
+      {entityType === 'job_id' && (
+        <ConversationSummary
+          jobId={entityId}
+          emailSignal={interactions.filter((i) => i.type === 'email').length}
+        />
+      )}
+
+      {/* Quote-PDF version diff (jobs only). Renders nothing until the job has
+          harvested quote PDFs. Spec §7.3. */}
+      {entityType === 'job_id' && (
+        <QuoteVersions
+          jobId={entityId}
+          emailSignal={interactions.filter((i) => i.type === 'email').length}
+        />
+      )}
+
       {/* Add interaction form */}
       <form
         onSubmit={handleSubmit}
@@ -608,7 +965,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                 <option value="">No alert</option>
                 {users.map((u) => (
                   <option key={u.id} value={u.id}>
-                    {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
+                    {displayFullName(u, u.email)}
                   </option>
                 ))}
               </select>
@@ -641,13 +998,19 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                   }`}
                 >
                   <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                    {(u.first_name || u.email)[0].toUpperCase()}
+                    {(displayFirstName(u, u.email)[0] ?? '?').toUpperCase()}
                   </span>
                   <span>
                     <span className="font-medium">
-                      {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
+                      {displayFullName(u, u.email)}
                     </span>
-                    {u.first_name && (
+                    {/* The legal name, when it differs — so an admin picking from
+                        a list of seven can still tell who is who. */}
+                    {u.preferred_name && u.first_name
+                      && u.preferred_name.trim() !== u.first_name.trim() && (
+                      <span className="text-gray-400 text-xs ml-1.5">({u.first_name})</span>
+                    )}
+                    {(u.first_name || u.preferred_name) && (
                       <span className="text-gray-400 text-xs ml-1.5">{u.email}</span>
                     )}
                   </span>
@@ -665,7 +1028,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
               if (!u) return null;
               return (
                 <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
-                  @{u.first_name || u.email}
+                  @{displayFirstName(u, u.email)}
                   <button
                     type="button"
                     onClick={() => setMentionedIds(mentionedIds.filter((id) => id !== uid))}
@@ -693,8 +1056,9 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         )}
 
         {/* Skip-chase-bump opt-out — only relevant when logging a contact
-            event on a job. Checked = don't push next_chase_date forward. */}
-        {entityType === 'job_id' && ['call', 'email', 'meeting'].includes(interactionType) && (
+            event on a job that is still an enquiry. Checked = don't push
+            next_chase_date forward. */}
+        {chaseBumpApplies && (
           <label
             className="flex items-center gap-1.5 text-xs text-gray-500 mt-2 cursor-pointer"
             title="By default, logging a call/email/meeting pushes the chase date forward by your usual chase interval. Tick this to keep the chase date as-is — useful for backdated entries or non-consequential events."
@@ -714,7 +1078,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
 
         <div className="flex justify-between items-center mt-2 gap-2">
           <div className="flex items-center gap-3 text-xs text-gray-400">
-            <span>Posting as {user?.first_name} {user?.last_name}</span>
+            <span>Posting as {displayFullName(user)}</span>
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
@@ -744,202 +1108,101 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         </div>
       </form>
 
+      {/* Timeline toolbar — type filters + view switch (migration 160) */}
+      {interactions.length > 0 && (
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+          <div className="flex gap-1.5 flex-wrap">
+            {([
+              { k: 'all', label: 'All types' },
+              { k: 'note', label: 'Notes' },
+              { k: 'call', label: 'Calls & emails' },
+              { k: 'meeting', label: 'Meetings' },
+              { k: 'chase', label: 'Chase' },
+            ] as const).map((f) => (
+              <button
+                key={f.k}
+                type="button"
+                onClick={() => setTypeFilter(f.k)}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  typeFilter === f.k
+                    ? 'bg-ooosh-50 text-ooosh-700 border-ooosh-200'
+                    : 'bg-white text-gray-500 border-gray-200 hover:border-ooosh-200'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <div className="inline-flex bg-gray-100 rounded-lg p-0.5" title="Conversation hides automated updates (status changes, edits, syncs)">
+            {([
+              { k: 'all', label: 'All activity' },
+              { k: 'conversation', label: 'Conversation' },
+            ] as const).map((v) => (
+              <button
+                key={v.k}
+                type="button"
+                onClick={() => setViewMode(v.k)}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                  viewMode === v.k ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Timeline */}
       {interactions.length === 0 ? (
         <p className="text-center text-sm text-gray-400 py-8">No activity yet. Add a note above to get started.</p>
+      ) : renderNodes.length === 0 ? (
+        <p className="text-center text-sm text-gray-400 py-8">
+          Nothing to show with these filters.{' '}
+          <button
+            type="button"
+            className="text-ooosh-600 hover:underline"
+            onClick={() => { setTypeFilter('all'); setViewMode('all'); }}
+          >
+            Clear filters
+          </button>
+        </p>
       ) : (
-        <div className="space-y-4">
-          {groupIntoThreads(interactions).map((group) => {
-            const interaction = group.root;
-            const replies = group.replies;
-            const replyCount = replies.length;
-            const expanded = expandedThreads.has(interaction.id);
-            const COLLAPSE_THRESHOLD = 2;
-            const visibleReplies = (replyCount > COLLAPSE_THRESHOLD && !expanded)
-              ? replies.slice(-1) // show just the most recent when collapsed
-              : replies;
-
-            return (
-              <div key={interaction.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <InteractionRow
-                  interaction={interaction}
-                  isReply={false}
-                  movingId={movingId}
-                  onStartMove={() => startMove(interaction.id)}
-                  onCancelMove={() => setMovingId(null)}
-                  moveSearch={moveSearch}
-                  moveResults={moveResults}
-                  moveLoading={moveLoading}
-                  onSearchEntities={searchEntities}
-                  onConfirmMove={(target) => confirmMove(interaction.id, target)}
-                  renderContent={renderContent}
-                />
-
-                {/* Replies — nested, indented */}
-                {replyCount > 0 && (
-                  <div className="mt-3 ml-11 border-l-2 border-gray-100 pl-3 space-y-3">
-                    {replyCount > COLLAPSE_THRESHOLD && !expanded && (
-                      <button
-                        type="button"
-                        onClick={() => toggleThread(interaction.id)}
-                        className="text-xs text-ooosh-600 hover:text-ooosh-800"
-                      >
-                        Show {replyCount - 1} earlier {replyCount - 1 === 1 ? 'reply' : 'replies'}
-                      </button>
-                    )}
-                    {visibleReplies.map((r) => (
-                      <InteractionRow
-                        key={r.id}
-                        interaction={r}
-                        isReply
-                        movingId={null}
-                        onStartMove={() => {}}
-                        onCancelMove={() => {}}
-                        moveSearch=""
-                        moveResults={[]}
-                        moveLoading={false}
-                        onSearchEntities={() => {}}
-                        onConfirmMove={() => {}}
-                        renderContent={renderContent}
-                      />
-                    ))}
-                    {expanded && replyCount > COLLAPSE_THRESHOLD && (
-                      <button
-                        type="button"
-                        onClick={() => toggleThread(interaction.id)}
-                        className="text-xs text-gray-400 hover:text-gray-600"
-                      >
-                        Collapse thread
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Reply composer (inline, when active for this thread) */}
-                {replyParentId === interaction.id ? (
-                  <form
-                    onSubmit={handleReplySubmit}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                        handleFiles(e.dataTransfer.files, 'reply');
-                      }
-                    }}
-                    className="mt-3 ml-11 bg-gray-50 rounded-lg border border-gray-200 p-3"
+        <div className="space-y-3">
+          {renderNodes.map((node) => {
+            if (node.kind === 'day') {
+              return (
+                <div key={`day-${node.key}`} className="flex items-center gap-3 pt-2 first:pt-0">
+                  <span className="text-[11px] uppercase tracking-wide font-semibold text-gray-400">{node.label}</span>
+                  <span className="flex-1 h-px bg-gray-100" />
+                </div>
+              );
+            }
+            if (node.kind === 'sys') {
+              return <SystemRow key={node.item.id} item={node.item} />;
+            }
+            if (node.kind === 'sysgroup') {
+              const open = expandedSysGroups.has(node.key);
+              return (
+                <div key={`grp-${node.key}`} className="border border-dashed border-gray-200 rounded-lg overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => toggleSysGroup(node.key)}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-500 bg-gray-50 hover:bg-gray-100"
                   >
-                    <div className="relative">
-                      <textarea
-                        ref={replyTextareaRef}
-                        value={replyContent}
-                        onChange={handleReplyContentChange}
-                        onKeyDown={handleReplyKeyDown}
-                        onPaste={(e) => handlePaste(e, 'reply')}
-                        placeholder="Write a reply… (type @ to mention, paste a screenshot, or drop a file)"
-                        rows={2}
-                        autoFocus
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
-                      />
-                      {replyShowMentions && replyFilteredUsers.length > 0 && (
-                        <div className="absolute left-0 right-0 bottom-full mb-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
-                          {replyFilteredUsers.map((u, i) => (
-                            <button
-                              key={u.id}
-                              type="button"
-                              onClick={() => insertReplyMention(u)}
-                              className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 ${
-                                i === replyMentionIndex ? 'bg-ooosh-50 text-ooosh-700' : 'hover:bg-gray-50'
-                              }`}
-                            >
-                              <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                                {(u.first_name || u.email)[0].toUpperCase()}
-                              </span>
-                              <span>
-                                <span className="font-medium">
-                                  {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
-                                </span>
-                                {u.first_name && (
-                                  <span className="text-gray-400 text-xs ml-1.5">{u.email}</span>
-                                )}
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                    <span className="text-gray-400">⚙</span>
+                    {node.items.length} automated updates
+                    <span className={`ml-auto transition-transform ${open ? 'rotate-90' : ''}`}>›</span>
+                  </button>
+                  {open && (
+                    <div className="p-1.5 space-y-1">
+                      {node.items.map((it) => <SystemRow key={it.id} item={it} />)}
                     </div>
-                    {replyMentionedIds.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-                        {replyMentionedIds.map((uid) => {
-                          const u = users.find((x) => x.id === uid);
-                          if (!u) return null;
-                          return (
-                            <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
-                              @{u.first_name || u.email}
-                              <button
-                                type="button"
-                                onClick={() => setReplyMentionedIds(replyMentionedIds.filter((id) => id !== uid))}
-                                className="hover:text-pink-900"
-                              >
-                                &times;
-                              </button>
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
-                    <PendingAttachmentStrip items={replyAttach.pending} onRemove={(id) => removeAttachment(id, 'reply')} />
-                    <div className="flex justify-between items-center mt-2">
-                      <label className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-ooosh-700 cursor-pointer">
-                        📎 Attach
-                        <input
-                          type="file"
-                          multiple
-                          className="hidden"
-                          onChange={(e) => {
-                            if (e.target.files) handleFiles(e.target.files, 'reply');
-                            e.target.value = '';
-                          }}
-                        />
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            replyAttach.clear();
-                            setReplyContent('');
-                            setReplyMentionedIds([]);
-                            setReplyShowMentions(false);
-                            setReplyParentId(null);
-                          }}
-                          className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="submit"
-                          disabled={!replyContent.trim() || replySubmitting || replyAttach.hasInFlight}
-                          className="bg-ooosh-600 text-white px-3 py-1 rounded text-xs font-medium hover:bg-ooosh-700 disabled:opacity-50"
-                        >
-                          {replySubmitting ? 'Posting…' : 'Reply'}
-                        </button>
-                      </div>
-                    </div>
-                  </form>
-                ) : (
-                  // Reply trigger — only on note/mention/email/call/meeting types
-                  // (not on status_transition / system events).
-                  ['note', 'mention', 'email', 'call', 'meeting', 'chase'].includes(interaction.type) && (
-                    <button
-                      type="button"
-                      onClick={() => setReplyParentId(interaction.id)}
-                      className="mt-2 ml-11 text-xs text-gray-400 hover:text-ooosh-700"
-                    >
-                      ↩ Reply
-                    </button>
-                  )
-                )}
-              </div>
-            );
+                  )}
+                </div>
+              );
+            }
+            return renderUserGroup(node.group);
           })}
         </div>
       )}
@@ -955,6 +1218,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
 interface InteractionRowProps {
   interaction: Interaction;
   isReply: boolean;
+  currentUserId?: string;
+  onEdited: () => void;
   movingId: string | null;
   onStartMove: () => void;
   onCancelMove: () => void;
@@ -964,12 +1229,281 @@ interface InteractionRowProps {
   onSearchEntities: (q: string) => void;
   onConfirmMove: (target: SearchResult) => void;
   renderContent: (text: string) => React.ReactNode;
+  isAdmin: boolean;
+  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach' | 'reattach') => void;
+  onMoveToJob: (id: string, jobId: string) => void;
+}
+
+// Quoted-reply boundary in an email body: the first inline "On … wrote:"
+// attribution, an Outlook From/Sent header, an "Original Message" divider, or a
+// '>' quoted line. Everything from there down is quoted history (redundant —
+// earlier messages are their own ingested interactions), so we collapse it.
+//
+// CHARACTER-based (not line-based) on purpose: ingested HTML emails have their
+// newlines flattened to spaces at storage time, so the whole thread arrives as
+// one giant line and line-anchored patterns (wrote:$) never match. We scan the
+// raw text for the earliest inline marker instead. Returns a char index, or -1.
+const QUOTE_MARKERS: RegExp[] = [
+  // "On Tue, 14 Jul 2026 at 13:07, Ooosh! Tours Ltd <info@…> wrote:" — inline,
+  // non-greedy, bounded so it can't run away across a whole email.
+  /\bOn\s[\s\S]{5,200}?\bwrote:/i,
+  /-{2,}\s*Original Message\s*-{2,}/i,
+  // Outlook header block "From: … Sent: …"
+  /\bFrom:\s[\s\S]{0,160}?\bSent:\s/i,
+  // A run of '>' quoting.
+  /(^|\n)\s*>/,
+];
+function findQuoteBoundaryChar(text: string): number {
+  let idx = -1;
+  for (const p of QUOTE_MARKERS) {
+    const m = p.exec(text);
+    if (m && m.index >= 0 && (idx === -1 || m.index < idx)) idx = m.index;
+  }
+  return idx;
+}
+
+// Renders interaction content with two INDEPENDENT toggles for emails:
+//  · "Show more" expands the new message when it's long (clamped to ~10 lines,
+//    or ~600 chars since ingested HTML emails arrive as one flattened line);
+//  · "show quoted text" reveals the quoted reply history beneath it.
+// A non-email or short body just renders as-is.
+function InteractionBody({
+  text, isEmail, renderContent,
+}: {
+  text: string;
+  isEmail: boolean;
+  renderContent: (t: string) => ReactNode;
+}) {
+  const [showMore, setShowMore] = useState(false);
+  const [showQuoted, setShowQuoted] = useState(false);
+  const full = text || '';
+
+  // Split into the new message (primary) and the quoted tail (email only).
+  // Require a bit of real content before the boundary (guards an all-quote email).
+  const boundary = isEmail ? findQuoteBoundaryChar(full) : -1;
+  const hasQuote = boundary > 20;
+  const primary = hasQuote ? full.slice(0, boundary).replace(/\s+$/, '') : full;
+  const quoted = hasQuote ? full.slice(boundary).trim() : '';
+
+  const LINE_LIMIT = 10;
+  const CHAR_LIMIT = 600;
+  const primaryLines = primary.split('\n');
+  const needsClamp = primary.length > CHAR_LIMIT || primaryLines.length > LINE_LIMIT;
+  const clampedHead = primaryLines.length > LINE_LIMIT
+    ? primaryLines.slice(0, LINE_LIMIT).join('\n').trimEnd()
+    : primary.slice(0, CHAR_LIMIT).trimEnd();
+  const primaryShown = !needsClamp || showMore ? primary : `${clampedHead}…`;
+
+  return (
+    <div className="mt-1 text-sm text-gray-800 whitespace-pre-wrap break-words">
+      {renderContent(primaryShown || full)}
+      {needsClamp && (
+        <button type="button" onClick={() => setShowMore(!showMore)}
+          className="mt-1 block text-xs text-ooosh-600 hover:text-ooosh-800">
+          {showMore ? 'Show less' : 'Show more'}
+        </button>
+      )}
+      {quoted && (showQuoted ? (
+        <>
+          <div className="mt-2 pl-2.5 border-l-2 border-gray-200 text-gray-500 text-[13px] whitespace-pre-wrap break-words">
+            {renderContent(quoted)}
+          </div>
+          <button type="button" onClick={() => setShowQuoted(false)} className="mt-1 text-xs text-ooosh-600 hover:text-ooosh-800">
+            Hide quoted text
+          </button>
+        </>
+      ) : (
+        <button type="button" onClick={() => setShowQuoted(true)}
+          className="mt-1 inline-flex items-center text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded px-1.5 py-0.5"
+          title="Show quoted / earlier thread">
+          ··· show quoted text
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Provenance + manual backstops for an ingested email row (Auto-Chase filtering
+// foundation). One line under the email: WHY it's on this job (for weaker match
+// methods), a "hidden from staff" marker (admin view only), and the related
+// controls together — Move to job (search by number or name), Not this job
+// (detach → tombstone), and Hide (admin). High-confidence attaches (own PDF /
+// explicit #ref) get no caveat chip. Detached emails render as a tombstone in
+// InteractionRow instead of this bar.
+function EmailProvenanceBar({
+  interaction, isAdmin, onEmailAction, onMoveToJob,
+}: {
+  interaction: Interaction;
+  isAdmin: boolean;
+  onEmailAction: (id: string, action: 'hide' | 'unhide' | 'detach' | 'reattach') => void;
+  onMoveToJob: (id: string, jobId: string) => void;
+}) {
+  const [moving, setMoving] = useState(false);
+  const [jobQuery, setJobQuery] = useState('');
+  const [jobResults, setJobResults] = useState<JobSearchResult[]>([]);
+  const [jobLoading, setJobLoading] = useState(false);
+  const jobSearchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function searchJobs(q: string) {
+    setJobQuery(q);
+    if (jobSearchRef.current) clearTimeout(jobSearchRef.current);
+    if (q.trim().length < 2) { setJobResults([]); return; }
+    jobSearchRef.current = setTimeout(async () => {
+      setJobLoading(true);
+      try {
+        const res = await api.get<{ data: Array<{ id: string; hh_job_number: number | null; job_name: string | null; client_name: string | null }> }>(
+          `/hirehop/jobs?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        setJobResults((res.data || []).map((j) => ({
+          id: j.id,
+          label: `${j.hh_job_number ? `#${j.hh_job_number} · ` : ''}${j.job_name || j.client_name || 'Job'}`,
+        })));
+      } catch {
+        setJobResults([]);
+      } finally {
+        setJobLoading(false);
+      }
+    }, 300);
+  }
+
+  if (!interaction.gmail_message_id) return null;
+  const method = interaction.match_method;
+  const hidden = !!interaction.hidden_at;
+
+  let chip: { label: string; cls: string } | null = null;
+  if (method === 'sender_person_single_open_job') {
+    chip = { label: 'auto-attached · sender match', cls: 'bg-amber-50 text-amber-700 border border-amber-200' };
+  } else if (method === 'thread_anchor') {
+    chip = { label: 'linked via thread', cls: 'bg-gray-100 text-gray-500' };
+  } else if (method === 'backfill_forced') {
+    chip = { label: 'backfilled', cls: 'bg-gray-100 text-gray-500' };
+  }
+
+  return (
+    <div className="mt-1.5 text-xs">
+      <div className="flex items-center flex-wrap gap-x-3 gap-y-1">
+        {chip && <span className={`px-1.5 py-0.5 rounded ${chip.cls}`}>{chip.label}</span>}
+        {hidden && (
+          <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">
+            🔒 Hidden from staff
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => { setMoving((m) => !m); setJobQuery(''); setJobResults([]); }}
+          className={moving ? 'text-ooosh-700' : 'text-gray-400 hover:text-gray-700'}
+          title="Move this email to another job (search by job number or name)"
+        >
+          Move to job
+        </button>
+        <button
+          type="button"
+          onClick={() => onEmailAction(interaction.id, 'detach')}
+          className="text-gray-400 hover:text-red-600"
+          title="Remove this email from this job (wrong job / discussed in passing)"
+        >
+          Not this job
+        </button>
+        {isAdmin && (
+          hidden ? (
+            <button type="button" onClick={() => onEmailAction(interaction.id, 'unhide')} className="text-gray-400 hover:text-gray-700">
+              Unhide
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onEmailAction(interaction.id, 'hide')}
+              className="text-gray-400 hover:text-purple-700"
+              title="Hide from the all-staff timeline (you'll still see it as admin)"
+            >
+              Hide
+            </button>
+          )
+        )}
+      </div>
+
+      {moving && (
+        <div className="mt-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
+          <input
+            type="text"
+            value={jobQuery}
+            onChange={(e) => searchJobs(e.target.value)}
+            placeholder="Job number or name…"
+            autoFocus
+            className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+          {jobLoading && <p className="text-gray-400 mt-1.5">Searching…</p>}
+          {jobResults.length > 0 && (
+            <div className="mt-1.5 space-y-1 max-h-44 overflow-y-auto">
+              {jobResults.map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => { setMoving(false); onMoveToJob(interaction.id, r.id); }}
+                  className="w-full text-left px-2.5 py-1.5 rounded hover:bg-ooosh-50 text-gray-800"
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {jobQuery.trim().length >= 2 && !jobLoading && jobResults.length === 0 && (
+            <p className="text-gray-400 mt-1.5">No jobs found</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function InteractionRow({
-  interaction, isReply, movingId, onStartMove, onCancelMove,
+  interaction, isReply, currentUserId, onEdited, movingId, onStartMove, onCancelMove,
   moveSearch, moveResults, moveLoading, onSearchEntities, onConfirmMove, renderContent,
+  isAdmin, onEmailAction, onMoveToJob,
 }: InteractionRowProps) {
+  // Detached ingested email → greyed one-line tombstone (like a system row), so a
+  // mistaken "Not this job" is recoverable. Excluded from the AI reads backend-side.
+  if (interaction.gmail_message_id && interaction.detached_at) {
+    const label = interaction.email_subject || interaction.email_snippet || interaction.content || '(email)';
+    return (
+      <div className="flex items-center gap-2 text-xs text-gray-400 italic py-0.5">
+        <span aria-hidden>🔗</span>
+        <span className="truncate">Removed from this job — {label}</span>
+        <span className="text-gray-300 shrink-0">· {formatCompact(interaction.created_at)}</span>
+        <button
+          type="button"
+          onClick={() => onEmailAction(interaction.id, 'reattach')}
+          className="not-italic text-ooosh-600 hover:text-ooosh-800 shrink-0"
+        >
+          Re-attach
+        </button>
+      </div>
+    );
+  }
+
+  // Creator-only editing of human notes. Automated (source='system') entries
+  // are immutable; the backend enforces both rules regardless of the UI.
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(interaction.content);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const canEdit = interaction.source !== 'system'
+    && !!currentUserId && interaction.created_by === currentUserId;
+
+  async function saveEdit() {
+    const trimmed = editValue.trim();
+    if (!trimmed || savingEdit) return;
+    setSavingEdit(true);
+    try {
+      await api.patch(`/interactions/${interaction.id}`, { content: trimmed });
+      setEditing(false);
+      onEdited();
+    } catch (err) {
+      console.error('Edit interaction failed:', err);
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
   return (
     <>
       <div className="flex items-start gap-3">
@@ -978,37 +1512,107 @@ function InteractionRow({
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
-              <span className="font-medium text-gray-700">{interaction.created_by_name || 'System'}</span>
-              <span>{isReply ? 'replied' : `logged a ${interaction.type}`}</span>
-              {!isReply && interaction.job_status_at_creation != null && (
-                <>
-                  <span>&middot;</span>
-                  <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-semibold ${JOB_STATUS_COLOURS[interaction.job_status_at_creation] || 'bg-gray-50 text-gray-500 border-gray-200'}`}>
-                    {JOB_STATUS_MAP[interaction.job_status_at_creation] || interaction.job_status_name_at_creation || `Status ${interaction.job_status_at_creation}`}
-                  </span>
-                </>
-              )}
-              <span>&middot;</span>
-              <span>{formatDateTime(interaction.created_at)}</span>
-            </div>
-            {!isReply && (
-              <button
-                type="button"
-                onClick={onStartMove}
-                className={`text-xs px-2 py-0.5 rounded transition-colors ${
-                  movingId === interaction.id
-                    ? 'bg-ooosh-100 text-ooosh-700'
-                    : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
-                }`}
-                title="Move to another record"
-              >
-                Move
-              </button>
+            {interaction.gmail_message_id ? (
+              // Ingested email — show who it's actually from/to + direction, not
+              // the system author. (email_from/to are raw RFC headers.)
+              <div className="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
+                <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-semibold ${
+                  interaction.email_direction === 'outbound'
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : 'bg-blue-50 text-blue-700 border-blue-200'
+                }`}>
+                  {interaction.email_direction === 'outbound' ? 'Sent' : 'Received'}
+                </span>
+                <span className="text-gray-700 min-w-0">
+                  <span className="font-medium" title={interaction.email_from || undefined}>{emailPartyName(interaction.email_from)}</span>
+                  <span className="text-gray-400"> → </span>
+                  <span className="font-medium" title={interaction.email_to || undefined}>{emailToLabel(interaction.email_to)}</span>
+                </span>
+                <span>&middot;</span>
+                <span>{formatDateTime(interaction.created_at)}</span>
+                {interaction.edited_at && <span className="italic text-gray-400">· edited</span>}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
+                <span className="font-medium text-gray-700">{interaction.created_by_name || 'System'}</span>
+                <span>{isReply ? 'replied' : `logged a ${interaction.type}`}</span>
+                {!isReply && interaction.job_status_at_creation != null && (
+                  <>
+                    <span>&middot;</span>
+                    <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-semibold ${JOB_STATUS_COLOURS[interaction.job_status_at_creation] || 'bg-gray-50 text-gray-500 border-gray-200'}`}>
+                      {JOB_STATUS_MAP[interaction.job_status_at_creation] || interaction.job_status_name_at_creation || `Status ${interaction.job_status_at_creation}`}
+                    </span>
+                  </>
+                )}
+                <span>&middot;</span>
+                <span>{formatDateTime(interaction.created_at)}</span>
+                {interaction.edited_at && <span className="italic text-gray-400">· edited</span>}
+              </div>
             )}
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {canEdit && !editing && (
+                <button
+                  type="button"
+                  onClick={() => { setEditValue(interaction.content); setEditing(true); }}
+                  className="text-xs px-2 py-0.5 rounded text-gray-400 hover:text-ooosh-700 hover:bg-gray-100 transition-colors"
+                  title="Edit this note"
+                >
+                  Edit
+                </button>
+              )}
+              {!isReply && !interaction.gmail_message_id && (
+                <button
+                  type="button"
+                  onClick={onStartMove}
+                  className={`text-xs px-2 py-0.5 rounded transition-colors ${
+                    movingId === interaction.id
+                      ? 'bg-ooosh-100 text-ooosh-700'
+                      : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                  }`}
+                  title="Move to another record"
+                >
+                  Move
+                </button>
+              )}
+            </div>
           </div>
-          <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap">{renderContent(interaction.content)}</p>
+          {editing ? (
+            <div className="mt-1.5">
+              <textarea
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') setEditing(false); }}
+                rows={3}
+                autoFocus
+                className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
+              />
+              <div className="flex items-center gap-2 mt-1.5">
+                <button
+                  type="button"
+                  onClick={saveEdit}
+                  disabled={!editValue.trim() || savingEdit}
+                  className="bg-ooosh-600 text-white px-3 py-1 rounded text-xs font-medium hover:bg-ooosh-700 disabled:opacity-50"
+                >
+                  {savingEdit ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditing(false)}
+                  className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <InteractionBody
+              text={interaction.content}
+              isEmail={interaction.type === 'email'}
+              renderContent={renderContent}
+            />
+          )}
           <AttachmentList files={interaction.files} />
+          {!editing && <EmailProvenanceBar interaction={interaction} isAdmin={isAdmin} onEmailAction={onEmailAction} onMoveToJob={onMoveToJob} />}
           <Reactions interactionId={interaction.id} reactions={interaction.reactions} />
         </div>
       </div>

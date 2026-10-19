@@ -19,11 +19,9 @@
  * canonical form — stops duplicate suppliers from typo variants. Returned
  * alongside `supplier_matched: {from, to}` so the UI can show what changed.
  */
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
-import { xeroBroker } from './xero-broker';
-
-const MODEL_ID = 'claude-haiku-4-5';
-const MAX_TOKENS = 1024;
+import { extractDocument } from './document-extract';
+import { matchSupplier } from './supplier-match';
+import { ukToday } from './uk-date';
 
 // Xero account codes the OP capture modal exposes — keep in step with
 // COST_CATEGORIES in frontend/src/components/CostCaptureModal.tsx.
@@ -62,26 +60,48 @@ Extraction rules:
 - VAT: ONLY treat the cost as VAT-bearing if the document explicitly shows a VAT amount or a VAT line/number. Many UK sole-traders and freelancers are not VAT-registered and their invoices show NO VAT — for those, set amount_vat to 0, amount_net equal to amount_gross, and vat_treatment to "no_vat". When a VAT amount IS shown, set vat_treatment to "standard" and return the actual gross/net/vat from the document. NEVER invent or assume 20% VAT that isn't printed.
 - If only a gross total is visible and no VAT is shown, treat it as no_vat (net = gross, vat = 0).
 - invoice_number: the supplier's invoice/receipt reference as printed (e.g. "INV-10472", "138106", "SI-2024-0091") — usually labelled "Invoice No", "Invoice #", "Reference", "Receipt No" or similar, often near the date in the header. Return it exactly as printed (keep any prefix). Null when there genuinely isn't one (common on fuel/till receipts). Do NOT use the order number, customer number, account number, or our job number.
+- vehicle_reg: the UK vehicle registration plate of the vehicle the cost relates to, if shown — usually labelled "Vehicle Reg", "Reg", "Registration", "Reg No", or "VRM" (common on garage invoices, MOT certificates, tyre receipts). Return it normalised: uppercase, no spaces (e.g. "RO23 HLR" → "RO23HLR"). Null if no registration is shown. Do NOT use the VIN / chassis number, the make/model, or the production year.
+- mileage: the vehicle's odometer reading in miles, if shown — usually labelled "Mileage", "Mileage (miles)", "Odometer", "Miles", or "Mileage in". Return as an integer, stripping commas and units (e.g. "99,607 miles" → 99607). Null if not shown. Do NOT confuse it with the invoice number, year, or any monetary amount.
+- service_type: when the document is a vehicle servicing/repair/garage invoice, classify the PRIMARY work into ONE of: "service" (routine/scheduled service, oil/filter change, inspection), "repair" (mechanical, bodywork, glass, accident or breakage fixes), "mot" (MOT test), "tyre" (tyres, wheels, balancing, alignment, tracking, punctures), "insurance" (insurance-related work), "tax" (road tax / VED), "other" (anything else). If the invoice clearly covers ONE kind of work, return that specific type (e.g. an invoice only for replacing tyres → "tyre"). If it's a genuine mix of different work, return "service". Null when the document is NOT a vehicle servicing/repair document (fuel, parking, non-vehicle costs).
 - supplier: the merchant's canonical company name as printed on the receipt header (e.g. "TTS360 Ltd", "Shell U.K. Limited", "Halfords Autocentres") — NOT the tagline, address line, or "thank you" line. Strip trailing punctuation.
-- cost_date: format YYYY-MM-DD. Receipt dates are usually DD/MM/YYYY (UK). Null if not visible.
+- cost_date: format YYYY-MM-DD. Receipt dates are UK DAY-FIRST (DD/MM/YYYY) — when a date is ambiguous (both parts ≤ 12, e.g. 11/06), read it day-first (11 June, NOT 6 November). The cost date is normally TODAY or in the recent past; it should not be months in the future. Null if not visible.
+- THE YEAR. These are receipts for costs being captured now: they are nearly always from the last few weeks, occasionally a few months. The user message gives you today's date — use it. When the printed year is unclear, abbreviated (2 digits), smudged, or absent, resolve to the MOST RECENT year that puts the date on or before today; never reach back to an older one. A receipt dated more than a year ago is almost always a misread year, not a genuinely ancient receipt. Never invent a year that contradicts what is clearly printed — if the document plainly says 2024, return 2024 and let a human judge it.
+- due_date: the date payment is DUE, format YYYY-MM-DD — only when the document explicitly prints one (labelled "Due Date", "Payment Due", "Pay By", "Date Due"). A due date is normally ON or AFTER the invoice date and in the near future, so it is the one date here that legitimately looks forward. Also return it when the document states plain terms you can resolve against the invoice date (e.g. "Net 30", "Payment terms: 14 days" → invoice date + that many days). Null when the document says nothing about when payment is due — do NOT invent one from a default assumption.
 - job_number: if the document clearly references an Ooosh job/booking number (e.g. "Job 15291", "#15291", "Attention: Ooosh Tours (#15291)", "your ref 15291"), return JUST the digits as a string. Otherwise null. Do NOT guess from invoice numbers, phone numbers, postcodes, dates, or amounts — only a clear job/booking reference.
 - description: 1-2 line summary of what was bought (e.g. "Brake pads and disc rotors", "5 packs of D'Addario strings").
 - confidence: "high" when every key field reads cleanly; "medium" with some guessing on amounts or supplier; "low" on poor image quality or non-receipt input.
 - Vehicle work: prefer 406 for routine maintenance, 409 for accident/breakage repairs.
 - Fuel always 410. Parking always 411 (or 399 for fines).
-- Crew invoices (named individual sending an invoice for their services) → 320.`;
+- Crew invoices (named individual sending an invoice for their services) → 320.
+
+LINES — splitting one invoice into differently-coded / differently-VAT-rated parts.
+- Return "lines" ONLY when the document ITSELF itemises, and the items would take DIFFERENT category_codes or DIFFERENT VAT treatment. Otherwise return an empty array.
+- NEVER infer a split from narrative text. "Driver services, Chelsea, 3 days — £250" has no lines: there is nothing written down to read. A guess here becomes a wrong number in the accounts. Empty array.
+- BUNDLE printed items that share BOTH a category_code AND a VAT rate into ONE line. An invoice listing a train, a taxi and a flight, all zero-rated, is ONE line coded 325 described "Travel: train, taxi, flight" — not three. Two travel items at DIFFERENT VAT rates stay apart.
+- Each line's amount_gross is INCLUSIVE of that line's VAT, and amount_vat is the VAT inside it (0 where there is none).
+- The lines' amount_gross MUST sum to the document's amount_gross, and their amount_vat to amount_vat. If you cannot make them add up, return an empty array rather than adjusting anything to fit — the totals are what we pay and must never be bent to match a split.
+- 2 to 20 lines. One line is not a split; return an empty array instead.`;
 
 const SCHEMA = {
   type: 'object' as const,
   properties: {
     supplier: { type: ['string', 'null'] },
     cost_date: { type: ['string', 'null'] },
+    due_date: { type: ['string', 'null'] },
     amount_gross: { type: ['number', 'null'] },
     amount_vat: { type: ['number', 'null'] },
     amount_net: { type: ['number', 'null'] },
     vat_treatment: { type: 'string', enum: ['standard', 'no_vat'] },
     invoice_number: { type: ['string', 'null'] },
     job_number: { type: ['string', 'null'] },
+    vehicle_reg: { type: ['string', 'null'] },
+    mileage: { type: ['number', 'null'] },
+    service_type: {
+      anyOf: [
+        { type: 'string', enum: ['service', 'repair', 'mot', 'insurance', 'tax', 'tyre', 'other'] },
+        { type: 'null' },
+      ],
+    },
     description: { type: ['string', 'null'] },
     category_code: {
       anyOf: [
@@ -90,10 +110,27 @@ const SCHEMA = {
       ],
     },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    lines: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          description: { type: ['string', 'null'] },
+          amount_gross: { type: 'number' },
+          amount_vat: { type: 'number' },
+          category_code: {
+            anyOf: [{ type: 'string', enum: [...CATEGORY_CODES] }, { type: 'null' }],
+          },
+        },
+        required: ['description', 'amount_gross', 'amount_vat', 'category_code'],
+        additionalProperties: false,
+      },
+    },
   },
   required: [
-    'supplier', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net',
-    'vat_treatment', 'invoice_number', 'job_number', 'description', 'category_code', 'confidence',
+    'supplier', 'cost_date', 'due_date', 'amount_gross', 'amount_vat', 'amount_net',
+    'vat_treatment', 'invoice_number', 'job_number', 'vehicle_reg', 'mileage',
+    'service_type', 'description', 'category_code', 'confidence', 'lines',
   ],
   additionalProperties: false,
 };
@@ -101,22 +138,47 @@ const SCHEMA = {
 export interface ExtractedReceipt {
   supplier: string | null;
   cost_date: string | null;
+  /** Payment due date as printed / derivable from stated terms. Suggestion only. */
+  due_date: string | null;
   amount_gross: number | null;
   amount_vat: number | null;
   amount_net: number | null;
   vat_treatment: 'standard' | 'no_vat';
   invoice_number: string | null;
   job_number: string | null;
+  /** UK reg plate of the related vehicle, normalised uppercase no-spaces. */
+  vehicle_reg: string | null;
+  /** Odometer reading in miles. */
+  mileage: number | null;
+  /** Primary vehicle work classification, mapped to the service-log pills. */
+  service_type: 'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other' | null;
   description: string | null;
   category_code: string | null;
   confidence: 'high' | 'medium' | 'low';
+  /**
+   * Proposed split, ONLY where the document itself itemises. Empty for the
+   * overwhelming majority — see reconcileLines() for why we'd rather return
+   * nothing than a plausible guess.
+   */
+  lines: ExtractedLine[];
   /** Set when we canonicalised supplier against an existing Xero contact. */
   supplier_matched?: { from: string; to: string };
+  /** Resolved Xero contact, when the match was certain enough to apply. */
+  xero_contact_id?: string | null;
+  /**
+   * A CLOSE but not certain Xero contact. Deliberately not applied — the modal
+   * asks "is it this one?" and a yes is remembered as an alias, so the question
+   * is only ever asked once per printed name.
+   */
+  supplier_suggestion?: { name: string; xero_contact_id: string };
 }
 
-const SUPPORTED_IMAGE_TYPES = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-]);
+export interface ExtractedLine {
+  description: string | null;
+  amount_gross: number;
+  amount_vat: number;
+  category_code: string | null;
+}
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const close = (a: number, b: number) => Math.abs(a - b) <= 0.02;
@@ -179,28 +241,100 @@ function normaliseAmounts(p: ExtractedReceipt): void {
   downgrade();
 }
 
-function buildContentBlock(mimeType: string, base64: string) {
-  if (mimeType === 'application/pdf') {
-    return {
-      type: 'document' as const,
-      source: {
-        type: 'base64' as const,
-        media_type: 'application/pdf' as const,
-        data: base64,
-      },
-    };
+/**
+ * Date sanity check. Receipt dates are UK day-first (DD/MM/YYYY) and almost
+ * always today or in the recent past. The model occasionally reads an ambiguous
+ * date the US way (MM/DD), turning e.g. 11/06 (11 June) into 6 November — which
+ * then lands months in the FUTURE. When the extracted date is implausibly
+ * future, try the day/month swap; if that lands a valid date in the past, take
+ * it (and downgrade confidence so the modal flags it). If it can't be repaired,
+ * keep the date but still downgrade so a human double-checks.
+ */
+export function normaliseCostDate(p: ExtractedReceipt): void {
+  if (!p.cost_date) return;
+  const m = p.cost_date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return;
+  const [, ys, mo, da] = m;
+  const month = Number(mo), day = Number(da);
+  const now = new Date();
+  const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const TOL_MS = 7 * 86_400_000; // allow a week's grace for the odd genuinely-future invoice
+  // Beyond this, a capture date stops being "recent" and starts being suspicious.
+  // Four months covers a year-end catch-up without nagging; a receipt older than
+  // that is nearly always a misread year. Keep in step with STALE_COST_DAYS in
+  // frontend/src/components/CostCaptureModal.tsx, which draws the warning.
+  const STALE_MS = 120 * 86_400_000;
+  const downgrade = () => { if (p.confidence === 'high') p.confidence = 'medium'; };
+
+  const t = Date.UTC(Number(ys), month - 1, day);
+  if (t <= todayUTC + TOL_MS) {
+    // Plausible direction, but is it plausibly RECENT? A receipt being captured
+    // now is days or weeks old, not years. We do NOT rewrite the year: a genuine
+    // historic invoice does get uploaded occasionally, and silently moving its
+    // date would be worse than the misread. Downgrade confidence so the modal's
+    // green "confidence: high" banner stops vouching for it, and let the human
+    // see the "dated over N months ago" warning the capture modal now shows.
+    if (t < todayUTC - STALE_MS) downgrade();
+    return;
   }
-  if (SUPPORTED_IMAGE_TYPES.has(mimeType)) {
-    return {
-      type: 'image' as const,
-      source: {
-        type: 'base64' as const,
-        media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-        data: base64,
-      },
-    };
+
+  // Implausibly future. If both fields are ≤ 12 the date is ambiguous, so the
+  // day/month swap is safe (a ≤12 "day" is valid in any month). Take the swap
+  // only if it brings the date back into the plausible (past) range.
+  if (month <= 12 && day <= 12) {
+    const swapped = Date.UTC(Number(ys), day - 1, month);
+    if (swapped <= todayUTC + TOL_MS) {
+      p.cost_date = `${ys}-${da}-${mo}`; // day↔month
+      downgrade();
+      return;
+    }
   }
-  throw new Error(`Unsupported file type: ${mimeType} (expected image/jpeg|png|gif|webp or application/pdf)`);
+  downgrade(); // can't safely repair — flag for the human
+}
+
+/**
+ * Sanity-check the extracted DUE date. Unlike cost_date this one legitimately
+ * points forward, so the future-date repair in normaliseCostDate must NOT be
+ * applied to it. We only reject shapes that can't be a real due date: an
+ * unparseable string, a date before the invoice date, or one absurdly far out
+ * (a misread year). Left as a plain suggestion — the modal shows it against the
+ * derived default and staff confirm.
+ */
+function normaliseDueDate(p: ExtractedReceipt): void {
+  if (!p.due_date) return;
+  const m = p.due_date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) { p.due_date = null; return; }
+  const due = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (Number.isNaN(due)) { p.due_date = null; return; }
+
+  // Before the invoice date → a misread (or the invoice date itself repeated).
+  if (p.cost_date && /^\d{4}-\d{2}-\d{2}$/.test(p.cost_date)) {
+    const [cy, cm, cd] = p.cost_date.split('-').map(Number);
+    if (due < Date.UTC(cy, cm - 1, cd)) { p.due_date = null; return; }
+  }
+  // More than a year out is not a payment term we'd ever see on a supplier bill.
+  const now = new Date();
+  const todayUTC = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  if (due > todayUTC + 366 * 86_400_000) p.due_date = null;
+}
+
+/**
+ * Tidy the extracted vehicle reg + mileage. The fleet-match + sanity-check
+ * happens in the modal (against the loaded fleet list) — here we just normalise
+ * the shapes so matching is reliable: reg → uppercase alphanumerics only,
+ * mileage → a sane positive integer (drop commas/decimals, reject absurd reads).
+ */
+function normaliseVehicle(p: ExtractedReceipt): void {
+  if (p.vehicle_reg) {
+    const cleaned = p.vehicle_reg.replace(/[^a-z0-9]/gi, '').toUpperCase();
+    p.vehicle_reg = cleaned.length >= 2 && cleaned.length <= 8 ? cleaned : null;
+  }
+  if (p.mileage != null) {
+    const m = Math.round(p.mileage);
+    // Odometers are positive and well under 1,000,000 miles — anything outside
+    // that is a misread (e.g. a phone number or invoice ref), so drop it.
+    p.mileage = m > 0 && m < 1_000_000 ? m : null;
+  }
 }
 
 /**
@@ -209,93 +343,85 @@ function buildContentBlock(mimeType: string, base64: string) {
  * fine for typo-class duplicates without over-matching. Fails silently if
  * Xero is unreachable.
  */
-async function canonicaliseSupplier(
-  extracted: string,
-): Promise<{ canonical: string; matched: boolean }> {
-  try {
-    const contacts = await xeroBroker.searchContacts(extracted, 5);
-    const lower = extracted.toLowerCase();
-    const hit = contacts.find((c) => {
-      const cl = c.Name.toLowerCase();
-      return cl === lower || cl.includes(lower) || lower.includes(cl);
-    });
-    if (hit && hit.Name !== extracted) {
-      return { canonical: hit.Name, matched: true };
-    }
-  } catch {
-    /* Xero down — keep extracted name */
+// Supplier matching lives in services/supplier-match.ts — learned aliases first,
+// then a normalised comparison, then a near match OFFERED for confirmation. The
+// old version here lowercased and checked substring containment, which sees no
+// relation between "High Class-Cleaning LTD" and "High Class Cleaning" and so
+// offered to create a duplicate contact.
+
+/**
+ * Keep a proposed split only if it is arithmetically honest. Otherwise drop it.
+ *
+ * The totals are what we pay; a split is a convenience. So the rule is one-way:
+ * lines that don't reconcile to the document's own gross and VAT are DISCARDED,
+ * never nudged into agreement, and never allowed to move the totals. A missing
+ * split costs someone thirty seconds of typing; a plausible-but-wrong one goes
+ * to Xero and nobody notices.
+ *
+ * Also drops a "split" of fewer than two lines, which is just the cost again.
+ */
+export function reconcileLines(p: ExtractedReceipt): void {
+  const lines = Array.isArray(p.lines) ? p.lines : [];
+  if (lines.length < 2 || p.amount_gross == null) { p.lines = []; return; }
+
+  const pence = (n: unknown) => Math.round((Number(n) || 0) * 100);
+  const grossSum = lines.reduce((t, l) => t + pence(l.amount_gross), 0);
+  const vatSum = lines.reduce((t, l) => t + pence(l.amount_vat), 0);
+
+  const sane = lines.every((l) => pence(l.amount_gross) > 0
+    && pence(l.amount_vat) >= 0
+    && pence(l.amount_vat) <= pence(l.amount_gross));
+  // 1p of rounding slack, the same tolerance the save path allows.
+  const balances = Math.abs(grossSum - pence(p.amount_gross)) <= 1
+    && Math.abs(vatSum - pence(p.amount_vat ?? 0)) <= 1;
+
+  if (!sane || !balances) {
+    p.lines = [];
+    if (p.confidence === 'high') p.confidence = 'medium';
   }
-  return { canonical: extracted, matched: false };
 }
 
 export async function extractReceipt(buffer: Buffer, mimeType: string): Promise<ExtractedReceipt> {
-  if (!isAnthropicConfigured()) {
-    throw new Error('ANTHROPIC_API_KEY not configured');
-  }
-  const client = getAnthropicClient();
-  const contentBlock = buildContentBlock(mimeType, buffer.toString('base64'));
-
-  const response = await client.messages.create({
-    model: MODEL_ID,
-    max_tokens: MAX_TOKENS,
-    // One cache_control breakpoint on the system prompt — its bytes are
-    // identical across every call so this hits the cache from request 2.
-    system: [
-      {
-        type: 'text',
-        text: SYSTEM_PROMPT,
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    messages: [
-      {
-        role: 'user',
-        content: [
-          contentBlock,
-          { type: 'text', text: 'Extract the details from this receipt.' },
-        ],
-      },
-    ],
-    // Structured-output constraint: response will be valid JSON matching SCHEMA.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    output_config: { format: { type: 'json_schema', schema: SCHEMA as any } } as any,
+  const parsed = await extractDocument<ExtractedReceipt>({
+    files: { buffer, mimeType },
+    systemPrompt: SYSTEM_PROMPT,
+    schema: SCHEMA,
+    // Today's date goes in the USER message, never the system prompt: the system
+    // prompt is byte-identical across calls so one cache_control breakpoint
+    // serves it at ~10% input cost, and a date in there would bust that cache
+    // every single day. Without it the model has no anchor for "recent" and
+    // guesses a year — which is how fuel receipts arrived dated 2024.
+    userInstruction: `Extract the details from this receipt. Today's date is ${ukToday()}.`,
+    logTag: 'receipt-extract',
   });
-
-  // Pull the JSON text out of the response content blocks.
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('Claude returned no text content');
-  }
-  let parsed: ExtractedReceipt;
-  try {
-    parsed = JSON.parse(textBlock.text);
-  } catch {
-    // Structured outputs should make this unreachable, but if Claude wraps in
-    // a code fence on a flake, dig out the JSON object.
-    const m = textBlock.text.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('Claude returned unparseable response');
-    parsed = JSON.parse(m[0]);
-  }
 
   // Deterministic repair of gross/net/VAT arithmetic (downgrades confidence
   // when a correction was needed so the modal flags it for a human check).
   normaliseAmounts(parsed);
+  normaliseCostDate(parsed);
+  normaliseDueDate(parsed);
+  normaliseVehicle(parsed);
+  // AFTER normaliseAmounts — the totals may have just been repaired, and the
+  // lines have to reconcile against the repaired figures, not the raw ones.
+  reconcileLines(parsed);
 
-  // Xero supplier canonicalisation — non-blocking, best-effort.
+  // Xero supplier matching — non-blocking, best-effort.
+  //
+  // An alias or an exact normalised match is APPLIED: someone has either
+  // confirmed it before, or the two names are the same once punctuation and
+  // "Ltd" are set aside. A NEAR match is only OFFERED — silently merging on a
+  // fuzzy match would file costs against the wrong supplier, which is worse
+  // than the duplicate contact it avoids.
   if (parsed.supplier && parsed.supplier.trim()) {
-    const { canonical, matched } = await canonicaliseSupplier(parsed.supplier.trim());
-    if (matched) {
-      parsed.supplier_matched = { from: parsed.supplier, to: canonical };
-      parsed.supplier = canonical;
+    const printed = parsed.supplier.trim();
+    const m = await matchSupplier(printed);
+    if ((m.kind === 'alias' || m.kind === 'exact') && m.xeroName) {
+      if (m.xeroName !== printed) parsed.supplier_matched = { from: printed, to: m.xeroName };
+      parsed.supplier = m.xeroName;
+      parsed.xero_contact_id = m.xeroContactId ?? null;
+    } else if (m.kind === 'near' && m.xeroName && m.xeroContactId) {
+      parsed.supplier_suggestion = { name: m.xeroName, xero_contact_id: m.xeroContactId };
     }
-  }
-
-  // Telemetry — cache hits should appear from request 2 onwards.
-  if (response.usage?.cache_read_input_tokens) {
-    console.log(
-      `[receipt-extract] cache read: ${response.usage.cache_read_input_tokens} tokens, ` +
-        `confidence: ${parsed.confidence}`,
-    );
   }
 
   return parsed;

@@ -1,14 +1,25 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import emailService from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { shiftLinkPath } from '../services/studio-sitter';
+import { bumpSiblingChaseDates } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
+// Staff only. `authenticate` alone admits EVERY active user: a `freelancer`
+// is an ordinary `users` row and POST /api/auth/login has no role gate, so
+// such an account holds a full OP JWT. Verified safe to gate the whole
+// router — the Next.js portal is hard-prefixed to `/api/portal` in
+// `src/lib/op-api.ts`, the vehicles book-out kiosk's scoped token never calls
+// this router, and every frontend consumer is a staff page. See
+// docs/reference/PLATFORM-CONVENTIONS.md → "Reference-route RBAC".
+router.use(authorize(...STAFF_ROLES));
 
 // Attachment shape — mirrors the metadata returned by
 // POST /api/files/upload?attachment_only=true. Stored on interactions.files
@@ -31,8 +42,11 @@ const createInteractionSchema = z.object({
   opportunity_id: z.string().uuid().optional().nullable(),
   venue_id: z.string().uuid().optional().nullable(),
   issue_id: z.string().uuid().optional().nullable(),
+  held_item_id: z.string().uuid().optional().nullable(),
+  // Studio-sitter shift handover thread anchor (Rehearsals slice 3).
+  shift_id: z.string().uuid().optional().nullable(),
   // Threading: if set, this is a reply. Server flattens to thread root and
-  // inherits the parent's anchor (job/person/org/venue/issue/opportunity).
+  // inherits the parent's anchor (job/person/org/venue/issue/held-item/shift/opportunity).
   parent_interaction_id: z.string().uuid().optional().nullable(),
   // Attachments — files already uploaded via attachment_only=true
   attachments: z.array(attachmentSchema).optional().default([]),
@@ -66,13 +80,13 @@ const createInteractionSchema = z.object({
 // summary rows from job_issue_events instead of the chatter.)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { person_id, organisation_id, job_id, venue_id, issue_id, page = '1', limit = '50' } = req.query;
+    const { person_id, organisation_id, job_id, venue_id, issue_id, held_item_id, shift_id, page = '1', limit = '50' } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
       SELECT i.*,
         u.email as created_by_email,
-        CONCAT(p.first_name, ' ', p.last_name) as created_by_name
+        ${DISPLAY_NAME_SQL} as created_by_name
       FROM interactions i
       LEFT JOIN users u ON u.id = i.created_by
       LEFT JOIN people p ON p.id = u.person_id
@@ -82,13 +96,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let paramIndex = 1;
 
     if (person_id) {
-      // Issue messages don't bubble to person timelines.
-      sql += ` AND i.person_id = $${paramIndex} AND i.issue_id IS NULL`;
+      // Issue + held-item + shift messages don't bubble to person timelines.
+      sql += ` AND i.person_id = $${paramIndex} AND i.issue_id IS NULL AND i.held_item_id IS NULL AND i.shift_id IS NULL`;
       params.push(person_id);
       paramIndex++;
     }
     if (organisation_id) {
-      sql += ` AND i.organisation_id = $${paramIndex} AND i.issue_id IS NULL`;
+      sql += ` AND i.organisation_id = $${paramIndex} AND i.issue_id IS NULL AND i.held_item_id IS NULL AND i.shift_id IS NULL`;
       params.push(organisation_id);
       paramIndex++;
     }
@@ -96,22 +110,40 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       // Job timeline filters issue-scoped interactions out by default — the
       // IssueDetailPage owns that conversation. Caller can pass
       // include_issues=true to override (e.g. for a forensic "everything
-      // that touched this job" view).
-      sql += ` AND i.job_id = $${paramIndex}`;
+      // that touched this job" view). Held-item + shift chatter never bubbles
+      // here — each lives on its own record's discussion thread.
+      sql += ` AND i.job_id = $${paramIndex} AND i.held_item_id IS NULL AND i.shift_id IS NULL`;
       params.push(job_id);
       paramIndex++;
       if (req.query.include_issues !== 'true') {
         sql += ` AND i.issue_id IS NULL`;
       }
+      // Confidentiality backstop: an email hidden from the timeline drops off
+      // the all-staff view but STAYS visible to admin (the record is preserved,
+      // just not surfaced to everyone). Auto-Chase filtering foundation.
+      if (req.user?.role !== 'admin') {
+        sql += ` AND i.hidden_at IS NULL`;
+      }
     }
     if (venue_id) {
-      sql += ` AND i.venue_id = $${paramIndex} AND i.issue_id IS NULL`;
+      sql += ` AND i.venue_id = $${paramIndex} AND i.issue_id IS NULL AND i.held_item_id IS NULL AND i.shift_id IS NULL`;
       params.push(venue_id);
       paramIndex++;
     }
     if (issue_id) {
       sql += ` AND i.issue_id = $${paramIndex}`;
       params.push(issue_id);
+      paramIndex++;
+    }
+    if (held_item_id) {
+      sql += ` AND i.held_item_id = $${paramIndex}`;
+      params.push(held_item_id);
+      paramIndex++;
+    }
+    if (shift_id) {
+      // Studio-sitter handover thread — a flat, chronological log per shift.
+      sql += ` AND i.shift_id = $${paramIndex}`;
+      params.push(shift_id);
       paramIndex++;
     }
 
@@ -164,7 +196,7 @@ router.get('/:id/thread', async (req: AuthRequest, res: Response) => {
     const threadResult = await query(
       `SELECT i.*,
         u.email AS created_by_email,
-        CONCAT(p.first_name, ' ', p.last_name) AS created_by_name
+        ${DISPLAY_NAME_SQL} AS created_by_name
        FROM interactions i
        LEFT JOIN users u ON u.id = i.created_by
        LEFT JOIN people p ON p.id = u.person_id
@@ -189,7 +221,7 @@ router.get('/:id/thread', async (req: AuthRequest, res: Response) => {
       const partResult = await query(
         `SELECT u.id,
           u.email,
-          COALESCE(NULLIF(CONCAT(p.first_name, ' ', p.last_name), ' '), u.email) AS name
+          COALESCE(NULLIF(${DISPLAY_NAME_SQL}, ' '), u.email) AS name
          FROM users u
          LEFT JOIN people p ON p.id = u.person_id
          WHERE u.id = ANY($1::uuid[])`,
@@ -284,7 +316,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       next_chase_date, chase_alert_user_id, chase_alert_delivery, skip_chase_bump,
       attachments,
     } = req.body;
-    let { person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id, parent_interaction_id } = req.body;
+    let { person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id, held_item_id, shift_id, parent_interaction_id } = req.body;
 
     // Threading: if this is a reply, look up the parent and inherit its
     // anchor. We FLATTEN to the thread root — replies always hang off root,
@@ -294,7 +326,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     if (parent_interaction_id) {
       const parentResult = await query(
         `SELECT id, parent_interaction_id, person_id, organisation_id, job_id,
-                opportunity_id, venue_id, issue_id, created_by, mentioned_user_ids
+                opportunity_id, venue_id, issue_id, held_item_id, shift_id, created_by, mentioned_user_ids
          FROM interactions WHERE id = $1`,
         [parent_interaction_id]
       );
@@ -309,8 +341,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         parent_interaction_id = parentRow!.parent_interaction_id as string;
         // Re-fetch the actual root for anchor inheritance.
         const rootResult = await query(
-          `SELECT id, person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id,
-                  created_by, mentioned_user_ids
+          `SELECT id, person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id, held_item_id,
+                  shift_id, created_by, mentioned_user_ids
            FROM interactions WHERE id = $1`,
           [parent_interaction_id]
         );
@@ -325,6 +357,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       opportunity_id = (parentRow!.opportunity_id as string | null) ?? null;
       venue_id = (parentRow!.venue_id as string | null) ?? null;
       issue_id = (parentRow!.issue_id as string | null) ?? null;
+      held_item_id = (parentRow!.held_item_id as string | null) ?? null;
+      shift_id = (parentRow!.shift_id as string | null) ?? null;
     }
 
     // If linked to a job, snapshot current status for tracking
@@ -354,17 +388,27 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
 
     const result = await query(
       `INSERT INTO interactions (type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-        issue_id, parent_interaction_id, mentioned_user_ids, files, created_by,
+        issue_id, held_item_id, shift_id, parent_interaction_id, mentioned_user_ids, files, created_by,
         job_status_at_creation, job_status_name_at_creation, pipeline_status_at_creation,
         chase_method, chase_response)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16, $17, $18, $19)
        RETURNING *`,
       [type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-        issue_id || null, parent_interaction_id || null,
+        issue_id || null, held_item_id || null, shift_id || null, parent_interaction_id || null,
         mentioned_user_ids, JSON.stringify(filesPayload), req.user!.id,
         jobStatusAt, jobStatusNameAt, pipelineStatusAt,
         chase_method || null, chase_response || null]
     );
+
+    // Staff reply on a studio-sitter shift thread → email the sitter (they have
+    // no portal bell). Best-effort; never blocks the reply. This route is
+    // staff-authenticated, so any shift_id post here is a staff reply.
+    if (shift_id && content && req.user?.id) {
+      const staffUserId = req.user.id;
+      import('../services/studio-sitter-lockup')
+        .then(({ notifySitterOfStaffReply }) => notifySitterOfStaffReply(shift_id as string, content, staffUserId))
+        .catch((err) => console.error('[interactions] sitter reply email failed (non-fatal):', err));
+    }
 
     // Chase side-effects: bump chase_count, set next_chase_date, persist
     // alert preferences. Crucially we DO NOT touch pipeline_status — chasing
@@ -389,6 +433,9 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $2`,
         [chaseDate, job_id, chase_alert_user_id || null, chase_alert_delivery || null]
       );
+      // Quote options: one call covers the whole enquiry — the live siblings
+      // move too, never shortening a sibling's deliberately later date.
+      bumpSiblingChaseDates(job_id, chaseDate).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
     }
 
     // Auto-bump chase on contact-type interactions (call / email / meeting).
@@ -426,32 +473,51 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $1`,
         [job_id]
       );
+      // Quote options: the same bump for the enquiry's other live options.
+      bumpSiblingChaseDates(job_id, null).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
     }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
 
     // Author display name — used by both mention and thread-reply notifications.
     const creatorResult = await query(
-      `SELECT CONCAT(p.first_name, ' ', p.last_name) as name
+      `SELECT ${DISPLAY_NAME_SQL} as name
        FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
       [req.user!.id]
     );
     const creatorName = creatorResult.rows[0]?.name || 'Someone';
 
+    // Held-item discussions deep-link back to the holding page with the item
+    // pre-opened. Lost property lives on its own view; everything else on the
+    // main "Held for Clients" page. One cheap lookup to pick the right page.
+    let heldItemUrl: string | null = null;
+    if (held_item_id) {
+      const hi = await query(`SELECT kind FROM held_items WHERE id = $1`, [held_item_id]);
+      const kind = hi.rows[0]?.kind;
+      heldItemUrl = kind === 'lost_property'
+        ? `/holding/lost-property?item=${held_item_id}`
+        : `/holding?item=${held_item_id}`;
+    }
+
     // Resolve the entity anchor that mentions / thread re-notifications point at.
-    // Issue-anchored interactions point at the IssueDetailPage rather than a
-    // generic entity page.
+    // Issue- and held-item-anchored interactions point at their own surfaces
+    // rather than a generic entity page.
     const entityType = issue_id ? 'job_issues'
+      : held_item_id ? 'held_items'
+      : shift_id ? 'studio_sitter_shifts'
       : person_id ? 'people'
       : organisation_id ? 'organisations'
       : venue_id ? 'venues'
       : job_id ? 'jobs'
       : null;
-    const entityId = issue_id || person_id || organisation_id || venue_id || job_id || null;
+    const entityId = issue_id || held_item_id || shift_id || person_id || organisation_id || venue_id || job_id || null;
 
     // Build action URL for click-through navigation. Issue messages route to
-    // the IssueDetailPage; otherwise default to the entity's timeline tab.
+    // the IssueDetailPage, held-item messages to the holding page; otherwise
+    // default to the entity's timeline tab.
     const actionUrl = issue_id ? `/operations/problems/${issue_id}`
+      : heldItemUrl ? heldItemUrl
+      : shift_id ? (await shiftLinkPath(shift_id)).path
       : job_id ? `/jobs/${job_id}?tab=timeline`
       : person_id ? `/people/${person_id}`
       : organisation_id ? `/organisations/${organisation_id}`
@@ -480,7 +546,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     if (mentioned_user_ids && mentioned_user_ids.length > 0) {
       // Bulk-load recipients + delivery preferences in one round-trip.
       const recipientResult = await query(
-        `SELECT u.id, u.email, p.first_name,
+        `SELECT u.id, u.email, p.first_name, p.preferred_name,
           COALESCE(
             (SELECT delivery_method FROM user_notification_preferences
               WHERE user_id = u.id AND notification_type = 'mention'),
@@ -533,7 +599,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         // email_sent_at), so we log loudly. Acceptable trade-off — alarming
         // every flake would create more noise than it saves.
         if (wantsEmail) {
-          const recipientName = recipient.first_name || 'there';
+          // What they go by, not what the passport says — this is a greeting.
+          const recipientName = recipient.preferred_name?.trim() || recipient.first_name || 'there';
           const recipientEmail = recipient.email;
           const priorityLabel = priority === 'urgent' ? 'URGENT: ' : priority === 'high' ? 'Important: ' : '';
           const subject = `${priorityLabel}${creatorName} mentioned you`;
@@ -644,6 +711,58 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('Create interaction error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/interactions/:id — edit a note's content (creator only)
+//
+// Only genuine human-authored entries (source='user') can be edited, and only
+// by their author. Automated/audit entries (source='system' — status changes,
+// "Job details updated", etc.) are immutable. We record edited_at/edited_by
+// for the "· edited" marker but deliberately DON'T keep the previous text —
+// corrections by anyone else go via a reply, not a silent rewrite.
+const editInteractionSchema = z.object({
+  content: z.string().min(1).max(20000),
+});
+
+router.patch('/:id', validate(editInteractionSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { content } = req.body;
+    const existing = await query(
+      'SELECT id, created_by, source, type FROM interactions WHERE id = $1',
+      [req.params.id]
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Interaction not found' });
+      return;
+    }
+    const row = existing.rows[0];
+
+    if (row.source === 'system') {
+      res.status(403).json({ error: 'Automated timeline entries can’t be edited. Add a reply to correct or clarify.' });
+      return;
+    }
+    if (row.created_by !== req.user!.id) {
+      res.status(403).json({ error: 'Only the author can edit this note. Add a reply to correct or clarify.' });
+      return;
+    }
+
+    const result = await query(
+      `UPDATE interactions
+         SET content = $1, edited_at = NOW(), edited_by = $2
+       WHERE id = $3
+       RETURNING *,
+         (SELECT ${DISPLAY_NAME_SQL}
+            FROM users u LEFT JOIN people p ON p.id = u.person_id
+           WHERE u.id = interactions.created_by) AS created_by_name`,
+      [content.trim(), req.user!.id, req.params.id]
+    );
+
+    await logAudit(req.user!.id, 'interactions', String(req.params.id), 'update', row, result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Edit interaction error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

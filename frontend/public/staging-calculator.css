@@ -1,0 +1,1190 @@
+/**
+ * OOOSH Staging Calculator — Styles
+ * v2.5 — Accessories edge selectors, push-to-job button
+ */
+
+/* ============================================================================
+   BASE & RESET
+   ============================================================================ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #f0f4f8;
+  color: #1e293b;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+
+/* ============================================================================
+   LAYOUT
+   ============================================================================ */
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+
+/* ============================================================================
+   HEADER
+   ============================================================================ */
+
+.page-header {
+  margin-bottom: 24px;
+}
+
+.back-link {
+  color: #3b82f6;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}
+
+.page-header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 8px 0 4px;
+}
+
+.subtitle {
+  color: #64748b;
+  font-size: 15px;
+}
+
+
+/* ============================================================================
+   CARDS
+   ============================================================================ */
+
+.card, .result-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  margin-bottom: 20px;
+}
+
+
+/* ============================================================================
+   FORM LAYOUT
+   ============================================================================ */
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+
+.form-row:last-child {
+  margin-bottom: 0;
+}
+
+.form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 6px;
+}
+
+.unit-group {
+  flex: 0 0 auto;
+}
+
+.dim-group {
+  flex: 1 1 120px;
+  min-width: 120px;
+}
+
+.combiner-group {
+  flex: 1 1 300px;
+}
+
+.job-row {
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.job-group {
+  flex: 0 0 200px;
+}
+
+.client-group {
+  flex: 1 1 200px;
+}
+
+.client-display {
+  padding: 10px 14px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 16px;
+  background: #f8fafc;
+  color: #64748b;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.client-display.loaded {
+  color: #1e293b;
+  font-weight: 500;
+}
+
+.client-display .job-status {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #dbeafe;
+  color: #2563eb;
+}
+
+.btn-group {
+  flex: 0 0 auto;
+}
+
+/* Input fields */
+input[type="number"],
+input[type="date"],
+input[type="text"],
+select {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 16px;
+  font-family: 'Inter', sans-serif;
+  color: #1e293b;
+  background: #fff;
+  transition: border-color 0.2s;
+}
+
+input[type="number"]:focus,
+input[type="date"]:focus,
+select:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* Remove number input spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+
+/* ============================================================================
+   UNIT TOGGLE — Pill style
+   ============================================================================ */
+
+.unit-toggle-pill {
+  display: inline-flex;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.unit-btn {
+  padding: 9px 16px;
+  border: none;
+  background: #fff;
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.unit-btn:first-child {
+  border-right: 1.5px solid #e2e8f0;
+}
+
+.unit-btn.active {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.unit-btn:hover:not(.active) {
+  background: #f1f5f9;
+}
+
+
+/* ============================================================================
+   IMPERIAL SPLIT INPUTS (ft / in)
+   ============================================================================ */
+
+.input-imperial {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.input-imperial input {
+  flex: 1;
+  min-width: 50px;
+}
+
+.imperial-sep {
+  font-size: 18px;
+  color: #94a3b8;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.hidden {
+  display: none !important;
+}
+
+
+/* ============================================================================
+   DATE RANGE INPUTS
+   ============================================================================ */
+
+.date-group {
+  flex: 1 1 280px;
+}
+
+.date-range-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.date-range-inputs input[type="date"] {
+  flex: 1;
+  min-width: 130px;
+  font-size: 14px;
+  padding: 9px 10px;
+}
+
+.date-sep {
+  font-size: 16px;
+  color: #94a3b8;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+/* Availability badge in parts table */
+.avail-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.avail-badge.ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.avail-badge.tight {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.avail-badge.short {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+
+/* ============================================================================
+   CALCULATE BUTTON
+   ============================================================================ */
+
+.btn-calculate {
+  padding: 10px 32px;
+  background: #3b82f6;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+
+.btn-calculate:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.btn-calculate:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
+
+/* ============================================================================
+   LOADING & ERROR STATES
+   ============================================================================ */
+
+.loading-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 10px;
+  color: #0369a1;
+  font-weight: 500;
+}
+
+.loading-spinner {
+  width: 22px;
+  height: 22px;
+  border: 3px solid #bae6fd;
+  border-top-color: #0369a1;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.error-banner {
+  padding: 20px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  color: #991b1b;
+}
+
+.error-banner strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.error-banner p {
+  font-size: 14px;
+  color: #b91c1c;
+}
+
+.info-banner {
+  padding: 14px 20px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 10px;
+  color: #0369a1;
+  font-size: 14px;
+  margin-bottom: 20px;
+}
+
+.stock-only-banner {
+  background: #f0fdf4;
+  border-color: #86efac;
+  color: #166534;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+
+/* ============================================================================
+   DIMENSION SUMMARY (Stage Configuration)
+   ============================================================================ */
+
+.summary-card h2 {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+
+.dim-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 16px;
+}
+
+.dim-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.dim-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  margin-bottom: 2px;
+}
+
+.dim-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.dim-secondary {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.dim-adjusted {
+  font-size: 12px;
+  color: #f59e0b;
+  font-style: italic;
+  margin-top: 2px;
+}
+
+
+/* ============================================================================
+   BADGES & CHIPS
+   ============================================================================ */
+
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  background: #e2e8f0;
+  border-radius: 100px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+  vertical-align: middle;
+}
+
+.chip {
+  display: inline-block;
+  padding: 8px 16px;
+  background: #e2e8f0;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: 'Inter', sans-serif;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.chip:hover {
+  background: #3b82f6;
+  color: #fff;
+  border-color: #3b82f6;
+}
+
+
+/* ============================================================================
+   LAYOUT VISUAL (SVG container)
+   ============================================================================ */
+
+.layout-visual-container {
+  margin: 16px 0;
+  text-align: center;
+  overflow-x: auto;
+}
+
+
+/* ============================================================================
+   JUNCTION SUMMARY
+   ============================================================================ */
+
+.junction-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.junction-type {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.junction-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.junction-dot.solo { background: #22c55e; }
+.junction-dot.edge { background: #f59e0b; }
+.junction-dot.interior { background: #3b82f6; }
+
+.junction-desc {
+  color: #94a3b8;
+  font-size: 13px;
+  margin-left: auto;
+}
+
+
+/* ============================================================================
+   PARTS TABLE
+   ============================================================================ */
+
+.parts-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+.parts-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  border-bottom: 2px solid #e2e8f0;
+}
+
+.parts-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.parts-table .num {
+  text-align: center;
+  font-weight: 600;
+}
+
+.parts-table .note {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.category-row td {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #3b82f6;
+  padding-top: 16px;
+  border-bottom: none;
+}
+
+.status-ok { color: #16a34a; font-weight: 600; }
+.status-tight { color: #f59e0b; font-weight: 600; }
+.status-short { color: #dc2626; font-weight: 600; }
+
+
+/* ============================================================================
+   ALTERNATIVE SECTIONS — Heights & Stock alternatives
+   ============================================================================ */
+
+.alt-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1.5px dashed #e2e8f0;
+}
+
+.alt-section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+/* Height suggestion chips */
+.alt-height-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.alt-height-chip {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 16px;
+  background: #f0fdf4;
+  border: 1.5px solid #86efac;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+  font-family: 'Inter', sans-serif;
+}
+
+.alt-height-chip:hover {
+  background: #dcfce7;
+  border-color: #22c55e;
+}
+
+.alt-chip-label {
+  font-size: 15px;
+  font-weight: 700;
+  color: #166534;
+}
+
+.alt-chip-desc {
+  font-size: 12px;
+  color: #4ade80;
+  margin-top: 2px;
+}
+
+/* Stock alternative deck card */
+.alt-deck-card {
+  padding: 14px 18px;
+  background: #f0fdf4;
+  border: 1.5px solid #86efac;
+  border-radius: 10px;
+  margin-top: 8px;
+}
+
+.alt-deck-card h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #166534;
+  margin-bottom: 8px;
+}
+
+.alt-deck-list {
+  list-style: none;
+  padding: 0;
+}
+
+.alt-deck-list li {
+  font-size: 14px;
+  padding: 3px 0;
+  color: #15803d;
+}
+
+.alt-deck-list li::before {
+  content: '✓ ';
+  color: #22c55e;
+  font-weight: 700;
+}
+
+
+/* ============================================================================
+   SUGGESTIONS CARD (for impossible dimensions)
+   ============================================================================ */
+
+.suggestions-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  margin-top: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.suggestions-card h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: #334155;
+}
+
+.suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+
+/* ============================================================================
+   WARNINGS
+   ============================================================================ */
+
+.warnings-card {
+  border-left: 4px solid #f59e0b;
+}
+
+.warnings-card h2 {
+  font-size: 16px;
+  margin-bottom: 10px;
+}
+
+.warnings-card ul {
+  list-style: none;
+  padding: 0;
+}
+
+.warnings-card li {
+  padding: 6px 0;
+  font-size: 14px;
+  color: #92400e;
+}
+
+
+/* ============================================================================
+   ACCESSORIES — Edge selectors for handrails & steps
+   ============================================================================ */
+
+.accessories-card h2 {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.accessories-subtitle {
+  font-size: 13px;
+  color: #64748b;
+  margin-bottom: 16px;
+}
+
+/* Top-down stage map with edge selectors */
+.stage-map {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.stage-map-edge-top,
+.stage-map-edge-bottom {
+  display: flex;
+  justify-content: center;
+}
+
+.stage-map-middle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stage-map-body {
+  width: 280px;
+  height: 160px;
+  background: #1e293b;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 500;
+  position: relative;
+}
+
+.stage-map-label {
+  text-align: center;
+  line-height: 1.3;
+}
+
+.stage-map-label .map-dim {
+  font-weight: 700;
+  color: #e2e8f0;
+  font-size: 15px;
+}
+
+/* Edge selector controls */
+.edge-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+}
+
+.edge-select select {
+  width: auto;
+  min-width: 100px;
+  padding: 6px 10px;
+  font-size: 13px;
+  border-radius: 6px;
+}
+
+.edge-select .edge-label {
+  min-width: 50px;
+  text-align: right;
+  font-weight: 600;
+  color: #334155;
+}
+
+.edge-select .edge-dim {
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+/* Accessories parts sub-list */
+.accessories-parts {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.accessories-parts h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #334155;
+}
+
+.acc-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 14px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.acc-item:last-child {
+  border-bottom: none;
+}
+
+.acc-item-name {
+  color: #1e293b;
+}
+
+.acc-item-qty {
+  font-weight: 600;
+  color: #334155;
+}
+
+.acc-item-status {
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.acc-note {
+  font-size: 12px;
+  color: #f59e0b;
+  font-style: italic;
+  margin-top: 8px;
+}
+
+
+/* ============================================================================
+   PUSH TO HIREHOP
+   ============================================================================ */
+
+.push-section {
+  margin-top: 24px;
+  padding: 20px;
+  background: #fefce8;
+  border: 1.5px solid #fde047;
+  border-radius: 12px;
+}
+
+.push-section h2 {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: #854d0e;
+}
+
+.push-section p {
+  font-size: 14px;
+  color: #a16207;
+  margin-bottom: 12px;
+}
+
+.push-summary {
+  font-size: 13px;
+  color: #92400e;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: rgba(255,255,255,0.5);
+  border-radius: 8px;
+}
+
+.push-summary strong {
+  color: #78350f;
+}
+
+.btn-push {
+  padding: 12px 28px;
+  background: #f59e0b;
+  color: #78350f;
+  border: none;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-push:hover:not(:disabled) {
+  background: #d97706;
+  color: #fff;
+}
+
+.btn-push:disabled {
+  background: #cbd5e1;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.push-success {
+  padding: 16px;
+  background: #f0fdf4;
+  border: 1.5px solid #86efac;
+  border-radius: 10px;
+  color: #166534;
+  font-weight: 600;
+}
+
+.push-error {
+  padding: 16px;
+  background: #fef2f2;
+  border: 1.5px solid #fca5a5;
+  border-radius: 10px;
+  color: #991b1b;
+  font-weight: 500;
+}
+
+.push-no-job {
+  padding: 16px;
+  background: #f8fafc;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  color: #64748b;
+  font-size: 14px;
+}
+
+
+/* ============================================================================
+   RESPONSIVE
+   ============================================================================ */
+
+@media (max-width: 640px) {
+  .container {
+    padding: 12px;
+  }
+
+  .form-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .dim-group, .combiner-group, .date-group, .job-group, .client-group {
+    flex-basis: 100%;
+  }
+
+  .btn-calculate {
+    width: 100%;
+  }
+
+  .dim-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .junction-desc {
+    display: none;
+  }
+
+  .parts-table {
+    font-size: 13px;
+  }
+
+  .parts-table th,
+  .parts-table td {
+    padding: 8px 6px;
+  }
+
+  .stage-map-body {
+    width: 200px;
+    height: 120px;
+  }
+
+  .stage-map-middle {
+    flex-direction: column;
+  }
+}
+
+
+/* ============================================================================
+   ACCESSORIES — Edge selector styles
+   ============================================================================ */
+
+.accessories-card {
+  border-top: 3px solid #8b5cf6;
+}
+
+.edge-selector-label {
+  font-size: 14px;
+  color: #6b7280;
+  margin-bottom: 12px;
+}
+
+.stage-edge-visual {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.edge-visual-top {
+  text-align: center;
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 4px;
+}
+
+.edge-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #2d3748;
+  border: 1px solid #2a3040;
+  border-radius: 8px;
+  padding: 10px 16px;
+  gap: 12px;
+}
+
+.edge-visual-middle {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  min-height: 100px;
+}
+
+.edge-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #2d3748;
+  border: 1px solid #2a3040;
+  border-radius: 8px;
+  padding: 10px 8px;
+  min-width: 70px;
+  gap: 8px;
+}
+
+.stage-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #0f1219;
+  border: 2px dashed #2a3040;
+  border-radius: 8px;
+  padding: 20px;
+  gap: 4px;
+}
+
+.stage-body-label {
+  font-size: 18px;
+  font-weight: 700;
+  color: #4b5563;
+  letter-spacing: 2px;
+}
+
+.stage-body-dim {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.edge-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e5e7eb;
+  white-space: nowrap;
+}
+
+.edge-length {
+  font-weight: 400;
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.edge-options {
+  display: flex;
+  gap: 6px;
+}
+
+.edge-options-vertical {
+  flex-direction: column;
+}
+
+.edge-btn {
+  padding: 6px 12px;
+  border: 1px solid #374151;
+  background: #1a1f2a;
+  color: #9ca3af;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.edge-btn:hover {
+  border-color: #6366f1;
+  color: #c7d2fe;
+}
+
+.edge-btn.active {
+  background: #312e81;
+  border-color: #6366f1;
+  color: #c7d2fe;
+  font-weight: 600;
+}
+
+.edge-btn-sm {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.accessory-parts h3 {
+  font-size: 15px;
+  color: #e5e7eb;
+  margin-bottom: 10px;
+}
+
+/* Responsive: stack edge selectors on mobile */
+@media (max-width: 600px) {
+  .edge-visual-middle {
+    flex-direction: column;
+  }
+
+  .edge-side {
+    flex-direction: row;
+    min-width: unset;
+  }
+
+  .edge-options-vertical {
+    flex-direction: row;
+  }
+
+  .edge-row {
+    flex-direction: column;
+    gap: 8px;
+    text-align: center;
+  }
+}
+
+
+/* ============================================================================
+   PUSH TO HIREHOP — button styles
+   ============================================================================ */
+
+.push-card {
+  border-top: 3px solid #10b981;
+}
+
+.btn-success {
+  background: linear-gradient(135deg, #059669 0%, #10b981 100%) !important;
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+}

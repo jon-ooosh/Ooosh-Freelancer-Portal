@@ -17,8 +17,13 @@
 import { query, getClient } from '../config/database';
 import type { HHLineItem } from './hirehop-job-sync';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
+import { syncCostResolveRequirementStatus } from './cost-requirement-sync';
 import { hhBroker } from './hirehop-broker';
 import { calculateVatAdjustment } from './vat-adjustment';
+import { BACKLINE_CATEGORY_IDS } from './backline-categories';
+import { computeRehearsalDetail, buildRehearsalSummary, type RehearsalDetail } from './rehearsal-plan';
+import { syncRehearsalRequirementStatus } from './studio-sitter';
+import { hireGenuinelyReturning } from './hire-lifecycle';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -29,35 +34,11 @@ const REHEARSAL_CATEGORY = 450;         // Rehearsal Rooms
 const STORAGE_CATEGORY = 449;           // Storage Space
 
 // "Backline" in Ooosh's operational context = ALL equipment the warehouse preps.
-// This includes instruments, PA/sound, DJ, lighting, staging, power, video, accessories.
-// Essentially everything EXCEPT: vehicles (370-371), rehearsal rooms (450), storage (449).
-// We use an inclusive approach: any category >= 372 that isn't a vehicle/rehearsal/storage.
-const BACKLINE_CATEGORIES = [
-  // Guitars (372-378)
-  372, 373, 374, 375, 376, 377, 378,
-  // Basses (379-384)
-  379, 380, 381, 382, 383, 384,
-  // Drums (385-398)
-  385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398,
-  // Keyboards (399-404)
-  399, 400, 401, 402, 403, 404,
-  // Woodwind (405)
-  405,
-  // Backline accessories — stands, cases, fans, valves (406-410)
-  406, 407, 408, 409, 410,
-  // PA / Sound (411-428)
-  411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428,
-  // DJ (429-431)
-  429, 430, 431,
-  // Lighting (432-438)
-  432, 433, 434, 435, 436, 437, 438,
-  // Power (439-443)
-  439, 440, 441, 442, 443,
-  // Staging (444-448)
-  444, 445, 446, 447, 448,
-  // Video (451-453)
-  451, 452, 453,
-];
+// Single source of truth in `backline-categories.ts` (shared with the Backline
+// Matcher). Includes instruments, PA/sound, DJ, lighting, staging, power, video,
+// accessories. Everything EXCEPT vehicles (370-371), rehearsal rooms (450),
+// storage (449).
+const BACKLINE_CATEGORIES = BACKLINE_CATEGORY_IDS;
 
 // Keep separate arrays for sanity-check flags (has_pa, has_lighting, etc.)
 const PA_CATEGORIES = [411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428];
@@ -78,6 +59,19 @@ const SEAT_PARENT_LIST_ID = 1645; // "Rear seats:" stock item
 // abroad and needs a VE103B. One cert per vehicle going abroad, so the line
 // QUANTITY = number of vans going abroad = number of certs needed.
 const VE103B_CERT_LIST_ID = 1023;
+
+// ATA Carnet arrangement fee — chargeable HH sale item (CATEGORY_ID 355 "Misc
+// Sale Item", £750). Its presence on a job is sales' signal that we're
+// arranging a carnet on the client's behalf (the 'we_supply' mode). Mirrors
+// the VE103B detection. See docs/CARNET-SPEC.md.
+//
+// ⚠️ The CATEGORY_ID 355 guard is REQUIRED, not belt-and-braces: HireHop's
+// asset and sale-item stock-ID spaces are SEPARATE, so a rental ASSET can also
+// carry LIST_ID 575 (a completely different item). Matching LIST_ID alone
+// false-fired the carnet on any job carrying asset-575 (jobs 16142 / 16007 /
+// 15828 incident, Jun 2026). The real carnet sale item is uniquely 575 + cat 355.
+const CARNET_ARRANGEMENT_LIST_ID = 575;
+const MISC_SALE_CATEGORY = 355;
 
 // ── Derived flags shape ──────────────────────────────────────────────────
 
@@ -104,6 +98,7 @@ export interface DerivedFlags {
   seat_config: 'round_table' | 'forward_facing' | null;
   ve103b_required: boolean;           // VE103B cert item (1023) present on the job
   vans_going_abroad: number;          // Count of certs needed (= qty of item 1023)
+  has_carnet: boolean;                // Carnet arrangement fee (575) present — we supply a carnet
   has_backline: boolean;
   backline_item_count: number;
   has_rehearsal: boolean;
@@ -119,6 +114,10 @@ export interface DerivedFlags {
     rehearsals: number;
     other: number;
   };
+  // Studio-sitter detection intelligence (rooms + flavour + sitter-needed
+  // evenings). Populated in deriveRequirementsForJob (needs job dates), NOT in
+  // deriveFlags (item-only). Optional — absent on item-only deriveFlags calls.
+  rehearsal_detail?: RehearsalDetail | null;
 }
 
 // ── Derive flags from line items ─────────────────────────────────────────
@@ -134,6 +133,7 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     seat_config: null,
     ve103b_required: false,
     vans_going_abroad: 0,
+    has_carnet: false,
     has_backline: false,
     backline_item_count: 0,
     has_rehearsal: false,
@@ -189,6 +189,11 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     if (item.LIST_ID === VE103B_CERT_LIST_ID && item.kind !== 0) {
       flags.ve103b_required = true;
       flags.vans_going_abroad += Math.max(1, item.QUANTITY);
+    }
+
+    // ── Carnet arrangement fee (sale item 575) → we're supplying a carnet ──
+    if (item.LIST_ID === CARNET_ARRANGEMENT_LIST_ID && item.CATEGORY_ID === MISC_SALE_CATEGORY && item.kind !== 0) {
+      flags.has_carnet = true;
     }
 
     if (BACKLINE_CATEGORIES.includes(item.CATEGORY_ID) && item.kind === 2) {
@@ -288,9 +293,14 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     mismatchesFlagged: [],
   };
 
-  // Load job with line items
+  // Load job with line items. Rehearsal date columns are extracted in
+  // Europe/London so the finish-on-the-day rule (see rehearsal-plan.ts) keys off
+  // the real local hour regardless of server timezone.
   const jobResult = await query(
-    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal
+    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal, self_drive_van_override,
+       (COALESCE(job_date, out_date) AT TIME ZONE 'Europe/London')::date::text AS reh_start_date,
+       (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London')::date::text AS reh_end_date,
+       EXTRACT(HOUR FROM (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London'))::int AS reh_end_hour
      FROM jobs WHERE id = $1 AND is_deleted = false`,
     [jobId]
   );
@@ -316,6 +326,32 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     }
     flags.van_and_driver_count = flags.vehicle_slots.length;
     flags.self_drive_count = 0;
+  }
+  // Sequential-swap override (Option X): when staff have declared the real
+  // simultaneous self-drive van count (e.g. HH lists qty-2 but it's one van
+  // swapped mid-hire), cap self_drive_count to that. vehicle_slots is left
+  // intact so the card still shows both physical vans (with a "treated as N"
+  // label) — only the COUNT that drives excess + top-N + additional-driver
+  // charge is corrected. The existing excess mismatch logic then either
+  // auto-updates an uncollected record or flags one with money taken.
+  if (job.self_drive_van_override !== null && job.self_drive_van_override !== undefined) {
+    const ov = Number(job.self_drive_van_override);
+    if (Number.isFinite(ov) && ov >= 0) {
+      flags.self_drive_count = Math.min(ov, flags.self_drive_count);
+    }
+  }
+  // ── Rehearsal detection intelligence (Phase A) ──
+  // Needs job dates, so computed here rather than in the item-only deriveFlags().
+  // Attaching to `flags` persists it in hh_derived_flags and surfaces it on the
+  // requirement card via the derived-flags read. See services/rehearsal-plan.ts.
+  if (flags.has_rehearsal) {
+    flags.rehearsal_detail = computeRehearsalDetail(items, {
+      startDate: job.reh_start_date ?? null,
+      endDate: job.reh_end_date ?? null,
+      endHour: job.reh_end_hour ?? null,
+    });
+  } else {
+    flags.rehearsal_detail = null;
   }
   result.flags = flags;
 
@@ -457,6 +493,19 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         }
       }
 
+      // Auto-cover from the client's standing held-on-account balance (opt-in,
+      // admin-set per client). Runs before the requirement sync so a covered
+      // (waived) record is already in place when the card status is derived.
+      // Covers every chargeable record on the job (stub AND driver records), so
+      // a hire form that absorbed the stub can't leave a driver reading "Required".
+      const cover = await applyAccountAutoCover((t, p) => client.query(t, p), jobId, { jobTotal: expectedExcess });
+      if (cover.covered) {
+        result.requirementsUpdated.push(`excess_record (${cover.covered} auto-covered by held-on-account balance)`);
+      }
+      if (cover.reverted) {
+        result.requirementsUpdated.push(`excess_record (auto-cover removed — ${cover.reverted} reverted to needed)`);
+      }
+
       // Promote the excess requirement to 'done' if coverage is already met
       // (e.g. derivation runs after a portal pre-auth has landed).
       await syncExcessRequirementStatus(jobId, client);
@@ -485,20 +534,68 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // ── Rehearsal ──
     if (flags.has_rehearsal) {
       await upsertAutoRequirement(client, jobId, 'rehearsal', flags, previousFlags, result, {
-        notes: 'Rehearsal space detected from HireHop items',
+        notes: buildRehearsalSummary(flags.rehearsal_detail ?? null),
         snapshot: items.filter(i => i.CATEGORY_ID === REHEARSAL_CATEGORY),
       });
+    }
+
+    // ── Carnet (sale item 575 — we supply a carnet) ──
+    if (flags.has_carnet) {
+      await upsertAutoRequirement(client, jobId, 'carnet', flags, previousFlags, result, {
+        notes: 'ATA Carnet arrangement detected from HireHop — we supply',
+        snapshot: items.filter(i => i.LIST_ID === CARNET_ARRANGEMENT_LIST_ID && i.CATEGORY_ID === MISC_SALE_CATEGORY && i.kind !== 0),
+      });
+
+      // Ensure a job_carnets record exists (we_supply mode). Like the job_excess
+      // auto-create: only inserts if none exists, never clobbers staff progress.
+      // The unique-live index means a 'cancelled' row won't block a fresh one.
+      const existingCarnet = await client.query(
+        `SELECT id FROM job_carnets WHERE job_id = $1 AND status <> 'cancelled' LIMIT 1`,
+        [jobId]
+      );
+      if (existingCarnet.rows.length === 0) {
+        await client.query(
+          `INSERT INTO job_carnets (job_id, mode, status, notes, created_by)
+           VALUES ($1, 'we_supply', 'detected', $2, $3)`,
+          [
+            jobId,
+            'Auto-created: carnet arrangement fee (item 575) detected on HireHop',
+            '00000000-0000-0000-0000-000000000000',
+          ]
+        );
+        result.requirementsCreated.push('carnet_record');
+      }
+    } else {
+      // Carnet no longer detected on HH (or never really was — see the asset/sale
+      // ID-collision note on the detection constant). Remove an UNTOUCHED
+      // auto-created record so false positives self-heal on the next sync.
+      // Mirrors the requirement stale-cleanup below (which deletes not_started
+      // auto requirements). Anything a human has touched (status moved off
+      // 'detected', client form back, application ref, or a lead name entered)
+      // is left intact for manual review.
+      const wiped = await client.query(
+        `DELETE FROM job_carnets
+         WHERE job_id = $1 AND mode = 'we_supply' AND status = 'detected'
+           AND form_submitted_at IS NULL AND application_ref IS NULL AND lead_name IS NULL
+           AND NOT EXISTS (SELECT 1 FROM carnet_gmrs g WHERE g.carnet_id = job_carnets.id)
+         RETURNING id`,
+        [jobId]
+      );
+      if (wiped.rows.length > 0) {
+        result.requirementsUpdated.push('carnet_record (removed — not on HH)');
+      }
     }
 
     // ── Clean up stale requirements ──
     // If HH doesn't have items for a requirement type that was auto-created,
     // remove it (if not_started) or flag it (if staff has acted on it).
-    const DETECTABLE_TYPES = ['vehicle', 'hire_forms', 'excess', 'backline', 'rehearsal'];
+    const DETECTABLE_TYPES = ['vehicle', 'hire_forms', 'excess', 'backline', 'rehearsal', 'carnet'];
     const activeTypes = new Set<string>();
     if (flags.has_vehicle) { activeTypes.add('vehicle'); }
     if (flags.has_vehicle && hasAnySelfDrive && !isInternal) { activeTypes.add('hire_forms'); activeTypes.add('excess'); }
     if (flags.has_backline) { activeTypes.add('backline'); }
     if (flags.has_rehearsal) { activeTypes.add('rehearsal'); }
+    if (flags.has_carnet) { activeTypes.add('carnet'); }
 
     // Every vehicle slot is van_and_driver (or job is internal) —
     // hire_forms/excess are suspended, not stale
@@ -611,7 +708,17 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
     // ── Auto-generate close-out requirements when job reaches return status ──
     // HH status 6=Returned Incomplete, 7=Returned, 8=Requires Attention, 11=Completed
-    const isReturnPhase = hhStatus >= 6 && hhStatus !== 9 && hhStatus !== 10; // exclude cancelled/not interested
+    //
+    // HH status 6 is ambiguous — it fires on a genuine end-of-hire check-in AND
+    // on a mid-hire partial item return (a client hands back one element while
+    // the rest stays out). Gate on the hire-end date so a mid-hire partial does
+    // NOT prematurely spin up invoice / payment / client-followup close-out
+    // cards (which the chase scanner would then nag about while the tour is
+    // still out). Status 7/8/11 mean everything is physically back → always a
+    // genuine return. See CLAUDE.md → "The status-6 no man's land".
+    const isReturnPhase =
+      hhStatus >= 6 && hhStatus !== 9 && hhStatus !== 10 && // exclude cancelled/not interested
+      hireGenuinelyReturning(hhStatus, jobRow?.return_date, jobRow?.job_end);
     // HH status 7+ means everything is physically back (Returned, Requires Attention, Completed)
     const isFullyReturned = hhStatus >= 7 && hhStatus !== 9 && hhStatus !== 10;
 
@@ -653,6 +760,42 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         }
       }
 
+      // Conditional: cost recharge resolution — only if the job has any cost
+      // flagged for client recharge. Skipped on internal jobs (no client to bill).
+      if (!isInternal) {
+        const rechargeCount = await client.query(
+          `SELECT COUNT(*) AS cnt FROM costs WHERE job_id = $1 AND recharge_mode <> 'none'`,
+          [jobId]
+        );
+        if (parseInt(rechargeCount.rows[0]?.cnt || '0') > 0) {
+          await ensureCloseout('cost_resolve', 'Resolve all client recharges (bill to HireHop, bill externally, or absorb)');
+        }
+
+        // Standing "recharge running costs" card — forward-looking, on jobs
+        // declared to recharge their running costs (a quote recharge line or the
+        // Tools toggle). Created amber regardless of whether costs have landed
+        // yet (the whole point: it says "expect the freelancer's fuel/parking
+        // invoice, recharge it"). Manual close via "no further costs".
+        const rrc = await client.query(
+          `SELECT recharge_running_costs FROM jobs WHERE id = $1`,
+          [jobId]
+        );
+        if (rrc.rows[0]?.recharge_running_costs) {
+          const exists = await client.query(
+            `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'recharge_running_costs' AND phase = 'post_hire'`,
+            [jobId]
+          );
+          if (exists.rows.length === 0) {
+            await client.query(
+              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+               VALUES ($1, 'recharge_running_costs', 'in_progress', $2, true, 'auto_post_hire', 'post_hire')`,
+              [jobId, 'Running costs recharged at actual + 20%. Log the freelancer/supplier invoices as they land, recharge each to the client, then mark done when no further costs are expected.']
+            );
+            result.requirementsCreated.push('recharge_running_costs (post_hire)');
+          }
+        }
+      }
+
       // Conditional: freelancer follow-up — only if crew assignments exist
       const crewCount = await client.query(
         `SELECT COUNT(*) AS cnt FROM quote_assignments qa
@@ -664,11 +807,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         await ensureCloseout('freelancer_followup', 'Check in with freelancers — expenses, feedback, issues');
       }
 
-      // Conditional: damage review — only if any vehicle assignment has has_damage=true
+      // Conditional: damage review — only if any vehicle assignment has has_damage=true.
+      // Dual job match: a staff-allocation / V&D row carries only
+      // hirehop_job_id (job_id stays NULL until a hire form is submitted),
+      // so a job_id-only test misses damage flagged on exactly those hires.
       const damageCount = await client.query(
         `SELECT COUNT(*) AS cnt FROM vehicle_hire_assignments
-         WHERE job_id = $1 AND has_damage = true`,
-        [jobId]
+         WHERE has_damage = true
+           AND (job_id = $1 OR ($2::int IS NOT NULL AND hirehop_job_id = $2::int))`,
+        [jobId, hhJobNumber ?? null]
       );
       if (parseInt(damageCount.rows[0]?.cnt || '0') > 0) {
         await ensureCloseout('damage_review', 'Vehicle damage flagged during hire — review and resolve');
@@ -700,6 +847,9 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       // 'in_progress' — including demoting a card staff marked Resolved while
       // money's still in limbo. Replaces the old forward-only autoResolve.
       await syncExcessRequirementStatus(jobId, client);
+      // Same treatment for the cost_resolve card — green only when every
+      // recharge-flagged cost on the job is resolved (pushed/external/absorbed).
+      await syncCostResolveRequirementStatus(jobId, client);
 
       // Client follow-up: check if any interaction exists after return_date
       const postReturnInteraction = await client.query(
@@ -795,6 +945,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
   // ── Seat availability (read-only, outside transaction) ──
   if (flags.seat_config && flags.has_vehicle) {
     result.seatAvailability = await checkSeatAvailability(flags, items);
+  }
+
+  // ── Wind the rehearsal requirement status from sitter coverage ──
+  // Coverage-authoritative: adding/removing a sitter-needed evening re-derives
+  // the status (e.g. a new date winds 'done' back to 'in_progress'). Best-effort.
+  if (flags.has_rehearsal) {
+    try { await syncRehearsalRequirementStatus(jobId); } catch (err) {
+      console.error(`[HH Derive] rehearsal status sync failed for job ${jobId}:`, err);
+    }
   }
 
   return result;
@@ -910,10 +1069,17 @@ async function upsertAutoRequirement(
 type SuspensionReason = 'Van & Driver' | 'Internal';
 
 async function suspendRequirement(client: any, jobId: string, requirementType: string, reason: SuspensionReason): Promise<void> {
-  // Only suspend auto-created pre_hire requirements that aren't already suspended
+  // Suspend the pre_hire requirement of this type regardless of how it was
+  // created. Only ever called for hire_forms / excess, both of which are fully
+  // V&D-/Internal-governed — when the job is wholly Van & Driver (or internal)
+  // they aren't needed no matter their origin. NB: the enquiry-form
+  // "Self-drive van" quick-select inserts these with is_auto=false (column
+  // default), so filtering on is_auto=true here silently skipped them and left
+  // the hire-form/excess chain live on V&D jobs.
   const existing = await client.query(
     `SELECT id, status, notes FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND phase = 'pre_hire'`,
+     WHERE job_id = $1 AND requirement_type = $2 AND phase = 'pre_hire'
+       AND status NOT IN ('cancelled', 'done')`,
     [jobId, requirementType]
   );
   if (existing.rows.length === 0) return;
@@ -933,6 +1099,142 @@ async function suspendRequirement(client: any, jobId: string, requirementType: s
      WHERE id = $2`,
     [updatedNotes, req.id]
   );
+}
+
+/** The marker note stamped on every account-auto-covered excess record. Also
+ *  the signal the frontend keys off to render a distinct "Covered by account"
+ *  pill (via the `auto_covered` flag on excess payloads). */
+export const AUTO_COVER_MARKER = '[Auto-covered by account]';
+
+/** Minimal querier both a transaction client (`client.query`) and the pool
+ *  (`query`) satisfy, so `applyAccountAutoCover` can run inside a hire-form
+ *  transaction OR standalone from quick-assign / derivation. */
+type Querier = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount: number | null }>;
+
+/**
+ * Auto-cover a self-drive hire's excess from the client's standing
+ * held-on-account balance (migration 174). Opt-in + admin-set per client via
+ * `organisations.auto_cover_excess_from_account`.
+ *
+ * Covers EVERY live chargeable excess record on the job — status `needed` /
+ * `pending`, whether it's the pre-hire derivation stub (`assignment_id IS NULL`)
+ * OR an assignment-linked driver record created when a hire form / quick-assign
+ * lands. This is the fix for the "hire form escapes auto-cover" gap: absorbing
+ * the waived stub into a driver assignment un-waives it, so covering only the
+ * stub left the actual driver record reading "Required". Now the WHOLE hire
+ * reads as covered, never "Needed"/"Required" — matching the clarity we give
+ * every other client's excess.
+ *
+ * Sets `excess_status = 'waived'` + the `[Auto-covered by account]` marker so
+ * the dispatch gate, the excess requirement card and the Money tab all treat it
+ * as resolved (waived is in every terminal/covered whitelist), and the UI can
+ * render a distinct purple "Covered by account" pill.
+ *
+ * STANDING cover: the held balance is NOT consumed (it's a rolling deposit,
+ * returned by BACS when the client stops), so repeat hires all draw on the same
+ * balance — acceptable for the trusted regulars this is enabled for. Full cover
+ * only: if the balance is short of the job's total expected excess (a rare
+ * multi-van hire) nothing is covered and staff collect as usual (the "client has
+ * £X on account" banner still shows).
+ *
+ * Marker-gated + idempotent, and safe for the whole population: a record with
+ * real money (`taken`/`partially_paid`/`pre_auth`) or a top-N loser
+ * (`not_required`) is NEVER touched, and the opted-out / balance-short REVERT
+ * only ever flips records WE auto-covered (marker present) back to `needed` —
+ * a manual staff waive (no marker) is left alone. For a non-opted client it runs
+ * only the marker-guarded revert, which matches nothing.
+ *
+ * Runs from three places so a hire is never briefly "Required": the derivation
+ * engine (sync/webhook/on-demand + revert-on-toggle-off), the hire-form POST,
+ * and quick-assign — the last two the instant a driver's excess record is
+ * written.
+ *
+ * @returns counts of records covered / reverted this pass.
+ */
+export async function applyAccountAutoCover(
+  q: Querier,
+  jobId: string,
+  opts?: { jobTotal?: number }
+): Promise<{ covered: number; reverted: number }> {
+  const info = await q(
+    `SELECT COALESCE(o.auto_cover_excess_from_account, false) AS opted_in,
+            j.client_id,
+            COALESCE((j.hh_derived_flags->>'self_drive_count')::int, 0) AS self_drive_count
+     FROM jobs j LEFT JOIN organisations o ON o.id = j.client_id
+     WHERE j.id = $1`,
+    [jobId]
+  );
+  const row = info.rows[0];
+  if (!row) return { covered: 0, reverted: 0 };
+  const optedIn = row.opted_in === true;
+  const clientId = row.client_id || null;
+  // The job's total expected excess = van_count × £1,200. The derivation engine
+  // passes the freshly-computed figure (its capped self_drive_count isn't
+  // persisted to hh_derived_flags until the end of the run); the standalone
+  // hire-form / quick-assign callers omit it and fall back to the persisted flag
+  // (same value those paths already read for their own van-count logic).
+  const jobTotal = opts?.jobTotal != null
+    ? opts.jobTotal
+    : (parseInt(row.self_drive_count, 10) || 0) * 1200;
+
+  // Revert only the records WE auto-covered (marker present) back to a live
+  // requirement — leaves a manual staff waive (no marker) untouched. Does NOT
+  // touch excess_amount_required: each record's required figure (the driver's
+  // individual liability, or the derivation stub's van-total) is maintained by
+  // its own creation/derivation path, so we only flip the status label.
+  //
+  // The pattern is a PLAIN '...' string, never E'...' (Oct 2026). In an E''
+  // string Postgres eats the backslashes, so `\[` arrived as a bare `[`, the
+  // marker became a bracket expression with the invalid range `o-c`, and this
+  // UPDATE threw "invalid regular expression" the first time it met a real row
+  // — rolling back the whole derivation for that job. It had never fired.
+  const revert = async (): Promise<number> => {
+    const r = await q(
+      `UPDATE job_excess
+       SET excess_status = 'needed',
+           claim_notes = NULL,
+           notes = NULLIF(regexp_replace(COALESCE(notes, ''), '\\n?\\[Auto-covered by account\\][^\\n]*', '', 'g'), ''),
+           updated_at = NOW()
+       WHERE job_id = $1
+         AND excess_status = 'waived'
+         AND COALESCE(notes, '') LIKE '%' || $2 || '%'`,
+      [jobId, AUTO_COVER_MARKER]
+    );
+    return r.rowCount || 0;
+  };
+
+  if (!optedIn || !clientId || jobTotal <= 0) {
+    return { covered: 0, reverted: await revert() };
+  }
+
+  // Client's standing held-on-account balance (this job's own records excluded).
+  const bal = await q(
+    `SELECT COALESCE(SUM(h.held_amount), 0) AS balance
+     FROM job_excess je
+     JOIN v_excess_held h ON h.excess_id = je.id
+     JOIN jobs j ON j.id = je.job_id
+     WHERE j.client_id = $1 AND je.held_on_account = TRUE AND je.job_id <> $2`,
+    [clientId, jobId]
+  );
+  const balance = parseFloat(bal.rows[0]?.balance || 0);
+
+  if (balance < jobTotal) {
+    return { covered: 0, reverted: await revert() };
+  }
+
+  const marker = `${AUTO_COVER_MARKER} £${jobTotal.toLocaleString()} covered by £${balance.toLocaleString()} held on account for this client — no fresh excess collected.`;
+  const r = await q(
+    `UPDATE job_excess
+     SET excess_status = 'waived',
+         claim_notes = $2,
+         notes = CASE WHEN COALESCE(notes, '') LIKE '%' || $3 || '%' THEN notes
+                      ELSE COALESCE(notes || E'\n', '') || $2 END,
+         updated_at = NOW()
+     WHERE job_id = $1
+       AND excess_status IN ('needed', 'pending')`,
+    [jobId, marker, AUTO_COVER_MARKER]
+  );
+  return { covered: r.rowCount || 0, reverted: 0 };
 }
 
 /**
@@ -991,9 +1293,12 @@ async function restoreJobExcessFromSuspension(client: any, jobId: string): Promi
  * toggle. Puts it back to its previous status.
  */
 async function restoreSuspendedRequirement(client: any, jobId: string, requirementType: string): Promise<void> {
+  // Mirror suspendRequirement: marker-gated, origin-agnostic (no is_auto filter)
+  // so a manually-created (enquiry-form) hire_forms/excess requirement that was
+  // suspended on V&D gets restored when the job flips back to self-drive.
   const existing = await client.query(
     `SELECT id, notes FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND status = 'blocked' AND phase = 'pre_hire'`,
+     WHERE job_id = $1 AND requirement_type = $2 AND status = 'blocked' AND phase = 'pre_hire'`,
     [jobId, requirementType]
   );
   if (existing.rows.length === 0) return;

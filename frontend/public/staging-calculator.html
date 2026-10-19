@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Staging Calculator — OOOSH Staff Hub</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="icon" href="/android-chrome-192x192.png" type="image/png" sizes="192x192">
+  <link rel="stylesheet" href="/staging-calculator.css?v=2.6">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <header class="page-header">
+      <h1>🏗️ Staging Calculator</h1>
+      <p class="subtitle">Enter desired stage dimensions to calculate deck, leg, and hardware requirements.</p>
+    </header>
+
+    <!-- Input Form -->
+    <div class="card input-card">
+      <form id="calc-form">
+        <!-- Job reference (optional — auto-populates dates from HireHop) -->
+        <div class="form-row job-row">
+          <div class="form-group job-group">
+            <label for="job-number">HireHop Job Number</label>
+            <input type="text" id="job-number" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 13422">
+          </div>
+          <div class="form-group client-group">
+            <label>Client</label>
+            <div class="client-display" id="client-display">—</div>
+          </div>
+        </div>
+
+        <div class="form-row">
+
+          <!-- Unit Toggle (pill style) -->
+          <div class="form-group unit-group">
+            <label>Units</label>
+            <div class="unit-toggle-pill" id="unit-toggle-pill">
+              <button type="button" class="unit-btn active" data-unit="m">m</button>
+              <button type="button" class="unit-btn" data-unit="ft">ft / in</button>
+            </div>
+          </div>
+
+          <!-- Length -->
+          <div class="form-group dim-group">
+            <label id="length-label">Length</label>
+            <div class="input-metric" id="length-metric">
+              <input type="number" id="stage-length-m" step="any" min="0.01" placeholder="m" required>
+            </div>
+            <div class="input-imperial hidden" id="length-imperial">
+              <input type="number" id="stage-length-ft" step="1" min="0" placeholder="ft">
+              <span class="imperial-sep">'</span>
+              <input type="number" id="stage-length-in" step="0.25" min="0" max="11.75" placeholder="in">
+              <span class="imperial-sep">"</span>
+            </div>
+          </div>
+
+          <!-- Width -->
+          <div class="form-group dim-group">
+            <label id="width-label">Width</label>
+            <div class="input-metric" id="width-metric">
+              <input type="number" id="stage-width-m" step="any" min="0.01" placeholder="m" required>
+            </div>
+            <div class="input-imperial hidden" id="width-imperial">
+              <input type="number" id="stage-width-ft" step="1" min="0" placeholder="ft">
+              <span class="imperial-sep">'</span>
+              <input type="number" id="stage-width-in" step="0.25" min="0" max="11.75" placeholder="in">
+              <span class="imperial-sep">"</span>
+            </div>
+          </div>
+
+          <!-- Height -->
+          <div class="form-group dim-group">
+            <label id="height-label">Height</label>
+            <div class="input-metric" id="height-metric">
+              <input type="number" id="stage-height-m" step="any" min="0.01" placeholder="m" required>
+            </div>
+            <div class="input-imperial hidden" id="height-imperial">
+              <input type="number" id="stage-height-ft" step="1" min="0" placeholder="ft">
+              <span class="imperial-sep">'</span>
+              <input type="number" id="stage-height-in" step="0.25" min="0" max="11.75" placeholder="in">
+              <span class="imperial-sep">"</span>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="form-row">
+          <!-- Combiner Mode -->
+          <div class="form-group combiner-group">
+            <label for="combiner-mode">Combiners</label>
+            <select id="combiner-mode">
+              <option value="all">Use everywhere (fewer legs)</option>
+              <option value="interior-only">Interior junctions only</option>
+              <option value="none">No combiners (separate legs)</option>
+            </select>
+          </div>
+
+          <!-- Screwjack toggle — shown inline with combiners -->
+          <div class="form-group" style="align-self:flex-end; padding-bottom:6px; white-space:nowrap">
+            <label style="display:flex; align-items:center; gap:6px; font-weight:500; cursor:pointer">
+              <input type="checkbox" id="use-screwjacks" checked
+                style="width:16px; height:16px; cursor:pointer; accent-color:#4f46e5">
+              Use screwjacks
+            </label>
+          </div>
+
+          <!-- Date Range (optional — for availability checking) -->
+          <div class="form-group date-group">
+            <label for="avail-start">Dates (optional)</label>
+            <div class="date-range-inputs">
+              <input type="date" id="avail-start" placeholder="Start">
+              <span class="date-sep">→</span>
+              <input type="date" id="avail-end" placeholder="End">
+            </div>
+          </div>
+
+          <!-- Calculate Button -->
+          <div class="form-group btn-group">
+            <button type="submit" class="btn btn-calculate">Calculate</button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <!-- Results (populated by JS) -->
+    <div id="results" class="results hidden"></div>
+
+    <!--
+      Action buttons and push-to-job live here, OUTSIDE the results div.
+      This means they are permanent DOM fixtures — no innerHTML operation
+      on the results div or accessories container can ever wipe them.
+      JS updates their *content* directly via getElementById.
+    -->
+    <div id="action-buttons-container"></div>
+    <div id="push-section-container"></div>
+
+  </div>
+
+  <!-- Pako for URL compression (tiny — ~13KB gzipped) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+  <script src="/staging-calculator.js?v=2.6"></script>
+</body>
+</html>

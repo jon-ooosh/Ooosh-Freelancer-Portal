@@ -14,12 +14,15 @@
  */
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { deriveFlags } from '../services/hh-requirement-derivation';
 import type { HHLineItem } from '../services/hirehop-job-sync';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // Candidate pipeline statuses we'll consider scanning. Provisional is
 // excluded — provisional is "basically confirmed, waiting on £" per jon,
@@ -154,7 +157,7 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
       `SELECT
          j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
          j.pipeline_status, j.job_date, j.job_end, j.job_value,
-         j.line_items, j.vehicle_slot_modes, j.hold_reason,
+         j.line_items, j.vehicle_slot_modes, j.hold_reason, j.group_id,
          (SELECT p.first_name || ' ' || p.last_name FROM people p WHERE p.id = j.manager1_person_id) AS manager_name,
          NULL::timestamptz AS last_interaction_at,
          NULL::text AS last_interaction_snippet
@@ -207,9 +210,13 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
          AND j.job_date <= $4::timestamptz
          AND j.job_end >= $3::timestamptz
          AND j.job_end >= CURRENT_DATE - INTERVAL '1 day'
+         -- Quote options: the other options of the SAME enquiry are not
+         -- replacements for each other — the slot is being used by the one
+         -- the client picked (docs/QUOTE-VERSIONS-SPEC.md §8).
+         AND ($5::uuid IS NULL OR j.group_id IS DISTINCT FROM $5::uuid)
        ORDER BY j.job_date ASC
        LIMIT 100`,
-      [jobId, CANDIDATE_STATUSES, freed.job_date, freed.job_end]
+      [jobId, CANDIDATE_STATUSES, freed.job_date, freed.job_end, (freed as { group_id?: string | null }).group_id ?? null]
     );
 
     const freedFlags = rowToFlags(freed);

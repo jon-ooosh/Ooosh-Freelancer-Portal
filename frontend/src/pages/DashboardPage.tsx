@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFirstName } from '../lib/displayName';
 import type { OperationsData, BacklineOverview } from '../components/dashboard/types';
 import { StatCard } from '../components/dashboard/v2/primitives';
 import { SECTIONS } from '../components/dashboard/v2/registry';
@@ -105,7 +106,7 @@ export default function DashboardPage() {
   }
 
   const stats = data.stat_cards;
-  const userName = user?.first_name || 'there';
+  const userName = displayFirstName(user);
 
   return (
     <div

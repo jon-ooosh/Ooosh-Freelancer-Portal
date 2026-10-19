@@ -18,6 +18,7 @@ import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { knotsToMph } from '../types/traccar'
 import type { IssueLocation } from '../types/issue'
 import { withRetry } from '../lib/retry'
+import OohCheckInPrompt from '../../../components/OohCheckInPrompt'
 import { mapSeverityToOpSeverity } from '../lib/op-issue-mapping'
 import { VehicleIssuesSurfaceBanner } from '../components/issues/VehicleIssuesSurfaceBanner'
 import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
@@ -33,7 +34,7 @@ import type {
   CapturedPhoto,
   DamageItem,
 } from '../types/vehicle-event'
-import { FUEL_LEVELS, DAMAGE_LOCATIONS } from '../types/vehicle-event'
+import { FUEL_LEVELS, DAMAGE_LOCATIONS, isFuelReduction } from '../types/vehicle-event'
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
@@ -94,7 +95,7 @@ export function CheckInPage() {
   const [queuedOffline, setQueuedOffline] = useState(false)
 
   // Form autosave
-  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft } = useFormAutosave({
+  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft, acceptDraft } = useFormAutosave({
     flowType: 'check-in',
     disabled: submitSuccess || queuedOffline,
   })
@@ -177,7 +178,7 @@ export function CheckInPage() {
       signatureBlob: draftLoaded.signatureBlob,
     })
     setStep(draftLoaded.step)
-    dismissDraft()
+    acceptDraft()
   }
 
   // Fetch driver hire forms for this job (for hire dates, insurance, etc.)
@@ -256,6 +257,9 @@ export function CheckInPage() {
       front_right: 'Front Right',
       rear_left: 'Rear Left',
       rear_right: 'Rear Right',
+      right_panel: 'Passenger Side',
+      rear_doors: 'Rear Centre',
+      rear_door_driver: 'Rear Centre',
       windscreen: 'Windscreen',
       interior_front: 'Interior',
       interior_rear: 'Interior',
@@ -319,12 +323,41 @@ export function CheckInPage() {
 
         setCheckInStatus(ciStatus)
 
+        // The van's CURRENT hire comes from the DB assignment (authoritative),
+        // NOT the latest R2 book-out event. They diverge when a book-out flips
+        // the assignment status but its history event never landed — the event
+        // query then returns a STALE book-out from a previous hire, and we'd
+        // otherwise stamp this check-in against the wrong job (RX73TBZ 16057↔
+        // 16149, Jun 2026: the Unpeople return got recorded against the prior
+        // Ritchie Prior hire). Prefer the eligibility job whenever present.
+        // Coerce to string to match the existing book-out job pipeline
+        // (form.bookOutHireHopJob + getCollection are string-typed; the
+        // eligibility endpoint returns the job as a number).
+        const authoritativeJob =
+          !ciStatus.alreadyCheckedIn && ciStatus.hirehopJob != null
+            ? String(ciStatus.hirehopJob)
+            : null
+
         if (bookOut) {
+          if (
+            authoritativeJob != null &&
+            bookOut.hireHopJob != null &&
+            authoritativeJob !== bookOut.hireHopJob
+          ) {
+            console.warn(
+              `[check-in] Book-out event job (${bookOut.hireHopJob}) disagrees ` +
+                `with the van's open assignment (${authoritativeJob}) for ` +
+                `${form.vehicleReg} — using the assignment job. The book-out ` +
+                `history event for the live hire is likely stale or missing.`,
+            )
+          }
+          const resolvedJob = authoritativeJob ?? bookOut.hireHopJob
+
           // Fetch photos from R2 + collection data (if exists)
           const [photos, collection] = await Promise.all([
             fetchBookOutPhotos(bookOut.id, form.vehicleReg),
-            bookOut.hireHopJob
-              ? getCollection(form.vehicleReg, bookOut.hireHopJob)
+            resolvedJob
+              ? getCollection(form.vehicleReg, resolvedJob)
               : Promise.resolve(null),
           ])
           if (cancelled) return
@@ -340,7 +373,7 @@ export function CheckInPage() {
             bookOutMileage: bookOut.mileage,
             bookOutFuelLevel: bookOut.fuelLevel,
             bookOutDriverName: bookOut.driverName,
-            bookOutHireHopJob: bookOut.hireHopJob,
+            bookOutHireHopJob: resolvedJob,
             bookOutClientEmail: bookOut.clientEmail,
             bookOutNotes: bookOut.notes,
             bookOutPhotos: photos,
@@ -416,11 +449,21 @@ export function CheckInPage() {
       ? mileageNum - form.bookOutMileage
       : null
 
+    // Swapped-out van: the client handed it over AT THE SWAP, so the swap's
+    // soft check-in reading is their end point. Blank swap readings (common
+    // for a breakdown) mean no client comparison — never a fall-back to the
+    // base reading, which includes recovery / garage / our own driving.
+    const swapReading = !collectionData && checkInStatus?.swapped
+      ? (checkInStatus.swapReading ?? { mileage: null, fuelLevel: null, at: null })
+      : null
+
     // Client-chargeable miles: book-out to collection (if collection data exists)
     // The drive from collection point back to base is not the client's responsibility
     const clientMilesDriven = collectionData && form.bookOutMileage
       ? collectionData.mileage - form.bookOutMileage
-      : mileageDiff
+      : swapReading
+        ? (swapReading.mileage != null && form.bookOutMileage ? swapReading.mileage - form.bookOutMileage : null)
+        : mileageDiff
 
     // ── Step 1: Create Monday.com Check In event ──
     setUploadProgress('Creating check-in event...')
@@ -438,6 +481,8 @@ export function CheckInPage() {
             mileageDiff != null ? `Total miles (book-out to base): ${mileageDiff.toLocaleString()}` : null,
             collectionData ? `Client miles (book-out to collection): ${clientMilesDriven?.toLocaleString() ?? '?'}` : null,
             collectionData ? `Collection fuel: ${collectionData.fuelLevel} (by ${collectionData.collectedBy})` : null,
+            swapReading ? `Swapped out mid-hire. Client miles (book-out to swap): ${clientMilesDriven?.toLocaleString() ?? 'not recorded'}` : null,
+            swapReading ? `Swap fuel: ${swapReading.fuelLevel || 'not recorded'}` : null,
             `Photos: ${form.photos.length} captured`,
             form.damageItems.length > 0 ? `Damage items: ${form.damageItems.length}` : 'No new damage',
             !form.driverPresent ? 'Driver not present at check-in' : null,
@@ -447,6 +492,13 @@ export function CheckInPage() {
           hireHopJob: form.bookOutHireHopJob || null,
           clientEmail: form.bookOutClientEmail || null,
           hireStatus: 'Prep Needed',
+          // Drives vehicle_hire_assignments.has_damage server-side, which is
+          // what gates the post-hire `damage_review` close-out card. Never
+          // sent before Sept 2026, so the card had never once appeared.
+          hasDamage: form.damageItems.length > 0,
+          // Persist the returning driver as a first-class field so a later
+          // PDF regeneration doesn't have to parse it out of `details`.
+          driverName: form.bookOutDriverName || null,
         }),
       'R2 event creation',
     )
@@ -569,12 +621,20 @@ export function CheckInPage() {
       let issuesReflagged = 0
       const createdIssueIds: string[] = []
       for (const damage of form.damageItems) {
-        if (!damage.description.trim()) continue
         try {
           const componentKey = `bodywork_${damage.location.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 50) || 'general'}`
+          // A damage item with no typed description is still a real damage
+          // report — location, severity and photos say plenty, and the
+          // Description box is optional with no validation behind it. This
+          // used to `continue` past any blank description, dropping the
+          // whole issue SILENTLY: the dent reached the condition-report PDF
+          // (which needs no description) but never the Problems register
+          // (job 15428 / RX24SZD, Sept 2026). Fall back, never skip.
+          const damageDesc = damage.description.trim()
+            || `${damage.severity} damage flagged at check-in — see photos`
           const locationNote = issueLocation
-            ? `${damage.description} [GPS: ${issueLocation.lat.toFixed(5)}, ${issueLocation.lng.toFixed(5)}]`
-            : damage.description
+            ? `${damageDesc} [GPS: ${issueLocation.lat.toFixed(5)}, ${issueLocation.lng.toFixed(5)}]`
+            : damageDesc
           const damagePhotoKeys = damageKeysByItemId[damage.id] || []
           const resp = await apiFetch('/api/problems/auto-create', {
             method: 'POST',
@@ -585,7 +645,7 @@ export function CheckInPage() {
               category: 'damaged',
               source_module: 'vehicle',
               severity: mapSeverityToOpSeverity(damage.severity),
-              summary: `${damage.location}: ${damage.description}`.slice(0, 250),
+              summary: `${damage.location}: ${damageDesc}`.slice(0, 250),
               description: locationNote,
               // Link the issue to the job — resolved to the OP UUID
               // server-side. Without this, check-in damage issues were
@@ -618,17 +678,23 @@ export function CheckInPage() {
         }
       }
 
-      if (issuesCreated > 0 || issuesReflagged > 0 || issuesFailed > 0) {
-        const parts: string[] = []
-        if (issuesCreated) parts.push(`${issuesCreated} new`)
-        if (issuesReflagged) parts.push(`${issuesReflagged} re-flagged`)
-        if (issuesFailed) parts.push(`${issuesFailed} failed`)
-        results.push({
-          label: 'Damage issues logged',
-          success: issuesFailed === 0,
-          detail: parts.join(' · '),
-        })
-      }
+      // ALWAYS render this row once damage has been flagged. The old guard
+      // (`created || reflagged || failed`) meant a damage set that produced
+      // no issues at all rendered NO row — so staff saw a clean success
+      // screen with no hint the damage hadn't been logged anywhere. Silence
+      // was what made the 15428 skip invisible for a day; the fallback above
+      // fixes the cause, this makes any future gap impossible to miss.
+      const parts: string[] = []
+      if (issuesCreated) parts.push(`${issuesCreated} new`)
+      if (issuesReflagged) parts.push(`${issuesReflagged} re-flagged`)
+      if (issuesFailed) parts.push(`${issuesFailed} failed`)
+      results.push({
+        label: 'Damage issues logged',
+        success: issuesFailed === 0 && (issuesCreated + issuesReflagged) > 0,
+        detail: parts.length > 0
+          ? parts.join(' · ')
+          : `0 logged from ${form.damageItems.length} damage item(s) — log manually on the job`,
+      })
 
       // ── Step 3b: TTS360 repair quote (optional) ──
       // Fires AFTER the auto-create loop so we have all the issue IDs.
@@ -744,12 +810,18 @@ export function CheckInPage() {
     setUploadProgress('Generating PDF & sending email...')
     const emailTo = form.bookOutClientEmail
     // Calculate fuel difference for email alert.
-    // When collection data exists, use collection fuel for client charge comparison
-    // (the drive from collection point to base uses fuel that's not the client's responsibility)
-    const clientFuelRef = collectionData?.fuelLevel || form.bookOutFuelLevel
-    const clientFuelLabel = collectionData ? 'collection' : 'book-out'
-    const fuelDiff = clientFuelRef && form.fuelLevel && clientFuelRef !== form.fuelLevel
-      ? `${clientFuelRef} (${clientFuelLabel}) -> ${form.fuelLevel} (base)`
+    // The client's fuel is book-out vs the point THEY handed the van back:
+    // the collection reading when a freelancer collected it (the drive from
+    // collection point to base uses fuel that's not the client's
+    // responsibility), otherwise the check-in reading. Comparing collection
+    // against base measured our own driver's fuel use (16616, Oct 2026).
+    // Only a REDUCTION alerts — more fuel coming back isn't the client's problem.
+    const clientReturnFuel = collectionData ? collectionData.fuelLevel
+      : swapReading ? swapReading.fuelLevel
+      : form.fuelLevel
+    const clientReturnLabel = collectionData ? 'collection' : swapReading ? 'swap' : 'check-in'
+    const fuelDiff = isFuelReduction(form.bookOutFuelLevel, clientReturnFuel)
+      ? `${form.bookOutFuelLevel} at book-out -> ${clientReturnFuel} at ${clientReturnLabel}`
       : null
 
     if (!emailTo && !form.bookOutHireHopJob) {
@@ -766,6 +838,7 @@ export function CheckInPage() {
       () =>
         sendConditionReport(
           {
+            eventId,
             vehicleReg: form.vehicleReg,
             vehicleType: form.vehicleType,
             vehicleMake: selectedVehicle?.make,
@@ -790,6 +863,16 @@ export function CheckInPage() {
             bookOutMileage: form.bookOutMileage,
             bookOutFuelLevel: form.bookOutFuelLevel,
             bookOutDate: form.bookOutDate,
+            // Freelancer collection reading, so the PDF shows the same
+            // book-out -> collection comparison the email does
+            collectionMileage: collectionData?.mileage ?? null,
+            collectionFuelLevel: collectionData?.fuelLevel ?? null,
+            collectionDateTime: collectionData?.collectedAt ?? null,
+            // Swapped-out van: the swap reading is the client's end point
+            swappedOut: !!swapReading,
+            swapMileage: swapReading?.mileage ?? null,
+            swapFuelLevel: swapReading?.fuelLevel ?? null,
+            swapDateTime: swapReading?.at ?? null,
             driverPresent: form.driverPresent,
             damageItems: damageItemsWithBase64,
           },
@@ -799,6 +882,7 @@ export function CheckInPage() {
             damageCount: form.damageItems.length,
             fuelDifference: fuelDiff,
             milesDriven: clientMilesDriven,
+            swappedOut: !!swapReading,
           },
         ),
       'Check-in report PDF + email',
@@ -1027,6 +1111,12 @@ export function CheckInPage() {
             {form.vehicleReg} checked in
           </p>
         </div>
+
+        {/* OOH return compliance capture — renders only if this was an OOH return */}
+        <OohCheckInPrompt
+          reg={form.vehicleReg}
+          hhJobNumber={form.bookOutHireHopJob ? (parseInt(form.bookOutHireHopJob, 10) || null) : null}
+        />
 
         {opResults.length > 0 && (
           <div className="space-y-2">
@@ -1519,6 +1609,33 @@ function StepReviewBookOut({
         </div>
       )}
 
+      {/* Swapped out mid-hire — the client handed the van over at the swap */}
+      {!collectionData && checkInStatus?.swapped && (() => {
+        const sr = checkInStatus.swapReading
+        const at = sr?.at ? new Date(sr.at) : null
+        const atStr = at && !Number.isNaN(at.getTime())
+          ? at.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+          : 'Not recorded'
+        const nothingRecorded = sr?.mileage == null && !sr?.fuelLevel
+        return (
+          <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4">
+            <p className="text-xs font-semibold text-purple-800 uppercase mb-2">
+              Swapped Out Mid-Hire
+            </p>
+            <div className="space-y-1 text-sm">
+              <SummaryRow label="Swapped" value={atStr} />
+              <SummaryRow label="Mileage at Swap" value={sr?.mileage != null ? `${sr.mileage.toLocaleString()} mi` : 'Not recorded'} />
+              <SummaryRow label="Fuel at Swap" value={sr?.fuelLevel || 'Not recorded'} />
+            </div>
+            <p className="mt-2 text-xs text-purple-600">
+              {nothingRecorded
+                ? 'No readings were recorded at the swap, so this check-in will not flag fuel or miles to the client.'
+                : 'Client fuel and miles are taken from the swap reading, not the base reading.'}
+            </p>
+          </div>
+        )
+      })()}
+
       {lightbox && (
         <PhotoLightbox
           src={lightbox.src}
@@ -1611,17 +1728,23 @@ function StepCurrentState({
             </button>
           ))}
         </div>
-        {/* Comparison with book-out */}
-        {form.bookOutFuelLevel && (
-          <p className="mt-1.5 text-xs text-gray-400">
-            Book-out fuel: {form.bookOutFuelLevel}
-            {form.fuelLevel && form.fuelLevel !== form.bookOutFuelLevel && (
-              <span className="ml-1 font-medium text-amber-600">
-                (changed)
-              </span>
-            )}
-          </p>
-        )}
+        {/* Comparison with book-out — active prompt when fuel dropped. */}
+        {form.bookOutFuelLevel && (() => {
+          const outIdx = FUEL_LEVELS.indexOf(form.bookOutFuelLevel as FuelLevel)
+          const inIdx = form.fuelLevel ? FUEL_LEVELS.indexOf(form.fuelLevel) : -1
+          const dropped = inIdx >= 0 && outIdx >= 0 && inIdx < outIdx
+          return (
+            <div className="mt-1.5 text-xs">
+              <span className="text-gray-400">Book-out fuel: {form.bookOutFuelLevel}</span>
+              {form.fuelLevel && form.fuelLevel === form.bookOutFuelLevel && <span className="ml-1 text-gray-400">(unchanged)</span>}
+              {dropped && (
+                <div className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+                  ⛽ Fuel down ({form.bookOutFuelLevel} → {form.fuelLevel}) — if this hire recharges running costs, the refuel is chargeable. Log the fuel receipt against the job (Money → Costs).
+                </div>
+              )}
+            </div>
+          )
+        })()}
         {form.fuelLevel && (
           <div className="mt-3 overflow-hidden rounded-full bg-gray-100">
             <div
@@ -1772,7 +1895,7 @@ function StepDamageReport({
 
           {/* Description */}
           <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">Description</label>
+            <label className="mb-1 block text-xs font-medium text-gray-600">Description (optional)</label>
             <textarea
               value={item.description}
               onChange={e => updateItem(item.id, { description: e.target.value })}

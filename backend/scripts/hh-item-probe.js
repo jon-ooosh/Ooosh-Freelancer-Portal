@@ -113,10 +113,61 @@ async function listCategories() {
   }
 }
 
+// ── Item-master probe (find where the front-panel photo lives) ─────────
+async function probeItemMaster(listId) {
+  console.log(`\n${'='.repeat(70)}`);
+  console.log(`  HireHop Stock-Item Master probe — LIST_ID ${listId}`);
+  console.log(`  (Hunting for the image/photo field — not present on the job pull)`);
+  console.log(`${'='.repeat(70)}\n`);
+
+  // The job pull has no image field, and the public hirehop.info URL uses an
+  // internal asset id (e.g. 2346_592) that is NOT the LIST_ID. So the photo
+  // filename must live on the stock-item master record. We don't know the
+  // endpoint, so try several and dump whatever returns.
+  const candidates = [
+    ['/api/item_data.php', { item: listId }],
+    ['/php_functions/item_data.php', { item: listId }],
+    ['/php_functions/item_refresh.php', { item: listId }],
+    ['/php_functions/stock_item.php', { id: listId }],
+    ['/frames/item_data.php', { item: listId }],
+    ['/api/stock.php', { id: listId }],
+  ];
+
+  for (const [endpoint, params] of candidates) {
+    try {
+      const data = await hhGet(endpoint, params);
+      const ok = data && typeof data === 'object' && !data.error &&
+                 Object.keys(data).length > 0;
+      console.log(`  ${ok ? '✓' : '✗'} ${endpoint} → ${
+        typeof data === 'string' ? data.slice(0, 80)
+          : JSON.stringify(Object.keys(data || {})).slice(0, 200)}`);
+      if (ok) {
+        // Dump any field that smells like an image/asset reference
+        for (const [k, v] of Object.entries(data)) {
+          const lk = k.toLowerCase();
+          if (lk.includes('img') || lk.includes('image') || lk.includes('photo') ||
+              lk.includes('upload') || lk.includes('asset') || lk.includes('file') ||
+              lk.includes('pic') || lk.includes('thumb') ||
+              (typeof v === 'string' && /\.(png|jpe?g|webp)/i.test(v))) {
+            console.log(`      ⮑ ${k}: ${JSON.stringify(v).slice(0, 160)}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`  ✗ ${endpoint} → error: ${e.message}`);
+    }
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 async function main() {
   if (ARG === '--categories') {
     return listCategories();
+  }
+  if (ARG === '--item') {
+    const listId = process.argv[3];
+    if (!listId) { console.error('Usage: node hh-item-probe.js --item <LIST_ID>'); process.exit(1); }
+    return probeItemMaster(listId);
   }
 
   console.log(`\n${'='.repeat(70)}`);
@@ -186,6 +237,9 @@ async function main() {
     }
   }
 
+  // ── 1b. RACK PLANNER analysis (LFT/RGT tree + classification) ──
+  rackAnalysis(items);
+
   // ── 2. job_data.php (alternative endpoint with embedded items) ──
   console.log('\n\n━━━ ENDPOINT 2: job_data.php ━━━');
   console.log('(Alternative — returns job data with embedded items array)\n');
@@ -232,6 +286,129 @@ async function main() {
   }
   console.log(`\nAll field names seen across items_to_supply_list response:`);
   console.log(`  ${[...allFields].sort().join(', ')}`);
+}
+
+// ── Rack Planner analysis ──────────────────────────────────────────────
+// Answers the three §5 open questions in one pass:
+//   Q1 — do autopulled accessories (looms/IEC/Cat5) surface as their own lines?
+//   Q2 — does the job pull group package components under a parent (LFT/RGT)?
+//   Q3 — are all pre-built packages VIRTUAL (no non-virtual packages)?
+function rackAnalysis(items) {
+  console.log('\n\n━━━ RACK PLANNER ANALYSIS ━━━\n');
+
+  const getField = (item, ...names) => {
+    for (const n of names) if (item[n] !== undefined && item[n] !== null) return item[n];
+    return undefined;
+  };
+  const isVirtual = (item) => {
+    const v = getField(item, 'VIRTUAL', 'virtual');
+    return v === '1' || v === 1 || v === true || v === 'Yes' || v === 'yes';
+  };
+  // rackheight can be a flat value or a {type,value} shape (like preptimemins)
+  const rackHeight = (item) => {
+    const cf = getField(item, 'TYPE_CUSTOM_FIELDS', 'CUSTOM_FIELDS') || {};
+    let rh = cf.rackheight;
+    if (rh && typeof rh === 'object') rh = rh.value;
+    return rh !== undefined && rh !== null && rh !== '' ? Number(rh) : null;
+  };
+  // rackwidth: a HireHop checkbox custom field — ticked (truthy) = HALF width
+  // (two fit across a 19" bay). Field is named `rackwidth`; absent = full width.
+  const halfWidth = (item) => {
+    const cf = getField(item, 'TYPE_CUSTOM_FIELDS', 'CUSTOM_FIELDS') || {};
+    let hw = cf.rackwidth ?? cf.halfwidth;
+    if (hw && typeof hw === 'object') hw = hw.value;
+    return hw === 1 || hw === '1' || hw === true || hw === 'true' || hw === 'yes' || hw === 'Yes';
+  };
+  // Hunt for any field that might carry the front-panel photo path/filename
+  const imageFields = (item) => {
+    const out = {};
+    for (const [k, v] of Object.entries(item)) {
+      const lk = k.toLowerCase();
+      if (lk.includes('img') || lk.includes('image') || lk.includes('photo') ||
+          lk.includes('upload') || lk.includes('pic') || lk.includes('thumb') ||
+          (typeof v === 'string' && /\.(png|jpe?g|webp)$/i.test(v))) {
+        out[k] = v;
+      }
+    }
+    return out;
+  };
+
+  // Classify each item the way the picker would
+  function classify(item) {
+    const kind = Number(getField(item, 'kind') ?? 2);
+    if (kind === 0) return 'header';
+    if (kind === 4) return 'service/crew';
+    if (isVirtual(item)) return 'PRE-BUILT (virtual)';
+    if (rackHeight(item) > 0) return 'U-ITEM (rackable)';
+    return 'loose / autopull?';
+  }
+
+  // Build LFT/RGT containment tree — a child sits inside parent's [LFT, RGT]
+  const enriched = items.map((item, idx) => ({
+    idx,
+    item,
+    name: getField(item, 'title', 'NAME', 'name', 'DESCRIPTION') || '(no name)',
+    kind: Number(getField(item, 'kind') ?? 2),
+    lft: Number(getField(item, 'LFT', 'lft') ?? 0),
+    rgt: Number(getField(item, 'RGT', 'rgt') ?? 0),
+    virtual: isVirtual(item),
+    rh: rackHeight(item),
+    hw: halfWidth(item),
+    listId: getField(item, 'LIST_ID', 'ITEM_ID', 'ID'),
+    autopull: getField(item, 'AUTOPULL'),
+    cat: getField(item, 'CATEGORY_ID', 'ACC_CATEGORY'),
+    cls: classify(item),
+    imgs: imageFields(item),
+  }));
+
+  // Flat table
+  console.log('All lines (in returned order):');
+  console.log('  ' + ['#', 'kind', 'LFT', 'RGT', 'virt', 'rackH', 'halfW', 'cat', 'LIST_ID', 'class', 'name'].join('\t'));
+  for (const e of enriched) {
+    console.log('  ' + [
+      e.idx + 1, e.kind, e.lft, e.rgt, e.virtual ? 'Y' : '-',
+      e.rh ?? '-', e.hw ? '½' : '-', e.cat ?? '-', e.listId ?? '-', e.cls, e.name,
+    ].join('\t'));
+  }
+
+  // Nested-set tree: for each item, its parent is the narrowest enclosing range
+  console.log('\nLFT/RGT containment tree (indent = nested inside):');
+  const hasNesting = enriched.some((e) => e.rgt > e.lft + 1);
+  if (!hasNesting) {
+    console.log('  ⚠ No nesting detected (all RGT == LFT+1). Package grouping is NOT');
+    console.log('    expressed via LFT/RGT on this job — Q2 needs a fallback rule.');
+  }
+  for (const e of enriched) {
+    // Count how many other items strictly enclose this one
+    const depth = enriched.filter((p) =>
+      p !== e && p.lft < e.lft && p.rgt > e.rgt && p.lft > 0).length;
+    const indent = '  ' + '    '.repeat(depth);
+    const tag = e.virtual ? '[PRE-BUILT]' : (e.rh > 0 ? `[U-ITEM ${e.rh}U${e.hw ? ' ½w' : ''}]` : '[loose]');
+    console.log(`${indent}${tag} ${e.name}  (LFT ${e.lft}–${e.rgt})`);
+  }
+
+  // Image-field report (does the job pull carry a derivable photo path?)
+  console.log('\nImage/photo-related fields seen on items:');
+  const withImgs = enriched.filter((e) => Object.keys(e.imgs).length > 0);
+  if (withImgs.length === 0) {
+    console.log('  ⚠ None. Photo path is NOT in the job pull — must derive from the');
+    console.log('    item master / construct the hirehop.info URL from name + ID.');
+  } else {
+    for (const e of withImgs) {
+      console.log(`  "${e.name}": ${JSON.stringify(e.imgs)}`);
+    }
+  }
+
+  // Answers summary
+  const autopullCandidates = enriched.filter((e) =>
+    !e.virtual && e.rh === null && e.kind === 2);
+  console.log('\n── §5 answers from this job ──');
+  console.log(`  Q1 (autopulls as lines): ${autopullCandidates.length} non-virtual, non-rackable kind:2 lines`);
+  console.log('       (looms/IEC/Cat5 should be in here if they surface — eyeball the names above)');
+  console.log(`  Q2 (grouping): ${hasNesting ? 'LFT/RGT nesting PRESENT — collapse packages by containment' : 'NO nesting — needs fallback rule'}`);
+  const nonVirtPackages = enriched.filter((e) => !e.virtual && e.rgt > e.lft + 1);
+  console.log(`  Q3 (non-virtual packages): ${nonVirtPackages.length} non-virtual items that enclose children`);
+  console.log(`       ${nonVirtPackages.length === 0 ? '✓ none — VIRTUAL rule holds' : '⚠ found some — VIRTUAL rule has a gap, inspect above'}`);
 }
 
 main().catch(err => {

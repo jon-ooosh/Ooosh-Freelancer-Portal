@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stage Configuration — Ooosh Tours</title>
+
+  <!-- Favicon -->
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="icon" href="/favicon-192.png" type="image/png" sizes="192x192">
+
+  <!-- Open Graph meta tags — makes shared links look nice in emails, WhatsApp, Slack etc -->
+  <meta property="og:title" content="Stage Configuration — Ooosh Tours">
+  <meta property="og:description" content="Interactive 3D stage layout preview. Rotate, zoom, and explore the proposed staging configuration.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://staff.oooshtours.co.uk/android-chrome-192x192.png">
+  <meta property="og:image:width" content="192">
+  <meta property="og:image:height" content="192">
+  <meta property="og:site_name" content="Ooosh Tours">
+
+  <!-- Twitter card (used by many apps as fallback) -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Stage Configuration — Ooosh Tours">
+  <meta name="twitter:description" content="Interactive 3D stage layout preview from Ooosh Tours.">
+  <meta name="twitter:image" content="https://staff.oooshtours.co.uk/android-chrome-192x192.png">
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: #0c0f14;
+      color: #e8eaed;
+      overflow: hidden;
+      height: 100vh;
+    }
+
+    /* ── Top bar ── */
+    .top-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      background: linear-gradient(180deg, rgba(12,15,20,0.95) 0%, rgba(12,15,20,0) 100%);
+      pointer-events: none;
+    }
+    .top-bar > * { pointer-events: auto; }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      object-fit: contain;
+    }
+    .brand-text {
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.02em;
+      color: #f1f5f9;
+    }
+    .brand-sub {
+      font-size: 11px;
+      color: #64748b;
+      font-family: 'Space Mono', monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    /* ── Dimensions panel ── */
+    .dims-panel {
+      position: fixed;
+      bottom: 24px;
+      left: 24px;
+      z-index: 100;
+      background: rgba(15, 18, 25, 0.9);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 14px;
+      padding: 20px 24px;
+      min-width: 220px;
+    }
+    .dims-title {
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: #64748b;
+      margin-bottom: 14px;
+    }
+    .dim-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .dim-row:last-child { border-bottom: none; }
+    .dim-name {
+      font-size: 13px;
+      color: #94a3b8;
+      font-weight: 500;
+    }
+    .dim-val {
+      font-family: 'Space Mono', monospace;
+      font-size: 15px;
+      font-weight: 700;
+      color: #f1f5f9;
+    }
+    .dim-secondary-val {
+      font-family: 'Space Mono', monospace;
+      font-size: 11px;
+      color: #475569;
+      margin-left: 6px;
+    }
+
+    /* ── Controls hint ── */
+    .controls-hint {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 100;
+      font-size: 12px;
+      color: #475569;
+      text-align: right;
+      line-height: 1.8;
+    }
+    .controls-hint kbd {
+      display: inline-block;
+      padding: 2px 6px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 4px;
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      color: #94a3b8;
+    }
+
+    /* ── Canvas ── */
+    #stage-canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* ── Loading state ── */
+    .loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: #0c0f14;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      transition: opacity 0.5s;
+    }
+    .loading-overlay.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .loading-spinner {
+      width: 32px; height: 32px;
+      border: 3px solid rgba(99,102,241,0.2);
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-text {
+      font-family: 'Space Mono', monospace;
+      font-size: 12px;
+      color: #64748b;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    /* ── Error state ── */
+    .error-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: #0c0f14;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 40px;
+      text-align: center;
+    }
+    .error-overlay h2 {
+      font-size: 20px;
+      color: #f87171;
+    }
+    .error-overlay p {
+      color: #64748b;
+      font-size: 14px;
+      max-width: 400px;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 640px) {
+      .dims-panel { bottom: 12px; left: 12px; right: 12px; min-width: unset; }
+      .controls-hint { display: none; }
+      .top-bar { padding: 12px 16px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Loading overlay -->
+  <div class="loading-overlay" id="loading">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Building stage…</div>
+  </div>
+
+  <!-- Top bar -->
+  <div class="top-bar">
+    <div class="brand">
+      <img src="/favicon-192.png" alt="Ooosh Tours" class="brand-logo">
+      <div>
+        <div class="brand-text">Ooosh Tours</div>
+        <div class="brand-sub">Stage Configuration</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dimensions panel (populated by JS) -->
+  <div class="dims-panel" id="dims-panel" style="display:none">
+    <div class="dims-title">Dimensions</div>
+    <div id="dims-content"></div>
+  </div>
+
+  <!-- Controls hint -->
+  <div class="controls-hint">
+    <kbd>Drag</kbd> rotate<br>
+    <kbd>Scroll</kbd> zoom<br>
+    <kbd>Shift+Drag</kbd> pan
+  </div>
+
+  <!-- Three.js canvas -->
+  <canvas id="stage-canvas"></canvas>
+
+  <!-- Pako for URL decompression (tiny — ~13KB gzipped) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="/stage-view.js"></script>
+</body>
+</html>

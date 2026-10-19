@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import type { DashboardSectionProps } from '../sections';
+import type { PcnAttentionItem } from '../../types';
 import { Card } from '../primitives';
 import { api } from '../../../../services/api';
 
@@ -208,6 +209,14 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
 
   // Secondary row (amber/blue/purple)
+  const carnets: NABucket = {
+    key: 'carnets',
+    title: 'Carnets',
+    accent: 'amber',
+    count: na.carnet_count || 0,
+    items: [],
+    viewAllHref: '/operations/carnets',
+  };
   const referrals: NABucket = {
     key: 'referrals',
     title: 'Referrals',
@@ -276,6 +285,78 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
       href: r.job_uuid ? `/jobs/${r.job_uuid}` : '/money/excess',
     })),
     viewAllHref: '/money/excess',
+  };
+  // Company-card (COT) purchases with no receipt attached, older than the 3-day
+  // grace. The daily chaser nudges each holder; this is the fleet-wide backlog.
+  // Amber — action-needed (bookkeeping audit), not time-critical.
+  const cotReceipts: NABucket = {
+    key: 'cot_receipts',
+    title: 'COT Receipts',
+    accent: 'amber',
+    count: na.cot_receipts_outstanding_count || 0,
+    items: [],
+    viewAllHref: '/money/costs?missing_receipt=1',
+  };
+  // Staff with outstanding documents to read/sign (managers only — the backend
+  // returns 0 for non-managers so this hides). Deep-links to the admin library.
+  const staffDocs: NABucket = {
+    key: 'staff_documents',
+    title: 'Staff Documents',
+    accent: 'amber',
+    count: na.staff_documents_outstanding_count || 0,
+    items: [],
+    viewAllHref: '/staff/documents/admin',
+  };
+  // Client recharges flagged but not yet resolved (pushed to HH / billed
+  // externally / absorbed) on active or finished hires. Amber — money we could
+  // be billing back that's sitting unactioned. Deep-links to the Recharges tab.
+  const rechargesToResolve: NABucket = {
+    key: 'recharges_to_resolve',
+    title: 'Recharges to Resolve',
+    accent: 'amber',
+    count: na.recharges_to_resolve_count || 0,
+    items: [],
+    viewAllHref: '/money/costs?view=recharge',
+  };
+  // High-priority backline gaps with no acquisition plan — kit we've flagged
+  // high priority that we don't stock and haven't decided to get. Blue —
+  // informational purchasing prompt, not time-critical. Deep-links to the
+  // Backline Matcher filtered to high-priority.
+  const backlineToBuy: NABucket = {
+    key: 'backline_to_buy',
+    title: 'Backline to Buy',
+    accent: 'blue',
+    count: na.backline_to_buy_count || 0,
+    items: [],
+    viewAllHref: '/operations/backline-matcher?priority=high',
+  };
+
+  // Lead Finder — new, still-sellable leads worth a look (definition:
+  // backend services/leads/attention.ts). Blue — an opportunity, not a fault.
+  // Self-hiding: no grey tile when there's nothing to look at. Each item
+  // deep-links to the Leads page with that lead opened.
+  const leadsToReview: NABucket = {
+    key: 'leads_to_review',
+    title: 'Leads to look at',
+    accent: 'blue',
+    count: na.leads_to_review_count || 0,
+    items: (na.leads_to_review || []).map((l) => {
+      const h = l.client_history;
+      const sub = l.stream === 'warm' && h
+        ? (h.enquiries ? `${h.booked} booked · ${h.lost} lost` : 'known, no hires yet')
+        : [l.relevance_score != null ? `score ${l.relevance_score}` : null, l.origin_country].filter(Boolean).join(' · ');
+      return {
+        id: l.id,
+        label: l.artist_name,
+        age: l.first_date
+          ? `starts ${new Date(`${l.first_date}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })}`
+          : undefined,
+        sub: sub || undefined,
+        tag: l.stream === 'warm' ? 'WARM' : undefined,
+        href: `/jobs/leads?lead=${l.id}`,
+      };
+    }),
+    viewAllHref: '/jobs/leads',
   };
 
   // Transport arrangements to action — quotes in next 7 days on a
@@ -360,12 +441,141 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     viewAllHref: '/operations/problems',
   };
 
+  // ── PCN buckets (Step 8) — internal surfacing only, never client comms ──
+  // Three red (time-critical: police NIP / ready-to-transfer / deadline near)
+  // + one amber (awaiting a path). Only non-empty ones are appended to the
+  // secondary row, so clean PCN state adds nothing to the dashboard.
+  const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  const deadlineLabel = (d: string | null) => {
+    if (!d) return undefined;
+    const days = Math.round((new Date(d).getTime() - today0.getTime()) / 86400000);
+    return days < 0 ? `${-days}d overdue` : days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days}d`;
+  };
+  const nipDaysLeft = (offenceAt: string | null) => {
+    if (!offenceAt) return 'respond ASAP';
+    const left = 28 - Math.floor((Date.now() - new Date(offenceAt).getTime()) / 86400000);
+    return left <= 0 ? 'window passed' : `${left}d of 28 left`;
+  };
+  const pcnItem = (p: PcnAttentionItem, age?: string): NACardItem => ({
+    id: p.id,
+    label: `${p.reference || '(no ref)'}${p.reg ? ` · ${p.reg}` : ''}`.slice(0, 80),
+    age,
+    sub: p.hh_job_number ? `job #${p.hh_job_number}` : undefined,
+    href: `/vehicles/pcns/${p.id}`,
+  });
+  const pcnNip: NABucket = {
+    key: 'pcn_nip', title: 'Police NIP — respond now', accent: 'red',
+    count: na.pcn_nip_urgent?.length || 0,
+    items: (na.pcn_nip_urgent || []).map((p) => pcnItem(p, nipDaysLeft(p.offence_at))),
+    viewAllHref: '/vehicles/pcns?fine_type=police_nip',
+  };
+  const pcnTransfer: NABucket = {
+    key: 'pcn_transfer', title: 'PCN — ready to transfer', accent: 'red',
+    count: na.pcn_ready_to_transfer?.length || 0,
+    items: (na.pcn_ready_to_transfer || []).map((p) => pcnItem(p, 'chased, no proof')),
+    viewAllHref: '/vehicles/pcns?status=driver_notified_pay',
+  };
+  const pcnDeadline: NABucket = {
+    key: 'pcn_deadline', title: 'PCN deadline approaching', accent: 'red',
+    count: na.pcn_deadline_approaching?.length || 0,
+    items: (na.pcn_deadline_approaching || []).map((p) => pcnItem(p, deadlineLabel(p.issuer_deadline))),
+    viewAllHref: '/vehicles/pcns',
+  };
+  const pcnAwaiting: NABucket = {
+    key: 'pcn_awaiting', title: 'PCNs awaiting action', accent: 'amber',
+    count: na.pcn_awaiting_action?.length || 0,
+    items: (na.pcn_awaiting_action || []).map((p) => pcnItem(p)),
+    viewAllHref: '/vehicles/pcns?status=received',
+  };
+  const pcnBuckets = [pcnNip, pcnTransfer, pcnDeadline, pcnAwaiting].filter((b) => b.count > 0);
+
+  // Possible insurance claims nobody is watching: check date passed or never
+  // set (docs/INCIDENT-CLAIMS-SPEC.md §9.2–9.3). Hidden when there are none.
+  const claimChecks: NABucket = {
+    key: 'claim_checks', title: 'Insurance claims to check on', accent: 'amber',
+    count: na.claim_check_overdue_total || 0,
+    items: (na.claim_check_overdue || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: c.next_check_on ? deadlineLabel(c.next_check_on) : 'no check date',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  // A client submitted the form — a manager needs to review it before anything else happens.
+  const claimReview: NABucket = {
+    key: 'claim_review', title: 'Claim forms to review', accent: 'amber',
+    count: na.claim_to_review?.length || 0,
+    items: (na.claim_to_review || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: c.next_check_on ? `submitted ${c.next_check_on.split('-').reverse().join('/')}` : 'submitted',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  // Four client reminders and still no form — the chase has stopped; phone them.
+  const claimChase: NABucket = {
+    key: 'claim_chase', title: 'Claim forms not coming back', accent: 'red',
+    count: na.claim_chase_exhausted?.length || 0,
+    items: (na.claim_chase_exhausted || []).map((c) => ({
+      id: c.id,
+      label: `${c.vehicle_reg || 'No van'}${c.hh_job_number ? ` · #${c.hh_job_number}` : ''}`,
+      age: '4 reminders sent',
+      sub: c.owner_name ? `owner ${c.owner_name}` : 'no owner',
+      href: `/vehicles/claims/${c.id}`,
+    })),
+    viewAllHref: '/vehicles/claims',
+  };
+  const claimBuckets = [claimChase, claimReview, claimChecks].filter((b) => b.count > 0);
+
+  // Studio-sitter cover gaps (Rehearsals) — evenings in the next 14 days that
+  // need a sitter but have none assigned. Amber — action-needed planning.
+  const sitterGaps: NABucket = {
+    key: 'sitter_gaps',
+    title: 'Evenings without a sitter',
+    accent: 'amber',
+    count: na.sitter_gap_count || 0,
+    items: (na.sitter_gaps || []).map((g) => ({
+      id: g.date,
+      label: g.jobs.length ? g.jobs.join(', ') : 'Rehearsal',
+      age: new Date(`${g.date}T00:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }),
+      href: '/operations/studio-sitters',
+    })),
+    viewAllHref: '/operations/studio-sitters',
+  };
+
+  // Holding — items nobody has identified. Self-hiding (like the PCN buckets):
+  // the secondary row already renders 13 cards unconditionally, greying the
+  // empty ones, and a surface meant to say "a human is needed here" shouldn't
+  // grow another permanent grey tile. Filtered out below when zero.
+  const holdingUnlinked: NABucket = {
+    key: 'holding-unlinked',
+    title: 'Unidentified items',
+    accent: 'amber',
+    count: na.holding_unlinked_count || 0,
+    items: (na.holding_unlinked || []).map((h) => ({
+      id: h.id,
+      label: h.description || 'Held item',
+      // action_due here is the found/logged date, so it reads as an age.
+      age: h.action_due
+        ? `${Math.max(0, Math.floor((Date.now() - new Date(h.action_due).getTime()) / 86400000))}d old`
+        : undefined,
+      tag: h.found_vehicle_reg || undefined,
+      href: `/holding?item=${h.id}`,
+    })),
+    viewAllHref: '/holding?action=link_owner',
+  };
+
   const allClear = overdueTotal === 0;
   const overdueBuckets = [departures, completions, backline, transport];
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, receiptsOutstanding, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
+  const selfHiding = [holdingUnlinked, leadsToReview].filter((b) => b.count > 0);
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, cotReceipts, staffDocs, rechargesToResolve, ...pcnBuckets, ...claimBuckets, ...selfHiding, carnets, referrals, excess, sitterGaps, backlineToBuy, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

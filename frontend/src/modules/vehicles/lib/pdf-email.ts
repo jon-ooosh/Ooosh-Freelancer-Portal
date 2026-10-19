@@ -13,6 +13,10 @@
 import { apiFetch } from '../config/api-config'
 
 interface PdfData {
+  // Vehicle event this report belongs to. When set, the backend freezes
+  // the generated PDF at condition-reports/{REG}/{eventId}.pdf so a later
+  // regeneration serves the exact original bytes.
+  eventId?: string
   vehicleReg: string
   vehicleType: string
   vehicleMake?: string
@@ -36,9 +40,23 @@ interface PdfData {
   allDrivers?: string[]
   // Check-in specific fields
   isCheckIn?: boolean
+  // Freelancer collection from the client — an interim record "as we
+  // picked it up", for the client's reference (not the final check-in)
+  isCollection?: boolean
   bookOutMileage?: number | null
   bookOutFuelLevel?: string | null
   bookOutDate?: string | null
+  // Freelancer collection reading (check-in only) — set when the van was
+  // collected from the client before it came back to base
+  collectionMileage?: number | null
+  collectionFuelLevel?: string | null
+  collectionDateTime?: string | null
+  // Swapped-out van (check-in only) — the swap's soft check-in reading is
+  // where the client handed it over; mileage/fuel null when not recorded
+  swappedOut?: boolean
+  swapMileage?: number | null
+  swapFuelLevel?: string | null
+  swapDateTime?: string | null
   driverPresent?: boolean
   damageItems?: Array<{
     location: string
@@ -124,6 +142,7 @@ export async function sendConditionReport(
     damageCount?: number
     fuelDifference?: string | null
     milesDriven?: number | null
+    swappedOut?: boolean
   },
 ): Promise<ConditionReportSendResult[]> {
   console.log(`[pdf-email] Calling send-condition-report for ${recipients.length} recipient(s)...`)

@@ -8,6 +8,11 @@ import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PERSON_ORG_ROLES } from '@shared/index';
+import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
+import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
+import { stripOptionSuffix } from '../lib/quoteOptions';
+import { ukToday } from '../lib/ukDate';
+import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 
 // Roles available for the "Linked organisations" picker on a job. These map
 // to `job_organisations.role` (VARCHAR(50), free-text). Keep aligned with the
@@ -237,6 +242,61 @@ function sortJobs(jobs: Job[], mode: SortMode): Job[] {
 
 // ── Client Picker (search People & Organisations) ──────────────────────────
 
+// ── Quote options: one card per group ──────────────────────────────────────
+//
+// Alternative quotes for one enquiry (docs/QUOTE-VERSIONS-SPEC.md §6.4) are
+// sibling jobs sharing a group_id. On the board and the list they collapse
+// onto ONE card per group per column: the group's lead (pinned or most
+// progressed) when it sits in this column, else the lowest option number here.
+// A chevron expands the others in place. Members that sit in other columns
+// render there, each badged "1 of 4 options" so the split stays visible.
+
+interface BoardEntry { job: Job; others: Job[] }
+
+function collapseByGroup(list: Job[]): BoardEntry[] {
+  const out: BoardEntry[] = [];
+  const seen = new Set<string>();
+  for (const job of list) {
+    const gid = job.group_id;
+    if (!gid || !job.group_summary) { out.push({ job, others: [] }); continue; }
+    if (seen.has(gid)) continue;
+    seen.add(gid);
+    const here = list.filter((j) => j.group_id === gid);
+    const leadId = job.group_summary.lead_job_id;
+    const rep = here.find((j) => j.id === leadId)
+      ?? [...here].sort((a, b) => (a.option_no ?? 0) - (b.option_no ?? 0))[0];
+    out.push({ job: rep, others: here.filter((j) => j.id !== rep.id) });
+  }
+  return out;
+}
+
+function groupBadgeText(entry: BoardEntry): string | null {
+  const gs = entry.job.group_summary;
+  if (!gs) return null;
+  const here = entry.others.length + 1;
+  return here === gs.member_count ? `${gs.member_count} options` : `${here} of ${gs.member_count} options`;
+}
+
+/** The "3 options ▾" pill on a collapsed card or row; a plain tag when there's nothing to expand. */
+function GroupBadge({ entry, expanded, onToggle }: { entry: BoardEntry; expanded: boolean; onToggle: () => void }) {
+  const text = groupBadgeText(entry);
+  if (!text) return null;
+  const cls = 'text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-ooosh-100 text-ooosh-700 whitespace-nowrap';
+  if (entry.others.length === 0) {
+    return <span className={cls} title="Other options of this enquiry sit in other columns">{text}</span>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      className={`${cls} hover:bg-ooosh-200`}
+      title={expanded ? 'Hide the other options' : 'Show every option'}
+    >
+      {text} {expanded ? '▴' : '▾'}
+    </button>
+  );
+}
+
 function ClientPicker({
   value,
   onChange,
@@ -399,12 +459,22 @@ function PipelineCard({
   onClick,
   onChase,
   progress,
+  groupEntry,
+  groupExpanded,
+  onToggleGroup,
+  isGroupMember,
 }: {
   job: Job;
   onDragStart: (e: React.DragEvent, job: Job) => void;
   onClick: (job: Job) => void;
   onChase: (job: Job) => void;
   progress?: ReqProgress;
+  /** Quote options: the collapsed group this card stands for (board only). */
+  groupEntry?: BoardEntry;
+  groupExpanded?: boolean;
+  onToggleGroup?: () => void;
+  /** An option shown beneath its collapsed group card. */
+  isGroupMember?: boolean;
 }) {
   const isLost = job.pipeline_status === 'lost';
   const chase = isLost ? { text: '', urgency: 'none' as const } : chaseDueLabel(job.next_chase_date);
@@ -419,7 +489,7 @@ function PipelineCard({
       onDragStart={(e) => onDragStart(e, job)}
       onClick={() => onClick(job)}
       className={`bg-white rounded-lg shadow-sm border border-gray-200 p-3 cursor-grab active:cursor-grabbing
-        hover:shadow-md transition-shadow ${borderClass}`}
+        hover:shadow-md transition-shadow ${borderClass} ${isGroupMember ? 'ml-3 border-dashed' : ''}`}
     >
       {/* Row 1: Job number + (real status badge if visiting Chasing) + value */}
       <div className="flex items-center justify-between mb-1 gap-2">
@@ -437,6 +507,9 @@ function PipelineCard({
             </a>
           ) : (
             <span className="text-xs font-mono text-gray-400">NEW</span>
+          )}
+          {groupEntry && onToggleGroup && (
+            <GroupBadge entry={groupEntry} expanded={!!groupExpanded} onToggle={onToggleGroup} />
           )}
           {/* Underlying status badge: shown when card is visiting the Chasing
               virtual column so the real lifecycle state stays visible. */}
@@ -463,28 +536,21 @@ function PipelineCard({
         })()}
       </div>
 
-      {/* Row 2: Job name */}
+      {/* Row 2: Job name — a grouped job's "(Option N)" suffix becomes its own line */}
       <div className="text-sm font-medium text-gray-900 truncate mb-0.5">
-        {job.job_name || 'Untitled'}
+        {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled') : (job.job_name || 'Untitled')}
       </div>
-
-      {/* Row 3: Band (if linked) takes top slot, else Client */}
-      {(job as any).band_name ? (
-        <>
-          <div className="text-xs text-purple-700 font-medium truncate mb-0.5">
-            {(job as any).band_name} <span className="text-purple-400 font-normal">(Band)</span>
-          </div>
-          {(job.company_name || job.client_name) && (
-            <div className="text-xs text-gray-400 truncate mb-1">
-              Billed to: {job.company_name || job.client_name}
-            </div>
-          )}
-        </>
-      ) : (
-        <div className="text-xs text-gray-500 truncate mb-1">
-          {job.company_name || job.client_name || '—'}
+      {job.option_no && (
+        <div className="text-[11px] font-medium text-ooosh-700 truncate mb-0.5">
+          Option {job.option_no}{job.option_label ? ` · ${job.option_label}` : ''}
         </div>
       )}
+
+      {/* Row 3: Lead organisation, else the client. One line either way — a
+          lead org no longer demotes the client to a "Billed to:" sub-line. */}
+      <div className="text-xs text-gray-500 truncate mb-1">
+        {jobDisplayOrgNameOr(job)}
+      </div>
 
       {/* Row 4: Dates */}
       {job.job_date && (
@@ -565,12 +631,14 @@ function TransitionModal({
   isOpen,
   targetStatus,
   jobId,
+  hireStart,
   onConfirm,
   onCancel,
 }: {
   isOpen: boolean;
   targetStatus: PipelineStatus | null;
   jobId?: string;
+  hireStart?: string | null;
   onConfirm: (data: Record<string, unknown>) => void;
   onCancel: () => void;
 }) {
@@ -578,11 +646,34 @@ function TransitionModal({
   const [holdDetail, setHoldDetail] = useState('');
   const [setRevisit, setSetRevisit] = useState(false);
   const [revisitDate, setRevisitDate] = useState('');
+  // Staff has taken manual control of the revisit fields — stop re-defaulting them.
+  const [revisitTouched, setRevisitTouched] = useState(false);
   const [confirmedMethod, setConfirmedMethod] = useState<ConfirmedMethod>('deposit');
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
+
+  // This modal stays mounted between opens (it early-returns on !isOpen rather
+  // than being conditionally rendered), so state survives a close. Re-arm the
+  // auto-default each time it opens, otherwise one manual edit would suppress
+  // the default for every later pause until the page is reloaded.
+  useEffect(() => { if (isOpen) setRevisitTouched(false); }, [isOpen]);
+
+  // Mirrors JobDetailPage's StatusTransitionModal — "Under 4-day window" pauses
+  // pre-fill a revisit date a fortnight before the hire starts. Declared BEFORE
+  // the isOpen early-return so hook order stays stable across open/close.
+  const autoRevisit = defaultRevisitDate(hireStart);
+  useEffect(() => {
+    if (targetStatus !== 'paused' || revisitTouched) return;
+    if (holdReason === 'under_minimum' && autoRevisit) {
+      setSetRevisit(true);
+      setRevisitDate(autoRevisit);
+    } else {
+      setSetRevisit(false);
+      setRevisitDate('');
+    }
+  }, [targetStatus, holdReason, autoRevisit, revisitTouched]);
 
   if (!isOpen || !targetStatus) return null;
 
@@ -641,7 +732,7 @@ function TransitionModal({
                 <input
                   type="checkbox"
                   checked={setRevisit}
-                  onChange={(e) => setSetRevisit(e.target.checked)}
+                  onChange={(e) => { setRevisitTouched(true); setSetRevisit(e.target.checked); }}
                   className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
                 />
                 Set a revisit date?
@@ -653,10 +744,15 @@ function TransitionModal({
                 <input
                   type="date"
                   value={revisitDate}
-                  onChange={(e) => setRevisitDate(e.target.value)}
-                  min={new Date().toISOString().split('T')[0]}
+                  onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
+                  min={ukToday()}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 />
+              )}
+              {setRevisit && !revisitTouched && revisitDate === autoRevisit && autoRevisit && (
+                <p className="text-xs text-ooosh-600 mt-1">
+                  Defaulted to {REVISIT_LEAD_DAYS_UNDER_MINIMUM} days before the hire starts — change it if you'd rather come back sooner or later.
+                </p>
               )}
             </div>
           </div>
@@ -886,6 +982,24 @@ function NewEnquiryModal({
   const [linkedOrgPickedName, setLinkedOrgPickedName] = useState('');
   const [linkedOrgRole, setLinkedOrgRole] = useState<string>('band');
 
+  // Org-graph contacts. When the picked client has org-to-org relationships
+  // (e.g. a band managed by an agency, repped by an agent), surface those
+  // related orgs and their EXISTING people so staff can tick an agent / TM
+  // onto this hire without re-creating them. Ticking does two writes the rest
+  // of the contact/email logic already reads: links the related org
+  // (job_organisations, via linkedOrgs on submit) AND ticks the person
+  // (job_contacts, via tickedExistingPersonIds). The graph link the user made
+  // on the Relationships tab is what powers this — no duplicate people.
+  const [orgSuggestions, setOrgSuggestions] = useState<Array<{
+    org_id: string; org_name: string; org_type: string;
+    relationship_type: string; suggested_role: string;
+  }>>([]);
+  const [relatedOrgPeople, setRelatedOrgPeople] = useState<Record<string, Array<{
+    id: string; person_id: string; person_name: string; person_email: string | null;
+    role: string; is_primary: boolean; status: string;
+  }>>>({});
+  const [expandedRelatedOrgs, setExpandedRelatedOrgs] = useState<Set<string>>(new Set());
+
   // Backwards-compat shims for client history (which keys off the band's
   // org_id). Derived from linkedOrgs — first band wins.
   const bandLink = linkedOrgs.find(l => l.role === 'band' && l.orgId);
@@ -943,6 +1057,7 @@ function NewEnquiryModal({
       };
       band_info?: { id: string; name: string; do_not_hire: boolean; do_not_hire_reason: string | null; internal_notes: string | null } | null;
     } | null;
+    endorsements?: Endorsement[];
   } | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -1051,6 +1166,37 @@ function NewEnquiryModal({
       })
       .catch(() => { if (!cancelled) setClientPeople([]); })
       .finally(() => { if (!cancelled) setClientPeopleLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientId]);
+
+  // Org-graph cascade: when a client org is picked, pull its org-to-org
+  // relationships (management, agency, label, promoter...) and each related
+  // org's existing people, so they're reachable as tickable contacts on this
+  // hire. Collapsed by default to keep the picker tidy; the count in each
+  // group header tells staff there's something behind it.
+  useEffect(() => {
+    if (!clientId) { setOrgSuggestions([]); setRelatedOrgPeople({}); setExpandedRelatedOrgs(new Set()); return; }
+    let cancelled = false;
+    setExpandedRelatedOrgs(new Set());
+    (async () => {
+      try {
+        const res = await api.get<{ data: Array<{ org_id: string; org_name: string; org_type: string; relationship_type: string; suggested_role: string }> }>(`/organisations/${clientId}/suggestions`);
+        if (cancelled) return;
+        const suggestions = res.data || [];
+        setOrgSuggestions(suggestions);
+        const peopleByOrg: Record<string, Array<{ id: string; person_id: string; person_name: string; person_email: string | null; role: string; is_primary: boolean; status: string }>> = {};
+        await Promise.all(suggestions.map(async (s) => {
+          try {
+            const orgData = await api.get<{ people?: Array<{ id: string; person_id: string; person_name: string; person_email: string | null; role: string; is_primary: boolean; status: string }> | null }>(`/organisations/${s.org_id}`);
+            peopleByOrg[s.org_id] = (orgData.people || []).filter(p => p.status === 'active');
+          } catch { peopleByOrg[s.org_id] = []; }
+        }));
+        if (!cancelled) setRelatedOrgPeople(peopleByOrg);
+      } catch {
+        if (!cancelled) { setOrgSuggestions([]); setRelatedOrgPeople({}); }
+      }
+    })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);
@@ -1180,6 +1326,51 @@ function NewEnquiryModal({
     }
   };
 
+  // Map an org-graph suggestion's role onto a valid linked-org role. The
+  // graph may suggest a related org as 'client' (e.g. a band's manager), but
+  // we already have a client here — surface those as 'management'. Anything
+  // not in LINKED_ORG_ROLES falls back to 'other' so job_organisations.role
+  // stays valid.
+  const suggestedToLinkedRole = (suggestedRole: string): string => {
+    if (suggestedRole === 'client') return 'management';
+    return LINKED_ORG_ROLES.some(r => r.value === suggestedRole) ? suggestedRole : 'other';
+  };
+
+  // Ensure a related org from the graph is linked to this hire. On submit
+  // linkedOrgs become job_organisations rows, which is what makes the org's
+  // people candidates on Job Detail later + a recipient fallback. Idempotent.
+  const ensureRelatedOrgLinked = (s: { org_id: string; org_name: string; suggested_role: string }) => {
+    setLinkedOrgs(prev => {
+      if (prev.some(lo => lo.orgId === s.org_id)) return prev;
+      return [...prev, {
+        _tempId: `lo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        orgId: s.org_id,
+        orgName: s.org_name,
+        role: suggestedToLinkedRole(s.suggested_role),
+        isNew: false,
+      }];
+    });
+  };
+
+  // "+ Add to hire" on the suggestion strip — link the related org and open
+  // its contact group so staff can tick the specific person.
+  const handleAddRelatedOrg = (s: { org_id: string; org_name: string; suggested_role: string }) => {
+    ensureRelatedOrgLinked(s);
+    setExpandedRelatedOrgs(prev => new Set(prev).add(s.org_id));
+  };
+
+  // Tick a contact who belongs to a related org: link the org (so it persists
+  // + becomes a candidate) AND tick the person (flows into job_contacts via
+  // tickedExistingPersonIds). Reuses the shared chip toggle so lead-promotion
+  // and the emailless guard behave exactly as for client contacts.
+  const handleRelatedContactClick = (
+    s: { org_id: string; org_name: string; suggested_role: string },
+    person: { person_id: string; person_email: string | null }
+  ) => {
+    ensureRelatedOrgLinked(s);
+    handleChipClick(person.person_id, !!(person.person_email && person.person_email.trim()));
+  };
+
   const handleClientSelect = async (result: SearchResult) => {
     setIsNewClient(false);
     clearClientContacts();
@@ -1219,7 +1410,7 @@ function NewEnquiryModal({
   };
 
   // Today's date for min constraint (no past dates)
-  const today = new Date().toISOString().split('T')[0];
+  const today = ukToday();
 
   // Helper: add N days to a date string
   const addDays = (dateStr: string, days: number): string => {
@@ -2028,6 +2219,111 @@ function NewEnquiryModal({
             </div>
           )}
 
+          {/* Org-graph contacts — surface people at orgs CONNECTED to the
+              client via the Relationships tab (management, agency, label...).
+              Collapsed by default; expand to tick an agent / TM onto this
+              hire. Ticking links the related org + ticks the person, so the
+              email/contact logic picks them up with no re-creation. */}
+          {clientId && orgSuggestions.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Connected to {clientName || 'this client'} <span className="text-gray-400 font-normal">(from the org's relationships — expand to add a contact)</span>
+              </label>
+              <div className="space-y-1.5">
+                {orgSuggestions.map(s => {
+                  const people = relatedOrgPeople[s.org_id] || [];
+                  const expanded = expandedRelatedOrgs.has(s.org_id);
+                  const isLinked = linkedOrgs.some(lo => lo.orgId === s.org_id);
+                  const roleLabel = LINKED_ORG_ROLES.find(r => r.value === suggestedToLinkedRole(s.suggested_role))?.label || s.suggested_role;
+                  return (
+                    <div key={s.org_id} className="border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="flex items-center justify-between px-3 py-2 bg-gray-50">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedRelatedOrgs(prev => {
+                            const next = new Set(prev);
+                            next.has(s.org_id) ? next.delete(s.org_id) : next.add(s.org_id);
+                            return next;
+                          })}
+                          className="flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900 min-w-0"
+                        >
+                          <span className="text-gray-400">{expanded ? '▾' : '▸'}</span>
+                          <span className="font-medium truncate">{s.org_name}</span>
+                          <span className="text-xs text-gray-400">· {roleLabel}</span>
+                          <span className="text-xs text-gray-400">({people.length})</span>
+                        </button>
+                        {isLinked ? (
+                          <span className="text-xs text-purple-600 whitespace-nowrap" title="Linked to this hire">✓ on this hire</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleAddRelatedOrg(s)}
+                            className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium whitespace-nowrap"
+                            title="Link this organisation to the hire"
+                          >
+                            + Add to hire
+                          </button>
+                        )}
+                      </div>
+                      {expanded && (
+                        <div className="px-3 py-2">
+                          {people.length === 0 ? (
+                            <p className="text-xs text-gray-400 italic">No contacts on file at {s.org_name}.</p>
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                              {people.map(p => {
+                                const ticked = tickedExistingPersonIds.has(p.person_id);
+                                const isLead = leadContactKey === p.person_id;
+                                const hasEmail = !!(p.person_email && p.person_email.trim());
+                                return (
+                                  <span
+                                    key={p.id}
+                                    className={`inline-flex items-center gap-1 px-2 py-1 border rounded text-xs cursor-pointer transition-colors ${
+                                      isLead
+                                        ? 'bg-blue-100 border-blue-400 text-blue-900'
+                                        : ticked
+                                          ? 'bg-blue-50 border-blue-200 text-blue-800'
+                                          : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
+                                    }`}
+                                    onClick={() => ticked ? handleChipClick(p.person_id, hasEmail) : handleRelatedContactClick(s, p)}
+                                    title={
+                                      isLead
+                                        ? 'Lead contact'
+                                        : ticked
+                                          ? (hasEmail ? 'Click again to make lead contact' : 'No email — can\'t be lead contact')
+                                          : (hasEmail ? 'Click to add to this hire' : 'Click to add as CC (no email — can\'t be lead)')
+                                    }
+                                  >
+                                    {isLead && <span title="Lead contact">★</span>}
+                                    <span className={isLead ? 'font-bold' : 'font-medium'}>{p.person_name}</span>
+                                    {p.role && <span className="opacity-60">({p.role})</span>}
+                                    {!hasEmail && (
+                                      <span className="opacity-50 italic text-[10px]" title="No email on file">⚠ no email</span>
+                                    )}
+                                    {ticked && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); handleChipRemove(p.person_id); }}
+                                        className="ml-0.5 opacity-50 hover:opacity-100 leading-none"
+                                        title="Remove from this hire"
+                                      >
+                                        &times;
+                                      </button>
+                                    )}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Linked organisations — generalises the old single "Band / Act"
               picker. A job can carry N linked orgs (band, management,
               promoter, label, venue operator, supplier). The first linked
@@ -2581,10 +2877,14 @@ function NewEnquiryModal({
               </div>
             )}
 
+            {/* Endorsed artists — only when there are any */}
+            <EndorsementsNote endorsements={clientHistory!.endorsements} />
+
             {/* Working Terms */}
             {clientHistory!.client_info?.working_terms_type && (
-              <div className="mb-3 p-2.5 bg-white border border-gray-200 rounded-lg">
-                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
+              // Faded while Do Not Hire (the red box above leads) — kept, not hidden, in case a manager hires them anyway
+              <div className={`mb-3 p-2.5 bg-white border border-gray-200 rounded-lg ${clientHistory!.client_info.do_not_hire ? 'opacity-50' : ''}`}>
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms{clientHistory!.client_info.do_not_hire && <span className="normal-case font-normal italic"> — on hold while Do Not Hire</span>}</div>
                 <div className="flex items-center gap-2">
                   <span className={`inline-block px-2.5 py-1 rounded text-sm font-semibold text-white ${
                     { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[clientHistory!.client_info.working_terms_type] || 'bg-gray-500'
@@ -2813,6 +3113,13 @@ export default function PipelinePage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [jobs, setJobs] = useState<Job[]>([]);
+  // Quote options: which collapsed group cards are expanded (by group id).
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = (groupId: string) => setExpandedGroups((prev) => {
+    const next = new Set(prev);
+    if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+    return next;
+  });
   const [stats, setStats] = useState<PipelineStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
@@ -2907,6 +3214,7 @@ export default function PipelinePage() {
   const [transitionModal, setTransitionModal] = useState<{
     jobId: string;
     targetStatus: PipelineStatus;
+    hireStart?: string | null;
   } | null>(null);
   const [chaseModal, setChaseModal] = useState<Job | null>(null);
 
@@ -3020,7 +3328,7 @@ export default function PipelinePage() {
     if (targetStatus === 'chasing') {
       if (job.is_chasing) return;  // already there, nothing to do
       try {
-        const today = new Date().toISOString().split('T')[0];
+        const today = ukToday();
         await api.patch(`/pipeline/${job.id}`, { next_chase_date: today });
         fetchPipeline();
       } catch (err) {
@@ -3051,7 +3359,7 @@ export default function PipelinePage() {
     if (job.pipeline_status === targetStatus) return;
 
     if (['paused', 'confirmed', 'lost'].includes(targetStatus)) {
-      setTransitionModal({ jobId: job.id, targetStatus });
+      setTransitionModal({ jobId: job.id, targetStatus, hireStart: job.job_date || job.out_date });
       return;
     }
 
@@ -3402,7 +3710,9 @@ export default function PipelinePage() {
             {visibleColumns.map((status) => {
               const config = PIPELINE_STATUS_CONFIG[status];
               const columnJobs = jobsByStatus[status];
-              const columnValue = columnJobs.reduce((sum, j) => sum + (pipelineDisplayValue(j).amount || 0), 0);
+              // One card per options group (its lead); the count and value follow suit.
+              const columnEntries = collapseByGroup(columnJobs);
+              const columnValue = columnEntries.reduce((sum, e) => sum + (pipelineDisplayValue(e.job).amount || 0), 0);
 
               return (
                 <div
@@ -3421,7 +3731,7 @@ export default function PipelinePage() {
                         />
                         <span className="text-sm font-semibold text-gray-900">{config.label}</span>
                         <span className="text-xs text-gray-400 bg-gray-200 px-1.5 py-0.5 rounded-full">
-                          {columnJobs.length}
+                          {columnEntries.length}
                         </span>
                       </div>
                       {columnValue > 0 && (
@@ -3439,16 +3749,35 @@ export default function PipelinePage() {
                         No jobs
                       </div>
                     ) : (
-                      columnJobs.map((job) => (
-                        <PipelineCard
-                          key={job.id}
-                          job={job}
-                          onDragStart={handleDragStart}
-                          onClick={handleCardClick}
-                          onChase={(j) => setChaseModal(j)}
-                          progress={reqProgress[job.id]}
-                        />
-                      ))
+                      columnEntries.map((entry) => {
+                        const gid = entry.job.group_id || '';
+                        const expanded = !!gid && expandedGroups.has(gid);
+                        return (
+                          <div key={entry.job.id} className="space-y-2">
+                            <PipelineCard
+                              job={entry.job}
+                              onDragStart={handleDragStart}
+                              onClick={handleCardClick}
+                              onChase={(j) => setChaseModal(j)}
+                              progress={reqProgress[entry.job.id]}
+                              groupEntry={entry.job.group_summary ? entry : undefined}
+                              groupExpanded={expanded}
+                              onToggleGroup={gid ? () => toggleGroup(gid) : undefined}
+                            />
+                            {expanded && entry.others.map((member) => (
+                              <PipelineCard
+                                key={member.id}
+                                job={member}
+                                onDragStart={handleDragStart}
+                                onClick={handleCardClick}
+                                onChase={(j) => setChaseModal(j)}
+                                progress={reqProgress[member.id]}
+                                isGroupMember
+                              />
+                            ))}
+                          </div>
+                        );
+                      })
                     )}
                   </div>
                 </div>
@@ -3494,17 +3823,30 @@ export default function PipelinePage() {
               }
             });
 
-            const renderListRow = (job: Job) => {
+            const renderListRow = (job: Job, entry?: BoardEntry, isMember = false) => {
               const statusConfig = PIPELINE_STATUS_CONFIG[job.pipeline_status || 'new_enquiry'];
               const chase = job.pipeline_status === 'lost' ? { text: '', urgency: 'none' as const } : chaseDueLabel(job.next_chase_date);
+              const gid = job.group_id || '';
               return (
                 <tr
                   key={job.id}
                   onClick={() => handleCardClick(job)}
-                  className="hover:bg-gray-50 cursor-pointer"
+                  className={`hover:bg-gray-50 cursor-pointer ${isMember ? 'bg-gray-50/60' : ''}`}
                 >
-                  <td className="px-4 py-3">
-                    <div className="text-sm font-medium text-gray-900">{job.job_name || 'Untitled'}</div>
+                  <td className={`px-4 py-3 ${isMember ? 'pl-10' : ''}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-900">
+                        {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled') : (job.job_name || 'Untitled')}
+                      </span>
+                      {entry && entry.job.group_summary && (
+                        <GroupBadge entry={entry} expanded={!!gid && expandedGroups.has(gid)} onToggle={() => gid && toggleGroup(gid)} />
+                      )}
+                    </div>
+                    {job.option_no && (
+                      <div className="text-[11px] font-medium text-ooosh-700">
+                        Option {job.option_no}{job.option_label ? ` · ${job.option_label}` : ''}
+                      </div>
+                    )}
                     <div className="text-xs font-mono">
                       {job.hh_job_number ? (
                         <a
@@ -3522,7 +3864,7 @@ export default function PipelinePage() {
                     </div>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-600">
-                    {job.company_name || job.client_name || '—'}
+                    {jobDisplayOrgNameOr(job)}
                   </td>
                   <td className="px-4 py-3">
                     <span
@@ -3591,6 +3933,18 @@ export default function PipelinePage() {
               </thead>
             );
 
+            // Quote options: one row per group per section, expandable.
+            const renderSectionRows = (sectionJobs: Job[]) =>
+              collapseByGroup(sectionJobs).flatMap((entry) => {
+                const gid = entry.job.group_id || '';
+                const expanded = !!gid && expandedGroups.has(gid);
+                return [
+                  renderListRow(entry.job, entry),
+                  ...(expanded ? entry.others.map((m) => renderListRow(m, undefined, true)) : []),
+                ];
+              });
+            const actionEntries = collapseByGroup(actionRequired).length;
+
             const sections = [
               { key: 'action', label: 'Action Required', jobs: actionRequired, bgHeader: 'bg-red-50', textColor: 'text-red-700', borderColor: 'border-red-200 border-l-red-500' },
               { key: 'waiting', label: 'Waiting', jobs: waiting, bgHeader: 'bg-amber-50', textColor: 'text-amber-700', borderColor: 'border-amber-200 border-l-amber-500' },
@@ -3607,7 +3961,7 @@ export default function PipelinePage() {
                     <span className="text-red-600 text-lg">!</span>
                     <div>
                       <span className="text-sm font-semibold text-red-700">
-                        {actionRequired.length} enquir{actionRequired.length === 1 ? 'y' : 'ies'} need{actionRequired.length === 1 ? 's' : ''} attention
+                        {actionEntries} enquir{actionEntries === 1 ? 'y' : 'ies'} need{actionEntries === 1 ? 's' : ''} attention
                       </span>
                       <span className="text-sm text-red-600 ml-2">
                         — overdue chases, due today, or new enquiries without a chase date
@@ -3622,14 +3976,14 @@ export default function PipelinePage() {
                     <div key={section.key} className={`bg-white rounded-xl shadow-sm border border-l-4 ${section.borderColor} overflow-hidden`}>
                       <div className={`${section.bgHeader} px-4 py-2.5 border-b border-gray-200`}>
                         <span className={`text-xs font-semibold ${section.textColor} uppercase tracking-wide`}>
-                          {section.label} ({section.jobs.length})
+                          {section.label} ({collapseByGroup(section.jobs).length})
                         </span>
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full">
                           {tableHead}
                           <tbody className="divide-y divide-gray-200">
-                            {section.jobs.map(renderListRow)}
+                            {renderSectionRows(section.jobs)}
                           </tbody>
                         </table>
                       </div>
@@ -3672,6 +4026,7 @@ export default function PipelinePage() {
         isOpen={!!transitionModal}
         targetStatus={transitionModal?.targetStatus || null}
         jobId={transitionModal?.jobId}
+        hireStart={transitionModal?.hireStart}
         onConfirm={handleTransitionConfirm}
         onCancel={() => setTransitionModal(null)}
       />

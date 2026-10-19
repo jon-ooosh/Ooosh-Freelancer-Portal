@@ -10,12 +10,63 @@ import type { ChecklistItem, DetailPrompt, SettingsData } from '../lib/settings-
 
 // ── Reusable detail prompts ──
 
-const FLUID_TOPUP: Record<string, DetailPrompt> = {
-  'Topped up': {
-    label: 'Approx. amount added?',
-    type: 'options',
-    choices: ['< 500ml', '~500ml', '~1L', '~1.5L', '~2L', '2L+', 'Full refill'],
-  },
+/**
+ * Fluid level items: the READING is the answer, the ACTION is the detail.
+ *
+ * The old shape asked one question ("Ok / Topped up / Problem") and so
+ * conflated two facts — what the level was, and what was done about it. A van
+ * topped up every single prep looked identical to one topped up once, and the
+ * level it was found at was never recorded at all. Splitting them is what makes
+ * a drinking van visible.
+ *
+ * Levels ascend left to right so the pills read like a gauge. `Empty` and
+ * `Overfull` both flag: one is a leak or a burn, the other risks seals and the
+ * cat. A quarter does not flag — that is a normal top-up, not a fault.
+ *
+ * IMPORTANT — three places downstream read the word "Topped up" to count a
+ * top-up, deduct stock and show fluid history. They read it out of the DETAIL
+ * now (and still out of the answer, for prep sessions recorded before this
+ * change). Keep the "Topped up …" prefix on these choices or they go quiet:
+ *   - lib/stock-consumption.ts      (deducts oil/coolant/screenwash from stock)
+ *   - backend services/vehicle-forecast.ts  (the "drinking oil" watch flag)
+ *   - components/prep/PrepHistoryTab.tsx    (fluids topped, per session)
+ */
+const FLUID_LEVELS = ['Empty', '¼', '½', '¾', 'Full', 'Overfull', 'Problem']
+
+/** Levels that raise an issue. A quarter is a top-up, not a fault. */
+const FLUID_LEVEL_FLAGS = ['Empty', 'Overfull', 'Problem']
+
+// "Full refill" is spelled exactly so — parseFluidAmount() in types/stock.ts
+// matches that literal to deduct a full container's worth.
+const FLUID_TOPUP_CHOICES = [
+  'No — left as is',
+  'Topped up < 500ml', 'Topped up ~500ml', 'Topped up ~1L',
+  'Topped up ~1.5L', 'Topped up ~2L', 'Topped up 2L+',
+  'Topped up — Full refill',
+]
+
+// Only reachable from 'Overfull' — the one level where the fix is taking fluid
+// OUT. Draining deliberately does NOT touch stock; nothing was consumed.
+const FLUID_DRAIN_CHOICES = [
+  'No — left as is',
+  'Drained off ~500ml', 'Drained off ~1L', 'Drained off 1L+',
+]
+
+const TOPUP_PROMPT: DetailPrompt = {
+  label: 'Adjusted?',
+  type: 'options',
+  choices: FLUID_TOPUP_CHOICES,
+}
+
+const FLUID_ADJUSTMENT: Record<string, DetailPrompt> = {
+  'Empty': TOPUP_PROMPT,
+  '¼': TOPUP_PROMPT,
+  '½': TOPUP_PROMPT,
+  '¾': TOPUP_PROMPT,
+  // No prompt on 'Full' — nothing to do at full, and offering one invites
+  // staff to record the level AFTER topping up instead of as found.
+  'Overfull': { label: 'Adjusted?', type: 'options', choices: FLUID_DRAIN_CHOICES },
+  'Problem': { label: "What's the problem?", type: 'text' },
 }
 
 const HEADLIGHT_BULB_REPLACED: Record<string, DetailPrompt> = {
@@ -81,6 +132,10 @@ const REPLACED_PRESENT_SINGLE: Record<string, DetailPrompt> = {
   },
 }
 
+// Tread-measurement instruction. Shared so the live-form normaliser
+// (PrepPage) can recognise + apply the canonical wording.
+export const TREAD_NOTE = 'Measure all 3 points across the tyre width and enter the LOWEST.'
+
 // ── Helper ──
 function item(
   name: string,
@@ -143,19 +198,25 @@ const PREP_ALL: ChecklistItem[] = [
   item('Orange side marker lights', 'Vehicle Exterior', ['All working fine', 'Problem'], ['Problem']),
   item('Spare wheel', 'Vehicle Exterior', ['Present & tagged', 'Problem'], ['Problem']),
   item('Front left tyre pressure', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'PSI' }),
-  item('Front left tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm' }),
+  item('Front left tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm', notes: TREAD_NOTE }),
   item('Front right tyre pressure', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'PSI' }),
-  item('Front right tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm' }),
+  item('Front right tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm', notes: TREAD_NOTE }),
   item('Rear left tyre pressure', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'PSI' }),
-  item('Rear left tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm' }),
+  item('Rear left tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm', notes: TREAD_NOTE }),
   item('Rear right tyre pressure', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'PSI' }),
-  item('Rear right tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm' }),
+  item('Rear right tyre tread depth', 'Vehicle Exterior', [], [], { inputType: 'number', unit: 'mm', notes: TREAD_NOTE }),
+  // Tyre walls — the outward (kerb side) and inward (chassis side) faces both
+  // need eyeballing for cracks, bulges and damage that don't show in tread depth.
+  item('Exterior tyre walls OK?', 'Vehicle Exterior', ['Ok', 'Problem'], ['Problem'], { notes: 'Outward-facing wall of each tyre — check for cracks, bulges, splits.' }),
+  item('Interior tyre walls OK?', 'Vehicle Exterior', ['Ok', 'Problem'], ['Problem'], { notes: 'Inward-facing (chassis side) wall of each tyre — check for cracks, bulges, splits.' }),
 
   // Engine
-  item('Oil level', 'Engine', ['Ok', 'Topped up', 'Problem'], ['Problem'], { notes: 'Should be 1/2 full', detailPrompts: FLUID_TOPUP }),
-  item('Water / coolant level', 'Engine', ['Ok', 'Topped up', 'Problem'], ['Problem'], { notes: 'At the half way rim', detailPrompts: FLUID_TOPUP }),
-  item('Screen wash level', 'Engine', ['Ok', 'Topped up', 'Problem'], ['Problem'], { notes: 'At least half full', detailPrompts: FLUID_TOPUP }),
-  item('Ad Blue level', 'Engine', ['Ok', 'Topped up', 'Problem', 'N/A'], ['Problem'], { notes: 'Please fill', detailPrompts: FLUID_TOPUP }),
+  item('Oil level', 'Engine', FLUID_LEVELS, FLUID_LEVEL_FLAGS, { notes: 'Level AS FOUND, before any top-up. Should be at least 1/2.', detailPrompts: FLUID_ADJUSTMENT }),
+  item('Water / coolant level', 'Engine', FLUID_LEVELS, FLUID_LEVEL_FLAGS, { notes: 'Level AS FOUND, before any top-up. Should be at the half way rim.', detailPrompts: FLUID_ADJUSTMENT }),
+  item('Screen wash level', 'Engine', FLUID_LEVELS, FLUID_LEVEL_FLAGS, { notes: 'Level AS FOUND, before any top-up. Should be at least half full.', detailPrompts: FLUID_ADJUSTMENT }),
+  // N/A stays on AdBlue — some vans genuinely aren't fitted with it, and that
+  // is an answer, not a fault.
+  item('Ad Blue level', 'Engine', [...FLUID_LEVELS, 'N/A'], FLUID_LEVEL_FLAGS, { notes: 'Level AS FOUND, before any top-up. Please fill.', detailPrompts: FLUID_ADJUSTMENT }),
 
   // Front Cab
   item('Indicators', 'Front Cab', ['Tested & working', 'Replaced bulb(s) & now all working', 'Problem'], ['Problem'], { detailPrompts: INDICATOR_BULB_REPLACED }),
@@ -201,6 +262,98 @@ const PREP_ALL: ChecklistItem[] = [
   item('Loading lights', 'Boot', ['Tested & all working ok', 'Fixed & now all working', 'N/A'], [], { detailPrompts: FIXED_ISSUE }),
   item('Floor hoovered & mopped (boot)', 'Boot', ['All clean', 'Problem', 'N/A'], ['Problem']),
 ]
+
+// ── Live-form normaliser ──
+//
+// The live prep form reads its checklist from R2 (`settings/checklists.json`),
+// falling back to DEFAULT_CHECKLIST_SETTINGS only when R2 is empty.
+//
+// AS OF SEPT 2026 PROD'S R2 COPY IS EMPTY and the live form runs on the
+// defaults above, so editing them IS enough. (This comment previously said the
+// opposite. It was checked on 18 Sep 2026 — `update-fluid-checklist-items.ts`
+// found no object at that key — and corrected.)
+//
+// That can change the moment anyone presses Save on Settings > Checklists:
+// from then on R2 wins and edits to the defaults above stop reaching the form.
+// So do NOT rely on either state. This normaliser is applied to whatever
+// prepMap the form ends up using, guaranteeing the safety-critical tyre
+// content is present regardless of R2 state — and it is the right home for
+// anything else that MUST be on the form no matter what R2 holds.
+//
+// Idempotent + minimally invasive: only adds the wall tickboxes if absent, and
+// only sets the tread note when the item has no note (won't clobber a custom
+// one set via the Checklists settings editor).
+const EXTERIOR_WALL_NAME = 'Exterior tyre walls OK?'
+const INTERIOR_WALL_NAME = 'Interior tyre walls OK?'
+
+export function ensureTyreChecklistContent(
+  prepMap: Record<string, ChecklistItem[]>,
+): Record<string, ChecklistItem[]> {
+  const out: Record<string, ChecklistItem[]> = {}
+  for (const [key, list] of Object.entries(prepMap)) {
+    const items = [...list]
+
+    // Fire extinguisher (and any "not fitted" item): N/A must be a selectable,
+    // NON-flag option. Some vans were never fitted with an extinguisher, so
+    // "N/A" is a legitimate answer, not a problem. Prod's R2 checklist predates
+    // the default fix, so normalise here: guarantee 'N/A' is in options and
+    // strip it out of flagValues if a stale config has it flagging. Runs on
+    // every list (not gated on tyre content). Idempotent.
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]!
+      if (it.name.toLowerCase().includes('fire extinguisher') && it.inputType === 'options') {
+        const options = it.options.includes('N/A') ? it.options : [...it.options, 'N/A']
+        const flagValues = it.flagValues.filter(v => v.toLowerCase() !== 'n/a')
+        if (options !== it.options || flagValues.length !== it.flagValues.length) {
+          items[i] = { ...it, options, flagValues }
+        }
+      }
+    }
+
+    const hasTread = items.some(i => i.unit === 'mm' && i.name.toLowerCase().includes('tread'))
+    // Only touch lists that actually carry the tyre tread items.
+    if (!hasTread) {
+      out[key] = items
+      continue
+    }
+
+    // Canonical tread wording where none is set.
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]!
+      if (it.unit === 'mm' && it.name.toLowerCase().includes('tread') && !it.notes) {
+        items[i] = { ...it, notes: TREAD_NOTE }
+      }
+    }
+
+    // Ensure both wall tickboxes exist, inserted after the last tyre item.
+    const wallSection = items.find(i => i.unit === 'mm')?.section || 'Vehicle Exterior'
+    const toAdd: ChecklistItem[] = []
+    if (!items.some(i => i.name === EXTERIOR_WALL_NAME)) {
+      toAdd.push(item(EXTERIOR_WALL_NAME, wallSection, ['Ok', 'Problem'], ['Problem'], {
+        notes: 'Outward-facing wall of each tyre — check for cracks, bulges, splits.',
+      }))
+    }
+    if (!items.some(i => i.name === INTERIOR_WALL_NAME)) {
+      toAdd.push(item(INTERIOR_WALL_NAME, wallSection, ['Ok', 'Problem'], ['Problem'], {
+        notes: 'Inward-facing (chassis side) wall of each tyre — check for cracks, bulges, splits.',
+      }))
+    }
+    if (toAdd.length > 0) {
+      let lastTyreIdx = -1
+      for (let i = 0; i < items.length; i++) {
+        if (items[i]!.unit === 'mm' || items[i]!.unit === 'PSI') lastTyreIdx = i
+      }
+      if (lastTyreIdx >= 0) {
+        items.splice(lastTyreIdx + 1, 0, ...toAdd)
+      } else {
+        items.push(...toAdd)
+      }
+    }
+
+    out[key] = items
+  }
+  return out
+}
 
 // ── Combined default settings ──
 

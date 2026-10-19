@@ -10,10 +10,18 @@ export interface FileAttachment {
   label?: string;
   comment?: string;
   url: string;
-  type: 'document' | 'image' | 'other';
+  // 'link' = an external URL (Dropbox, WeTransfer, Google Drive, etc.) rather
+  // than a file stored in R2. `url` holds the http(s) address; no bytes are
+  // hosted by us. Rendered with a distinct chip and opened in a new tab.
+  type: 'document' | 'image' | 'other' | 'link';
   uploaded_at: string;
   uploaded_by: string;
   share_with_freelancer?: boolean;
+  // Org files only. Whether this file reads through onto the jobs that org is
+  // on (docs/CROSS-ENTITY-FILES-SPEC.md). ABSENT MEANS TRUE — the default is to
+  // surface, so a rider is reusable the moment it's uploaded; set false to keep
+  // something internal (a contract) on the org alone.
+  show_on_jobs?: boolean;
 }
 
 export interface Person {
@@ -307,6 +315,7 @@ export const LOST_REASON_OPTIONS = [
   'Timing',
   'No Decision',
   'Cancelled Event',
+  'Confirmed Alternative Quote (from us)',
   'Other',
 ] as const;
 
@@ -330,9 +339,22 @@ export interface Job {
   colour: string | null;
   // Client
   client_id: string | null;
+  // client_name / company_name are HireHop's raw CLIENT / COMPANY strings.
+  // company_name is never written by OP and client_name only survives a
+  // deliberate client change because the sync guards it on client_locked_at,
+  // so neither is the canonical name. Prefer jobDisplayOrgName() (frontend
+  // lib/jobOrgName.ts), which reads the joined org name instead.
   client_name: string | null;
   company_name: string | null;
   client_ref: string | null;
+  // Canonical client org name, joined from organisations via client_id.
+  // Present on the single-job, job-list, pipeline and cancellations responses;
+  // absent elsewhere (hence optional).
+  client_org_name?: string | null;
+  // Name of the org explicitly flagged to headline this job on lists
+  // (job_organisations.is_primary). NULL = no explicit lead, fall back to the
+  // client. Display only — client_id stays authoritative for accounting.
+  lead_org_name?: string | null;
   // Venue
   venue_id: string | null;
   venue_name: string | null;
@@ -406,6 +428,16 @@ export interface Job {
   cancellation_tier: string | null;
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
+  // Quote options (migration 286, docs/QUOTE-VERSIONS-SPEC.md): alternative
+  // quotes for ONE enquiry are sibling jobs in a job_groups row. NULL on an
+  // ordinary job. option_no is the alternative's identity ("Option 2"), never a
+  // revision counter; option_label is the staff-typed differentiator.
+  group_id?: string | null;
+  option_no?: number | null;
+  option_label?: string | null;
+  // GET /api/pipeline only: the group this job belongs to, with its lead
+  // resolved, so the board can collapse the options onto one card.
+  group_summary?: JobGroupSummary | null;
   // Source
   enquiry_source: EnquirySource | null;
   // HireHop status (separate from pipeline_status)
@@ -418,6 +450,70 @@ export interface Job {
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+// ── Quote options (job groups) ───────────────────────────────────────────────
+// docs/QUOTE-VERSIONS-SPEC.md — "version" there is "option" in code. A group is
+// a thin layer over ordinary jobs; GET /api/pipeline/groups/:id returns it.
+export type JobGroupKind = 'alternative' | 'part_of';
+
+export interface JobGroup {
+  id: string;
+  kind: JobGroupKind;
+  label: string | null;
+  /** NULL = lead derived (most progressed option); set = pinned by staff. */
+  lead_job_id: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JobGroupMember {
+  id: string;
+  hh_job_number: number | null;
+  job_name: string | null;
+  option_no: number | null;
+  option_label: string | null;
+  pipeline_status: string | null;
+  status: number | null;
+  out_date: string | null;
+  job_date: string | null;
+  job_end: string | null;
+  return_date: string | null;
+  job_value: number | null;
+  next_chase_date: string | null;
+  is_chasing: boolean;
+  lost_reason: string | null;
+  dismissed_at: string | null;
+  is_van_and_driver: boolean | null;
+  start_time: string | null;
+  end_time: string | null;
+  config: string | null;
+  items_count: number;
+  item_names: string[];
+  is_lead: boolean;
+}
+
+export interface JobGroupSummaryMember {
+  id: string;
+  option_no: number | null;
+  option_label: string | null;
+  pipeline_status: string | null;
+  hh_job_number: number | null;
+  is_chasing: boolean;
+}
+
+export interface JobGroupSummary {
+  label: string | null;
+  pinned_lead_id: string | null;
+  lead_job_id: string | null;
+  member_count: number;
+  members: JobGroupSummaryMember[];
+}
+
+export interface JobGroupRead {
+  group: JobGroup;
+  members: JobGroupMember[];
 }
 
 export interface Interaction {
@@ -526,12 +622,20 @@ export type QuoteJobType = 'delivery' | 'collection' | 'crewed';
 export type QuoteCalcMode = 'hourly' | 'dayrate';
 export type QuoteWhatIsIt = 'vehicle' | 'equipment' | 'people';
 
+// Per-expense-line billing state (three-state, Jun 2026). `included` is kept in
+// step (true ⇔ 'included') for back-compat with code reading the old boolean.
+// 'na' = not applicable (excluded from every total). PD defaults to 'na' since
+// most jobs (esp. sub-one-day) carry no Per Diem; also usable on any line that
+// simply doesn't apply to a job.
+export type ExpenseChargeMode = 'included' | 'not_included' | 'recharge' | 'na';
+
 export interface QuoteExpenseItem {
   id: string;
   category: string;   // fuel, parking, tolls, transport_out, transport_back, hotel, pd, other
   label: string;
   amount: number;
   included: boolean;
+  chargeMode?: ExpenseChargeMode;
   description?: string;
   pdDays?: number;
 }
@@ -648,9 +752,19 @@ export interface Driver {
   licence_points: number;
   licence_endorsements: LicenceEndorsement[];
   licence_restrictions: string | null;
+  /** Entitlement categories as iDenfy reports them, e.g. "B,BE,C1". */
+  licence_categories: string | null;
   licence_next_check_due: string | null;
   date_passed_test: string | null;
-  // Document expiry dates (the validity backbone)
+  // Document FROM dates — the validity backbone. Staff and the hire form set
+  // ONLY these; every *_valid_until below is derived from them on write by
+  // backend/src/services/driver-validity.ts. Never write an expiry directly.
+  poa1_doc_date: string | null;
+  poa2_doc_date: string | null;
+  passport_check_date: string | null;
+  passport_expiry: string | null;
+  // Derived expiry windows (read-only for consumers).
+  licence_check_valid_until: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;
@@ -823,8 +937,17 @@ export interface JobExcess {
   dispatch_override_by: string | null;
   dispatch_override_at: string | null;
   suggested_collection_method: 'payment' | 'pre_auth';
+  // "Held on account" (migration 154): parked excess deliberately held for the
+  // client's future hire. Status stays 'taken' (counted, visible, actionable);
+  // this flag just marks intent + drives the badge. Not a status.
+  held_on_account?: boolean;
   person_id: string | null;
   notes: string | null;
+  // Computed (not a stored column): true when this record was auto-covered from
+  // the client's standing held-on-account balance (waived + [Auto-covered by
+  // account] marker). Drives the distinct "Covered by account" pill. Set by the
+  // per-job excess selects (money summary, /excess by-org/by-person).
+  auto_covered?: boolean;
   // HH deposit reconciliation (migration 039)
   hh_deposit_id: number | null;
   hh_reconciled_at: string | null;
@@ -990,6 +1113,12 @@ export type CostPaymentMethod =
   | 'reimburse_me' | 'not_yet_paid';
 export type CostPaymentStatus = 'paid' | 'awaiting_payment' | 'awaiting_invoice';
 export type CostRechargeMode = 'none' | 'full' | 'partial';
+// Recharge resolution lifecycle (Phase D). pending = flagged, not yet resolved;
+// recharged_hh = pushed to HireHop; recharged_external = billed another way
+// (closed HH job → direct Xero invoice etc.); absorbed = written off (reason kept).
+export type CostRechargeStatus = 'pending' | 'recharged_hh' | 'recharged_external' | 'absorbed';
+// Markup applied to the recharge net (ex VAT). greater_of = max(percent, floor).
+export type CostMarkupType = 'greater_of' | 'percent' | 'fixed' | 'none';
 // Job-linked costs only. quote_actual = part of an existing quote (track, never
 // recharge — already billed via the quote); extra = above-and-beyond, eligible
 // for client recharge. NULL on overhead/vehicle costs with no job.
@@ -997,6 +1126,28 @@ export type CostIntent = 'quote_actual' | 'extra';
 export type CostApprovalState = 'submitted' | 'verified' | 'approved' | 'paid';
 export type CostXeroSyncState = 'pending' | 'bill_created' | 'attached' | 'reconciled' | 'error';
 export type CostStatus = 'draft' | 'confirmed' | 'resolved';
+
+// Supplier payment terms → bill due date. 'default' source = no stored terms
+// (flat invoice + 30). See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
+export interface SupplierPaymentTerms {
+  basis: 'invoice_date' | 'end_of_invoice_month';
+  days: number;
+  source: 'manual' | 'xero' | 'default' | 'freelancer';
+}
+
+/**
+ * One supporting document filed against a cost. `r2_key` is a private-bucket
+ * key — fetch it through the authenticated /files/download helper, never as a
+ * plain <img src>.
+ */
+export interface CostDocument {
+  r2_key: string;
+  filename: string;
+  content_type?: string | null;
+  size_bytes?: number | null;
+  uploaded_at?: string | null;
+  uploaded_by?: string | null;
+}
 
 export interface Cost {
   id: string;
@@ -1010,6 +1161,17 @@ export interface Cost {
   amount_net: number | null;
   vat_treatment?: 'standard' | 'reclaim_split';
   invoice_number?: string | null;
+  xero_contact_id?: string | null;
+  // THE due date (list + get-one), resolved server-side by resolveDueDate():
+  // staff override → the freelancer Friday rule → the supplier's payment terms.
+  due_date?: string | null;
+  // What the rules alone would give — lets the UI offer "reset to default".
+  due_date_derived?: string | null;
+  due_date_is_override?: boolean;
+  // Staff override. NULL = follow the derived rule. Never read this raw for
+  // display; `due_date` above already accounts for it.
+  due_date_override?: string | null;
+  terms?: SupplierPaymentTerms;
   currency: string;
   description: string | null;
   category: string | null;
@@ -1030,6 +1192,14 @@ export interface Cost {
   cost_intent: CostIntent | null;
   recharged_to_hh_at: string | null;
   recharge_hh_item_id: string | null;
+  /** Resolution lifecycle: pending | recharged_hh | recharged_external | absorbed. NULL when recharge_mode='none'. */
+  recharge_status: CostRechargeStatus | null;
+  recharge_base_amount: number | null;
+  recharge_markup_type: CostMarkupType | null;
+  recharge_markup_value: number | null;
+  recharge_resolution_note: string | null;
+  recharge_resolved_by: string | null;
+  recharge_resolved_at: string | null;
   approval_state: CostApprovalState | null;
   verified_by: string | null;
   verified_at: string | null;
@@ -1039,13 +1209,42 @@ export interface Cost {
   paid_at: string | null;
   paid_value_date: string | null;
   paid_method: string | null;
+  /**
+   * Cleared from the OP ledger without OP paying it — already settled in Xero
+   * or elsewhere. Suppresses the Xero payment leg on every push path, so a
+   * later edit can't pay the supplier a second time (migration 224).
+   */
+  settled_externally?: boolean;
+  settled_externally_note?: string | null;
+  /**
+   * Money coming BACK from a supplier — a refund or card credit note. The
+   * amounts on a credit are NEGATIVE (migration 229), so it nets against the
+   * purchase in every existing total without being taught anything. Entered as
+   * positive by every client; the server applies the sign.
+   */
+  is_credit?: boolean;
+  /** The purchase a credit came back from; null if it was never captured. */
+  refund_of_cost_id?: string | null;
+  /** Remittance advice sent to the payee for this cost (audit + "sent" pip). */
+  remittance_sent_at?: string | null;
+  remittance_email?: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
+  /**
+   * Extra evidence filed with this payable alongside the main receipt — a
+   * freelancer's fuel receipt behind their invoice, a delivery note, a warranty
+   * card. One payable, one Xero bill; these ride along as extra attachments.
+   */
+  supporting_documents?: CostDocument[];
   xero_sync_state: CostXeroSyncState;
   xero_object_id: string | null;
+  /** What xero_object_id is in Xero: a Bill ('invoice') or a Spend Money ('banktransaction'). NULL on legacy rows. */
+  xero_object_type?: 'invoice' | 'banktransaction' | null;
   xero_payment_id: string | null;
   xero_synced_at: string | null;
   xero_error: string | null;
+  /** Set when an already-pushed cost is edited with a Xero-affecting field; cleared on re-sync. */
+  xero_stale?: boolean;
   status: CostStatus;
   notes: string | null;
   created_at: string;
@@ -1066,7 +1265,26 @@ export interface CostAllocation {
 
 // Holding module — "Held for Clients" / "Lost Property" / temp storage
 // One engine; `kind` drives behaviour + display home. See docs/HOLDING-MODULE-SPEC.md.
+// `temp_storage` is DEPRECATED (Aug 2026) — folded into `incoming`. The value
+// stays in the union (and the DB CHECK constraint) so historical rows and any
+// in-flight API caller keep working; the UI no longer offers it. Two kinds
+// remain, split by a question staff can always answer — does the client know
+// we've got it? incoming = they sent/left it (ends in a handover);
+// lost_property = we found it (ends in collection/disposal, chase ladder).
 export type HeldItemKind = 'incoming' | 'lost_property' | 'temp_storage';
+
+/**
+ * What this item needs from a human next — derived server-side in
+ * routes/holding.ts so the list, the action strip, the filters and any future
+ * dashboard bucket all read one definition. Ordered by precedence, not by kind.
+ */
+export type HeldItemNextAction =
+  | 'link_owner'   // owner unknown — can't chase or hand over until identified
+  | 'receive'      // declared, not arrived
+  | 'chase_owner'  // lost property, owner known
+  | 'hand_over'    // here, owner known
+  | 'decide'       // hold_until / dispose_after has passed
+  | 'none';        // terminal
 
 export type HeldItemStatus =
   | 'expected'
@@ -1169,10 +1387,16 @@ export interface HeldItem {
   found_vehicle_reg?: string | null;
   received_by_name?: string | null;
 
+  // Count of discussion-thread interactions on this item (SELECT_WITH_JOINS).
+  discussion_count?: number;
+
   // Computed chase fields (lost property) — derived in SELECT_WITH_JOINS so the
   // list, detail card and review queue all agree. null for non-lost-property.
   next_chase_due?: string | null;
   chase_state?: 'none' | 'paused' | 'due' | 'scheduled' | null;
+  // Derived server-side (routes/holding.ts) — see HeldItemNextAction.
+  next_action?: HeldItemNextAction;
+  action_due?: string | null;
 }
 
 // API response wrappers

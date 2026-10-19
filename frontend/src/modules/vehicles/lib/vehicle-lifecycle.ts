@@ -80,3 +80,34 @@ export function formatGbp(value: number | null | undefined): string {
     maximumFractionDigits: 2,
   }).format(value)
 }
+
+/**
+ * Average miles per year since first registration.
+ *
+ * The number that actually decides whether a van is worth keeping: 140,000
+ * miles means very different things on a two-year-old van and a six-year-old
+ * one, and the 5-year sell window above is pure calendar maths without it.
+ *
+ * Returns null when we can't say — no odometer reading, no first-reg date, or
+ * a van registered less than three months ago (too short a run to annualise
+ * from; a 2,000-mile fortnight would read as 52,000/yr).
+ */
+export function annualMileage(
+  currentMileage: number | null | undefined,
+  dateFirstReg: string | null | undefined,
+): number | null {
+  if (currentMileage == null || currentMileage <= 0 || !dateFirstReg) return null
+  const first = new Date(dateFirstReg + 'T00:00:00')
+  if (isNaN(first.getTime())) return null
+  const years = (Date.now() - first.getTime()) / (1000 * 60 * 60 * 24 * 365.25)
+  if (years < 0.25) return null
+  return Math.round(currentMileage / years)
+}
+
+/** "24k/yr" — compact enough to sit under a mileage figure in a dense table. */
+export function formatAnnualMileage(perYear: number | null): string | null {
+  if (perYear == null) return null
+  return perYear >= 1000
+    ? `${(perYear / 1000).toFixed(perYear >= 10000 ? 0 : 1)}k/yr`
+    : `${perYear}/yr`
+}

@@ -41,6 +41,23 @@ export const FUEL_LEVELS: FuelLevel[] = [
   'Empty', '1/8', '2/8', '3/8', '4/8', '5/8', '6/8', '7/8', 'Full',
 ]
 
+/**
+ * True when `after` is a LOWER fuel reading than `before` — the only fuel
+ * change worth alerting a client about (more fuel coming back is not a
+ * problem). An unrecognised value (legacy free text) falls back to "any
+ * difference", so a real shortfall is never silently dropped.
+ */
+export function isFuelReduction(
+  before: string | null | undefined,
+  after: string | null | undefined,
+): boolean {
+  if (!before || !after || before === after) return false
+  const b = FUEL_LEVELS.indexOf(before as FuelLevel)
+  const a = FUEL_LEVELS.indexOf(after as FuelLevel)
+  if (b < 0 || a < 0) return true
+  return a < b
+}
+
 export interface VehicleEvent {
   id: string
   name: string
@@ -66,8 +83,10 @@ export type PhotoAngle =
   | 'interior_front'
   | 'sliding_door'
   | 'interior_rear'
+  | 'right_panel'
   | 'rear_right'
   | 'rear_doors'
+  | 'rear_door_driver'
   | 'rear_left'
   | 'left_panel'
   | 'driver_door'
@@ -84,8 +103,14 @@ export const REQUIRED_PHOTOS: { angle: PhotoAngle; label: string }[] = [
   { angle: 'interior_front', label: 'Interior Front' },
   { angle: 'sliding_door', label: 'Sliding Door' },
   { angle: 'interior_rear', label: 'Interior Rear' },
+  { angle: 'right_panel', label: 'Right Panel' },
   { angle: 'rear_right', label: 'Rear Right' },
-  { angle: 'rear_doors', label: 'Rear Doors' },
+  // One photo per rear door since Sep 2026. `rear_doors` keeps its key so a
+  // book-out from before (one shot of both doors) still lines up with its
+  // check-in; it now means the sliding-door side's door. Named by side, not
+  // left/right, because which is "left" depends on where you stand.
+  { angle: 'rear_doors', label: 'Rear Door — Sliding-Door Side' },
+  { angle: 'rear_door_driver', label: 'Rear Door — Driver Side' },
   { angle: 'rear_left', label: 'Rear Left' },
   { angle: 'left_panel', label: 'Left Panel' },
   { angle: 'driver_door', label: 'Driver Door' },
@@ -109,12 +134,15 @@ export const LEGACY_WINDSCREEN_ANGLE = 'windscreen'
  *
  * `extra_${number}` is the canonical shape for an optional book-out
  * extra: a unique angle per capture so a check-in retake can target the
- * same slot without colliding with sibling extras. `'other'` / `'damage'`
- * / `damage_${number}` are kept for backwards compatibility with legacy
- * data and the in-progress damage flow on check-in.
+ * same slot without colliding with sibling extras. `flag_${number}` is the
+ * equivalent for prep flag photos — each flagged checklist item gets a
+ * unique angle so multiple flag photos don't overwrite each other in R2
+ * (they all used to share `'other'`). `'other'` / `'damage'` /
+ * `damage_${number}` are kept for backwards compatibility with legacy data
+ * and the in-progress damage flow on check-in.
  */
 export interface CapturedPhoto {
-  angle: PhotoAngle | 'damage' | 'other' | `damage_${number}` | `extra_${number}`
+  angle: PhotoAngle | 'damage' | 'other' | `damage_${number}` | `extra_${number}` | `flag_${number}`
   label: string
   blobUrl: string        // Object URL for preview
   blob: Blob             // Actual image data
@@ -156,7 +184,8 @@ export interface BookOutFormState {
   hireEndTime?: string | null        // HH:mm
   excess?: string | null             // Excess amount (mirrored from linked board)
   ve103b?: string | null             // VE103b reference
-  ve103bGeneratedAtDesk?: boolean    // Cert generated at the desk (Phase A) — skip submit-time generation
+  ve103bGeneratedAtDesk?: boolean    // Cert generated at the desk (Phase A) — the Generate button shows done
+  ve103bHandedOver?: boolean         // Book-out Confirm tick: printed VE103B handed to the driver
   returnOvernight?: string | null    // "Yes" | "No" | "Don't know"
   allDrivers?: string[]              // All driver names on this job (for PDF display)
   hireFormEntries?: Array<{          // Full hire form data per driver (for write-back + multi-driver emails)

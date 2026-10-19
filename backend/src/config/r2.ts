@@ -1,8 +1,12 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import {
+  S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command,
+  CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand,
+} from '@aws-sdk/client-s3';
+import { open } from 'fs/promises';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || '';
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || '';
@@ -42,6 +46,50 @@ export async function uploadToR2(
 
   // Return the key — the frontend constructs the full URL via the download route
   return key;
+}
+
+/**
+ * Upload a file from disk in 64MB parts, so a large file (the nightly Traccar
+ * dump, ~1GB) never sits in memory whole — uploadToR2 takes a Buffer, which on
+ * this 4GB, no-swap server is not an option at that size. A failed upload is
+ * aborted so R2 doesn't keep the orphaned parts.
+ */
+export async function uploadFileToR2(key: string, filePath: string, contentType: string): Promise<number> {
+  const PART = 64 * 1024 * 1024;
+  const file = await open(filePath, 'r');
+  const { UploadId } = await s3.send(new CreateMultipartUploadCommand({
+    Bucket: R2_BUCKET_NAME, Key: key, ContentType: contentType,
+  }));
+  try {
+    const parts: { ETag: string; PartNumber: number }[] = [];
+    const buf = Buffer.alloc(PART);
+    let total = 0;
+    for (let n = 1; ; n++) {
+      // Fill the whole part: a short read is only allowed for the last one.
+      let filled = 0;
+      while (filled < PART) {
+        const { bytesRead } = await file.read(buf, filled, PART - filled, total + filled);
+        if (bytesRead === 0) break;
+        filled += bytesRead;
+      }
+      if (filled === 0 && n > 1) break;
+      const res = await s3.send(new UploadPartCommand({
+        Bucket: R2_BUCKET_NAME, Key: key, UploadId, PartNumber: n, Body: buf.subarray(0, filled),
+      }));
+      parts.push({ ETag: res.ETag as string, PartNumber: n });
+      total += filled;
+      if (filled < PART) break;
+    }
+    await s3.send(new CompleteMultipartUploadCommand({
+      Bucket: R2_BUCKET_NAME, Key: key, UploadId, MultipartUpload: { Parts: parts },
+    }));
+    return total;
+  } catch (err) {
+    await s3.send(new AbortMultipartUploadCommand({ Bucket: R2_BUCKET_NAME, Key: key, UploadId })).catch(() => {});
+    throw err;
+  } finally {
+    await file.close();
+  }
 }
 
 export async function deleteFromR2(key: string): Promise<void> {
@@ -105,6 +153,13 @@ export async function uploadToPublicR2(
 
 export async function getFromPublicR2(key: string) {
   return s3.send(new GetObjectCommand({
+    Bucket: R2_PUBLIC_BUCKET_NAME,
+    Key: key,
+  }));
+}
+
+export async function deleteFromPublicR2(key: string): Promise<void> {
+  await s3.send(new DeleteObjectCommand({
     Bucket: R2_PUBLIC_BUCKET_NAME,
     Key: key,
   }));

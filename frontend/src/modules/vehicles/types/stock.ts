@@ -64,7 +64,9 @@ export interface StockConsumptionMapping {
 /** Fluid amount text -> approximate litres */
 export function parseFluidAmount(text: string): number {
   if (!text) return 0
-  if (text.includes('500ml') && text.startsWith('<')) return 0.3
+  // `includes`, not `startsWith` — the choice now reads "Topped up < 500ml",
+  // so anchoring at the start silently graded every splash as a half litre.
+  if (text.includes('500ml') && text.includes('<')) return 0.3
   if (text.includes('500ml')) return 0.5
   if (text.includes('1.5L')) return 1.5
   if (text.includes('1L')) return 1

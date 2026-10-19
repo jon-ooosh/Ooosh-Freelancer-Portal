@@ -1,4 +1,5 @@
 import { Link, useSearchParams } from 'react-router-dom'
+import { hasManagerRole } from '../../../lib/roles'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useFilteredVehicles } from '../hooks/useVehicles'
@@ -8,7 +9,7 @@ import { getDateUrgency } from '../types/vehicle'
 import { vmPath } from '../config/route-paths'
 import { createVehicle, uploadVehicleFile, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
 import { buildDefaultChecklist } from '../lib/setup-checklist'
-import { lifespanCountdown, sellByDate, formatGbp } from '../lib/vehicle-lifecycle'
+import { lifespanCountdown, sellByDate, formatGbp, annualMileage, formatAnnualMileage } from '../lib/vehicle-lifecycle'
 import { FinanceProviderSelect } from '../components/FinanceLifecycleSection'
 import type { SetupChecklistItem } from '../types/vehicle'
 import { getServiceMileageStatus, getRossettsStatus, URGENCY_TEXT } from '../lib/service-status'
@@ -16,6 +17,10 @@ import { isSetupPending, checklistProgress } from '../lib/setup-checklist'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import type { Vehicle } from '../types/vehicle'
 import type { ComplianceSettings } from '../lib/fleet-api'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
+import { MotFlags } from '../components/mot/MotFlags'
+import { refreshAllMots } from '../lib/mot-history'
 
 /** Colour classes for simple vehicle types */
 const typeColours: Record<string, string> = {
@@ -49,6 +54,7 @@ function DateBadge({ label, date, warningDays = 30 }: { label: string; date: str
 }
 
 function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: boolean }) {
+  const openSales = useOpenSalesByVehicle()
   const gearbox = vehicleGearbox(vehicle)
   const gearboxLabel = gearbox === 'auto' ? 'Auto' : gearbox === 'manual' ? 'Manual' : null
 
@@ -61,7 +67,9 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
         {/* Top row: reg + type badges */}
         <div className="flex items-start justify-between">
           <div>
-            <h3 className="text-lg font-bold text-ooosh-navy">{vehicle.reg}</h3>
+            <h3 className="text-lg font-bold text-ooosh-navy">
+              {vehicle.reg} <ForSalePill sale={openSales.get(vehicle.id)} />
+            </h3>
             <p className="text-sm text-gray-500">
               {vehicle.make} {vehicle.colour ? `· ${vehicle.colour}` : ''}
             </p>
@@ -120,9 +128,22 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
           )}
         </div>
 
+        {/* Mileage — the age-vs-miles read, same as the table + finance views */}
+        {vehicle.currentMileage != null && (
+          <p className="mt-2 text-xs text-gray-500 tabular-nums">
+            {vehicle.currentMileage.toLocaleString()} miles
+            {formatAnnualMileage(annualMileage(vehicle.currentMileage, vehicle.dateFirstReg))
+              ? ` · ${formatAnnualMileage(annualMileage(vehicle.currentMileage, vehicle.dateFirstReg))}`
+              : ''}
+          </p>
+        )}
+
         {/* Key dates that need attention */}
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5">
-          <DateBadge label="MOT" date={vehicle.motDue} />
+          <span className="inline-flex items-center gap-1">
+            <DateBadge label="MOT" date={vehicle.motDue} />
+            <MotFlags v={vehicle} />
+          </span>
           <DateBadge label="Tax" date={vehicle.taxDue} />
           {vehicle.tflDue && <DateBadge label="TFL" date={vehicle.tflDue} />}
         </div>
@@ -200,6 +221,24 @@ function SortTh({ label, col, sort, onSort, className = '', align = 'left' }: {
   )
 }
 
+/**
+ * Mileage cell: the odometer reading with its miles-per-year underneath.
+ *
+ * The pair is the point. Deciding whether to move a van on is an age-vs-miles
+ * judgement, and neither number answers it alone — 140k on a two-year-old van
+ * and 140k on a six-year-old one are different vans. Shared by the fleet table
+ * and the finance board so both read the same way.
+ */
+function MileageCell({ vehicle, className = '' }: { vehicle: Vehicle; className?: string }) {
+  const perYear = formatAnnualMileage(annualMileage(vehicle.currentMileage, vehicle.dateFirstReg))
+  return (
+    <td className={`whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-gray-600 ${className}`}>
+      {vehicle.currentMileage != null ? vehicle.currentMileage.toLocaleString() : '—'}
+      {perYear && <div className="text-[10px] text-gray-400">{perYear}</div>}
+    </td>
+  )
+}
+
 /** Compact date for the dense table — "26 May 26". */
 function compactDate(dateStr: string | null): string {
   if (!dateStr) return '—'
@@ -213,12 +252,13 @@ function compactDate(dateStr: string | null): string {
 }
 
 /** A single colour-coded date cell for the fleet table. */
-function DateCell({ date, warningDays }: { date: string | null; warningDays: number }) {
+function DateCell({ date, warningDays, extra }: { date: string | null; warningDays: number; extra?: React.ReactNode }) {
   const urgency = getDateUrgency(date, warningDays)
   return (
     <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[urgency]}`}>
       {compactDate(date)}
       {urgency === 'overdue' && date && ' ⚠️'}
+      {extra}
     </td>
   )
 }
@@ -253,6 +293,7 @@ function FleetTable({
 }) {
   const [sort, setSort] = useState<SortState | null>(null)
   const onSort = (col: string) => setSort(s => nextSort(s, col))
+  const openSales = useOpenSalesByVehicle()
 
   const accessor = (v: Vehicle, col: string): string | number | null => {
     switch (col) {
@@ -303,6 +344,7 @@ function FleetTable({
                   <Link to={vmPath(`/vehicles/${vehicle.id}`)} className="text-sm font-bold text-ooosh-navy hover:underline">
                     {vehicle.reg}
                   </Link>
+                  <ForSalePill sale={openSales.get(vehicle.id)} className="ml-1.5" />
                   {isSetupPending(vehicle.setupChecklist) && (
                     <span
                       className="ml-1.5 inline-block rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 align-middle"
@@ -328,9 +370,7 @@ function FleetTable({
                     </span>
                   )}
                 </td>
-                <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-gray-600">
-                  {vehicle.currentMileage != null ? vehicle.currentMileage.toLocaleString() : '—'}
-                </td>
+                <MileageCell vehicle={vehicle} />
                 <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[svc.urgency]}`}>
                   {svc.milesRemaining == null
                     ? '—'
@@ -338,7 +378,9 @@ function FleetTable({
                       ? `${Math.abs(svc.milesRemaining).toLocaleString()} over ⚠️`
                       : `${svc.milesRemaining.toLocaleString()} mi`}
                 </td>
-                <DateCell date={vehicle.motDue} warningDays={settings.mot_warning_days} />
+                {/* The MOT date is DVSA's; the flags say what else DVSA knows (services/dvsa-mot.ts). */}
+                <DateCell date={vehicle.motDue} warningDays={settings.mot_warning_days}
+                  extra={<MotFlags v={vehicle} className="ml-1" />} />
                 <DateCell date={vehicle.taxDue} warningDays={settings.tax_warning_days} />
                 <DateCell date={vehicle.tflDue} warningDays={settings.tfl_warning_days} />
                 <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[ross.urgency]}`}>
@@ -388,6 +430,7 @@ function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
       case 'deposit': return v.depositPaid
       case 'financed': return v.amountFinanced
       case 'total': return v.totalPayable
+      case 'mileage': return v.currentMileage
       case 'sellby': { const d = sellByDate(v.dateFirstReg); return d ? d.getTime() : null }
       case 'countdown': return lifespanCountdown(v.dateFirstReg)?.months ?? null
       default: return null
@@ -409,6 +452,7 @@ function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
             <SortTh label="Deposit" col="deposit" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
             <SortTh label="Financed" col="financed" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
             <SortTh label="Total payable" col="total" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
+            <SortTh label="Mileage" col="mileage" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
             <SortTh label="5-yr sell-by" col="sellby" sort={sort} onSort={onSort} className="px-2 py-2" />
             <SortTh label="Countdown" col="countdown" sort={sort} onSort={onSort} className="px-2 py-2" />
             <th className="px-2 py-2 text-center">Docs</th>
@@ -444,6 +488,7 @@ function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
                 <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums font-medium text-gray-800">
                   {vehicle.totalPayable != null ? formatGbp(vehicle.totalPayable) : '—'}
                 </td>
+                <MileageCell vehicle={vehicle} />
                 <td className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-gray-600">
                   {sellBy ? compactDate(sellBy.toISOString().slice(0, 10)) : '—'}
                 </td>
@@ -469,6 +514,12 @@ export function VehiclesPage() {
   const [searchParams] = useSearchParams()
   const statusHighlight = searchParams.get('status') // e.g. "on-hire"
   const { vehicles, allVehicles, filters, setFilters, isLoading, isError, error, refetch } = useFilteredVehicles()
+  // "For sale" pill — vans with an open sale (docs/VEHICLE-SALES-SPEC.md). Kept
+  // out of useFilteredVehicles because the sale list is a separate query the
+  // hook doesn't know about; exclusive with the other pills, like they are
+  // with each other.
+  const openSales = useOpenSalesByVehicle()
+  const [forSaleOnly, setForSaleOnly] = useState(false)
   const { data: allocations } = useAllocations()
   const allocatedVehicleIds = useMemo(
     () => new Set((allocations || []).map(a => a.vehicleId)),
@@ -476,7 +527,7 @@ export function VehiclesPage() {
   )
   const [showAddForm, setShowAddForm] = useState(false)
   const opAuth = getOpAuthState()
-  const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  const isAdmin = hasManagerRole(opAuth?.userRole)
   // Finance is admin-only — the Finance board view + finance fields on the add
   // form only render for strict admins.
   const isStrictAdmin = opAuth?.userRole === 'admin'
@@ -515,7 +566,27 @@ export function VehiclesPage() {
     }
   }, []) // Only on mount — don't re-run as filters change
 
-  const sortedVehicles = vehicles
+  const sortedVehicles = forSaleOnly ? vehicles.filter(v => openSales.has(v.id)) : vehicles
+
+  // "Refresh MOTs from DVSA" (admin). The run is in the background on the
+  // server (one van every ~1.5 s), so reload the list once it should be done.
+  const [motRefreshMsg, setMotRefreshMsg] = useState<string | null>(null)
+  const [motRefreshing, setMotRefreshing] = useState(false)
+  async function handleRefreshAllMots() {
+    setMotRefreshing(true)
+    setMotRefreshMsg(null)
+    try {
+      const r = await refreshAllMots()
+      const secs = Math.ceil(r.vehicles * 1.8) + 5
+      setMotRefreshMsg(r.started
+        ? `Checking ${r.vehicles} vans with DVSA — about ${secs < 90 ? `${secs} seconds` : `${Math.ceil(secs / 60)} minutes`}. The list updates when it's done.`
+        : 'A DVSA check is already running — the list updates when it finishes.')
+      setTimeout(() => { void refetch(); setMotRefreshing(false) }, secs * 1000)
+    } catch (err) {
+      setMotRefreshMsg((err as Error).message)
+      setMotRefreshing(false)
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -525,7 +596,7 @@ export function VehiclesPage() {
           Vehicles
           {!isLoading && (
             <span className="ml-2 text-sm font-normal text-gray-400">
-              {vehicles.length}{filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold ? ` / ${allVehicles.length}` : ''}
+              {sortedVehicles.length}{filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold || forSaleOnly ? ` / ${allVehicles.length}` : ''}
             </span>
           )}
         </h2>
@@ -556,6 +627,16 @@ export function VehiclesPage() {
               </button>
             )}
           </div>
+          {isStrictAdmin && (
+            <button
+              onClick={handleRefreshAllMots}
+              disabled={motRefreshing}
+              title="Fetch every active van's MOT from DVSA now (it also runs every morning at 07:30)"
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {motRefreshing ? 'Checking MOTs…' : 'Refresh MOTs'}
+            </button>
+          )}
           {isAdmin && (
             <button
               onClick={() => setShowAddForm(true)}
@@ -573,6 +654,10 @@ export function VehiclesPage() {
           </button>
         </div>
       </div>
+
+      {motRefreshMsg && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">{motRefreshMsg}</div>
+      )}
 
       {/* Add Vehicle form */}
       {showAddForm && (
@@ -598,9 +683,9 @@ export function VehiclesPage() {
       {/* Type filter pills */}
       <div className="flex flex-wrap gap-2">
         <button
-          onClick={() => setFilters(f => ({ ...f, simpleType: null, hireStatus: null, showOldSold: false }))}
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({ ...f, simpleType: null, hireStatus: null, showOldSold: false })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-            !filters.simpleType && !filters.hireStatus && !filters.showOldSold
+            !filters.simpleType && !filters.hireStatus && !filters.showOldSold && !forSaleOnly
               ? 'bg-ooosh-navy text-white'
               : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
           }`}
@@ -610,12 +695,12 @@ export function VehiclesPage() {
         {VEHICLE_TYPES.map(type => (
           <button
             key={type}
-            onClick={() => setFilters(f => ({
+            onClick={() => { setForSaleOnly(false); setFilters(f => ({
               ...f,
               simpleType: f.simpleType === type ? null : type,
               hireStatus: null,
               showOldSold: false,
-            }))}
+            })) }}
             className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
               filters.simpleType === type
                 ? 'bg-ooosh-navy text-white'
@@ -631,12 +716,12 @@ export function VehiclesPage() {
 
         {/* Status filter pills */}
         <button
-          onClick={() => setFilters(f => ({
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({
             ...f,
             hireStatus: f.hireStatus === 'On Hire' ? null : 'On Hire',
             simpleType: null,
             showOldSold: false,
-          }))}
+          })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
             filters.hireStatus === 'On Hire'
               ? 'bg-blue-600 text-white'
@@ -646,12 +731,12 @@ export function VehiclesPage() {
           On Hire
         </button>
         <button
-          onClick={() => setFilters(f => ({
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({
             ...f,
             hireStatus: f.hireStatus === 'Available' ? null : 'Available',
             simpleType: null,
             showOldSold: false,
-          }))}
+          })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
             filters.hireStatus === 'Available'
               ? 'bg-green-600 text-white'
@@ -661,12 +746,12 @@ export function VehiclesPage() {
           Ready
         </button>
         <button
-          onClick={() => setFilters(f => ({
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({
             ...f,
             hireStatus: f.hireStatus === 'Prep Needed' ? null : 'Prep Needed',
             simpleType: null,
             showOldSold: false,
-          }))}
+          })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
             filters.hireStatus === 'Prep Needed'
               ? 'bg-amber-600 text-white'
@@ -677,12 +762,12 @@ export function VehiclesPage() {
         </button>
 
         <button
-          onClick={() => setFilters(f => ({
+          onClick={() => { setForSaleOnly(false); setFilters(f => ({
             ...f,
             simpleType: null,
             hireStatus: null,
             showOldSold: !f.showOldSold,
-          }))}
+          })) }}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
             filters.showOldSold
               ? 'bg-ooosh-navy text-white'
@@ -690,6 +775,19 @@ export function VehiclesPage() {
           }`}
         >
           Old &amp; Sold
+        </button>
+        <button
+          onClick={() => {
+            setForSaleOnly(v => !v)
+            setFilters(f => ({ ...f, simpleType: null, hireStatus: null, showOldSold: false }))
+          }}
+          className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+            forSaleOnly
+              ? 'bg-indigo-600 text-white'
+              : 'bg-indigo-100 text-indigo-700 hover:opacity-80'
+          }`}
+        >
+          For Sale
         </button>
       </div>
 
@@ -727,7 +825,7 @@ export function VehiclesPage() {
       {!isLoading && !isError && (
         sortedVehicles.length === 0 ? (
           <div className="rounded-lg border border-gray-200 bg-white p-6 text-center text-sm text-gray-400">
-            {filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold
+            {filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold || forSaleOnly
               ? 'No vehicles match your filters'
               : 'No vehicles found'}
           </div>

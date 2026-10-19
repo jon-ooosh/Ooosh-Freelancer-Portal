@@ -1,10 +1,13 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { z } from 'zod';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── GET /api/notifications — bell dropdown (legacy, kept for backward compat) ──
 router.get('/', async (req: AuthRequest, res: Response) => {
@@ -626,12 +629,16 @@ router.post('/:id/unacknowledge', async (req: AuthRequest, res: Response) => {
     const notif = result.rows[0];
 
     // Reverse the reminder cascade if applicable.
+    // The pattern is a PLAIN '...' string, never E'...' (Oct 2026): an E''
+    // string eats the backslashes, so `\[` reached the regex as a bare `[` and
+    // the marker became a one-character class — stripping every M, a, r, k, e,
+    // d… from the notes ("Check the van tyres" came back as "Chhys").
     if (notif.entity_type === 'job_requirements' && notif.entity_id) {
       try {
         await query(
           `UPDATE job_requirements
            SET status = 'in_progress',
-               notes = REGEXP_REPLACE(COALESCE(notes, ''), E'\\n?\\[Marked done via inbox acknowledgement\\]', '', 'g'),
+               notes = REGEXP_REPLACE(COALESCE(notes, ''), '\\n?\\[Marked done via inbox acknowledgement\\]', '', 'g'),
                updated_at = NOW()
            WHERE id = $1
              AND requirement_type = 'reminder'
@@ -741,8 +748,8 @@ router.post('/:id/action', async (req: AuthRequest, res: Response) => {
       }
       const chaseMethod = (action.params?.chase_method as string | undefined) || null;
       const interactionResult = await query(
-        `INSERT INTO interactions (type, content, job_id, created_by, chase_method)
-         VALUES ('chase', $1, $2, $3, $4)
+        `INSERT INTO interactions (type, content, job_id, created_by, chase_method, source)
+         VALUES ('chase', $1, $2, $3, $4, 'system')
          RETURNING id`,
         [`Chase logged from inbox: ${notif.title}`, jobId, req.user!.id, chaseMethod]
       );

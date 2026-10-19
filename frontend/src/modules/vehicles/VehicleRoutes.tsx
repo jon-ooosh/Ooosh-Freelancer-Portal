@@ -28,6 +28,7 @@ import { FleetMapPage } from './pages/FleetMapPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { CostReportPage } from './pages/CostReportPage'
 import { VehicleSettingsPage } from './pages/VehicleSettingsPage'
+import { VehicleSalePage } from './pages/VehicleSalePage'
 
 /**
  * All Vehicle Management routes.
@@ -36,6 +37,7 @@ import { VehicleSettingsPage } from './pages/VehicleSettingsPage'
  *   /vehicles/           → Dashboard (HomePage)
  *   /vehicles/fleet      → Vehicle list
  *   /vehicles/fleet/:id  → Vehicle detail
+ *   /vehicles/fleet/:id/sale → Selling the van (docs/VEHICLE-SALES-SPEC.md)
  *   /vehicles/book-out   → Book-out wizard
  *   /vehicles/check-in   → Check-in wizard
  *   /vehicles/collection → Freelancer collection
@@ -64,6 +66,7 @@ export function VehicleRoutes() {
         <Route path="fleet" element={<VehiclesPage />} />
         <Route path="fleet/:id" element={<VehicleDetailPage />} />
         <Route path="fleet/:id/settings" element={<VehicleSettingsPage />} />
+        <Route path="fleet/:id/sale" element={<VehicleSalePage />} />
         <Route path="fleet/:id/hire/:hhJob" element={<HireRecordPage />} />
         <Route path="book-out" element={<BookOutPage />} />
         <Route path="check-in" element={<CheckInPage />} />

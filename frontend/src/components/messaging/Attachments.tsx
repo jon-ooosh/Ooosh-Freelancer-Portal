@@ -30,6 +30,7 @@
 
 import { useState, useEffect } from 'react';
 import { api } from '../../services/api';
+import { useAuthedFileUrl } from '../../hooks/useAuthedFileUrl';
 
 export interface InteractionAttachment {
   r2_key?: string;
@@ -84,30 +85,14 @@ export function attachmentsForPayload(items: PendingAttachment[]) {
 }
 
 export function AttachmentImage({ att }: { att: InteractionAttachment }) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [error, setError] = useState(false);
   const [lightbox, setLightbox] = useState(false);
 
-  useEffect(() => {
-    let revoked: string | null = null;
-    let cancelled = false;
-    const key = attachmentKey(att);
-    if (!key) { setError(true); return; }
-
-    api.blob(`/files/download?key=${encodeURIComponent(key)}`)
-      .then(({ blob }) => {
-        if (cancelled) return;
-        const url = URL.createObjectURL(blob);
-        revoked = url;
-        setSrc(url);
-      })
-      .catch(() => { if (!cancelled) setError(true); });
-
-    return () => {
-      cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
-    };
-  }, [att]);
+  // Keyed on the R2 key, not the `att` object: a timeline refetch hands back
+  // structurally identical attachments with fresh identities, which used to
+  // re-download every image on the thread.
+  const key = attachmentKey(att);
+  const { ref, url: src, failed } = useAuthedFileUrl(key);
+  const error = failed || !key;
 
   // Escape closes the lightbox.
   useEffect(() => {
@@ -127,8 +112,11 @@ export function AttachmentImage({ att }: { att: InteractionAttachment }) {
     );
   }
   if (!src) {
+    // The ref lives here as well as on the loaded image: a thread can carry a
+    // long tail of attachments, and this placeholder is the only thing on
+    // screen for the ones still below the fold.
     return (
-      <div className="border border-gray-200 rounded p-2 text-xs text-gray-400 bg-gray-50 animate-pulse">
+      <div ref={ref} className="border border-gray-200 rounded p-2 text-xs text-gray-400 bg-gray-50 animate-pulse">
         Loading…
       </div>
     );
@@ -139,6 +127,7 @@ export function AttachmentImage({ att }: { att: InteractionAttachment }) {
   return (
     <>
       <button
+        ref={ref}
         type="button"
         onClick={() => setLightbox(true)}
         className="inline-block p-0 border-0 bg-transparent cursor-zoom-in"

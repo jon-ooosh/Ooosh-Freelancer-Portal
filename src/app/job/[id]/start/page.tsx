@@ -4,7 +4,15 @@
  * Delivery/Collection Start Page
  *
  * Quick wizard that asks "What are you delivering/collecting today?"
- * and routes the driver to the right flow:
+ * and routes the driver to the right flow.
+ *
+ * Picking a van option here declares requires_van_leg=true on the quote BEFORE
+ * the redirect, and that declaration is what the server waits on before it can
+ * close the job. So a mis-pick on a backline job doesn't just show an error —
+ * it leaves the quote unclosable (HH 16448, 12 Sep: three days open, closed by
+ * hand in the end). Hence the steer below when the job is booked as backline.
+ *
+ * Routes:
  * - Van only → vehicle book-out (vehicle management app)
  * - Backline only → equipment checklist (/job/[id]/complete)
  * - Both → vehicle book-out first, then returns to /job/[id]/complete
@@ -30,6 +38,10 @@ interface JobSummary {
   venueName?: string
   date?: string
   time?: string
+  // What the job is booked as in OP. Used to order the options below — a
+  // backline job shouldn't lead with the van. Often null, so only ever a
+  // steer, never a gate.
+  whatIsIt?: 'equipment' | 'vehicle' | 'people'
 }
 
 // =============================================================================
@@ -84,24 +96,52 @@ export default function StartDeliveryPage() {
     }
   }, [jobId, router])
 
-  // Handle vehicle book-out
-  const handleBookout = async (vanOnly: boolean) => {
+  // Declare which legs this job involves so OP can close the quote server-side
+  // when the last required leg lands (no cross-domain return hop needed).
+  // Best-effort: never block the freelancer starting if this call fails — the
+  // legacy return-hop flow still works, we just lose the server-close safety net.
+  const declareLegs = async (van: boolean, equipment: boolean) => {
+    try {
+      await fetch(`/api/jobs/${jobId}/legs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ van, equipment }),
+      })
+    } catch (err) {
+      console.warn('Declare legs failed (non-blocking):', err)
+    }
+  }
+
+  // Backline only → equipment leg, no van. Declare then go to the checklist.
+  const handleBacklineOnly = async () => {
+    await declareLegs(false, true)
+    router.push(`/job/${jobId}/complete`)
+  }
+
+  // Handle the VAN leg. For a delivery this is a book-out; for a collection
+  // it's a check-in / return (the Lewis mis-route fix — collections used to be
+  // sent through book-out). vanOnly=true → van only; vanOnly=false → "both"
+  // (van leg first, then equipment checklist).
+  const handleVanLeg = async (vanOnly: boolean) => {
     setBookoutLoading(true)
     setBookoutError(null)
     try {
-      const res = await fetch(`/api/jobs/${jobId}/bookout-token`, {
+      await declareLegs(true, !vanOnly)
+      const isCollection = job?.type === 'collection'
+      const endpoint = isCollection ? 'checkin-token' : 'bookout-token'
+      const res = await fetch(`/api/jobs/${jobId}/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ vanOnly }),
       })
       const data = await res.json()
       if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to start book-out')
+        throw new Error(data.error || `Failed to start ${isCollection ? 'check-in' : 'book-out'}`)
       }
-      window.location.href = data.bookoutUrl
+      window.location.href = isCollection ? data.checkinUrl : data.bookoutUrl
     } catch (err) {
-      console.error('Book-out error:', err)
-      setBookoutError(err instanceof Error ? err.message : 'Failed to start book-out')
+      console.error('Van leg error:', err)
+      setBookoutError(err instanceof Error ? err.message : 'Failed to start')
       setBookoutLoading(false)
     }
   }
@@ -137,6 +177,35 @@ export default function StartDeliveryPage() {
   }
 
   const isDelivery = job.type === 'delivery'
+  const verb = isDelivery ? 'delivering' : 'collecting'
+  // Booked as backline in OP. Lead with the backline option and say so —
+  // picking a van leg here is what left HH 16448 unclosable. A steer only:
+  // what_is_it is null on roughly a third of jobs, and a backline job can
+  // legitimately involve a hire van, so all three options stay live.
+  const expectsBackline = job.whatIsIt === 'equipment'
+
+  // One definition, two positions — top of the list on a backline job,
+  // otherwise its usual middle slot.
+  const backlineButton = (
+    <button
+      onClick={handleBacklineOnly}
+      disabled={bookoutLoading}
+      className={`w-full flex items-center gap-4 p-5 rounded-xl border-2 bg-white hover:border-purple-400 hover:bg-purple-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm ${
+        expectsBackline ? 'border-purple-400' : 'border-gray-200'
+      }`}
+    >
+      <span className="text-3xl">🎸</span>
+      <div className="flex-1">
+        <p className="font-semibold text-gray-900">Backline only</p>
+        <p className="text-sm text-gray-500">Equipment checklist &amp; sign-off</p>
+      </div>
+      {expectsBackline && (
+        <span className="rounded-full bg-purple-100 px-2 py-1 text-xs font-medium text-purple-700">
+          Expected
+        </span>
+      )}
+    </button>
+  )
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -164,45 +233,49 @@ export default function StartDeliveryPage() {
           </p>
         </div>
 
+        {expectsBackline && (
+          <div className="mb-4 rounded-lg border border-purple-200 bg-purple-50 p-3">
+            <p className="text-sm text-purple-900">
+              <span className="font-semibold">This job is booked as backline.</span>{' '}
+              Only pick a van option if you&apos;re also {verb} an Ooosh hire van for the
+              customer.
+            </p>
+          </div>
+        )}
+
         <div className="space-y-3">
+          {/* Backline only — first when the job is booked as backline */}
+          {expectsBackline && backlineButton}
+
           {/* Van only */}
           <button
-            onClick={() => handleBookout(true)}
+            onClick={() => handleVanLeg(true)}
             disabled={bookoutLoading}
             className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-blue-400 hover:bg-blue-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
           >
             <span className="text-3xl">🚐</span>
             <div className="flex-1">
               <p className="font-semibold text-gray-900">Van only</p>
-              <p className="text-sm text-gray-500">Vehicle book-out process</p>
+              <p className="text-sm text-gray-500">{isDelivery ? 'Vehicle book-out process' : 'Vehicle check-in / return process'}</p>
             </div>
             {bookoutLoading && (
               <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
             )}
           </button>
 
-          {/* Backline only */}
-          <Link
-            href={`/job/${jobId}/complete`}
-            className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-purple-400 hover:bg-purple-50 transition-colors text-left shadow-sm"
-          >
-            <span className="text-3xl">🎸</span>
-            <div className="flex-1">
-              <p className="font-semibold text-gray-900">Backline only</p>
-              <p className="text-sm text-gray-500">Equipment checklist &amp; sign-off</p>
-            </div>
-          </Link>
+          {/* Backline only — normal position when we can't tell */}
+          {!expectsBackline && backlineButton}
 
           {/* Both */}
           <button
-            onClick={() => handleBookout(false)}
+            onClick={() => handleVanLeg(false)}
             disabled={bookoutLoading}
             className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-green-400 hover:bg-green-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
           >
             <span className="text-3xl">🚐🎸</span>
             <div className="flex-1">
               <p className="font-semibold text-gray-900">Both</p>
-              <p className="text-sm text-gray-500">Vehicle book-out, then equipment checklist</p>
+              <p className="text-sm text-gray-500">{isDelivery ? 'Vehicle book-out, then equipment checklist' : 'Vehicle check-in, then equipment checklist'}</p>
             </div>
             {bookoutLoading && (
               <div className="w-5 h-5 border-2 border-green-500 border-t-transparent rounded-full animate-spin"></div>

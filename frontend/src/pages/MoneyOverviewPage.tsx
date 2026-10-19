@@ -10,6 +10,8 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
+import IncomingPaymentsPanel from '../components/IncomingPaymentsPanel';
 
 interface BalanceRow {
   job_id: string; hh_job_number: number | null; job_name: string | null;
@@ -39,12 +41,20 @@ interface PendingRefundRow {
   id: number; job_id: string; hh_job_number: number | null;
   client_name: string | null; amount: string; notes: string | null; payment_date: string;
 }
+// Money we hold that a client is owed back, derived from HireHop's invoice
+// `owing` (usually a credit note raised after the invoice was paid). NOT an
+// IOU: there is no row to Process or Clear — it resolves by actually refunding.
+interface ClientOverpaidRow {
+  job_id: string; hh_job_number: number | null; job_name: string | null;
+  client_name: string | null; amount: string; last_synced_at: string | null;
+}
 interface OverviewData {
   balances_outstanding: BalanceRow[];
   balances_resolved: BalanceRow[];
   deposits_pending: DepositPendingRow[];
   excess_held: ExcessHeldRow[];
   pending_refunds: PendingRefundRow[];
+  client_overpaid: ClientOverpaidRow[];
   totals: {
     balance_outstanding: number; balances_count: number;
     balances_resolved_total: number; balances_resolved_count: number;
@@ -53,6 +63,8 @@ interface OverviewData {
     excess_held_upcoming: number; excess_held_upcoming_count: number;
     excess_held_past: number; excess_held_past_count: number;
     pending_refunds: number; pending_refunds_count: number;
+    client_overpaid: number; client_overpaid_count: number;
+    owed_to_clients: number;
   };
 }
 
@@ -64,8 +76,8 @@ const gbp = (n: number | string | null) =>
 type Timing = 'all' | 'finished' | 'upcoming';
 type Tab = 'balances' | 'deposits' | 'excess' | 'refunds';
 const PREFS_KEY = 'ooosh_money_overview_prefs';
-interface OverviewPrefs { tab: Tab; includeSpeculative: boolean; balancesTiming: Timing; excessTiming: Timing; groupByClient: boolean }
-const DEFAULT_PREFS: OverviewPrefs = { tab: 'balances', includeSpeculative: false, balancesTiming: 'all', excessTiming: 'all', groupByClient: false };
+interface OverviewPrefs { tab: Tab; includeSpeculative: boolean; balancesTiming: Timing; excessTiming: Timing; groupByClient: boolean; showResolved: boolean }
+const DEFAULT_PREFS: OverviewPrefs = { tab: 'balances', includeSpeculative: false, balancesTiming: 'all', excessTiming: 'all', groupByClient: false, showResolved: false };
 function loadPrefs(): OverviewPrefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
@@ -263,6 +275,109 @@ function ResolveBalanceModal({ target, onClose, onDone }: {
   );
 }
 
+// Pending-refund dismiss reasons (mirror of money.ts DISMISS_REFUND_REASONS).
+const DISMISS_REASONS = [
+  { value: 'refunded_externally', label: 'Already refunded outside OP (HireHop / Stripe / bank)' },
+  { value: 'refunded_via_op', label: 'Refunded in OP, but not through this IOU' },
+  { value: 'not_required', label: 'Not required (artifact / superseded)' },
+  { value: 'duplicate', label: 'Duplicate record' },
+  { value: 'other', label: 'Other' },
+];
+
+// Dismiss-refund modal — single (a PendingRefundRow) or bulk ('bulk', date-based).
+// Clears the OP IOU WITHOUT moving money — for refunds already done out-of-band
+// or pre-refund-tracking artifacts. Does NOT touch HireHop / Stripe / Xero.
+function DismissRefundModal({ target, isAdmin, onClose, onDone }: {
+  target: PendingRefundRow | 'bulk';
+  isAdmin: boolean;
+  onClose: () => void;
+  onDone: (msg: string) => void;
+}) {
+  const isBulk = target === 'bulk';
+  const [reason, setReason] = useState('refunded_externally');
+  const [notes, setNotes] = useState('');
+  const [beforeDate, setBeforeDate] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async () => {
+    setSaving(true); setErr('');
+    try {
+      if (isBulk) {
+        if (!beforeDate) throw new Error('Pick a "logged before" date');
+        const res = await api.post<{ dismissed: number }>('/money/refunds/bulk-dismiss', {
+          reason, notes: notes || null, logged_before: beforeDate,
+        });
+        onDone(`Cleared ${res.dismissed} pending refund${res.dismissed === 1 ? '' : 's'}`);
+      } else {
+        await api.post(`/money/${target.job_id}/dismiss-refund`, {
+          refund_id: String(target.id), reason, notes: notes || null,
+        });
+        onDone('Pending refund cleared');
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold text-gray-900 mb-1">
+          {isBulk ? 'Bulk clear pending refunds' : 'Clear pending refund'}
+        </h3>
+        {isBulk ? (
+          <p className="text-xs text-gray-500 mb-3">
+            Clears every pending refund logged before the chosen date. Use for the backlog from
+            before refund tracking was finished. Does NOT move any money or touch HireHop / Stripe / Xero.
+          </p>
+        ) : (
+          <p className="text-xs text-gray-500 mb-3">
+            #{target.hh_job_number ?? '—'}{target.client_name ? ` · ${target.client_name}` : ''} · {gbp(target.amount)}.
+            Clears this IOU — no money moves. Use when the refund was already handled in HireHop / Stripe / the bank,
+            or shouldn't have been logged. To actually send a refund, use the Money tab on the job instead.
+          </p>
+        )}
+
+        {isBulk && (
+          <div className="mb-3">
+            <label className="block text-xs font-medium text-gray-600 mb-1">Logged before</label>
+            <input type="date" value={beforeDate} onChange={(e) => setBeforeDate(e.target.value)}
+              className="w-full text-sm border border-gray-300 rounded-md px-3 py-2" />
+          </div>
+        )}
+
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-600 mb-1">Reason</label>
+          <select value={reason} onChange={(e) => setReason(e.target.value)}
+            className="w-full text-sm border border-gray-300 rounded-md px-3 py-2">
+            {DISMISS_REASONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+          </select>
+        </div>
+
+        <div className="mb-4">
+          <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
+            placeholder="e.g. refunded £150 in full direct in HireHop"
+            className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 resize-y" />
+        </div>
+
+        {err && <p className="text-xs text-red-600 mb-3">{err}</p>}
+        {isBulk && !isAdmin && <p className="text-xs text-amber-600 mb-3">Bulk clear is admin-only.</p>}
+
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+          <button onClick={submit} disabled={saving || (isBulk && !isAdmin)}
+            className="px-4 py-1.5 text-sm font-medium text-white bg-ooosh-600 rounded-md hover:bg-ooosh-700 disabled:opacity-50">
+            {saving ? 'Saving…' : isBulk ? 'Clear matching' : 'Clear refund'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Debt-chase tracker button: count + click-to-log, hover for the last chase.
 // Undo lives in the toast the parent shows after logging.
 function ChaseButton({ row, onChase }: { row: BalanceRow; onChase: (r: BalanceRow) => void }) {
@@ -386,14 +501,97 @@ function GroupedBalances({ rows, isAdmin, onResolve, onChase }: {
 }
 
 type Col = { label: string; sortable?: boolean; align?: 'right' };
-type Row = { key: string; href: string; cells: React.ReactNode[]; sort: (string | number)[]; search: string };
+type AmountField = { key: string; label: string };
+type Row = {
+  key: string; href: string; cells: React.ReactNode[];
+  sort: (string | number)[]; search: string;
+  // Numeric targets for amount-search mode, keyed by AmountField.key.
+  amounts?: Record<string, number>;
+};
 
-function Table({ columns, rows, empty }: { columns: Col[]; rows: Row[]; empty: string }) {
-  const [q, setQ] = useState('');
-  const [sortIdx, setSortIdx] = useState<number | null>(null);
-  const [dir, setDir] = useState<'asc' | 'desc'>('asc');
+// Per-table view state (sort + text search + amount search) persists per tab so
+// staff return to the overview set up the way they left it, and it survives a
+// page refresh. Distinct from the page-level OverviewPrefs (tabs/pills/toggles).
+const TABLE_PREFS_PREFIX = 'ooosh_money_overview_table_';
+interface TableState {
+  q: string; sortIdx: number | null; dir: 'asc' | 'desc';
+  amountMode: boolean; amountStr: string; tolerance: number; fields: string[];
+}
+function loadTableState(key: string | undefined, defaultFields: string[]): TableState {
+  const base: TableState = { q: '', sortIdx: null, dir: 'asc', amountMode: false, amountStr: '', tolerance: 20, fields: defaultFields };
+  if (!key) return base;
+  try {
+    const raw = localStorage.getItem(TABLE_PREFS_PREFIX + key);
+    if (raw) {
+      const p = { ...base, ...JSON.parse(raw) } as TableState;
+      if (!['asc', 'desc'].includes(p.dir)) p.dir = 'asc';
+      if (typeof p.tolerance !== 'number' || isNaN(p.tolerance) || p.tolerance < 0) p.tolerance = 20;
+      if (!Array.isArray(p.fields)) p.fields = defaultFields;
+      return p;
+    }
+  } catch { /* corrupted/blocked storage — fall through to defaults */ }
+  return base;
+}
+
+// Amount-search: covers the "unreferenced PayPal/Wise payment landed — which job
+// does it clear?" case. International transfers arrive shaved by a ~£15 fee plus
+// a little FX drift, so we match within a ±tolerance (default £20) rather than
+// exactly, and surface the nearest matches first with the delta shown.
+function Table({ columns, rows, empty, persistKey, amountSearch }: {
+  columns: Col[]; rows: Row[]; empty: string;
+  persistKey?: string;
+  amountSearch?: { fields: AmountField[] };
+}) {
+  const defaultFields = amountSearch ? [amountSearch.fields[0].key] : [];
+  const [init] = useState(() => loadTableState(persistKey, defaultFields));
+  const [q, setQ] = useState(init.q);
+  const [sortIdx, setSortIdx] = useState<number | null>(init.sortIdx);
+  const [dir, setDir] = useState<'asc' | 'desc'>(init.dir);
+  const [amountMode, setAmountMode] = useState(amountSearch ? init.amountMode : false);
+  const [amountStr, setAmountStr] = useState(init.amountStr);
+  const [tolerance, setTolerance] = useState(init.tolerance);
+  const [fields, setFields] = useState<string[]>(() => {
+    if (!amountSearch) return [];
+    const valid = init.fields.filter((k) => amountSearch.fields.some((f) => f.key === k));
+    return valid.length ? valid : defaultFields;
+  });
+
+  // Persist this table's view state under its tab key.
+  useEffect(() => {
+    if (!persistKey) return;
+    try {
+      localStorage.setItem(
+        TABLE_PREFS_PREFIX + persistKey,
+        JSON.stringify({ q, sortIdx, dir, amountMode, amountStr, tolerance, fields } satisfies TableState),
+      );
+    } catch { /* storage blocked — just won't persist */ }
+  }, [persistKey, q, sortIdx, dir, amountMode, amountStr, tolerance, fields]);
 
   const view = useMemo(() => {
+    // Amount-search mode: keep rows whose chosen amount(s) fall within ±tolerance
+    // of the target, nearest first, annotated with the signed delta.
+    if (amountMode && amountSearch) {
+      const target = parseFloat(amountStr.replace(/[£,\s]/g, ''));
+      const active = amountSearch.fields.filter((f) => fields.includes(f.key));
+      if (isNaN(target)) return rows.map((row) => ({ row, match: null as null | { label: string; delta: number } }));
+      const out: { row: Row; match: { label: string; delta: number } }[] = [];
+      for (const row of rows) {
+        if (!row.amounts) continue;
+        let best: { label: string; delta: number } | null = null;
+        for (const f of active) {
+          const v = row.amounts[f.key];
+          if (v === undefined || v === null) continue;
+          const delta = v - target; // signed: negative = row is below the searched amount
+          if (Math.abs(delta) <= tolerance && (!best || Math.abs(delta) < Math.abs(best.delta))) {
+            best = { label: f.label, delta };
+          }
+        }
+        if (best) out.push({ row, match: best });
+      }
+      out.sort((a, b) => Math.abs(a.match.delta) - Math.abs(b.match.delta));
+      return out;
+    }
+    // Text-search mode (default).
     const needle = q.trim().toLowerCase();
     let out = needle ? rows.filter((r) => r.search.toLowerCase().includes(needle)) : rows.slice();
     if (sortIdx !== null) {
@@ -405,51 +603,120 @@ function Table({ columns, rows, empty }: { columns: Col[]; rows: Row[]; empty: s
         return dir === 'asc' ? cmp : -cmp;
       });
     }
-    return out;
-  }, [rows, q, sortIdx, dir]);
+    return out.map((row) => ({ row, match: null as null | { label: string; delta: number } }));
+  }, [rows, q, sortIdx, dir, amountMode, amountStr, tolerance, fields, amountSearch]);
 
   const clickSort = (i: number) => {
-    if (!columns[i].sortable) return;
+    if (amountMode || !columns[i].sortable) return;
     if (sortIdx === i) setDir(dir === 'asc' ? 'desc' : 'asc');
     else { setSortIdx(i); setDir('asc'); }
   };
 
+  const fmtDelta = (delta: number) => (delta === 0 ? 'exact' : (delta > 0 ? '+' : '−') + gbp(Math.abs(delta)));
+
   return (
     <div>
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100">
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search job, client…"
-          className="flex-1 max-w-xs px-3 py-1.5 text-sm border border-gray-300 rounded-md"
-        />
-        <span className="text-xs text-gray-400">{view.length} of {rows.length}</span>
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 flex-wrap">
+        {amountSearch && (
+          <button
+            type="button"
+            onClick={() => setAmountMode((m) => !m)}
+            title={amountMode ? 'Switch back to text search' : 'Search by amount — find a job whose balance matches a payment (±tolerance for transfer fees)'}
+            className={`px-2.5 py-1.5 text-sm rounded-md border font-medium ${amountMode ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >£</button>
+        )}
+        {amountMode && amountSearch ? (
+          <>
+            <div className="relative">
+              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">£</span>
+              <input
+                autoFocus
+                value={amountStr}
+                onChange={(e) => setAmountStr(e.target.value)}
+                inputMode="decimal"
+                placeholder="amount"
+                className="w-28 pl-6 pr-2 py-1.5 text-sm border border-gray-300 rounded-md"
+              />
+            </div>
+            <span className="text-xs text-gray-400">±</span>
+            <div className="relative">
+              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">£</span>
+              <input
+                type="number" min={0} step={5}
+                value={tolerance}
+                onChange={(e) => setTolerance(Math.max(0, parseFloat(e.target.value) || 0))}
+                title="Tolerance — how far either side of the amount to match (covers transfer fees + FX drift)"
+                className="w-20 pl-5 pr-1.5 py-1.5 text-sm border border-gray-300 rounded-md"
+              />
+            </div>
+            <div className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs">
+              {amountSearch.fields.map((f, i) => {
+                const on = fields.includes(f.key);
+                return (
+                  <button
+                    key={f.key} type="button"
+                    title={`Match against ${f.label}${on ? '' : ' too'}`}
+                    onClick={() => setFields((cur) => {
+                      if (cur.includes(f.key)) {
+                        const next = cur.filter((k) => k !== f.key);
+                        return next.length ? next : cur; // always keep at least one
+                      }
+                      return [...cur, f.key];
+                    })}
+                    className={`px-2.5 py-1 ${i > 0 ? 'border-l border-gray-300' : ''} ${on ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >{f.label}</button>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search job, client…"
+            className="flex-1 max-w-xs px-3 py-1.5 text-sm border border-gray-300 rounded-md"
+          />
+        )}
+        <span className="text-xs text-gray-400 ml-auto whitespace-nowrap">{view.length} of {rows.length}</span>
       </div>
       {view.length === 0 ? (
-        <p className="p-6 text-sm text-gray-500">{rows.length === 0 ? empty : 'No matches.'}</p>
+        <p className="p-6 text-sm text-gray-500">
+          {rows.length === 0 ? empty : amountMode ? 'No balances within that range — try widening the ± tolerance.' : 'No matches.'}
+        </p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
+                {amountMode && <th className="px-4 py-2 font-medium whitespace-nowrap">Match</th>}
                 {columns.map((c, i) => (
                   <th
                     key={c.label}
                     onClick={() => clickSort(i)}
-                    className={`px-4 py-2 font-medium whitespace-nowrap ${c.align === 'right' ? 'text-right' : ''} ${c.sortable ? 'cursor-pointer hover:text-gray-800 select-none' : ''}`}
+                    className={`px-4 py-2 font-medium whitespace-nowrap ${c.align === 'right' ? 'text-right' : ''} ${!amountMode && c.sortable ? 'cursor-pointer hover:text-gray-800 select-none' : ''}`}
                   >
                     {c.label}
-                    {sortIdx === i && <span className="ml-1">{dir === 'asc' ? '▲' : '▼'}</span>}
+                    {!amountMode && sortIdx === i && <span className="ml-1">{dir === 'asc' ? '▲' : '▼'}</span>}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {view.map((r) => (
-                <tr key={r.key} className="hover:bg-gray-50">
-                  {r.cells.map((cell, i) => (
+              {view.map(({ row, match }) => (
+                <tr key={row.key} className="hover:bg-gray-50">
+                  {amountMode && (
+                    <td className="px-4 py-2.5 align-top whitespace-nowrap">
+                      {match ? (
+                        <span className="text-xs">
+                          <span className="text-gray-500">{match.label}</span>{' '}
+                          <span className={match.delta === 0 ? 'text-green-700 font-medium' : 'text-gray-700'}>{fmtDelta(match.delta)}</span>
+                        </span>
+                      ) : <span className="text-gray-300">—</span>}
+                    </td>
+                  )}
+                  {row.cells.map((cell, i) => (
                     <td key={i} className={`px-4 py-2.5 align-top ${columns[i].align === 'right' ? 'text-right' : ''}`}>
-                      {i === 0 ? <Link to={r.href} className="hover:underline">{cell}</Link> : cell}
+                      {i === 0 ? <Link to={row.href} className="hover:underline">{cell}</Link> : cell}
                     </td>
                   ))}
                 </tr>
@@ -466,9 +733,11 @@ export default function MoneyOverviewPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
+  const role = useAuthStore((s) => s.user?.role);
+  const isAdmin = role === 'admin';
+  const canManage = hasManagerRole(role);
   const [resolveTarget, setResolveTarget] = useState<BalanceRow | 'bulk' | null>(null);
-  const [showResolved, setShowResolved] = useState(false);
+  const [dismissTarget, setDismissTarget] = useState<PendingRefundRow | 'bulk' | null>(null);
   const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   // Filters initialise from the last-used prefs and persist on every change.
   const [prefs] = useState(loadPrefs);
@@ -480,12 +749,13 @@ export default function MoneyOverviewPage() {
   const [balancesTiming, setBalancesTiming] = useState<Timing>(prefs.balancesTiming);
   const [excessTiming, setExcessTiming] = useState<Timing>(prefs.excessTiming);
   const [groupByClient, setGroupByClient] = useState(prefs.groupByClient);
+  const [showResolved, setShowResolved] = useState(prefs.showResolved);
 
   useEffect(() => {
     try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ tab, includeSpeculative, balancesTiming, excessTiming, groupByClient } satisfies OverviewPrefs));
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ tab, includeSpeculative, balancesTiming, excessTiming, groupByClient, showResolved } satisfies OverviewPrefs));
     } catch { /* storage blocked — prefs just won't persist */ }
-  }, [tab, includeSpeculative, balancesTiming, excessTiming, groupByClient]);
+  }, [tab, includeSpeculative, balancesTiming, excessTiming, groupByClient, showResolved]);
 
   // `quiet` skips the page-level spinner (row actions like chase logging
   // shouldn't unmount the table).
@@ -567,13 +837,33 @@ export default function MoneyOverviewPage() {
         </>
       ),
     },
-    { key: 'refunds', label: 'Pending Refunds', value: gbp(t.pending_refunds), sub: `${t.pending_refunds_count} to process`, accent: 'text-purple-700' },
+    {
+      // Both kinds of "we owe this client money" under one figure, because that
+      // is the question someone glancing at the card is asking. The two rows
+      // below it stay separate — an IOU can be Processed or Cleared, an
+      // overpaid invoice can only be refunded.
+      key: 'refunds',
+      label: 'Owed to Clients',
+      value: gbp(t.owed_to_clients),
+      accent: 'text-purple-700',
+      sub: `${t.pending_refunds_count} refund IOU${t.pending_refunds_count === 1 ? '' : 's'}`,
+      subNode: (
+        <>
+          {t.pending_refunds_count} refund IOU{t.pending_refunds_count === 1 ? '' : 's'}
+          {t.client_overpaid_count > 0 && (
+            <> {' · '}<span className="text-amber-700 font-medium">{gbp(t.client_overpaid)} overpaid</span>
+              <span className="text-gray-400"> ({t.client_overpaid_count})</span></>
+          )}
+        </>
+      ),
+    },
   ];
 
   // Build rows per tab (cells + parallel sort values + search blob).
   const balanceRows: Row[] = balancesFiltered.map((r) => ({
     key: r.job_id, href: jobHref(r),
     search: `${r.hh_job_number ?? ''} ${r.client_name ?? ''} ${r.job_name ?? ''} ${r.pipeline_status ?? ''}`,
+    amounts: { outstanding: parseFloat(r.balance_outstanding), hire: parseFloat(r.hire_value_inc_vat) },
     sort: [r.hh_job_number ?? 0, r.client_name ?? '', r.pipeline_status ?? '', dateMs(r.job_end || r.return_date), parseFloat(r.hire_value_inc_vat), parseFloat(r.balance_outstanding), dateMs(r.last_chased_at ?? null)],
     cells: [
       <JobRef hh={r.hh_job_number} name={r.job_name} />,
@@ -642,8 +932,40 @@ export default function MoneyOverviewPage() {
       fmtDate(r.payment_date),
       <span className="font-semibold text-purple-700">{gbp(r.amount)}</span>,
       <span className="text-gray-500 text-xs">{r.notes || '—'}</span>,
+      ...(canManage ? [
+        <button
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setDismissTarget(r); }}
+          title="Clear this IOU without moving money (already refunded out-of-band / artifact)"
+          className="text-xs text-gray-500 hover:text-ooosh-700 underline whitespace-nowrap"
+        >Clear</button>,
+      ] : []),
     ],
   }));
+
+  const overpaidRows: Row[] = data.client_overpaid.map((r) => ({
+    key: r.job_id, href: `/jobs/${r.job_id}?tab=money`,
+    search: `${r.hh_job_number ?? ''} ${r.client_name ?? ''} ${r.job_name ?? ''}`,
+    sort: [r.hh_job_number ?? 0, r.client_name ?? '', parseFloat(r.amount), dateMs(r.last_synced_at)],
+    cells: [
+      <JobRef hh={r.hh_job_number} name={r.job_name} />,
+      r.client_name || '—',
+      <span className="font-semibold text-amber-700">{gbp(r.amount)}</span>,
+      <span className="text-gray-500 text-xs">{fmtDate(r.last_synced_at)}</span>,
+    ],
+  }));
+
+  const overpaidColumns: Col[] = [
+    { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
+    { label: 'Overpaid', sortable: true, align: 'right' },
+    { label: 'Figures from', sortable: true },
+  ];
+
+  const refundColumns: Col[] = [
+    { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
+    { label: 'Logged', sortable: true }, { label: 'Amount', sortable: true, align: 'right' },
+    { label: 'Reason' },
+    ...(canManage ? [{ label: '', align: 'right' as const }] : []),
+  ];
 
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto">
@@ -652,8 +974,11 @@ export default function MoneyOverviewPage() {
         <button onClick={() => load()} className="text-sm text-ooosh-600 hover:text-ooosh-700 underline">Refresh</button>
       </div>
       <p className="text-xs text-gray-500 mb-4">
-        Cached per-job figures — each job refreshes when its Money tab is opened. Excess and pending refunds are live.
+        Cached per-job figures — each job refreshes when its Money tab is opened. Excess and pending refunds are live; overpaid invoices are cached.
       </p>
+
+      {/* Wise incoming payments that need a human (see services/wise-incoming.ts) */}
+      <IncomingPaymentsPanel />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {cards.map((c) => (
@@ -706,6 +1031,8 @@ export default function MoneyOverviewPage() {
                 columns={balanceColumns}
                 empty="No outstanding balances on synced jobs."
                 rows={balanceRows}
+                persistKey="balances"
+                amountSearch={{ fields: [{ key: 'outstanding', label: 'Outstanding' }, { key: 'hire', label: 'Hire value' }] }}
               />
             )}
             {data.balances_resolved.length > 0 && (
@@ -770,6 +1097,7 @@ export default function MoneyOverviewPage() {
             ]}
             empty="No confirmed jobs awaiting a deposit (on synced jobs)."
             rows={depositRows}
+            persistKey="deposits"
           />
         )}
         {tab === 'excess' && (
@@ -786,19 +1114,54 @@ export default function MoneyOverviewPage() {
               ]}
               empty="No excess currently held."
               rows={excessRows}
+              persistKey="excess"
             />
           </>
         )}
         {tab === 'refunds' && (
-          <Table
-            columns={[
-              { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
-              { label: 'Logged', sortable: true }, { label: 'Amount', sortable: true, align: 'right' },
-              { label: 'Reason' },
-            ]}
-            empty="No pending refunds."
-            rows={refundRows}
-          />
+          <>
+            <div className="flex items-center justify-between gap-3 flex-wrap px-4 pt-3">
+              <p className="text-xs text-gray-500">
+                Refund IOUs from cancellations awaiting processing. <strong>Process</strong> moves money (Money tab on the job);
+                <strong> Clear</strong> just removes the IOU for refunds already handled out-of-band.
+              </p>
+              {isAdmin && data.pending_refunds.length > 0 && (
+                <button
+                  onClick={() => setDismissTarget('bulk')}
+                  className="text-xs text-gray-500 hover:text-ooosh-700 underline whitespace-nowrap"
+                >Bulk clear old refunds…</button>
+              )}
+            </div>
+            <Table
+              columns={refundColumns}
+              empty="No pending refunds."
+              rows={refundRows}
+              persistKey="refunds"
+            />
+            {/* Separate table, same card. An overpaid invoice is the same
+                conclusion — we're holding a client's money — but a different
+                thing: there is no IOU row to Process or Clear, only a refund to
+                make. Listing them together under one set of actions would
+                promise a Clear button that can't exist. */}
+            {data.client_overpaid.length > 0 && (
+              <>
+                <div className="px-4 pt-5">
+                  <h3 className="text-sm font-semibold text-gray-900">Overpaid invoices</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    HireHop shows more paid than these invoices are worth — usually a credit note raised after payment.
+                    There's no IOU to clear: refund it from the job's Money tab and the row disappears on its own.
+                    Jobs appear here once their Money tab has been opened.
+                  </p>
+                </div>
+                <Table
+                  columns={overpaidColumns}
+                  empty="None."
+                  rows={overpaidRows}
+                  persistKey="overpaid"
+                />
+              </>
+            )}
+          </>
         )}
       </div>
 
@@ -807,6 +1170,14 @@ export default function MoneyOverviewPage() {
           target={resolveTarget}
           onClose={() => setResolveTarget(null)}
           onDone={(msg) => { setResolveTarget(null); setToast({ msg }); load(); }}
+        />
+      )}
+      {dismissTarget && (
+        <DismissRefundModal
+          target={dismissTarget}
+          isAdmin={isAdmin}
+          onClose={() => setDismissTarget(null)}
+          onDone={(msg) => { setDismissTarget(null); setToast({ msg }); load(); }}
         />
       )}
       {toast && (

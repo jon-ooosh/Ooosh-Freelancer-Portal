@@ -8,12 +8,13 @@
  */
 
 import { useState, useEffect, Suspense } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import Image from 'next/image'
 
 function ResetPasswordForm() {
   const searchParams = useSearchParams()
+  const router = useRouter()
   const token = searchParams.get('token')
   
   const [password, setPassword] = useState('')
@@ -21,8 +22,25 @@ function ResetPasswordForm() {
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
+  // In OP mode the reset endpoint logs the user straight in (sets a session
+  // cookie) and returns the user object. When that happens we send them to the
+  // dashboard rather than back to the sign-in page — going via /login would
+  // otherwise risk a stale lockout from earlier wrong-password attempts.
+  const [loggedIn, setLoggedIn] = useState(false)
   const [loading, setLoading] = useState(false)
   const [tokenValid, setTokenValid] = useState<boolean | null>(null)
+
+  // Auto-drop the freelancer straight into the dashboard once the reset has
+  // logged them in (OP mode sets a session cookie). Stops the Lewis
+  // double-reset loop where landing back on a login screen prompted another
+  // reset. The success card shows for a beat first, and the button remains as a
+  // fallback if the redirect is blocked.
+  useEffect(() => {
+    if (success && loggedIn) {
+      const t = setTimeout(() => router.replace('/dashboard'), 1200)
+      return () => clearTimeout(t)
+    }
+  }, [success, loggedIn, router])
 
   // Validate token on mount
   useEffect(() => {
@@ -70,6 +88,8 @@ function ResetPasswordForm() {
         return
       }
 
+      // OP mode returns the user object and has already set the session cookie.
+      setLoggedIn(!!data.user)
       setSuccess(true)
     } catch (err) {
       setError('An error occurred. Please try again.')
@@ -122,13 +142,15 @@ function ResetPasswordForm() {
         </div>
         <h3 className="text-lg font-medium text-gray-900 mb-2">Password reset successful</h3>
         <p className="text-sm text-gray-600 mb-6">
-          Your password has been updated. You can now sign in with your new password.
+          {loggedIn
+            ? "Your password has been updated and you're now signed in."
+            : 'Your password has been updated. You can now sign in with your new password.'}
         </p>
         <Link
-          href="/login"
+          href={loggedIn ? '/dashboard' : '/login'}
           className="inline-flex justify-center rounded-lg bg-ooosh-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ooosh-500 transition-colors"
         >
-          Sign in
+          {loggedIn ? 'Go to dashboard' : 'Sign in'}
         </Link>
       </div>
     )

@@ -8,9 +8,10 @@
  * Per-issue rows are clickable and navigate to /operations/problems/:id
  * for the full control panel (timeline, comments, resolution).
  */
-import { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { useOpenClaimsFor, ExistingClaimChoice } from './claims/format';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -39,7 +40,11 @@ interface Issue {
   created_at: string;
   reported_by_name: string | null;
   assigned_to_name: string | null;
+  claim_id?: string | null;
 }
+
+/** Pre-fill from the Job › Drivers card "Report incident" button (?report_incident=<vehicleId>&incident_driver=<driverId>). */
+interface IncidentPrefill { vehicleId: string; driverId: string }
 
 interface PickerData {
   job: {
@@ -95,6 +100,24 @@ export default function JobProblemsPanel({ jobId }: { jobId: string }) {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
+  const [prefill, setPrefill] = useState<IncidentPrefill | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // "Report incident" on a Drivers card lands here: open the form pre-filled
+  // as vehicle damage with the possible-claim box ticked, then drop the params
+  // so a refresh doesn't re-open it (docs/INCIDENT-CLAIMS-SPEC.md §3).
+  useEffect(() => {
+    const vehicleId = searchParams.get('report_incident');
+    if (!vehicleId) return;
+    setPrefill({ vehicleId, driverId: searchParams.get('incident_driver') || '' });
+    setShowForm(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete('report_incident');
+    next.delete('incident_driver');
+    setSearchParams(next, { replace: true });
+    setTimeout(() => panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+  }, [searchParams, setSearchParams]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -114,7 +137,7 @@ export default function JobProblemsPanel({ jobId }: { jobId: string }) {
   const resolved = items.filter(i => ['resolved', 'written_off', 'cancelled'].includes(i.status));
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
+    <div ref={panelRef} className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-semibold text-gray-900">Problems</h3>
@@ -127,7 +150,7 @@ export default function JobProblemsPanel({ jobId }: { jobId: string }) {
           )}
         </div>
         <button
-          onClick={() => setShowForm(s => !s)}
+          onClick={() => { setPrefill(null); setShowForm(s => !s); }}
           className="text-xs px-2.5 py-1 border border-gray-300 rounded hover:bg-gray-50 transition-colors"
         >
           {showForm ? 'Cancel' : '+ Log Problem'}
@@ -136,9 +159,11 @@ export default function JobProblemsPanel({ jobId }: { jobId: string }) {
 
       {showForm && (
         <LogProblemForm
+          key={prefill ? `${prefill.vehicleId}|${prefill.driverId}` : 'blank'}
           jobId={jobId}
-          onCancel={() => setShowForm(false)}
-          onCreated={() => { setShowForm(false); load(); }}
+          prefill={prefill}
+          onCancel={() => { setShowForm(false); setPrefill(null); }}
+          onCreated={() => { setShowForm(false); setPrefill(null); load(); }}
         />
       )}
 
@@ -200,6 +225,9 @@ function Row({ i }: { i: Issue }) {
             {i.severity === 'urgent' && (
               <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700">⚠ Urgent</span>
             )}
+            {i.claim_id && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700" title="Part of a possible insurance claim">🛡️ Claim</span>
+            )}
             <span className="text-[10px] text-gray-500">{ageDays === 0 ? 'today' : `${ageDays}d`}</span>
             {i.assigned_to_name && (
               <span className="text-[10px] text-blue-600">→ {i.assigned_to_name}</span>
@@ -222,18 +250,29 @@ function Row({ i }: { i: Issue }) {
 
 type SubjectKind = 'vehicle' | 'equipment' | 'driver' | 'person' | 'client' | 'job';
 
-function LogProblemForm({ jobId, onCancel, onCreated }: {
+function LogProblemForm({ jobId, prefill, onCancel, onCreated }: {
   jobId: string;
+  prefill?: IncidentPrefill | null;
   onCancel: () => void;
   onCreated: () => void;
 }) {
+  const navigate = useNavigate();
   const [picker, setPicker] = useState<PickerData | null>(null);
   const [pickerLoading, setPickerLoading] = useState(true);
 
   const [category, setCategory] = useState<IssueCategory>('damaged');
   const [subjectKind, setSubjectKind] = useState<SubjectKind>('vehicle');
-  const [vehicleId, setVehicleId] = useState('');
-  const [driverId, setDriverId] = useState('');
+  const [vehicleId, setVehicleId] = useState(prefill?.vehicleId || '');
+  const [driverId, setDriverId] = useState(prefill?.driverId || '');
+  // Tick to open a possible insurance claim from this Problem in the same
+  // save (docs/INCIDENT-CLAIMS-SPEC.md §3 step 3). The broker is not told.
+  const [possibleClaim, setPossibleClaim] = useState(!!prefill);
+  // An open case already on this job → offer to add the Problem to it (a flag, not a gate).
+  const openClaims = useOpenClaimsFor(jobId, null, possibleClaim);
+  const [claimTarget, setClaimTarget] = useState('');
+  useEffect(() => {
+    if (openClaims && !claimTarget) setClaimTarget(openClaims[0]?.id || 'new');
+  }, [openClaims, claimTarget]);
   const [personId, setPersonId] = useState('');
   const [lineItemId, setLineItemId] = useState('');     // HH list_id stringified
   const [lineItemName, setLineItemName] = useState(''); // denormalised
@@ -276,6 +315,8 @@ function LogProblemForm({ jobId, onCancel, onCreated }: {
         source_module: 'manual',
       };
       if (subjectKind === 'vehicle' && vehicleId) payload.vehicle_id = vehicleId;
+      // From "Report incident": the driver rides along with a vehicle Problem.
+      if (subjectKind === 'vehicle' && prefill?.driverId && driverId) payload.driver_id = driverId;
       if (subjectKind === 'driver' && driverId) payload.driver_id = driverId;
       if (subjectKind === 'person' && personId) payload.person_id = personId;
       if (subjectKind === 'client' && picker?.job.client_organisation_id) {
@@ -289,7 +330,23 @@ function LogProblemForm({ jobId, onCancel, onCreated }: {
       if (dueDate) payload.due_date = dueDate;
       if (surfaceOn) payload.surface_on = surfaceOn;
 
-      await api.post('/problems', payload);
+      const created = await api.post<{ data: { id: string } }>('/problems', payload);
+      if (possibleClaim) {
+        try {
+          if (claimTarget && claimTarget !== 'new') {
+            await api.post(`/claims/${claimTarget}/problems`, { issue_id: created.data.id });
+            navigate(`/vehicles/claims/${claimTarget}`);
+            return;
+          }
+          const claim = await api.post<{ data: { id: string } }>(`/claims/from-problem/${created.data.id}`, {});
+          navigate(`/vehicles/claims/${claim.data.id}`);
+        } catch {
+          // The Problem exists — don't let a retry log it twice. Send staff to it.
+          alert('The Problem was logged, but the claim could not be opened. Open it from the Problem with "Possible insurance claim".');
+          navigate(`/operations/problems/${created.data.id}`);
+        }
+        return;
+      }
       onCreated();
     } catch (err) {
       console.error('Failed to log problem:', err);
@@ -515,6 +572,17 @@ function LogProblemForm({ jobId, onCancel, onCreated }: {
           </select>
         </div>
       </div>
+
+      <label className="text-xs text-gray-700 flex items-start gap-2 px-2 py-1.5 bg-indigo-50 border border-indigo-200 rounded">
+        <input type="checkbox" checked={possibleClaim} onChange={e => setPossibleClaim(e.target.checked)} className="mt-0.5" />
+        <span>
+          🛡️ Possible insurance claim
+          <span className="block text-[10px] text-gray-500">Opens a claim case for this Problem. Nothing is sent to the broker.</span>
+        </span>
+      </label>
+      {possibleClaim && openClaims && openClaims.length > 0 && (
+        <ExistingClaimChoice claims={openClaims} value={claimTarget} onChange={setClaimTarget} />
+      )}
 
       {error && <div className="text-xs text-red-600">{error}</div>}
 

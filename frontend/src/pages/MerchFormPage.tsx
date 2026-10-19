@@ -8,6 +8,7 @@
  */
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { ukToday } from '../lib/ukDate';
 
 const inputCls = 'w-full border border-slate-300 rounded-xl px-4 py-3 text-base';
 const PURPLE = '#7B5EA7';
@@ -16,7 +17,7 @@ export default function MerchFormPage() {
   const [params] = useSearchParams();
   const jobFromUrl = params.get('job') || '';
   const [ctx, setCtx] = useState<{ client_name: string | null } | null>(null);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const [f, setF] = useState({
     band_name: '', hh_job_number: jobFromUrl, box_count: '', boxes_unknown: false, expected_date: '',
     import_charge_flag: '', contact_email: '', contact_phone: '', notes: '', agree: false,

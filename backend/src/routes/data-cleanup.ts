@@ -1,12 +1,15 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query, getClient } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── Sync Review Queue ─────────────────────────────────────────────────────
 
@@ -145,11 +148,15 @@ router.post('/convert-person-to-org',
         [newOrgId, person_id]
       );
 
-      // Soft-delete the person
+      // Soft-delete the person AND clear its email — they're now represented by
+      // the org (which carries the email). Leaving the email on the dead person
+      // row is a landmine for any email->person lookup that doesn't filter
+      // is_deleted (e.g. portal login). Original preserved in the audit note.
+      const convertedEmailNote = person.email ? ` (was ${person.email})` : '';
       await client.query(
-        `UPDATE people SET is_deleted = true, notes = COALESCE(notes, '') || $1, updated_at = NOW()
+        `UPDATE people SET is_deleted = true, email = NULL, notes = COALESCE(notes, '') || $1, updated_at = NOW()
          WHERE id = $2`,
-        [`\n[Converted to organisation: ${orgName} (${newOrgId})]`, person_id]
+        [`\n[Converted to organisation: ${orgName} (${newOrgId})${convertedEmailNote}]`, person_id]
       );
 
       await client.query('COMMIT');

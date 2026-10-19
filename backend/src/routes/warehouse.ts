@@ -21,21 +21,20 @@
  *   • On-Hire flip: pipeline_status='dispatched' + HH writeback to status 5
  */
 import { Router, Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
+import { verifyStaffToken } from '../middleware/auth';
+import { signFor, verifyFor } from '../services/tokens';
 import { hhBroker } from '../services/hirehop-broker';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { generateDeliveryNotePdf, type DeliveryNoteItem } from '../services/delivery-note-pdf';
 import { emailService } from '../services/email-service';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { getJobEmailRecipients } from '../services/money-emails';
+import { resolveJobEmailContacts } from '../services/job-contact-candidates';
 
-if (!process.env.JWT_SECRET) {
-  throw new Error('FATAL: JWT_SECRET environment variable is required');
-}
-const JWT_SECRET: string = process.env.JWT_SECRET;
 const SESSION_TTL_SECONDS = 12 * 60 * 60; // 12h — kiosk left running between shifts
 
 // Stable UUID seeded by migration 031 — used as created_by for PIN-only sessions
@@ -77,26 +76,21 @@ function authenticateWarehouse(req: WarehouseRequest, res: Response, next: NextF
   }
   const token = authHeader.slice(7);
 
-  let decoded: Record<string, unknown>;
-  try {
-    decoded = jwt.verify(token, JWT_SECRET) as Record<string, unknown>;
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return;
-  }
-
-  if (decoded.scope === 'warehouse_session' && typeof decoded.sessionId === 'string') {
+  // Each family verifies against its own audience (services/tokens.ts).
+  const kiosk = verifyFor<{ scope?: string; sessionId?: string }>('warehouse', token);
+  if (kiosk && kiosk.scope === 'warehouse_session' && typeof kiosk.sessionId === 'string') {
     req.warehouseSession = {
       scope: 'warehouse_session',
-      sessionId: decoded.sessionId,
+      sessionId: kiosk.sessionId,
     };
     next();
     return;
   }
 
-  // Staff JWT shape: { id, email, role }
-  if (typeof decoded.id === 'string' && typeof decoded.email === 'string' && typeof decoded.role === 'string') {
-    req.staffUser = { id: decoded.id, email: decoded.email, role: decoded.role };
+  // Staff access token — THE staff check, shared with `authenticate`.
+  const staff = verifyStaffToken(token);
+  if (staff) {
+    req.staffUser = { id: staff.id, email: staff.email, role: staff.role };
     next();
     return;
   }
@@ -108,8 +102,19 @@ const router = Router();
 
 // ─── POST /api/warehouse/auth/pin ───────────────────────────────────
 // Validate the kiosk PIN and return a warehouse_session JWT.
+//
+// A static PIN with no attempt limit is a brute-force target (Oct 2026 audit).
+// The kiosk enters it once per 12h session, so 10 tries in 15 minutes per IP
+// covers a fumbled entry and nothing more.
+const pinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many PIN attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
-router.post('/auth/pin', async (req: Request, res: Response) => {
+router.post('/auth/pin', pinLimiter, async (req: Request, res: Response) => {
   try {
     const { pin } = req.body as { pin?: unknown };
     if (typeof pin !== 'string' || !pin) {
@@ -126,10 +131,10 @@ router.post('/auth/pin', async (req: Request, res: Response) => {
       res.status(401).json({ error: 'Incorrect PIN' });
       return;
     }
-    const token = jwt.sign(
+    const token = signFor(
+      'warehouse',
       { scope: 'warehouse_session', sessionId: uuid() } satisfies WarehouseSessionClaims,
-      JWT_SECRET,
-      { expiresIn: SESSION_TTL_SECONDS }
+      SESSION_TTL_SECONDS
     );
     res.json({ token, expiresIn: SESSION_TTL_SECONDS });
   } catch (err) {
@@ -249,84 +254,6 @@ interface EquipmentItem {
   quantity: number;
 }
 
-interface CollectionContact {
-  personId: string;
-  name: string;
-  email: string;
-  phone: string | null;
-  role: string | null;
-  isPrimary: boolean;
-}
-
-/**
- * Contacts associated with a job, for the "who's collecting?" picker.
- * Mirrors the Job Detail contacts card: per-job `job_contacts` rows first
- * (lead/primary at the top), then candidate people from the client org +
- * any org linked via `job_organisations`. Deduped by person — a ticked
- * job contact wins over the same person surfacing as an org candidate.
- */
-async function getCollectionContacts(jobId: string): Promise<CollectionContact[]> {
-  const tickedResult = await query(
-    `SELECT jc.person_id, jc.is_primary, jc.role_override,
-            p.first_name, p.last_name, p.email, p.phone
-     FROM job_contacts jc
-     JOIN people p ON p.id = jc.person_id AND p.is_deleted = false
-     WHERE jc.job_id = $1
-     ORDER BY jc.is_primary DESC, p.first_name ASC`,
-    [jobId]
-  );
-
-  const candidatesResult = await query(
-    `SELECT DISTINCT ON (p.id)
-            p.id AS person_id,
-            p.first_name, p.last_name, p.email, p.phone,
-            por.role,
-            CASE WHEN o.id = j.client_id THEN 0 ELSE 1 END AS source_priority
-     FROM jobs j
-     JOIN person_organisation_roles por ON por.status = 'active'
-     JOIN organisations o ON o.id = por.organisation_id AND o.is_deleted = false
-     JOIN people p ON p.id = por.person_id AND p.is_deleted = false
-     WHERE j.id = $1
-       AND (
-         o.id = j.client_id
-         OR o.id IN (SELECT organisation_id FROM job_organisations WHERE job_id = j.id)
-       )
-     ORDER BY p.id, source_priority, por.is_primary DESC`,
-    [jobId]
-  );
-
-  const seen = new Set<string>();
-  const contacts: CollectionContact[] = [];
-
-  for (const r of tickedResult.rows as Array<Record<string, any>>) {
-    if (seen.has(r.person_id)) continue;
-    seen.add(r.person_id);
-    contacts.push({
-      personId: r.person_id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email || '',
-      phone: r.phone || null,
-      role: r.role_override || null,
-      isPrimary: !!r.is_primary,
-    });
-  }
-
-  for (const r of candidatesResult.rows as Array<Record<string, any>>) {
-    if (seen.has(r.person_id)) continue;
-    seen.add(r.person_id);
-    contacts.push({
-      personId: r.person_id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email || '',
-      phone: r.phone || null,
-      role: r.role || null,
-      isPrimary: false,
-    });
-  }
-
-  return contacts.filter((c) => c.name);
-}
-
 router.get('/collections/:jobId', async (req: WarehouseRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
@@ -353,7 +280,7 @@ router.get('/collections/:jobId', async (req: WarehouseRequest, res: Response) =
     // a person / per-job contact instead of the org row (common now after the
     // address-book restructure: per-job contacts, merges, HH shell orgs).
     const [contacts, recipients] = await Promise.all([
-      getCollectionContacts(jobId),
+      resolveJobEmailContacts(jobId),
       getJobEmailRecipients(jobId),
     ]);
 
@@ -615,8 +542,8 @@ router.post('/collections/:jobId/complete', async (req: WarehouseRequest, res: R
 
     try {
       await query(
-        `INSERT INTO interactions (id, type, content, job_id, created_by, created_at, pipeline_status_at_creation)
-         VALUES ($1, 'note', $2, $3, $4, $5, 'dispatched')`,
+        `INSERT INTO interactions (id, type, content, job_id, created_by, created_at, pipeline_status_at_creation, source)
+         VALUES ($1, 'note', $2, $3, $4, $5, 'dispatched', 'system')`,
         [uuid(), content, jobId, actorId(req), completedAtIso]
       );
     } catch (err) {

@@ -22,8 +22,18 @@ interface ReminderResult {
   accessEvents: number;
 }
 
+// Admin + manager — used for access-request notifications (applicable to the
+// whole team).
 async function adminIds(): Promise<string[]> {
   const res = await query(`SELECT id FROM users WHERE role IN ('admin','manager') AND is_active = true`);
+  return res.rows.map((r: Record<string, unknown>) => r.id as string);
+}
+
+// Admins only — the fallback recipient for billing / rate-review reminders when
+// a tenancy has no explicit bill_reminder_person_id. These are owner-level money
+// tasks, so they shouldn't fan out to the whole management group.
+async function adminOnlyIds(): Promise<string[]> {
+  const res = await query(`SELECT id FROM users WHERE role = 'admin' AND is_active = true`);
   return res.rows.map((r: Record<string, unknown>) => r.id as string);
 }
 
@@ -100,7 +110,9 @@ export async function notifyAccessEvent(eventId: string, notOnAccessList = false
 
 export async function runStorageReminders(): Promise<ReminderResult> {
   const result: ReminderResult = { billingDue: 0, billingOverdue: 0, reviews: 0, accessEvents: 0 };
-  const admins = await adminIds();
+  // Billing + rate-review fallback is admins only; access requests (handled in
+  // notifyAccessEvent) keep the wider admin+manager default.
+  const admins = await adminOnlyIds();
 
   // ── 1 + 2. Billing (manual mode only) ──────────────────────────────────
   const billing = await query(`

@@ -23,6 +23,7 @@ import { emailService } from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 import { buildMerchLabelPdf } from '../services/holding-label-pdf';
 import { syncMerchRequirementStatus } from '../services/holding-requirement-sync';
+import { HELD_ITEM_SELECT } from '../services/held-item-query';
 
 const router = Router();
 
@@ -67,7 +68,11 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
     if (j.rows.length > 0) { jobId = j.rows[0].id; jobName = j.rows[0].job_name; }
   }
 
-  const description = b.box_count ? `${b.box_count} box(es) of merch/equipment` : 'Merch/equipment (box count TBC)';
+  // Description says WHAT it is, never HOW MANY — a count baked in here froze
+  // at declaration time ("5 box(es)…") and stayed wrong once a partial arrival
+  // was booked in. The quantity lives in box_count/received_count and is
+  // rendered from there on every surface (frontend holding/counts.ts).
+  const description = 'Merch/equipment';
 
   const ins = await query(
     `INSERT INTO held_items (
@@ -90,7 +95,7 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
   if (jobId) {
     try {
       await query(
-        `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source) VALUES ('note', $1, $2, $3, 'system')`,
         [`📦 Incoming delivery declared via merch form: ${description} from ${b.band_name}`, jobId, SYSTEM_USER_ID]
       );
       await syncMerchRequirementStatus(jobId);
@@ -174,51 +179,9 @@ router.get('/:id/label', async (req: AuthRequest, res: Response) => {
 
 const TERMINAL = ['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'];
 
-// Shared SELECT with the joined display fields the frontend expects
-const SELECT_WITH_JOINS = `
-  SELECT h.*,
-         (p.first_name || ' ' || p.last_name)      AS owner_person_name,
-         o.name                                    AS owner_organisation_name,
-         loc.name                                  AS storage_location_name,
-         j.job_name                                AS job_name,
-         fv.reg                                    AS found_vehicle_reg,
-         (rbp.first_name || ' ' || rbp.last_name)  AS received_by_name,
-         -- Chase derivation — single source of truth; mirrors the daily scan in
-         -- services/holding-reminders.ts so the list, detail card and review
-         -- queue can never disagree about "what's due".
-         CASE
-           WHEN h.kind <> 'lost_property'
-             OR h.status IN ('collected','shipped_back','disposed','cancelled')
-             OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
-             OR h.found_date IS NULL THEN NULL
-           WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE
-             THEN h.expected_collection_date
-           ELSE GREATEST(
-             (h.found_date + INTERVAL '7 days')::date,
-             COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
-           )
-         END                                       AS next_chase_due,
-         CASE
-           WHEN h.kind <> 'lost_property' THEN NULL
-           WHEN h.status IN ('collected','shipped_back','disposed','cancelled')
-             OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
-             OR h.found_date IS NULL THEN 'none'
-           WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE THEN 'paused'
-           WHEN GREATEST(
-             (h.found_date + INTERVAL '7 days')::date,
-             COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
-           ) <= CURRENT_DATE THEN 'due'
-           ELSE 'scheduled'
-         END                                       AS chase_state
-  FROM held_items h
-  LEFT JOIN people p              ON p.id = h.owner_person_id
-  LEFT JOIN organisations o       ON o.id = h.owner_organisation_id
-  LEFT JOIN held_item_locations loc ON loc.id = h.storage_location_id
-  LEFT JOIN jobs j                ON j.id = h.job_id
-  LEFT JOIN fleet_vehicles fv     ON fv.id = h.found_vehicle_id
-  LEFT JOIN users rb              ON rb.id = h.received_by
-  LEFT JOIN people rbp            ON rbp.id = rb.person_id
-`;
+// The shared SELECT (incl. the derived next_action / chase columns) lives in
+// services/held-item-query.ts so the dashboard reads the same definition.
+const SELECT_WITH_JOINS = HELD_ITEM_SELECT;
 
 // ════════════════════════ LOCATIONS (picklist) ════════════════════════
 
@@ -332,20 +295,32 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   const { kind, status, search, owner_unknown, include_done } = req.query;
-  let sql = `${SELECT_WITH_JOINS} WHERE 1=1`;
+  // Wrapped so the ORDER BY can use the derived action_due inside a COALESCE
+  // (Postgres allows a bare output alias in ORDER BY, but not one inside an
+  // expression). Negligible at this table's size — tens of open rows.
+  //
+  // The Holding page filters by next_action CLIENT-side off this one response,
+  // so the action-strip counts stay stable while a filter is applied. No
+  // server-side next_action param — one filter implementation, not two.
+  let sql = `SELECT * FROM (${SELECT_WITH_JOINS}) q WHERE 1=1`;
   const params: unknown[] = [];
   let i = 1;
-  if (kind) { sql += ` AND h.kind = $${i++}`; params.push(kind); }
-  if (status) { sql += ` AND h.status = $${i++}`; params.push(status); }
-  if (owner_unknown === 'true') { sql += ` AND h.owner_unknown = true`; }
-  if (include_done !== 'true') { sql += ` AND h.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')`; }
+  if (kind) { sql += ` AND q.kind = $${i++}`; params.push(kind); }
+  if (status) { sql += ` AND q.status = $${i++}`; params.push(status); }
+  if (owner_unknown === 'true') { sql += ` AND q.owner_unknown = true`; }
+  if (include_done !== 'true') { sql += ` AND q.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')`; }
   if (search) {
-    sql += ` AND (h.description ILIKE $${i} OR h.client_name_text ILIKE $${i} OR h.notes ILIKE $${i}
-                  OR CAST(h.hh_job_number AS TEXT) ILIKE $${i})`;
+    sql += ` AND (q.description ILIKE $${i} OR q.client_name_text ILIKE $${i} OR q.notes ILIKE $${i}
+                  OR CAST(q.hh_job_number AS TEXT) ILIKE $${i})`;
     params.push(`%${search}%`);
     i++;
   }
-  sql += ` ORDER BY COALESCE(h.needed_by, h.dispose_after, h.created_at::date) ASC, h.created_at DESC`;
+  // Resolved rows sink to the bottom when "show done" is on (false < true in
+  // Postgres), then "when does this need me" — action_due, falling back to the
+  // legacy needed-by ordering for rows with no action date.
+  sql += ` ORDER BY (q.next_action = 'none') ASC,
+                    COALESCE(q.action_due, q.needed_by, q.dispose_after, q.created_at::date) ASC,
+                    q.created_at DESC`;
   const result = await query(sql, params);
   res.json({ data: result.rows });
 });
@@ -504,13 +479,23 @@ const linkSchema = z.object({
   client_name_text: z.string().optional().nullable(),
   job_id: z.string().uuid().optional().nullable(),
   hh_job_number: z.number().int().optional().nullable(),
+  // edit=true: the caller is the authoritative owner/job editor — SET fields
+  // directly (so values can be CHANGED or CLEARED), not COALESCE-backfilled.
+  // Omitted/false keeps the original backfill-only behaviour (fill NULLs only).
+  edit: z.boolean().optional(),
 });
 
 router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof linkSchema>;
+  const edit = b.edit === true;
+
+  // Remember the current job so we can re-sync its merch pip if the link moves.
+  const prev = await query(`SELECT job_id FROM held_items WHERE id = $1`, [req.params.id]);
+  if (prev.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
+  const oldJobId = prev.rows[0].job_id as string | null;
 
   // If an HH job number was supplied, resolve the OP job + its client so we can
-  // backfill both the job link and the owner from one entry (HH number first).
+  // derive both the job link and the owner from one entry (HH number first).
   const jobCtx = await resolveJobContext(b.hh_job_number);
   const jobId = b.job_id ?? jobCtx.jobId;
   // An explicitly-picked owner always wins; otherwise derive the org from the job.
@@ -518,22 +503,37 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   const ownerOrgId = b.owner_organisation_id ?? (ownerGiven ? null : jobCtx.clientOrgId);
   const clientNameText = b.client_name_text ?? ((ownerGiven || ownerOrgId) ? null : jobCtx.clientName);
 
-  // Resolve the job's out_date so forward-looking kinds get a needed_by deadline
+  // edit=true → authoritative SET (change/clear). Otherwise COALESCE backfill.
   const result = await query(
-    `UPDATE held_items SET
-        owner_person_id       = COALESCE($1, owner_person_id),
-        owner_organisation_id = COALESCE($2, owner_organisation_id),
-        client_name_text      = COALESCE($3, client_name_text),
-        job_id                = COALESCE($4, job_id),
-        hh_job_number         = COALESCE($5, hh_job_number),
-        owner_unknown         = CASE
-          WHEN $1 IS NOT NULL OR $2 IS NOT NULL THEN false ELSE owner_unknown END,
-        needed_by             = CASE
-          WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
-          THEN (SELECT out_date::date FROM jobs WHERE id = $4)
-          ELSE needed_by END,
-        updated_at            = NOW()
-     WHERE id = $6 RETURNING *`,
+    edit
+      ? `UPDATE held_items SET
+            owner_person_id       = $1,
+            owner_organisation_id = $2,
+            client_name_text      = $3,
+            job_id                = $4,
+            hh_job_number         = $5,
+            owner_unknown         = CASE
+              WHEN $1 IS NOT NULL OR $2 IS NOT NULL OR $3 IS NOT NULL THEN false ELSE true END,
+            needed_by             = CASE
+              WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
+              THEN (SELECT out_date::date FROM jobs WHERE id = $4)
+              ELSE needed_by END,
+            updated_at            = NOW()
+         WHERE id = $6 RETURNING *`
+      : `UPDATE held_items SET
+            owner_person_id       = COALESCE($1, owner_person_id),
+            owner_organisation_id = COALESCE($2, owner_organisation_id),
+            client_name_text      = COALESCE($3, client_name_text),
+            job_id                = COALESCE($4, job_id),
+            hh_job_number         = COALESCE($5, hh_job_number),
+            owner_unknown         = CASE
+              WHEN $1 IS NOT NULL OR $2 IS NOT NULL THEN false ELSE owner_unknown END,
+            needed_by             = CASE
+              WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
+              THEN (SELECT out_date::date FROM jobs WHERE id = $4)
+              ELSE needed_by END,
+            updated_at            = NOW()
+         WHERE id = $6 RETURNING *`,
     [
       b.owner_person_id ?? null, ownerOrgId, clientNameText,
       jobId, b.hh_job_number ?? null, req.params.id,
@@ -543,10 +543,13 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   const item = result.rows[0];
   await logAudit(req.user!.id, 'held_items', item.id, 'update', null, item);
 
-  if (item.job_id) {
-    await logToJobTimeline(item, req.user!.id, 'linked');
-    await syncMerchRequirementStatus(item.job_id);
-  }
+  // Re-sync the merch pip on BOTH the old and new job (a re-point leaves the
+  // old job's pip stale otherwise).
+  const jobsToSync = new Set<string>();
+  if (oldJobId) jobsToSync.add(oldJobId);
+  if (item.job_id) jobsToSync.add(item.job_id);
+  for (const jid of jobsToSync) await syncMerchRequirementStatus(jid);
+  if (item.job_id) await logToJobTimeline(item, req.user!.id, 'linked');
 
   res.json({ data: item });
 });
@@ -953,7 +956,7 @@ async function logToJobTimeline(item: Record<string, unknown>, userId: string, v
     const kindLabel = item.kind === 'lost_property' ? 'Lost property' : item.kind === 'incoming' ? 'Incoming delivery' : 'Held item';
     const desc = (item.description as string) || `${item.box_count || ''} item(s)`.trim();
     await query(
-      `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
+      `INSERT INTO interactions (type, content, job_id, created_by, source) VALUES ('note', $1, $2, $3, 'system')`,
       [`📦 ${kindLabel} ${verb}: ${desc}`.trim(), item.job_id, userId]
     );
   } catch (err) {

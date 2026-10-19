@@ -1,6 +1,6 @@
 /**
  * Condition-report email content — subject + HTML body for the vehicle
- * book-out / check-in condition report emails.
+ * book-out / collection / check-in condition report emails.
  *
  * Ported verbatim from the frontend's `pdf-email.ts` buildEmailHtml() when
  * the send-condition-report endpoint moved PDF generation + emailing fully
@@ -18,11 +18,16 @@ export interface ConditionReportEmailParams {
   driverName: string;
   eventDate: string;
   isCheckIn?: boolean;
+  // Freelancer collection from the client — interim "as we picked it up"
+  // record for the client's reference; the check-in at base follows.
+  isCollection?: boolean;
   driverPresent?: boolean;
   hireHopJob?: string | null;
   damageCount?: number;
-  fuelDifference?: string | null; // e.g. "Full -> 3/8"
+  fuelDifference?: string | null; // e.g. "Full at book-out -> 3/8 at check-in"
   milesDriven?: number | null;
+  // Check-in of a van swapped out mid-hire — figures are from the swap
+  swappedOut?: boolean;
 }
 
 function formatDateShort(dateStr: string): string {
@@ -36,7 +41,8 @@ function formatDateShort(dateStr: string): string {
 
 /** ASCII-safe subject line (no em-dashes) — matches the legacy frontend format. */
 export function buildConditionReportSubject(params: ConditionReportEmailParams): string {
-  const reportType = params.isCheckIn ? 'Check-In Report' : 'Condition Report';
+  const reportType = params.isCheckIn ? 'Check-In Report'
+    : params.isCollection ? 'Collection Report' : 'Condition Report';
   const jobPart = params.hireHopJob ? ` ${params.hireHopJob}` : '';
   return `Vehicle ${reportType}${jobPart} - ${params.vehicleReg} - ${formatDateShort(params.eventDate)}`;
 }
@@ -63,7 +69,12 @@ export function buildConditionReportEmailHtml(params: ConditionReportEmailParams
         <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
           This report documents the condition of the vehicle at the end of the hire,
           including any changes from the original book-out condition.
-        </p>${params.milesDriven != null ? `
+        </p>${params.swappedOut ? `
+        <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
+          This vehicle was swapped for a replacement during your hire. Any mileage and fuel
+          figures below are from the time of the swap, and this report confirms the vehicle
+          is now back at our base.
+        </p>` : ''}${params.milesDriven != null ? `
         <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
           Total miles driven: <strong>${params.milesDriven.toLocaleString()} miles</strong>
         </p>` : ''}${params.damageCount && params.damageCount > 0 ? `
@@ -75,13 +86,67 @@ export function buildConditionReportEmailHtml(params: ConditionReportEmailParams
         </div>` : ''}${params.fuelDifference ? `
         <div style="margin: 0 0 16px; padding: 12px; background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 6px;">
           <p style="margin: 0; font-size: 14px; color: #92400e;">
-            <strong>Fuel Difference:</strong> The vehicle was returned with a different fuel level than at book-out (${params.fuelDifference}).
+            <strong>Fuel Difference:</strong> The vehicle was handed back with less fuel than at book-out (${params.fuelDifference}).
           </p>
         </div>` : ''}${params.driverPresent === false ? `
         <p style="margin: 0 0 16px; padding: 12px; background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; font-size: 13px; color: #92400e;">
           <strong>Note:</strong> The driver was not present at the time of check-in.
           The vehicle was inspected without the driver in attendance.
         </p>` : ''}
+        <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
+          Please review the attached PDF and contact us if you have any queries.
+        </p>
+        <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
+          Thank you for choosing Ooosh Tours!
+        </p>
+        <p style="margin: 0 0 8px; font-size: 14px; color: #374151;">
+          If you have any questions, please call us on <strong>+44 (0) 1273 911382</strong>
+          or email <a href="mailto:info@oooshtours.co.uk" style="color: #1b2a4e;">info@oooshtours.co.uk</a>.
+        </p>
+      </div>
+
+      <div style="padding: 16px 24px; background: #ffffff; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
+        <p style="margin: 0; font-size: 12px; color: #9ca3af;">
+          Ooosh Tours Ltd
+        </p>
+        <p style="margin: 4px 0 0; font-size: 11px; color: #d1d5db;">
+          This is an automated message. Please do not reply directly to this email.
+        </p>
+      </div>
+    </div>
+    `;
+  }
+
+  if (params.isCollection) {
+    return `
+    <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background-color: #1b2a4e; padding: 24px; text-align: center; border-radius: 8px 8px 0 0;">
+        <h1 style="color: white; font-size: 20px; margin: 0;">Vehicle Collection Report</h1>
+        <p style="color: #b4bed2; font-size: 13px; margin: 8px 0 0;">Collection Record</p>
+      </div>
+
+      <div style="padding: 24px; background: #f9fafb; border: 1px solid #e5e7eb; border-top: none;">
+        <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
+          Hi ${params.driverName},
+        </p>
+        <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
+          Please find attached the vehicle collection report for <strong>${params.vehicleReg}</strong>${params.hireHopJob ? ` on job number <strong>${params.hireHopJob}</strong>` : ''},
+          recorded when our driver collected the vehicle from you on <strong>${date}</strong>.
+        </p>
+        <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
+          This report records the condition of the vehicle at the point of collection,
+          including mileage, fuel level, and condition photographs. It is for your reference only.
+          The final check-in will be carried out once the vehicle is back at our base,
+          and we will send you that report separately.
+        </p>${params.milesDriven != null ? `
+        <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
+          Total miles driven: <strong>${params.milesDriven.toLocaleString()} miles</strong>
+        </p>` : ''}${params.fuelDifference ? `
+        <div style="margin: 0 0 16px; padding: 12px; background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 6px;">
+          <p style="margin: 0; font-size: 14px; color: #92400e;">
+            <strong>Fuel Difference:</strong> The vehicle was handed back with less fuel than at book-out (${params.fuelDifference}).
+          </p>
+        </div>` : ''}
         <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
           Please review the attached PDF and contact us if you have any queries.
         </p>

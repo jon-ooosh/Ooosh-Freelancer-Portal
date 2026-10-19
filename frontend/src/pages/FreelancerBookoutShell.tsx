@@ -8,8 +8,12 @@
  *
  * Lifecycle:
  *   1. URL has `?freelancerToken=...` → exchange with OP for a scoped
- *      session JWT, persist to localStorage, drop URL params, render
- *      BookOutPage.
+ *      session JWT, persist to localStorage, render BookOutPage. The token
+ *      STAYS in the URL: a reload of the same link resumes the stored
+ *      session, and if the phone has thrown its storage away (an iPhone
+ *      reloading the page after the camera — HH 16714, 10 Oct 2026, which
+ *      used to land the freelancer on the STAFF login) the link is simply
+ *      exchanged again. The link is valid 24h and may be redeemed repeatedly.
  *   2. No token param but localStorage has a live session → resume
  *      (refresh-safe, tab-restore-safe). Session JWT is 4h; past that
  *      we clear and send them back to the portal.
@@ -25,18 +29,27 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BookOutPage } from '../modules/vehicles/pages/BookOutPage'
+import { FreelancerLinkError } from '../modules/vehicles/components/FreelancerLinkError'
+import { FreelancerVanPicker } from '../modules/vehicles/components/FreelancerVanPicker'
 import {
   clearFreelancerSession,
   getFreelancerSession,
   resolveFreelancerToken,
   setFreelancerSession,
 } from '../modules/vehicles/adapters/freelancer-session'
+import type { FreelancerVanCandidate } from '../modules/vehicles/adapters/freelancer-session'
+import { safeReturnUrl } from '../modules/vehicles/lib/safe-url'
 
 type ShellState =
   | { kind: 'loading' }
   | { kind: 'ready' }
-  | { kind: 'expired'; returnUrl: string | null }
-  | { kind: 'error'; message: string; returnUrl: string | null }
+  // More than one van allocated to this job — the freelancer picks the reg in
+  // front of them before we mint a session (the HH 15307 failure, delivery
+  // side). The HMAC token stays in the URL until they pick, so a refresh
+  // re-shows the picker rather than dying.
+  | { kind: 'select'; candidates: FreelancerVanCandidate[]; hmacToken: string; returnUrl: string | null }
+  | { kind: 'expired'; returnUrl: string | null; startUrl: string | null }
+  | { kind: 'error'; message: string; returnUrl: string | null; startUrl: string | null; code?: string }
 
 const OP_API_BASE = '/api/vehicles'
 
@@ -47,34 +60,77 @@ const queryClient = new QueryClient({
 })
 
 export default function FreelancerBookoutShell() {
-  const [searchParams, setSearchParams] = useSearchParams()
+  const [searchParams] = useSearchParams()
   const [state, setState] = useState<ShellState>({ kind: 'loading' })
+  const [pickBusyId, setPickBusyId] = useState<string | null>(null)
+  const [pickError, setPickError] = useState<string | null>(null)
+
+  // Claim one van from the picker. Same endpoint, now with the chosen
+  // assignment — the server re-checks it's genuinely a van on this job.
+  const handleSelect = async (candidate: FreelancerVanCandidate) => {
+    if (state.kind !== 'select') return
+    setPickBusyId(candidate.assignmentId)
+    setPickError(null)
+    const result = await resolveFreelancerToken(
+      OP_API_BASE,
+      state.hmacToken,
+      state.returnUrl,
+      'freelancer-bookout/resolve',
+      candidate.assignmentId,
+    )
+    if (result.kind === 'ok') {
+      setFreelancerSession(result.token, result.context, state.hmacToken)
+      setState({ kind: 'ready' })
+      return
+    }
+    setPickBusyId(null)
+    setPickError(
+      result.kind === 'error'
+        ? result.error
+        : 'That van could not be claimed — please try another or call the office.',
+    )
+  }
 
   useEffect(() => {
     let cancelled = false
 
     async function init() {
       const hmacToken = searchParams.get('freelancerToken')
-      const returnUrl = searchParams.get('returnUrl')
+      const returnUrl = safeReturnUrl(searchParams.get('returnUrl'))
+      // Where to send them if the van leg can't run — see FreelancerLinkError.
+      const startUrl = safeReturnUrl(searchParams.get('startUrl'))
 
-      // Fresh arrival from portal — exchange the token.
       if (hmacToken) {
-        const result = await resolveFreelancerToken(OP_API_BASE, hmacToken, returnUrl)
-        if (cancelled) return
-
-        if (!result.ok) {
-          setState({ kind: 'error', message: result.error, returnUrl })
+        // Same link as the session on this phone → a reload, resume it
+        // (keeps the van picked on a multi-van job). A different link is a
+        // fresh "Start delivery" from the portal → exchange it.
+        const existing = getFreelancerSession()
+        if (existing && existing.linkToken === hmacToken) {
+          setState({ kind: 'ready' })
           return
         }
 
-        setFreelancerSession(result.token, result.context)
+        // Fresh arrival from portal (or storage lost) — exchange the token.
+        const result = await resolveFreelancerToken(OP_API_BASE, hmacToken, returnUrl)
+        if (cancelled) return
 
-        // Strip the token/returnUrl from the URL so a refresh/back-button
-        // doesn't try to re-exchange a one-shot HMAC and fail.
-        const next = new URLSearchParams(searchParams)
-        next.delete('freelancerToken')
-        next.delete('returnUrl')
-        setSearchParams(next, { replace: true })
+        if (result.kind === 'error') {
+          setState({ kind: 'error', message: result.error, returnUrl, startUrl, code: result.code })
+          return
+        }
+
+        if (result.kind === 'select') {
+          // Bin any session left over from an earlier van on this device —
+          // otherwise abandoning the picker and coming back without a token
+          // would resume the OLD van, which is the bug we're fixing.
+          clearFreelancerSession()
+          // Leave the token in the URL — no session yet, and a refresh should
+          // land back on the picker.
+          setState({ kind: 'select', candidates: result.candidates, hmacToken, returnUrl })
+          return
+        }
+
+        setFreelancerSession(result.token, result.context, hmacToken)
 
         setState({ kind: 'ready' })
         return
@@ -88,25 +144,54 @@ export default function FreelancerBookoutShell() {
       }
 
       // No token, no session → expired or arrived directly.
-      setState({ kind: 'expired', returnUrl })
+      setState({ kind: 'expired', returnUrl, startUrl })
     }
 
     init()
     return () => {
       cancelled = true
     }
-  }, [searchParams, setSearchParams])
+  }, [searchParams])
 
   if (state.kind === 'loading') {
     return <LoadingScreen />
   }
 
   if (state.kind === 'error') {
-    return <ErrorScreen message={state.message} returnUrl={state.returnUrl} />
+    return (
+      <FreelancerLinkError
+        message={state.message}
+        returnUrl={state.returnUrl}
+        startUrl={state.startUrl}
+        code={state.code}
+        action="book-out"
+      />
+    )
+  }
+
+  if (state.kind === 'select') {
+    return (
+      <FreelancerVanPicker
+        candidates={state.candidates}
+        action="book-out"
+        busyAssignmentId={pickBusyId}
+        error={pickError}
+        onSelect={handleSelect}
+      />
+    )
   }
 
   if (state.kind === 'expired') {
-    return <ExpiredScreen returnUrl={state.returnUrl} />
+    clearFreelancerSession()
+    return (
+      <FreelancerLinkError
+        message="Your book-out session has ended, or isn't on this phone any more. Head back to the freelancer portal and click “Start delivery” again to resume."
+        returnUrl={state.returnUrl}
+        startUrl={state.startUrl}
+        action="book-out"
+        staffLoginHref="/login?redirect=%2Fvehicles%2Fbook-out"
+      />
+    )
   }
 
   // Freelancer session is live — render BookOutPage. It reads scope +
@@ -130,49 +215,3 @@ function LoadingScreen() {
   )
 }
 
-function ErrorScreen({ message, returnUrl }: { message: string; returnUrl: string | null }) {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-      <div className="max-w-md rounded-lg border border-red-200 bg-white p-6 shadow-sm">
-        <h1 className="text-lg font-semibold text-red-700">Couldn&apos;t start book-out</h1>
-        <p className="mt-2 text-sm text-gray-700">{message}</p>
-        <p className="mt-4 text-xs text-gray-500">
-          Go back to the freelancer portal and try starting the delivery again. If this keeps
-          happening, ask Ooosh Tours to check the allocation.
-        </p>
-        {returnUrl && (
-          <a
-            href={returnUrl}
-            className="mt-4 inline-block rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-semibold text-white"
-          >
-            Back to portal
-          </a>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function ExpiredScreen({ returnUrl }: { returnUrl: string | null }) {
-  // Wipe any stale scraps just in case.
-  clearFreelancerSession()
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-      <div className="max-w-md rounded-lg border border-amber-200 bg-white p-6 shadow-sm">
-        <h1 className="text-lg font-semibold text-amber-700">Session expired</h1>
-        <p className="mt-2 text-sm text-gray-700">
-          Your book-out session has ended (sessions last 4 hours). Head back to the freelancer
-          portal and click &ldquo;Start delivery&rdquo; again to resume.
-        </p>
-        {returnUrl && (
-          <a
-            href={returnUrl}
-            className="mt-4 inline-block rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-semibold text-white"
-          >
-            Back to portal
-          </a>
-        )}
-      </div>
-    </div>
-  )
-}

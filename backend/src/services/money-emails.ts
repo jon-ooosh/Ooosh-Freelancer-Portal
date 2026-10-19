@@ -6,6 +6,30 @@ import { query } from '../config/database';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { resolveRoutingOverride } from './email-routing';
+import { isBookingWonTransition } from './pipeline-stage';
+import { greetingName } from './display-name';
+
+/**
+ * The greeting for one email that goes to several people: "Aaron",
+ * "Aaron and Reed", "Aaron, Reed, Mark and Tim". Past four names it is "all";
+ * with no usable name it is "there". Names should already be greeting names
+ * (preferred name, else first name) — a blank entry is someone we can't name,
+ * who still gets the email but isn't listed.
+ */
+export function greetEveryone(names: Array<string | null | undefined>): string {
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const raw of names) {
+    const name = (raw || '').trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    list.push(name);
+  }
+  if (list.length === 0) return 'there';
+  if (list.length > 4) return 'all';
+  if (list.length === 1) return list[0];
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
 
 /** Refund timescale based on payment method */
 export function getRefundTimescale(paymentMethod: string): string {
@@ -13,6 +37,9 @@ export function getRefundTimescale(paymentMethod: string): string {
     worldpay: 'As you paid by card in person, this should take 2 to 3 working days to come back.',
     amex: 'As you paid by Amex, this should take 2 to 3 working days to come back.',
     stripe_gbp: 'As you paid by card through our online link, this should take 5 to 10 working days to come back.',
+    // Not a payment method — the key the refund route passes for a card-reader payment
+    // (recorded as stripe_gbp, source 'stripe_terminal'), which was never "our online link".
+    stripe_terminal: 'As you paid by card, this should take 5 to 10 working days to come back.',
     wise_bacs: 'For UK bank transfers this should be with you within an hour. For international transfers, please allow 1 to 2 working days.',
     till_cash: 'As you paid by cash, please contact us to arrange collection of your refund.',
     paypal: 'As you paid by PayPal, this should be instant.',
@@ -40,6 +67,8 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   primaryEmail: string | null;
   primaryFirstName: string | null;
   ccEmails: string[];
+  /** Greeting name for each recipient, primary first, then the CCs in order ('' = no usable name). */
+  recipientNames: string[];
 }> {
   // First pass: per-job contact selection (migration 086). When staff have
   // explicitly ticked who's on THIS hire via the contact picker, those rows
@@ -55,7 +84,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   // reachable, return `null` and let resolveClientEmailTarget route to
   // info@ with the "no client email on file" banner.
   const jobContactsRows = await query(
-    `SELECT p.email, p.first_name, p.last_name, jc.is_primary
+    `SELECT p.email, p.first_name, p.last_name, p.preferred_name, jc.is_primary
      FROM job_contacts jc
      JOIN people p ON p.id = jc.person_id
      WHERE jc.job_id = $1
@@ -79,6 +108,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
         primaryEmail: null,
         primaryFirstName: jobResult.rows[0]?.client_name?.split(' ')[0] || null,
         ccEmails: [],
+        recipientNames: [],
       };
     }
     // Preserve the staff-chosen primary if reachable; else the next
@@ -89,8 +119,9 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
     const ccEmails = reachable.slice(1).map((r: any) => r.email);
     return {
       primaryEmail: primary.email,
-      primaryFirstName: primary.first_name || primary.email?.split('@')[0] || null,
+      primaryFirstName: greetingName(primary, '') || primary.email?.split('@')[0] || null,
       ccEmails,
+      recipientNames: reachable.map((r: any) => greetingName(r, '')),
     };
   }
 
@@ -99,7 +130,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   // NOTE: manager1_person_id / manager2_person_id are INTERNAL Ooosh staff (account managers),
   // not client contacts — they are NOT included here.
   const result = await query(
-    `SELECT DISTINCT p.email, p.first_name, p.last_name,
+    `SELECT DISTINCT p.email, p.first_name, p.last_name, p.preferred_name,
        CASE
          WHEN por.role IN ('Tour Manager', 'Manager', 'Production Manager', 'Accountant', 'Booking Agent') THEN 1
          WHEN por.role = 'General Contact' THEN 2
@@ -107,7 +138,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
        END AS priority
      FROM people p
      JOIN person_organisation_roles por ON por.person_id = p.id AND por.status = 'active'
-     WHERE p.email IS NOT NULL AND p.email != ''
+     WHERE p.is_deleted = false AND p.email IS NOT NULL AND p.email != ''
        AND (
          por.organisation_id IN (SELECT organisation_id FROM job_organisations WHERE job_id = $1)
          OR por.organisation_id = (SELECT client_id FROM jobs WHERE id = $1)
@@ -151,6 +182,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
         primaryEmail: org.email,
         primaryFirstName: org.name?.split(' ')[0] || null,
         ccEmails: [],
+        recipientNames: [],
       };
     }
 
@@ -161,7 +193,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
     // with a valid email counts; anything fuzzier would risk routing a
     // stranger's confirmation to the wrong person.
     const clientNameMatch = await query(
-      `SELECT p.email, p.first_name
+      `SELECT p.email, p.first_name, p.preferred_name
        FROM jobs j
        JOIN people p
          ON p.is_deleted = false
@@ -177,8 +209,9 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
       const person = clientNameMatch.rows[0];
       return {
         primaryEmail: person.email,
-        primaryFirstName: person.first_name,
+        primaryFirstName: greetingName(person, '') || null,
         ccEmails: [],
+        recipientNames: [greetingName(person, '')],
       };
     }
 
@@ -187,16 +220,17 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
       `SELECT client_name, company_name FROM jobs WHERE id = $1`,
       [jobId]
     );
-    return { primaryEmail: null, primaryFirstName: jobResult.rows[0]?.client_name?.split(' ')[0] || null, ccEmails: [] };
+    return { primaryEmail: null, primaryFirstName: jobResult.rows[0]?.client_name?.split(' ')[0] || null, ccEmails: [], recipientNames: [] };
   }
 
   const primary = result.rows[0];
-  const ccEmails = result.rows.slice(1).map((r: any) => r.email).filter(Boolean);
+  const ccRows = result.rows.slice(1).filter((r: any) => r.email);
 
   return {
     primaryEmail: primary.email,
-    primaryFirstName: primary.first_name || primary.email?.split('@')[0] || null,
-    ccEmails,
+    primaryFirstName: greetingName(primary, '') || primary.email?.split('@')[0] || null,
+    ccEmails: ccRows.map((r: any) => r.email),
+    recipientNames: [primary, ...ccRows].map((r: any) => greetingName(r, '')),
   };
 }
 
@@ -216,6 +250,10 @@ export async function resolveClientEmailTarget(jobId: string, templateId?: strin
   primaryEmail: string;
   primaryFirstName: string;
   ccEmails: string[];
+  /** Everyone the email goes to, by name — "Reed, Mark and Tim". Use it for a client money email's "Hi …". */
+  greeting: string;
+  /** Greeting name per recipient, primary first ('' = no usable name). */
+  recipientNames: string[];
   isFallback: boolean;
   clientName: string | null;
   jobNumber: string | null;
@@ -230,6 +268,8 @@ export async function resolveClientEmailTarget(jobId: string, templateId?: strin
         primaryEmail: override.primaryEmail,
         primaryFirstName: override.primaryFirstName || 'there',
         ccEmails: override.ccEmails,
+        greeting: greetEveryone(override.recipientNames),
+        recipientNames: override.recipientNames,
         isFallback: false,
         clientName: null,
         jobNumber: null,
@@ -244,6 +284,11 @@ export async function resolveClientEmailTarget(jobId: string, templateId?: strin
       primaryEmail: recipients.primaryEmail,
       primaryFirstName: recipients.primaryFirstName || 'there',
       ccEmails: recipients.ccEmails,
+      // An org mailbox (no person) keeps the old single greeting.
+      greeting: recipients.recipientNames.length > 0
+        ? greetEveryone(recipients.recipientNames)
+        : recipients.primaryFirstName || 'there',
+      recipientNames: recipients.recipientNames,
       isFallback: false,
       clientName: null,
       jobNumber: null,
@@ -260,6 +305,8 @@ export async function resolveClientEmailTarget(jobId: string, templateId?: strin
     primaryEmail: 'info@oooshtours.co.uk',
     primaryFirstName: 'team',
     ccEmails: [],
+    greeting: 'team',
+    recipientNames: [],
     isFallback: true,
     clientName: job?.client_name || job?.company_name || null,
     jobNumber: job?.hh_job_number ? String(job.hh_job_number) : null,
@@ -311,7 +358,7 @@ export async function logFallbackToTimeline(opts: {
   const content = `Automated email (${opts.templateId}) could not be addressed — no client email on file. Redirected to info@ so the team can forward manually and update the address book.${amountPart}`;
   try {
     await query(
-      `INSERT INTO interactions (type, content, job_id) VALUES ('email', $1, $2)`,
+      `INSERT INTO interactions (type, content, job_id, source) VALUES ('email', $1, $2, 'system')`,
       [content, opts.jobId]
     );
   } catch (err) {
@@ -333,7 +380,7 @@ export async function getDriverEmail(driverId: string): Promise<{
   firstName: string | null;
 }> {
   const result = await query(
-    `SELECT d.email, d.full_name, p.email AS person_email, p.first_name
+    `SELECT d.email, d.full_name, p.email AS person_email, p.first_name, p.preferred_name
      FROM drivers d
      LEFT JOIN people p ON p.id = d.person_id
      WHERE d.id = $1`,
@@ -344,7 +391,7 @@ export async function getDriverEmail(driverId: string): Promise<{
 
   const row = result.rows[0];
   // Extract first name, skipping common title prefixes (MR, MRS, MS, MISS, DR, etc.)
-  let firstName = row.first_name;
+  let firstName = greetingName(row, '') || null;
   if (!firstName && row.full_name) {
     const titles = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'sir', 'lady', 'lord']);
     const parts = row.full_name.trim().split(/\s+/);
@@ -377,10 +424,44 @@ export async function sendPaymentEmail(opts: {
    * matching invariant comment in routes/money.ts.
    */
   isConfirmingBooking: boolean;
-}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean }> {
-  const { jobId, amount, bankName, isConfirmingBooking } = opts;
+  /**
+   * Optional explicit recipient list (from the "Resend confirmation" picker).
+   * When supplied and non-empty, it REPLACES the normal address-book resolution
+   * entirely — first entry becomes `to`, the rest are CC. No info@ fallback
+   * banner fires (these are a deliberate staff choice, not a silent miss).
+   * Omit for the automatic auto-send path.
+   */
+  overrideRecipients?: Array<{ email: string; name?: string | null }>;
+}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean; toEmail?: string; ccEmails?: string[] }> {
+  const { jobId, amount, bankName, isConfirmingBooking, overrideRecipients } = opts;
   const templateId = isConfirmingBooking ? 'booking_confirmed_deposit' : 'payment_received';
-  const target = await resolveClientEmailTarget(jobId, templateId);
+
+  // Recipient resolution: an explicit picker override wins; otherwise fall back
+  // to the standard address-book resolution (which itself lands on info@ when
+  // nothing is reachable).
+  let toEmail: string;
+  let ccEmails: string[];
+  let firstName: string;
+  let isFallback = false;
+  let target: Awaited<ReturnType<typeof resolveClientEmailTarget>> | null = null;
+
+  const cleanOverride = (overrideRecipients || [])
+    .map((r) => ({ email: (r.email || '').trim(), name: r.name || '' }))
+    .filter((r) => r.email);
+
+  if (cleanOverride.length > 0) {
+    toEmail = cleanOverride[0].email;
+    ccEmails = cleanOverride.slice(1).map((r) => r.email);
+    firstName = cleanOverride.length > 1
+      ? greetEveryone(cleanOverride.map((r) => r.name.trim().split(/\s+/)[0]))
+      : cleanOverride[0].name.trim().split(/\s+/)[0] || toEmail.split('@')[0] || 'there';
+  } else {
+    target = await resolveClientEmailTarget(jobId, templateId);
+    toEmail = target.primaryEmail;
+    ccEmails = target.ccEmails;
+    firstName = target.greeting;
+    isFallback = target.isFallback;
+  }
 
   const jobResult = await query(
     `SELECT job_name, hh_job_number, job_date, job_end, out_date, return_date FROM jobs WHERE id = $1`,
@@ -407,9 +488,9 @@ export async function sendPaymentEmail(opts: {
 
   try {
     const res = await emailService.send(templateId, {
-      to: target.primaryEmail,
-      cc: target.ccEmails.length > 0 ? target.ccEmails : undefined,
-      prependBanner: target.isFallback
+      to: toEmail,
+      cc: ccEmails.length > 0 ? ccEmails : undefined,
+      prependBanner: isFallback && target
         ? buildFallbackBanner({
             jobId,
             clientName: target.clientName,
@@ -418,7 +499,7 @@ export async function sendPaymentEmail(opts: {
           })
         : undefined,
       variables: {
-        firstName: target.primaryFirstName,
+        firstName,
         amount: `\u00A3${amount.toFixed(2)}`,
         bankName: bankName || 'card',
         jobName,
@@ -432,13 +513,273 @@ export async function sendPaymentEmail(opts: {
         balanceSection: '',
       },
     });
-    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback: target.isFallback };
-    if (target.isFallback) {
+    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback, toEmail, ccEmails };
+    if (isFallback) {
       await logFallbackToTimeline({ jobId, templateId, amount });
     }
-    return { sent: true, isFallback: target.isFallback };
+    return { sent: true, isFallback, toEmail, ccEmails };
   } catch (err) {
-    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback: target.isFallback };
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback, toEmail, ccEmails };
+  }
+}
+
+/**
+ * Confirm a HIRE refund to the client (deposit/balance going back).
+ *
+ * NOT for insurance excess — `sendExcessEmail` owns that, and the two must stay
+ * separate in the client's inbox: "your excess is back" and "we've refunded
+ * part of your hire" are different conversations.
+ *
+ * Caller decides WHETHER to send, not this function. A Stripe refund has
+ * genuinely moved the money, so `/refund-payment` fires it automatically; every
+ * other method is record-only and the money moves by hand, so the Money tab
+ * asks. See routes/money.ts.
+ */
+export async function sendRefundEmail(opts: {
+  jobId: string;
+  amount: number;
+  /** OP payment-method key — drives the method-specific timescale sentence. */
+  paymentMethod: string;
+  /** Staff's picked recipients (the refund modal's picker). When non-empty it REPLACES
+   *  the address-book resolution — first is To, the rest CC — as in sendPaymentEmail. */
+  overrideRecipients?: Array<{ email: string; name?: string | null }>;
+}): Promise<{ sent: boolean; reason?: 'error'; error?: string; isFallback?: boolean; toEmail?: string }> {
+  const { jobId, amount, paymentMethod, overrideRecipients } = opts;
+  const templateId = 'hire_refund_processed';
+
+  // templateId passed through so the job's per-bucket routing override applies,
+  // same as every other client-facing money email.
+  const target = await resolveClientEmailTarget(jobId, templateId);
+  const cleanOverride = (overrideRecipients || [])
+    .map((r) => ({ email: (r.email || '').trim(), name: r.name || '' }))
+    .filter((r) => r.email);
+  if (cleanOverride.length > 0) {
+    target.primaryEmail = cleanOverride[0].email;
+    target.ccEmails = cleanOverride.slice(1).map((r) => r.email);
+    target.greeting = cleanOverride.length > 1
+      ? greetEveryone(cleanOverride.map((r) => r.name.trim().split(/\s+/)[0]))
+      : cleanOverride[0].name.trim().split(/\s+/)[0] || cleanOverride[0].email.split('@')[0] || 'there';
+    target.isFallback = false;
+  }
+
+  const jobResult = await query(
+    `SELECT job_name, hh_job_number FROM jobs WHERE id = $1`,
+    [jobId]
+  );
+  const job = jobResult.rows[0];
+
+  try {
+    const res = await emailService.send(templateId, {
+      to: target.primaryEmail,
+      cc: target.ccEmails.length > 0 ? target.ccEmails : undefined,
+      prependBanner: target.isFallback
+        ? buildFallbackBanner({
+            jobId,
+            clientName: target.clientName,
+            jobNumber: target.jobNumber,
+            jobName: target.jobName,
+          })
+        : undefined,
+      variables: {
+        firstName: target.greeting,
+        amount: `\u00A3${amount.toFixed(2)}`,
+        jobName: job?.job_name || `Job #${job?.hh_job_number || ''}`,
+        jobNumber: String(job?.hh_job_number || ''),
+        refundTimescale: getRefundTimescale(paymentMethod),
+      },
+    });
+    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback: target.isFallback, toEmail: target.primaryEmail };
+    if (target.isFallback) await logFallbackToTimeline({ jobId, templateId, amount });
+    return { sent: true, isFallback: target.isFallback, toEmail: target.primaryEmail };
+  } catch (err) {
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback: target.isFallback, toEmail: target.primaryEmail };
+  }
+}
+
+/** One payment line for the itemised statement (resend confirmation). */
+export interface StatementPaymentLine {
+  date: string;        // ISO or display date string
+  method: string;      // bank name / method label
+  amount: number;      // positive for a payment, positive for a refund (isRefund distinguishes)
+  isRefund?: boolean;
+}
+
+/** Build the branded itemised-payment-statement HTML body used by the manual
+ *  "Resend confirmation" action. Rendered as a `bodyHtmlOverride` so the base
+ *  layout (Ooosh header + client signature) still wraps it. All values are
+ *  composed here (not passed through {{var}} substitution), so escape any
+ *  free-text before embedding — payment methods + dates are controlled strings,
+ *  so no user free-text lands in this HTML. */
+export function buildPaymentStatementHtml(opts: {
+  firstName: string;
+  jobName: string;
+  jobNumber: string;
+  payments: StatementPaymentLine[];
+  hireValueIncVat: number;
+  totalPaid: number;
+  balanceOwed: number;
+}): string {
+  const { firstName, jobName, jobNumber, payments, hireValueIncVat, totalPaid, balanceOwed } = opts;
+  const gbp = (n: number) => `£${(n || 0).toFixed(2)}`;
+  const fmtDate = (d: string) => {
+    const parsed = new Date(d);
+    return isNaN(parsed.getTime())
+      ? escapeHtml(d)
+      : parsed.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+  const jobRef = jobNumber ? ` (job <strong>#${escapeHtml(jobNumber)}</strong>)` : '';
+  const paidInFull = balanceOwed <= 0.01;
+
+  const rows = payments.length > 0
+    ? payments.map((p) => `
+        <tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-size:14px;color:#333;">${fmtDate(p.date)}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-size:14px;color:#333;">${escapeHtml(p.method || 'Card')}${p.isRefund ? ' <span style="color:#b91c1c;font-size:12px;">(refund)</span>' : ''}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-size:14px;color:${p.isRefund ? '#b91c1c' : '#333'};text-align:right;white-space:nowrap;">${p.isRefund ? '−' : ''}${gbp(p.amount)}</td>
+        </tr>`).join('')
+    : `<tr><td colspan="3" style="padding:12px;font-size:14px;color:#777;text-align:center;">No payments recorded yet.</td></tr>`;
+
+  return `
+    <p style="margin:0 0 16px;font-size:16px;color:#333;">Hi ${escapeHtml(firstName)},</p>
+    <p style="margin:0 0 20px;font-size:15px;color:#333;line-height:1.5;">
+      Here's a summary of the payments we've received for <strong>${escapeHtml(jobName)}</strong>${jobRef}.
+    </p>
+
+    <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin:0 0 20px;border:1px solid #eee;border-radius:8px;overflow:hidden;">
+      <thead>
+        <tr style="background-color:#f7f5fb;">
+          <th style="padding:10px 12px;font-size:13px;color:#7B5EA7;text-align:left;border-bottom:1px solid #e5e0ee;">Date</th>
+          <th style="padding:10px 12px;font-size:13px;color:#7B5EA7;text-align:left;border-bottom:1px solid #e5e0ee;">Method</th>
+          <th style="padding:10px 12px;font-size:13px;color:#7B5EA7;text-align:right;border-bottom:1px solid #e5e0ee;">Amount</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+
+    <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin:0 0 20px;">
+      <tr>
+        <td style="padding:6px 12px;font-size:14px;color:#555;">Hire total</td>
+        <td style="padding:6px 12px;font-size:14px;color:#333;text-align:right;white-space:nowrap;">${gbp(hireValueIncVat)}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 12px;font-size:14px;color:#555;border-top:1px solid #eee;">Total paid</td>
+        <td style="padding:6px 12px;font-size:14px;font-weight:600;color:#166534;text-align:right;white-space:nowrap;border-top:1px solid #eee;">${gbp(totalPaid)}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 12px;font-size:15px;font-weight:700;color:#333;border-top:2px solid #e5e0ee;">${paidInFull ? 'Balance' : 'Balance outstanding'}</td>
+        <td style="padding:8px 12px;font-size:15px;font-weight:700;text-align:right;white-space:nowrap;border-top:2px solid #e5e0ee;color:${paidInFull ? '#166534' : '#b91c1c'};">${paidInFull ? 'Paid in full' : gbp(balanceOwed)}</td>
+      </tr>
+    </table>
+
+    <p style="margin:0 0 8px;font-size:14px;color:#555;line-height:1.5;">
+      If anything doesn't look right, just reply to this email and we'll sort it out.
+    </p>
+    <p style="margin:0;font-size:14px;color:#555;">Thanks,<br/>The Ooosh Tours team</p>
+  `;
+}
+
+/** Send the itemised payment statement (the manual "Resend confirmation" action).
+ *  Reuses the live `booking_confirmed_deposit` template as the delivery vehicle
+ *  (so it inherits the client variant + EMAIL_LIVE_TEMPLATES allowlist) but
+ *  overrides the subject + body — the body is the itemised statement rather than
+ *  the single-total confirmation copy.
+ *
+ *  Recipient resolution mirrors sendPaymentEmail: an explicit override wins
+ *  (first = to, rest = CC, no info@ banner); otherwise the address-book default
+ *  (which lands on info@ with a banner when nothing's reachable). */
+export async function sendPaymentStatementEmail(opts: {
+  jobId: string;
+  payments: StatementPaymentLine[];
+  hireValueIncVat: number;
+  totalPaid: number;
+  balanceOwed: number;
+  overrideRecipients?: Array<{ email: string; name?: string | null }>;
+}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean; toEmail?: string; ccEmails?: string[] }> {
+  const { jobId, payments, hireValueIncVat, totalPaid, balanceOwed, overrideRecipients } = opts;
+  const templateId = 'booking_confirmed_deposit';
+
+  let toEmail: string;
+  let ccEmails: string[];
+  let firstName: string;
+  let isFallback = false;
+  let target: Awaited<ReturnType<typeof resolveClientEmailTarget>> | null = null;
+
+  const cleanOverride = (overrideRecipients || [])
+    .map((r) => ({ email: (r.email || '').trim(), name: r.name || '' }))
+    .filter((r) => r.email);
+
+  if (cleanOverride.length > 0) {
+    toEmail = cleanOverride[0].email;
+    ccEmails = cleanOverride.slice(1).map((r) => r.email);
+    firstName = cleanOverride.length > 1
+      ? greetEveryone(cleanOverride.map((r) => r.name.trim().split(/\s+/)[0]))
+      : cleanOverride[0].name.trim().split(/\s+/)[0] || toEmail.split('@')[0] || 'there';
+  } else {
+    target = await resolveClientEmailTarget(jobId, templateId);
+    toEmail = target.primaryEmail;
+    ccEmails = target.ccEmails;
+    firstName = target.greeting;
+    isFallback = target.isFallback;
+  }
+
+  const jobResult = await query(`SELECT job_name, hh_job_number FROM jobs WHERE id = $1`, [jobId]);
+  const job = jobResult.rows[0];
+  const jobNumber = String(job?.hh_job_number || '');
+  const jobName = job?.job_name || (jobNumber ? `Job #${jobNumber}` : 'your hire');
+
+  const bodyHtml = buildPaymentStatementHtml({
+    firstName, jobName, jobNumber, payments, hireValueIncVat, totalPaid, balanceOwed,
+  });
+  const subject = `Payment summary — ${jobName}${jobNumber ? ` (#${jobNumber})` : ''}`;
+
+  try {
+    const res = await emailService.send(templateId, {
+      to: toEmail,
+      cc: ccEmails.length > 0 ? ccEmails : undefined,
+      subjectOverride: subject,
+      bodyHtmlOverride: bodyHtml,
+      prependBanner: isFallback && target
+        ? buildFallbackBanner({
+            jobId,
+            clientName: target.clientName,
+            jobNumber: target.jobNumber,
+            jobName: target.jobName,
+          })
+        : undefined,
+    });
+    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback, toEmail, ccEmails };
+    if (isFallback) {
+      await logFallbackToTimeline({ jobId, templateId, amount: totalPaid });
+    }
+    return { sent: true, isFallback, toEmail, ccEmails };
+  } catch (err) {
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback, toEmail, ccEmails };
+  }
+}
+
+/** Log an `email` interaction on the job timeline recording that staff manually
+ *  re-sent the payment/booking confirmation, and to whom. Separate from the
+ *  fallback-to-info@ logger — this is the audit trail for a deliberate resend. */
+export async function logResendToTimeline(opts: {
+  jobId: string;
+  recipients: string[];
+  itemised: boolean;
+  isFallback?: boolean;
+}): Promise<void> {
+  const to = opts.recipients.filter(Boolean);
+  const who = to.length > 0
+    ? to.join(', ')
+    : 'info@ (no client contact on file)';
+  const what = opts.itemised ? 'payment summary' : 'booking/payment confirmation';
+  const fallbackNote = opts.isFallback ? ' (redirected to info@ — no client email on file)' : '';
+  const content = `📧 Resent ${what} to ${who}${fallbackNote}.`;
+  try {
+    await query(
+      `INSERT INTO interactions (type, content, job_id, source) VALUES ('email', $1, $2, 'system')`,
+      [content, opts.jobId]
+    );
+  } catch (err) {
+    console.error('[money-emails] Failed to log resend to timeline:', err instanceof Error ? err.message : err);
   }
 }
 
@@ -454,8 +795,11 @@ export async function sendExcessEmail(opts: {
   originalAmount?: number;
   retainedAmount?: number;
   previousJobNumber?: string;
-}) {
-  const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount, previousJobNumber } = opts;
+  /** Staff's picked recipients (the card reader's "Send receipt?"). When non-empty it
+   *  REPLACES the driver + job-contact resolution — first is To, the rest CC. */
+  overrideRecipients?: Array<{ email: string; name?: string | null }>;
+}): Promise<{ sent: boolean; error?: string; toEmail?: string; ccEmails?: string[] }> {
+  const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount, previousJobNumber, overrideRecipients } = opts;
 
   // Get excess record + optional driver info (LEFT JOIN — assignment may be NULL for Money tab records)
   const excessResult = await query(
@@ -466,7 +810,7 @@ export async function sendExcessEmail(opts: {
      WHERE je.id = $1`,
     [excessId]
   );
-  if (excessResult.rows.length === 0) return;
+  if (excessResult.rows.length === 0) return { sent: false, error: 'Excess record not found' };
   const excess = excessResult.rows[0];
 
   // Get job info
@@ -475,35 +819,20 @@ export async function sendExcessEmail(opts: {
   const jobName = job?.job_name || `Job #${job?.hh_job_number || ''}`;
   const jobNumber = job?.hh_job_number || '';
 
-  // Determine recipient: driver email if available, otherwise job contacts
-  let recipientEmail: string | null = null;
-  let recipientFirstName: string | null = null;
-
-  if (excess.driver_id) {
-    const driver = await getDriverEmail(excess.driver_id);
-    recipientEmail = driver.email;
-    recipientFirstName = driver.firstName;
+  const resolved = await resolveExcessEmailTarget(excess.driver_id || null, jobId, templateId);
+  const { target } = resolved;
+  let { recipientEmail, recipientFirstName, isFallback, ccList } = resolved;
+  const cleanOverride = (overrideRecipients || [])
+    .map((r) => ({ email: (r.email || '').trim(), name: r.name || '' }))
+    .filter((r) => r.email);
+  if (cleanOverride.length > 0) {
+    recipientEmail = cleanOverride[0].email;
+    ccList = cleanOverride.slice(1).map((r) => r.email);
+    recipientFirstName = cleanOverride.length > 1
+      ? greetEveryone(cleanOverride.map((r) => r.name.trim().split(/\s+/)[0]))
+      : cleanOverride[0].name.trim().split(/\s+/)[0] || recipientEmail.split('@')[0] || 'there';
+    isFallback = false;
   }
-
-  // Fall back to job client contacts if no driver email.
-  // If nothing is reachable, resolveClientEmailTarget returns info@ with isFallback=true
-  // so the message still lands somewhere and staff get an amber banner + timeline entry.
-  // templateId passed through so per-bucket excess routing overrides take effect.
-  const target = await resolveClientEmailTarget(jobId, templateId);
-  let isFallback = false;
-  if (!recipientEmail) {
-    recipientEmail = target.primaryEmail;
-    recipientFirstName = target.primaryFirstName;
-    isFallback = target.isFallback;
-  }
-
-  // CC list: include job contacts that aren't the primary recipient (only when not falling back)
-  const ccList = isFallback
-    ? []
-    : [
-        ...(target.primaryEmail && target.primaryEmail !== recipientEmail ? [target.primaryEmail] : []),
-        ...target.ccEmails,
-      ].filter(e => e !== recipientEmail);
 
   // Format dates — use future tense for payment receipt, past tense for reimbursement
   const fmtDate = (d: any) => d ? new Date(d).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '';
@@ -513,11 +842,7 @@ export async function sendExcessEmail(opts: {
   const hireStart = startDate ? ` that starts on ${fmtDate(startDate)}` : '';
   const hireEnd = endDate ? (isReimbursement ? ` that finished on ${fmtDate(endDate)}` : `, which finishes on ${fmtDate(endDate)}`) : '';
 
-  const reasonSection = reason
-    ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;"><tr><td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;"><p style="margin:0;font-size:15px;color:#991b1b;">${reason}</p></td></tr></table>`
-    : '';
-
-  await emailService.send(templateId, {
+  const sendResult = await emailService.send(templateId, {
     to: recipientEmail,
     cc: ccList.length > 0 ? ccList : undefined,
     prependBanner: isFallback
@@ -540,27 +865,97 @@ export async function sendExcessEmail(opts: {
       refundAmount: refundAmount != null ? `\u00A3${refundAmount.toFixed(2)}` : '',
       originalAmount: originalAmount != null ? `\u00A3${originalAmount.toFixed(2)}` : '',
       retainedAmount: retainedAmount != null ? `\u00A3${retainedAmount.toFixed(2)}` : '',
+      // Plain text only: every variable is HTML-escaped, so markup built here
+      // arrives as visible code. The reason box lives in the template.
       reason: reason || '',
-      reasonSection,
       previousJobNumber: previousJobNumber || '',
       previousJobRef: previousJobNumber ? ` #${previousJobNumber}` : '',
       claimAmount: `\u00A3${amount.toFixed(2)}`,
     },
   });
 
+  if (!sendResult.success) return { sent: false, error: sendResult.error, toEmail: recipientEmail, ccEmails: ccList };
   if (isFallback) {
     await logFallbackToTimeline({ jobId, templateId, amount });
   }
+  return { sent: true, toEmail: recipientEmail, ccEmails: ccList };
 }
 
-/** Send last-minute booking alert to info@ */
-export async function sendLastMinuteAlert(jobId: string) {
+/**
+ * Who an excess email goes to by itself: the driver (when the record has one) as To,
+ * with the job's contacts copied in; else the job's contacts (resolveClientEmailTarget,
+ * landing on info@ with isFallback when nothing is reachable). sendExcessEmail uses
+ * it, and so does the card reader's "Send receipt?" pre-tick — one rule, not two.
+ */
+export async function resolveExcessEmailTarget(driverId: string | null, jobId: string, templateId: string): Promise<{
+  recipientEmail: string;
+  recipientFirstName: string;
+  ccList: string[];
+  isFallback: boolean;
+  target: Awaited<ReturnType<typeof resolveClientEmailTarget>>;
+}> {
+  // Determine recipient: driver email if available, otherwise job contacts
+  let recipientEmail: string | null = null;
+  let recipientFirstName: string | null = null;
+
+  if (driverId) {
+    const driver = await getDriverEmail(driverId);
+    recipientEmail = driver.email;
+    recipientFirstName = driver.firstName;
+  }
+
+  // Fall back to job client contacts if no driver email.
+  // If nothing is reachable, resolveClientEmailTarget returns info@ with isFallback=true
+  // so the message still lands somewhere and staff get an amber banner + timeline entry.
+  // templateId passed through so per-bucket excess routing overrides take effect.
+  const target = await resolveClientEmailTarget(jobId, templateId);
+  let isFallback = false;
+  if (!recipientEmail) {
+    recipientEmail = target.primaryEmail;
+    recipientFirstName = target.greeting;
+    isFallback = target.isFallback;
+  } else {
+    // The driver is the To and the job contacts are copied in — greet them all.
+    recipientFirstName = greetEveryone([recipientFirstName, ...target.recipientNames]);
+  }
+
+  // CC list: include job contacts that aren't the primary recipient (only when not falling back)
+  const ccList = isFallback
+    ? []
+    : [
+        ...(target.primaryEmail && target.primaryEmail !== recipientEmail ? [target.primaryEmail] : []),
+        ...target.ccEmails,
+      ].filter(e => e !== recipientEmail);
+
+  return { recipientEmail, recipientFirstName: recipientFirstName || 'there', ccList, isFallback, target };
+}
+
+/**
+ * Send the last-minute booking alert to info@.
+ *
+ * Fires at most ONCE per job (see jobs.last_minute_alerted_at, migration 226),
+ * and only when `fromStatus` says the booking was genuinely just won. Callers
+ * pass the status the job was on immediately before the move to 'confirmed';
+ * pass null only where no status transition is involved at all.
+ */
+export async function sendLastMinuteAlert(jobId: string, fromStatus: string | null) {
+  // Not a booking being won — a re-save, or a correction from further down the
+  // operational chain. Say nothing. `isBookingWonTransition` is THE definition
+  // (services/pipeline-stage.ts); keeping it there rather than here means the
+  // confirmation reminders in routes/pipeline.ts apply the identical test.
+  if (!isBookingWonTransition(fromStatus)) return;
+
   const jobResult = await query(
-    `SELECT job_name, hh_job_number, client_name, company_name, job_date, out_date, is_internal FROM jobs WHERE id = $1`,
+    `SELECT job_name, hh_job_number, client_name, company_name, job_date, out_date,
+            is_internal, last_minute_alerted_at
+       FROM jobs WHERE id = $1`,
     [jobId]
   );
   if (jobResult.rows.length === 0) return;
   const job = jobResult.rows[0];
+
+  // Already shouted about this one. Cleared again if the job is lost/cancelled.
+  if (job.last_minute_alerted_at) return;
 
   // Internal jobs (garage visits etc.) aren't bookings — no alert
   if (job.is_internal === true) return;
@@ -572,8 +967,12 @@ export async function sendLastMinuteAlert(jobId: string) {
   const now = new Date();
   const daysUntil = Math.ceil((start.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
-  // Only alert if within 3 days
+  // Only alert if within 3 days...
   if (daysUntil > 3) return;
+  // ...and not for a job that has already started. Without this floor a job
+  // three weeks in the past scores daysUntil = -21, sails past the check above
+  // and gets labelled "URGENT: Same-day booking / TODAY".
+  if (daysUntil < 0) return;
 
   const startFormatted = start.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const clientName = job.client_name || job.company_name || 'Unknown client';
@@ -606,4 +1005,8 @@ export async function sendLastMinuteAlert(jobId: string) {
       jobUrl,
     },
   });
+
+  // Stamp only after a successful send — a throw above leaves the marker unset
+  // so a retry can still get the alert out.
+  await query(`UPDATE jobs SET last_minute_alerted_at = NOW() WHERE id = $1`, [jobId]);
 }

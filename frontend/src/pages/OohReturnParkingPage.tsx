@@ -22,12 +22,20 @@ L.Icon.Default.mergeOptions({
   shadowUrl: markerShadow,
 });
 
+interface OohInfo {
+  gateCode: string | null;
+  yardAddress: string | null;
+  yardMapsUrl: string | null;
+  keydropPhotoUrl: string | null;
+  what3words: string | null;
+}
 interface FormContext {
   vehicleReg: string;
   jobNumber: number | null;
   jobName: string | null;
   driverName: string | null;
   alreadySubmitted: boolean;
+  info?: OohInfo | null;
 }
 
 interface PrefillData {
@@ -175,8 +183,8 @@ export default function OohReturnParkingPage() {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-start justify-center py-6 px-3">
       <div className="w-full max-w-lg bg-white rounded-2xl shadow-lg overflow-hidden">
         <div className="bg-ooosh-navy px-5 py-4 text-white">
-          <h1 className="text-lg font-semibold">Confirm parking location</h1>
-          <p className="text-xs text-white/80 mt-0.5">Out-of-hours van return</p>
+          <h1 className="text-lg font-semibold">Returning your van</h1>
+          <p className="text-xs text-white/80 mt-0.5">Out-of-hours return — instructions + confirm parking</p>
         </div>
 
         <div className="px-5 py-5 space-y-4">
@@ -225,6 +233,57 @@ export default function OohReturnParkingPage() {
               {ctx.alreadySubmitted && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
                   You've already submitted a location for this hire. Submitting again will update it.
+                </div>
+              )}
+
+              {/* Return procedure — same content as the OOH info email */}
+              {ctx.info && (
+                <div className="space-y-3">
+                  {ctx.info.gateCode && (
+                    <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                      <p className="text-xs text-gray-500">Yard gate code</p>
+                      <p className="text-2xl font-bold tracking-widest font-mono text-gray-900">{ctx.info.gateCode}</p>
+                      {ctx.info.yardAddress && (
+                        <p className="text-xs text-gray-500 mt-1">Yard: {ctx.info.yardAddress}</p>
+                      )}
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1">
+                        {ctx.info.yardMapsUrl && (
+                          <a href={ctx.info.yardMapsUrl} target="_blank" rel="noreferrer" className="text-xs text-ooosh-navy underline">
+                            Open in Google Maps →
+                          </a>
+                        )}
+                        {ctx.info.what3words && (
+                          <span className="text-xs text-gray-500">what3words: <strong>{ctx.info.what3words}</strong></span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <details className="rounded-lg border border-gray-200 bg-white p-3" open>
+                    <summary className="text-sm font-medium text-gray-700 cursor-pointer">When you arrive</summary>
+                    <ul className="mt-2 pl-5 list-disc text-sm text-gray-600 space-y-1.5">
+                      <li>Let yourself into the yard — line up the padlock numbers and pull the black knob to open.</li>
+                      <li>Drive as far into the yard as possible and as far to the left as you can. Leave room for other vehicles behind you.</li>
+                      <li>Double-check you haven't left anything in the van.</li>
+                      <li>Close all windows / sunroofs and lock all doors.</li>
+                      <li>Close the gates behind you and refit the padlock through the gate chain. Roll the numbers to scramble the code.</li>
+                      <li>
+                        Place the keys in the secure key drop under the first window — <strong>not</strong> through the letterbox on the glass door.
+                        {ctx.info.keydropPhotoUrl && (
+                          <> <a href={ctx.info.keydropPhotoUrl} target="_blank" rel="noreferrer" className="text-ooosh-navy underline">photo →</a></>
+                        )}
+                      </li>
+                    </ul>
+                  </details>
+
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    <p className="font-medium">If the yard is full</p>
+                    <p className="mt-1 text-amber-800">
+                      Please do <strong>not</strong> park outside our gates, in front of our neighbour's gates, or on
+                      double-yellow lines — it can block HGV access and may incur extra costs. The nearest safe legal
+                      parking is usually the seafront. <strong>Wherever you park, drop a pin below so we can find it.</strong>
+                    </p>
+                  </div>
                 </div>
               )}
 

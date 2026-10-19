@@ -6,6 +6,7 @@
  */
 
 import { mondayQuery, BOARD_IDS } from './monday'
+import { ukToday } from '../../../lib/ukDate'
 
 // Monday.com column IDs for the Issues board (18400365329)
 const ISSUE_COLUMNS = {
@@ -42,7 +43,7 @@ export interface CreateIssueParams {
 export async function createIssue(
   params: CreateIssueParams,
 ): Promise<{ id: string; error?: string }> {
-  const dateStr = params.reportedDate || new Date().toISOString().split('T')[0]!
+  const dateStr = params.reportedDate || ukToday()
   const itemName = `${params.vehicleReg} - ${params.issueType} - ${params.severity}`
 
   const columnValues: Record<string, unknown> = {

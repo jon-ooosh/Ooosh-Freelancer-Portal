@@ -64,7 +64,17 @@ export interface XeroLineItem {
 
 export interface CreateBillInput {
   contactName: string;
+  /** When known, used directly (skips the name-based get-or-create lookup). */
+  contactId?: string;
   reference?: string;
+  /**
+   * Supplier's invoice number → Xero `InvoiceNumber`. On an ACCPAY bill this IS
+   * the field the Xero UI labels "Reference" (the visible box); the API
+   * `Reference` field above is stored but hidden on bills. So the supplier
+   * invoice number must go here to actually show up on the bill. (Spend-money
+   * has no InvoiceNumber — there the API `Reference` is the visible field.)
+   */
+  invoiceNumber?: string;
   date?: string;          // YYYY-MM-DD
   dueDate?: string;       // YYYY-MM-DD
   lineItems: XeroLineItem[];
@@ -83,6 +93,13 @@ export interface CreateSpendMoneyInput {
   reference?: string;
   lineItems: XeroLineItem[];
   lineAmountTypes?: 'Inclusive' | 'Exclusive' | 'NoTax';
+  /**
+   * Which way the money went. SPEND (default) is a purchase; RECEIVE is money
+   * coming BACK on the same account — a card refund from a supplier, which
+   * arrives on the bank feed as a credit and reconciles against this.
+   * Line amounts are POSITIVE either way; the type is what carries the sign.
+   */
+  type?: 'SPEND' | 'RECEIVE';
 }
 
 export interface XeroHealth {
@@ -363,6 +380,34 @@ class XeroBroker {
     return r.BankTransactions || [];
   }
 
+  /** Read a single ACCPAY/ACCREC invoice by ID (diagnostics / read-back). billsScope for ACCPAY. */
+  async getInvoice(invoiceId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.request<{ Invoices?: Array<Record<string, unknown>> }>('GET', `/Invoices/${invoiceId}`, { billsScope: true });
+    return r.Invoices?.[0] ?? null;
+  }
+
+  /**
+   * Read MANY invoices in one call (filtered), for the payment pull-back sync.
+   *
+   * Xero's Invoices list omits the Payments array on a bulk read UNLESS the
+   * summaryOnly default is overridden, which is why this passes the ids as a
+   * `where` and nothing else — a filtered list returns full objects, including
+   * `Payments`, `AmountDue` and `Status`. billsScope for ACCPAY.
+   */
+  async getInvoices(where: string): Promise<Array<Record<string, unknown>>> {
+    const r = await this.request<{ Invoices?: Array<Record<string, unknown>> }>('GET', '/Invoices', {
+      query: { where },
+      billsScope: true,
+    });
+    return r.Invoices || [];
+  }
+
+  /** Read a single spend-money bank transaction by ID (diagnostics / read-back). */
+  async getBankTransaction(bankTransactionId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.request<{ BankTransactions?: Array<Record<string, unknown>> }>('GET', `/BankTransactions/${bankTransactionId}`);
+    return r.BankTransactions?.[0] ?? null;
+  }
+
   // ── Writes ───────────────────────────────────────────────────────────────
 
   /** Find a contact by exact name or create it (for ACCPAY supplier linkage). */
@@ -395,9 +440,31 @@ class XeroBroker {
       .map((c) => ({ ContactID: c.ContactID, Name: c.Name }));
   }
 
+  /**
+   * Read a contact's BILL payment terms (PaymentTerms.Bills) and map them onto
+   * our {basis, days} model. Returns null when no bill terms are set, or when
+   * Xero uses a term type we don't model (the fixed Nth-of-month variants —
+   * staff set those manually). Used to seed supplier_payment_terms from Xero.
+   */
+  async getContactBillTerms(contactId: string): Promise<{ basis: 'invoice_date' | 'end_of_invoice_month'; days: number } | null> {
+    const r = await this.request<{ Contacts?: Array<{ PaymentTerms?: { Bills?: { Day?: number; Type?: string } } }> }>(
+      'GET', `/Contacts/${encodeURIComponent(contactId)}`,
+    );
+    const bills = r.Contacts?.[0]?.PaymentTerms?.Bills;
+    if (!bills || bills.Day == null || !bills.Type) return null;
+    const day = Number(bills.Day);
+    if (!Number.isFinite(day) || day < 0) return null;
+    switch (bills.Type) {
+      case 'DAYSAFTERBILLDATE':  return { basis: 'invoice_date', days: day };
+      case 'DAYSAFTERBILLMONTH': return { basis: 'end_of_invoice_month', days: day };
+      // OFCURRENTMONTH / OFOLLOWINGMONTH are fixed-day-of-month — not our model.
+      default: return null;
+    }
+  }
+
   /** Create an unpaid supplier bill (ACCPAY invoice). */
   async createBill(input: CreateBillInput): Promise<{ InvoiceID: string; InvoiceNumber?: string }> {
-    const contact = await this.getOrCreateContact(input.contactName);
+    const contactID = input.contactId ?? (await this.getOrCreateContact(input.contactName)).ContactID;
     const r = await this.request<{ Invoices: Array<{ InvoiceID: string; InvoiceNumber?: string }> }>(
       'PUT',
       '/Invoices',
@@ -406,7 +473,9 @@ class XeroBroker {
           Invoices: [
             {
               Type: 'ACCPAY',
-              Contact: { ContactID: contact.ContactID },
+              Contact: { ContactID: contactID },
+              // InvoiceNumber = the "Reference" box shown on a bill in the Xero UI.
+              ...(input.invoiceNumber ? { InvoiceNumber: input.invoiceNumber } : {}),
               Reference: input.reference,
               Date: input.date,
               DueDate: input.dueDate,
@@ -456,7 +525,87 @@ class XeroBroker {
     return r.Payments[0];
   }
 
-  /** Spend money (petty cash / PayPal / reimbursement not on a bank feed). */
+  /**
+   * One overpayment — its `RemainingCredit` and what it is already applied to.
+   * A HireHop deposit lands in Xero as an overpayment (`ACC_DATA.OverpaymentID`
+   * on the HireHop row). Granular `accounting.payments` → the bills token.
+   */
+  async getOverpayment(overpaymentId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.request<{ Overpayments?: Array<Record<string, unknown>> }>(
+      'GET', `/Overpayments/${overpaymentId}`, { billsScope: true },
+    );
+    return r.Overpayments?.[0] ?? null;
+  }
+
+  /**
+   * Apply part or all of an overpayment to a sales invoice — Xero's "Apply
+   * credit". HireHop allocates a deposit to an invoice on its side but never
+   * pushes that allocation to Xero (shop weekly close, Sep 2026), so OP does it.
+   */
+  async allocateOverpayment(input: {
+    overpaymentId: string;
+    invoiceId: string;
+    amount: number;
+    date: string;         // YYYY-MM-DD — on or after both the overpayment and the invoice
+  }): Promise<void> {
+    await this.request('PUT', `/Overpayments/${input.overpaymentId}/Allocations`, {
+      body: {
+        Allocations: [{ Invoice: { InvoiceID: input.invoiceId }, Amount: input.amount, Date: input.date }],
+      },
+      billsScope: true,
+    });
+  }
+
+  /**
+   * ONE payment covering MANY bills — Xero's BatchPayments.
+   *
+   * The reason this exists rather than a loop over payInvoice(): a single bank
+   * transfer paying twenty garage invoices should reconcile against ONE bank
+   * line. Twenty individual payments are each correct in the ledger, but leave
+   * twenty rows to tick against that one line in the bank feed — which is the
+   * tedium bulk pay was meant to remove, just moved into Xero.
+   *
+   * Xero returns the batch plus its constituent payments; we hand back both so
+   * the caller can stamp the per-invoice PaymentID where it's available and fall
+   * back to the BatchPaymentID where it isn't.
+   */
+  async createBatchPayment(input: {
+    accountId: string;
+    date?: string;        // YYYY-MM-DD
+    reference?: string;
+    payments: Array<{ invoiceId: string; amount: number }>;
+  }): Promise<{ BatchPaymentID?: string; Payments?: Array<{ PaymentID?: string; Invoice?: { InvoiceID?: string } }> }> {
+    const r = await this.request<{ BatchPayments?: Array<{
+      BatchPaymentID?: string;
+      Payments?: Array<{ PaymentID?: string; Invoice?: { InvoiceID?: string } }>;
+    }> }>(
+      'PUT',
+      '/BatchPayments',
+      {
+        body: {
+          BatchPayments: [
+            {
+              Account: { AccountID: input.accountId },
+              Date: input.date,
+              Reference: input.reference,
+              Payments: input.payments.map((p) => ({
+                Invoice: { InvoiceID: p.invoiceId },
+                Amount: p.amount,
+              })),
+            },
+          ],
+        },
+        billsScope: true,
+      }
+    );
+    return r.BatchPayments?.[0] ?? {};
+  }
+
+  /**
+   * Money moving on a bank/card account without an invoice behind it: a spend
+   * (petty cash / PayPal / card purchase), or — with `type: 'RECEIVE'` — a
+   * supplier refund landing back on the card.
+   */
   async createSpendMoney(input: CreateSpendMoneyInput): Promise<{ BankTransactionID: string }> {
     const contactID = input.contactId
       ?? (await this.getOrCreateContact(input.contactName ?? 'Unknown supplier')).ContactID;
@@ -470,7 +619,76 @@ class XeroBroker {
         body: {
           BankTransactions: [
             {
-              Type: 'SPEND',
+              Type: input.type || 'SPEND',
+              Contact: { ContactID: contactID },
+              BankAccount: bankAccount,
+              Date: input.date,
+              Reference: input.reference,
+              LineAmountTypes: input.lineAmountTypes || 'Inclusive',
+              LineItems: input.lineItems,
+            },
+          ],
+        },
+      }
+    );
+    return r.BankTransactions[0];
+  }
+
+  /**
+   * Update an existing ACCPAY bill in place (POST with InvoiceID). Used by the
+   * edit-after-push re-sync. Xero rejects amount changes on a PAID invoice, so
+   * the caller must gate on payment state before calling. Line items are
+   * REPLACED with what we send.
+   */
+  async updateBill(invoiceId: string, input: CreateBillInput): Promise<{ InvoiceID: string }> {
+    const contact = await this.getOrCreateContact(input.contactName);
+    const r = await this.request<{ Invoices: Array<{ InvoiceID: string }> }>(
+      'POST',
+      '/Invoices',
+      {
+        body: {
+          Invoices: [
+            {
+              InvoiceID: invoiceId,
+              Type: 'ACCPAY',
+              Contact: { ContactID: contact.ContactID },
+              // InvoiceNumber = the "Reference" box shown on a bill in the Xero UI.
+              ...(input.invoiceNumber ? { InvoiceNumber: input.invoiceNumber } : {}),
+              Reference: input.reference,
+              Date: input.date,
+              DueDate: input.dueDate,
+              LineAmountTypes: input.lineAmountTypes || 'Inclusive',
+              Status: input.status || 'AUTHORISED',
+              LineItems: input.lineItems,
+            },
+          ],
+        },
+        billsScope: true,
+      }
+    );
+    return r.Invoices[0];
+  }
+
+  /**
+   * Update an existing Spend Money transaction in place (POST with
+   * BankTransactionID). Xero rejects edits to a RECONCILED transaction, so the
+   * caller must gate on reconciled state. Line items are REPLACED.
+   */
+  async updateSpendMoney(bankTransactionId: string, input: CreateSpendMoneyInput): Promise<{ BankTransactionID: string }> {
+    const contactID = input.contactId
+      ?? (await this.getOrCreateContact(input.contactName ?? 'Unknown supplier')).ContactID;
+    const bankAccount = input.bankAccountId
+      ? { AccountID: input.bankAccountId }
+      : { Code: input.bankAccountCode };
+    const r = await this.request<{ BankTransactions: Array<{ BankTransactionID: string }> }>(
+      'POST',
+      '/BankTransactions',
+      {
+        body: {
+          BankTransactions: [
+            {
+              BankTransactionID: bankTransactionId,
+              Type: input.type || 'SPEND',
               Contact: { ContactID: contactID },
               BankAccount: bankAccount,
               Date: input.date,

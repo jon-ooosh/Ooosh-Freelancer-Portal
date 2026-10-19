@@ -1,12 +1,26 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query, getClient } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { recentlyViewedOrderSql, recordAddressBookView } from '../services/address-book-views';
+import { phoneDigitsForSearch } from '../services/address-book-search';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { JOB_OUTCOME_SQL, JOB_LOST_OR_CANCELLED_SQL } from '../services/job-outcomes';
+import { ukToday } from '../services/uk-date';
+import { notAltQuoteLossSql } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
+// Staff only. `authenticate` alone admits EVERY active user: a `freelancer`
+// is an ordinary `users` row and POST /api/auth/login has no role gate, so
+// such an account holds a full OP JWT. Verified safe to gate the whole
+// router — the Next.js portal is hard-prefixed to `/api/portal` in
+// `src/lib/op-api.ts`, the vehicles book-out kiosk's scoped token never calls
+// this router, and every frontend consumer is a staff page. See
+// docs/reference/PLATFORM-CONVENTIONS.md → "Reference-route RBAC".
+router.use(authorize(...STAFF_ROLES));
 
 const fileSchema = z.object({
   name: z.string(),
@@ -32,6 +46,8 @@ const createOrgSchema = z.object({
   working_terms_type: z.enum(['usual', 'flex_balance', 'no_deposit', 'credit', 'custom']).optional().nullable(),
   working_terms_credit_days: z.number().int().optional().nullable(),
   working_terms_notes: z.string().optional().nullable(),
+  // Who at Ooosh looks after this client (migration 289)
+  account_owner_user_id: z.string().uuid().optional().nullable(),
   // AI text fields
   ai_summary: z.string().optional().nullable(),
   ai_research: z.string().optional().nullable(),
@@ -42,15 +58,36 @@ const updateOrgSchema = createOrgSchema.partial();
 // GET /api/organisations
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, type, page = '1', limit = '50', tag, has_email, has_people, missing_email, missing_phone, location, sort } = req.query;
+    const { search, type, page = '1', limit = '50', tag, has_email, has_people, missing_email, missing_phone, location, sort, owner } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
+
+    // "Last contacted" = most recent GENUINE contact-type interaction (call/email/meeting —
+    // auto-chase ingested client emails are type='email', so they count) reachable from the org:
+    // its own timeline, interactions on jobs linked to it (job_organisations OR jobs.client_id),
+    // and interactions on people linked to it (active roles). Client contact overwhelmingly lands
+    // on the job timeline, not the org's, so the org's own interactions alone read stale.
+    const lastContactSubquery = `(
+      SELECT MAX(i.created_at) FROM interactions i
+      WHERE i.type IN ('call','email','meeting') AND (
+        i.organisation_id = o.id
+        OR i.job_id IN (
+          SELECT jo.job_id FROM job_organisations jo WHERE jo.organisation_id = o.id
+          UNION
+          SELECT j2.id FROM jobs j2 WHERE j2.client_id = o.id AND j2.is_deleted = false
+        )
+        OR i.person_id IN (
+          SELECT por.person_id FROM person_organisation_roles por
+          WHERE por.organisation_id = o.id AND por.status = 'active'
+        )
+      )
+    )`;
 
     let sql = `
       SELECT o.*,
         (SELECT COUNT(*) FROM person_organisation_roles por
          WHERE por.organisation_id = o.id AND por.status = 'active') as active_people_count,
         parent.name as parent_name,
-        (SELECT MAX(i.created_at) FROM interactions i WHERE i.organisation_id = o.id) as last_interaction_at
+        ${lastContactSubquery} as last_interaction_at
       FROM organisations o
       LEFT JOIN organisations parent ON parent.id = o.parent_id
       WHERE o.is_deleted = false
@@ -58,9 +95,35 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const params: unknown[] = [];
     let paramIndex = 1;
 
+    // Search: name, email, a CURRENT member's name, and the phone when the search
+    // looks like one (digits only). Name matches sort first — see ORDER BY below.
+    let searchParam: string | null = null;
     if (search) {
-      sql += ` AND o.name ILIKE $${paramIndex}`;
-      params.push(`%${search}%`);
+      searchParam = `$${paramIndex}`;
+      const phone = phoneDigitsForSearch(String(search));
+      sql += ` AND (
+        o.name ILIKE $${paramIndex} OR
+        o.email ILIKE $${paramIndex} OR
+        EXISTS (
+          SELECT 1 FROM person_organisation_roles sr
+          JOIN people sp ON sp.id = sr.person_id AND sp.is_deleted = false
+          WHERE sr.organisation_id = o.id AND sr.status = 'active'
+            AND CONCAT(sp.first_name, ' ', sp.last_name) ILIKE $${paramIndex}
+        )${phone ? ` OR
+        regexp_replace(COALESCE(o.phone, ''), '\\D', '', 'g') LIKE $${paramIndex + 1}` : ''}
+      )`;
+      params.push(`%${String(search).trim()}%`);
+      paramIndex++;
+      if (phone) {
+        params.push(`%${phone}%`);
+        paramIndex++;
+      }
+    }
+
+    // "My clients" — orgs whose account owner is the caller
+    if (owner === 'me') {
+      sql += ` AND o.account_owner_user_id = $${paramIndex}`;
+      params.push(req.user!.id);
       paramIndex++;
     }
 
@@ -108,9 +171,17 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       'name': 'o.name',
       'recently_added': 'o.created_at DESC',
       'recently_updated': 'o.updated_at DESC',
-      'last_contacted': '(SELECT MAX(i.created_at) FROM interactions i WHERE i.organisation_id = o.id) DESC NULLS LAST',
+      'last_contacted': `${lastContactSubquery} DESC NULLS LAST`,
     };
-    const orderBy = sortMap[sort as string] || 'o.name';
+    let orderBy = sortMap[sort as string] || 'o.name';
+    if (sort === 'recently_viewed') {
+      params.push(req.user!.id);
+      orderBy = `${recentlyViewedOrderSql('organisation', 'o.id', `$${paramIndex}`)}, o.name`;
+      paramIndex++;
+    } else if (searchParam && orderBy === 'o.name') {
+      // Orgs whose own name matched come before ones found via a member / email / phone
+      orderBy = `CASE WHEN o.name ILIKE ${searchParam} THEN 0 ELSE 1 END, o.name`;
+    }
 
     sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
@@ -151,11 +222,13 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         ) ORDER BY por.status, p.last_name)
         FROM person_organisation_roles por
         JOIN people p ON p.id = por.person_id
-        WHERE por.organisation_id = o.id
+        WHERE por.organisation_id = o.id AND p.is_deleted = false
         ) as people,
         (SELECT json_agg(json_build_object('id', sub.id, 'name', sub.name, 'type', sub.type))
          FROM organisations sub WHERE sub.parent_id = o.id AND sub.is_deleted = false
-        ) as subsidiaries
+        ) as subsidiaries,
+        (SELECT ${DISPLAY_NAME_SQL} FROM users ou JOIN people p ON p.id = ou.person_id
+          WHERE ou.id = o.account_owner_user_id) as account_owner_name
       FROM organisations o
       LEFT JOIN organisations parent ON parent.id = o.parent_id
       WHERE o.id = $1 AND o.is_deleted = false`,
@@ -166,6 +239,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       res.status(404).json({ error: 'Organisation not found' });
       return;
     }
+
+    // Only the Organisation page passes this — pickers/forms reading this GET don't count as a view.
+    if (req.query.track_view === '1') void recordAddressBookView(req.user?.id, 'organisation', String(req.params.id));
 
     // Fetch org-to-org relationships
     const relationships = await query(
@@ -218,12 +294,61 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /api/organisations/:id/contact-candidates
+// Active contact people for an org, expanded across related orgs (Org>Org via
+// organisation_relationships — e.g. a band's management company). Mirrors the
+// New Enquiry job cascade (/pipeline/:jobId/contacts) but org-scoped. Used by
+// the storage lead-contact picker. ACTIVE roles only (por.status='active') —
+// ended roles carry status='historical' and must NOT surface.
+router.get('/:id/contact-candidates', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `WITH related AS (
+         SELECT $1::uuid AS org_id, 0 AS priority
+         UNION
+         SELECT CASE WHEN r.from_org_id = $1 THEN r.to_org_id ELSE r.from_org_id END, 1
+         FROM organisation_relationships r
+         WHERE (r.from_org_id = $1 OR r.to_org_id = $1) AND r.status = 'active'
+       )
+       SELECT DISTINCT ON (p.id)
+              p.id AS person_id, p.first_name, p.last_name, p.email, p.phone,
+              por.role, por.is_primary AS is_org_primary,
+              o.id AS source_org_id, o.name AS source_org_name, rel.priority
+       FROM related rel
+       JOIN person_organisation_roles por ON por.organisation_id = rel.org_id AND por.status = 'active'
+       JOIN organisations o ON o.id = rel.org_id AND o.is_deleted = false
+       JOIN people p ON p.id = por.person_id AND p.is_deleted = false
+       ORDER BY p.id, rel.priority, por.is_primary DESC`,
+      [req.params.id]
+    );
+    const candidates = result.rows
+      .map((r: Record<string, unknown>) => ({
+        person_id: r.person_id,
+        name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+        email: r.email,
+        role: r.role,
+        is_org_primary: r.is_org_primary,
+        source_org_id: r.source_org_id,
+        source_org_name: r.source_org_name,
+        own_org: r.priority === 0,
+      }))
+      // Display order: own-org first, then org-primary, then name
+      .sort((a, b) => Number(b.own_org) - Number(a.own_org)
+        || Number(b.is_org_primary) - Number(a.is_org_primary)
+        || a.name.localeCompare(b.name));
+    res.json({ data: candidates });
+  } catch (error) {
+    console.error('Get org contact candidates error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/organisations
 router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
       name, type, parent_id, website, email, phone, address, location, notes, tags, files,
-      working_terms_type, working_terms_credit_days, working_terms_notes,
+      working_terms_type, working_terms_credit_days, working_terms_notes, account_owner_user_id,
     } = req.body;
 
     // Default working terms to 'usual' when not explicitly set
@@ -232,13 +357,13 @@ router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Respon
     const result = await query(
       `INSERT INTO organisations (
         name, type, parent_id, website, email, phone, address, location, notes, tags, files,
-        working_terms_type, working_terms_credit_days, working_terms_notes, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        working_terms_type, working_terms_credit_days, working_terms_notes, created_by, account_owner_user_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING *`,
       [
         name, type, parent_id, website, email?.toLowerCase(), phone, address, location, notes, tags, JSON.stringify(files),
         effectiveWorkingTerms, working_terms_credit_days ?? null, working_terms_notes ?? null,
-        req.user!.id,
+        req.user!.id, account_owner_user_id ?? null,
       ]
     );
 
@@ -820,7 +945,7 @@ router.post('/:id/merge',
       const fillFields = [
         'website', 'email', 'phone', 'address', 'location', 'notes',
         'working_terms_type', 'working_terms_credit_days', 'working_terms_notes',
-        'ai_summary', 'ai_research', 'parent_id',
+        'ai_summary', 'ai_research', 'parent_id', 'account_owner_user_id',
       ];
       const updates: string[] = [];
       const params: unknown[] = [];
@@ -869,7 +994,7 @@ router.post('/:id/merge',
       }
 
       // Append a backref note to keeper.notes so future readers can trace
-      const today = new Date().toISOString().split('T')[0];
+      const today = ukToday();
       const backrefNote = `\n[Merged from "${loser.name}" (${loserId}) on ${today} by ${req.user!.email || req.user!.id}]`;
       // If we already updated notes from null, append to that; otherwise append to existing.
       const notesIdx = updates.findIndex(u => u.startsWith('notes = '));
@@ -1194,6 +1319,36 @@ router.post('/:id/do-not-hire', authorize('admin', 'manager'), async (req: AuthR
   }
 });
 
+// POST /api/organisations/:id/auto-cover-excess — Toggle auto-cover-excess-from-
+// held-account (ADMIN ONLY). Opts this client's self-drive hires into being
+// covered from their standing held-on-account balance (migration 169). Kept to
+// admin only — this stops a client collecting fresh excess, so it must not be a
+// staff-level toggle.
+router.post('/:id/auto-cover-excess', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const on = req.body.auto_cover === true;
+    const result = await query(
+      `UPDATE organisations SET
+        auto_cover_excess_from_account = $1,
+        auto_cover_excess_set_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
+        auto_cover_excess_set_by = CASE WHEN $1 THEN $2 ELSE NULL END,
+        updated_at = NOW()
+      WHERE id = $3 AND is_deleted = false
+      RETURNING id, auto_cover_excess_from_account`,
+      [on, req.user?.email || 'unknown', req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Organisation not found' });
+      return;
+    }
+    await logAudit(req.user!.id, 'organisations', req.params.id as string, 'update', null, { auto_cover_excess_from_account: on });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Auto-cover excess toggle error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── Hire History (all jobs linked to this org) ──────────────────────────
 
 router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
@@ -1225,14 +1380,15 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
       filterParams.push(role);
       filterClauses.push(`oj.role = $${filterParams.length + 1}`); // +1 because $1 is id
     }
+    // Bucket definitions shared with the Leads client history (services/job-outcomes.ts).
     if (outcome === 'confirmed') {
-      filterClauses.push(`(j.pipeline_status IN ('confirmed','prepped','dispatched') OR (j.pipeline_status IS NULL AND j.status IN (2,3,4,5,8)))`);
+      filterClauses.push(JOB_OUTCOME_SQL.confirmed);
     } else if (outcome === 'returned') {
-      filterClauses.push(`(j.pipeline_status IN ('returned','returned_incomplete','completed') OR (j.pipeline_status IS NULL AND j.status IN (6,7,11)))`);
+      filterClauses.push(JOB_OUTCOME_SQL.returned);
     } else if (outcome === 'open') {
-      filterClauses.push(`(j.pipeline_status IN ('new_enquiry','quoting','provisional','paused','chasing') OR (j.pipeline_status IS NULL AND j.status IN (0,1)))`);
+      filterClauses.push(JOB_OUTCOME_SQL.open);
     } else if (outcome === 'lost') {
-      filterClauses.push(`(j.pipeline_status IN ('lost','cancelled') OR (j.pipeline_status IS NULL AND j.status IN (9,10)))`);
+      filterClauses.push(JOB_LOST_OR_CANCELLED_SQL);
     }
     if (Number.isFinite(year) && year > 1900 && year < 3000) {
       filterParams.push(year);
@@ -1287,21 +1443,24 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
       [id, ...filterParams, limit, offset]
     );
 
-    // Compute summary stats
+    // Compute summary stats — respects the active filters so the four cards move with the
+    // visible list. total_value sums whatever job_value is present across the filtered set
+    // (no status restriction — the Money tab owns the figure; here we just sum what's there).
     const statsResult = await query(
       `${jobLinkCTE}
        SELECT
-         COUNT(*) AS total_jobs,
+         COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('j')}) AS total_jobs,
          COUNT(*) FILTER (WHERE j.pipeline_status = 'completed' OR j.status = 11) AS completed_jobs,
          COUNT(*) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2) AS confirmed_jobs,
-         COUNT(*) FILTER (WHERE j.pipeline_status = 'lost') AS lost_jobs,
-         COALESCE(SUM(j.job_value) FILTER (WHERE j.pipeline_status IN ('confirmed','completed','prepped','dispatched','returned','returned_incomplete') OR j.status BETWEEN 2 AND 11), 0) AS total_value
+         COUNT(*) FILTER (WHERE j.pipeline_status = 'lost' AND ${notAltQuoteLossSql('j')}) AS lost_jobs,
+         COALESCE(SUM(j.job_value), 0) AS total_value
        FROM org_jobs oj
-       JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false`,
-      [id]
+       JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
+       WHERE 1=1${filterSql}`,
+      [id, ...filterParams]
     );
 
-    // Count retros by rating
+    // Count retros by rating (also filtered, so the retro card tracks the visible set)
     const retroResult = await query(
       `${jobLinkCTE}
        SELECT
@@ -1310,8 +1469,9 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
          COUNT(*) FILTER (WHERE i.content LIKE 'Job retro: Issues%') AS retro_issues
        FROM org_jobs oj
        JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
-       LEFT JOIN interactions i ON i.job_id = j.id AND i.content LIKE 'Job retro:%'`,
-      [id]
+       LEFT JOIN interactions i ON i.job_id = j.id AND i.content LIKE 'Job retro:%'
+       WHERE 1=1${filterSql}`,
+      [id, ...filterParams]
     );
 
     // Distinct roles + years across the whole hire history (unfiltered) — populates filter dropdowns

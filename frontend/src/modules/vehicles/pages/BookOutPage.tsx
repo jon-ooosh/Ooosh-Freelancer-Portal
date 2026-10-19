@@ -39,12 +39,16 @@ import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
 import type { ChecklistItem } from '../lib/settings-api'
 import type { HireHopJob } from '../types/hirehop'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 
 /** Per-operation result shown on the success/complete screen */
 interface OpResult {
   label: string
   success: boolean
   detail?: string
+  /** Not a failure — a reminder for a person to act on (amber, not red) */
+  warning?: boolean
 }
 
 // Testing mode: set to true to skip photo minimum requirement.
@@ -111,7 +115,7 @@ export function BookOutPage() {
   const [queuedOffline, setQueuedOffline] = useState(false)
 
   // Form autosave to IndexedDB
-  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft } = useFormAutosave({
+  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft, acceptDraft } = useFormAutosave({
     flowType: 'book-out',
     disabled: submitSuccess || queuedOffline,
   })
@@ -142,6 +146,7 @@ export function BookOutPage() {
         excess: form.excess,
         ve103b: form.ve103b,
         ve103bGeneratedAtDesk: form.ve103bGeneratedAtDesk,
+        ve103bHandedOver: form.ve103bHandedOver,
         returnOvernight: form.returnOvernight,
         allDrivers: form.allDrivers,
         hireFormEntries: form.hireFormEntries,
@@ -178,13 +183,14 @@ export function BookOutPage() {
       excess: (d.excess as string) || null,
       ve103b: (d.ve103b as string) || null,
       ve103bGeneratedAtDesk: Boolean(d.ve103bGeneratedAtDesk),
+      ve103bHandedOver: Boolean(d.ve103bHandedOver),
       returnOvernight: (d.returnOvernight as string) || null,
       allDrivers: (d.allDrivers as string[]) || undefined,
       hireFormEntries: (d.hireFormEntries as BookOutFormState['hireFormEntries']) || undefined,
       allocationId: (d.allocationId as string) || null,
     })
     setStep(draftLoaded.step)
-    dismissDraft()
+    acceptDraft()
   }
 
   // Fetch last known mileage when vehicle is selected
@@ -554,9 +560,12 @@ export function BookOutPage() {
         return true
       }
       case 'Photos':
-        return TESTING_MODE || capturedRequiredCount >= requiredPhotoCount
+        // V&D soft book-out (Ooosh hands the van to our own/freelancer driver):
+        // photos are optional — staff add them case-by-case. Only fuel + mileage
+        // are required to proceed. Normal customer self-drive is unchanged.
+        return TESTING_MODE || isVanAndDriver || capturedRequiredCount >= requiredPhotoCount
       case 'Briefing':
-        return allBriefingChecked
+        return isVanAndDriver || allBriefingChecked
       case 'Confirm':
         return true
       default:
@@ -565,8 +574,10 @@ export function BookOutPage() {
   }
 
   async function handleSubmit() {
-    // Require signature before submitting
-    if (!signatureRef.current?.hasSignature()) {
+    // Require signature before submitting — EXCEPT on a V&D soft book-out, where
+    // fuel + mileage are the only hard requirements (signature optional, staff
+    // judge per case). Normal customer self-drive still requires the signature.
+    if (!isVanAndDriver && !signatureRef.current?.hasSignature()) {
       setSubmitError('Please provide a driver signature before completing the book-out.')
       return
     }
@@ -740,6 +751,7 @@ export function BookOutPage() {
     setUploadProgress('Generating PDF & finalising...')
 
     const pdfData = {
+      eventId,
       vehicleReg: form.vehicleReg,
       vehicleType: form.vehicleType,
       vehicleMake: selectedVehicle?.make,
@@ -856,22 +868,31 @@ export function BookOutPage() {
       if (hireFormEntries.length === 0) return []
       let writeBackOk = 0
       let writeBackFail = 0
+      let firstError = ''
       for (const entry of hireFormEntries) {
         const isLeadDriver = entry.driverName === form.driverName
-        const wbResult = await updateDriverHireForm({
-          hireFormItemId: entry.id,
-          vehicleId: form.vehicleId || undefined,
-          vehicleReg: form.vehicleReg,
-          mileageOut: isNaN(mileageNum) ? undefined : mileageNum,
-          startTime: form.hireStartTime || undefined,
-          endTime: form.hireEndTime || undefined,
-          ve103b: isLeadDriver ? (form.ve103b || undefined) : undefined,
-          returnOvernight: form.returnOvernight || undefined,
-        })
+        // Retried: a Wi-Fi/4G handover kills the request in flight ("Failed
+        // to fetch"). The PATCH is safe to repeat — same values, and the
+        // multi-van path reuses the row it already cloned (Oct 2026).
+        const wbResult = await withRetry(async () => {
+          const r = await updateDriverHireForm({
+            hireFormItemId: entry.id,
+            vehicleId: form.vehicleId || undefined,
+            vehicleReg: form.vehicleReg,
+            mileageOut: isNaN(mileageNum) ? undefined : mileageNum,
+            startTime: form.hireStartTime || undefined,
+            endTime: form.hireEndTime || undefined,
+            ve103b: isLeadDriver ? (form.ve103b || undefined) : undefined,
+            returnOvernight: form.returnOvernight || undefined,
+          })
+          if (!r.success) throw new Error(r.error || 'Update failed')
+          return r
+        }, `Hire form write-back ${entry.driverName}`)
         if (wbResult.success) {
           writeBackOk++
         } else {
           writeBackFail++
+          if (!firstError) firstError = `${entry.driverName}: ${wbResult.error || 'Update failed'}`
           console.warn('[book-out] Write-back failed for', entry.driverName, ':', wbResult.error)
         }
       }
@@ -885,53 +906,66 @@ export function BookOutPage() {
       return [{
         label: 'Hire form write-back',
         success: false,
-        detail: `${writeBackOk} updated, ${writeBackFail} failed (column IDs may need configuring)`,
+        detail: `${writeBackOk} updated, ${writeBackFail} failed — ${firstError}`,
       }]
     })()
 
-    // Track: VE103B certificate generation (independent, only if cert number entered)
+    // Track: VE103B check (independent). Reads only — it never generates.
+    // The cert is made at the desk BEFORE the van goes out (the Driver &
+    // Hire step's "Generate VE103B now", or the VE103B page) and printed on
+    // the pre-printed form; a PDF emailed at the walkaround reached the
+    // office as the van drove off, and a second attempt on a number already
+    // used can only 409 (RX22SWN / 16573, Oct 2026). What matters here is
+    // that one is on file and the paper copy went with the van — a warning,
+    // never a gate.
     // V&D soft book-out: skipped — no VE103B for non-customer hires.
-    const ve103bTrack = (async () => {
+    // Freelancer book-out: skipped — /api/ve103b is staff-only (Oct 2026).
+    const ve103bTrack = (async (): Promise<OpResult[]> => {
       if (isVanAndDriver) return []
-      // Already generated at the desk (Phase A) — don't re-generate (would 409
-      // on the unique cert number anyway). Report it as done for the summary.
-      if (form.ve103bGeneratedAtDesk) {
-        return [{ label: 'VE103B certificate', success: true, detail: 'Generated at the desk' }]
-      }
-      if (!form.ve103b || !form.hireFormEntries || form.hireFormEntries.length === 0) return []
-      // Find the lead driver's assignment ID
-      const leadEntry = form.hireFormEntries.find(e => e.driverName === form.driverName)
-      if (!leadEntry) return []
-      try {
-        const response = await apiFetch('/api/ve103b/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            assignment_id: leadEntry.id,
-            certificate_number: form.ve103b,
-          }),
-        })
-        if (response.ok) {
-          const data = await response.json()
-          return [{
-            label: 'VE103B certificate',
-            success: true,
-            detail: `${data.pdf_filename} — ${data.emailed ? 'emailed to office' : 'email failed'}`,
-          }]
-        }
-        const err = await response.json().catch(() => ({ error: 'Unknown error' }))
+      if (isFreelancer) return []
+      if (!form.hireHopJob) return []
+      const label = 'VE103B certificate'
+      const statusResult = await withRetry(async () => {
+        const r = await apiFetch(`/api/ve103b/job/${encodeURIComponent(form.hireHopJob)}/status`)
+        if (!r.ok) throw new Error(`Failed (${r.status})`)
+        return (await r.json()) as Ve103bJobStatus
+      }, 'VE103B status check')
+      const status = statusResult.data
+      // Needed when a cert number is on this form or HireHop has the VE103B item.
+      const needed = Boolean(form.ve103b || form.ve103bGeneratedAtDesk || status?.ve103b_required)
+      if (!needed) return []
+      if (!statusResult.success || !status) {
         return [{
-          label: 'VE103B certificate',
+          label,
           success: false,
-          detail: err.message || err.error || `Failed (${response.status})`,
-        }]
-      } catch (e) {
-        return [{
-          label: 'VE103B certificate',
-          success: false,
-          detail: e instanceof Error ? e.message : 'Generation failed',
+          warning: true,
+          detail: "Couldn't check — look on the VE103B page before the van leaves",
         }]
       }
+      const certsNeeded = Math.max(1, status.vans_going_abroad)
+      if (status.certs_issued < certsNeeded) {
+        return [{
+          label,
+          success: false,
+          warning: true,
+          detail: certsNeeded > 1
+            ? `${status.certs_issued} of ${certsNeeded} on file for this job — generate the missing one before the van leaves`
+            : 'None on file for this job — generate it at the desk and give the driver the printed copy before the van leaves',
+        }]
+      }
+      if (!form.ve103bHandedOver) {
+        return [{
+          label,
+          success: false,
+          warning: true,
+          detail: 'On file, but not ticked as handed over — make sure the printed copy goes with the van',
+        }]
+      }
+      return [{
+        label,
+        success: true,
+        detail: `On file${form.ve103b ? ` (${form.ve103b})` : ''} — printed copy handed to the driver`,
+      }]
     })()
 
     // Track: V&D assignment promotion + book-out state transition
@@ -1121,7 +1155,7 @@ export function BookOutPage() {
   // Success screen
   if (submitSuccess) {
     const allOk = opResults.every(r => r.success)
-    const anyFailed = opResults.some(r => !r.success)
+    const anyFailed = opResults.some(r => !r.success && !r.warning)
 
     return (
       <div className="space-y-6 px-4 py-6">
@@ -1165,12 +1199,18 @@ export function BookOutPage() {
               <div
                 key={i}
                 className={`flex items-start gap-2 rounded-lg border p-3 ${
-                  r.success ? 'border-green-100 bg-green-50/50' : 'border-red-100 bg-red-50/50'
+                  r.success ? 'border-green-100 bg-green-50/50'
+                    : r.warning ? 'border-amber-100 bg-amber-50/50'
+                    : 'border-red-100 bg-red-50/50'
                 }`}
               >
                 {r.success ? (
                   <svg className="mt-0.5 h-4 w-4 shrink-0 text-green-500" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                ) : r.warning ? (
+                  <svg className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
                   </svg>
                 ) : (
                   <svg className="mt-0.5 h-4 w-4 shrink-0 text-red-500" fill="currentColor" viewBox="0 0 20 20">
@@ -1178,11 +1218,11 @@ export function BookOutPage() {
                   </svg>
                 )}
                 <div>
-                  <p className={`text-sm font-medium ${r.success ? 'text-green-800' : 'text-red-800'}`}>
+                  <p className={`text-sm font-medium ${r.success ? 'text-green-800' : r.warning ? 'text-amber-800' : 'text-red-800'}`}>
                     {r.label}
                   </p>
                   {r.detail && (
-                    <p className={`text-xs ${r.success ? 'text-green-600' : 'text-red-600'}`}>
+                    <p className={`text-xs ${r.success ? 'text-green-600' : r.warning ? 'text-amber-700' : 'text-red-600'}`}>
                       {r.detail}
                     </p>
                   )}
@@ -1399,14 +1439,21 @@ export function BookOutPage() {
         )}
 
         {STEPS[step] === 'Photos' && (
-          <StepPhotos
-            photos={form.photos}
-            onCapture={handlePhotoCapture}
-            onRemove={handlePhotoRemove}
-            onUpdatePhoto={handlePhotoUpdate}
-            requiredCount={requiredPhotoCount}
-            capturedCount={capturedRequiredCount}
-          />
+          <>
+            {isVanAndDriver && (
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Van &amp; Driver soft book-out — photos are <strong>optional</strong>. Add any you want (recommended for a new driver or a long hire), or skip and continue.
+              </div>
+            )}
+            <StepPhotos
+              photos={form.photos}
+              onCapture={handlePhotoCapture}
+              onRemove={handlePhotoRemove}
+              onUpdatePhoto={handlePhotoUpdate}
+              requiredCount={requiredPhotoCount}
+              capturedCount={capturedRequiredCount}
+            />
+          </>
         )}
 
         {STEPS[step] === 'Briefing' && (
@@ -1426,13 +1473,21 @@ export function BookOutPage() {
         )}
 
         {STEPS[step] === 'Confirm' && (
-          <StepConfirm
-            form={form}
-            onSubmit={handleSubmit}
-            isSubmitting={isSubmitting}
-            error={submitError}
-            signatureRef={signatureRef}
-          />
+          <>
+            {isVanAndDriver && (
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Van &amp; Driver soft book-out — the driver <strong>signature is optional</strong>. Fuel &amp; mileage are the only requirements.
+              </div>
+            )}
+            <StepConfirm
+              form={form}
+              onUpdate={updateForm}
+              onSubmit={handleSubmit}
+              isSubmitting={isSubmitting}
+              error={submitError}
+              signatureRef={signatureRef}
+            />
+          </>
         )}
       </div>
 
@@ -1495,6 +1550,8 @@ function StepSelectVehicle({
   hireHopJob: HireHopJob | null
   onSelect: (v: Vehicle) => void
 }) {
+  // "For sale" pill — staff only; the hook stays idle in a freelancer session.
+  const openSales = useOpenSalesByVehicle()
   // Extract van requirements if a HireHop job is linked
   const requirements = useMemo(
     () => hireHopJob ? extractVanRequirements(hireHopJob) : [],
@@ -1589,6 +1646,7 @@ function StepSelectVehicle({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   <span className="font-mono text-sm font-bold text-ooosh-navy">{v.reg}</span>
+                  <ForSalePill sale={openSales.get(v.id)} />
                   <span className="text-xs text-gray-400">{v.simpleType}</span>
                   {gearbox !== 'unknown' && (
                     <span className="text-[10px] text-gray-400">({gearbox === 'auto' ? 'A' : 'M'})</span>
@@ -1673,6 +1731,12 @@ function Ve103bDeskGate({
   const leadEntry = (form.hireFormEntries || []).find(e => e.driverName === form.driverName)
     || (form.hireFormEntries || [])[0]
 
+  // Every cert this job needs is already issued — e.g. the form restarted
+  // after the phone killed the tab, losing ve103bGeneratedAtDesk. Generating
+  // again could only 409 on the used number (RX22SWN / 16573, Oct 2026).
+  const alreadyOnFile = Boolean(status && status.certs_issued > 0
+    && status.certs_issued >= Math.max(1, status.vans_going_abroad))
+
   const handleGenerate = async () => {
     if (!form.ve103b || !leadEntry || !hhJob) return
     setBusy(true)
@@ -1699,7 +1763,7 @@ function Ve103bDeskGate({
       const resp = await apiFetch('/api/ve103b/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assignment_id: leadEntry.id, certificate_number: form.ve103b }),
+        body: JSON.stringify({ assignment_id: leadEntry.id, certificate_number: form.ve103b, source: 'book_out' }),
       })
       if (resp.ok) {
         const data = await resp.json()
@@ -1772,11 +1836,11 @@ function Ve103bDeskGate({
           )}
           <button
             type="button"
-            disabled={busy || !form.ve103b || !leadEntry || form.ve103bGeneratedAtDesk}
+            disabled={busy || !form.ve103b || !leadEntry || form.ve103bGeneratedAtDesk || alreadyOnFile}
             onClick={handleGenerate}
             className="w-full rounded-lg bg-ooosh-navy px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
-            {form.ve103bGeneratedAtDesk ? 'VE103B generated ✓' : busy ? 'Generating…' : 'Generate VE103B now'}
+            {form.ve103bGeneratedAtDesk ? 'VE103B generated ✓' : alreadyOnFile ? 'VE103B already on file ✓' : busy ? 'Generating…' : 'Generate VE103B now'}
           </button>
           {result && (
             <p className={`text-[11px] ${result.ok ? 'text-green-600' : 'text-red-600'}`}>{result.msg}</p>
@@ -2891,10 +2955,12 @@ function StepBriefing({
 
 function StepConfirm({
   form,
+  onUpdate,
   error,
   signatureRef,
 }: {
   form: BookOutFormState
+  onUpdate: <K extends keyof BookOutFormState>(key: K, value: BookOutFormState[K]) => void
   onSubmit: () => void
   isSubmitting: boolean
   error: string | null
@@ -2936,6 +3002,24 @@ function StepConfirm({
             />
           ))}
         </div>
+      )}
+
+      {/* VE103B hand-over — the cert is generated at the desk; what the
+          walkaround confirms is that the printed copy went with the van.
+          A reminder, never a gate: the results screen goes amber if unticked. */}
+      {(form.ve103b || form.ve103bGeneratedAtDesk) && (
+        <label className="flex items-start gap-2 rounded-lg border border-gray-200 bg-white p-3">
+          <input
+            type="checkbox"
+            checked={Boolean(form.ve103bHandedOver)}
+            onChange={e => onUpdate('ve103bHandedOver', e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-ooosh-navy focus:ring-ooosh-navy"
+          />
+          <span className="text-sm text-gray-700">
+            Printed VE103B handed to the driver
+            <span className="block text-xs text-gray-400">It must travel with the van when it leaves the UK.</span>
+          </span>
+        </label>
       )}
 
       {/* Signature capture — grabbed from canvas at submit time, no confirm step */}

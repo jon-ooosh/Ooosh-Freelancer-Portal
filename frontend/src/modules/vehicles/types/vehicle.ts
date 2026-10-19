@@ -18,6 +18,17 @@ export interface Vehicle {
   serviceStatus: string   // OK, SERVICE BOOKED, SERVICE DUE!, SERVICE DUE SOON, CHECK
   // Key dates
   motDue: string | null           // YYYY-MM-DD
+  /** Where motDue came from: DVSA, or typed by hand (VEHICLE-SALES-SPEC §16). Null = not reconciled yet. */
+  motDueSource?: 'dvsa' | 'manual' | null
+  /** DVSA's own summary, cached at each refresh (services/dvsa-mot.ts). */
+  dvsaMotDue?: string | null
+  dvsaAdvisories?: number | null
+  /** Of those, how many nobody has marked done / noted yet (§18) — the chip count. */
+  dvsaAdvisoriesOpen?: number | null
+  dvsaRecall?: string | null
+  dvsaLatestResult?: string | null
+  dvsaLatestTestOn?: string | null
+  dvsaCheckedAt?: string | null
   taxDue: string | null           // YYYY-MM-DD
   tflDue: string | null           // YYYY-MM-DD
   lastServiceDate: string | null  // YYYY-MM-DD
@@ -96,6 +107,7 @@ export interface Vehicle {
   files: VehicleFile[]
   // Fleet group classification
   isOldSold: boolean              // true = from Monday "Old and sold" group
+  outlineType?: string | null      // damage-marking drawing for insurance claims (null = guess from model)
   // Raw data for anything we haven't mapped yet
   _raw?: Record<string, unknown>
 }

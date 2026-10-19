@@ -2,20 +2,34 @@ import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { listAssignableStaff } from '../services/assignable-staff';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // GET /api/users — list users (for @mention lookups, team management)
+//
+// `?assignable=true` returns only people who can actually be given something to
+// do, via services/assignable-staff.ts — THE definition, shared with To Do's
+// "For" picker so the two cannot disagree about who exists. It owns the rule
+// and its fallback; do not re-derive either here.
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
+    if (req.query.assignable === 'true') {
+      res.json({ data: await listAssignableStaff() });
+      return;
+    }
+
     const includeInactive = req.query.include_inactive === 'true';
     const whereClause = includeInactive ? '' : 'WHERE u.is_active = true';
     const result = await query(
       `SELECT u.id, u.email, u.role, u.is_active, u.last_login, u.avatar_url, u.hh_user_id,
-        p.first_name, p.last_name
+        p.first_name, p.last_name, p.preferred_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
        ${whereClause}
@@ -112,7 +126,7 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateUserSchema), as
     // Return updated user
     const result = await query(
       `SELECT u.id, u.email, u.role, u.is_active, u.avatar_url, u.hh_user_id,
-        p.first_name, p.last_name
+        p.first_name, p.last_name, p.preferred_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
        WHERE u.id = $1`,
@@ -151,6 +165,67 @@ router.post('/:id/force-password', authorize('admin'), validate(forcePasswordSch
     res.json({ success: true, message: 'Password reset. User will be prompted to change it on next login.' });
   } catch (error) {
     console.error('Force password error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── COT card register (admin-managed) ───────────────────────────────────────
+// Admin sets each staff member's company card (last 4 + a friendly label). The
+// cost-capture flow auto-fills the card holder + last 4 from this server-side —
+// staff never type card details.
+
+// GET /api/users/cot-cards — the register (admin only)
+router.get('/cot-cards', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT u.id, u.email, u.is_active, u.cot_card_last4, u.cot_card_label,
+              p.first_name, p.last_name,
+              a.status AS agreement_status, c.completed_at AS agreement_completed_at
+         FROM users u
+         LEFT JOIN people p ON p.id = u.person_id
+         LEFT JOIN staff_documents d ON d.slug = 'cot-card-agreement'
+         LEFT JOIN staff_document_assignments a ON a.user_id = u.id AND a.document_id = d.id
+         LEFT JOIN staff_document_completions c ON c.id = a.current_completion_id
+        WHERE u.role <> 'freelancer'
+        ORDER BY u.is_active DESC, p.first_name, p.last_name`
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('List COT cards error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const cotCardSchema = z.object({
+  cot_card_last4: z.string().regex(/^\d{4}$/).nullable().optional(),
+  cot_card_label: z.string().trim().max(60).nullable().optional(),
+});
+
+// PATCH /api/users/:id/cot-card — admin sets a staff member's company card
+router.patch('/:id/cot-card', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = cotCardSchema.safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { cot_card_last4, cot_card_label } = parse.data;
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    if (cot_card_last4 !== undefined) { vals.push(cot_card_last4 || null); sets.push(`cot_card_last4 = $${vals.length}`); }
+    if (cot_card_label !== undefined) { vals.push(cot_card_label || null); sets.push(`cot_card_label = $${vals.length}`); }
+    if (!sets.length) { res.status(400).json({ error: 'Nothing to update' }); return; }
+    vals.push(req.params.id);
+    const r = await query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id, cot_card_last4, cot_card_label`,
+      vals,
+    );
+    if (!r.rows.length) { res.status(404).json({ error: 'User not found' }); return; }
+    // Issuing/updating a card seeds any COT-card-holder-targeted staff document
+    // (e.g. the card Authorised User Agreement) for this user. Fire-and-forget.
+    import('../services/staff-documents')
+      .then((m) => m.syncCotCardHolderDocuments())
+      .catch((e) => console.error('COT card doc sync failed:', e));
+    res.json({ data: r.rows[0] });
+  } catch (error) {
+    console.error('Update COT card error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
