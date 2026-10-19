@@ -3,7 +3,7 @@ import multer from 'multer';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, isManagerTier } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 import { query } from '../config/database';
@@ -114,6 +114,13 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
     const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs', 'drivers'];
     if (!validTypes.includes(entity_type)) {
       res.status(400).json({ error: 'Invalid entity_type' });
+      return;
+    }
+
+    // A driver's documents are the insurability evidence for a hire (B.2, Oct
+    // 2026): deleting one is a manager's call. Every other file is desk work.
+    if (entity_type === 'drivers' && !isManagerTier(req.user?.role)) {
+      res.status(403).json({ error: "Deleting a driver's document is a manager action." });
       return;
     }
 
