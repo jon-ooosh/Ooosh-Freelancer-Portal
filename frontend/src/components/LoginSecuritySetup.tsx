@@ -146,7 +146,7 @@ export default function LoginSecuritySetup({ onDone, compact }: Props) {
         <div className="rounded-lg border border-ooosh-200 bg-ooosh-50 px-4 py-3">
           <p className="text-sm font-medium text-gray-900">Use a passkey{offerEmail ? ' (recommended)' : ''}</p>
           <p className="mt-0.5 text-[13px] text-gray-600">
-            Face ID, Touch ID or Windows Hello on this device stands in for your password and the code. Nothing to type, nothing to phish.
+            Face ID, Touch ID or Windows Hello on this device stands in for your password and the code.
             {isAdmin && ' Admin logins need one.'}
           </p>
           <button type="button" className={`${primary} mt-2`} onClick={addPasskey} disabled={busy}>
