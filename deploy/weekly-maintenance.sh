@@ -431,6 +431,64 @@ echo "System logs after trimming to 3 months / 2GB: $(journalctl --disk-usage 2>
 echo "" >> "$REPORT_FILE"
 
 # --- Send to Claude and email ---
+# --- GitHub: Dependabot queue -------------------------------------------
+# What is waiting in the repo's pull-request list and what to do about each.
+# Minor/patch bumps merge themselves once CI is green (dependabot-auto-merge.yml);
+# majors never do. Needs GITHUB_TOKEN (fine-grained, read-only: Pull requests +
+# Checks + Metadata on the repo) and GITHUB_REPO in config.env. Skipped quietly
+# when they are not set.
+echo "--- GitHub: Dependabot queue ---" >> "$REPORT_FILE"
+if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPO:-}" ]; then
+    GITHUB_TOKEN="$GITHUB_TOKEN" GITHUB_REPO="$GITHUB_REPO" python3 - >> "$REPORT_FILE" 2>&1 <<'PY'
+import json, os, re, sys, urllib.request, datetime
+repo = os.environ["GITHUB_REPO"]; tok = os.environ["GITHUB_TOKEN"]
+def gh(path):
+    req = urllib.request.Request(f"https://api.github.com/repos/{repo}{path}",
+        headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json", "User-Agent": "ooosh-weekly"})
+    with urllib.request.urlopen(req, timeout=20) as r: return json.load(r)
+try:
+    prs = gh("/pulls?state=open&per_page=100")
+except Exception as e:
+    print(f"Could not read GitHub: {e}"); sys.exit(0)
+bots = [p for p in prs if p["user"]["login"] == "dependabot[bot]"]
+others = [p for p in prs if p["user"]["login"] != "dependabot[bot]"]
+print(f"Open pull requests: {len(prs)} ({len(bots)} Dependabot, {len(others)} other)")
+if not bots: print("Dependabot queue is empty.")
+now = datetime.datetime.now(datetime.timezone.utc)
+def semver_major(t):
+    m = re.search(r"from (\d+)[\d.]* to (\d+)[\d.]*", t)
+    return bool(m and m.group(1) != m.group(2))
+for p in bots:
+    title = p["title"]; n = p["number"]
+    age = (now - datetime.datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))).days
+    major = semver_major(title) and "minor-and-patch" not in p["head"]["ref"]
+    try:
+        runs = gh(f"/commits/{p['head']['sha']}/check-runs?per_page=50")["check_runs"]
+        ci = [r for r in runs if r["name"] in ("Backend build", "Frontend build")]
+        concl = {r["conclusion"] for r in ci}
+        state = "green" if ci and concl == {"success"} else ("red" if "failure" in concl else "pending")
+    except Exception:
+        state = "unknown"
+    if major:
+        action = f"MAJOR version - never auto-merges. Open a Claude session: \"review Dependabot PR #{n} and recommend merge or close\"."
+    elif state == "red":
+        action = f"build FAILS - open a Claude session: \"fix Dependabot PR #{n}\"."
+    elif state == "green" and age >= 3:
+        action = f"green but stuck {age}d - comment \"@dependabot rebase\" on it (or ask Claude to); it then merges itself."
+    elif state == "green":
+        action = "green - will merge itself."
+    else:
+        action = f"CI {state} - check again next week; if still open, comment \"@dependabot rebase\"."
+    print(f"#{n} ({age}d, CI {state}) {title}\n    -> {action}")
+if others:
+    print("Other open PRs (yours, not Dependabot):")
+    for p in others: print(f"  #{p['number']} {p['title']}")
+PY
+else
+    echo "Not configured: set GITHUB_TOKEN and GITHUB_REPO in /etc/ooosh-maintenance/config.env" >> "$REPORT_FILE"
+fi
+echo "" >> "$REPORT_FILE"
+
 echo "Sending report to Claude for digest..."
 python3 /etc/ooosh-maintenance/send-digest.py "$REPORT_FILE"
 

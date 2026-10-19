@@ -18,7 +18,10 @@ CONF=${CONF:-/opt/traccar/conf/traccar.xml}
 LOGS_DIR=${LOGS_DIR:-/opt/traccar/logs}
 DATA_COPY=${DATA_COPY:-/root/traccar-data-final}
 REPO=${REPO:-/var/www/ooosh-portal}
-PORTS=${PORTS:-"-p 5027:5027 -p 5027:5027/udp -p 8082:8082"}
+# 8082 (the web UI) is bound to localhost: nginx proxies tracking.oooshtours.co.uk to it.
+# Docker publishes ports UNDERNEATH ufw, so a bare "-p 8082:8082" put the plain-HTTP
+# login page on the open internet (found 19 Oct 2026). 5027 must stay public: the vans report to it.
+PORTS=${PORTS:-"-p 5027:5027 -p 5027:5027/udp -p 127.0.0.1:8082:8082"}
 WEB=${WEB:-http://localhost:8082}
 MIN_FREE_GB=${MIN_FREE_GB:-6}
 
