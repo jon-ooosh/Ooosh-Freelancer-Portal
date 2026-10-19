@@ -455,6 +455,21 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         )}
       </header>
 
+      {/* Login security not set up yet (STAFF-LOGIN-SECURITY-SPEC §6): a banner
+          until the enforcement date, then the login itself insists. */}
+      {user && user.mfa_enrolled === false && user.mfa_enforced_from && (
+        <div className="bg-amber-50 border-b border-amber-200">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 text-sm text-amber-900 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span>
+              Set up your login security before{' '}
+              {new Date(user.mfa_enforced_from).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })}
+              {' '}— one email code, then your own devices are remembered.
+            </span>
+            <Link to="/me?tab=profile" className="font-medium underline">Set up now</Link>
+          </div>
+        </div>
+      )}
+
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {children}

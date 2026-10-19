@@ -262,11 +262,16 @@ once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`serv
 confirmed; the portal repo refuses before any Stripe session). Phase 2 (`part_of` groups) is not built — **spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
 
-**DRAFT, Oct 2026:** `docs/STAFF-LOGIN-SECURITY-SPEC.md` — two-factor for every OP staff
-login (passkeys primary, email code fallback, trusted devices for 90 days so a person's own
-laptop and phone are challenged once each), per-account slowdown, `system@` made unable to
-log in, and the warehouse iPad's PIN session gaining a scoped till with "sold by". §1 is
-settled, §5 the phases, §7 the questions still open. Nothing built yet.
+**PHASE 1 BUILT, Oct 2026:** `docs/STAFF-LOGIN-SECURITY-SPEC.md` — two-factor for every OP
+staff login. Built: a 6-digit email code as the second factor, **trusted devices** (the
+`op_device` cookie, httpOnly, `/api/auth` only, 90 days — a person's own laptop and phone are
+asked once each), per-account slowdown on wrong passwords (Redis, fail-open), `users.login_disabled`
+(the `system@` service identity never logs in), My profile › Login security, Staff page › Access
+› Login security (reset, sign out everywhere; an admin's row only by an admin), and the grace
+period `system_settings.staff_2fa_enforced_from` (a banner until that date, then the login
+insists). All of it in `services/staff-login-security.ts`; `/auth/login` answers `{ pending }`
+when a code is owed, then `/auth/login/code`. Phase 2 (passkeys, mandatory for admins) and
+Phase 3 (the kiosk till) are specified, not built.
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
@@ -373,6 +378,7 @@ existing definition:
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
 | Is this a STAFF access token? | `middleware/auth.ts` `verifyStaffToken()` — `authenticate` and the Socket.io handshake both use it; never a second `jwt.verify` for staff |
+| Is this login allowed in, does this device skip the code, is this account slowed down? | `services/staff-login-security.ts` — the second factor, trusted devices, the per-account slowdown; `routes/auth.ts` decides, this answers |
 | Minting or verifying ANY JWT | `services/tokens.ts` `signFor(audience, …)` / `verifyFor(audience, …)` — every family has its own `aud`; never call `jsonwebtoken` directly (the portal session, on its own secret, is the one exception) |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |

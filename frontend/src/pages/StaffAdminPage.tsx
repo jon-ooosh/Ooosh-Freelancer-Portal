@@ -7,6 +7,7 @@ import StaffReviews, { type ReviewPerson } from '../components/StaffReviews';
 import StaffPay from '../components/StaffPay';
 import StaffAttention, { type AttentionItem } from '../components/StaffAttention';
 import StaffPersonOverview from '../components/StaffPersonOverview';
+import StaffLoginSecurity from '../components/StaffLoginSecurity';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import StaffBalancePanel from '../components/StaffBalancePanel';
@@ -623,6 +624,9 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
       {active === 'access' && (
         <div className="space-y-4">
           <AccountSection row={row} isAdmin={isAdmin} onSaved={onSaved} onError={onError} />
+          {row.userId && row.account && (
+            <StaffLoginSecurity userId={row.userId} name={row.name} onSaved={onSaved} onError={onError} />
+          )}
           {isAdmin && <CotCardSection row={row} onSaved={onSaved} onError={onError} />}
         </div>
       )}

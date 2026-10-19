@@ -1,6 +1,9 @@
 # Staff login security — two-factor, trusted devices, passkeys, the kiosk till
 
-**Status (19 Oct 2026): DRAFT for jon's approval. Nothing is built.** Written at the end
+**Status (19 Oct 2026): §1 approved by jon; PHASE 1 BUILT (email codes, trusted devices,
+per-account slowdown, `login_disabled`, My profile › Login security, Staff page › Access
+controls, the 14-day grace period) — 33 HTTP checks on a scratch database, codes read back
+from a local SMTP sink. Phases 2–3 not started.** Written at the end
 of the October security audit (`SECURITY-AUDIT-BRIEF.md`) — the audit closed every
 code-level hole it found; what is left is the front door. A stolen or phished staff
 password is now the most likely way into OP, and nothing in the code can stop a login
@@ -36,6 +39,14 @@ widens one.
    till. Each sale names the PERSON from a dropdown of who is in today. The PIN
    exchange is accepted only from the yard's own internet connections.
 8. **No refunds, reversals or money overview from the kiosk.** Those need a real login.
+
+Answers to the §7 questions (jon, 19 Oct 2026): the staff Google Workspace mailboxes ARE
+behind 2FA, so an email code is a sound second factor for non-admins; **90 days** for a
+trusted device; the yard's iPad has only ever used `95.144.185.166` (the second office
+connection, `149.102.26.238`, appears only in staff logins — confirm with the ISP before
+adding it); the kiosk MAY take card-reader payments with the dropdown name behind it;
+**recovery codes are held by jon**, which simplifies §3.5 to: admins only get recovery
+codes, everyone else is recovered by an admin reset.
 
 Deliberately NOT built: SMS codes, authenticator apps (could be added later as a third
 fallback), single sign-on with Google, hardware keys as a separate method (a YubiKey
