@@ -479,7 +479,7 @@ async function recordApproved(session: TerminalSession, pi: PaymentIntentLike): 
     subject: `⚠ Card reader payment NOT recorded - £${amount.toFixed(2)}`,
     html: `<p>A card payment of <strong>£${amount.toFixed(2)}</strong> was approved on the reader${s.livemode ? '' : ' (TEST MODE)'} but OP could not record it.</p>
 <p>Reason: ${reason}</p>
-<p>Stripe PaymentIntent: ${pi.id}. The money has been taken - record it by hand on the job's Money tab (method Stripe GBP, reference ${pi.id}).</p>`,
+<p>Stripe PaymentIntent: ${pi.id}. The money has been taken - an admin records it by hand on the job's Money tab (method Stripe (Online), reference ${pi.id}).</p>`,
     variant: 'internal',
   }).catch((e) => console.error('[terminal] alert email failed:', e));
 }
