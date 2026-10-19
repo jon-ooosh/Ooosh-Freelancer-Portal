@@ -19,6 +19,7 @@ import RechargeResolveModal, { RechargeSlot } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
 import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
 import RecipientPicker, { type PickedRecipient } from './RecipientPicker';
+import { newPaymentMethodAllowed } from '../lib/paymentMethods';
 import CloseOutMoneyPanel from './CloseOutMoneyPanel';
 import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
@@ -141,12 +142,16 @@ interface FinancialData {
   };
 }
 
+// Record Payment's methods, in the order staff should reach for them. The card reader
+// goes in front when it's switched on; the last four are admin only for new money
+// (lib/paymentMethods.ts, STRIPE-TERMINAL-SPEC §15). Refund lists are separate and keep
+// every method.
 const PAYMENT_METHODS_BASE = [
+  { value: 'stripe_gbp', label: 'Stripe (Online)' },
+  { value: 'wise_bacs', label: 'Wise (Bank Transfer)' },
+  { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
   { value: 'amex', label: 'Amex' },
-  { value: 'stripe_gbp', label: 'Stripe GBP' },
-  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
-  { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'paypal', label: 'Paypal' },
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
 ];
@@ -438,7 +443,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   const [showPaymentForm, setShowPaymentForm] = useState(false);
   const [payType] = useState('deposit');
   const [payAmount, setPayAmount] = useState('');
-  const [payMethod, setPayMethod] = useState('worldpay');
+  const [payMethod, setPayMethod] = useState(''); // set to the first allowed method when the form opens
   const [payRef, setPayRef] = useState('');
   const [payNotes, setPayNotes] = useState('');
   const [payExcessId, setPayExcessId] = useState('');
@@ -921,11 +926,26 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
       setReaderRecorded(false);
       setPayAmount('');
       setPayNotes('');
-      setPayMethod('worldpay');
+      setPayMethod('');
       loadData();
       onJobChanged?.();
     }
   }
+
+  // What this login may record new money by: the reader first (when on), then Stripe,
+  // Wise, cash — and, for an admin only, the old ones.
+  const methodOptions = [
+    ...(readerAccess?.enabled
+      ? [{ value: 'card_reader', label: readerAccess.mode === 'test' ? 'Card reader (TEST MODE)' : 'Card reader' }]
+      : []),
+    ...PAYMENT_METHODS_BASE.filter(m => newPaymentMethodAllowed(m.value, role)),
+  ];
+  // Default to the first of them, and never leave the form on one this login can't use.
+  const methodKeys = methodOptions.map(m => m.value).join(',');
+  useEffect(() => {
+    if (!showPaymentForm || !readerAccess) return;
+    if (!methodOptions.some(m => m.value === payMethod)) setPayMethod(methodOptions[0]?.value || 'stripe_gbp');
+  }, [showPaymentForm, readerAccess, methodKeys]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ask once whether this login may use the card reader (admin-only while testing).
   useEffect(() => {
@@ -2153,9 +2173,6 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
         const autoType = !financial.deposit_paid ? 'deposit' : 'balance';
 
         const isReader = payMethod === 'card_reader';
-        const methodOptions = readerAccess?.enabled
-          ? [{ value: 'card_reader', label: readerAccess.mode === 'test' ? 'Card reader (TEST MODE)' : 'Card reader' }, ...PAYMENT_METHODS_BASE]
-          : PAYMENT_METHODS_BASE;
         // An amount that isn't one of the buttons needs a reason (spec §1.11). The
         // Notes box only says so once such an amount is in the box (jon, 16 Oct).
         const enteredAmt = parseFloat(payAmount);

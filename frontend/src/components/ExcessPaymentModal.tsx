@@ -8,6 +8,8 @@ import { QRCodeSVG } from 'qrcode.react';
 import { api } from '../services/api';
 import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
 import { describePreauth } from '../lib/preauth';
+import { useAuthStore } from '../hooks/useAuthStore';
+import { newPaymentMethodAllowed } from '../lib/paymentMethods';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
 interface OutstandingInvoice {
@@ -106,14 +108,15 @@ interface ExcessPaymentModalProps {
 }
 
 const PAYMENT_METHODS = [
+  { value: 'stripe_gbp', label: 'Stripe (Online)' },
+  { value: 'wise_bacs', label: 'Wise (Bank Transfer)' },
+  { value: 'till_cash', label: 'Till (Cash)' },
+  { value: 'rolled_over', label: 'Rolled Over from Previous Hire' },
+  // Admin only for new money (STRIPE-TERMINAL-SPEC §15) — filtered by newPaymentMethodAllowed().
   { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
   { value: 'amex', label: 'Amex' },
-  { value: 'stripe_gbp', label: 'Stripe GBP' },
-  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
-  { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'paypal', label: 'Paypal' },
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
-  { value: 'rolled_over', label: 'Rolled Over from Previous Hire' },
 ];
 
 const REIMBURSE_METHODS = [
@@ -323,7 +326,11 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   const [payTotalCollected, setPayTotalCollected] = useState(
     requiredAmount > 0 ? requiredAmount.toFixed(2) : previousTaken.toFixed(2)
   );
-  const [payMethod, setPayMethod] = useState('worldpay');
+  // Worldpay, Amex, PayPal and Lloyds are admin only for new money (§15).
+  const userRole = useAuthStore((s) => s.user?.role);
+  const isAdminUser = userRole === 'admin';
+  const paymentMethodOptions = PAYMENT_METHODS.filter((m) => newPaymentMethodAllowed(m.value, userRole));
+  const [payMethod, setPayMethod] = useState(isAdminUser ? 'worldpay' : 'stripe_gbp');
   const [payReference, setPayReference] = useState('');
   const [payPushToHH, setPayPushToHH] = useState(true);
   const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
@@ -1011,7 +1018,7 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   if (readerAccess?.enabled && readerOptions?.payment.allowed) {
     availableActions.push({ action: 'reader_payment', label: `Excess payment on card reader${readerMode}`, icon: '£' });
   }
-  if (preAuthAvailable && isShortHire) {
+  if (preAuthAvailable && isShortHire && isAdminUser) {
     // Badged only when the reader isn't answering for the record: if it is, it either
     // carries the badge itself or has said the pre-auth window isn't open yet.
     availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth', icon: '◫', recommended: readerAccess?.enabled && readerOptions ? undefined : 'Recommended · short hire' });
@@ -1021,7 +1028,7 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   }
   // Non-short hires (or when it wasn't surfaced first): the pre-auth option
   // still appears here in its usual position.
-  if (preAuthAvailable && !isShortHire) {
+  if (preAuthAvailable && !isShortHire && isAdminUser) {
     availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth', icon: '◫' });
   }
   // Pre-auth holds: capture (→ taken). For held money you can't claim/reimburse,
@@ -1426,7 +1433,7 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                     onChange={(e) => setPayMethod(e.target.value)}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   >
-                    {PAYMENT_METHODS.map((m) => (
+                    {paymentMethodOptions.map((m) => (
                       <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
                   </select>

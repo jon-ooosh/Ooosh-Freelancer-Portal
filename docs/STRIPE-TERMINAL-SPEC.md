@@ -387,3 +387,24 @@ Not "retire Worldpay in March" but **one way of taking a card, now**:
 - The card-slip to-do stays (it only ever fires for Worldpay/Amex); update `.claude/rules/money-excess.md`.
 - When the reader is down, staff use the client's payment portal link (§1.10) — or ask jon.
 
+### 15.1 Built (19 Oct 2026)
+
+jon widened it on the day: **every NEW payment method other than the reader, Stripe (Online), Wise
+(Bank Transfer) and Till (Cash) is admin only** — Worldpay, Amex, PayPal and Lloyds. **Refunds and
+reimbursements are untouched** (every method, every role), so historic excess money can still go back
+the way it came without jon.
+- One list, mirrored: `backend/src/services/payment-methods.ts` ↔ `frontend/src/lib/paymentMethods.ts`
+  (`newPaymentMethodAllowed(method, role)`). Enforced server-side on Money-tab record-payment (service
+  accounts exempt — the Wise matcher), the excess payment route and staff-till sales (`kind = 'sale'`
+  only; a refund keeps its own tender).
+- Order everywhere: Card reader (when on for the login), Stripe (Online), Wise (Bank Transfer), Till
+  (Cash); then the admin-only ones. "Rolled Over from Previous Hire" stays for everyone on the excess
+  form — it moves no money.
+- **Record Pre-Auth is admin only** (button hidden, `POST /excess/:id/record-preauth` is `authorize('admin')`).
+- Till labels unchanged ("Stripe", "Bank transfer", "Cash") — they print on receipts and the week's takings.
+  Default tender: the reader if on, else Worldpay for an admin, Cash for everyone else.
+- **Sitter till: Card reader, Cash and "Put it on their bill"** (`SITTER_TENDER_KEYS`), and its sale
+  route refuses any other tender.
+- The reader's splash screen (Ooosh logo) is a Stripe Dashboard setting (Terminal → location →
+  configuration → Splash screen), not code.
+
