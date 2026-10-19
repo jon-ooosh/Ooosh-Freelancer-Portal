@@ -6,6 +6,7 @@ import { displayFirstName, displayFullName, displayInitials } from '../lib/displ
 import { api } from '../services/api';
 import GlobalSearch from './GlobalSearch';
 import NotificationBell from './NotificationBell';
+import LoginSecurityModal from './LoginSecurityModal';
 
 interface NavItem {
   path: string;
@@ -302,6 +303,22 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const logout = useAuthStore((s) => s.logout);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  // Login security (STAFF-LOGIN-SECURITY-SPEC §6): the banner's "Set up now"
+  // opens the flow right here; an admin without a passkey gets it unasked and
+  // cannot close it (§1.2). The stored user was written at login, so a session
+  // that predates this code learns its security state from /auth/me once.
+  const [securityOpen, setSecurityOpen] = useState(false);
+  const updateUser = useAuthStore((s) => s.updateUser);
+  useEffect(() => {
+    api.get<{ mfa_enrolled?: boolean; mfa_enforced_from?: string | null; passkeys?: number; passkey_required?: boolean }>('/auth/me')
+      .then((me) => updateUser({
+        mfa_enrolled: me.mfa_enrolled, mfa_enforced_from: me.mfa_enforced_from,
+        passkeys: me.passkeys, passkey_required: me.passkey_required,
+      }))
+      .catch(() => { /* the banner simply waits for the next login */ });
+  }, [updateUser]);
+  const passkeyRequired = user?.passkey_required === true;
+
   function isItemActive(item: NavItem): boolean {
     if (item.children) {
       return item.children.some((child) => {
@@ -463,11 +480,18 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <span>
               Set up your login security before{' '}
               {new Date(user.mfa_enforced_from).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })}
-              {' '}— one email code, then your own devices are remembered.
+              {' '}— a passkey or one email code, then your own devices are remembered.
             </span>
-            <Link to="/me?tab=profile" className="font-medium underline">Set up now</Link>
+            <button type="button" onClick={() => setSecurityOpen(true)} className="font-medium underline">Set up now</button>
           </div>
         </div>
+      )}
+      {(securityOpen || passkeyRequired) && (
+        <LoginSecurityModal
+          required={passkeyRequired}
+          enforcedFrom={user?.mfa_enforced_from}
+          onClose={() => setSecurityOpen(false)}
+        />
       )}
 
       {/* Main content */}

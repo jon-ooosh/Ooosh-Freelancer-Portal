@@ -65,7 +65,8 @@ export interface CreateShopSaleInput {
   soldToJobId?: string | null;
   soldToPersonId?: string | null;
   notes?: string | null;
-  recordedIn?: 'staff_till' | 'sitter_till';
+  /** Which till: the staff page, a sitter's phone, or the warehouse kiosk (STAFF-LOGIN-SECURITY-SPEC §4). */
+  recordedIn?: 'staff_till' | 'sitter_till' | 'kiosk_till';
   /** The sitter's evening (studio_sitter_shifts) — sitter till only. */
   shiftId?: string | null;
   /** Set ONLY by the card reader (services/stripe-terminal.ts), once the card was
@@ -83,6 +84,9 @@ export interface ShopActor {
   id: string | null;
   personId?: string | null;
   role: string;
+  /** Set when the kiosk till (no login) names a person from its dropdown — a
+   *  reader session so marked is the only kind the kiosk may read back. */
+  via?: 'kiosk';
 }
 
 export interface ShopSaleTotals {
@@ -427,6 +431,8 @@ export async function listShopSales(opts: {
   review?: boolean;
   /** One sitter's evening — the portal till's own list. */
   shiftId?: string;
+  /** Only sales rung up on one till — the kiosk sees its own last few, nothing else. */
+  recordedIn?: 'staff_till' | 'sitter_till' | 'kiosk_till';
 } = {}) {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const r = await query(
@@ -481,11 +487,12 @@ export async function listShopSales(opts: {
              OR (s.kind = 'reversal' AND s.status <> 'cancelled' AND s.refund_settled_at IS NULL))
         AND (NOT $4::boolean OR (s.needs_review AND s.reviewed_at IS NULL AND s.status <> 'cancelled'))
         AND ($5::uuid IS NULL OR s.shift_id = $5)
+        AND ($6::text IS NULL OR s.recorded_in = $6)
       GROUP BY s.id, p.preferred_name, p.first_name, p.last_name, o.sale_number,
                sj.id, sj.hh_job_number, sj.job_name, sj.company_name, sj.client_name, sjo.name
       ORDER BY s.created_at DESC
       LIMIT $2`,
-    [opts.since || null, limit, !!opts.attention, !!opts.review, opts.shiftId || null],
+    [opts.since || null, limit, !!opts.attention, !!opts.review, opts.shiftId || null, opts.recordedIn || null],
   );
   return r.rows.map((row: any) => ({
     ...row,

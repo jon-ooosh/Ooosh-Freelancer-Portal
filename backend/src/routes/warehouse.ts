@@ -34,6 +34,7 @@ import { emailService } from '../services/email-service';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { getJobEmailRecipients } from '../services/money-emails';
 import { resolveJobEmailContacts } from '../services/job-contact-candidates';
+import { kioskIpAllowed, bareIp } from '../services/kiosk-till';
 
 const SESSION_TTL_SECONDS = 12 * 60 * 60; // 12h — kiosk left running between shifts
 
@@ -44,6 +45,9 @@ const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 interface WarehouseSessionClaims {
   scope: 'warehouse_session';
   sessionId: string;
+  /** What this PIN session may do: collections here, the till on /api/shop
+   *  (STAFF-LOGIN-SECURITY-SPEC §4.1, services/kiosk-till.ts). */
+  scopes: Array<'collections' | 'till'>;
 }
 
 interface WarehouseRequest extends Request {
@@ -77,11 +81,13 @@ function authenticateWarehouse(req: WarehouseRequest, res: Response, next: NextF
   const token = authHeader.slice(7);
 
   // Each family verifies against its own audience (services/tokens.ts).
-  const kiosk = verifyFor<{ scope?: string; sessionId?: string }>('warehouse', token);
+  const kiosk = verifyFor<{ scope?: string; sessionId?: string; scopes?: unknown }>('warehouse', token);
   if (kiosk && kiosk.scope === 'warehouse_session' && typeof kiosk.sessionId === 'string') {
     req.warehouseSession = {
       scope: 'warehouse_session',
       sessionId: kiosk.sessionId,
+      // A session minted before the till existed has no scopes claim: collections only.
+      scopes: Array.isArray(kiosk.scopes) ? kiosk.scopes.filter((s): s is 'collections' | 'till' => s === 'collections' || s === 'till') : ['collections'],
     };
     next();
     return;
@@ -131,9 +137,17 @@ router.post('/auth/pin', pinLimiter, async (req: Request, res: Response) => {
       res.status(401).json({ error: 'Incorrect PIN' });
       return;
     }
+    // §4.4: the PIN is accepted only from the yard's own connections
+    // (`system_settings.kiosk_allowed_ips`; empty = anywhere). Checked AFTER
+    // the PIN so a wrong address learns nothing about the PIN.
+    if (!(await kioskIpAllowed(req.ip))) {
+      console.warn(`[warehouse] PIN refused from ${bareIp(req.ip)} — not on kiosk_allowed_ips`);
+      res.status(403).json({ error: 'The kiosk PIN only works from the warehouse connection.' });
+      return;
+    }
     const token = signFor(
       'warehouse',
-      { scope: 'warehouse_session', sessionId: uuid() } satisfies WarehouseSessionClaims,
+      { scope: 'warehouse_session', sessionId: uuid(), scopes: ['collections', 'till'] } satisfies WarehouseSessionClaims,
       SESSION_TTL_SECONDS
     );
     res.json({ token, expiresIn: SESSION_TTL_SECONDS });

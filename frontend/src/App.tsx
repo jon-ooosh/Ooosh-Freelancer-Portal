@@ -222,6 +222,8 @@ export default function App() {
       <Route path="/warehouse" element={<WarehousePinPage />} />
       <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />
       <Route path="/warehouse/collections/:jobId" element={<WarehouseCollectionDetailPage />} />
+      {/* The kiosk till: the same PIN session on the shop routes (STAFF-LOGIN-SECURITY-SPEC §4). */}
+      <Route path="/warehouse/till" element={<ShopTillPage kiosk />} />
       <Route
         path="/*"
         element={

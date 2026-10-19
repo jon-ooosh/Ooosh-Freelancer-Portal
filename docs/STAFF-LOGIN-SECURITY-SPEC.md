@@ -1,9 +1,10 @@
 # Staff login security — two-factor, trusted devices, passkeys, the kiosk till
 
-**Status (19 Oct 2026): §1 approved by jon; PHASE 1 BUILT (email codes, trusted devices,
-per-account slowdown, `login_disabled`, My profile › Login security, Staff page › Access
-controls, the 14-day grace period) — 33 HTTP checks on a scratch database, codes read back
-from a local SMTP sink. Phases 2–3 not started.** Written at the end
+**Status (19 Oct 2026): §1 approved by jon; ALL THREE PHASES BUILT.** Phase 1 (email codes,
+trusted devices, per-account slowdown, `login_disabled`, My profile › Login security, Staff page
+› Access controls, the 14-day grace period) is live since 19 Oct. Phases 2–3 (passkeys with the
+admin mandate and recovery codes; the kiosk till) are built in one PR — **§8 is what shipped and
+where it differs from the design below; read it before touching any of this.** Written at the end
 of the October security audit (`SECURITY-AUDIT-BRIEF.md`) — the audit closed every
 code-level hole it found; what is left is the front door. A stolen or phished staff
 password is now the most likely way into OP, and nothing in the code can stop a login
@@ -251,3 +252,96 @@ Each phase is one PR, built and exercised on the scratch database as the audit w
 4. **May the kiosk take card-reader payments** without a named staff login behind
    it? (§4.2 says yes behind a setting; the person is still named on the sale.)
 5. **Recovery codes**: printed and kept in the office safe, or each person's own?
+
+---
+
+## 8. What was built — phases 2 and 3 (Oct 2026)
+
+Both on the scratch database: 62 HTTP checks (every kiosk refusal path, recovery codes, the
+admin rule) and 24 browser checks driving the real SPA with Chromium's virtual authenticator
+(enrol from the forced modal, passkey as the second step, passkey as the whole login, remove
+and re-add, the manager's banner → modal → passkey). Migration `297_passkeys_and_kiosk_till.sql`.
+
+### 8.1 Passkeys (§3.4) — `services/staff-passkeys.ts`
+
+- `@simplewebauthn/server` 14 / `@simplewebauthn/browser` 14. Relying party id
+  `WEBAUTHN_RP_ID` (default `staff.oooshtours.co.uk`), origin `WEBAUTHN_ORIGIN` (default
+  `https://` + that). **Production needs no new env.** A scratch server sets both (`localhost`,
+  `http://localhost:5173`) — a passkey is bound to the RP id and never works on another.
+- Challenges in Redis, 5 minutes, read-once (`webauthn:reg:<userId>`, `webauthn:auth:<nonce>`).
+  No Redis → the passkey ceremony answers 503 and the email code still works.
+- Table `user_passkeys` (credential id, public key, counter, transports, label, device type,
+  backed-up flag, `revoked_at`); "Remove" revokes, never deletes.
+- Routes (`routes/auth.ts`): `POST /security/passkeys/options` + `POST /security/passkeys`
+  (add to my login; counts as enrolment), `DELETE /security/passkeys/:id`,
+  `POST /login/passkey/options` (with `pending` → only that person's keys; without → a
+  discoverable credential names the person) + `POST /login/passkey` (→ session, trusts the
+  device unless `trustDevice: false`), `POST /login/recovery`, `POST /security/recovery-codes`
+  (admin). `GET /auth/security` lists passkeys and `recovery_codes_left`; `/auth/me` and the
+  login response carry `passkeys` (count) and `passkey_required`.
+- **The admin mandate is two things.** The UI: an admin with no passkey sees the setup modal on
+  every page and cannot close it (`user.passkey_required`, Layout). The server: once an admin
+  HAS a passkey, `/login` offers `methods: ['passkey']` only — the email code is not sent and
+  `/login/code` refuses it ("Use your passkey or a recovery code"). A non-admin with a passkey
+  keeps `['passkey', 'email']`. The mandate cannot be enforced before the first passkey exists
+  (they need a session to add one), hence the UI gate for that window.
+- **Recovery codes are admins only** (§1): ten, `XXXX-XXXX`, no 0/O/1/I, hashed, single use.
+  Minted with the admin's FIRST passkey and shown once in the modal (the modal deliberately stays
+  open until "I've saved these" — lifting the mandate first would close it under them);
+  "New set" on the profile card voids the old ten. An admin reset (Staff › Access) wipes passkeys
+  and codes too.
+- **Lock-out remedy for the only admin**: no passkey to hand and no recovery code left — on the
+  server, `UPDATE users SET mfa_enrolled_at = NULL WHERE email = '…'; UPDATE user_passkeys SET
+  revoked_at = NOW() WHERE user_id = …;` then log in with the password during the grace period
+  (or set `staff_2fa_enforced_from` forward for a day). This is the trade-off of §1.2 and it is
+  deliberate.
+- The login page: "Sign in with a passkey" under the password form (the whole login); on the
+  second step "Use your passkey", the code box only when email is a method, and "Use a recovery
+  code" when the person has any.
+
+### 8.2 Enrolment UX (jon, 19 Oct)
+
+The banner's "Set up now" opens `LoginSecurityModal` → `LoginSecuritySetup`, the one flow the
+profile card also uses: passkey first ("recommended"; an admin sees only this), "Or an email
+code" below. Done → the modal closes and the banner goes. The Layout also refreshes the stored
+user from `/auth/me` once per page load, so a session that predates the deploy sees the banner
+on its next page load rather than its next login.
+
+### 8.3 Grace period — NOT ended by this PR
+
+§5 said phase 2 ends the grace period. It is left as the setting (2 November) and is now
+editable on Settings › Login security & kiosk ("Second factor required from"). jon decides when.
+
+### 8.4 The kiosk till (§4) — `services/kiosk-till.ts`
+
+- The PIN session (`POST /warehouse/auth/pin`) carries `scopes: ['collections', 'till']`. A
+  session minted before this (no claim) is collections only.
+- **Where the PIN works**: `system_settings.kiosk_allowed_ips` (seeded `95.144.185.166`;
+  comma-separated; empty = anywhere, and Settings warns). Checked AFTER the PIN, so a wrong
+  address learns nothing about the PIN (401 for a wrong PIN, 403 for a right one from elsewhere).
+- **The allow-list** `KIOSK_TILL_ALLOW` is §4.2's table exactly, applied by
+  `staffOrKioskTill()` at the top of `routes/shop.ts` (a staff token still goes through
+  `authenticate` + `STAFF_ROLES`; a till session is admitted only to listed routes, 403 for the
+  rest, 401 everywhere outside /shop). `GET /shop/sales` for the kiosk is forced to its own last
+  five of today. `GET /shop/sellers` is the dropdown (`listAssignablePeople()` — THE definition).
+- **Who made the sale**: the spec's `sold_by_person_id` IS migration 251's
+  `recorded_by_person_id` (the sitter till's column) — no second column. A kiosk sale has
+  `recorded_in = 'kiosk_till'`, `recorded_by = NULL`, the person set; the discount ceiling is the
+  plain-staff one whoever is picked; `kind = 'sale'` and `till_cash` / `card_reader` only. The
+  receipt route only sends for a kiosk sale, in the seller's name.
+- **The reader on the kiosk**: `stripe_terminal_kiosk` (seeded `false`) admits the till to
+  `KIOSK_TERMINAL_ALLOW` on `routes/stripe-terminal.ts`; a session it asks about must be one a
+  kiosk sale started (`shop_payload.actor.via = 'kiosk'`, `sessionStartedByKiosk()`).
+- **Frontend**: `/warehouse/till` renders `ShopTillPage` in kiosk mode (its own header, the
+  "Who's selling?" dropdown remembered 30 minutes in sessionStorage, no mode toggle, no manager
+  tabs, no Cancel/Retry/Refund) and the Collections page has a "Till" button. `services/api.ts`
+  sends the warehouse token on `/warehouse/*` pages when nobody is logged in to OP — the server
+  decides what it may call.
+- **Housekeeping**: `kiosk_pin_rotated_at` (seeded today) and a daily 09:47 check that bells
+  admins when it is 91+ days old, fortnightly until "PIN changed today" is pressed in Settings.
+  The PIN itself stays `WAREHOUSE_PIN` in the server .env.
+- Settings › Login security & kiosk (admin): the enforcement date, the IP list, the reader
+  switch, the PIN date.
+
+Deliberately not built: SMS / authenticator apps / SSO (§1), the second office address in the
+IP list (confirm it is fixed first), a kiosk "consumption" (a stock write-off wants a login).

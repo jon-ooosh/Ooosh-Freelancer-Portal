@@ -262,16 +262,23 @@ once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`serv
 confirmed; the portal repo refuses before any Stripe session). Phase 2 (`part_of` groups) is not built — **spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
 
-**PHASE 1 BUILT, Oct 2026:** `docs/STAFF-LOGIN-SECURITY-SPEC.md` — two-factor for every OP
-staff login. Built: a 6-digit email code as the second factor, **trusted devices** (the
+**BUILT (all three phases), Oct 2026:** `docs/STAFF-LOGIN-SECURITY-SPEC.md` — two-factor for every OP
+staff login. Phase 1: a 6-digit email code as the second factor, **trusted devices** (the
 `op_device` cookie, httpOnly, `/api/auth` only, 90 days — a person's own laptop and phone are
 asked once each), per-account slowdown on wrong passwords (Redis, fail-open), `users.login_disabled`
 (the `system@` service identity never logs in), My profile › Login security, Staff page › Access
 › Login security (reset, sign out everywhere; an admin's row only by an admin), and the grace
 period `system_settings.staff_2fa_enforced_from` (a banner until that date, then the login
-insists). All of it in `services/staff-login-security.ts`; `/auth/login` answers `{ pending }`
-when a code is owed, then `/auth/login/code`. Phase 2 (passkeys, mandatory for admins) and
-Phase 3 (the kiosk till) are specified, not built.
+insists; editable in Settings). `services/staff-login-security.ts`; `/auth/login` answers `{ pending, methods }`
+when a second step is owed. **Phase 2: passkeys** (`services/staff-passkeys.ts`, @simplewebauthn, RP id
+`staff.oooshtours.co.uk`): "Sign in with a passkey" is the whole login; **mandatory for admins** — an admin
+with no passkey gets a modal that will not close, and once they have one the email code is refused for them;
+recovery codes are admins only, shown once. The banner's "Set up now" opens the setup modal in place.
+**Phase 3: the kiosk till** (`services/kiosk-till.ts`, `/warehouse/till`): the warehouse PIN session gains
+`scopes: ['collections','till']`, the PIN is accepted only from `system_settings.kiosk_allowed_ips`, the
+till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or reader, each naming a person
+from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
+`stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
@@ -379,6 +386,8 @@ existing definition:
 | Verifying an API key | `middleware/api-key.ts` |
 | Is this a STAFF access token? | `middleware/auth.ts` `verifyStaffToken()` — `authenticate` and the Socket.io handshake both use it; never a second `jwt.verify` for staff |
 | Is this login allowed in, does this device skip the code, is this account slowed down? | `services/staff-login-security.ts` — the second factor, trusted devices, the per-account slowdown; `routes/auth.ts` decides, this answers |
+| A passkey (register, log in with, remove), an admin's recovery codes | `services/staff-passkeys.ts` — challenges in Redis, rows in `user_passkeys`; frontend `lib/passkeys.ts`; the one setup flow is `components/LoginSecuritySetup.tsx` |
+| May the warehouse kiosk's PIN session call this? Who may it name on a sale? Where does the PIN work? | `services/kiosk-till.ts` — `staffOrKioskTill(KIOSK_TILL_ALLOW)`, `assertKioskSeller()`, `kioskIpAllowed()`; a kiosk request carries `req.kiosk`, never `req.user` |
 | Minting or verifying ANY JWT | `services/tokens.ts` `signFor(audience, …)` / `verifyFor(audience, …)` — every family has its own `aud`; never call `jsonwebtoken` directly (the portal session, on its own secret, is the one exception) |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |

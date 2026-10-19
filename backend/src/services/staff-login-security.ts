@@ -1,5 +1,6 @@
 /**
  * Staff login security, phase 1 — docs/STAFF-LOGIN-SECURITY-SPEC.md §3.
+ * (Phase 2's passkeys and recovery codes: services/staff-passkeys.ts.)
  *
  *   • The email code (second factor): sendLoginCode() / verifyLoginCode().
  *   • Trusted devices: a browser that passed the second factor carries the
@@ -25,6 +26,7 @@ import { emailService } from './email-service';
 import { getSystemSetting } from '../routes/system-settings';
 import { signFor, verifyFor } from './tokens';
 import { greetingName } from './display-name';
+import { countPasskeys, wipePasskeys } from './staff-passkeys';
 
 export const DEVICE_COOKIE = 'op_device';
 const DEVICE_DAYS = 90;
@@ -64,9 +66,21 @@ export async function isEnforcedNow(): Promise<boolean> {
   return today >= from;
 }
 
-/** What the SPA needs to show the banner / the Security card. */
-export async function securityInfo(user: LoginUserRow): Promise<{ mfa_enrolled: boolean; mfa_enforced_from: string | null }> {
-  return { mfa_enrolled: !!user.mfa_enrolled_at, mfa_enforced_from: await enforcedFrom() };
+/**
+ * What the SPA needs to show the banner / the Security card. `passkey_required`
+ * is the admin mandate (§1.2): an admin with no passkey is walked through adding
+ * one before anything else (the Layout's modal will not close until they have).
+ */
+export async function securityInfo(user: LoginUserRow): Promise<{
+  mfa_enrolled: boolean; mfa_enforced_from: string | null; passkeys: number; passkey_required: boolean;
+}> {
+  const passkeys = await countPasskeys(user.id);
+  return {
+    mfa_enrolled: !!user.mfa_enrolled_at,
+    mfa_enforced_from: await enforcedFrom(),
+    passkeys,
+    passkey_required: user.role === 'admin' && passkeys === 0,
+  };
 }
 
 // ── Email codes ────────────────────────────────────────────────────────────
@@ -240,6 +254,7 @@ export async function signOutEverywhere(userId: string): Promise<void> {
 export async function resetSecondFactor(userId: string): Promise<void> {
   await signOutEverywhere(userId);
   await query(`UPDATE staff_login_codes SET consumed_at = NOW() WHERE user_id = $1 AND consumed_at IS NULL`, [userId]);
+  await wipePasskeys(userId);
   await query(`UPDATE users SET mfa_enrolled_at = NULL WHERE id = $1`, [userId]);
 }
 

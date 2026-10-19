@@ -14,6 +14,9 @@ interface User {
   /** Login security (STAFF-LOGIN-SECURITY-SPEC): has a second factor; the date from which one is required. */
   mfa_enrolled?: boolean;
   mfa_enforced_from?: string | null;
+  /** How many passkeys; and the admin mandate — an admin with none is walked through adding one. */
+  passkeys?: number;
+  passkey_required?: boolean;
 }
 
 interface AuthState {

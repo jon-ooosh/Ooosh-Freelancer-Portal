@@ -19,16 +19,20 @@
  */
 import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
   canUseTerminal, getTerminalMode, isModeConfigured, listReaders, startTerminalPayment,
   readSession, retrySession, cancelSession, simulateTap, TerminalError,
   sendTerminalReceipt, defaultReceiptRecipients, excessReaderOptions, startShopTerminalPayment,
+  sessionStartedByKiosk,
 } from '../services/stripe-terminal';
+import { staffOrKioskTill, KIOSK_TERMINAL_ALLOW, assertKioskSeller } from '../services/kiosk-till';
 
 const router = Router();
-router.use(authenticate);
+// A staff login, or the warehouse kiosk's till session on KIOSK_TERMINAL_ALLOW
+// while `stripe_terminal_kiosk` is on (STAFF-LOGIN-SECURITY-SPEC §4.2).
+router.use(staffOrKioskTill(KIOSK_TERMINAL_ALLOW, { reader: true }));
 
 const fail = (res: Response, err: unknown, fallback: string) => {
   if (err instanceof TerminalError) {
@@ -41,6 +45,14 @@ const fail = (res: Response, err: unknown, fallback: string) => {
 
 async function requireTerminalAccess(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
+    // The kiosk was admitted by the setting at the door; a session it asks
+    // about must be one a kiosk sale started.
+    if (req.kiosk) {
+      const sid = typeof req.params.id === 'string' ? req.params.id : null;
+      if (sid && !(await sessionStartedByKiosk(sid))) { res.status(403).json({ error: 'That payment was not started on the kiosk.' }); return; }
+      next();
+      return;
+    }
     if (await canUseTerminal(req.user?.role)) { next(); return; }
     res.status(403).json({ error: 'The card reader is not switched on for your login yet.' });
   } catch (err) {
@@ -50,7 +62,7 @@ async function requireTerminalAccess(req: AuthRequest, res: Response, next: Next
 
 router.get('/access', async (req: AuthRequest, res: Response) => {
   try {
-    const enabled = await canUseTerminal(req.user?.role);
+    const enabled = req.kiosk ? true : await canUseTerminal(req.user?.role);
     const mode = await getTerminalMode();
     res.json({ data: { enabled, mode, configured: enabled ? isModeConfigured(mode) : undefined } });
   } catch (err) {
@@ -100,22 +112,27 @@ const shopPaySchema = z.object({
   })).min(1).max(100),
   sold_to_job_id: z.string().uuid().nullable().optional(),
   sold_to_person_id: z.string().uuid().nullable().optional(),
+  /** The kiosk till only: the person from its dropdown (§4.3). */
+  sold_by_person_id: z.string().uuid().nullable().optional(),
   notes: z.string().max(1000).nullable().optional(),
   reader_id: z.string().min(1).max(100),
 });
 
 router.post('/shop/pay', requireTerminalAccess, validate(shopPaySchema), async (req: AuthRequest, res: Response) => {
   try {
+    const kioskSeller = req.kiosk ? await assertKioskSeller(req.body.sold_by_person_id).catch((e: Error) => { throw new TerminalError(e.message); }) : null;
     const session = await startShopTerminalPayment({
       input: {
         lines: req.body.lines,
         soldToJobId: req.body.sold_to_job_id || null,
         soldToPersonId: req.body.sold_to_person_id || null,
         notes: req.body.notes || null,
-        recordedIn: 'staff_till',
+        recordedIn: req.kiosk ? 'kiosk_till' : 'staff_till',
         shiftId: null,
       },
-      actor: { id: req.user!.id, role: req.user!.role },
+      actor: kioskSeller
+        ? { id: null, personId: kioskSeller, role: 'staff', via: 'kiosk' }
+        : { id: req.user!.id, role: req.user!.role },
       readerId: req.body.reader_id,
     });
     res.json({ data: session });

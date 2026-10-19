@@ -99,6 +99,9 @@ function SettingsContent() {
       {/* Card reader (Stripe Terminal S700) — test/live switch + who may use it, admin only */}
       {currentUser?.role === 'admin' && <CardReaderSettingsSection />}
 
+      {/* Login security & the warehouse kiosk (STAFF-LOGIN-SECURITY-SPEC) — admin only */}
+      {currentUser?.role === 'admin' && <LoginAndKioskSettingsSection />}
+
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
 
@@ -2037,6 +2040,130 @@ function CardReaderSettingsSection() {
         </div>
         <p className="text-xs text-gray-500">
           Roles: admin, manager, staff, general_assistant (weekend managers follow manager). Leave as admin while testing.
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving || !changed}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Login security & the warehouse kiosk (docs/STAFF-LOGIN-SECURITY-SPEC.md §6, §4.4–4.5):
+ * the date from which every login needs a second factor, the addresses the kiosk
+ * PIN is accepted from, the reader on the kiosk till, and when the PIN was last
+ * changed (the quarterly reminder counts from it). Admin only.
+ */
+function LoginAndKioskSettingsSection() {
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [orig, setOrig] = useState<Record<string, string> | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const KEYS = ['staff_2fa_enforced_from', 'kiosk_allowed_ips', 'stripe_terminal_kiosk', 'kiosk_pin_rotated_at'];
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const [sec, money] = await Promise.all([
+        api.get<{ data: SystemSetting[] }>('/system-settings?category=security'),
+        api.get<{ data: SystemSetting[] }>('/system-settings?category=money'),
+      ]);
+      const all = [...sec.data, ...money.data];
+      const next: Record<string, string> = {};
+      for (const k of KEYS) next[k] = all.find(r => r.key === k)?.value ?? '';
+      setVals(next); setOrig(next);
+    } catch {
+      setError('Could not load the login security settings (has migration 297 run?).');
+    }
+  }
+
+  async function save(patch?: Record<string, string>) {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const settings = { ...vals, ...(patch || {}) };
+      settings.kiosk_allowed_ips = settings.kiosk_allowed_ips.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean).join(', ');
+      await api.put('/system-settings', { settings });
+      setSuccess('Saved.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (!orig) return error ? <div className="mb-6 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div> : null;
+  const changed = KEYS.some(k => vals[k] !== orig[k]);
+  const today = new Date().toLocaleDateString('en-CA');
+  const row = 'grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center';
+  const input = 'px-2 py-1.5 rounded border border-gray-300 text-sm';
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Login security &amp; kiosk</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Every staff login has a second step (passkey or email code, remembered per device). The warehouse iPad keeps its PIN
+        and now has a till; the PIN only works from the addresses below.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        <div className={row}>
+          <label htmlFor="staff_2fa_enforced_from" className="text-sm text-gray-700">
+            Second factor required from
+            <span className="block text-xs text-gray-400 font-mono">staff_2fa_enforced_from</span>
+          </label>
+          <input id="staff_2fa_enforced_from" type="date" value={vals.staff_2fa_enforced_from}
+            onChange={e => setVals(v => ({ ...v, staff_2fa_enforced_from: e.target.value }))} className={`${input} max-w-xs`} />
+        </div>
+        <p className="text-xs text-gray-500">Before this date a person with no second factor sees a banner; from it the login insists.</p>
+
+        <div className={row}>
+          <label htmlFor="kiosk_allowed_ips" className="text-sm text-gray-700">
+            Kiosk PIN accepted from (public IPs)
+            <span className="block text-xs text-gray-400 font-mono">kiosk_allowed_ips</span>
+          </label>
+          <input id="kiosk_allowed_ips" value={vals.kiosk_allowed_ips}
+            onChange={e => setVals(v => ({ ...v, kiosk_allowed_ips: e.target.value }))} placeholder="95.144.185.166" className={input} />
+        </div>
+        {!vals.kiosk_allowed_ips.trim() && (
+          <p className="text-xs text-amber-700">Empty — the kiosk PIN is accepted from anywhere on the internet. Put the yard's address in.</p>
+        )}
+
+        <div className={row}>
+          <label htmlFor="stripe_terminal_kiosk" className="text-sm text-gray-700">
+            Card reader on the kiosk till
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_kiosk</span>
+          </label>
+          <select id="stripe_terminal_kiosk" value={vals.stripe_terminal_kiosk === 'true' ? 'true' : 'false'}
+            onChange={e => setVals(v => ({ ...v, stripe_terminal_kiosk: e.target.value }))} className={`${input} max-w-xs`}>
+            <option value="false">Off — cash only on the kiosk</option>
+            <option value="true">On — the reader, the sale still names a person</option>
+          </select>
+        </div>
+
+        <div className={row}>
+          <span className="text-sm text-gray-700">
+            Warehouse PIN last changed
+            <span className="block text-xs text-gray-400 font-mono">kiosk_pin_rotated_at</span>
+          </span>
+          <span className="flex items-center gap-3 text-sm">
+            <span>{vals.kiosk_pin_rotated_at || '—'}</span>
+            <button type="button" onClick={() => void save({ kiosk_pin_rotated_at: today })} disabled={saving}
+              className="px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+              PIN changed today
+            </button>
+          </span>
+        </div>
+        <p className="text-xs text-gray-500">
+          The PIN itself is <code>WAREHOUSE_PIN</code> in the server&apos;s .env. Admins are reminded three months after this date.
         </p>
       </div>
 

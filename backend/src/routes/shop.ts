@@ -12,7 +12,8 @@
 import { Router, Response } from 'express';
 import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
+import { authorize, AuthRequest, MANAGER_ROLES } from '../middleware/auth';
+import { staffOrKioskTill, KIOSK_TILL_ALLOW, assertKioskSeller, listKioskSellers } from '../services/kiosk-till';
 import hhBroker from '../services/hirehop-broker';
 import {
   searchShopStock, findShopStockByBarcode, getShopStockItem,
@@ -28,11 +29,22 @@ import {
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const router = Router();
-router.use(authenticate);
-// STAFF_ROLES, not a hardcoded list — spelling out ('admin','manager','staff')
-// silently locks out weekend_manager and general_assistant, which has already
-// shipped as a live bug once.
-router.use(authorize(...STAFF_ROLES));
+// A staff login (STAFF_ROLES, not a hardcoded list — spelling out
+// ('admin','manager','staff') silently locks out weekend_manager and
+// general_assistant, which has already shipped as a live bug once), OR the
+// warehouse kiosk's PIN session, held to KIOSK_TILL_ALLOW (STAFF-LOGIN-SECURITY-SPEC
+// §4.2). A kiosk request carries `req.kiosk` and no `req.user`.
+router.use(staffOrKioskTill(KIOSK_TILL_ALLOW));
+
+/** The kiosk till's dropdown: who may be named on a sale (§4.3). */
+router.get('/sellers', async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listKioskSellers() });
+  } catch (err) {
+    console.error('[shop] sellers failed:', err);
+    res.status(500).json({ error: 'Could not load the staff list.' });
+  }
+});
 
 // ── Catalogue (zero HireHop calls) ───────────────────────────────────────
 
@@ -198,7 +210,8 @@ router.get('/jobs/search', async (req: AuthRequest, res: Response) => {
 /** What this user may discount, so the till can show the ceiling up front. */
 router.get('/discount-cap', async (req: AuthRequest, res: Response) => {
   try {
-    const pct = await maxDiscountPctForRole(req.user?.role);
+    // The kiosk discounts as plain staff — picking a manager's name must not unlock their ceiling.
+    const pct = await maxDiscountPctForRole(req.kiosk ? 'staff' : req.user?.role);
     res.json({ data: { maxDiscountPct: pct } });
   } catch (err) {
     console.error('[shop] discount cap failed:', err);
@@ -223,13 +236,30 @@ router.post('/quote', async (req: AuthRequest, res: Response) => {
 
 router.post('/sales', async (req: AuthRequest, res: Response) => {
   try {
+    // The kiosk till (§4.3): no login behind it, so the sale names the person
+    // from the dropdown and takes cash or the reader only — never "their bill",
+    // never consumption (a stock write-off wants a name AND a login).
+    if (req.kiosk) {
+      if (req.body?.kind !== 'sale') { res.status(403).json({ error: 'The kiosk till records sales only.' }); return; }
+      if (!['till_cash', 'card_reader'].includes(String(req.body?.tender))) {
+        res.status(403).json({ error: 'The kiosk takes cash or the card reader.' });
+        return;
+      }
+      const personId = await assertKioskSeller(req.body?.soldByPersonId);
+      const result = await createShopSale(
+        { ...req.body, shiftId: null, recordedIn: 'kiosk_till' },
+        { id: null, personId, role: 'staff', via: 'kiosk' },
+      );
+      res.status(201).json({ data: result });
+      return;
+    }
     // Worldpay / Amex / PayPal are admin only (STRIPE-TERMINAL-SPEC §15).
     if (req.body?.kind === 'sale' && !newPaymentMethodAllowed(req.body?.tender, req.user!.role)) {
       res.status(403).json({ error: ADMIN_ONLY_METHOD_MESSAGE });
       return;
     }
     // A shift belongs only to sales taken on the sitter till (portal routes).
-    const result = await createShopSale({ ...req.body, shiftId: null }, {
+    const result = await createShopSale({ ...req.body, shiftId: null, recordedIn: 'staff_till' }, {
       id: req.user!.id,
       role: req.user!.role,
     });
@@ -243,6 +273,13 @@ router.post('/sales', async (req: AuthRequest, res: Response) => {
 
 router.get('/sales', async (req: AuthRequest, res: Response) => {
   try {
+    // The kiosk sees its own last five of today — enough to send a receipt
+    // again, nothing resembling a money overview (§1.8).
+    if (req.kiosk) {
+      const since = new Date(); since.setHours(0, 0, 0, 0);
+      res.json({ data: await listShopSales({ limit: 5, since: since.toISOString(), recordedIn: 'kiosk_till' }) });
+      return;
+    }
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
     const since = req.query.since ? String(req.query.since) : undefined;
     const attention = req.query.attention === '1' || req.query.attention === 'true';
@@ -311,7 +348,14 @@ router.post('/sales/:id/reverse', authorize(...MANAGER_ROLES), async (req: AuthR
 router.post('/sales/:id/receipt', async (req: AuthRequest, res: Response) => {
   try {
     const { sendShopReceipt } = await import('../services/shop-receipts');
-    const result = await sendShopReceipt(String(req.params.id), String(req.body?.to ?? ''), { id: req.user!.id });
+    let by: { id: string | null; personId?: string | null } = { id: req.user?.id ?? null };
+    if (req.kiosk) {
+      // Only a kiosk sale, and the receipt goes out in the name it was rung up under.
+      const own = await query(`SELECT recorded_by_person_id FROM shop_sales WHERE id = $1 AND recorded_in = 'kiosk_till'`, [String(req.params.id)]);
+      if (!own.rows[0]) { res.status(403).json({ error: 'That sale was not made on the kiosk.' }); return; }
+      by = { id: null, personId: own.rows[0].recorded_by_person_id };
+    }
+    const result = await sendShopReceipt(String(req.params.id), String(req.body?.to ?? ''), by);
     if (!result.sent) return res.status(502).json({ error: `The receipt didn't send: ${result.error}` });
     res.json({ data: { sent: true } });
   } catch (err) {
