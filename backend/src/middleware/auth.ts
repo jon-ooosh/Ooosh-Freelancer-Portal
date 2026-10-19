@@ -83,6 +83,11 @@ export function authenticate(req: AuthRequest, res: Response, next: NextFunction
   next();
 }
 
+/** The same rule as authorize(...MANAGER_ROLES), for a check inside a handler. */
+export function isManagerTier(role: string | undefined): boolean {
+  return (MANAGER_ROLES as readonly string[]).includes(String(role));
+}
+
 export function authorize(...allowedRoles: AuthUser['role'][]) {
   return (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.user) {

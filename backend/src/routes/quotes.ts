@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES, isManagerTier } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
   calculateCosts,
@@ -183,7 +183,9 @@ const updateSettingsSchema = z.object({
   settings: z.record(z.string(), z.number()),
 });
 
-router.put('/settings', validate(updateSettingsSchema), async (req: AuthRequest, res: Response) => {
+// Manager-tier (SECURITY-AUDIT-BRIEF B.2, jon 19 Oct 2026): these are the rates
+// and markups behind every future quote.
+router.put('/settings', authorize(...MANAGER_ROLES), validate(updateSettingsSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { settings } = req.body;
     for (const [key, value] of Object.entries(settings)) {
@@ -926,6 +928,13 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
   try {
     const { status, cancelledReason } = req.body;
 
+    // Completing is a manager's call with a reason (POST /:id/complete-override);
+    // this route used to reach the same end state for anyone (B.2, Oct 2026).
+    if (status === 'completed' && !isManagerTier(req.user?.role)) {
+      res.status(403).json({ error: 'Completing a quote is a manager action — ask a manager to complete it.' });
+      return;
+    }
+
     // Capture old status so we can detect draft → confirmed transitions
     // and fire freelancer_assignment emails for pre-existing assignees.
     const oldStatusResult = await query(
@@ -1255,6 +1264,12 @@ const opsStatusSchema = z.object({
 router.patch('/:id/ops-status', validate(opsStatusSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { ops_status } = req.body;
+
+    // Same rule as /:id/status: 'completed' is the manager's (B.2, Oct 2026).
+    if (ops_status === 'completed' && !isManagerTier(req.user?.role)) {
+      res.status(403).json({ error: 'Completing a quote is a manager action — ask a manager to complete it.' });
+      return;
+    }
     const updates: string[] = ['ops_status = $1', 'updated_at = NOW()'];
     const params: unknown[] = [ops_status];
 
@@ -1839,7 +1854,8 @@ router.patch('/runs/:runId', validate(updateRunSchema), async (req: AuthRequest,
 // Delete (ungroup): FK is ON DELETE SET NULL, so member quotes are
 // ungrouped automatically and their standalone freelancer_fee values
 // become visible again — non-destructive.
-router.delete('/runs/:runId', async (req: AuthRequest, res: Response) => {
+// Manager-tier (B.2): ungrouping a run changes what the client and freelancers are quoted.
+router.delete('/runs/:runId', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
       `DELETE FROM run_groups WHERE id = $1 RETURNING id`,

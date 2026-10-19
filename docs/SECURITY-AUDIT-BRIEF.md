@@ -122,29 +122,22 @@ everywhere. Both portal-secret guards were seen to refuse startup.
    `frontend/public/stage-view.html` has one inline `<script>`; move it to a
    file or hash it first. The two static tools are the only pages loading from
    cdnjs and Google Fonts.
-2. **Per-router `authorize()` pass — audited 9 Oct 2026, decisions pending.**
-   All 19 `authenticate`-only routers now carry `router.use(authorize(...STAFF_ROLES))`
-   — a no-op today (only staff hold a staff token; confirmed over HTTP that a
-   `general_assistant` still reaches every one) but it keeps them closed if a
-   non-staff login shape is ever added. The read of every ungated endpoint found
-   these with **no manager/admin gate** — jon to decide which get one:
-   - `quotes.ts` `PUT /settings` — overwrites the global calculator rates and
-     markups for every future quote.
-   - `quotes.ts` `DELETE /runs/:runId` — hard-deletes a run group (combined
-     freelancer and client fees). `DELETE /:id` soft-deletes a quote.
-   - `quotes.ts` `PATCH /:id/status` and `/:id/ops-status` with `completed`
-     reach the same end state as the manager-only `POST /:id/complete-override`,
-     with no reason captured.
-   - `ve103b.ts` `POST /:id/void` and `POST /:id/reactivate` (hard-deletes a
-     voided certificate row — BVRLA-reported), and `POST /test-generate`, a
-     "temporary" endpoint that inserts real certificate rows and emails the office.
-   - `duplicates.ts` `POST /merge` — merges two people, soft-deletes one.
-   - `files.ts` `DELETE /delete` — hard R2 delete, including driver documents
-     (normal staff work; a manager gate only when `entity_type = 'drivers'`
-     would be the narrow option).
-   Everything else ungated is reads or everyday desk work; every route that
-   moves money in `costs.ts` is already admin-only. `vehicles.ts` and
-   `hire-forms.ts` were left alone on purpose (mixed audience).
+2. **Per-router `authorize()` pass — DONE 19 Oct 2026.** All 19 `authenticate`-only
+   routers carry `router.use(authorize(...STAFF_ROLES))` (a no-op today, but it keeps
+   them closed if a non-staff login shape is ever added). The six ungated writes the
+   read found are manager-tier since 19 Oct (jon: yes to all six):
+   - `quotes.ts` `PUT /settings` and `DELETE /runs/:runId` — `authorize(...MANAGER_ROLES)`.
+   - `quotes.ts` `PATCH /:id/status` and `/:id/ops-status` — a non-manager asking for
+     `completed` gets 403 pointing at the manager's `POST /:id/complete-override`
+     (`isManagerTier()` in `middleware/auth.ts`, the same rule as `authorize()`).
+   - `ve103b.ts` `POST /:id/void`, `POST /:id/reactivate`, `POST /test-generate` —
+     `authorize(...MANAGER_ROLES)`.
+   - `duplicates.ts` `POST /merge` — `authorize(...MANAGER_ROLES)`.
+   - `files.ts` `DELETE /delete` — the narrow gate: manager-tier only when
+     `entity_type = 'drivers'`; every other file stays everyday desk work.
+   Everything else ungated is reads or everyday desk work; every route that moves
+   money in `costs.ts` is already admin-only. `vehicles.ts` and `hire-forms.ts` were
+   left alone on purpose (mixed audience).
 3. **Tokens in URLs.** Reviewed and left as is. The book-out / check-in pages
    strip `freelancerToken` / `hubToken` with `replaceState` straight after
    redeeming (`modules/vehicles/hooks/useAuth.tsx`); the prep page strips its

@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { ukToday } from '../services/uk-date';
 import { findSimilarOrganisations, findSimilarPeople } from '../services/address-book-similar';
 
@@ -148,7 +148,8 @@ router.get('/', async (_req: AuthRequest, res: Response) => {
 });
 
 // POST /api/duplicates/merge — merge two people records
-router.post('/merge', async (req: AuthRequest, res: Response) => {
+// Manager-tier (B.2, Oct 2026): a merge soft-deletes a person and moves their history.
+router.post('/merge', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const { keep_id, merge_id } = req.body;
 
