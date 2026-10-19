@@ -47,6 +47,10 @@ APP_DIR="${APP_DIR:-/var/www/ooosh-portal}"
 # Not .txt or .log, so the 12-week clean-up at the bottom never deletes it.
 DISK_STATE="$LOG_DIR/disk-used.last"
 
+# Traccar's own log folder (mounted into its container). Overridable from
+# config.env.
+TRACCAR_LOG_DIR="${TRACCAR_LOG_DIR:-/opt/traccar/logs}"
+
 # Log everything to file
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -394,8 +398,7 @@ du -xh / --max-depth=2 2>/dev/null | sort -h | tail -12 | sed 's/^/  /' >> "$REP
 echo "PostgreSQL databases:" >> "$REPORT_FILE"
 sudo -u postgres psql -Atc "SELECT datname || ': ' || pg_size_pretty(pg_database_size(datname)) FROM pg_database WHERE datname NOT IN ('postgres', 'template0', 'template1') ORDER BY pg_database_size(datname) DESC" 2>/dev/null | sed 's/^/  /' >> "$REPORT_FILE"
 
-# journald caps itself (10% of the disk by default), so this levels off
-# rather than growing for ever.
+# Trimmed to 3 months / 2GB under Housekeeping below.
 echo "System logs (journal): $(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[KMGT]' | head -1)" >> "$REPORT_FILE"
 
 # A stopped container keeps everything inside it until it is removed -
@@ -413,6 +416,18 @@ echo "" >> "$REPORT_FILE"
 KERNEL_COUNT=$(dpkg --list | grep -c "^ii  linux-image" || true)
 echo "--- Housekeeping ---" >> "$REPORT_FILE"
 echo "Installed kernel images: $KERNEL_COUNT" >> "$REPORT_FILE"
+
+# Traccar starts a new log file every day (~20MB) and never deletes the old
+# ones: by Oct 2026 its log folder held 3.6GB going back to Feb. Keep 30 days.
+# The positions themselves stay in the database for 12 months.
+TC_LOGS_DELETED=$(find "$TRACCAR_LOG_DIR" -maxdepth 1 -name 'tracker-server.log.*' -mtime +30 -print -delete 2>/dev/null | wc -l)
+echo "Traccar log files over 30 days old deleted: $TC_LOGS_DELETED" >> "$REPORT_FILE"
+
+# System logs: keep 3 months, never more than 2GB. Long enough to find when
+# something that broke silently started (the sync_log bug went unnoticed for
+# weeks); the checks above only read the last 7 days. Runs after them.
+journalctl --vacuum-time=3months --vacuum-size=2G 2>&1 | tail -3
+echo "System logs after trimming to 3 months / 2GB: $(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[KMGT]' | head -1)" >> "$REPORT_FILE"
 echo "" >> "$REPORT_FILE"
 
 # --- Send to Claude and email ---
