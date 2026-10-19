@@ -127,7 +127,7 @@ writing any new billing call).
 ## Card-machine receipts
 
 - **Every path that moves excess money through the physical card machine raises `receipt_required`** — payment, record-preauth, capture, and the excess branch of Money-tab record-payment. `worldpay`/`amex` only, excess only. A new excess-money surface that skips this makes the prompt a lottery.
-- **Worldpay / Amex / PayPal / Lloyds are admin-only for NEW money** (`services/payment-methods.ts` `newPaymentMethodAllowed()`, mirrored in `frontend/src/lib/paymentMethods.ts`; STRIPE-TERMINAL-SPEC §15.1). Refund and reimburse paths keep every method for everyone — never gate them with it. Record Pre-Auth is admin-only.
+- **Stripe (Online) / Worldpay / Amex / PayPal / Lloyds are admin-only for NEW money** (staff: card reader, Wise, cash) (`services/payment-methods.ts` `newPaymentMethodAllowed()`, mirrored in `frontend/src/lib/paymentMethods.ts`; STRIPE-TERMINAL-SPEC §15–16). Refund and reimburse paths keep every method for everyone — never gate them with it. Record Pre-Auth is admin-only.
 - **The flag and `receipt_uploaded_at` move together** — raising the flag on a record with an earlier scan yields flag-set-but-to-do-invisible.
 
 ## Postgres

@@ -1,10 +1,10 @@
 # STRIPE TERMINAL SPEC — in-person card payments driven from OP
 
-**Status:** 🔨 PHASES 0–1 BUILT (16 Oct 2026) — admin-only, test mode first; **§11 is what shipped and
-where it differs from the plan below**. The S700 arrived 16 Oct and is registered (live mode) to the
-Ooosh location. Worldpay contract ends **March 2027**,
-which is the crossover deadline, not the start date. §1 is the settled decisions (jon's 7 Oct answers
-folded in); §9 has one open question left (online extended authorisation).
+**Status:** ✅ CLOSED, 19 Oct 2026 — **all phases built, live, for everyone** (staff + sitters). The card
+reader is THE way to take a card; Worldpay/Amex are admin-only backups until the contract ends **March
+2027** (cancel it then — nothing to build). §11–14 are what each phase shipped and where it differs from
+the plan below; **§15–16 are the final state.** §1 is the settled decisions; §9.5 (can the online portal's
+pre-auth use extended authorisation?) is the one question left — portal work, parked.
 
 **Replaces:** the Worldpay card terminal and the Amex merchant account that runs through it, and
 every manual "I took £X by Worldpay/Amex, as a payment/pre-auth" entry on the Money tab, the excess
@@ -389,16 +389,17 @@ Not "retire Worldpay in March" but **one way of taking a card, now**:
 
 ### 15.1 Built (19 Oct 2026)
 
-jon widened it on the day: **every NEW payment method other than the reader, Stripe (Online), Wise
-(Bank Transfer) and Till (Cash) is admin only** — Worldpay, Amex, PayPal and Lloyds. **Refunds and
+jon widened it on the day: **every NEW payment method other than the reader, Wise (Bank Transfer)
+and Till (Cash) is admin only** — Stripe (Online), Worldpay, Amex, PayPal and Lloyds (Stripe joined in
+§16). **Refunds and
 reimbursements are untouched** (every method, every role), so historic excess money can still go back
 the way it came without jon.
 - One list, mirrored: `backend/src/services/payment-methods.ts` ↔ `frontend/src/lib/paymentMethods.ts`
   (`newPaymentMethodAllowed(method, role)`). Enforced server-side on Money-tab record-payment (service
   accounts exempt — the Wise matcher), the excess payment route and staff-till sales (`kind = 'sale'`
   only; a refund keeps its own tender).
-- Order everywhere: Card reader (when on for the login), Stripe (Online), Wise (Bank Transfer), Till
-  (Cash); then the admin-only ones. "Rolled Over from Previous Hire" stays for everyone on the excess
+- Order everywhere: Card reader (when on for the login), Wise (Bank Transfer), Till (Cash); then the
+  admin-only ones. "Rolled Over from Previous Hire" stays for everyone on the excess
   form — it moves no money.
 - **Record Pre-Auth is admin only** (button hidden, `POST /excess/:id/record-preauth` is `authorize('admin')`).
 - Till labels unchanged ("Stripe", "Bank transfer", "Cash") — they print on receipts and the week's takings.
@@ -407,4 +408,21 @@ the way it came without jon.
   route refuses any other tender.
 - The reader's splash screen (Ooosh logo) is a Stripe Dashboard setting (Terminal → location →
   configuration → Splash screen), not code.
+
+## 16. The close (19 Oct 2026)
+
+- **Stripe (Online) is admin only for new money** too (jon): portal payments record themselves, so
+  typing one in is only ever an admin's recovery for one that failed to record. Removed from the shop
+  till for staff as well. Staff record new money by: Card reader, Wise (Bank Transfer), Till (Cash).
+  The reader's own recording calls `recordPayment()` / `createShopSale()` directly, so the route guard
+  never touches it. When a reader payment fails to record, the screen says an admin will record it
+  (info@ is emailed) — not "record it by hand", which staff no longer can.
+- **Refund labels match the payment options** (labels only — what each option does is unchanged):
+  the Stripe line reads **Stripe - Card reader** (taken on the reader), **Stripe (PayPal)** (the portal
+  tagged the HireHop deposit "(PayPal)" — the money still goes back through Stripe, to their PayPal)
+  or **Stripe (Online)** (`stripeRefundLabel()` in `MoneyTab.tsx`); Wise (Bank Transfer); Till (Cash).
+  Same words on the excess reimburse and "resolved externally" lists.
+- Live for everyone: `stripe_terminal_roles` widened by jon to every staff role + `freelancer`.
+- **Left, deliberately:** §9.5 (online pre-auth with extended authorisation — the portal repo);
+  cancelling Worldpay/Amex in March 2027; Tap to Pay, offline mode and tips (§10).
 

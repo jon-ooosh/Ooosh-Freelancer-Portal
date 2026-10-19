@@ -22,12 +22,12 @@ export const SHOP_TENDERS: ShopTender[] = [
   // switched on for the person at the till (shopTendersFor); a sale with it is created
   // by the reader once the card is approved, never by the till's own Save.
   { key: 'card_reader', label: 'Card reader' },
-  { key: 'stripe_gbp', label: 'Stripe' },
   { key: 'wise_bacs', label: 'Bank transfer' },
   { key: 'till_cash', label: 'Cash' },
   { key: 'invoice_later', label: 'Put it on their bill', needsJob: true },
   // Admin only for new sales (STRIPE-TERMINAL-SPEC §15, services/payment-methods.ts);
   // kept so history and refunds still read right.
+  { key: 'stripe_gbp', label: 'Stripe' },
   { key: 'worldpay', label: 'Card (Worldpay)' },
   { key: 'amex', label: 'Card (AmEx)' },
   { key: 'paypal', label: 'PayPal' },

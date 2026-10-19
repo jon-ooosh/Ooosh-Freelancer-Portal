@@ -9,7 +9,8 @@ recreating the container would have wiped 8 months of history.
 
 After this:
 - Traccar's data is in PostgreSQL database `traccar` (login `traccar`), its config
-  at `/opt/traccar/conf/traccar.xml` on the server, its logs at `/opt/traccar/logs`.
+  at `/opt/traccar/conf/traccar.xml` on the server, its logs at `/opt/traccar/logs`
+  (Traccar never deletes old logs; the Monday maintenance keeps 30 days).
 - The image is pinned as `ooosh/traccar:6.11.1` — never run `traccar/traccar:latest`
   against this database without upgrading deliberately (a newer Traccar migrates
   the schema forward; there is no way back).
@@ -177,6 +178,13 @@ Afterwards it runs every night at 03:10 and logs `Scheduler: Traccar backup comp
 ```bash
 docker rm traccar-h2-old
 rm -rf /root/traccar-data-2026-10-12 /root/traccar-data-final /root/traccar.xml /root/traccar.xml.bak-2026-10-12 /var/tmp/traccar-migrate
+
+# The original Traccar install (Feb 2026, before Docker). Its conf/traccar.xml now
+# holds the PostgreSQL settings, so starting it by mistake would point an older
+# Traccar at the live database. conf/ and logs/ stay: the container uses them.
+systemctl disable --now traccar 2>/dev/null; rm -f /etc/systemd/system/traccar.service; systemctl daemon-reload
+rm -rf /opt/traccar/jre /opt/traccar/lib /opt/traccar/web /opt/traccar/templates /opt/traccar/schema /opt/traccar/data /opt/traccar/tracker-server.jar
+ls /opt/traccar    # conf  logs
 ```
 
 ---

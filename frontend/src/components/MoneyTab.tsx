@@ -25,6 +25,15 @@ import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
 import type { JobExcess, Cost } from '../../../shared/types';
 
+/** The Stripe line on a refund, in the words the money came in by: the reader, a PayPal
+ *  payment through the portal (the portal tags the HireHop deposit "(PayPal)"), or a card
+ *  on the portal. A label only — every one refunds through Stripe. */
+function stripeRefundLabel(dep: { op_source?: string | null; description?: string | null; memo?: string | null } | null | undefined): string {
+  if (dep?.op_source === 'stripe_terminal') return 'Stripe - Card reader';
+  if (/\(PayPal\)/.test(`${dep?.description || ''} ${dep?.memo || ''}`)) return 'Stripe (PayPal)';
+  return 'Stripe (Online)';
+}
+
 // HireHop bank accounts (id → label) for the cross-job apply bank field.
 const HH_BANKS: Array<{ id: number; label: string }> = [
   { id: 265, label: 'Wise — Current Account (BACS)' },
@@ -143,13 +152,13 @@ interface FinancialData {
 }
 
 // Record Payment's methods, in the order staff should reach for them. The card reader
-// goes in front when it's switched on; the last four are admin only for new money
-// (lib/paymentMethods.ts, STRIPE-TERMINAL-SPEC §15). Refund lists are separate and keep
-// every method.
+// goes in front when it's switched on; everything after Till (Cash) is admin only for new
+// money (lib/paymentMethods.ts, STRIPE-TERMINAL-SPEC §15). Refund lists are separate and
+// keep every method.
 const PAYMENT_METHODS_BASE = [
-  { value: 'stripe_gbp', label: 'Stripe (Online)' },
   { value: 'wise_bacs', label: 'Wise (Bank Transfer)' },
   { value: 'till_cash', label: 'Till (Cash)' },
+  { value: 'stripe_gbp', label: 'Stripe (Online)' },
   { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
   { value: 'amex', label: 'Amex' },
   { value: 'paypal', label: 'Paypal' },
@@ -2625,12 +2634,12 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                     disabled={!!refundingDep.stripe_payment_intent}
                   >
-                    <option value="stripe_gbp">{refundingDep.op_source === 'stripe_terminal' ? 'Stripe - Card reader' : 'Stripe GBP'}</option>
+                    <option value="stripe_gbp">{stripeRefundLabel(refundingDep)}</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
-                    <option value="wise_bacs">Wise (BACS)</option>
+                    <option value="wise_bacs">Wise (Bank Transfer)</option>
                     <option value="lloyds_bank">Lloyds Bank</option>
-                    <option value="till_cash">Cash</option>
+                    <option value="till_cash">Till (Cash)</option>
                     <option value="paypal">PayPal</option>
                   </select>
                   {refundingDep.stripe_payment_intent && (
@@ -2853,12 +2862,12 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                     disabled={!!selectedDeposit?.stripe_payment_intent}
                   >
-                    <option value="stripe_gbp">{selectedDeposit?.op_source === 'stripe_terminal' ? 'Stripe - Card reader' : 'Stripe GBP'}</option>
+                    <option value="stripe_gbp">{stripeRefundLabel(selectedDeposit)}</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
-                    <option value="wise_bacs">Wise (BACS)</option>
+                    <option value="wise_bacs">Wise (Bank Transfer)</option>
                     <option value="lloyds_bank">Lloyds Bank</option>
-                    <option value="till_cash">Cash</option>
+                    <option value="till_cash">Till (Cash)</option>
                     <option value="paypal">PayPal</option>
                   </select>
                 </div>

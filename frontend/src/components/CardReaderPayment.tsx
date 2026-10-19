@@ -298,7 +298,9 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
           <div className="font-semibold">{isPreauth ? 'Pre-auth authorised, but OP could not record it' : 'Card taken, but OP could not record it'}</div>
           <div className="text-xs mt-1">
             {session.failure_message} - info@ has been emailed the details.
-            {isPreauth ? ' The amount is held on the card: record it with Record Pre-Auth, or cancel it in Stripe.' : ' Record it by hand (Stripe GBP).'}
+            {isPreauth
+              ? ' The amount is held on the card: an admin will record it (Record Pre-Auth) or cancel it in Stripe.'
+              : " An admin will record it by hand - don't take the card again."}
           </div>
         </div>
       )}
