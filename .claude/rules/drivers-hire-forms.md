@@ -56,6 +56,12 @@ Every Claude gets this wrong on first pass. A hire can have multiple drivers on 
 
 - **`services/referral-alert.ts` `sendReferralAlert` is the single sender** — fired from three paths, deduped by an atomic claim on `referral_alert_sent_at` (released on failure). **Do NOT add a local referral-alert sender** anywhere else.
 - **⚠️ `POST /api/driver-verification/update` must NEVER write `referral_status` / `referral_date`.** The hire-form app sends `referralStatus: 'pending'` unconditionally; whitelisting those columns leaked a false amber "Referred & Waiting" when nobody had referred anything. Same reason `identity_check_status` is stripped.
+- **The hire form may RAISE a referral, never LOWER one.** `/update` drops `requires_referral`
+  of anything but `true` and blank `referral_notes` (`isReferralDowngrade()`). The questionnaire
+  sends `false` whenever every answer is "no", and `isDriverAuthorisedForAgreement` passes any
+  driver with `requires_referral = false` — so until Oct 2026 a driver the insurer had DECLINED
+  could clear their own referral on the next hire form, and a points referral vanished on the next
+  hire while the DVLA check was still in date. Only a staff `resolve-referral` clears one.
 - Status hierarchy: `requires_referral=true` + `referral_status NULL` = red **to-do** (nobody has acted). `'pending'` = amber, staff emailed the insurer. `'approved'`/`'waived'` = green. `'declined'` = red.
 - **`'waived'` counts as authorised everywhere** — same operational effect as approved, distinct only for audit ("we saw the flag, here's why we cleared it without contacting the insurer").
 

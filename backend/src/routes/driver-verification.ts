@@ -820,6 +820,9 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       // Normalise: accept both camelCase and snake_case
       const dbField = camelToSnake[key] || key;
       if (!allowedFields.has(dbField)) continue;
+      // The hire form may RAISE a referral, never lower one — see
+      // isReferralDowngrade() below.
+      if (isReferralDowngrade(dbField, value)) continue;
       let coerced: unknown = value ?? null;
       if (DATE_FIELDS.has(dbField)) {
         coerced = normaliseDate(coerced);
@@ -1560,6 +1563,33 @@ function calculateNextStep(
 // ============================================================================
 // Response builders
 // ============================================================================
+
+/**
+ * True when a hire-form write would LOWER a referral — `requires_referral` set
+ * to anything but true, or `referral_notes` blanked. `/update` drops these.
+ *
+ * The insurance questionnaire sends `requiresReferral: false` and
+ * `referralReasons: null` whenever every answer is "no". Applied as-is, that
+ * cleared a referral the driver already had — from a previous hire's answers,
+ * a DVLA points check, or one the insurer DECLINED — and
+ * `isDriverAuthorisedForAgreement` passes any driver with
+ * `requires_referral = false`. So a declined driver could clear their own
+ * referral by filling in the next hire form with clean answers, and a points
+ * referral vanished on the next hire if the DVLA check was still in date (no
+ * new check runs to raise it again).
+ *
+ * Same rule as the staff licence-record check: a clean answer never clears an
+ * existing referral; only a staff `resolve-referral` does.
+ */
+export function isReferralDowngrade(dbField: string, value: unknown): boolean {
+  if (dbField === 'requires_referral') return value !== true;
+  if (dbField === 'referral_notes') {
+    if (value === null || value === undefined) return true;
+    if (typeof value === 'string') return value.trim() === '';
+    if (Array.isArray(value)) return value.length === 0;
+  }
+  return false;
+}
 
 export function buildDriverStatusResponse(driver: Record<string, unknown>) {
   const analysis = analyzeDocuments(driver);
