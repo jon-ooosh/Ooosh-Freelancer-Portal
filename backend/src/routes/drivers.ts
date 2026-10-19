@@ -21,6 +21,9 @@ import { sendIdentityReviewAlert } from '../services/identity-review';
 import { computeVerificationState } from '../services/driver-verification-state';
 import { unsignedJobNumberSql, findUnsignedDriversForJob } from '../services/driver-hire-progress';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { reconcileJobExcessTopN } from '../services/excess-topn';
+import { applyAccountAutoCover } from '../services/hh-requirement-derivation';
+import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 
 const router = Router();
 router.use(authenticate);
@@ -1224,13 +1227,56 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
 
     // Update excess records if adjusted_excess provided
     if (adjusted_excess != null) {
-      await query(
+      const touched = await query(
         `UPDATE job_excess SET excess_amount_required = $1, excess_calculation_basis = $2, updated_at = NOW()
          WHERE assignment_id IN (
            SELECT id FROM vehicle_hire_assignments WHERE driver_id = $3 AND status IN ('soft', 'confirmed', 'booked_out', 'active')
-         )`,
+         )
+         RETURNING job_id`,
         [adjusted_excess, `Referral ${outcome}: ${notes || 'insurer adjustment'}`, id]
       );
+
+      // Re-check who carries each hire's excess. The figure above lands on
+      // every one of this driver's records, including one marked Covered
+      // (not_required) because another driver on the van carries the charge —
+      // and nothing re-ranked afterwards, so the hire kept charging the other
+      // driver's lower figure (job 16564, Oct 2026: Turner's £1,500 sat on his
+      // Covered record while the hire still asked £1,200 on Boyd's, until staff
+      // raised Boyd's by hand). The same top-N the hire-form POST runs, then
+      // account auto-cover (as that POST does), then the excess card re-derived
+      // from the new amounts. Best-effort — never fails the referral save.
+      //
+      // When a record already holding money stops the re-rank (`blocked`),
+      // change nothing: the real run would zero the Covered record and erase
+      // the insurer's figure, which is what the Money tab's shortfall warning
+      // reads to tell staff a top-up is due.
+      const jobIds = [...new Set(touched.rows.map((r: { job_id: string | null }) => r.job_id).filter(Boolean))] as string[];
+      for (const jobId of jobIds) {
+        try {
+          const preview = await reconcileJobExcessTopN(query, jobId, { dryRun: true });
+          if (preview.blocked.length > 0) {
+            console.warn(
+              `[drivers] Referral excess on job ${jobId} not re-ranked — collected money holds the slot; ` +
+              `hire should total £${preview.correctTotal}, chargeable records total £${preview.chargeableTotal}`,
+            );
+          } else {
+            const topn = await reconcileJobExcessTopN(query, jobId);
+            if (topn.changed) console.log(`[drivers] Top-N reconciled after referral (job ${jobId}): ${topn.summary}`);
+          }
+        } catch (topnErr) {
+          console.error(`[drivers] reconcileJobExcessTopN after referral failed for job ${jobId} (non-fatal):`, topnErr);
+        }
+        try {
+          await applyAccountAutoCover(query, jobId);
+        } catch (coverErr) {
+          console.error(`[drivers] applyAccountAutoCover after referral failed for job ${jobId} (non-fatal):`, coverErr);
+        }
+        try {
+          await syncExcessRequirementStatus(jobId);
+        } catch (syncErr) {
+          console.error(`[drivers] syncExcessRequirementStatus after referral failed for job ${jobId} (non-fatal):`, syncErr);
+        }
+      }
     }
 
     // Audit log

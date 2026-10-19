@@ -369,14 +369,22 @@ export async function buildBriefing(
         ORDER BY rtd.sort_order ASC NULLS LAST, jr.requirement_type ASC`,
       [jobId],
     ),
-    // Excess records on this job (driver-linked or job-level)
+    // Excess records on this job (driver-linked or job-level).
+    //
+    // Skips `not_required` (a driver Covered by another driver's excess on the
+    // same van) and `waived` (nothing owed), as every other excess total does
+    // (the portal's excess-info, the Wise matcher). Either can still carry an
+    // amount: a referral approval writes the insurer's figure onto a Covered
+    // record, and an account auto-cover keeps the amount for reference. Summing
+    // them asked the client for £3,000 on a one-van hire whose excess was
+    // £1,500 (job 16564, Oct 2026).
     query(
       `SELECT je.id, je.excess_status, je.excess_amount_required,
-              je.excess_amount_taken
+              je.excess_amount_taken, je.amount_held
          FROM job_excess je
          LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-        WHERE je.job_id = $1
-           OR vha.job_id = $1`,
+        WHERE (je.job_id = $1 OR vha.job_id = $1)
+          AND je.excess_status NOT IN ('not_required', 'waived')`,
       [jobId],
     ),
     // Drivers linked via vehicle_hire_assignments. Hire-form status is
@@ -485,6 +493,10 @@ export async function buildBriefing(
   for (const row of excessResult.rows as Array<Record<string, unknown>>) {
     excess_required += parseFloat((row.excess_amount_required as string | number | null) as string) || 0;
     excess_taken += parseFloat((row.excess_amount_taken as string | number | null) as string) || 0;
+    // A pre-auth holds its value in amount_held, not excess_amount_taken (0
+    // until capture) — count it, or a client who has pre-authed still reads
+    // as owing the whole excess.
+    excess_taken += parseFloat((row.amount_held as string | number | null) as string) || 0;
   }
 
   // Hire value + deposits from HH billing_list when available. Mirrors the
