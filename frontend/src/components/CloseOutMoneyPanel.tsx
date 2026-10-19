@@ -71,6 +71,8 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const [busy, setBusy] = useState<'plan' | 'run' | 'sent' | 'target' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showWhy, setShowWhy] = useState(false);
+  // Before the hire is back the panel starts collapsed — see `notBack` below.
+  const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   // "Add a charge" — Completed jobs only, managers only (spec §4.6).
   const [charge, setCharge] = useState<{ description: string; amount: string; reason: string } | null>(null);
@@ -134,6 +136,35 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const hasInv = plan.invoices.length > 0;
   const completed = !!plan.fromLog || plan.hhStatus === 11;
   const cancel = plan.cancellation ?? null;
+
+  // Not back yet, but HireHop already has an invoice or a draft on the job — the only
+  // way the panel shows before return. Nothing here can move until the hire is back,
+  // and the full panel's red "hasn't returned yet" read as a pre-hire problem (job
+  // 16564, Oct 2026). So it starts as one grey line saying why it's here; a click opens
+  // the full panel for the rare invoice raised early. `notReturned` is HireHop below
+  // Returned Incomplete (6), so it covers the hire being out as well as not started.
+  // A cancelled job never "returns" and keeps the full panel.
+  const notBack = !cancel && plan.invoice.notReturned;
+  if (notBack && !expanded) {
+    const onJob = [
+      plan.invoices.length === 1 ? `invoice ${plan.invoices[0].number}`
+        : plan.invoices.length > 1 ? `${plan.invoices.length} invoices` : '',
+      inv.draft ? 'a draft invoice' : '',
+    ].filter(Boolean).join(' and ');
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+        <button type="button" onClick={() => setExpanded(true)} aria-expanded={false}
+          className="w-full px-5 py-3 flex flex-wrap items-center gap-2 text-left">
+          <span className="text-lg font-semibold text-gray-900">Invoice</span>
+          <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${TONE.grey.pill}`}>Not back yet</span>
+          <span className="flex-1 min-w-0 text-sm text-gray-600">
+            {onJob ? `HireHop already has ${onJob} on this job. ` : ''}Nothing to do here until the hire is back.
+          </span>
+          <span className="text-sm font-semibold text-ooosh-600">Show ▾</span>
+        </button>
+      </div>
+    );
+  }
 
   const chargeNet = Math.round((parseFloat(charge?.amount || '') || 0) * 100) / 100;
   const raiseCharge = async () => {
@@ -357,6 +388,10 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
             : plan.invoices.length === 1 ? `Invoice ${plan.invoices[0].number}` : plan.invoices.length > 1 ? 'Invoices' : 'Invoice'}
         </h3>
         <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${tone.pill}`}>{view.pill}</span>
+        {notBack && (
+          <button type="button" onClick={() => setExpanded(false)} aria-expanded
+            className="ml-auto text-sm font-semibold text-ooosh-600 hover:text-ooosh-800">Hide ▴</button>
+        )}
       </div>
 
       {/* Five steps */}

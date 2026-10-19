@@ -42,6 +42,7 @@ writing any new billing call).
 - **`pre_auth` holds its value in `amount_held`, NOT `excess_amount_taken`** (0 until capture). Coverage = `excess_amount_taken + amount_held`.
 - **`released` is terminal.** Exclude it from every "find an existing non-terminal record to reuse / absorb / re-arm" lookup, alongside `reimbursed` / `fully_claimed` / `rolled_over` / `not_required` / `waived`. Missing it lets a late duplicate event resurrect a released hold and re-surface stale money in Total Held.
 - **`waived` must be excluded from EVERY absorb lookup too** — one query that missed it silently un-waived a stub back to £1,200 when the driver's hire form landed. **One exception:** a stub waived by account auto-cover (`[Auto-covered by account]` in notes) IS absorbed — auto-cover re-covers it straight after. Skipping it left the stub beside a new driver record and doubled the job's excess (job 16833, Oct 2026).
+- **Any total of a job's excess must skip `not_required` and `waived` — a Covered record can still carry an amount.** A referral approval writes the insurer's figure onto a Covered sibling, and account auto-cover keeps its amount for reference. The pre-hire review summed both and asked a one-van client for £3,000 instead of £1,500 (job 16564, Oct 2026). Count `amount_held` as collected too (pre-auths).
 - **"Held on account" is an ATTRIBUTE (`held_on_account`), not a status.** The record stays `taken`. `rolled_over` is set ONLY by a genuine apply-forward to a child hire — it is excluded from `v_excess_held` on the assumption the cash moved.
 - **A rolled-over record's `payment_date` is when the rollover was applied, not when cash arrived.** Render "Carried over" and name the origin hire.
 
@@ -51,6 +52,7 @@ writing any new billing call).
 - **NEVER LOWER A DELIBERATELY-SET AMOUNT.** Rank and price on `effective = max(drivers.calculated_excess_amount, job_excess.excess_amount_required)`. An insurer surcharge or staff edit lives on the job record and must not be re-priced back to the £1,200 floor.
 - **Terminal records still OCCUPY slots** and count against `vanCount`. Filtering them out of the candidate query makes their slot look empty and promotes a covered sibling onto a settled hire (produced 71 false positives when it was got wrong).
 - `dryRun: true` is read-only by construction, not by BEGIN/ROLLBACK — the pool has been saturated before.
+- **Top-N runs after every write that changes a driver's excess**: hire-form POST, quick-assign, and `POST /drivers/:id/resolve-referral` with `adjusted_excess` (Oct 2026). The referral path runs it only when a dry run reports nothing `blocked` — a real run would zero the Covered record and erase the insurer's figure that the Money tab's shortfall warning reads.
 
 ## HireHop money mechanics
 

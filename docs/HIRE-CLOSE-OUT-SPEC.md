@@ -658,6 +658,14 @@ second press while the first is still running.
 
 **Step colours** (`closeOutView()`): grey to come · blue in hand · amber in hand but worth a
 look (money still owed on a Completed job) · red only when OP refuses to go on · green done.
+
+**Before the hire is back the panel is collapsed (19 Oct 2026).** It only shows before return
+when HireHop already has an invoice or a draft on the job, and its full form read red ("hasn't
+returned yet") — a pre-hire problem that wasn't one (job 16564: a stray draft in HireHop). While
+`plan.invoice.notReturned` (HireHop below 6, so on hire as well as not started) it is one grey
+line — "Invoice · Not back yet · HireHop already has a draft invoice on this job" — and "Show"
+opens the full panel as before, including a manager's "Create invoice anyway". Cancelled jobs
+keep the full panel. Frontend only (`CloseOutMoneyPanel.tsx`); `closeOutView()` is unchanged.
 "Paid in full" shows "Nothing paid yet" / "£x paid · £y owing" while money is owed.
 
 **The first invoice reads like the quote (13 Oct 2026).** jon: "include all owing items" (`all: 1`)
