@@ -10,6 +10,7 @@
  * already in the basket — a dozen calls a day at this volume.
  */
 import { Router, Response } from 'express';
+import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import hhBroker from '../services/hirehop-broker';
@@ -222,6 +223,11 @@ router.post('/quote', async (req: AuthRequest, res: Response) => {
 
 router.post('/sales', async (req: AuthRequest, res: Response) => {
   try {
+    // Worldpay / Amex / PayPal are admin only (STRIPE-TERMINAL-SPEC §15).
+    if (req.body?.kind === 'sale' && !newPaymentMethodAllowed(req.body?.tender, req.user!.role)) {
+      res.status(403).json({ error: ADMIN_ONLY_METHOD_MESSAGE });
+      return;
+    }
     // A shift belongs only to sales taken on the sitter till (portal routes).
     const result = await createShopSale({ ...req.body, shiftId: null }, {
       id: req.user!.id,

@@ -1442,7 +1442,7 @@ router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest
   try {
     const gate = await tillGate(req, res);
     if (!gate) return;
-    const { shopTendersFor } = await import('../services/shop-tenders');
+    const { sitterTendersFor } = await import('../services/shop-tenders');
     const { getCacheAge } = await import('../services/shop-stock');
     const { getTerminalMode } = await import('../services/stripe-terminal');
     const cardReader = await sitterCardReader(req.portalUser!.email);
@@ -1457,7 +1457,7 @@ router.get('/studio-sitter/shifts/:date/till/context', async (req: PortalRequest
       jobs: (detail?.jobs ?? []).map((j: any) => ({
         job_id: j.job_id, hh_job_number: j.hh_job_number, label: j.label, rooms: j.rooms ?? [],
       })),
-      tenders: shopTendersFor(cardReader),
+      tenders: sitterTendersFor(cardReader),
       // The card reader, when switched on for this sitter — and whether it's the simulator.
       card_reader: cardReader ? { enabled: true, mode: await getTerminalMode() } : { enabled: false },
       stock_as_of: (await getCacheAge()).refreshedAt,
@@ -1526,10 +1526,10 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
       return;
     }
 
-    const { SHOP_TENDERS } = await import('../services/shop-tenders');
+    const { SITTER_TENDER_KEYS } = await import('../services/shop-tenders');
     const tender = String(req.body?.tender || '');
     const jobId = req.body?.jobId ? String(req.body.jobId) : null;
-    if (!SHOP_TENDERS.some((t) => t.key === tender)) { res.status(400).json({ error: 'Pick how they paid.' }); return; }
+    if (!SITTER_TENDER_KEYS.includes(tender)) { res.status(400).json({ error: 'Pick how they paid.' }); return; }
 
     // Only tonight's bands — a sitter can't put a sale on some other job.
     if (jobId) {

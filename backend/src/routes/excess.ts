@@ -24,6 +24,7 @@ import { attachExcessReceipt } from '../services/excess-receipt';
 import { syncSavedRowToXero, sendXeroSyncFailedAlert, type XeroSyncResult } from '../services/hh-xero-sync';
 import { ukToday } from '../services/uk-date';
 import { recordPreauthHold, PreauthRecordError } from '../services/excess-preauth';
+import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
 import { stripeClientForPaymentIntent } from '../services/stripe-terminal';
 
 const router = Router();
@@ -1062,6 +1063,10 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
   try {
     const { id } = req.params;
     const { total_collected, amount: bodyAmount, method, reference, notes, push_to_hirehop, acknowledge_chain_break, source_excess_id } = req.body;
+    if (!newPaymentMethodAllowed(method, req.user?.role)) {
+      res.status(403).json({ error: ADMIN_ONLY_METHOD_MESSAGE });
+      return;
+    }
 
     // Look up the existing record so we can compute the delta (new money) when
     // the caller passes total_collected (absolute set), and so we have
@@ -1509,7 +1514,9 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
 //     two columns, so a hold recorded WITHOUT the PI still reads as "unrecorded"
 //     and re-alerts info@ every morning until the hold expires.
 
-router.post('/:id/record-preauth', validate(recordPreauthSchema), async (req: AuthRequest, res: Response) => {
+// Admin only (jon, 19 Oct 2026 — STRIPE-TERMINAL-SPEC §15): a pre-auth is taken on the card
+// reader now; recording one taken elsewhere (Worldpay / Amex) is jon's backup path.
+router.post('/:id/record-preauth', authorize('admin'), validate(recordPreauthSchema), async (req: AuthRequest, res: Response) => {
   // The body lives in services/excess-preauth.ts recordPreauthHold() — shared with the
   // card reader (services/stripe-terminal.ts), so a hold taken on the S700 lands on the
   // record exactly as one recorded here does.

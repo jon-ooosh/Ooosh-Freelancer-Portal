@@ -20,6 +20,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { newPaymentMethodAllowed } from '../lib/paymentMethods';
 import { hasManagerRole } from '../lib/roles';
 import { jobDisplayOrgName } from '../lib/jobOrgName';
 import ShopWeekPanel from '../components/shop/ShopWeekPanel';
@@ -192,7 +193,10 @@ export default function ShopTillPage() {
   const [searching, setSearching] = useState(false);
   const [basket, setBasket] = useState<BasketLine[]>([]);
   // Card is what almost every walk-in pays with, so it is the default.
-  const [tender, setTender] = useState('worldpay');
+  // Without the reader: Worldpay for an admin, Cash for everyone else — Worldpay,
+  // Amex and PayPal are admin only for new sales (STRIPE-TERMINAL-SPEC §15).
+  const noReaderTender = user?.role === 'admin' ? 'worldpay' : 'till_cash';
+  const [tender, setTender] = useState(noReaderTender);
   const [notes, setNotes] = useState('');
   // The card reader (STRIPE-TERMINAL-SPEC §14): offered as a payment method only
   // when switched on for this login; picking it sends the sale to the reader, and
@@ -266,7 +270,7 @@ export default function ShopTillPage() {
     setJobSearchOpen(false);
     setJobTerm('');
     setJobResults([]);
-    if (!j && tender === 'invoice_later') setTender(readerAccess?.enabled ? 'card_reader' : 'worldpay');
+    if (!j && tender === 'invoice_later') setTender(readerAccess?.enabled ? 'card_reader' : noReaderTender);
   };
 
   // Is the card reader switched on for this login? If so it is the default card.
@@ -274,11 +278,14 @@ export default function ShopTillPage() {
     api.get<{ data: CardReaderAccess }>('/terminal/access')
       .then(r => {
         setReaderAccess(r.data);
-        if (r.data.enabled) setTender(t => (t === 'worldpay' ? 'card_reader' : t));
+        if (r.data.enabled) setTender(t => (t === noReaderTender ? 'card_reader' : t));
       })
       .catch(() => setReaderAccess({ enabled: false, mode: 'test' }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const tenderOptions = TENDERS.filter(t => (!t.needsJob || route) && (t.key !== 'card_reader' || readerAccess?.enabled));
+  const tenderOptions = TENDERS.filter(t => (!t.needsJob || route)
+    && (t.key !== 'card_reader' || readerAccess?.enabled)
+    && newPaymentMethodAllowed(t.key, user?.role));
 
   // A band's job: offer its contacts in the receipt box (THE contact pool, server-side).
   useEffect(() => {

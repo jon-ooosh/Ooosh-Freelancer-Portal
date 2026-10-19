@@ -45,6 +45,7 @@ import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { getPaymentPortalLink } from '../services/payment-portal-link';
 import { recordPayment } from '../services/record-payment';
+import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
 import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment } from '../services/wise-incoming';
 import { ukToday } from '../services/uk-date';
 import { fireArrivalHook } from '../services/close-out-arrival';
@@ -2355,6 +2356,12 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
   // `authenticateFlexible` sets req.user.id to an api_keys row id — NOT a users id — for
   // API-key callers, and assigns role 'service' through an `as any`.
   const isServiceAccount = !!req.user && (req.user.role as string) === 'service';
+  // Staff record new money by the reader, Stripe, Wise or cash; the rest is admin only
+  // (STRIPE-TERMINAL-SPEC §15). Automation records what actually arrived, unchecked.
+  if (!isServiceAccount && !newPaymentMethodAllowed(req.body.payment_method, req.user?.role)) {
+    res.status(403).json({ error: ADMIN_ONLY_METHOD_MESSAGE });
+    return;
+  }
   const result = await recordPayment(jobId as string, req.body, {
     userId: req.user!.id,
     isServiceAccount,
