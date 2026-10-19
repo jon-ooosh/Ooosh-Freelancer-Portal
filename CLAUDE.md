@@ -262,6 +262,12 @@ once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`serv
 confirmed; the portal repo refuses before any Stripe session). Phase 2 (`part_of` groups) is not built — **spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
 
+**DRAFT, Oct 2026:** `docs/STAFF-LOGIN-SECURITY-SPEC.md` — two-factor for every OP staff
+login (passkeys primary, email code fallback, trusted devices for 90 days so a person's own
+laptop and phone are challenged once each), per-account slowdown, `system@` made unable to
+log in, and the warehouse iPad's PIN session gaining a scoped till with "sold by". §1 is
+settled, §5 the phases, §7 the questions still open. Nothing built yet.
+
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
 Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
