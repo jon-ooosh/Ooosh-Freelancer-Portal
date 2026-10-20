@@ -334,6 +334,7 @@ existing definition:
 | Is this driver identity-authorised? | `services/identity-review.ts` `isIdentityAuthorised()` |
 | Is this driver cleared for paperwork? | `hire-forms.ts` `isDriverAuthorisedForAgreement()` |
 | Is this driver signed for THIS hire? | `services/driver-hire-progress.ts` |
+| Something went wrong for a driver on the hire form — record it, email info@? | `services/hire-form-errors.ts` (`POST /driver-verification/telemetry/client-error`, table `hire_form_error_events`). Critical only emails, one per driver per page per hour, 10 an hour in all; there is deliberately no screen |
 | Who receives this client email? | `services/money-emails.ts` `resolveClientEmailTarget()` |
 | Who receives a PCN email? | `services/pcn-recipient.ts` |
 | Who could we contact on this job? | `services/job-contact-candidates.ts` |

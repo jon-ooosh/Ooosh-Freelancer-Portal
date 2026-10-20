@@ -28,6 +28,7 @@ import { sendDvaCheckAlert } from '../services/dva-check-alert';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { signFor, verifyFor } from '../services/tokens';
+import { recordHireFormError } from '../services/hire-form-errors';
 
 const router = Router();
 
@@ -1888,6 +1889,50 @@ router.post('/telemetry/monday-fallback', authenticateApiKey, async (req: Reques
   } catch (error) {
     console.error('[driver-verification] Fallback telemetry error:', error);
     res.status(500).json({ error: 'Failed to record fallback event' });
+  }
+});
+
+
+// ============================================================================
+// POST /api/driver-verification/telemetry/client-error
+// The hire form app's error reports (its log-client-error function, and the
+// session check's "would reject" lines). Every report is stored; a CRITICAL
+// one emails info@. See services/hire-form-errors.ts.
+// ============================================================================
+
+const clientErrorSchema = z.object({
+  severity: z.enum(['critical', 'warning', 'info']).catch('warning'),
+  page: z.string().min(1).max(2000),
+  error: z.string().min(1).max(10000),
+  email: z.string().max(2000).nullish(),
+  url: z.string().max(4000).nullish(),
+  userAgent: z.string().max(4000).nullish(),
+  additionalInfo: z.string().max(10000).nullish(),
+  timestamp: z.string().max(100).nullish(),
+});
+
+router.post('/telemetry/client-error', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = clientErrorSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid payload' });
+      return;
+    }
+    const b = parsed.data;
+    const result = await recordHireFormError({
+      severity: b.severity,
+      page: b.page.slice(0, 100),
+      error: b.error.slice(0, 2000),
+      email: b.email ? b.email.slice(0, 255) : null,
+      url: b.url ? b.url.slice(0, 500) : null,
+      userAgent: b.userAgent ? b.userAgent.slice(0, 500) : null,
+      additionalInfo: b.additionalInfo ? b.additionalInfo.slice(0, 2000) : null,
+      timestamp: b.timestamp || null,
+    });
+    res.json({ data: { logged: true, alerted: result.alerted } });
+  } catch (error) {
+    console.error('[driver-verification] client-error telemetry failed:', error);
+    res.status(500).json({ error: 'Failed to record error' });
   }
 });
 
