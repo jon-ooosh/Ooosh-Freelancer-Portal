@@ -30,6 +30,8 @@ import {
   normaliseAddress,
   processResendEvent,
   eventDetail,
+  whatToDo,
+  isSoftBounce,
   type ResendEmailEvent,
 } from '../email-delivery';
 
@@ -99,6 +101,23 @@ describe('jobNumberForLog', () => {
   it('is null when there is no plain job number', () => {
     expect(realJobNumberForLog('J-1234', 'Your Ooosh Tours verification code')).toBeNull();
     expect(realJobNumberForLog(undefined, 'Driver hire form')).toBeNull();
+  });
+});
+
+describe('soft-bounce advice', () => {
+  it('fits the subtype — re-sending a too-large or rejected email would bounce again', () => {
+    expect(whatToDo('soft_bounced', 'MailboxFull')).toMatch(/inbox is full/);
+    expect(whatToDo('soft_bounced', 'MessageTooLarge')).toMatch(/will bounce again/);
+    expect(whatToDo('soft_bounced', 'AttachmentRejected')).toMatch(/will bounce again/);
+    expect(whatToDo('soft_bounced', 'ContentRejected')).toMatch(/spam filter/);
+    expect(whatToDo('soft_bounced', 'General')).toMatch(/whether it arrived/);
+  });
+  it('knows a soft bounce by Resend\'s type', () => {
+    expect(isSoftBounce({ bounce: { type: 'Transient' } })).toBe(true);
+    expect(isSoftBounce({ bounce: { type: 'Temporary' } })).toBe(true);
+    expect(isSoftBounce({ bounce: { type: 'Permanent' } })).toBe(false);
+    expect(isSoftBounce({ bounce: { type: 'Undetermined' } })).toBe(false);
+    expect(isSoftBounce({})).toBe(false);
   });
 });
 
@@ -240,6 +259,50 @@ describe('processResendEvent — a failure', () => {
     await processResendEvent({ type: 'email.failed', data: { email_id: 're_9', to: ['a@b.com'], subject: 'x', failed: { reason: 'reached_daily_quota' } } }, 'msg_5');
     expect(has(calls, /email_address_problems/)).toBe(false);
     expect(mockSendRaw).toHaveBeenCalledTimes(1);
+  });
+
+  // City of Stars, 18 Oct 2026: "Delivered" then "Bounced — Transient / General"
+  // in the same minute. Resend doesn't block the address and an out-of-office
+  // reply looks like this, so: alert with soft-bounce words, never flag.
+  const softBounce: ResendEmailEvent = {
+    type: 'email.bounced',
+    data: {
+      email_id: 're_soft', created_at: '2026-10-18T12:11:00.000Z', to: ['hello@cityofstarschoir.co.uk'],
+      subject: 'Booking Confirmed — City of Stars Choir (#16800)',
+      bounce: { type: 'Transient', subType: 'General', message: 'The recipient\'s email provider sent a general bounce message.' },
+    },
+  };
+
+  it('a soft bounce alerts in its own words and does not flag the address', async () => {
+    const calls = fakeDb({ loggedTo: 'hello@cityofstarschoir.co.uk', jobNumber: 16800 });
+    await processResendEvent(softBounce, 'msg_soft');
+    expect(has(calls, /email_address_problems/)).toBe(false);
+
+    const bell = calls.find((c) => /INSERT INTO notifications/.test(c.sql))!;
+    expect(bell.params[1]).toBe('Email may not have reached hello@cityofstarschoir.co.uk (job #16800)');
+    expect(bell.params[2]).toMatch(/out-of-office/);
+    expect(bell.params[2]).not.toMatch(/suppression list/);
+
+    const note = calls.find((c) => /INSERT INTO interactions/.test(c.sql))!;
+    expect(note.params[0]).toMatch(/^Email may NOT have reached hello@cityofstarschoir\.co\.uk:/);
+
+    const sent = mockSendRaw.mock.calls[0][0];
+    expect(sent.subject).toBe('Email may not have arrived: hello@cityofstarschoir.co.uk (job #16800)');
+    expect(sent.html).toMatch(/may not have reached/);
+  });
+
+  it('a second soft bounce to the same address on the same job today only notes the timeline', async () => {
+    const calls = fakeDb({ loggedTo: 'hello@cityofstarschoir.co.uk', jobNumber: 16800, recentlyAlerted: true });
+    await processResendEvent(softBounce, 'msg_soft2');
+    expect(has(calls, /INSERT INTO interactions/)).toBe(true);
+    expect(has(calls, /INSERT INTO notifications/)).toBe(false);
+    expect(mockSendRaw).not.toHaveBeenCalled();
+  });
+
+  it('a hard bounce still flags the address', async () => {
+    const calls = fakeDb({ loggedTo: 'x@y.com', jobNumber: null, problemOpen: null });
+    await processResendEvent({ ...softBounce, data: { ...softBounce.data, to: ['x@y.com'], bounce: { type: 'Permanent', subType: 'General' } } }, 'msg_hard');
+    expect(has(calls, /INSERT INTO email_address_problems/)).toBe(true);
   });
 
   it('ignores event types it does not act on', async () => {
