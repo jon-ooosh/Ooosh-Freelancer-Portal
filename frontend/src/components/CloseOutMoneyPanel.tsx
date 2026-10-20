@@ -24,7 +24,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import {
   CloseOutPlan, CloseOutResult, loadCloseOutPlan, publishCloseOutPlan, subscribeCloseOutPlan,
-  closeOutView, shortLine, TONE, money, fmtDay, apiError,
+  closeOutView, shortLine, TONE, money, fmtDay, fmtWhen, apiError, lastInvoiceStop,
 } from '../lib/closeOutPlan';
 
 const PENNY = 0.005;
@@ -362,6 +362,12 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     return <button key={a.label} onClick={a.onClick} disabled={busy != null} className={cls}>{busy === 'run' && (a.kind === 'primary' || a.kind === 'amber') ? 'Working…' : a.label}</button>;
   };
 
+  // A press that stopped while raising the invoice, its draft still in HireHop. Kept on show
+  // until a later press gets past it or the draft goes — not just for the session that pressed
+  // (job 16724). Hidden while this session's own result is showing, which says the same thing.
+  const stop = result ? null : lastInvoiceStop(plan);
+  const stopMeta = stop ? [fmtWhen(stop.created_at), stop.user_name].filter(Boolean).join(', ') : '';
+
   const paidSoFar = plan.invoices.reduce((s, i) => s + (i.gross - i.owing), 0);
   const allInXero = plan.invoices.every(i => i.inXero);
   const stepDetail = (i: number): string => {
@@ -490,6 +496,14 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
                 <b className={`mr-1 ${ok ? 'text-green-600' : 'text-amber-600'}`}>{ok ? '✓' : '!'}</b>{text}
               </span>
             ))}
+          </div>
+        )}
+        {stop && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+            <div className="font-semibold">
+              The last press stopped{stopMeta ? ` (${stopMeta})` : ''}
+            </div>
+            <div className="mt-0.5">{stop.detail}</div>
           </div>
         )}
         {notice && <p className="text-sm text-gray-700">{notice}</p>}

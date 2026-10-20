@@ -458,6 +458,37 @@ async function pasteSupplyList(rep: CloseReporter, hhJobNumber: number, draftId:
   await rep.log('invoice_draft', true, `Draft invoice ${draftId} laid out like the quote: ${lines.length} lines pasted from the supply list.`);
 }
 
+/**
+ * The penny check's stop, worded for how the draft came to be. HireHop shows a "Quoted net
+ * total" on BOTH its Supplying and Billing tabs, and the check compares the draft with the
+ * Billing one — so "HireHop's quoted net is £158.13" read as a contradiction beside a
+ * Supplying tab saying £197.50 (job 16724, 20 Oct 2026: a per-Hour line with a hand-typed
+ * £45 that Billing priced as 3 × £1.88). A pasted draft carries the Supplying tab's figures,
+ * so a mismatch on one means HireHop prices a line differently on its two tabs.
+ */
+export function pennyStopMessage(p: {
+  draftId: number; draftNet: number; othersNet: number; accrued: number; retryHint: string;
+  /** pasted = the supply list onto an empty draft · adopted = a draft already on the job · drafted = "all owing items". */
+  how: 'pasted' | 'adopted' | 'drafted';
+}): string {
+  const apart = gbp(round2(Math.abs(p.draftNet + p.othersNet - p.accrued)));
+  const billing = `HireHop's Billing tab says the job comes to ${gbp(p.accrued)} ex VAT (${apart} apart)`;
+  const withOthers = p.othersNet >= PENNY ? ` (${gbp(round2(p.draftNet + p.othersNet))} with the ${gbp(p.othersNet)} already invoiced)` : '';
+  const stopped = 'Stopped at the draft; nothing has gone to Xero.';
+  const twoTabs = 'HireHop is pricing a line differently on its two tabs (usually an hourly or daily line with a hand-typed price)';
+  if (p.how === 'pasted') {
+    return `Draft ${p.draftId} has the Supplying tab's lines, ${gbp(p.draftNet)} ex VAT, but ${billing}. ${twoTabs}. ${stopped} `
+      + `Fix that line in Supplying until the Billing tab's "Quoted net total" agrees, delete draft ${p.draftId} in HireHop, then ${p.retryHint}.`;
+  }
+  if (p.how === 'adopted') {
+    return `Draft ${p.draftId}, already on the job, is ${gbp(p.draftNet)} ex VAT${withOthers}, but ${billing}. ${stopped} `
+      + `If the draft matches the Supplying tab's "Quoted net total", ${twoTabs}: fix that line. `
+      + `If not, change the job's lines in HireHop to agree with the draft, or delete draft ${p.draftId}. Then ${p.retryHint}.`;
+  }
+  return `Draft ${p.draftId} is ${gbp(p.draftNet)} ex VAT${withOthers}, but ${billing}. ${stopped} `
+    + `Check the job's lines in HireHop, delete draft ${p.draftId}, then ${p.retryHint}.`;
+}
+
 async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boolean): Promise<string> {
   const plan = await buildPlan(job);
   const inv = plan.invoice;
@@ -512,8 +543,10 @@ async function raiseSteps(job: JobRow, rep: CloseReporter, allowNotReturned: boo
   const othersNet = round2(invoiceRows(rows).filter((r) => !isProformaRow(r) && !isChargeOnlyInvoice(r) && idOf(r) !== draftId).reduce((s, r) => s + (invoiceNet(r) ?? 0), 0));
   const accrued = accruedNetOf(rows);
   if (Math.abs(round2(draftNet + othersNet) - accrued) >= PENNY) {
-    await rep.stop('invoice_penny', `Draft ${draftId} is ${gbp(draftNet)} ex VAT and ${gbp(othersNet)} is already invoiced, but HireHop's quoted net is ${gbp(accrued)} — `
-      + `they differ by ${gbp(round2(accrued - draftNet - othersNet))}. Stopped at the draft; nothing has gone to Xero. Check the job's lines in HireHop, then ${rep.retryHint}.`);
+    await rep.stop('invoice_penny', pennyStopMessage({
+      draftId, draftNet, othersNet, accrued, retryHint: rep.retryHint,
+      how: inv.draft ? 'adopted' : paste ? 'pasted' : 'drafted',
+    }));
   }
   await rep.log('invoice_penny', true, `Draft ${draftId}: ${gbp(draftNet)} ex VAT, ${gbp(draftGross)} inc VAT — matches HireHop's quoted total.`);
 
