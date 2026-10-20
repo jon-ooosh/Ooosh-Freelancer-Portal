@@ -95,6 +95,15 @@ function defaultRoute(c: TillContext): string | null | undefined {
 }
 
 /**
+ * Where every sale starts: the card reader when it's on for this sitter (almost
+ * every sale is card, jon Oct 2026), else nothing, so they pick. A wrong card-reader
+ * default shows itself (the reader waits for a card); a wrong Cash one would record.
+ */
+function defaultTender(c: TillContext): string | null {
+  return c.tenders.some((t) => t.key === 'card_reader') ? 'card_reader' : null
+}
+
+/**
  * Colour roles, so the checkout reads at a glance on a small screen: the total
  * bar is dark, a CHOICE is an outlined ✓ (not a filled block), and the one
  * button that records the sale is green. Filled-blue-everything made the
@@ -190,6 +199,7 @@ export default function SitterTillPage() {
       if (!r.ok) { setLoadError(data.error || 'Could not open the till.'); return }
       setCtx(data)
       setJobId(defaultRoute(data))
+      setTender(defaultTender(data))
     } catch {
       setLoadError('Could not reach the till. Check your signal and try again.')
     }
@@ -273,12 +283,12 @@ export default function SitterTillPage() {
   }
 
   // "Their bill" only exists once a band is picked; going back to walk-in
-  // clears it rather than leaving an impossible choice selected.
+  // returns to the default rather than leaving an impossible choice selected.
   const pickJob = (id: string | null | undefined) => {
     // A receipt address belongs to whoever the sale is for — switching clears it.
     if (id !== jobId) setReceiptTo('')
     setJobId(id)
-    if (!id && ctx?.tenders.find((t) => t.key === tender)?.needsJob) setTender(null)
+    if (!id && ctx?.tenders.find((t) => t.key === tender)?.needsJob) setTender(defaultTender(ctx))
   }
 
   const total = round2(basket.reduce((s, l) => s + lineGross(l), 0))
@@ -358,7 +368,7 @@ export default function SitterTillPage() {
       readerReceipt.current = ''
       setReceiptTo('')
       setBasket([])
-      setTender(null)
+      setTender(ctx ? defaultTender(ctx) : null)
       setJobId(ctx ? defaultRoute(ctx) : undefined)
       setReader(null)
       loadSales()
@@ -399,7 +409,7 @@ export default function SitterTillPage() {
       setDone((tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`) + changeNote + receiptNote)
       setReceiptTo('')
       setBasket([])
-      setTender(null)
+      setTender(ctx ? defaultTender(ctx) : null)
       setJobId(ctx ? defaultRoute(ctx) : undefined)
       loadSales()
       searchRef.current?.focus()
