@@ -93,6 +93,10 @@ interface DriverDetail {
   has_accidents: boolean;
   has_insurance_issues: boolean;
   has_driving_ban: boolean;
+  // Migration 298 — null means the driver last answered the old question set.
+  has_recent_convictions: boolean | null;
+  has_fault_claims: boolean | null;
+  address_mismatch: boolean | null;
   additional_details: string | null;
   insurance_status: string | null;
   overall_status: string | null;
@@ -584,6 +588,8 @@ const FIELD_LABELS: Record<string, string> = {
   passport_valid_until: 'Passport Valid Until', referral_notes: 'Referral Notes',
   has_disability: 'Disability', has_convictions: 'Convictions', has_prosecution: 'Prosecution',
   has_accidents: 'Accidents', has_insurance_issues: 'Insurance Issues', has_driving_ban: 'Driving Ban',
+  has_recent_convictions: 'Convictions (5 yrs)', has_fault_claims: '2+ At-Fault/Open Claims',
+  address_mismatch: 'Address Differs From Licence',
   additional_details: 'Additional Details', insurance_status: 'Insurance Status',
 };
 
@@ -820,6 +826,8 @@ function DriverDetailContent() {
       has_accidents: driver.has_accidents,
       has_insurance_issues: driver.has_insurance_issues,
       has_driving_ban: driver.has_driving_ban,
+      has_recent_convictions: driver.has_recent_convictions,
+      has_fault_claims: driver.has_fault_claims,
       additional_details: driver.additional_details || '',
       insurance_status: driver.insurance_status || '',
     });
@@ -1216,9 +1224,13 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
   const reasons: string[] = [];
   if (driver.referral_notes) reasons.push(driver.referral_notes);
   if (driver.has_disability) reasons.push('Declared disability/medical condition');
-  if (driver.has_convictions) reasons.push('Declared motoring convictions');
+  if (driver.has_convictions) reasons.push('Declared a serious motoring conviction');
   if (driver.has_prosecution) reasons.push('Declared pending prosecution');
-  if (driver.has_accidents) reasons.push('Declared previous accidents');
+  // Since migration 298 an accident or claim is only a declaration; the
+  // referral is has_fault_claims. Older answers (NULL) keep the old reading.
+  // Same rule as backend services/referral-alert.ts.
+  if (driver.has_fault_claims) reasons.push('Declared more than one at-fault or open claim (5 years)');
+  else if (driver.has_accidents && driver.has_fault_claims == null) reasons.push('Declared previous accidents');
   if (driver.has_insurance_issues) reasons.push('Declared insurance issues (declined/cancelled/special terms)');
   if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
   if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
@@ -1987,13 +1999,17 @@ function DetailsTab({
   const homeAddress = driver.address_full ||
     [driver.address_line1, driver.address_line2, driver.city, driver.postcode].filter(Boolean).join(', ');
 
+  // Order follows the hire form. The two "(5 yrs)" declarations never refer on
+  // their own (migration 298); the line under each is the one that does.
   const insuranceFields = [
-    { key: 'has_disability', label: 'Disability' },
-    { key: 'has_convictions', label: 'Convictions' },
-    { key: 'has_prosecution', label: 'Prosecution' },
-    { key: 'has_accidents', label: 'Accidents' },
+    { key: 'has_disability', label: 'Medical restriction' },
+    { key: 'has_recent_convictions', label: 'Convictions (5 yrs)' },
+    { key: 'has_convictions', label: 'Serious conviction' },
+    { key: 'has_prosecution', label: 'Prosecution pending' },
+    { key: 'has_accidents', label: 'Accidents/claims (5 yrs)' },
+    { key: 'has_fault_claims', label: '2+ at fault or open' },
     { key: 'has_insurance_issues', label: 'Insurance Issues' },
-    { key: 'has_driving_ban', label: 'Driving Ban' },
+    { key: 'has_driving_ban', label: 'Ban/suspension' },
   ];
 
   return (
@@ -2059,7 +2075,7 @@ function DetailsTab({
                 </label>
               ) : (
                 <>
-                  <span className={`w-2 h-2 rounded-full ${(driver as any)[key] ? 'bg-red-500' : 'bg-green-500'}`} />
+                  <span className={`w-2 h-2 rounded-full ${(driver as any)[key] === true ? 'bg-red-500' : (driver as any)[key] === false ? 'bg-green-500' : 'bg-gray-300'}`} title={(driver as any)[key] == null ? 'Not asked' : undefined} />
                   <span className="text-gray-700">{label}</span>
                 </>
               )}
@@ -2153,6 +2169,11 @@ function DetailsTab({
             )}
             {!editing && homeAddress && driver.licence_address && addressesDiffer(homeAddress, driver.licence_address) && (
               <p className="text-xs text-amber-600 mt-1">Address differs from home address</p>
+            )}
+            {!editing && driver.address_mismatch === true && (
+              <p className="text-xs text-amber-600 mt-1">
+                Driver said their proofs of address show a different address, so a UK licence holder also needs a passport check
+              </p>
             )}
           </div>
         </div>

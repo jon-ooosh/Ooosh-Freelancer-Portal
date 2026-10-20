@@ -391,6 +391,8 @@ router.post('/send-confirmation', authenticateApiKey, async (req: Request, res: 
         hasAccidents: formatYesNo(iq.hasAccidents),
         hasInsuranceIssues: formatYesNo(iq.hasInsuranceIssues),
         hasDrivingBan: formatYesNo(iq.hasDrivingBan),
+        hasRecentConvictions: formatYesNo(iq.hasRecentConvictions),
+        hasFaultClaims: formatYesNo(iq.hasFaultClaims),
         additionalDetails: (iq.additionalDetails as string) || '',
         docLicence: docStatus(docs.license),
         docPoa1: docStatus(docs.poa1),
@@ -537,7 +539,12 @@ router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res
       return;
     }
 
-    const nextStep = calculateNextStep(analysis, currentStep, addressMismatch);
+    // The request's flag is what THIS browser tab knows; the stored one is
+    // what the driver told us, even in another tab or on another device
+    // (migration 298). Until it was stored, a UK driver who came back from
+    // the email link after their POAs was routed straight past the passport.
+    const effectiveMismatch = addressMismatch || driver?.address_mismatch === true;
+    const nextStep = calculateNextStep(analysis, currentStep, effectiveMismatch);
 
     res.json({
       success: true,
@@ -710,6 +717,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       hasAccidents: 'has_accidents',
       hasInsuranceIssues: 'has_insurance_issues',
       hasDrivingBan: 'has_driving_ban',
+      // Migration 298 — declarations that don't refer, and the address choice.
+      hasRecentConvictions: 'has_recent_convictions',
+      hasFaultClaims: 'has_fault_claims',
+      addressMismatch: 'address_mismatch',
       additionalDetails: 'additional_details',
       insuranceStatus: 'insurance_status',
       overallStatus: 'overall_status',
@@ -749,6 +760,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'dvla_check_code', 'dvla_check_date',
       'has_disability', 'has_convictions', 'has_prosecution', 'has_accidents',
       'has_insurance_issues', 'has_driving_ban', 'additional_details',
+      'has_recent_convictions', 'has_fault_claims', 'address_mismatch',
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
       'idenfy_overall', 'idenfy_face_result', 'idenfy_doc_result',
@@ -1442,11 +1454,19 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
  * Routing engine — ported from get-next-step.js v2.6
  * Determines the next step a driver should complete based on document validity.
  */
-function calculateNextStep(
+export function calculateNextStep(
   analysis: DocumentAnalysis,
   currentStep: string,
   addressMismatch: boolean
 ): { step: string; reason: string } {
+  // A UK driver whose proofs of address show a different address from their
+  // licence also supplies a passport (agreed with the broker). Order is
+  // POA1 → POA2 → passport → DVLA. Every branch that can reach DVLA or
+  // signature checks this — until Oct 2026 four of them didn't, and sent a
+  // mismatch driver to signature with no passport.
+  const mismatchNeedsPassport = analysis.isUkDriver && addressMismatch && !analysis.passport.valid;
+  const mismatchPassport = { step: 'passport-upload', reason: 'Address differs from licence - passport required' };
+
   // 1. All valid → signature (but UK mismatch needs passport too)
   if (analysis.allValid) {
     if (analysis.isUkDriver && addressMismatch && !analysis.passport.valid) {
@@ -1464,6 +1484,7 @@ function calculateNextStep(
     if (!analysis.poa1.valid || !analysis.poa2.valid) {
       return { step: 'poa-instructions', reason: 'Proof of address documents required' };
     }
+    if (mismatchNeedsPassport) return mismatchPassport;
     if (analysis.isUkDriver && !analysis.dvla.valid) {
       return { step: 'dvla-check', reason: 'DVLA check required' };
     }
@@ -1478,6 +1499,7 @@ function calculateNextStep(
     if (!analysis.poa1.valid || !analysis.poa2.valid) {
       return { step: 'poa-instructions', reason: 'Licence verified - proof of address required' };
     }
+    if (mismatchNeedsPassport) return mismatchPassport;
     if (analysis.isUkDriver && !analysis.dvla.valid) {
       return { step: 'dvla-check', reason: 'POAs verified - DVLA check required' };
     }
@@ -1523,6 +1545,7 @@ function calculateNextStep(
   // 6. DVLA in progress
   if (currentStep === 'dvla-processing' || currentStep === 'dvla-check') {
     if (analysis.dvla.valid) {
+      if (mismatchNeedsPassport) return mismatchPassport;
       return { step: 'signature', reason: 'DVLA check complete' };
     }
     return { step: 'dvla-check', reason: 'DVLA check in progress' };
@@ -1530,6 +1553,7 @@ function calculateNextStep(
 
   // 7. DVLA complete
   if (currentStep === 'dvla-complete') {
+    if (mismatchNeedsPassport) return mismatchPassport;
     return { step: 'signature', reason: 'DVLA check verified - ready for signature' };
   }
 
@@ -1700,6 +1724,11 @@ export function buildDriverStatusResponse(driver: Record<string, unknown>) {
       hasAccidents: (driver.has_accidents as boolean) || false,
       hasInsuranceIssues: (driver.has_insurance_issues as boolean) || false,
       hasDrivingBan: (driver.has_driving_ban as boolean) || false,
+      // NULL-preserving, unlike the six above: null means the driver last
+      // answered the OLD question set (migration 298), and the hire form uses
+      // that to avoid pre-filling old answers under the new wording.
+      hasRecentConvictions: typeof driver.has_recent_convictions === 'boolean' ? driver.has_recent_convictions : null,
+      hasFaultClaims: typeof driver.has_fault_claims === 'boolean' ? driver.has_fault_claims : null,
       additionalDetails: (driver.additional_details as string) || '',
     },
     boardAId: driver.id || null,
@@ -1722,6 +1751,9 @@ export function buildDriverStatusResponse(driver: Record<string, unknown>) {
     // driver who reloads sees "we're checking this" rather than being asked
     // for the code again. Their own code, inside their own session.
     dvlaCheckCode: (driver.dvla_check_code as string) || null,
+    // The driver said their proofs of address differ from their licence
+    // (true), match it (false), or was never asked (null). Migration 298.
+    addressMismatch: typeof driver.address_mismatch === 'boolean' ? driver.address_mismatch : null,
   };
 }
 
@@ -1761,6 +1793,7 @@ function buildNewDriverStatus(email: string) {
     dvlaEndorsements: null,
     dvlaCalculatedExcess: null,
     dvlaCheckCode: null,
+    addressMismatch: null,
   };
 }
 

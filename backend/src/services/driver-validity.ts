@@ -356,9 +356,10 @@ export interface OutstandingDocuments {
  * windows it is derived from rather than being written out a second time.
  *
  * NOT covered: the extra passport a UK driver needs when their proof-of-address
- * doesn't match their licence address. That mismatch is detected in the
- * driver's browser and passed into the router per request (`addressMismatch`);
- * nothing on the driver row records it, so no server-side caller can see it.
+ * doesn't match their licence address. The hire-form router handles it (the
+ * driver's choice is stored as `drivers.address_mismatch` since migration 298,
+ * Oct 2026, and every `calculateNextStep` branch checks it). This function and
+ * its callers (the unsigned-form nudge) don't read it yet.
  */
 export function outstandingDocuments(v: DriverValidity): OutstandingDocuments {
   return {

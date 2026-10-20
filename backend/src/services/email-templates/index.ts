@@ -141,12 +141,14 @@ const templates: Record<string, EmailTemplate> = {
         {{#if showDvlaPoints}}<li>Licence points: <strong>{{dvlaPoints}}</strong></li>{{/if}}
         {{#if showDvlaPoints}}<li>Endorsements: <strong>{{dvlaEndorsements}}</strong></li>{{/if}}
         {{#if showDvlaPoints}}<li>Insurance excess (per incident): <strong>{{dvlaExcess}}</strong></li>{{/if}}
-        <li>Disability/medical conditions: <strong>{{hasDisability}}</strong></li>
-        <li>Motoring convictions: <strong>{{hasConvictions}}</strong></li>
-        <li>Pending prosecutions: <strong>{{hasProsecution}}</strong></li>
-        <li>Accidents (last 3 years): <strong>{{hasAccidents}}</strong></li>
-        <li>Insurance issues: <strong>{{hasInsuranceIssues}}</strong></li>
-        <li>Driving bans: <strong>{{hasDrivingBan}}</strong></li>
+        <li>Told not to drive, or driving restricted (medical): <strong>{{hasDisability}}</strong></li>
+        <li>Motoring convictions (last 5 years): <strong>{{hasRecentConvictions}}</strong></li>
+        <li>Serious motoring convictions: <strong>{{hasConvictions}}</strong></li>
+        <li>Prosecution pending: <strong>{{hasProsecution}}</strong></li>
+        <li>Accidents or claims (last 5 years): <strong>{{hasAccidents}}</strong></li>
+        <li>More than one at fault or still open: <strong>{{hasFaultClaims}}</strong></li>
+        <li>Refused motor insurance or special terms: <strong>{{hasInsuranceIssues}}</strong></li>
+        <li>Banned, disqualified or suspended (last 5 years): <strong>{{hasDrivingBan}}</strong></li>
       </ul>
       {{#if additionalDetails}}<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;"><strong>Additional details:</strong> {{additionalDetails}}</p>{{/if}}
 

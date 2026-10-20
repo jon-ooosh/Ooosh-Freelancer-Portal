@@ -259,7 +259,7 @@ export async function buildClaimPdf(
     const endorsements = Array.isArray(driver.licence_endorsements) ? (driver.licence_endorsements as unknown[]) : [];
     const fromHire = {
       accidents: !!driver.has_accidents,
-      convictions: !!driver.has_convictions || !!driver.has_prosecution
+      convictions: !!driver.has_convictions || !!driver.has_prosecution || !!driver.has_recent_convictions
         || Number(driver.licence_points || 0) > 0 || endorsements.length > 0,
       disability: !!driver.has_disability,
     };

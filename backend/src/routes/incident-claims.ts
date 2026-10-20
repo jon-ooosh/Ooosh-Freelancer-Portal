@@ -402,7 +402,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     let hireFormDeclarations: Record<string, unknown> | null = null;
     if (claim.driver_id) {
       const dr = await query(
-        `SELECT has_accidents, has_convictions, has_prosecution, has_disability,
+        `SELECT has_accidents, has_convictions, has_prosecution, has_recent_convictions, has_disability,
                 licence_points, licence_endorsements, additional_details
          FROM drivers WHERE id = $1`,
         [claim.driver_id],
@@ -412,8 +412,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         const endorsements = Array.isArray(x.licence_endorsements) ? x.licence_endorsements : [];
         hireFormDeclarations = {
           accidents: !!x.has_accidents,
-          // (b) combined: serious convictions OR pending prosecution OR any points / endorsements.
-          convictions: !!x.has_convictions || !!x.has_prosecution || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
+          // (b) combined: serious convictions OR pending prosecution OR any conviction in the
+          // last 5 years (has_recent_convictions, migration 298) OR any points / endorsements.
+          convictions: !!x.has_convictions || !!x.has_prosecution || !!x.has_recent_convictions || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
           disability: !!x.has_disability,
           licence_points: x.licence_points ?? null,
           endorsements,
