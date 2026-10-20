@@ -167,6 +167,22 @@ interface Totals {
 
 const money = (n: number) => `£${n.toFixed(2)}`;
 
+/** Coins and notes a customer is likely to hand over for cash (same as the sitter till). */
+const CASH_DENOMINATIONS = [2, 5, 10, 20, 50];
+
+/** The next three above the total: £1.50 → £2, £5, £10; £18 → £20, £50; over £50 → none (Other). */
+function likelyTendered(total: number): number[] {
+  return CASH_DENOMINATIONS.filter(d => d > total).slice(0, 3);
+}
+
+/** A typed amount ("25", "£25.50", "1,000") as pounds, or null if it isn't one. */
+function parseCashAmount(v: string): number | null {
+  const cleaned = v.replace(/[£,\s]/g, '');
+  if (cleaned === '') return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+}
+
 /** How the money physically goes back — OP can't do this part until Stripe. */
 function refundHow(tender: string | null, amount: number): string {
   const a = money(Math.abs(amount));
@@ -232,6 +248,11 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
   // Amex and PayPal are admin only for new sales (STRIPE-TERMINAL-SPEC §15).
   const noReaderTender = user?.role === 'admin' ? 'worldpay' : 'till_cash';
   const [tender, setTender] = useState(noReaderTender);
+  // Cash change helper (as on the sitter till): what the customer handed over, so
+  // the till can work out the change. Optional and display only (never sent or
+  // saved). 'exact' follows the total if the basket or a price changes.
+  const [cashGiven, setCashGiven] = useState<'exact' | 'other' | number | null>(null);
+  const [cashOther, setCashOther] = useState('');
   const [notes, setNotes] = useState('');
   // The card reader (STRIPE-TERMINAL-SPEC §14): offered as a payment method only
   // when switched on for this login; picking it sends the sale to the reader, and
@@ -245,7 +266,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
   const [availChecked, setAvailChecked] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<{ gross: number; id: string; kind: string; receipt?: string } | null>(null);
+  const [saved, setSaved] = useState<{ gross: number; id: string; kind: string; receipt?: string; change?: number } | null>(null);
   // Receipts (step 11). The checkout's optional box, the one Recent Sales row
   // whose receipt form is open, and the refund form's refund-receipt box.
   const [receiptTo, setReceiptTo] = useState('');
@@ -598,6 +619,17 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
 
   const overDiscountCap = totals.discount > 0 && totals.discountPct > maxDiscountPct + 0.001;
 
+  // A different payment method or mode, or an emptied basket, starts the cash helper afresh.
+  const basketEmpty = basket.length === 0;
+  useEffect(() => { setCashGiven(null); setCashOther(''); }, [tender, mode, basketEmpty]);
+  const cashGivenAmount = mode !== 'sale' || tender !== 'till_cash' || cashGiven === null
+    ? null
+    : cashGiven === 'exact' ? totals.gross
+    : cashGiven === 'other' ? parseCashAmount(cashOther)
+    : cashGiven;
+  /** Positive = change to give; negative = they've handed over too little. */
+  const cashChange = cashGivenAmount === null ? null : Math.round((cashGivenAmount - totals.gross) * 100) / 100;
+
   /** The till's basket as the backend takes it. */
   const basketLines = () => basket.map(l => ({
     hhStockId: l.stock.hhStockId,
@@ -654,7 +686,9 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
         receipt = err ? undefined : receiptTo.trim();
         if (err) setError(`Sale recorded, but the receipt didn't send: ${err}`);
       }
-      setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind, receipt });
+      // Repeat the change, in case they pressed Take before counting it out.
+      const change = mode === 'sale' && tender === 'till_cash' && cashChange !== null && cashChange > 0 ? cashChange : undefined;
+      setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind, receipt, change });
       setBasket([]);
       setNotes('');
       setReceiptTo('');
@@ -978,7 +1012,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
         <div className="mb-4 rounded border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">
           {saved.kind === 'consumption'
             ? 'Stock use recorded. Next one?'
-            : `Recorded — ${money(saved.gross)}${saved.receipt ? `, receipt sent to ${saved.receipt}` : ''}. Next one?`}
+            : `Recorded — ${money(saved.gross)}${saved.receipt ? `, receipt sent to ${saved.receipt}` : ''}.${saved.change ? ` Give ${money(saved.change)} change.` : ''} Next one?`}
         </div>
       )}
       {error && (
@@ -1261,6 +1295,59 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
                 <p className="mb-3 text-xs text-gray-600">
                   Nothing taken now — it goes on job #{route.hhJobNumber} and onto their invoice.
                 </p>
+              )}
+
+              {/* Cash: pick what they handed over and the till works out the change.
+                  Optional (Take works without it) and display only. */}
+              {tender === 'till_cash' && (
+                <div className="mb-3">
+                  <label className="mb-1 block text-xs font-medium text-gray-700">They gave you (optional)</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {([
+                      ['exact', 'Exact'],
+                      ...likelyTendered(totals.gross).map(d => [d, `£${d}`] as [number, string]),
+                      ['other', 'Other'],
+                    ] as ['exact' | 'other' | number, string][]).map(([value, label]) => (
+                      <button
+                        key={String(value)}
+                        type="button"
+                        onClick={() => setCashGiven(value)}
+                        className={`rounded border-2 px-3 py-1.5 text-xs font-medium ${
+                          cashGiven === value ? 'border-ooosh-600 bg-ooosh-50 text-ooosh-800' : 'border-transparent bg-gray-100 text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        {cashGiven === value ? '✓ ' : ''}{label}
+                      </button>
+                    ))}
+                  </div>
+                  {cashGiven === 'other' && (
+                    <input
+                      autoFocus
+                      inputMode="decimal"
+                      autoComplete="off"
+                      value={cashOther}
+                      onChange={e => setCashOther(e.target.value)}
+                      placeholder="How much did they give you? e.g. 25"
+                      className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                    />
+                  )}
+                  {cashChange !== null && cashChange > 0 && (
+                    <div className="mt-2 flex items-baseline justify-between rounded border-2 border-gray-900 px-3 py-2">
+                      <span className="text-sm font-semibold text-gray-900">Change to give</span>
+                      <span className="text-xl font-bold tabular-nums text-gray-900">{money(cashChange)}</span>
+                    </div>
+                  )}
+                  {cashChange === 0 && (
+                    <p className="mt-2 rounded border-2 border-gray-900 px-3 py-2 text-sm font-semibold text-gray-900">
+                      No change to give.
+                    </p>
+                  )}
+                  {cashChange !== null && cashChange < 0 && (
+                    <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      That&rsquo;s {money(-cashChange)} short of the {money(totals.gross)} total.
+                    </p>
+                  )}
+                </div>
               )}
             </>
           )}
