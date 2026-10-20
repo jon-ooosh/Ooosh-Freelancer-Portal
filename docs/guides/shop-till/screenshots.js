@@ -292,7 +292,7 @@ async function main() {
   await openTill(page, { contacts: [{ email: 'sam@example.com', label: 'Sam Hart' }] })
   await fillBasket(page)
   await page.locator('button', { hasText: BAND_2.label }).click()
-  await page.locator('button', { hasText: /^Card reader$/ }).click()
+  await page.locator('button', { hasText: /^(✓ )?Card reader$/ }).click()   // already the default
   await page.locator('button', { hasText: 'Sam Hart' }).click()
   const receiptBlock = page.locator('div', { has: page.getByText('Email a receipt?') }).last()
   await snap(page, '11-receipt', [receiptBlock, page.locator('button', { hasText: 'on card reader' })])
