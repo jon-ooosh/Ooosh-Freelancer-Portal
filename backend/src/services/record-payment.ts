@@ -23,6 +23,7 @@ import {
 } from './confirmation-hooks';
 import { fireEventTriggeredReminders } from './requirement-close-sweep';
 import { afterOptionConfirmed } from './option-confirm';
+import { PRE_CONFIRMED_STATUSES } from './pipeline-stage';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
 import { fireArrivalHook } from './close-out-arrival';
 
@@ -227,7 +228,9 @@ export async function recordPayment(
         const currentStatus = statusResult.rows[0]?.pipeline_status;
         const hhNum = statusResult.rows[0]?.hh_job_number;
 
-        if (currentStatus && ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(currentStatus)) {
+        // The shared list includes 'paused' — a paused enquiry the client pays for
+        // is won like any other (job 16256 stayed Paused while HireHop said Booked).
+        if (currentStatus && PRE_CONFIRMED_STATUSES.includes(currentStatus)) {
           // Move to confirmed in OP
           // confirmed_at is stamped here too. Until now only the pipeline
           // route set it, so every job won by a payment had a NULL
