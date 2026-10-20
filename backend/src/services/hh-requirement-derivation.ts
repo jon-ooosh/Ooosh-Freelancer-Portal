@@ -518,6 +518,23 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       const reason = isInternal ? 'Internal' : 'Van & Driver';
       await suspendRequirement(client, jobId, 'excess', reason);
       await suspendJobExcess(client, jobId, reason);
+    } else {
+      // No vehicle on HireHop at all (the van came off the quote). The stale
+      // sweep below already removes / flags the hire_forms and excess CARDS,
+      // but until Oct 2026 nothing touched the job_excess record, so the
+      // Money tab and the dispatch banner kept asking for £1,200 on a job
+      // with no van (job 16460). Suspend uncollected records exactly as the
+      // V&D / Internal toggles do — reversible, marker-gated, money-guarded —
+      // so a van re-added during quote churn restores them. Records holding
+      // real money or a live hold are left as they are and flagged instead.
+      const suspended = await suspendJobExcess(client, jobId, 'No vehicle');
+      if (suspended > 0) {
+        result.requirementsUpdated.push(`excess_record (${suspended} suspended — no vehicle on HH)`);
+      }
+      const flagged = await flagChargedExcessWithoutVehicle(client, jobId);
+      if (flagged > 0) {
+        result.mismatchesFlagged.push(`excess_record (${flagged} with money taken/held but no vehicle on HH)`);
+      }
     }
 
     // ── Backline ──
@@ -1066,7 +1083,7 @@ async function upsertAutoRequirement(
  * as internal. Instead of deleting, marks it as suspended so data persists
  * and can be restored if the toggle was accidental.
  */
-type SuspensionReason = 'Van & Driver' | 'Internal';
+type SuspensionReason = 'Van & Driver' | 'Internal' | 'No vehicle';
 
 async function suspendRequirement(client: any, jobId: string, requirementType: string, reason: SuspensionReason): Promise<void> {
   // Suspend the pre_hire requirement of this type regardless of how it was
@@ -1248,41 +1265,74 @@ export async function applyAccountAutoCover(
  * (`amount_taken=0`, status `needed`/`pending`); records holding payments or
  * pre-auth holds are left alone — staff resolves those manually because real
  * money has moved (or is held).
+ *
+ * 'No vehicle' (Oct 2026) differs in two ways. It also covers DRIVER-linked
+ * records — a hire form submitted before the van came off leaves one per
+ * driver, and the dispatch banner reads those per assignment — and it keeps
+ * `excess_amount_required` as it was, so a restore puts the driver's own
+ * figure straight back (a waived record may carry an amount; every total
+ * already skips waived). The stub is re-priced on restore regardless.
+ * Returns the number of records suspended.
  */
-async function suspendJobExcess(client: any, jobId: string, reason: SuspensionReason): Promise<void> {
-  await client.query(
+async function suspendJobExcess(client: any, jobId: string, reason: SuspensionReason): Promise<number> {
+  const noVehicle = reason === 'No vehicle';
+  const res = await client.query(
     `UPDATE job_excess
      SET excess_status = 'waived',
-         excess_amount_required = 0,
+         excess_amount_required = CASE WHEN $3::boolean THEN excess_amount_required ELSE 0 END,
          notes = COALESCE(NULLIF(notes, '') || E'\n', '') || $2,
          updated_at = NOW()
      WHERE job_id = $1
-       AND assignment_id IS NULL
+       AND ($3::boolean OR assignment_id IS NULL)
        AND COALESCE(excess_amount_taken, 0) = 0
+       AND COALESCE(amount_held, 0) = 0
        AND excess_status IN ('needed', 'pending')
        AND (notes IS NULL OR notes NOT LIKE '%[Suspended:%')`,
-    [jobId, `[Suspended: ${reason}]`]
+    [jobId, `[Suspended: ${reason}]`, noVehicle]
   );
+  return res.rowCount || 0;
+}
+
+/** The note stamped on a record that holds real money (taken or a live
+ *  pre-auth) on a job that no longer has a vehicle on HireHop. Never
+ *  auto-resolved — "never silently move money". Idempotent: the note is the
+ *  marker, so the 30-minute sync doesn't append it again. */
+const NO_VEHICLE_MONEY_NOTE =
+  '⚠️ No vehicle on HireHop now, but excess money is already taken or held on this record. Review required.';
+
+async function flagChargedExcessWithoutVehicle(client: any, jobId: string): Promise<number> {
+  const res = await client.query(
+    `UPDATE job_excess
+     SET notes = COALESCE(NULLIF(notes, '') || E'\n', '') || $2,
+         updated_at = NOW()
+     WHERE job_id = $1
+       AND excess_status IN ('taken', 'partially_paid', 'pre_auth')
+       AND (notes IS NULL OR notes NOT LIKE '%' || $2 || '%')`,
+    [jobId, NO_VEHICLE_MONEY_NOTE]
+  );
+  return res.rowCount || 0;
 }
 
 /**
- * Restore a job_excess record that was suspended (V&D or Internal). Flips
- * status back to `needed` and strips the marker; the existing updatableExcess
- * logic in the SDH branch then sees a `needed` record with stale (zeroed)
- * required amount and recomputes it via the standard £1,200 ×
- * self_drive_count path. Marker-gated so we never touch records that were
- * genuinely staff-waived.
+ * Restore a job_excess record that was suspended (V&D, Internal or No
+ * vehicle). Flips status back to `needed` and strips the marker; the existing
+ * updatableExcess logic in the SDH branch then sees a `needed` stub with a
+ * stale (zeroed) required amount and recomputes it via the standard £1,200 ×
+ * self_drive_count path. A driver-linked record (only ever suspended by 'No
+ * vehicle', which keeps its amount) comes back at the driver's own figure.
+ * Marker-gated so we never touch records that were genuinely staff-waived.
  */
 async function restoreJobExcessFromSuspension(client: any, jobId: string): Promise<void> {
   await client.query(
     `UPDATE job_excess
      SET excess_status = 'needed',
          notes = NULLIF(TRIM(BOTH E'\n ' FROM
-           REPLACE(REPLACE(COALESCE(notes, ''), '[Suspended: Van & Driver]', ''), '[Suspended: Internal]', '')), ''),
+           REPLACE(REPLACE(REPLACE(COALESCE(notes, ''),
+             '[Suspended: Van & Driver]', ''), '[Suspended: Internal]', ''), '[Suspended: No vehicle]', '')), ''),
          updated_at = NOW()
      WHERE job_id = $1
-       AND assignment_id IS NULL
-       AND (notes LIKE '%[Suspended: Van & Driver]%' OR notes LIKE '%[Suspended: Internal]%')
+       AND (notes LIKE '%[Suspended: Van & Driver]%' OR notes LIKE '%[Suspended: Internal]%'
+            OR notes LIKE '%[Suspended: No vehicle]%')
        AND COALESCE(excess_amount_taken, 0) = 0`,
     [jobId]
   );
