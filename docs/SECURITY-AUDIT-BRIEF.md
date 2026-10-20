@@ -138,6 +138,21 @@ everywhere. Both portal-secret guards were seen to refuse startup.
    Everything else ungated is reads or everyday desk work; every route that moves
    money in `costs.ts` is already admin-only. `vehicles.ts` and `hire-forms.ts` were
    left alone on purpose (mixed audience).
+4. **The payment portal's API key is scoped — 20 Oct 2026** (portal audit B.6,
+   `netlify-functions` `docs/SECURITY-AUDIT-BRIEF.md`). `authenticateFlexible` in
+   `routes/money.ts` gave any valid `api_keys` row `role: 'service'`, and every money route
+   without an `authorize()` accepted it — `refund-payment` (Stripe refund + HireHop + Xero),
+   `record-payment`, `summary`, `payments`, `payment-link`, `sync-values`. A leaked Netlify
+   env was money out. Now `api_keys.permissions` is honoured (`middleware/api-key.ts`
+   `apiKeyMayCall()`): a row naming `money:job-lookup`, `money:excess-info`,
+   `money:stripe-event`, `money:payment-event` reaches exactly those; `money:*` or an EMPTY
+   row (the column default, every key today) stays unrestricted so nothing changes until the
+   portal's row is set — do that once the code is live:
+   `UPDATE api_keys SET permissions = '["money:job-lookup","money:excess-info","money:stripe-event","money:payment-event"]' WHERE service = 'payment_portal';`
+   (check `SELECT name, service, key_prefix, permissions FROM api_keys WHERE is_active` first
+   — the portal's row is the one whose prefix matches Netlify's `OP_API_KEY`). The
+   `webhooks.ts` `external/status-transition` key check is untouched.
+
 3. **Tokens in URLs.** Reviewed and left as is. The book-out / check-in pages
    strip `freelancerToken` / `hubToken` with `replaceState` straight after
    redeeming (`modules/vehicles/hooks/useAuth.tsx`); the prep page strips its
