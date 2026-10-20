@@ -106,6 +106,22 @@ const choice = (on: boolean) =>
     : 'border-2 border-transparent bg-gray-100 text-gray-800'
 const round2 = (n: number) => Math.round(n * 100) / 100
 
+/** Coins and notes a customer is likely to hand over for a cash sale. */
+const CASH_DENOMINATIONS = [2, 5, 10, 20, 50]
+
+/** The next three above the total: £1.50 → £2, £5, £10; £18 → £20, £50; over £50 → none (Other). */
+function likelyTendered(total: number): number[] {
+  return CASH_DENOMINATIONS.filter((d) => d > total).slice(0, 3)
+}
+
+/** A typed amount ("25", "£25.50", "1,000") as pounds, or null if it isn't one. */
+function parseAmount(v: string): number | null {
+  const cleaned = v.replace(/[£,\s]/g, '')
+  if (cleaned === '') return null
+  const n = Number(cleaned)
+  return Number.isFinite(n) && n > 0 ? round2(n) : null
+}
+
 /**
  * Mirrors the office till and the server: VAT per LINE, rounded per line — a
  * basket can mix VAT rates. The server re-prices everything anyway; this is
@@ -139,6 +155,11 @@ export default function SitterTillPage() {
   // the wrong band's bill.
   const [jobId, setJobId] = useState<string | null | undefined>(undefined)
   const [tender, setTender] = useState<string | null>(null)
+  // Cash change helper: what the customer handed over, so the till can work out
+  // the change. Optional and display only (never sent or saved). 'exact' follows
+  // the total if the basket changes.
+  const [cashGiven, setCashGiven] = useState<'exact' | 'other' | number | null>(null)
+  const [cashOther, setCashOther] = useState('')
   const [saving, setSaving] = useState(false)
   // The card reader: the basket goes to the reader, and the sale is made once the
   // card is approved — so a declined card leaves nothing behind.
@@ -241,6 +262,16 @@ export default function SitterTillPage() {
       .map((l) => (l.item.hhStockId === id ? { ...l, qty: l.qty + delta } : l))
       .filter((l) => l.qty > 0))
 
+  // An emptied basket (a sale taken, or everything removed) starts the cash helper afresh.
+  useEffect(() => {
+    if (basket.length === 0) { setCashGiven(null); setCashOther('') }
+  }, [basket.length])
+
+  const pickTender = (key: string) => {
+    if (key !== tender) { setCashGiven(null); setCashOther('') }
+    setTender(key)
+  }
+
   // "Their bill" only exists once a band is picked; going back to walk-in
   // clears it rather than leaving an impossible choice selected.
   const pickJob = (id: string | null | undefined) => {
@@ -251,6 +282,13 @@ export default function SitterTillPage() {
   }
 
   const total = round2(basket.reduce((s, l) => s + lineGross(l), 0))
+  const cashGivenAmount = tender !== 'till_cash' || cashGiven === null
+    ? null
+    : cashGiven === 'exact' ? total
+    : cashGiven === 'other' ? parseAmount(cashOther)
+    : cashGiven
+  /** Positive = change to give; negative = they've handed over too little. */
+  const cashChange = cashGivenAmount === null ? null : round2(cashGivenAmount - total)
   const tenderObj = ctx?.tenders.find((t) => t.key === tender)
   const canTake = !!ctx?.open && basket.length > 0 && !!tender && jobId !== undefined && !saving
 
@@ -354,7 +392,11 @@ export default function SitterTillPage() {
         if (err) setError(`Sale recorded, but the receipt didn’t send: ${err}`)
         else receiptNote = ` Receipt sent to ${receiptTo.trim()}.`
       }
-      setDone((tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`) + receiptNote)
+      // Repeat the change, in case they tapped Take before counting it out.
+      const changeNote = tender === 'till_cash' && cashChange !== null && cashChange > 0
+        ? ` Give ${money(cashChange)} change.`
+        : ''
+      setDone((tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`) + changeNote + receiptNote)
       setReceiptTo('')
       setBasket([])
       setTender(null)
@@ -570,7 +612,7 @@ export default function SitterTillPage() {
                     {ctx.tenders.filter((t) => !t.needsJob || jobId).map((t) => (
                       <button
                         key={t.key}
-                        onClick={() => setTender(t.key)}
+                        onClick={() => pickTender(t.key)}
                         className={`rounded-lg px-3 py-3 text-sm font-medium ${choice(tender === t.key)} ${t.needsJob ? 'col-span-2' : ''}`}
                       >
                         {tender === t.key ? '✓ ' : ''}{t.label}
@@ -579,6 +621,70 @@ export default function SitterTillPage() {
                     ))}
                   </div>
                 </div>
+
+                {/* Cash: tap what they handed over and the till works out the change.
+                    Optional (Take works without it) and display only. */}
+                {tender === 'till_cash' && (
+                  <div>
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      They gave you <span className="font-normal normal-case">(optional)</span>
+                    </p>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setCashGiven('exact')}
+                        className={`rounded-lg px-2 py-3 text-sm font-medium ${choice(cashGiven === 'exact')}`}
+                      >
+                        {cashGiven === 'exact' ? '✓ ' : ''}Exact
+                      </button>
+                      {likelyTendered(total).map((d) => (
+                        <button
+                          key={d}
+                          type="button"
+                          onClick={() => setCashGiven(d)}
+                          className={`rounded-lg px-2 py-3 text-sm font-medium ${choice(cashGiven === d)}`}
+                        >
+                          {cashGiven === d ? '✓ ' : ''}£{d}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => setCashGiven('other')}
+                        className={`rounded-lg px-2 py-3 text-sm font-medium ${choice(cashGiven === 'other')}`}
+                      >
+                        {cashGiven === 'other' ? '✓ ' : ''}Other
+                      </button>
+                    </div>
+                    {cashGiven === 'other' && (
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        autoComplete="off"
+                        autoFocus
+                        value={cashOther}
+                        onChange={(e) => setCashOther(e.target.value)}
+                        placeholder="How much did they give you? e.g. 25"
+                        className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-3 text-base focus:border-ooosh-500 focus:outline-none"
+                      />
+                    )}
+                    {cashChange !== null && cashChange > 0 && (
+                      <div className="mt-2 flex items-baseline justify-between rounded-lg border-2 border-gray-900 px-4 py-3">
+                        <span className="text-sm font-semibold text-gray-900">Change to give</span>
+                        <span className="text-2xl font-bold tabular-nums text-gray-900">{money(cashChange)}</span>
+                      </div>
+                    )}
+                    {cashChange === 0 && (
+                      <p className="mt-2 rounded-lg border-2 border-gray-900 px-4 py-3 text-sm font-semibold text-gray-900">
+                        No change to give.
+                      </p>
+                    )}
+                    {cashChange !== null && cashChange < 0 && (
+                      <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                        That’s {money(-cashChange)} short of the {money(total)} total.
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {/* Optional receipt — typed only. Band contacts' addresses are
                     never sent to a sitter's phone. Not for "their bill": nothing

@@ -259,12 +259,14 @@ async function main() {
   const payBlock = page.locator('div', { has: page.getByText('How did they pay?', { exact: true }) }).last()
   await snap(page, '07-how-paid', [page.getByText("Who's it for?", { exact: true }), payBlock])
 
-  // 08: cash: pick Cash, then the green button
+  // 08: cash: pick Cash, tap what they gave you, the till shows the change
   await page.locator('button', { hasText: /^Cash$/ }).click()
-  const takeBtn = page.locator('button', { hasText: 'Take £18.00' })
-  await ring(takeBtn)
-  await snap(page, '08-cash-take', [payBlock, takeBtn])
+  await page.locator('div.grid-cols-3 button', { hasText: '£20' }).click()
+  const changeBox = page.getByText('Change to give').locator('..')
+  await ring(page.locator('div.grid-cols-3 button', { hasText: '£20' }))
+  await snap(page, '08-cash-change', [payBlock, changeBox])
   await clearRings(page)
+  const takeBtn = page.locator('button', { hasText: 'Take £18.00' })
 
   // 09: cash: done
   S.sales = [{ ...SALES[3], id: 'sale-1', created_at: at('19:42'), gross: 18, status: 'queued',
