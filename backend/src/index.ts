@@ -17,6 +17,7 @@ import routes from './routes';
 import { connectRedis } from './config/redis';
 import { startScheduler } from './config/scheduler';
 import { handleStripeWebhook } from './services/stripe-webhook';
+import { handleResendWebhook } from './services/email-delivery';
 
 dotenv.config({ quiet: true });
 
@@ -82,6 +83,9 @@ app.use(morgan('short'));
 // it BEFORE express.json() (which would consume + reparse the body). Scoped to
 // the one path — everything else still gets JSON parsing below.
 app.post('/api/webhooks/stripe', express.raw({ type: '*/*' }), handleStripeWebhook);
+// Resend (email delivery: bounces, suppressions, spam reports) — same reason:
+// its signature is over the exact raw bytes. services/email-delivery.ts.
+app.post('/api/webhooks/resend', express.raw({ type: '*/*' }), handleResendWebhook);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 

@@ -14,6 +14,8 @@ import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
 import { openR2Key } from '../lib/openAuthedFile';
 import { ukToday } from '../lib/ukDate';
+import EmailProblemFlag from '../components/EmailProblemFlag';
+import { useEmailProblems } from '../hooks/useEmailProblems';
 
 interface FileAttachment {
   name: string;
@@ -620,6 +622,8 @@ function DriverDetailContent() {
   const canEditDates = roleAllowed(user?.role, ['admin', 'manager', 'staff', 'general_assistant']);
 
   const [driver, setDriver] = useState<DriverDetail | null>(null);
+  // Is the driver's email bouncing / blocked by Resend? (hire forms go there)
+  const emailProblems = useEmailProblems([driver?.email]);
   const [hireHistory, setHireHistory] = useState<HireHistoryItem[]>([]);
   const [excessHistory, setExcessHistory] = useState<ExcessHistoryItem[]>([]);
   const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
@@ -898,7 +902,12 @@ function DriverDetailContent() {
             })()}
           </div>
           <div className="mt-1 flex items-center gap-3 text-sm text-gray-500">
-            {driver.email && <span>{driver.email}</span>}
+            {driver.email && (
+              <span className="inline-flex items-center gap-2">
+                {driver.email}
+                <EmailProblemFlag problem={emailProblems.problemFor(driver.email)} onMarkFixed={emailProblems.markFixed} />
+              </span>
+            )}
             {driver.phone && (
               <span>
                 {driver.phone_country && <span className="text-gray-400">{driver.phone_country} </span>}
