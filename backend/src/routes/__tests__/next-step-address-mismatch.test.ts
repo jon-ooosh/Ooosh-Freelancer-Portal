@@ -93,3 +93,16 @@ describe('buildDriverStatusResponse — migration 298 fields', () => {
     expect(res.addressMismatch).toBe(true);
   });
 });
+
+describe('buildDriverStatusResponse — referralOpen', () => {
+  it('is open when raised and not yet resolved (including declined)', () => {
+    expect(buildDriverStatusResponse({ email: 'a@x.com', requires_referral: true }).referralOpen).toBe(true);
+    expect(buildDriverStatusResponse({ email: 'a@x.com', requires_referral: true, referral_status: 'pending' }).referralOpen).toBe(true);
+    expect(buildDriverStatusResponse({ email: 'a@x.com', requires_referral: true, referral_status: 'declined' }).referralOpen).toBe(true);
+  });
+  it('is closed when approved, waived, or never raised', () => {
+    expect(buildDriverStatusResponse({ email: 'a@x.com', requires_referral: true, referral_status: 'approved' }).referralOpen).toBe(false);
+    expect(buildDriverStatusResponse({ email: 'a@x.com', requires_referral: true, referral_status: 'waived' }).referralOpen).toBe(false);
+    expect(buildDriverStatusResponse({ email: 'a@x.com' }).referralOpen).toBe(false);
+  });
+});
