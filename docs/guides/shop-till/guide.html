@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>How to use the shop till</title>
+<!--
+  Source of the studio sitters' shop till guide (PDF, uploaded to OP as a
+  Staff Document: category Training, shared with freelancers, so it shows on
+  the portal's Resources page).
+
+  Screenshots: screenshots.js. PDF: build-pdf.js. See README.md.
+  House rules for this copy: British English, no em or en dashes.
+-->
+<style>
+  @page { size: 105mm 220mm; margin: 0; }
+  /* Inter (the portal's font), bundled as web fonts: an installed OTF copy gets
+     embedded in the PDF as blurry Type 3 glyphs. Licence: fonts/OFL.txt. */
+  @font-face { font-family: 'Inter Guide'; font-weight: 400; src: url('fonts/inter-latin-400-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Inter Guide'; font-weight: 600; src: url('fonts/inter-latin-600-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Inter Guide'; font-weight: 700; src: url('fonts/inter-latin-700-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Inter Guide'; font-weight: 800; src: url('fonts/inter-latin-800-normal.woff2') format('woff2'); }
+  :root {
+    --brand: #833781;
+    --brand-soft: #f6eef6;
+    --ink: #111827;
+    --body: #374151;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body {
+    font-family: 'Inter Guide', sans-serif;
+    color: var(--body);
+    font-size: 14.5px;
+    line-height: 1.5;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    counter-reset: page;
+  }
+  .page {
+    width: 105mm;
+    height: 220mm;
+    padding: 22px 18px 34px;
+    position: relative;
+    overflow: hidden;
+    page-break-after: always;
+    break-after: page;
+    counter-increment: page;
+  }
+  .page:last-child { page-break-after: auto; break-after: auto; }
+  .page::after {
+    content: "Shop till guide  ·  " counter(page);
+    position: absolute;
+    left: 18px; right: 18px; bottom: 12px;
+    font-size: 10px;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    padding-top: 6px;
+  }
+  .step {
+    display: flex; align-items: center; gap: 10px;
+    margin: 0 0 10px;
+  }
+  .step .n {
+    flex: none;
+    width: 30px; height: 30px; border-radius: 50%;
+    background: var(--brand); color: #fff;
+    font-weight: 700; font-size: 15px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  h2 { margin: 0; font-size: 21px; line-height: 1.2; color: var(--ink); font-weight: 700; }
+  p { margin: 0 0 10px; }
+  b { color: var(--ink); font-weight: 600; }
+  ul { margin: 0 0 10px; padding-left: 18px; }
+  li { margin-bottom: 5px; }
+  .shot {
+    display: block; width: 100%;
+    border: 1px solid var(--line); border-radius: 12px;
+    margin: 4px 0 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .shot.narrow { width: 86%; margin-left: auto; margin-right: auto; }
+  .tip {
+    background: var(--brand-soft);
+    border-left: 4px solid var(--brand);
+    border-radius: 8px;
+    padding: 9px 12px;
+    margin: 0 0 12px;
+    font-size: 13.5px;
+  }
+  .tip p:last-child { margin-bottom: 0; }
+  .warn {
+    background: #fef2f2; border-left-color: #dc2626;
+  }
+
+  /* Cover */
+  .cover { display: flex; flex-direction: column; }
+  .cover .logo { width: 74px; margin: 2px 0 18px; }
+  .cover h1 { margin: 0 0 4px; font-size: 30px; line-height: 1.12; color: var(--ink); font-weight: 800; }
+  .cover .sub { margin: 0 0 16px; font-size: 16px; color: var(--brand); font-weight: 600; }
+  .rules { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 4px; margin-top: 4px; }
+  .rules h3 { margin: 0 0 8px; font-size: 15px; color: var(--ink); }
+  .rules ol { margin: 0; padding-left: 20px; font-size: 13.5px; }
+  .rules li { margin-bottom: 7px; }
+
+  /* Troubleshooting */
+  dl { margin: 0; }
+  dt { font-weight: 600; color: var(--ink); margin-top: 10px; }
+  dd { margin: 2px 0 0; }
+</style>
+</head>
+<body>
+
+<!-- ── Cover ──────────────────────────────────────────────────────────── -->
+<section class="page cover">
+  <img class="logo" src="../../../public/ooosh-tours-logo-small.png" alt="Ooosh! Tours">
+  <h1>How to use the shop till</h1>
+  <p class="sub">A quick guide for studio sitters</p>
+  <p>The shop till is on your phone, in the freelancer portal. Use it to check a price at any time, and to sell drinks, strings, gaffa and the rest on the night of your shift. Every sale goes straight to the office, so there's nothing to write down.</p>
+  <p><b>freelancer.oooshtours.co.uk</b> is the only site you need. The till, your shift, handover notes and the lock-up report are all there.</p>
+  <div class="tip"><p>Stuck at the till? Tap <b>How to use</b> at the top of the till to come back to this guide.</p></div>
+
+  <div class="rules">
+    <h3>Five things to remember</h3>
+    <ol>
+      <li>Find the item <b>before</b> you finish the sale.</li>
+      <li>More than one band in? Check which room it's for before you pick a band.</li>
+      <li>A card payment isn't done until the <b>phone</b> says so. Keep the till open while they pay.</li>
+      <li>Made a mistake? <b>Cancel</b> it straight away. After a couple of minutes it's gone to the office, so leave a handover note instead.</li>
+      <li>Anything else odd? Leave a <b>handover note</b> on your shift page. The office checks every till sale the next morning.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ── 1. Open the till ───────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">1</span><h2>Open the till</h2></div>
+  <p>On your dashboard, find tonight's <b>Studio Sitter</b> card and tap <b>View details</b>.</p>
+  <img class="shot" src="img/01-dashboard.png" alt="">
+  <p>On your shift page, tap <b>Shop till</b>.</p>
+  <img class="shot" src="img/02-shift-page.png" alt="">
+</section>
+
+<!-- ── 2. Look up a price ─────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">2</span><h2>Look up a price</h2></div>
+  <p>Type a word or two into the search box, for example <b>coke</b> or <b>gaffa</b>. Prices include VAT.</p>
+  <img class="shot" src="img/03-price-lookup.png" alt="">
+  <p>You can check prices any time. On any day that isn't your shift, the till says <b>Price lookup only</b>: you can see prices, but you can't sell.</p>
+  <p>Selling opens on the day of your shift and stays open until you lock up.</p>
+  <div class="tip"><p>The stock figure is what the office system thinks is on the shelf. It isn't always right, so check the shelf.</p></div>
+</section>
+
+<!-- ── 3. Add items ───────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">3</span><h2>Add items to the basket</h2></div>
+  <p>Search for the item and tap it to add it.</p>
+  <img class="shot" src="img/04-search.png" alt="">
+  <p>Use the plus and minus buttons to change how many. Each line shows its own price.</p>
+  <img class="shot" src="img/05-basket.png" alt="">
+  <div class="tip"><p>Says <b>none showing in stock</b>? The till still lets you sell it. Check the shelf first, and only sell it once it's in your hand.</p></div>
+</section>
+
+<!-- ── 4. Who's it for? ───────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">4</span><h2>Who's it for?</h2></div>
+  <ul>
+    <li><b>Walk-in</b>: anyone paying for themselves, there and then. That includes band members: someone buying a bottle of water for themselves may not want it on the band's bill.</li>
+    <li><b>A band</b>: tap their name when it's for the band, whether they pay now or it goes on their bill. Each band shows its room underneath.</li>
+  </ul>
+  <img class="shot narrow" src="img/06-whos-it-for.png" alt="">
+  <p>If only one band is in, they're picked for you, so tap <b>Walk-in</b> if it's someone paying for themselves. If more than one band is in, you have to pick, so check which room they're in.</p>
+</section>
+
+<!-- ── 5. How did they pay? ───────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">5</span><h2>How did they pay?</h2></div>
+  <img class="shot" src="img/07-how-paid.png" alt="">
+  <ul>
+    <li><b>Card reader</b>: the card machine on the front desk. It's always on. See step 7.</li>
+    <li><b>Cash</b>: goes in the cash till on the front desk, which has change in it. The till can work out the change for you. See step 6.</li>
+    <li><b>Put it on their bill</b>: nothing is paid tonight; it goes on the band's bill with us. This only shows once you've picked a band. See step 9.</li>
+  </ul>
+</section>
+
+<!-- ── 6. Cash ────────────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">6</span><h2>Taking cash</h2></div>
+  <p>Tap <b>Cash</b>. To have the till work out the change, tap what they gave you: <b>Exact</b>, a coin or note, or <b>Other</b> to type an amount. This part is optional.</p>
+  <img class="shot" src="img/08-cash-change.png" alt="">
+  <p>Put the money in the cash till on the front desk, give them their change, then tap the green <b>Take</b> button. A green message confirms the sale is recorded.</p>
+  <img class="shot" src="img/09-cash-done.png" alt="">
+</section>
+
+<!-- ── 7. Card reader ─────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">7</span><h2>Taking a card</h2></div>
+  <p>Tap <b>Card reader</b>, then <b>Take £… on card reader</b>. The amount appears on the card reader on the front desk.</p>
+  <p>Ask them to tap their card (or insert it, if the reader asks).</p>
+  <img class="shot" src="img/12-reader-waiting.png" alt="">
+  <p>When the card is approved, the phone shows a green message and the sale is recorded. You don't need to do anything else.</p>
+  <img class="shot" src="img/14-reader-approved.png" alt="">
+  <div class="tip"><p>Keep the till open on your phone until you see the green message.</p></div>
+</section>
+
+<!-- ── 8. Card problems ───────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">8</span><h2>If the card doesn't go through</h2></div>
+  <p>If the card is declined, the till says <b>Not taken</b>. Nothing has been charged.</p>
+  <img class="shot" src="img/13-reader-declined.png" alt="">
+  <ul>
+    <li>To try again (or with another card), tap <b>Try again</b>.</li>
+    <li>To pay another way, tap <b>Cancel payment</b>, then pick <b>Cash</b>.</li>
+    <li>Changed their mind while the reader is waiting? Tap <b>Cancel payment</b>. Nothing is taken.</li>
+  </ul>
+  <div class="tip warn"><p>Very rarely, the till says the card <b>was charged but the sale didn't record</b>. Don't take the payment again. The office has already been told; just leave a handover note.</p></div>
+</section>
+
+<!-- ── 9. Their bill ──────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">9</span><h2>Putting it on their bill</h2></div>
+  <p>Pick the band, tap <b>Put it on their bill</b>, then the green button.</p>
+  <img class="shot" src="img/10-their-bill.png" alt="">
+  <p>Nothing is paid tonight and there's no receipt: it will be on their invoice.</p>
+  <div class="tip"><p>More than one band in? Double-check which room it's for before you tap.</p></div>
+</section>
+
+<!-- ── 10. Receipts ───────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">10</span><h2>Emailing a receipt</h2></div>
+  <p>Receipts are optional. If they want one, fill in the email box <b>before</b> you take the payment.</p>
+  <p>If the band has contacts on file, they show as buttons above the box. Tap one, or type any address.</p>
+  <img class="shot" src="img/11-receipt.png" alt="">
+  <p>Forgot? Tap <b>Receipt</b> next to the sale in Tonight's list (step 11).</p>
+  <p>There's no receipt for <b>Put it on their bill</b>.</p>
+</section>
+
+<!-- ── 11. Tonight's list ─────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">11</span><h2>Tonight's sales and mistakes</h2></div>
+  <p>Every sale from tonight is listed at the bottom of the till, with totals for cash, card and bills.</p>
+  <img class="shot" src="img/15-tonight.png" alt="">
+  <ul>
+    <li><b>Made a mistake?</b> Tap <b>Cancel</b> next to the sale straight away, then do it again properly.</li>
+    <li><b>Cancel</b> only shows for a couple of minutes, until the sale has gone through to the office.</li>
+    <li>Spotted it too late? Leave a handover note saying what went wrong, and the office will sort it out.</li>
+  </ul>
+</section>
+
+<!-- ── 12. Locking up ─────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">12</span><h2>Locking up</h2></div>
+  <p>The lock-up report shows what the till took tonight.</p>
+  <img class="shot" src="img/17-lockup-summary.png" alt="">
+  <p>Once you send the lock-up report, the till closes for the night. You can still look up prices.</p>
+  <img class="shot" src="img/16-till-closed.png" alt="">
+  <p>Sold something after locking up? Leave a handover note.</p>
+</section>
+
+<!-- ── If something goes wrong ────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">?</span><h2>If something goes wrong</h2></div>
+  <dl>
+    <dt>It says "Price lookup only"</dt>
+    <dd>It isn't the day of your shift. You can check prices, but you can't sell until the day.</dd>
+
+    <dt>The button at the bottom is grey</dt>
+    <dd>It tells you what's still missing, for example <b>Pick who it's for</b> or <b>Pick how they paid</b>.</dd>
+
+    <dt>It couldn't reach the office system</dt>
+    <dd>Nothing was recorded. Check your signal and try again.</dd>
+
+    <dt>I can't find an item</dt>
+    <dd>Try a different word, for example <b>coke</b> rather than <b>coca-cola</b>. Still not there? Please don't sell it: the till can only record what's in it.</dd>
+
+    <dt>Wrong band, wrong payment or wrong amount</dt>
+    <dd>Cancel it from Tonight's list straight away and do it again. Too late to cancel? Leave a handover note.</dd>
+
+    <dt>The card was declined</dt>
+    <dd>Nothing was charged. Try again, try another card, or cancel and take cash (step 8).</dd>
+
+    <dt>Anything else</dt>
+    <dd>Leave a handover note on your shift page, under <b>Handover notes</b>. The office checks every till sale the next morning.</dd>
+  </dl>
+</section>
+
+</body>
+</html>
