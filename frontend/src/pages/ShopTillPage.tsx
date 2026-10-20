@@ -317,6 +317,11 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
   const [jobResults, setJobResults] = useState<SellableJob[]>([]);
   const [jobSearchOpen, setJobSearchOpen] = useState(false);
 
+  // Where every sale starts: the card reader when it's on for this login (almost
+  // every sale is card, jon Oct 2026), else noReaderTender. A wrong card-reader
+  // default shows itself (the reader waits for a card); a wrong Cash one records.
+  const defaultTender = readerAccess?.enabled ? 'card_reader' : noReaderTender;
+
   /** Change route, and re-check the tender: "their bill" needs a job (§4.1). */
   const chooseRoute = (j: SellableJob | null) => {
     // A receipt address belongs to whoever the sale was for. Switching who it's
@@ -326,7 +331,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
     setJobSearchOpen(false);
     setJobTerm('');
     setJobResults([]);
-    if (!j && tender === 'invoice_later') setTender(readerAccess?.enabled ? 'card_reader' : noReaderTender);
+    if (!j && tender === 'invoice_later') setTender(defaultTender);
   };
 
   // Is the card reader switched on for this login? If so it is the default card.
@@ -650,6 +655,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
     setNotes('');
     setReceiptTo('');
     chooseRoute(null);
+    setTender(defaultTender);   // the next customer starts on the default, not on this one's method
     loadRecent();
   }
 
@@ -693,6 +699,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
       setNotes('');
       setReceiptTo('');
       chooseRoute(null);
+      setTender(defaultTender);   // the next customer starts on the default, not on this one's method
       loadRecent();
       searchRef.current?.focus();
     } catch (e: any) {
