@@ -522,24 +522,38 @@ portal banner. Keep them short; the build session should put the final strings i
 netlify-functions #34 and the note-position follow-up). Test group on the live system: #16842
 (Option 1, lost), **#16843 (Option 2, confirmed)**, #16844 (Option 3, lost), client "TESTING 123 Ltd".
 
-**What is left, and where it is specified:**
+**What is left, and where it is specified** (revised 20 Oct 2026 with jon):
 
-1. **Phase 2 — `part_of` groups (festival-style "these belong together").** §10 "Phase 2 (not in
-   this build)" is the brief: same `job_groups` table with `kind = 'part_of'`; no
-   confirm-one-lose-others, no headline dedup; Compare becomes a Group view with roll-ups; the
-   Kanban shows a "part of <label>" chip instead of collapsing; "Add a related job" (duplicate OR
-   link existing). Everything in `job-groups.ts` that assumes `kind = 'alternative'` is gated by
-   `OPTION_GROUP_KIND` — grep for it. Also parked there: swapping a confirmation from one option
-   to another after payment (deposit moves via the Combine deposit mechanics).
-2. **§6.5 tags** — global search "Option 2 of 4" after a grouped job's name; org Hire History
-   nests options under the lead and the lost-as-alternative ones stay out of the stats cards
-   (the stats part IS done — `notAltQuoteLossSql`; the nesting and the search tag are not).
-3. **"Mark lost" from a Compare row** (§6.2 row actions) — not built; the Confirm panel covers the
-   real case, so this is a nicety.
-4. **The bell path has not been exercised live.** `services/option-confirm.ts` bells the job's
-   managers when an option confirms with nobody on the page (portal payment → payment-event,
-   HireHop status → webhook, Wise matcher → record-payment). To test: on a fresh test group set an
-   option to Booked IN HIREHOP and watch the bell; the link opens the job with `?group_prompt=1`.
+1. **Festival-style grouping is NOT Phase 2 of this module** (jon, 20 Oct 2026). Options are
+   "the client picks ONE"; a festival is "all of these belong together" (core backline, outlier
+   stages, a small PA, a dozen band spot-hires). Opposite rules, so it will be its own small
+   design — a "project" link with its own table and column, never `job_groups.kind = 'part_of'`.
+   **Do not build `part_of` on `job_groups`:** `OPTION_GROUP_KIND` is only checked where a group is
+   CREATED (add-option, link-existing). Every READ path treats any group as alternatives —
+   `portalOptionsFor()` (would refuse a band's payment once another band confirmed),
+   `nonLeadMemberIds()` (headline dedup), `afterOptionConfirmed()` (bells), Fill-a-Gap,
+   `bumpSiblingChaseDates`, the chase draft, the auto-loser, the Combine refusal, the Kanban
+   collapse and the Confirm panel. A separate link also lets one job be an option AND part of a
+   festival. Still parked: swapping a confirmation from one option to another after payment.
+2. ~~§6.5 tags~~ **BUILT 20 Oct 2026.** "Option 2 of 3" after a grouped job's name on global
+   search and on org/person Hire History (`components/OptionTag.tsx`; count from
+   `job-groups.ts` `optionCountSql()`; the name's "(Option N)" suffix is stripped beside it). An
+   option lost as an alternative is shown greyed rather than nested under the lead (jon: a flat
+   tag tells the same story for less). The PERSON Hire History stats now exclude alternative
+   losses too (only the org one did).
+3. ~~"Mark lost" from a Compare row~~ **Dropped** (jon, 20 Oct 2026). Compare disappears once an
+   option confirms, and before that the job's own Lost modal does it.
+4. **The bell path has not been exercised live.** It is for when an option confirms with NOBODY
+   on the job page: the client pays through the portal, someone sets Booked in HireHop, or the
+   Wise matcher records a transfer. `services/option-confirm.ts` bells the job's managers; the
+   link opens the job with `?group_prompt=1` and the Confirm panel. Nothing is ever auto-lost
+   (§1.6). The test group's #16843 was confirmed by hand in OP, so only the attended path is
+   proven. To test: on a fresh test group set an option to Booked IN HIREHOP and watch the bell.
+
+**Decided, not to build:** an option lost BEFORE the client chose (e.g. "no Twin, too dear",
+lost as Price) keeps its reason and counts as a real loss even if a sibling later confirms. Rare,
+arguably still true, and staff who know the client is choosing between options can pick
+"Confirmed Alternative Quote (from us)" themselves (jon, 20 Oct 2026).
 
 **Known artefacts of the build, not bugs to chase:**
 - #16843's HireHop dates/times are 13–14 Oct 11:20 — the HireHop duplicate was created by the

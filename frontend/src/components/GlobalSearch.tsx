@@ -7,6 +7,8 @@ import {
   PipelineStatus,
   OperationalStatus,
 } from '../../../shared/types';
+import { stripOptionSuffix } from '../lib/quoteOptions';
+import OptionTag from './OptionTag';
 
 interface SearchResult {
   id: string;
@@ -21,6 +23,9 @@ interface SearchResult {
   // (new_enquiry/quoting/paused) — dismissal is an overlay flag, not a status
   // value — so the badge must key off this rather than pipeline_status.
   is_dismissed?: boolean;
+  // Quote options (spec §6.5): set on a job in an options group → "Option 2 of 3".
+  option_no?: number | null;
+  option_count?: number | null;
 }
 
 const typeLabels: Record<string, string> = {
@@ -218,7 +223,10 @@ export default function GlobalSearch() {
                   </span>
                 )}
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{result.name}</p>
+                  <p className="text-sm font-medium text-gray-900 truncate">
+                    {result.option_no && result.option_count ? stripOptionSuffix(result.name) : result.name}{' '}
+                    <OptionTag optionNo={result.option_no} optionCount={result.option_count} />
+                  </p>
                   {result.subtitle && (
                     <p className="text-xs text-gray-500 truncate">{result.subtitle}</p>
                   )}

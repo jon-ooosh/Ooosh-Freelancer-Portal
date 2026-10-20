@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, STAFF_ROLES, authorize, AuthRequest } from '../middleware/auth';
+import { optionCountSql } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
@@ -82,7 +83,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
               'job' as type,
               pipeline_status,
               status as hh_status,
-              (dismissed_at IS NOT NULL) as is_dismissed
+              (dismissed_at IS NOT NULL) as is_dismissed,
+              option_no,
+              ${optionCountSql('jobs')} as option_count
        FROM jobs
        WHERE is_deleted = false AND (
          job_name ILIKE $1 OR company_name ILIKE $1 OR client_name ILIKE $1

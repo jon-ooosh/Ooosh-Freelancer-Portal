@@ -80,6 +80,11 @@ export const OPTION_COPY = {
   linkExistingSubmit: 'Link as an option',
   linkExistingBack: 'Back',
 
+  // The tag after a grouped job's name on global search and Hire History (spec §6.5)
+  tag: (optionNo: number, total: number) => `Option ${optionNo} of ${total}`,
+  tagTitle: (optionNo: number, total: number) => `One of ${total} alternative quotes for the same enquiry - this is Option ${optionNo}`,
+  tagAltLostTitle: 'The client chose another option of this enquiry - not counted as lost business',
+
   // Results
   createdOpWarn: 'Created in OP, but the HireHop duplicate failed - open the new option and use "Create in HireHop".',
   warningsHeading: 'Done, with warnings:',
