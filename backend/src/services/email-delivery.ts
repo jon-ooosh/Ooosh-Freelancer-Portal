@@ -43,6 +43,9 @@ const SIGNATURE_TOLERANCE_SECONDS = 5 * 60;
 
 export type ProblemKind = 'bounced' | 'suppressed' | 'complained';
 export type BadEventKind = ProblemKind | 'failed';
+/** What a failure is called in an alert. A soft bounce gets its own words: the
+ *  address is not blocked, and the email may even have arrived. */
+export type AlertKind = BadEventKind | 'soft_bounced';
 
 // ── Signature ────────────────────────────────────────────────────────────
 
@@ -141,11 +144,32 @@ export function eventDetail(kind: BadEventKind, data: ResendEmailEvent['data']):
   return data?.failed?.reason ? `Failed to send: ${data.failed.reason}` : 'Failed to send.';
 }
 
+/**
+ * A soft bounce — Resend's "Transient" (its docs' example also says
+ * "Temporary"). Resend does not block the address, and its docs warn that an
+ * out-of-office reply can be reported this way, i.e. the email DID arrive.
+ * "Undetermined" is treated as a hard bounce: flagged, which is only a warning
+ * and clears itself on the next delivery.
+ */
+export function isSoftBounce(data: ResendEmailEvent['data']): boolean {
+  const t = String(data?.bounce?.type || '').trim().toLowerCase();
+  return t === 'transient' || t === 'temporary';
+}
+
+/** "did not reach" — or, for a soft bounce, "may not have reached". */
+function reachWords(kind: AlertKind): { verb: string; noun: string } {
+  return kind === 'soft_bounced'
+    ? { verb: 'may not have reached', noun: 'Email may not have arrived' }
+    : { verb: 'did not reach', noun: 'Email not delivered' };
+}
+
 /** What happened, in words a person acts on. */
-export function plainReason(kind: BadEventKind): string {
+export function plainReason(kind: AlertKind): string {
   switch (kind) {
     case 'bounced':
       return 'it bounced: the recipient\'s mail server refused it (usually a mistyped or closed address)';
+    case 'soft_bounced':
+      return 'it soft-bounced: their mail server turned it away for now, or an out-of-office or forwarding reply came back as a bounce (in which case it did arrive). The address is not blocked';
     case 'suppressed':
       return 'it was not sent: Resend has blocked this address because earlier emails to it bounced or were reported as spam';
     case 'complained':
@@ -155,8 +179,21 @@ export function plainReason(kind: BadEventKind): string {
   }
 }
 
-export function whatToDo(kind: BadEventKind): string {
+/** `subType` is Resend's bounce subtype — only read for a soft bounce. */
+export function whatToDo(kind: AlertKind, subType?: string): string {
   switch (kind) {
+    case 'soft_bounced':
+      switch (subType) {
+        case 'MailboxFull':
+          return 'Their inbox is full. Phone or text them, or re-send it in a day or two.';
+        case 'MessageTooLarge':
+        case 'AttachmentRejected':
+          return 'Their mail server refused the size or the attachment, so re-sending the same email will bounce again. Phone them and get it to them another way, or to another address.';
+        case 'ContentRejected':
+          return 'Their spam filter refused it, so re-sending the same email will bounce again. Phone them and ask for another address, or for them to allow emails from oooshtours.co.uk.';
+        default:
+          return 'Check with them whether it arrived (an out-of-office reply can show up like this). If it did not, re-send it from the job; if it bounces again, check the address or ask for another one.';
+      }
     case 'complained':
       return 'Speak to them. Only if they do want our emails: remove the address from Resend\'s suppression list (Resend › Emails › Suppressions) and re-send.';
     case 'failed':
@@ -273,7 +310,9 @@ async function recentlyAlerted(email: string, jobId: string | null): Promise<boo
 }
 
 interface FailureContext {
-  kind: BadEventKind;
+  kind: AlertKind;
+  /** Resend's bounce subtype (MailboxFull, General…), for soft-bounce advice. */
+  subType?: string;
   recipient: string;
   onCc: boolean;
   subject: string;
@@ -290,8 +329,9 @@ function jobLabel(job: JobRef | null): string {
 
 async function writeTimeline(ctx: FailureContext): Promise<void> {
   if (!ctx.job && !ctx.personId && !ctx.orgId) return;
-  const content = `Email NOT delivered to ${ctx.recipient}${ctx.onCc ? ' (CC)' : ''}: "${ctx.subject}" — `
-    + `${plainReason(ctx.kind)}. What to do: ${whatToDo(ctx.kind)} (Resend: ${ctx.detail})`;
+  const lead = ctx.kind === 'soft_bounced' ? 'Email may NOT have reached' : 'Email NOT delivered to';
+  const content = `${lead} ${ctx.recipient}${ctx.onCc ? ' (CC)' : ''}: "${ctx.subject}" — `
+    + `${plainReason(ctx.kind)}. What to do: ${whatToDo(ctx.kind, ctx.subType)} (Resend: ${ctx.detail})`;
   try {
     await query(
       `INSERT INTO interactions (type, content, job_id, person_id, organisation_id, source)
@@ -317,9 +357,13 @@ function actionPath(ctx: FailureContext): string | null {
 async function raiseAlert(ctx: FailureContext): Promise<void> {
   const where = jobLabel(ctx.job);
   const path = actionPath(ctx);
-  const title = `Email not delivered to ${ctx.recipient}${ctx.job?.hh_job_number ? ` (job #${ctx.job.hh_job_number})` : ''}`;
+  const words = reachWords(ctx.kind);
+  const jobSuffix = ctx.job?.hh_job_number ? ` (job #${ctx.job.hh_job_number})` : '';
+  const title = ctx.kind === 'soft_bounced'
+    ? `Email may not have reached ${ctx.recipient}${jobSuffix}`
+    : `Email not delivered to ${ctx.recipient}${jobSuffix}`;
   const content = `"${ctx.subject}"${ctx.onCc ? ' (they were on CC)' : ''}: ${plainReason(ctx.kind)}. `
-    + `What to do: ${whatToDo(ctx.kind)} (Resend: ${ctx.detail})`;
+    + `What to do: ${whatToDo(ctx.kind, ctx.subType)} (Resend: ${ctx.detail})`;
 
   try {
     const users = await query(
@@ -349,14 +393,14 @@ async function raiseAlert(ctx: FailureContext): Promise<void> {
   if (ctx.recipient.endsWith(OWN_DOMAIN)) return;
 
   const lines = [
-    `<strong>An email from OP did not reach ${escapeHtml(ctx.recipient)}</strong>${ctx.onCc ? ' (on CC)' : ''}.`,
+    `<strong>An email from OP ${words.verb} ${escapeHtml(ctx.recipient)}</strong>${ctx.onCc ? ' (on CC)' : ''}.`,
     `Email: "${escapeHtml(ctx.subject)}"${where ? `<br>For: ${escapeHtml(where)}` : ''}`,
     `What happened: ${escapeHtml(plainReason(ctx.kind))}.`,
-    `What to do: ${escapeHtml(whatToDo(ctx.kind))}`,
+    `What to do: ${escapeHtml(whatToDo(ctx.kind, ctx.subType))}`,
     `Resend says: ${escapeHtml(ctx.detail)}`,
     path ? `<a href="${frontendLink(path)}">Open in OP &rarr;</a>` : '',
   ].filter(Boolean);
-  const subject = `Email not delivered: ${ctx.recipient}${ctx.job?.hh_job_number ? ` (job #${ctx.job.hh_job_number})` : ''}`;
+  const subject = `${words.noun}: ${ctx.recipient}${jobSuffix}`;
   const res = await emailService
     .sendRaw({ to: ALERT_EMAIL, subject, html: `<p>${lines.join('</p><p>')}</p>`, variant: 'internal' })
     .catch((e) => ({ success: false, error: e instanceof Error ? e.message : String(e) }));
@@ -391,10 +435,18 @@ async function recordFailure(
   if (inserted.rows.length === 0) return; // a retry of an event we already have
   const eventId = (inserted.rows[0] as { id: string }).id;
 
-  const wasOpen = kind === 'failed' ? true : await flagAddress(recipient, kind, detail);
+  // A soft bounce alerts but never flags the address: it says nothing about the
+  // address (Resend doesn't block it, and an out-of-office reply is reported
+  // this way). Nor is it re-sent automatically (jon asked, Oct 2026 — no): the
+  // email may well have arrived, so a retry would duplicate a booking
+  // confirmation or receipt; a too-large / content-rejected one would bounce
+  // again identically; and OP keeps no copy of what it sent. A person re-sends.
+  const soft = kind === 'bounced' && isSoftBounce(data);
+  const wasOpen = kind === 'failed' || soft ? true : await flagAddress(recipient, kind, detail);
 
   const ctx: FailureContext = {
-    kind,
+    kind: soft ? 'soft_bounced' : kind,
+    subType: data.bounce?.subType,
     recipient,
     onCc: !!logged && normaliseAddress(logged.recipient) !== recipient,
     subject,
@@ -405,8 +457,9 @@ async function recordFailure(
   };
   await writeTimeline(ctx);
 
-  // Same address, same job, already flagged and alerted today → the timeline
-  // line is enough. A fresh or re-opened problem always alerts.
+  // Same address, same job, already flagged (or a soft bounce / send failure)
+  // and alerted today → the timeline line is enough. A fresh or re-opened
+  // problem always alerts.
   if (wasOpen && await recentlyAlerted(recipient, job?.id || null)) return;
 
   await raiseAlert(ctx);
