@@ -2059,6 +2059,46 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // Sent by services/hire-form-errors.ts for a CRITICAL error reported by
+  // the driver hire form app. The email is the action point — there is no
+  // screen for these; every report is in hire_form_error_events.
+  hire_form_error_alert: {
+    variant: 'internal',
+    subject: '[Hire form problem] {{page}} — {{driverEmail}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#b91c1c;">A driver hit a problem on the hire form</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Something failed that the driver may not be able to fix by themselves. Check their record
+        and get in touch if they look stuck.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fee2e2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Driver</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{#if driverName}}{{driverName}} · {{/if}}{{driverEmail}}</p>
+            {{#if jobNumber}}<p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Job</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">#{{jobNumber}}</p>{{/if}}
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">When</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">{{when}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Where</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">{{page}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">What went wrong</p>
+            <p style="margin:0;font-size:13px;color:#1e293b;font-family:monospace;white-space:pre-wrap;">{{error}}</p>
+            {{#if details}}<p style="margin:8px 0 4px;font-size:12px;color:#991b1b;">Details</p>
+            <p style="margin:0;font-size:13px;color:#1e293b;font-family:monospace;white-space:pre-wrap;">{{details}}</p>{{/if}}
+          </td>
+        </tr>
+      </table>
+      {{#if driverUrl}}<p style="margin:0 0 12px;font-size:14px;color:#334155;">
+        <a href="{{driverUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the driver in Ooosh &rarr;</a>
+      </p>{{/if}}
+      <p style="margin:0;font-size:12px;color:#64748b;line-height:1.5;">
+        At most one email per driver per page per hour, and ten an hour in all. Every report,
+        including the ones not emailed, is in the hire_form_error_events table.
+      </p>
+    `,
+  },
+
   monday_fallback_alert: {
     variant: 'internal',
     subject: '[Portal fallback] {{operation}} fell back to Monday',

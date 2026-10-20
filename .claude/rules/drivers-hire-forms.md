@@ -117,6 +117,18 @@ Every Claude gets this wrong on first pass. A hire can have multiple drivers on 
 - **iDenfy return URLs must be same-origin with the driver's browser** — the session token lives in per-origin sessionStorage, and the app serves on two origins.
 - **`isUkLicence()` (`services/driver-validity.ts`) is THE "is this a DVLA driver?" test** — it decides which document regime applies (DVLA check vs passport), so never re-derive it inline. It accepts the country as a **code or a name**: the webhook writes `licence_issue_country` through `getCountryName()`, i.e. `"United Kingdom"`, while every consumer compared it to `"GB"` — so that half of the test never once matched and UK detection rested entirely on `licence_issued_by === 'DVLA'`. That mattered the day an expired PASSPORT session leaked into the licence path and overwrote `licence_issued_by` with `HMPO` (Charlie McWilliams / 15727): nothing was left to recognise him by, his passed DVLA check stopped counting, and OP demanded a passport he didn't need.
 
+## Errors the hire form reports
+
+- **`services/hire-form-errors.ts` is where they land** (`POST /driver-verification/telemetry/client-error`,
+  from the app's `log-client-error` function and its session check). Every report is stored in
+  `hire_form_error_events`; a CRITICAL one emails info@ — the email is the action point, and there is
+  deliberately no screen (jon, Oct 2026). Until then they went to a Google Apps Script whose `doPost`
+  never handled `log-error`: nothing was ever logged or emailed, and a failed DVLA upload is invisible
+  to the driver.
+- **The limits are per driver, not per page.** One email per (driver, page) per hour, so a retry
+  doesn't repeat it but a second driver failing the same way still alerts; and at most 10 an hour in
+  all, because `log-client-error` is open to the internet. Over-limit reports are still stored.
+
 ## Data handling
 
 - **`vehicle_hire_assignments` is soft-cancel only.** Set `status='cancelled'`; there is no `DELETE FROM vehicle_hire_assignments` in the codebase and there shouldn't be — the row is the record of a hire that physically happened, and R2 book-out/check-in events reference it.
