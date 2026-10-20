@@ -1754,6 +1754,12 @@ export function buildDriverStatusResponse(driver: Record<string, unknown>) {
     // The driver said their proofs of address differ from their licence
     // (true), match it (false), or was never asked (null). Migration 298.
     addressMismatch: typeof driver.address_mismatch === 'boolean' ? driver.address_mismatch : null,
+    // An insurer referral is open: raised, and not yet approved or waived.
+    // Same test as isDriverAuthorisedForAgreement (hire-forms.ts). The hire
+    // form's finish screen says "one more check on our side" instead of
+    // "approved" — the driver's own status, read-only, inside their session.
+    referralOpen: driver.requires_referral === true
+      && driver.referral_status !== 'approved' && driver.referral_status !== 'waived',
   };
 }
 
@@ -1794,6 +1800,7 @@ function buildNewDriverStatus(email: string) {
     dvlaCalculatedExcess: null,
     dvlaCheckCode: null,
     addressMismatch: null,
+    referralOpen: false,
   };
 }
 
