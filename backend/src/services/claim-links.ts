@@ -349,7 +349,7 @@ export async function saveSketch(
 /** Hire-form declaration answers for a driver, combined per spec §7.3. */
 export async function hireFormDeclarations(driverId: string) {
   const dr = await query(
-    `SELECT has_accidents, has_convictions, has_prosecution, has_disability, licence_points, licence_endorsements
+    `SELECT has_accidents, has_convictions, has_prosecution, has_recent_convictions, has_disability, licence_points, licence_endorsements
      FROM drivers WHERE id = $1`,
     [driverId],
   );
@@ -358,7 +358,7 @@ export async function hireFormDeclarations(driverId: string) {
   const endorsements = Array.isArray(x.licence_endorsements) ? x.licence_endorsements : [];
   return {
     accidents: !!x.has_accidents,
-    convictions: !!x.has_convictions || !!x.has_prosecution || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
+    convictions: !!x.has_convictions || !!x.has_prosecution || !!x.has_recent_convictions || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
     disability: !!x.has_disability,
   };
 }

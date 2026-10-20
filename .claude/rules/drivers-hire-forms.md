@@ -62,8 +62,27 @@ Every Claude gets this wrong on first pass. A hire can have multiple drivers on 
   driver with `requires_referral = false` — so until Oct 2026 a driver the insurer had DECLINED
   could clear their own referral on the next hire form, and a points referral vanished on the next
   hire while the DVLA check was still in date. Only a staff `resolve-referral` clears one.
+- **Declaring is not referring (migration 298, Oct 2026).** The Markerstudy guide wants every
+  driver's convictions and claims from the last 5 years on record, but most are fine without a
+  referral (two 3-pointers; one fault claim). So each is two questions: `has_recent_convictions` /
+  `has_accidents` RECORD it and never refer; `has_convictions` (ever DD/BA/UT, or a single 6+ point
+  offence other than SP30/SP50/CU80) / `has_fault_claims` (more than one at fault or still open)
+  are the referral ones. UK points are still priced by the DVLA check (`licence-excess.ts`). **NULL
+  on the two new columns = the driver last answered the old question set**: referral reasons then
+  read `has_accidents` the old way (a referral), and the hire form doesn't pre-fill old answers
+  under the new wording.
 - Status hierarchy: `requires_referral=true` + `referral_status NULL` = red **to-do** (nobody has acted). `'pending'` = amber, staff emailed the insurer. `'approved'`/`'waived'` = green. `'declined'` = red.
 - **`'waived'` counts as authorised everywhere** — same operational effect as approved, distinct only for audit ("we saw the flag, here's why we cleared it without contacting the insurer").
+
+## Address differs from licence → passport (UK)
+
+- **Agreed with the broker:** a UK licence holder whose two proofs of address show a different
+  address from their licence also supplies a passport. No referral.
+- **The driver's choice is stored, `drivers.address_mismatch` (migration 298).** It used to live
+  only in the browser tab, so a driver who came back from the email link after their POAs went
+  straight past the passport. `next-step` ORs the stored flag with the request's, and **every
+  `calculateNextStep` branch that can reach DVLA or signature checks it** (four didn't). Order:
+  POA1 → POA2 → passport → DVLA → signature.
 
 ## Northern Ireland (DVA) licences
 

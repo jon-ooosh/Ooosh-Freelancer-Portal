@@ -782,6 +782,10 @@ export interface Driver {
   has_accidents: boolean;
   has_insurance_issues: boolean;
   has_driving_ban: boolean;
+  // Migration 298 — null = never asked (the driver answered the old question set).
+  has_recent_convictions: boolean | null;
+  has_fault_claims: boolean | null;
+  address_mismatch: boolean | null;
   additional_details: string | null;
   insurance_status: InsuranceStatus | null;
   overall_status: string | null;
@@ -845,6 +849,8 @@ export interface DriverStatusResponse {
     hasAccidents: boolean;
     hasInsuranceIssues: boolean;
     hasDrivingBan: boolean;
+    hasRecentConvictions: boolean | null;
+    hasFaultClaims: boolean | null;
     additionalDetails: string;
   } | null;
   boardAId: string | null;

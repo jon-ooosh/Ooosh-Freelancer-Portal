@@ -337,6 +337,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '295_retire_stranded_auto_cover_stubs.sql',
         '296_staff_login_security.sql',
         '297_passkeys_and_kiosk_till.sql',
+        '298_driver_declarations_and_address_mismatch.sql',
       ];
 
       for (const migration of migrations) {
