@@ -429,6 +429,16 @@ export default function SitterTillPage() {
             <span className="text-xl">🛒</span>
             <h1 className="text-lg font-semibold text-gray-900">Shop till</h1>
           </div>
+          {/* The how-to guide is a PDF in Resources (a Staff Document shared with
+              freelancers). A new tab, so reading it mid-sale doesn't lose the basket. */}
+          <Link
+            href="/resources"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-ooosh-600 hover:bg-gray-50"
+          >
+            How to use
+          </Link>
         </div>
       </header>
 
