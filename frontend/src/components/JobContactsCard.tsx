@@ -42,6 +42,8 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../services/api';
+import EmailProblemFlag from './EmailProblemFlag';
+import { useEmailProblems } from '../hooks/useEmailProblems';
 
 export interface JobContactsCardProps {
   jobId: string;
@@ -104,6 +106,9 @@ export default function JobContactsCard({ jobId, onChanged }: JobContactsCardPro
   const [candidates, setCandidates] = useState<CandidateContact[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Which of these contacts' addresses are bouncing / blocked by Resend — so a
+  // dead CC is visible where it's chosen (services/email-delivery.ts).
+  const emailProblems = useEmailProblems([...candidates.map((c) => c.email), ...ticked.map((t) => t.email)]);
 
   // Routing overrides — sparse map { bucket: [person_id, ...] }
   const [routing, setRouting] = useState<Record<string, string[]>>({});
@@ -443,6 +448,7 @@ export default function JobContactsCard({ jobId, onChanged }: JobContactsCardPro
               {!candidate.email && (
                 <span className="opacity-50 italic text-[10px]" title="No email on file">⚠ no email</span>
               )}
+              <EmailProblemFlag compact problem={emailProblems.problemFor(candidate.email)} onMarkFixed={emailProblems.markFixed} />
               {isTickedHere && (
                 <button
                   type="button"
@@ -486,6 +492,7 @@ export default function JobContactsCard({ jobId, onChanged }: JobContactsCardPro
               {!hasEmail && (
                 <span className="opacity-50 italic text-[10px]" title="No email on file">⚠ no email</span>
               )}
+              <EmailProblemFlag compact problem={emailProblems.problemFor(t.email)} onMarkFixed={emailProblems.markFixed} />
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); handleChipRemove(t.person_id); }}
