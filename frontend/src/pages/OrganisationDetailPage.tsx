@@ -19,6 +19,8 @@ import { ORG_RELATIONSHIP_LABELS, PERSON_ORG_ROLES_WITH_MAIN_CONTACT, type OrgRe
 import { useAuthStore } from '../hooks/useAuthStore';
 import { useTabPresence } from '../hooks/useTabPresence';
 import EntityTabs from '../components/EntityTabs';
+import EmailProblemFlag from '../components/EmailProblemFlag';
+import { useEmailProblems } from '../hooks/useEmailProblems';
 import RecordActionsMenu from '../components/RecordActionsMenu';
 import WorkingTermsSummary from '../components/WorkingTermsSummary';
 import EndorsementsPanel from '../components/EndorsementsPanel';
@@ -158,6 +160,8 @@ function OrganisationDetailContent() {
 
   // Which secondary tabs have content — decides main row vs "More"
   const tabPresence = useTabPresence('organisation', id);
+  // Are any of these addresses bouncing / blocked by Resend? (services/email-delivery.ts)
+  const emailProblems = useEmailProblems([org?.email, ...(org?.people || []).map((p) => p.person_email)]);
 
   // Edit
   const [showEdit, setShowEdit] = useState(false);
@@ -598,7 +602,12 @@ function OrganisationDetailContent() {
         </div>
 
         <div className="mt-4 flex flex-wrap gap-6 text-sm text-gray-600">
-          {org.email && <a href={`mailto:${org.email}`} className="hover:text-ooosh-600">{org.email}</a>}
+          {org.email && (
+            <span className="inline-flex items-center gap-2">
+              <a href={`mailto:${org.email}`} className="hover:text-ooosh-600">{org.email}</a>
+              <EmailProblemFlag problem={emailProblems.problemFor(org.email)} onMarkFixed={emailProblems.markFixed} />
+            </span>
+          )}
           {org.phone && <span>{org.phone}</span>}
           {org.website && <a href={org.website} target="_blank" rel="noopener noreferrer" className="text-ooosh-600 hover:text-ooosh-700">{org.website}</a>}
           {org.location && <span>{org.location}</span>}
@@ -923,7 +932,10 @@ function OrganisationDetailContent() {
                             {p.person_name}
                           </Link>
                           {p.person_email && (
-                            <p className="text-xs text-gray-400">{p.person_email}</p>
+                            <p className="text-xs text-gray-400 flex flex-wrap items-center gap-1.5">
+                              {p.person_email}
+                              <EmailProblemFlag compact problem={emailProblems.problemFor(p.person_email)} onMarkFixed={emailProblems.markFixed} />
+                            </p>
                           )}
                         </td>
                         <td className="px-6 py-4">

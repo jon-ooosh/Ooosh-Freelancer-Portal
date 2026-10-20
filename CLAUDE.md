@@ -347,6 +347,7 @@ existing definition:
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |
 | Sending any email | `services/email-service.ts` |
+| Did this email actually arrive? Is this address bouncing / blocked by Resend? | `services/email-delivery.ts` (Resend webhook → `email_delivery_events`, `email_address_problems`); frontend `hooks/useEmailProblems.ts` + `components/EmailProblemFlag.tsx`. `email_log` 'sent' only means Resend accepted it |
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
@@ -572,6 +573,7 @@ journalctl -u ooosh-portal -n 50 --no-pager
 - **Backend `.env` must have `SESSION_SECRET`** (the portal cookie secret, shared
   with the Netlify portal app) **and it must differ from `JWT_SECRET`** — the service
   refuses to start otherwise (Oct 2026). Production has it; a fresh server needs it.
+- **`RESEND_WEBHOOK_SECRET`** (backend `.env`, Oct 2026) is the signing secret of the Resend webhook pointed at `https://staff.oooshtours.co.uk/api/webhooks/resend` (events: email bounced / suppressed / complained / failed / delivered). Without it the endpoint answers 503 and delivery problems go unseen.
 - **`npm install` before building is not optional** on the manual path — a PR that added
   a dependency fails the build with "Cannot find module …". `deploy.sh` always installs.
 - Run `npm run db:migrate` from `backend/` if there are new migrations. Re-running is

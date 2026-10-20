@@ -338,6 +338,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '296_staff_login_security.sql',
         '297_passkeys_and_kiosk_till.sql',
         '298_driver_declarations_and_address_mismatch.sql',
+        '299_email_delivery_problems.sql',
       ];
 
       for (const migration of migrations) {

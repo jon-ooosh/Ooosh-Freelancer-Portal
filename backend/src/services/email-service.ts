@@ -170,6 +170,20 @@ export function oneLineSubject(subject: string): string {
   return (subject || '').replace(/\s*[\r\n]+\s*/g, ' ').trim();
 }
 
+/**
+ * The HireHop job number an email is about, for `email_log.job_number`: the
+ * `jobNumber` template variable (every job-scoped template is passed one), else
+ * a "#16893" in the subject (raw sends). null when neither is a plain number.
+ * Only used to link a later delivery failure back to its job
+ * (services/email-delivery.ts) — never to decide who an email goes to.
+ */
+export function jobNumberForLog(variable: string | undefined, subject: string): number | null {
+  const v = (variable || '').trim().replace(/^#/, '');
+  if (/^\d{3,8}$/.test(v)) return parseInt(v, 10);
+  const m = (subject || '').match(/#(\d{4,8})\b/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 // ── Transient-error retry ─────────────────────────────────────────────────
 
 /**
@@ -511,6 +525,7 @@ class EmailService {
         status: 'sent',
         message_id: result.messageId || null,
         mode: effectiveMode,
+        job_number: jobNumberForLog(variables.jobNumber || variables.hhJobNumber, subject),
       });
 
       console.log(`[Email] Sent "${templateId}" to ${actualRecipient}${isRedirected ? ` (test mode, intended: ${options.to})` : goingLive && config.mode === 'test' ? ' (live via allowlist)' : ''}`);
@@ -533,6 +548,7 @@ class EmailService {
         status: 'failed',
         error_message: errorMessage,
         mode: isRedirected ? 'test' : 'live',
+        job_number: jobNumberForLog(variables.jobNumber || variables.hhJobNumber, subject),
       });
 
       console.error(`[Email] Failed to send "${templateId}" to ${actualRecipient} (after retries):`, errorMessage);
@@ -600,6 +616,7 @@ class EmailService {
         status: 'sent',
         message_id: result.messageId || null,
         mode: config.mode,
+        job_number: jobNumberForLog(undefined, subject),
       });
 
       return { success: true, messageId: result.messageId };
@@ -614,6 +631,7 @@ class EmailService {
         status: 'failed',
         error_message: errorMessage,
         mode: config.mode,
+        job_number: jobNumberForLog(undefined, subject),
       });
 
       // SMTP-independent outage canary (see send()).
@@ -684,25 +702,43 @@ class EmailService {
     message_id?: string | null;
     error_message?: string;
     mode: EmailMode;
+    /** HireHop job number the email is about (migration 299) — lets a later
+     *  bounce / suppression from Resend link back to its job. */
+    job_number?: number | null;
   }): Promise<string | undefined> {
+    const params = [
+      entry.template_id,
+      entry.recipient,
+      entry.actual_recipient,
+      entry.subject,
+      entry.status,
+      entry.message_id || null,
+      entry.error_message || null,
+      entry.mode,
+    ];
     try {
       const result = await query(
-        `INSERT INTO email_log (template_id, recipient, actual_recipient, subject, status, message_id, error_message, mode)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO email_log (template_id, recipient, actual_recipient, subject, status, message_id, error_message, mode, job_number)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id`,
-        [
-          entry.template_id,
-          entry.recipient,
-          entry.actual_recipient,
-          entry.subject,
-          entry.status,
-          entry.message_id || null,
-          entry.error_message || null,
-          entry.mode,
-        ],
+        [...params, entry.job_number ?? null],
       );
       return result.rows[0]?.id;
     } catch (err) {
+      // 42703 = undefined column: the code is deployed but migration 299 has
+      // not run yet. Log without the job number rather than lose the row —
+      // the scheduler's same-day dedup reads email_log.
+      if ((err as { code?: string })?.code === '42703') {
+        try {
+          const result = await query(
+            `INSERT INTO email_log (template_id, recipient, actual_recipient, subject, status, message_id, error_message, mode)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING id`,
+            params,
+          );
+          return result.rows[0]?.id;
+        } catch { /* fall through to the warning below */ }
+      }
       // Don't fail the email send if logging fails (table might not exist yet)
       console.warn('[Email] Failed to log email to audit trail:', err instanceof Error ? err.message : err);
       return undefined;

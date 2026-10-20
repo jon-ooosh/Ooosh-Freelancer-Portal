@@ -20,6 +20,8 @@ import EntityTabs from '../components/EntityTabs';
 import RecordActionsMenu from '../components/RecordActionsMenu';
 import WorkingTermsSummary from '../components/WorkingTermsSummary';
 import EndorsementsPanel from '../components/EndorsementsPanel';
+import EmailProblemFlag from '../components/EmailProblemFlag';
+import { useEmailProblems } from '../hooks/useEmailProblems';
 
 interface FileAttachment {
   name: string;
@@ -129,6 +131,8 @@ function PersonDetailContent() {
   const [heldCount, setHeldCount] = useState<number | null>(null);
   // Which secondary tabs have content — decides main row vs "More"
   const tabPresence = useTabPresence('person', id, { pcn: !!person?.is_freelancer });
+  // Is this person's email bouncing / blocked by Resend? (services/email-delivery.ts)
+  const emailProblems = useEmailProblems([person?.email]);
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
@@ -426,9 +430,12 @@ function PersonDetailContent() {
         {/* Contact details row */}
         <div className="mt-4 flex flex-wrap gap-6 text-sm text-gray-600">
           {person.email && (
-            <a href={`mailto:${person.email}`} className="hover:text-ooosh-600">
-              {person.email}
-            </a>
+            <span className="inline-flex items-center gap-2">
+              <a href={`mailto:${person.email}`} className="hover:text-ooosh-600">
+                {person.email}
+              </a>
+              <EmailProblemFlag problem={emailProblems.problemFor(person.email)} onMarkFixed={emailProblems.markFixed} />
+            </span>
           )}
           {person.mobile && (
             <a href={`tel:${person.mobile}`} className="hover:text-ooosh-600">

@@ -22,6 +22,15 @@ Full template registry, incident history and messaging spec pointers:
 - **The outage canary must NOT travel over the failing channel.** When a send fails after all retries it writes an **admin bell** (`email_sent_at` pre-stamped so the escalator never tries to email it), deduped hourly.
 - **When a bell and a direct email fire for the same event, set `email_sent_at = NOW()` on the bell** — the escalation scheduler skips notifications that already have it, so the recipient doesn't get the same content twice.
 
+## Did it actually arrive? — `services/email-delivery.ts`
+
+- **`email_log.status = 'sent'` means Resend ACCEPTED it, not that it arrived.** Bounces, suppressions (Resend's block list) and spam reports come back on `POST /api/webhooks/resend` and land in `email_delivery_events` + `email_address_problems` — a bell to managers, an email to info@, a line on the job timeline. Read those tables for "did the client get it?"; don't infer it from `email_log`.
+- **Resend judges each recipient separately.** One email can be delivered to the To and blocked for a CC; Resend's list view still shows the whole row as "Suppressed". A suppression never expires and a re-send changes nothing — somebody fixes the address or removes it in Resend.
+- **Never auto-retry a failed delivery and never auto-remove an address from Resend's suppression list.** Both hide the problem and damage sending reputation for every client.
+- **Never email info@ about one of our own addresses** — if info@ itself were blocked, the alert would trigger itself forever. Bell only.
+- **The job link comes from the `jobNumber` template variable** (stored as `email_log.job_number`) — one more reason every job-scoped template must be passed it.
+- **Anywhere new that shows a client or driver email address should show `components/EmailProblemFlag.tsx`** (data: `hooks/useEmailProblems.ts`, one request per page).
+
 ## Templates
 
 - **Production is `EMAIL_MODE=live` (via Resend) and has been since mid-2026.** Every registered template sends for real to the real recipient — `EMAIL_LIVE_TEMPLATES` is the test-mode allowlist and is **ignored entirely** when the mode is live, so a new template needs nothing added to it. Don't tell anyone to add one, and don't hedge a new email behind "it'll test-redirect until released" — it won't. Feature specs saying a template "ships OFF `EMAIL_LIVE_TEMPLATES`" describe a rollout that predates go-live.
