@@ -6,7 +6,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../services/api';
+import { api, isNoReply } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { describePreauth, paymentMethodLabel } from '../lib/preauth';
@@ -413,6 +413,27 @@ function RefundNotifyControl({ viaStripe, checked, onChange, jobId, onRecipients
   );
 }
 
+/** How long to wait before asking again when the server never replied — a deploy
+ *  restart is back in a couple of seconds, a slow one in ten. */
+const NO_REPLY_RETRY_MS = [3000, 10000];
+
+/**
+ * A GET that is asked again (twice) when no reply came back (`isNoReply`), before
+ * the caller says anything. Reads only — a write that got no reply may well have
+ * happened, so it is never repeated blind. Job 16169, 21 Oct 2026: the Money tab's
+ * reload straight after a card receipt hit a deploy restart, and the whole tab
+ * turned into a red error box until somebody refreshed the page.
+ */
+async function getAskingAgainIfNoReply<T>(path: string): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api.get<T>(path);
+    } catch (e) {
+      if (!isNoReply(e) || attempt >= NO_REPLY_RETRY_MS.length) throw e;
+      await new Promise((resolve) => setTimeout(resolve, NO_REPLY_RETRY_MS[attempt]));
+    }
+  }
+}
 
 export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
@@ -836,10 +857,12 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
 
   const loadData = useCallback(async () => {
     setLoading(true);
-    setError('');
     try {
-      const result = await api.get<{ data: FinancialData }>(`/money/${jobId}/summary`);
+      const result = await getAskingAgainIfNoReply<{ data: FinancialData }>(`/money/${jobId}/summary`);
       setData(result.data);
+      // Cleared on success, not before asking — so a "Couldn't refresh" line stays up
+      // (reading "Refreshing...") until the figures it warns about are replaced.
+      setError('');
     } catch (err: any) {
       setError(err.message || 'Failed to load financial data');
     } finally {
@@ -1151,7 +1174,10 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
     );
   }
 
-  if (error || !data) {
+  // The red box only when there is nothing to show. A REFRESH that fails keeps the
+  // figures on screen under an amber line instead (below) — replacing the whole tab
+  // made a successful card payment look like it had failed (job 16169).
+  if (!data) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
         {error || 'Failed to load financial data'}
@@ -1197,6 +1223,26 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
 
   return (
     <div className="space-y-6">
+      {/* A refresh failed: these are the figures from before it. Never shown quietly —
+          straight after a payment they won't include it, and that invites taking it twice. */}
+      {error && (
+        <div className="flex items-start gap-3 px-4 py-3 text-sm bg-amber-50 border border-amber-300 rounded-lg text-amber-900">
+          <div className="flex-1">
+            <div className="font-semibold">Couldn&rsquo;t refresh - these figures may be out of date</div>
+            <div className="text-xs mt-0.5">
+              Anything you just did may well have gone through: check before doing it again. ({error})
+            </div>
+          </div>
+          <button
+            onClick={() => { void loadData(); }}
+            disabled={loading}
+            className="px-3 py-1.5 text-xs font-medium text-amber-900 border border-amber-400 rounded-md hover:bg-amber-100 disabled:opacity-50"
+          >
+            {loading ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </div>
+      )}
+
       {/* Financial Summary */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <div className="flex items-center justify-between mb-4">
