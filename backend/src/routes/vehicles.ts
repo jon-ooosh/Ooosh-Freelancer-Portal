@@ -4907,6 +4907,19 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       size: 8, color: [146, 64, 14],
     });
     y += 18;
+  } else if (isCollection && data.driverPresent === false) {
+    // The customer signs for the van they hand back (Oct 2026); when nobody was
+    // there, the collecting driver's note leads the NOTES FROM CLIENT section.
+    pdf.setFillColor(255, 251, 235);
+    pdf.setDrawColor(253, 230, 138);
+    pdf.roundedRect(margin, y, contentWidth, 14, 2, 2, 'FD');
+    addText('Customer was not present at collection', margin + 4, y + 5.5, {
+      size: 9, bold: true, color: [146, 64, 14],
+    });
+    addText("The van was collected without the customer there. See the collecting driver's note above.", margin + 4, y + 10.5, {
+      size: 8, color: [146, 64, 14],
+    });
+    y += 18;
   } else if (data.signatureBase64) {
     try {
       const sigProps = pdf.getImageProperties(data.signatureBase64);
@@ -4929,7 +4942,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       });
       y += 25;
     }
-  } else if (data.signatureMissing) {
+  } else if (data.signatureMissing && !isCollection) {
     pdf.setDrawColor(200, 200, 200);
     pdf.setFillColor(250, 250, 250);
     pdf.roundedRect(margin, y, contentWidth, 20, 2, 2, 'FD');
@@ -4947,7 +4960,8 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     y += 25;
   }
 
-  addText('Driver: ' + (data.driverName || '-'), margin, y, { size: 9 });
+  // On a collection the signature is the customer's (the van's hirer).
+  addText((isCollection ? 'Customer: ' : 'Driver: ') + (data.driverName || '-'), margin, y, { size: 9 });
   addText('Date: ' + timestamp, 0, y, { size: 9, align: 'right' });
 
   // -- Footer on every page --

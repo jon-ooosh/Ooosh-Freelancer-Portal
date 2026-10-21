@@ -2,7 +2,14 @@
 
 /**
  * Job Completion Page
- * 
+ *
+ * Three forms (Oct 2026):
+ * - Delivery / collection ('dc', below): checklist, signature or photo, client note.
+ * - Crew job ('crew', the job's boardType): notes, optional photos, and an
+ *   opt-in "what's on the hire" note to the client. No signature.
+ * - People job ('people', ?mode=people from Start, or a job booked as People):
+ *   notes and an optional photo. No signature.
+ *
  * Allows drivers to complete a delivery/collection with:
  * - Interactive equipment checklist with tickboxes
  * - Notes field
@@ -27,6 +34,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
+import { ukToday, shortUkDate } from '@/lib/ukDate'
 
 // =============================================================================
 // TYPES
@@ -43,6 +51,11 @@ interface Job {
   hhRef?: string
   clientEmail?: string | null  // Client contact on file (OP's recipient rule) — used when there are no contacts to pick
   clientContacts?: ClientContact[]  // People on this job who can receive the delivery note
+  completedAtDate?: string | null
+  // Crew and People work: YYYY-MM-DD it can be completed from (its last day)
+  completeFrom?: string | null
+  // Has the van leg really happened? (the van-only screen)
+  vanLegDone?: boolean
 }
 
 /** A client contact the delivery note can go to (OP: resolveJobEmailContacts) */
@@ -491,7 +504,9 @@ interface ClientEmailInputProps {
   onEmailsChange: (emails: string[]) => void
   dontSend: boolean
   onDontSendChange: (dontSend: boolean) => void
-  jobType: 'delivery' | 'collection'
+  // 'hire' = a crew job's opt-in "what's on the hire" note (Oct 2026): the box
+  // is "Send…" (ticked = send) instead of "Don't send…".
+  jobType: 'delivery' | 'collection' | 'hire'
 }
 
 function ClientEmailInput({ 
@@ -548,16 +563,29 @@ function ClientEmailInput({
 
   return (
     <div className="space-y-3">
-      {/* Don't send checkbox */}
-      <label className="flex items-center gap-3 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={dontSend}
-          onChange={(e) => onDontSendChange(e.target.checked)}
-          className="w-5 h-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-        />
-        <span className="text-sm text-gray-700">Don't send {typeLabel.toLowerCase()} to client</span>
-      </label>
+      {jobType === 'hire' ? (
+        /* Crew: opt-in */
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={!dontSend}
+            onChange={(e) => onDontSendChange(!e.target.checked)}
+            className="w-5 h-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+          />
+          <span className="text-sm text-gray-700">Send the client a note of what&apos;s on the hire</span>
+        </label>
+      ) : (
+        /* Don't send checkbox */
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={dontSend}
+            onChange={(e) => onDontSendChange(e.target.checked)}
+            className="w-5 h-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+          />
+          <span className="text-sm text-gray-700">Don't send {typeLabel.toLowerCase()} to client</span>
+        </label>
+      )}
 
       {/* Job contacts to tick (same list as the warehouse collection page) */}
       {!dontSend && contacts.length > 0 && (
@@ -646,7 +674,9 @@ function ClientEmailInput({
           <p className="text-xs text-gray-500">
             {jobType === 'delivery' 
               ? 'A PDF delivery note with equipment list will be emailed to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
-              : 'A collection confirmation email will be sent to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
+              : jobType === 'hire'
+                ? 'A PDF listing the equipment on the hire will be emailed to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
+                : 'A collection confirmation email will be sent to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
             }
           </p>
         </div>
@@ -659,13 +689,22 @@ function ClientEmailInput({
 // EQUIPMENT LIST WITH TICKBOXES COMPONENT
 // =============================================================================
 
+/** One line of the equipment checklist as sent with the completion (OP puts it on the job timeline). */
+interface ChecklistLine {
+  name: string
+  quantity: number
+  checked: number
+}
+
 interface EquipmentChecklistProps {
   hhRef: string
   whatIsIt?: 'equipment' | 'vehicle' | 'people'
   isDelivery: boolean
+  /** Told every time a tick changes, so the page can send the ticks with the completion. */
+  onChange?: (lines: ChecklistLine[]) => void
 }
 
-function EquipmentChecklist({ hhRef, whatIsIt, isDelivery }: EquipmentChecklistProps) {
+function EquipmentChecklist({ hhRef, whatIsIt, isDelivery, onChange }: EquipmentChecklistProps) {
   const [items, setItems] = useState<EquipmentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -734,6 +773,15 @@ function EquipmentChecklist({ hhRef, whatIsIt, isDelivery }: EquipmentChecklistP
       return { ...prev, [itemKey]: newCount }
     })
   }
+
+  // Report the ticks up (Oct 2026: they're saved now, not just a screen aid).
+  useEffect(() => {
+    onChange?.(items.map((item, index) => ({
+      name: item.name,
+      quantity: item.quantity,
+      checked: Math.min(checkedCounts[`${item.id}-${index}`] || 0, item.quantity),
+    })))
+  }, [items, checkedCounts, onChange])
 
   // Calculate totals for summary
   const totalItems = items.reduce((sum, item) => sum + item.quantity, 0)
@@ -815,7 +863,7 @@ function EquipmentChecklist({ hhRef, whatIsIt, isDelivery }: EquipmentChecklistP
       )}
 
       <p className="text-sm text-gray-500 mb-3">
-        Tap to check off each item as you {isDelivery ? 'load/deliver' : 'collect'} it
+        Tick every item you&apos;ve {isDelivery ? 'handed over' : 'collected'}, or leave them all unticked if you didn&apos;t check.
       </p>
 
       <div className="space-y-1">
@@ -986,17 +1034,23 @@ function OfflineBanner() {
 // =============================================================================
 
 function VanOnlyConfirmation({
-  job, jobId, isDelivery, typeLabel, isOnline, onComplete
+  job, jobId, isDelivery, isOnline, onComplete
 }: {
   job: Job
   jobId: string
   isDelivery: boolean
-  typeLabel: string
   isOnline: boolean
   onComplete: () => void
 }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Oct 2026: every back button on the van screens used to land here, and "All
+  // Done" completed the job (stopping the reminders) whether or not a van had
+  // gone out or been collected. Now the button only shows once OP has the
+  // book-out / collection, and OP refuses it otherwise.
+  const vanDone = job.vanLegDone === true
+  const alreadyDone = !!job.completedAtDate
+  const stepName = isDelivery ? 'book-out' : 'collection'
 
   const handleConfirm = async () => {
     if (!isOnline) return
@@ -1008,7 +1062,7 @@ function VanOnlyConfirmation({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          notes: 'Van book-out completed (van only)',
+          notes: isDelivery ? 'Van book-out completed (van only)' : 'Van collected (van only)',
           customerPresent: false,
           vanOnly: true,
         }),
@@ -1061,7 +1115,7 @@ function VanOnlyConfirmation({
             Back
           </Link>
           <h1 className="flex-1 text-center font-semibold text-gray-900">
-            Complete {typeLabel}
+            Complete {isDelivery ? 'Delivery' : 'Collection'}
           </h1>
           <div className="w-16"></div>
         </div>
@@ -1071,7 +1125,11 @@ function VanOnlyConfirmation({
         <div className="text-center mb-8">
           <div className="text-5xl mb-4">🚐</div>
           <h2 className="text-xl font-bold text-gray-900 mb-2">
-            Van Book-Out Complete
+            {alreadyDone
+              ? 'Job complete'
+              : vanDone
+                ? (isDelivery ? 'Van booked out' : 'Van collected')
+                : (isDelivery ? 'Van not booked out yet' : 'Van not collected yet')}
           </h2>
           <p className="text-gray-500">
             {formatJobTitle(job.name, job.venueName)}
@@ -1081,14 +1139,29 @@ function VanOnlyConfirmation({
           )}
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm p-6 text-center mb-6">
-          <p className="text-gray-700 mb-2">
-            You&apos;ve completed the vehicle book-out for this {isDelivery ? 'delivery' : 'collection'}.
-          </p>
-          <p className="text-sm text-gray-500">
-            Tap below to mark this job as done.
-          </p>
-        </div>
+        {alreadyDone ? (
+          <div className="bg-white rounded-xl shadow-sm p-6 text-center mb-6">
+            <p className="text-gray-700">This job is already marked complete. Nothing more to do.</p>
+          </div>
+        ) : vanDone ? (
+          <div className="bg-white rounded-xl shadow-sm p-6 text-center mb-6">
+            <p className="text-gray-700 mb-2">
+              The van {stepName} for this {isDelivery ? 'delivery' : 'collection'} is on the system.
+            </p>
+            <p className="text-sm text-gray-500">
+              Tap below to mark this job as done.
+            </p>
+          </div>
+        ) : (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 mb-6">
+            <p className="text-amber-900 mb-2">
+              We can&apos;t see a van {stepName} for this job on the system yet, so it can&apos;t be marked done.
+            </p>
+            <p className="text-sm text-amber-800">
+              If you&apos;ve only just finished it, wait a moment and refresh. Otherwise go back and start the {stepName} again.
+            </p>
+          </div>
+        )}
 
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
@@ -1104,32 +1177,62 @@ function VanOnlyConfirmation({
           </div>
         )}
 
-        <button
-          onClick={handleConfirm}
-          disabled={submitting || !isOnline}
-          className={`w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center gap-2 transition-colors ${
-            !submitting && isOnline
-              ? 'bg-green-500 text-white hover:bg-green-600'
-              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-          }`}
-        >
-          {submitting ? (
-            <>
-              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-              Completing...
-            </>
-          ) : !isOnline ? (
-            <>
-              <span>📡</span>
-              Offline - Cannot Submit
-            </>
-          ) : (
-            <>
-              <span>✓</span>
-              All Done
-            </>
-          )}
-        </button>
+        {alreadyDone ? (
+          <Link
+            href={`/job/${jobId}`}
+            className="w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center bg-white border border-gray-200 text-gray-700 hover:bg-gray-50"
+          >
+            Back to the job
+          </Link>
+        ) : vanDone ? (
+          <button
+            onClick={handleConfirm}
+            disabled={submitting || !isOnline}
+            className={`w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center gap-2 transition-colors ${
+              !submitting && isOnline
+                ? 'bg-green-500 text-white hover:bg-green-600'
+                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+            }`}
+          >
+            {submitting ? (
+              <>
+                <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                Completing...
+              </>
+            ) : !isOnline ? (
+              <>
+                <span>📡</span>
+                Offline - Cannot Submit
+              </>
+            ) : (
+              <>
+                <span>✓</span>
+                All Done
+              </>
+            )}
+          </button>
+        ) : (
+          <div className="space-y-3">
+            <Link
+              href={`/job/${jobId}/start`}
+              className="w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center bg-purple-500 text-white hover:bg-purple-600"
+            >
+              Start the {stepName} again
+            </Link>
+            <button
+              onClick={() => window.location.reload()}
+              className="w-full py-3 rounded-xl font-medium flex items-center justify-center bg-white border border-gray-200 text-gray-700 hover:bg-gray-50"
+            >
+              Refresh
+            </button>
+            <Link
+              href={`/job/${jobId}`}
+              className="block text-center text-sm font-medium text-gray-500 hover:text-gray-700 py-2"
+            >
+              Back to the job
+            </Link>
+          </div>
+        )}
       </main>
     </div>
   )
@@ -1149,6 +1252,10 @@ export default function CompletePage() {
 
   // Job data
   const [job, setJob] = useState<Job | null>(null)
+  // The job's board from OP: 'crew' decides the crew form.
+  const [boardType, setBoardType] = useState<string | null>(null)
+  // The equipment ticks, sent with the completion (OP puts them on the timeline)
+  const [checklist, setChecklist] = useState<ChecklistLine[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -1189,6 +1296,9 @@ export default function CompletePage() {
 
         const fetchedJob = data.job || null
         setJob(fetchedJob)
+        setBoardType(data.boardType || null)
+        // A crew job's client note is opt-in (the delivery note is opt-out).
+        if (data.boardType === 'crew') setDontSendClientEmail(true)
 
         // Capture user email for Ooosh staff detection
         if (data.userEmail) {
@@ -1216,12 +1326,25 @@ export default function CompletePage() {
     }
   }, [jobId, router])
 
+  // Which form: crew from the job itself; People from Start (?mode=people) or
+  // a job booked as People; ?mode=dc when a People job's driver picked another
+  // option on Start. Everything else is a delivery/collection hand-over.
+  const modeParam = searchParams.get('mode')
+  const mode: 'dc' | 'crew' | 'people' = boardType === 'crew'
+    ? 'crew'
+    : modeParam === 'people' || modeParam === 'dc'
+      ? modeParam
+      : job?.whatIsIt === 'people' ? 'people' : 'dc'
+
   // Check if form is valid
-  // Customer present: signature required, photos optional
-  // Customer not present: at least 1 photo required, no signature needed
-  const isValid = customerPresent 
-    ? signature !== null 
-    : photos.length >= 1
+  // Delivery/collection — customer present: signature required, photos optional;
+  // customer not present: at least 1 photo required, no signature needed.
+  // Crew and People: always (notes and photos are optional).
+  const isValid = mode !== 'dc'
+    ? true
+    : customerPresent
+      ? signature !== null
+      : photos.length >= 1
 
   // Check if client emails are valid (if sending)
   const hasValidClientEmails = dontSendClientEmail || 
@@ -1248,10 +1371,16 @@ export default function CompletePage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          mode,
           notes,
-          signature: customerPresent ? signature : null,
+          signature: mode === 'dc' && customerPresent ? signature : null,
           photos: photos.length > 0 ? photos : undefined,
-          customerPresent,
+          // Only a hand-over has a customer to be present or not.
+          customerPresent: mode === 'dc' ? customerPresent : true,
+          // What was ticked off (delivery/collection only)
+          ...(mode === 'dc' && checklist.length > 0 ? { equipmentChecklist: checklist } : {}),
+          // Crew: the opt-in "what's on the hire" note
+          ...(mode === 'crew' ? { sendHireNote: !dontSendClientEmail } : {}),
           // Extra client addresses typed here. Blank is fine: OP sends to the
           // client contact on file (resolveClientEmailTarget). sendClientEmail
           // is false ONLY when "Don't send" is ticked.
@@ -1343,8 +1472,13 @@ export default function CompletePage() {
   }
 
   const isDelivery = job.type === 'delivery'
-  const typeLabel = isDelivery ? 'Delivery' : 'Collection'
-  const typeIcon = isDelivery ? '📦' : '📥'
+  const typeLabel = mode === 'dc' ? (isDelivery ? 'Delivery' : 'Collection') : 'Job'
+  const typeIcon = mode === 'crew' ? '👷' : mode === 'people' ? '👥' : isDelivery ? '📦' : '📥'
+  // Crew / People completed before the last day: a warning, not a block (the
+  // job page only offers Complete from the last day; a link can still land here).
+  const earlyFor = mode !== 'dc' && job.completeFrom && ukToday() < job.completeFrom
+    ? job.completeFrom
+    : null
 
   // Van-only confirmation: simple "All done?" screen after vehicle book-out
   if (vanOnly) {
@@ -1353,15 +1487,15 @@ export default function CompletePage() {
         job={job}
         jobId={jobId}
         isDelivery={isDelivery}
-        typeLabel={typeLabel}
         isOnline={isOnline}
         onComplete={() => router.push(`/job/${jobId}?completed=true`)}
       />
     )
   }
 
-  // Only show client email section for equipment jobs (not vehicles, for now)
-  const showClientEmailSection = job.whatIsIt === 'equipment' || !job.whatIsIt
+  // Only show client email section for equipment jobs (not vehicles, for now);
+  // a crew job has its own opt-in hire note below, a People job none.
+  const showClientEmailSection = mode === 'dc' && (job.whatIsIt === 'equipment' || !job.whatIsIt)
 
   return (
     <div className="min-h-screen bg-gray-50 pb-8">
@@ -1402,12 +1536,21 @@ export default function CompletePage() {
           </div>
         </div>
 
-        {/* Equipment Checklist with Tickboxes */}
-        {job.hhRef && (
+        {earlyFor && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <p className="text-sm text-amber-900">
+              This job runs until {shortUkDate(earlyFor)}. Only mark it complete once your last day is done.
+            </p>
+          </div>
+        )}
+
+        {/* Equipment Checklist with Tickboxes (hand-overs only) */}
+        {mode === 'dc' && job.hhRef && (
           <EquipmentChecklist 
             hhRef={job.hhRef} 
             whatIsIt={job.whatIsIt}
             isDelivery={isDelivery}
+            onChange={setChecklist}
           />
         )}
 
@@ -1436,13 +1579,16 @@ export default function CompletePage() {
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            placeholder="Any notes about this delivery/collection... (e.g., items missing, access issues, customer requests)"
+            placeholder={mode === 'dc'
+              ? 'Any notes about this delivery/collection... (e.g., items missing, access issues, customer requests)'
+              : 'Anything the office should know about the job? (optional)'}
             className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 resize-none"
             rows={3}
           />
         </div>
 
-        {/* Customer Present Toggle */}
+        {/* Customer Present Toggle (hand-overs only) */}
+        {mode === 'dc' && (
         <div className="bg-white rounded-xl shadow-sm p-4">
           <label className="flex items-center justify-between cursor-pointer">
             <div>
@@ -1468,24 +1614,28 @@ export default function CompletePage() {
             </div>
           </label>
         </div>
+        )}
 
         {/* Photos */}
         <div className="bg-white rounded-xl shadow-sm p-4">
           <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
             <span>📸</span> Photos
-            {!customerPresent && <span className="text-red-500 text-sm">*required</span>}
-            {customerPresent && <span className="text-gray-400 text-sm">(optional)</span>}
+            {mode === 'dc' && !customerPresent
+              ? <span className="text-red-500 text-sm">*required</span>
+              : <span className="text-gray-400 text-sm">(optional)</span>}
           </h3>
           <p className="text-sm text-gray-500 mb-3">
-            {customerPresent 
-              ? 'Optionally add photos of the delivery/collection'
-              : 'Take at least one photo showing where items were left'
+            {mode !== 'dc'
+              ? 'Add a photo if it helps the office'
+              : customerPresent 
+                ? 'Optionally add photos of the delivery/collection'
+                : 'Take at least one photo showing where items were left'
             }
           </p>
           <PhotoCapture 
             photos={photos} 
             onPhotosChange={setPhotos} 
-            required={!customerPresent}
+            required={mode === 'dc' && !customerPresent}
           />
         </div>
 
@@ -1514,8 +1664,27 @@ export default function CompletePage() {
           </div>
         )}
 
-        {/* Signature (when customer present) */}
-        {customerPresent && (
+        {/* Crew: the opt-in "what's on the hire" note */}
+        {mode === 'crew' && job.hhRef && (
+          <div className="bg-white rounded-xl shadow-sm p-4">
+            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span>📧</span> Equipment on hire
+            </h3>
+            <ClientEmailInput
+              contacts={job.clientContacts || []}
+              selectedContactEmails={selectedContactEmails}
+              onToggleContact={toggleContactEmail}
+              emails={clientEmails}
+              onEmailsChange={setClientEmails}
+              dontSend={dontSendClientEmail}
+              onDontSendChange={setDontSendClientEmail}
+              jobType="hire"
+            />
+          </div>
+        )}
+
+        {/* Signature (hand-overs, when customer present) */}
+        {mode === 'dc' && customerPresent && (
           <div className="bg-white rounded-xl shadow-sm p-4">
             <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
               <span>✍️</span> Client Signature
@@ -1571,7 +1740,7 @@ export default function CompletePage() {
           )}
         </button>
 
-        {!isValid && isOnline && (
+        {mode === 'dc' && !isValid && isOnline && (
           <p className="text-center text-sm text-gray-500">
             {customerPresent 
               ? 'Please capture client signature above'

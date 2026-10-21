@@ -29,6 +29,13 @@ export interface DeliveryNoteData {
   /** Array of base64 data URLs or raw bytes for delivery photos */
   photos?: Array<string | Buffer>;
   driverName?: string;
+  /**
+   * 'delivery' (default): the signed delivery note. 'hire': the same layout as a
+   * plain "what's on your hire" note for a CREW job's client (Oct 2026: a tech
+   * on the first day or the whole tour still sends one) — no signature box,
+   * because nobody signs for kit a crew member is working alongside.
+   */
+  variant?: 'delivery' | 'hire';
 }
 
 function formatDateNice(dateStr: string): string {
@@ -110,6 +117,7 @@ function drawSignatureLines(
  * Generate a delivery-note PDF. Returns the raw bytes.
  */
 export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<Buffer> {
+  const isHire = data.variant === 'hire';
   const pdfDoc = await PDFDocument.create();
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
@@ -154,7 +162,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     });
   }
 
-  const titleText = 'Delivery Note';
+  const titleText = isHire ? 'Equipment on Hire' : 'Delivery Note';
   const titleSize = 24;
   const titleWidth = helveticaBold.widthOfTextAtSize(titleText, titleSize);
   page.drawText(titleText, {
@@ -231,7 +239,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   yPosition = detailsBoxTop - detailsBoxHeight - 20;
 
   if (data.deliveryAddress) {
-    page.drawText('Delivery Address:', {
+    page.drawText(isHire ? 'Venue Address:' : 'Delivery Address:', {
       x: margin, y: yPosition, size: labelSize, font: helvetica, color: lightGray,
     });
     // Venue addresses often arrive with literal newlines. pdf-lib's drawText
@@ -254,7 +262,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   }
 
   // ── Equipment table ──────────────────────────────────────────────
-  page.drawText('Equipment Delivered', {
+  page.drawText(isHire ? 'Equipment on this hire' : 'Equipment Delivered', {
     x: margin, y: yPosition, size: 14, font: helveticaBold, color: textColor,
   });
   yPosition -= 20;
@@ -335,53 +343,57 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
 
   yPosition -= 10;
 
-  // ── Signature box ────────────────────────────────────────────────
-  yPosition -= 20;
-  if (yPosition < margin + 100) {
-    page = pdfDoc.addPage([pageWidth, pageHeight]);
-    yPosition = pageHeight - margin;
-  }
+  // ── Signature box (delivery notes only) ──────────────────────────
+  if (!isHire) {
+    yPosition -= 20;
+    if (yPosition < margin + 100) {
+      page = pdfDoc.addPage([pageWidth, pageHeight]);
+      yPosition = pageHeight - margin;
+    }
 
-  const sigBoxTop = yPosition;
-  const sigBoxHeight = 100;
+    const sigBoxTop = yPosition;
+    const sigBoxHeight = 100;
 
-  page.drawRectangle({
-    x: margin, y: yPosition - sigBoxHeight, width: contentWidth, height: sigBoxHeight,
-    borderColor, borderWidth: 1,
-  });
-  page.drawText('Acknowledgement of Delivery', {
-    x: margin + 15, y: yPosition - 20, size: 11, font: helveticaBold, color: textColor,
-  });
+    page.drawRectangle({
+      x: margin, y: yPosition - sigBoxHeight, width: contentWidth, height: sigBoxHeight,
+      borderColor, borderWidth: 1,
+    });
+    page.drawText('Acknowledgement of Delivery', {
+      x: margin + 15, y: yPosition - 20, size: 11, font: helveticaBold, color: textColor,
+    });
 
-  yPosition -= 35;
+    yPosition -= 35;
 
-  if (data.signature) {
-    try {
-      const sigBytes = toImageBuffer(data.signature);
-      const sigImage = await pdfDoc.embedPng(sigBytes);
-      const maxWidth = 180;
-      const maxHeight = 50;
-      const scale = Math.min(maxWidth / sigImage.width, maxHeight / sigImage.height);
-      const w = sigImage.width * scale;
-      const h = sigImage.height * scale;
-      page.drawImage(sigImage, {
-        x: margin + 15, y: yPosition - h, width: w, height: h,
-      });
-      const receivedText = data.driverName
-        ? `Received by customer — delivered by ${data.driverName}`
-        : 'Received by customer';
-      page.drawText(receivedText, {
-        x: margin + 15, y: sigBoxTop - sigBoxHeight + 12, size: 9, font: helvetica, color: lightGray,
-      });
-    } catch (err) {
-      console.error('[delivery-note-pdf] Failed to embed signature:', err);
+    if (data.signature) {
+      try {
+        const sigBytes = toImageBuffer(data.signature);
+        const sigImage = await pdfDoc.embedPng(sigBytes);
+        const maxWidth = 180;
+        const maxHeight = 50;
+        const scale = Math.min(maxWidth / sigImage.width, maxHeight / sigImage.height);
+        const w = sigImage.width * scale;
+        const h = sigImage.height * scale;
+        page.drawImage(sigImage, {
+          x: margin + 15, y: yPosition - h, width: w, height: h,
+        });
+        const receivedText = data.driverName
+          ? `Received by customer — delivered by ${data.driverName}`
+          : 'Received by customer';
+        page.drawText(receivedText, {
+          x: margin + 15, y: sigBoxTop - sigBoxHeight + 12, size: 9, font: helvetica, color: lightGray,
+        });
+      } catch (err) {
+        console.error('[delivery-note-pdf] Failed to embed signature:', err);
+        drawSignatureLines(page, margin + 15, yPosition, sigBoxTop - sigBoxHeight + 12, helvetica, lightGray);
+      }
+    } else {
       drawSignatureLines(page, margin + 15, yPosition, sigBoxTop - sigBoxHeight + 12, helvetica, lightGray);
     }
-  } else {
-    drawSignatureLines(page, margin + 15, yPosition, sigBoxTop - sigBoxHeight + 12, helvetica, lightGray);
-  }
 
-  yPosition = sigBoxTop - sigBoxHeight - 20;
+    yPosition = sigBoxTop - sigBoxHeight - 20;
+  } else {
+    yPosition -= 20;
+  }
 
   // ── Photos ───────────────────────────────────────────────────────
   if (data.photos && data.photos.length > 0) {
@@ -389,7 +401,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
       page = pdfDoc.addPage([pageWidth, pageHeight]);
       yPosition = pageHeight - margin;
     }
-    page.drawText('Delivery Photos', {
+    page.drawText(isHire ? 'Photos' : 'Delivery Photos', {
       x: margin, y: yPosition, size: 14, font: helveticaBold, color: textColor,
     });
     yPosition -= 25;
