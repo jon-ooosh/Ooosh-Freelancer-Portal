@@ -11,7 +11,7 @@ import { useState, useEffect, Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { cls, Banner } from '@/components/ui'
-import { AuthShell, AuthResult, authInput, authLabel } from '@/components/AuthShell'
+import { AuthShell, AuthResult, authInput, authLabel, RememberPhone } from '@/components/AuthShell'
 
 function ResetPasswordForm() {
   const searchParams = useSearchParams()
@@ -21,6 +21,7 @@ function ResetPasswordForm() {
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [remember, setRemember] = useState(true)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
   // In OP mode the reset endpoint logs the user straight in (sets a session
@@ -79,7 +80,7 @@ function ResetPasswordForm() {
       const response = await fetch('/api/auth/reset-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, password }),
+        body: JSON.stringify({ token, password, trustDevice: remember }),
       })
 
       const data = await response.json()
@@ -185,6 +186,8 @@ function ResetPasswordForm() {
           className={input}
         />
       </div>
+
+      <RememberPhone checked={remember} onChange={setRemember} />
 
       <button type="submit" disabled={loading} className={`${cls.btnPrimary} w-full`}>
         {loading ? 'Resetting...' : 'Reset password'}

@@ -136,6 +136,8 @@ middleware; the general `authenticate` accepts exactly one shape.
 | Freelancer book-out / collection | `{ scope: 'freelancer_bookout' }` | `authenticateVehicleFlexible` |
 | Freelancer prep (§21.6) | `{ scope: 'freelancer_prep' }` (+ 15-min `freelancer_prep_redeem`) | `authenticateVehicleFlexible` + `FREELANCER_PREP_ALLOW` |
 | Portal session | `{ id, email, name }` — signed with `SESSION_SECRET` / `PORTAL_SESSION_SECRET`, which is mandatory and must differ from `JWT_SECRET` (Oct 2026) | `portalAuth` — refuses `scope` tokens |
+| Portal sign-in, code owed (10 min) | aud `portal_login_pending`, `{ personId }` | `/api/portal/auth/login/code` + `/send-code` only (`portal-login-security.ts`) |
+| Portal remembered phone (90 days) | aud `portal_device`, `{ personId, deviceId }`; never a session | `/api/portal/auth/login` only, and only with a live `portal_trusted_devices` row |
 
 **Until Oct 2026 `authenticate` verified the signature and nothing else**, so every
 row above passed it — a public hire-form session read `GET /api/drivers` (proven on

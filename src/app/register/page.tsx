@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { cls, Banner } from '@/components/ui'
-import { AuthShell, authInput, authLabel } from '@/components/AuthShell'
+import { AuthShell, authInput, authLabel, RememberPhone } from '@/components/AuthShell'
 
 type Step = 'email' | 'verify' | 'password'
 
@@ -13,6 +13,7 @@ export default function RegisterPage() {
   const [verificationCode, setVerificationCode] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  const [remember, setRemember] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(false)
@@ -94,7 +95,7 @@ export default function RegisterPage() {
       const response = await fetch('/api/auth/register/complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, code: verificationCode }),
+        body: JSON.stringify({ email, password, code: verificationCode, trustDevice: remember }),
       })
 
       const data = await response.json()
@@ -246,6 +247,7 @@ export default function RegisterPage() {
             />
             <p className="text-[13px] text-hf-muted">Must be at least 8 characters</p>
           </div>
+          <RememberPhone checked={remember} onChange={setRemember} />
           <button type="submit" disabled={loading} className={`${cls.btnPrimary} w-full`}>
             {loading ? 'Creating account...' : 'Create account'}
           </button>

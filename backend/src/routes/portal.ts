@@ -29,7 +29,11 @@ import { greetingName, fullDisplayName } from '../services/display-name';
 import { ukToday } from '../services/uk-date';
 import { isEndKeyed, lastWorkDay } from '../services/quote-schedule';
 import { isVanLegDone } from '../services/quote-completion';
-import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures } from '../services/staff-login-security';
+import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures, deviceLabelFrom } from '../services/staff-login-security';
+import {
+  isPortalEnforcedNow, portalEmailHint, signPortalPending, readPortalPending, sendPortalLoginCode,
+  verifyPortalLoginCode, rememberPortalDevice, isRememberedPortalDevice,
+} from '../services/portal-login-security';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -128,6 +132,17 @@ const portalEmailLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   message: { error: 'Too many requests. Try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+// The code step of two-step sign-in (FREELANCER-PORTAL-SPEC §7). Its own
+// budget: OP sees every freelancer as Netlify's few addresses, so sharing the
+// login one would halve it once the code is on. The code is already held per
+// person (5 tries a code, 3 emailed codes in 15 minutes, a valid password first).
+const portalCodeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: 'Too many attempts. Try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -256,7 +271,43 @@ function isUuidLike(value: unknown): boolean {
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
+  // Two-factor sign-in (FREELANCER-PORTAL-SPEC §7): the phone's remembered-device
+  // pass (the portal keeps it in its own httpOnly cookie) and the phone's user
+  // agent, which only names the device in the code email ("on iPhone · Safari").
+  deviceToken: z.string().max(2000).optional(),
+  userAgent: z.string().max(400).optional(),
 });
+
+/** Sign-up, reset and the code step: "Remember this phone for 90 days", ticked by default, always asked. */
+const deviceFields = {
+  trustDevice: z.boolean().optional(),
+  userAgent: z.string().max(400).optional(),
+};
+
+/**
+ * Issue the portal session (cookie + body), as every successful sign-in does.
+ * The Netlify portal mints its own cookie from `user` (see its login route), so
+ * nothing may reach here before both steps have passed.
+ */
+function startPortalSession(
+  res: Response,
+  person: { id: string; email: string | null; first_name?: string | null; last_name?: string | null; preferred_name?: string | null },
+  fallbackEmail: string,
+) {
+  const name = fullDisplayName(person);
+  const email = person.email || fallbackEmail;
+  const sessionToken = jwt.sign({ id: person.id, email, name }, PORTAL_SECRET, { expiresIn: '30d', algorithm: 'HS256' });
+  res.cookie('session', sessionToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    path: '/',
+  });
+  query('UPDATE people SET portal_last_login = NOW() WHERE id = $1', [person.id])
+    .catch(err => console.error('Failed to update portal_last_login:', err));
+  return { id: person.id, name, email };
+}
 
 router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Response) => {
   try {
@@ -320,42 +371,90 @@ router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Respons
       return;
     }
 
+    // Two-factor sign-in (FREELANCER-PORTAL-SPEC §7). Once the switch-on date
+    // has come, a phone that isn't remembered gets no session yet: a code is
+    // emailed and the portal asks for it (POST /auth/login/code). `success` is
+    // false and there is no `user`, so the portal mints nothing.
+    if (await isPortalEnforcedNow() && !(await isRememberedPortalDevice(parsed.data.deviceToken, freelancer.id))) {
+      const sent = await sendPortalLoginCode(freelancer, deviceLabelFrom(parsed.data.userAgent));
+      res.json({
+        success: false,
+        pending: signPortalPending(freelancer.id),
+        emailHint: portalEmailHint(freelancer.email || normalizedEmail),
+        codeSent: sent.ok,
+        codeError: sent.ok ? null : sent.error,
+      });
+      return;
+    }
+
     // Display only — the portal dashboard greets from this claim and settings
     // prints it. The id, not the name, is what identifies the session.
-    const name = fullDisplayName(freelancer);
-
-    // Create session token (compatible with portal's jose-based verification)
-    const sessionToken = jwt.sign(
-      { id: freelancer.id, email: freelancer.email || normalizedEmail, name },
-      PORTAL_SECRET,
-      { expiresIn: '30d', algorithm: 'HS256' }
-    );
-
-    // Set as cookie (matching portal's existing cookie format)
-    res.cookie('session', sessionToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-      path: '/',
-    });
-
-    // Update last login timestamp (fire and forget)
-    query(
-      'UPDATE people SET portal_last_login = NOW() WHERE id = $1',
-      [freelancer.id]
-    ).catch(err => console.error('Failed to update portal_last_login:', err));
-
-    res.json({
-      success: true,
-      user: {
-        id: freelancer.id,
-        name,
-        email: freelancer.email || normalizedEmail,
-      },
-    });
+    const user = startPortalSession(res, freelancer, normalizedEmail);
+    res.json({ success: true, user });
   } catch (error) {
     console.error('Portal login error:', error);
+    res.status(500).json({ error: 'An error occurred during login' });
+  }
+});
+
+// ── Two-factor sign-in: the code step (FREELANCER-PORTAL-SPEC §7) ─────
+
+/** The person a pending pass names, re-read: they must still be allowed in. */
+async function personFromPending(token: unknown) {
+  const personId = readPortalPending(token);
+  if (!personId) return null;
+  const r = await query(
+    `SELECT id, first_name, last_name, preferred_name, email, is_freelancer, is_approved, is_deleted
+       FROM people WHERE id = $1`,
+    [personId]
+  );
+  const person = r.rows[0];
+  return person && portalAccessAllowed(person) ? person : null;
+}
+
+const PENDING_EXPIRED = { error: 'Your sign-in has timed out. Please start again.', code: 'pending_expired' };
+
+// POST /api/portal/auth/login/send-code — { pending, userAgent? }: send another code
+router.post('/auth/login/send-code', portalCodeLimiter, async (req: Request, res: Response) => {
+  try {
+    const person = await personFromPending(req.body?.pending);
+    if (!person) { res.status(400).json(PENDING_EXPIRED); return; }
+    const ua = typeof req.body?.userAgent === 'string' ? req.body.userAgent.slice(0, 400) : undefined;
+    const sent = await sendPortalLoginCode(person, deviceLabelFrom(ua));
+    if (!sent.ok) { res.status(sent.status).json({ error: sent.error }); return; }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Portal login send-code error:', error);
+    res.status(500).json({ error: 'Could not send a code. Please try again.' });
+  }
+});
+
+const loginCodeSchema = z.object({
+  pending: z.string().min(1),
+  code: z.string(),
+  ...deviceFields,
+});
+
+// POST /api/portal/auth/login/code — { pending, code, trustDevice, userAgent }: the
+// second step. A wrong code is a 400, never a 401 (a 401 reads as "signed out").
+router.post('/auth/login/code', portalCodeLimiter, async (req: Request, res: Response) => {
+  try {
+    const parsed = loginCodeSchema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: 'Enter the 6-digit code' }); return; }
+    const person = await personFromPending(parsed.data.pending);
+    if (!person) { res.status(400).json(PENDING_EXPIRED); return; }
+    const code = parsed.data.code.trim();
+    if (!/^\d{6}$/.test(code)) { res.status(400).json({ error: 'Enter the 6-digit code' }); return; }
+    const check = await verifyPortalLoginCode(person.id, code);
+    if (!check.ok) { res.status(400).json({ error: check.error }); return; }
+
+    const user = startPortalSession(res, person, person.email || '');
+    const deviceToken = parsed.data.trustDevice
+      ? await rememberPortalDevice(person.id, deviceLabelFrom(parsed.data.userAgent))
+      : undefined;
+    res.json({ success: true, user, ...(deviceToken ? { deviceToken } : {}) });
+  } catch (error) {
+    console.error('Portal login code error:', error);
     res.status(500).json({ error: 'An error occurred during login' });
   }
 });
@@ -499,6 +598,7 @@ const registerCompleteSchema = z.object({
   email: z.string().email(),
   code: z.string().length(6),
   password: z.string().min(8, 'Password must be at least 8 characters'),
+  ...deviceFields,
 });
 
 router.post('/auth/register/complete', portalLoginLimiter, async (req: Request, res: Response) => {
@@ -563,9 +663,15 @@ router.post('/auth/register/complete', portalLoginLimiter, async (req: Request, 
       path: '/',
     });
 
+    // The emailed sign-up code proved the inbox: it counts as the second step,
+    // so the phone may be remembered (FREELANCER-PORTAL-SPEC §7).
+    const deviceToken = parsed.data.trustDevice
+      ? await rememberPortalDevice(person.id, deviceLabelFrom(parsed.data.userAgent))
+      : undefined;
     res.json({
       success: true,
       user: { id: person.id, name, email: person.email || email },
+      ...(deviceToken ? { deviceToken } : {}),
     });
   } catch (error) {
     console.error('Portal register/complete error:', error);
@@ -677,6 +783,7 @@ router.get('/auth/verify-reset-token', async (req: Request, res: Response) => {
 const resetSchema = z.object({
   token: z.string().min(40),
   password: z.string().min(8, 'Password must be at least 8 characters'),
+  ...deviceFields,
 });
 
 router.post('/auth/reset-password', portalLoginLimiter, async (req: Request, res: Response) => {
@@ -768,7 +875,12 @@ router.post('/auth/reset-password', portalLoginLimiter, async (req: Request, res
       path: '/',
     });
 
-    res.json({ success: true, user: { id: row.person_id, name, email: row.email } });
+    // The emailed reset link proved the inbox: it counts as the second step,
+    // so the phone may be remembered (FREELANCER-PORTAL-SPEC §7).
+    const deviceToken = parsed.data.trustDevice
+      ? await rememberPortalDevice(row.person_id, deviceLabelFrom(parsed.data.userAgent))
+      : undefined;
+    res.json({ success: true, user: { id: row.person_id, name, email: row.email }, ...(deviceToken ? { deviceToken } : {}) });
   } catch (error) {
     console.error('Portal reset-password error:', error);
     res.status(500).json({ error: 'Failed to reset password' });

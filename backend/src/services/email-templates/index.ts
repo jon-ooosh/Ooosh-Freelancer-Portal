@@ -1881,6 +1881,27 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // Freelancer portal sign-in code (FREELANCER-PORTAL-SPEC §7). An account email,
+  // never muted by "Job emails". British English, no em dashes (portal copy rule).
+  portal_login_code: {
+    variant: 'internal',
+    preheader: 'Your Ooosh portal sign-in code',
+    subject: 'Your Ooosh portal sign-in code: {{code}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Your sign-in code</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{name}}, enter this code to finish signing in to the Ooosh freelancer portal{{#if deviceLabel}} on {{deviceLabel}}{{/if}}:
+      </p>
+      <div style="margin:0 0 20px;padding:20px;text-align:center;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+        <p style="margin:0;font-size:32px;font-weight:700;letter-spacing:6px;color:#A75390;font-family:monospace;">{{code}}</p>
+      </div>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        It expires in {{expiryMinutes}} minutes. If you didn't just try to sign in, someone else has your
+        password: reset it with "Forgotten it?" on the sign-in page and let the office know.
+      </p>
+    `,
+  },
+
   portal_verification_code: {
     variant: 'internal',
     subject: 'Your Ooosh freelancer verification code',

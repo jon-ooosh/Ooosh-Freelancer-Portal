@@ -786,17 +786,25 @@ export async function declareLegsOP(
 
 /**
  * Login to OP portal (create session).
+ *
+ * Two-step sign-in (FREELANCER-PORTAL-SPEC §7): once it is switched on, a
+ * phone OP doesn't remember gets `success: false` with `pending` (and a code
+ * emailed) instead of a user. The code goes to loginCodeOP().
  */
 export async function loginToOP(
   email: string,
-  password: string
-): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; error?: string; status?: number }> {
+  password: string,
+  device: { deviceToken?: string; userAgent?: string } = {},
+): Promise<{
+  success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; error?: string; status?: number
+  pending?: string; emailHint?: string; codeSent?: boolean; codeError?: string | null
+}> {
   const url = `${getOpUrl()}/api/portal/auth/login`
 
   const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, deviceToken: device.deviceToken, userAgent: device.userAgent }),
   })
 
   const data = await response.json()
@@ -813,7 +821,26 @@ export async function loginToOP(
     if (match) sessionToken = match[1]
   }
 
+  if (data.pending) {
+    return { success: false, pending: data.pending, emailHint: data.emailHint, codeSent: !!data.codeSent, codeError: data.codeError ?? null }
+  }
+
   return { success: true, user: data.user, sessionToken }
+}
+
+/** The second step: the emailed code (or one the office read out). */
+export async function loginCodeOP(
+  pending: string,
+  code: string,
+  trustDevice: boolean,
+  userAgent: string | undefined,
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; deviceToken?: string }> {
+  return opPostJson('/auth/login/code', { pending, code, trustDevice, userAgent })
+}
+
+/** "Send a new code". */
+export async function loginSendCodeOP(pending: string, userAgent: string | undefined): Promise<{ success: boolean }> {
+  return opPostJson('/auth/login/send-code', { pending, userAgent })
 }
 
 // =============================================================================
@@ -849,13 +876,14 @@ export async function registerVerifyOP(email: string, code: string): Promise<{ s
 export async function registerCompleteOP(
   email: string,
   code: string,
-  password: string
-): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string }> {
+  password: string,
+  device: { trustDevice?: boolean; userAgent?: string } = {},
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; deviceToken?: string }> {
   const url = `${getOpUrl()}/api/portal/auth/register/complete`
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, code, password }),
+    body: JSON.stringify({ email, code, password, trustDevice: device.trustDevice, userAgent: device.userAgent }),
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -871,7 +899,7 @@ export async function registerCompleteOP(
     const m = setCookie.match(/session=([^;]+)/)
     if (m) sessionToken = m[1]
   }
-  return { success: true, user: data.user, sessionToken }
+  return { success: true, user: data.user, sessionToken, deviceToken: data.deviceToken }
 }
 
 export async function forgotPasswordOP(email: string): Promise<{ success: boolean; message?: string }> {
@@ -894,13 +922,14 @@ export async function verifyResetTokenOP(token: string): Promise<{ valid: boolea
 
 export async function resetPasswordOP(
   token: string,
-  password: string
-): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string }> {
+  password: string,
+  device: { trustDevice?: boolean; userAgent?: string } = {},
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; deviceToken?: string }> {
   const url = `${getOpUrl()}/api/portal/auth/reset-password`
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, password }),
+    body: JSON.stringify({ token, password, trustDevice: device.trustDevice, userAgent: device.userAgent }),
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -916,5 +945,5 @@ export async function resetPasswordOP(
     const m = setCookie.match(/session=([^;]+)/)
     if (m) sessionToken = m[1]
   }
-  return { success: true, user: data.user, sessionToken }
+  return { success: true, user: data.user, sessionToken, deviceToken: data.deviceToken }
 }

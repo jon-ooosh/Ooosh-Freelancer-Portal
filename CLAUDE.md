@@ -284,8 +284,9 @@ from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), th
 completion fixes, payment terms, security fixes, the Claude Design reskin of the portal (tokens in
 `tailwind.config.js` `hf`/`kind`, shared pieces in `src/components/ui.tsx`), past work on the Completed page
 (every kind, one window: `src/lib/history.ts`), the van screens in the portal look for freelancers only
-(`frontend/src/modules/vehicles/components/freelancer/`, colours from `shared/design/freelancer-tokens.cjs`).
-Next: 2FA, Earnings (plan + backfill in §5), the four guides.
+(`frontend/src/modules/vehicles/components/freelancer/`, colours from `shared/design/freelancer-tokens.cjs`),
+portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1).
+Next: Earnings (plan + backfill in §5), the four guides.
 **§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
@@ -398,6 +399,7 @@ existing definition:
 | Verifying an API key | `middleware/api-key.ts` |
 | Is this a STAFF access token? | `middleware/auth.ts` `verifyStaffToken()` — `authenticate` and the Socket.io handshake both use it; never a second `jwt.verify` for staff |
 | Is this login allowed in, does this device skip the code, is this account slowed down? | `services/staff-login-security.ts` — the second factor, trusted devices, the per-account slowdown; `routes/auth.ts` decides, this answers |
+| A FREELANCER's portal sign-in: is the code on, does this phone skip it, a code (emailed or read out by staff), sign out everywhere | `services/portal-login-security.ts` — `routes/portal.ts` decides, this answers; the office's card is `PortalSignInCard.tsx` on the Freelancer tab (`docs/FREELANCER-PORTAL-SPEC.md` §7.1) |
 | A passkey (register, log in with, remove), an admin's recovery codes | `services/staff-passkeys.ts` — challenges in Redis, rows in `user_passkeys`; frontend `lib/passkeys.ts`; the one setup flow is `components/LoginSecuritySetup.tsx` |
 | May the warehouse kiosk's PIN session call this? Who may it name on a sale? Where does the PIN work? | `services/kiosk-till.ts` — `staffOrKioskTill(KIOSK_TILL_ALLOW)`, `assertKioskSeller()`, `kioskIpAllowed()`; a kiosk request carries `req.kiosk`, never `req.user` |
 | Minting or verifying ANY JWT | `services/tokens.ts` `signFor(audience, …)` / `verifyFor(audience, …)` — every family has its own `aud`; never call `jsonwebtoken` directly (the portal session, on its own secret, is the one exception) |

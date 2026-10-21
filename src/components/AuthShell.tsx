@@ -56,3 +56,25 @@ export function AuthResult({ tone, title, children, action }: {
 /** Input height used on the signed-out pages (design 1a: 52px, 17px text). */
 export const authInput = 'h-[52px] !text-[17px]'
 export const authLabel = 'text-[14px] font-semibold text-hf-body'
+
+/**
+ * "Remember this phone for 90 days" (two-step sign-in, FREELANCER-PORTAL-SPEC §7).
+ * Ticked by default and always shown, never assumed (jon, Oct 2026): on the
+ * login code step, the last step of sign-up and the reset form. A remembered
+ * phone skips the emailed code; the password is still needed.
+ */
+export function RememberPhone({ checked, onChange }: { checked: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label className="flex items-start gap-3 cursor-pointer">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="sr-only peer" />
+      <span aria-hidden className={`mt-px flex-none w-[26px] h-[26px] rounded-lg flex items-center justify-center peer-focus-visible:ring-4 peer-focus-visible:ring-hf-tint ${
+        checked ? 'bg-hf-accent text-white' : 'bg-white border-2 border-hf-control'}`}>
+        {checked && <Check size={16} strokeWidth={3} />}
+      </span>
+      <span className="flex flex-col gap-0.5">
+        <span className="text-[15px] font-semibold text-hf-ink">Remember this phone for 90 days</span>
+        <span className="text-[13px] leading-[1.4] text-hf-muted">Skips the emailed sign-in code on this phone. Untick it on a shared or borrowed phone.</span>
+      </span>
+    </label>
+  )
+}

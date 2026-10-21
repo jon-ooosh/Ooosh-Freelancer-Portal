@@ -28,7 +28,9 @@ export type TokenAudience =
   | 'freelancer_prep'         // one van, one task — same file
   | 'freelancer_prep_redeem'  // 15-min link token that becomes a prep session — same file
   | 'login_pending'           // password accepted, second factor still owed — routes/auth.ts (5 min)
-  | 'trusted_device';         // the op_device cookie: this browser passed the second factor — services/staff-login-security.ts (90 days)
+  | 'trusted_device'          // the op_device cookie: this browser passed the second factor — services/staff-login-security.ts (90 days)
+  | 'portal_login_pending'    // freelancer portal: password accepted, the emailed code still owed — services/portal-login-security.ts (10 min)
+  | 'portal_device';          // freelancer portal: this phone passed the second step (the portal's portal_device cookie) — same file (90 days)
 
 if (!process.env.JWT_SECRET) {
   throw new Error('FATAL: JWT_SECRET environment variable is required');

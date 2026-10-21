@@ -2058,6 +2058,8 @@ function CardReaderSettingsSection() {
  * the date from which every login needs a second factor, the addresses the kiosk
  * PIN is accepted from, the reader on the kiosk till, and when the PIN was last
  * changed (the quarterly reminder counts from it). Admin only.
+ * Also the freelancer portal's switch-on date for its emailed code
+ * (docs/FREELANCER-PORTAL-SPEC.md §7; empty = off).
  */
 function LoginAndKioskSettingsSection() {
   const [vals, setVals] = useState<Record<string, string>>({});
@@ -2065,7 +2067,7 @@ function LoginAndKioskSettingsSection() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const KEYS = ['staff_2fa_enforced_from', 'kiosk_allowed_ips', 'stripe_terminal_kiosk', 'kiosk_pin_rotated_at'];
+  const KEYS = ['staff_2fa_enforced_from', 'portal_2fa_enforced_from', 'kiosk_allowed_ips', 'stripe_terminal_kiosk', 'kiosk_pin_rotated_at'];
 
   useEffect(() => { void load(); }, []);
 
@@ -2124,6 +2126,30 @@ function LoginAndKioskSettingsSection() {
             onChange={e => setVals(v => ({ ...v, staff_2fa_enforced_from: e.target.value }))} className={`${input} max-w-xs`} />
         </div>
         <p className="text-xs text-gray-500">Before this date a person with no second factor sees a banner; from it the login insists.</p>
+
+        {/* Freelancer portal two-step sign-in (FREELANCER-PORTAL-SPEC §7). Ships off. */}
+        <div className={row}>
+          <label htmlFor="portal_2fa_enforced_from" className="text-sm text-gray-700">
+            Freelancer portal: code required from
+            <span className="block text-xs text-gray-400 font-mono">portal_2fa_enforced_from</span>
+          </label>
+          <span className="flex items-center gap-3">
+            <input id="portal_2fa_enforced_from" type="date" value={vals.portal_2fa_enforced_from}
+              onChange={e => setVals(v => ({ ...v, portal_2fa_enforced_from: e.target.value }))} className={`${input} max-w-xs`} />
+            {vals.portal_2fa_enforced_from && (
+              <button type="button" onClick={() => setVals(v => ({ ...v, portal_2fa_enforced_from: '' }))}
+                className="px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50">
+                Clear (off)
+              </button>
+            )}
+          </span>
+        </div>
+        <p className="text-xs text-gray-500">
+          {vals.portal_2fa_enforced_from
+            ? 'From this date, a freelancer signing in on a phone the portal doesn\'t remember gets a 6-digit code by email. Signing up or resetting a password counts as the code. Tell freelancers first; there is no banner.'
+            : 'Empty, so off: the portal asks for a password only. Pick a date to switch the emailed code on.'}
+          {' '}Help for one freelancer is on their Freelancer tab (Portal sign-in).
+        </p>
 
         <div className={row}>
           <label htmlFor="kiosk_allowed_ips" className="text-sm text-gray-700">
