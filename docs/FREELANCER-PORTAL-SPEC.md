@@ -9,18 +9,17 @@ touching completion, the chaser, Earnings, the guides or anything freelancer-fac
 
 **State on 21 Oct 2026:** PR 1 (completion fixes), the payment-terms PR, PR 2 (security) and PR 3 (the
 portal reskin) are merged and deployed. The "How to invoice Ooosh Tours Ltd" Google Doc and its copy in
-the portal's Resources are updated (§4). Past work on the Completed page (§10) is built (its own PR).
-Nothing is half-built.
+the portal's Resources are updated (§4). Past work on the Completed page (§10) is merged and deployed.
+PR 4, the van screens in the portal look (§11), is built. Nothing is half-built.
 
 **Do next, in this order** (one PR each; jon merges and deploys, then the next starts from fresh main):
 
-1. **PR 4: van screens reskin, freelancer scope only (§11).**
-2. **PR 5: portal 2FA (§7).** Email code plus a 90-day trusted device; info@ included.
-3. **Earnings (§5).** The data plan, the backfill jon wants, and the read-only SQL to run first. The
+1. **PR 5: portal 2FA (§7).** Email code plus a 90-day trusted device; info@ included.
+2. **Earnings (§5).** The data plan, the backfill jon wants, and the read-only SQL to run first. The
    Completed page (§10) already lists every kind of work per month; Earnings adds the money view.
-4. **The four freelancer guides (§8)**, after PR 4 so the screenshots show the new look. Rebuild the
+3. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
    shop-till guide (`docs/guides/shop-till/`) in the new look at the same time.
-5. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+4. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -35,9 +34,9 @@ them from the recipe there.
 | – | Payment terms aligned (§4) | merged 21 Oct 2026 |
 | 2 | Security quick fixes (§6) | merged 21 Oct 2026 |
 | 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`), §9 | merged 21 Oct 2026 |
-| – | Past work on the Completed page (§10) | built 21 Oct 2026 |
-| 4 | Van screens reskin, freelancer scope only (§11) | next |
-| 5 | Portal 2FA (§7) | after |
+| – | Past work on the Completed page (§10) | merged 21 Oct 2026 |
+| 4 | Van screens reskin, freelancer scope only (§11) | built 21 Oct 2026 |
+| 5 | Portal 2FA (§7) | next |
 | 6 | Earnings (§5) | after |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
 | – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | any time |
@@ -302,6 +301,41 @@ module" section; open the `.dc.html` in a browser with `support.js` beside it).
   lucide icons). `frontend/` has neither lucide nor DM Sans yet: add `lucide-react` pinned (the portal
   uses 1.50.0) and load DM Sans for the freelancer wrapper only.
 - **Test** the way §12 says, against `vite preview`, with the shells' token-resolve calls mocked.
+
+**What shipped (built 21 Oct 2026; jon's five calls agreed first):**
+- **How:** same engine, a second face. `BookOutPage` / `CollectionPage` keep every bit of logic (steps,
+  `canAdvance`, autosave and drafts, compression, uploads, retries, `handleSubmit`); when `scope ===
+  'freelancer'` they draw freelancer-only screens from `frontend/src/modules/vehicles/components/freelancer/`
+  (`ui.tsx` kit, `VanConfirm`, `FreelancerPhotos`, `DoneScreen`) that call the same functions. The staff
+  JSX is untouched. The shared `PhotoCapture`, `SignatureCapture` and `DraftResumePrompt` take an optional
+  `look="freelancer"`; without it they render as before. The shells wrap everything in `FreelancerTheme`.
+- **Tokens, once:** the design's colours moved to `shared/design/freelancer-tokens.cjs`, read by BOTH
+  Tailwind configs (portal and `frontend/`), so the van screens and the portal can't drift. DM Sans is
+  self-hosted (`@fontsource-variable/dm-sans` 5.3.0, imported by the kit only); `lucide-react` 1.50.0.
+- **Jon's calls:** (1) Back from a freelancer's first step returns to "Is this the van in front of you?";
+  they never reach the staff steps (Select Vehicle, Driver & Hire), and an old draft saved on one resumes
+  on Fuel & mileage. (2) "No, call the office" dials 01273 911382; "‹ Portal" still goes to the job
+  page. (3) Photos: a "Next up" card with the framing guide and tip, "Take photo" opens the camera
+  straight away (no full-screen guide, no "Photo guides" switch), all 18 tiles four across with short
+  names, a taken photo offers Retake / Remove, an extra photo can carry a label. (4) Check & sign: Driver
+  (Drivers when more than one), Mileage, Fuel, Photos, Hire ends when known, Notes when written, and the
+  VE103B tick when it shows. (5) The done screen is the design's when every step worked; otherwise it
+  lists what happened. Smaller: the fuel gauge keeps red / amber / green by level; photo names on screen
+  have no em dashes (the PDF keeps REQUIRED_PHOTOS' names); text shared with staff passes through
+  `noEmDash()` before a freelancer sees it.
+- **Collection:** step 0 ("Vehicle & Job") is the van screen; 1 to 3 are numbered. The customer signs
+  ("Customer's signature"), "Customer not here" with its note stays (the design's 3g was wrong).
+- **"Both" jobs:** the done screen says the equipment checklist is next when the portal's return link
+  has no `vanOnly=true` (how the portal already tells them apart). Book-out still hops back to the portal
+  3 seconds after a clean submit.
+- **Proof it changed nothing else:** the staff book-out and collection screens (select, draft prompt,
+  state, photos, briefing, confirm) were screenshotted on main and on this branch: pixel-identical. A
+  full freelancer book-out and collection were submitted on both from the same draft: every request
+  (event, fleet status, 18 photo uploads, condition report, collection) identical apart from ids, times
+  and the signature image. 45 screen checks on the new flows. The portal's compiled CSS is byte-identical
+  after the token move.
+- **Deploy:** the staff frontend gains two packages (`npm install` before the build) and reads
+  `../shared/design/`; the portal (Netlify) rebuilds on merge with the same colours.
 
 ## 12. How this programme tested (recreate as needed)
 

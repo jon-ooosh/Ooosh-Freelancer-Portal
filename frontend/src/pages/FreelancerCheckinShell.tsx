@@ -27,6 +27,7 @@ import {
 } from '../modules/vehicles/adapters/freelancer-session'
 import type { FreelancerVanCandidate } from '../modules/vehicles/adapters/freelancer-session'
 import { safeReturnUrl } from '../modules/vehicles/lib/safe-url'
+import { FreelancerTheme, CentredSpinner } from '../modules/vehicles/components/freelancer/ui'
 
 type ShellState =
   | { kind: 'loading' }
@@ -46,7 +47,19 @@ const queryClient = new QueryClient({
   },
 })
 
+/**
+ * Everything a freelancer sees here wears the portal's look (FREELANCER-PORTAL-SPEC
+ * §11): one theme wrapper, so the staff navy UI is never touched.
+ */
 export default function FreelancerCheckinShell() {
+  return (
+    <FreelancerTheme>
+      <CheckinShellBody />
+    </FreelancerTheme>
+  )
+}
+
+function CheckinShellBody() {
   const [searchParams] = useSearchParams()
   const [state, setState] = useState<ShellState>({ kind: 'loading' })
   const [pickBusyId, setPickBusyId] = useState<string | null>(null)
@@ -139,14 +152,7 @@ export default function FreelancerCheckinShell() {
   }, [searchParams])
 
   if (state.kind === 'loading') {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-ooosh-navy border-t-transparent" />
-          <p className="mt-4 text-sm text-gray-600">Authorising your collection…</p>
-        </div>
-      </div>
-    )
+    return <CentredSpinner text="Getting your collection ready…" />
   }
 
   if (state.kind === 'error') {
