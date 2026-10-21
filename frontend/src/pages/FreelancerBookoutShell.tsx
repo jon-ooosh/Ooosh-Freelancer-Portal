@@ -39,6 +39,7 @@ import {
 } from '../modules/vehicles/adapters/freelancer-session'
 import type { FreelancerVanCandidate } from '../modules/vehicles/adapters/freelancer-session'
 import { safeReturnUrl } from '../modules/vehicles/lib/safe-url'
+import { FreelancerTheme, CentredSpinner } from '../modules/vehicles/components/freelancer/ui'
 
 type ShellState =
   | { kind: 'loading' }
@@ -59,7 +60,19 @@ const queryClient = new QueryClient({
   },
 })
 
+/**
+ * Everything a freelancer sees here wears the portal's look (FREELANCER-PORTAL-SPEC
+ * §11): one theme wrapper, so the staff navy UI is never touched.
+ */
 export default function FreelancerBookoutShell() {
+  return (
+    <FreelancerTheme>
+      <BookoutShellBody />
+    </FreelancerTheme>
+  )
+}
+
+function BookoutShellBody() {
   const [searchParams] = useSearchParams()
   const [state, setState] = useState<ShellState>({ kind: 'loading' })
   const [pickBusyId, setPickBusyId] = useState<string | null>(null)
@@ -185,7 +198,7 @@ export default function FreelancerBookoutShell() {
     clearFreelancerSession()
     return (
       <FreelancerLinkError
-        message="Your book-out session has ended, or isn't on this phone any more. Head back to the freelancer portal and click “Start delivery” again to resume."
+        message="Your book-out session has ended, or isn't on this phone any more. Head back to the freelancer portal and tap “Start delivery” again to carry on."
         returnUrl={state.returnUrl}
         startUrl={state.startUrl}
         action="book-out"
@@ -205,13 +218,6 @@ export default function FreelancerBookoutShell() {
 }
 
 function LoadingScreen() {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50">
-      <div className="text-center">
-        <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-ooosh-navy border-t-transparent" />
-        <p className="mt-4 text-sm text-gray-600">Authorising your book-out…</p>
-      </div>
-    </div>
-  )
+  return <CentredSpinner text="Getting your book-out ready…" />
 }
 

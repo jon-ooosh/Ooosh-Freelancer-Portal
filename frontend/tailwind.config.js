@@ -1,4 +1,10 @@
 /** @type {import('tailwindcss').Config} */
+// The freelancer look (`hf` / `kind` colours, DM Sans) is ONLY for the van
+// screens a freelancer reaches from the portal (FreelancerBookoutShell /
+// FreelancerCheckinShell, FREELANCER-PORTAL-SPEC §11). The colours are the
+// portal's own, from one shared file. Staff screens never use these names.
+import freelancerTokens from '../shared/design/freelancer-tokens.cjs';
+
 export default {
   content: [
     "./index.html",
@@ -22,6 +28,12 @@ export default {
           navy: '#072a49',
           blue: '#0c93e8',
         },
+        hf: freelancerTokens.hf,
+        kind: freelancerTokens.kind,
+      },
+      fontFamily: {
+        // Self-hosted (@fontsource-variable/dm-sans), loaded by the freelancer theme only.
+        freelancer: ['"DM Sans Variable"', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
       },
     },
   },

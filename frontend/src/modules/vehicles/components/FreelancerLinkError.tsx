@@ -20,6 +20,8 @@
  */
 
 import { safeReturnUrl, portalJobUrl } from '../lib/safe-url'
+import { Phone, TriangleAlert } from 'lucide-react'
+import { fl } from './freelancer/ui'
 
 const OFFICE_PHONE = '+44 (0) 1273 911382'
 const OFFICE_EMAIL = 'info@oooshtours.co.uk'
@@ -60,29 +62,27 @@ export function FreelancerLinkError({
   const wrongLeg = !!wizardUrl && WRONG_LEG_CODES.includes(code || '')
 
   return (
-    <div className="mx-auto max-w-md space-y-5 px-4 py-8">
-      <div className="rounded-lg border-2 border-amber-200 bg-amber-50 p-6 text-center">
-        <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100">
-          <svg className="h-6 w-6 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-          </svg>
+    <div className="mx-auto flex max-w-lg flex-col gap-5 px-4 py-10">
+      <div className="flex flex-col items-center gap-4 text-center">
+        <div className="flex h-[72px] w-[72px] items-center justify-center rounded-full bg-hf-amber-tile text-hf-amber-text">
+          <TriangleAlert size={34} strokeWidth={2.2} />
         </div>
-        <h2 className="text-lg font-semibold text-amber-900">
+        <h1 className={fl.pageTitle}>
           {wrongLeg
             ? "Looks like there's no van on this job"
             : "We couldn't link your van automatically"}
-        </h2>
-        <p className="mt-2 text-sm text-amber-800">{message}</p>
-        <p className="mt-3 text-xs text-amber-700">
+        </h1>
+        <p className="text-[16px] leading-[1.5] text-hf-body">{message}</p>
+        <p className="text-[15px] leading-[1.5] text-hf-muted">
           {wrongLeg ? (
             <>
-              Don&apos;t worry — nothing is lost. Go back, pick what you&apos;re really{' '}
+              Don&apos;t worry, nothing is lost. Go back, pick what you&apos;re really{' '}
               {action === 'check-in' ? 'collecting' : 'delivering'}, and carry on. Call the
               office if you&apos;re not sure.
             </>
           ) : (
             <>
-              Don&apos;t worry — you can still{' '}
+              Don&apos;t worry, you can still{' '}
               {action === 'check-in' ? 'check the van in' : 'take the van out'}. Give the
               office a call and we&apos;ll sort it while you&apos;re on the phone.
             </>
@@ -90,47 +90,39 @@ export function FreelancerLinkError({
         </p>
       </div>
 
-      <div className="space-y-3">
+      <div className="flex flex-col gap-2.5">
         {wrongLeg && (
-          <a
-            href={wizardUrl!}
-            className="block w-full rounded-lg bg-ooosh-navy py-3 text-center font-semibold text-white"
-          >
+          <a href={wizardUrl!} className={`${fl.btnPrimary} w-full`}>
             Change what I&apos;m {action === 'check-in' ? 'collecting' : 'delivering'}
           </a>
         )}
         <button
+          type="button"
           onClick={retry}
-          className={
-            wrongLeg
-              ? 'w-full rounded-lg border border-gray-300 bg-white py-3 text-center font-semibold text-gray-700'
-              : 'w-full rounded-lg bg-ooosh-navy py-3 text-center font-semibold text-white'
-          }
+          className={`${wrongLeg ? fl.btnSecondary : fl.btnPrimary} w-full`}
         >
           Try again
         </button>
         {portalUrl && (
-          <a
-            href={portalUrl}
-            className="block w-full rounded-lg border border-gray-300 bg-white py-3 text-center font-semibold text-gray-700"
-          >
+          <a href={portalUrl} className={`${fl.btnSecondary} w-full`}>
             Back to the portal
           </a>
         )}
       </div>
 
-      <div className="rounded-lg bg-gray-50 p-4 text-center text-sm text-gray-600">
-        <p className="font-medium text-gray-700">Call the office</p>
-        <a href={`tel:${OFFICE_PHONE.replace(/[^\d+]/g, '')}`} className="mt-1 block text-base font-semibold text-ooosh-navy">
+      <div className={`${fl.card} flex flex-col items-center gap-1 p-4 text-center`}>
+        <p className="text-[14px] font-semibold text-hf-body">Call the office</p>
+        <a href={`tel:${OFFICE_PHONE.replace(/[^\d+]/g, '')}`} className="inline-flex items-center gap-2 text-[20px] font-bold text-hf-link">
+          <Phone size={18} strokeWidth={2.2} />
           {OFFICE_PHONE}
         </a>
-        <a href={`mailto:${OFFICE_EMAIL}`} className="mt-1 block text-xs text-gray-500">
+        <a href={`mailto:${OFFICE_EMAIL}`} className="text-[14px] text-hf-muted">
           {OFFICE_EMAIL}
         </a>
       </div>
 
       {staffLoginHref && (
-        <p className="text-center text-xs text-gray-400">
+        <p className="text-center text-[13px] text-hf-muted">
           Ooosh staff?{' '}
           <a href={staffLoginHref} className="underline">
             Log in to OP
