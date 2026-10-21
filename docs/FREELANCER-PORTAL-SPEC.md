@@ -9,9 +9,9 @@ touching completion, the chaser, Earnings or the freelancer guides.
 
 | # | PR | State |
 |---|---|---|
-| 1 | Completion fixes (§2) | this PR |
-| – | Payment terms aligned (§4, §5 step 6) | next |
-| 2 | Security quick fixes (§6) | after |
+| 1 | Completion fixes (§2) | merged 21 Oct 2026 |
+| – | Payment terms aligned (§4) | this PR |
+| 2 | Security quick fixes (§6) | next |
 | 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`, added with that PR) | after |
 | 4 | Van screens reskin, freelancer scope only | after |
 | 5 | Portal 2FA (§7) | after |
@@ -79,8 +79,11 @@ Also: real Completed / Cancelled "View all" pages, "Add to Calendar" downloads a
 - Confirming a job is by email from the office, not in the portal.
 - Collection signature: the customer's, with a "not here" note.
 - Freelancer fees: never say "plus VAT" (99% aren't registered; those who are add it).
-- Payment terms: first Friday one week after APPROVAL (usually 8 to 14 days after approval). Please
-  don't chase until 30 days have passed.
+- Payment terms: first Friday one week after APPROVAL, 8 to 14 days after approval (a Friday approval
+  is paid the Friday after next). Please don't chase until 30 days after sending the invoice. Done in
+  the code (`supplier-terms.ts` `freelancerDueDateFromApproval()`; bills approved before the deploy
+  keep their invoice-date due date), both freelancer emails and the "How to invoice Ooosh Tours Ltd"
+  Google Doc.
 - The guides are available to everyone; quote the screen's own wording; no staff-site warning (that
   code path is fixed).
 - Briefing items are read live from OP (`settings/checklists.json` in R2, edited at
@@ -116,8 +119,8 @@ can't say per job whether they've INVOICED it or been PAID.
 5. "Send invoice": v1 a pre-filled email to whoever booked them plus the invoicing guide; v2 a portal
    upload creating a `submitted` cost with the person and work items, belled to the booker. Invoices
    carry bank details: never store them under the R2 `files/` prefix (readable by every staff login).
-6. Payment terms (§4) are aligned in the code and the welcome email first, so "expected payment" dates
-   can be shown.
+6. Payment terms (§4) are aligned (Oct 2026), so an approved invoice's "expected payment" date can be
+   shown: it is the cost's `resolveDueDate()` due date. Before approval there is no firm date.
 
 Read-only checks to run on production first:
 ```sql

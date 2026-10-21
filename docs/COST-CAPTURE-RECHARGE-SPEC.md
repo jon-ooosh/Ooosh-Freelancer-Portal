@@ -974,6 +974,15 @@ with the derived default and the terms behind it, and lets staff correct it.
   real rule is "their invoice date, first Friday +7 days" (due 8–14 days after
   they submit). Anchoring on approval meant the date didn't exist until a manager
   approved, so it couldn't be shown at capture at all.
+- **…and moved BACK to approval, Oct 2026 (jon, final).** The rule freelancers are
+  told (the "How to invoice" guide, the welcome email) is "the first Friday one week
+  after approval": 8 to 14 days after approval, a Friday approval waiting for the
+  Friday after next (`freelancerDueDateFromApproval()`). Capture still shows a date:
+  an unapproved invoice is shown as if approved today, and settles on approval,
+  which is when the bill goes to Xero. Bills approved before the switch (the instant
+  in `system_settings.freelancer_terms_approval_from`, stamped by migration 301 at
+  deploy) keep the invoice-date rule, so no payment moved and OP still agrees with
+  Xero. Freelancers are asked not to chase until 30 days after sending the invoice.
 - **`GET /costs/due-date-preview`** gives the modal the derived default for a
   cost that doesn't exist yet, from the same engine.
 - The field renders **only for pay-later methods** — a cost already paid on the

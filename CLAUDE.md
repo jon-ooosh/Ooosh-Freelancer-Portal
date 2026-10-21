@@ -350,7 +350,7 @@ existing definition:
 | Has a quote's van leg actually happened (booked out / collected)? | `services/quote-completion.ts` `isVanLegDone()` — by direction; "out on hire" is NOT a collection. The portal's van-only "All Done" and `maybeCloseQuote` both ask it |
 | What happens to transport when a job dies? | `services/job-close-cascade.ts` |
 | What happens to requirements when a job dies? | `services/requirement-close-sweep.ts` |
-| When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` |
+| When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` — a freelancer invoice: the first Friday a week after APPROVAL, 8 to 14 days (jon, Oct 2026, final — it had moved to the invoice date and back); bills approved before the switch (`system_settings.freelancer_terms_approval_from`) keep the invoice-date rule |
 | What are this job's costs? | `GET /costs/by-job/:jobId` |
 | Money coming BACK from a supplier? | `services/cost-credit.ts` |
 | What does this held item need next? | `services/held-item-query.ts` |
