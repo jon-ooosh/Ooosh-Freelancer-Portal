@@ -3,7 +3,30 @@
 The freelancer portal (`src/`, freelancer.oooshtours.co.uk) and the freelancer-facing van screens
 (`frontend/src/modules/vehicles/`, freelancer scope) are being straightened out and refreshed in a
 series of PRs. This file is the handover: what's decided, what's done, what's next. Read it before
-touching completion, the chaser, Earnings or the freelancer guides.
+touching completion, the chaser, Earnings, the guides or anything freelancer-facing.
+
+## 0. Start here (next session)
+
+**State on 21 Oct 2026:** PR 1 (completion fixes), the payment-terms PR, PR 2 (security) and PR 3 (the
+portal reskin) are merged and deployed. The "How to invoice Ooosh Tours Ltd" Google Doc and its copy in
+the portal's Resources are updated (§4). Nothing is half-built.
+
+**Do next, in this order** (one PR each; jon merges and deploys, then the next starts from fresh main):
+
+1. **Past studio-sitter nights in the portal (§10).** Small. A sitter's shifts vanish 14 days after the
+   night, because that is the look-back of OP's `GET /api/portal/studio-sitter/shifts`, and the Completed
+   list only holds quotes. Charlie Stanley asked for his 29 / 30 Sept nights.
+2. **PR 4: van screens reskin, freelancer scope only (§11).**
+3. **PR 5: portal 2FA (§7).** Email code plus a 90-day trusted device; info@ included.
+4. **Earnings (§5).** The data plan, the backfill jon wants, and the read-only SQL to run first.
+5. **The four freelancer guides (§8)**, after PR 4 so the screenshots show the new look. Rebuild the
+   shop-till guide (`docs/guides/shop-till/`) in the new look at the same time.
+6. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+
+**How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
+in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
+§12 is how this programme tested its changes; the scripts lived in a session scratchpad, so recreate
+them from the recipe there.
 
 ## 1. The order of work
 
@@ -12,11 +35,13 @@ touching completion, the chaser, Earnings or the freelancer guides.
 | 1 | Completion fixes (§2) | merged 21 Oct 2026 |
 | – | Payment terms aligned (§4) | merged 21 Oct 2026 |
 | 2 | Security quick fixes (§6) | merged 21 Oct 2026 |
-| 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`), §9 | this PR |
-| 4 | Van screens reskin, freelancer scope only | after |
+| 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`), §9 | merged 21 Oct 2026 |
+| – | Past studio-sitter nights (§10) | next |
+| 4 | Van screens reskin, freelancer scope only (§11) | after |
 | 5 | Portal 2FA (§7) | after |
-| 6 | Earnings (§5) | **new session**, after the above |
-| 7 | Four freelancer guides (§8) | after the reskin, so the screenshots show the new look |
+| 6 | Earnings (§5) | after |
+| 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
+| – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | any time |
 
 ## 2. Completion: what PR 1 changed and why
 
@@ -88,6 +113,13 @@ Also: real Completed / Cancelled "View all" pages, "Add to Calendar" downloads a
   code path is fixed).
 - Briefing items are read live from OP (`settings/checklists.json` in R2, edited at
   staff.oooshtours.co.uk/vehicles/settings → Checklists → Briefing): one list, general plus per van type.
+- Freelancer jobs are confirmed by email from the office (the portal has no "confirm" step).
+- Copy on the portal: "Forgotten it?" is the reset link's name (the login errors name it too);
+  "Job emails" is what the notification settings are called; the old Monday office statuses
+  ("TO DO!", "Arranging") show as "Being arranged". The pause banner is amber (the design's warning).
+- Staff who used their OP staff password on the portal (no portal password) were cut off by PR 2 on
+  purpose: they set a portal password with "Forgotten it?" (matt@ and one freelancer, Oct 2026). The
+  shared info@ login only shows Ooosh-crew jobs, never jobs given to a person.
 
 ## 5. Earnings (handover for a new session)
 
@@ -196,4 +228,71 @@ The portal now follows `docs/design/freelancer-portal-refresh/` (README there = 
 - **Copy:** British English, hyphens not em dashes, "Forgotten it?" on the login (the login error
   messages name it, so change both together), "Job emails" for the notification settings.
 - **Not built from the mock:** Earnings stays a "Coming soon" page (§5).
+
+## 10. Past studio-sitter nights (next, small)
+
+**The problem (21 Oct 2026):** a sitter's nights disappear from the portal 14 days after them.
+`GET /api/portal/studio-sitter/shifts` (`backend/src/routes/portal.ts`) asks
+`services/studio-sitter.ts` `getSitterShifts()` for `today - 14` to `today + 365`. The dashboard shows
+what that returns (Today / Tomorrow / Later / Earlier), and `/completed` (`src/components/JobHistoryList.tsx`)
+only lists quotes from `/api/jobs` (last 30 days). So nothing shows a night older than 14 days. Not caused
+by PRs 1-3 (none touched that window). The shift page itself still opens for any date the person is
+assigned to (`isSitterAssignedTo()` has no window), so links work.
+
+**To confirm for one person** (production, read-only):
+```sql
+SELECT s.shift_date, s.status AS shift_status, a.status AS assignment_status, p.email
+FROM studio_sitter_shift_assignments a
+JOIN studio_sitter_shifts s ON s.id = a.shift_id
+JOIN people p ON p.id = a.person_id
+WHERE p.first_name ILIKE 'charlie' AND p.last_name ILIKE 'stanley'
+ORDER BY s.shift_date DESC LIMIT 10;
+```
+Rows with `assignment_status` assigned/confirmed and a date more than 14 days ago are hidden by the
+window. If the email differs from the one he logs in with, it is a duplicate person record instead.
+
+**Proposed fix (agree with jon first):** keep the dashboard as it is (14 days), and give past nights a
+home on the Completed page: OP's route takes an optional `?past=90` (clamped to 14..120 days, the
+future window unchanged), the portal's `/api/studio-sitter/shifts` passes it through, and
+`JobHistoryList` (which = 'completed') adds the person's past nights from that call as rows ("Studio
+sitter · Tue 29 Sep", linking to `/shift/{date}`, "Locked up" when `report_submitted_at` is set), sorted
+in with the jobs by date. Yard days could join the same list later (`/api/day-bookings` `past`).
+
+## 11. PR 4: the van screens, freelancer scope only
+
+The design is screens 13-19 / mocks 3a-3g in `docs/design/freelancer-portal-refresh/` (README "Vehicles
+module" section; open the `.dc.html` in a browser with `support.js` beside it).
+
+- **Where:** the staff app (`frontend/`), reached by freelancers through `src/pages/FreelancerBookoutShell.tsx`
+  and `FreelancerCheckinShell.tsx` (they wrap the vehicle module's `BookOutPage.tsx` / `CollectionPage.tsx`).
+  Also `components/FreelancerVanPicker.tsx`, `components/FreelancerLinkError.tsx`,
+  `components/book-out/PhotoCapture.tsx`, `components/book-out/SignatureCapture.tsx`.
+- **Only in freelancer scope:** wrap the two shells in a theme container (e.g. `data-theme="freelancer"`)
+  and style through it, so the staff navy UI is untouched. Never change staff behaviour.
+- **Read first:** `.claude/rules/vehicles-bookout.md` (freelancer mode, drafts, photo memory rules,
+  multi-van picker) and `.claude/rules/frontend.md`.
+- **Behaviour unchanged.** Keep: the 9 fuel levels, the 18 photos in order, the briefing items read
+  live from OP settings, the fuel-drop warning, the customer signature on a collection with the
+  "Customer not here" note (PR 1; the design's "Your signature" on 3g is wrong), back / cancel links to the
+  portal JOB page (`lib/safe-url.ts` `portalJobUrl()`), draft resume (`acceptDraft()`).
+- **Look:** the portal's tokens and fonts (`tailwind.config.js` `hf` / `kind` at the repo root, DM Sans,
+  lucide icons). `frontend/` has neither lucide nor DM Sans yet: add `lucide-react` pinned (the portal
+  uses 1.50.0) and load DM Sans for the freelancer wrapper only.
+- **Test** the way §12 says, against `vite preview`, with the shells' token-resolve calls mocked.
+
+## 12. How this programme tested (recreate as needed)
+
+- **Portal pages:** `SESSION_SECRET=<any 32+ chars> npx next dev -p 3100`, then Playwright (`npm root -g`
+  has it; Chromium is at `/opt/pw-browsers`). Sign a session cookie with `jose`
+  (`new SignJWT({ id, email, name }).setProtectedHeader({ alg: 'HS256' }).setIssuedAt()` with the same
+  secret), add it to the browser context, and `context.route('**/api/**', ...)` to answer every portal
+  API call with fixture JSON shaped like OP's responses. Phone viewport 390x844, scale 2.
+- **OP routes:** a throwaway Postgres 16 (`initdb` as the postgres user, a spare port), `npx tsx
+  src/migrations/run.ts up` against it (the full history applies cleanly), a throwaway `redis-server`,
+  then a tsx script that mounts the real routers (`routes/portal.ts`, `routes/vehicles.ts`) on an
+  express app with `cookie-parser` and drives them with `fetch`. Delete the database afterwards.
+- **Before pushing:** `npx tsc --noEmit -p .` in the root, `backend/` and `frontend/`; `next build`
+  (stop the dev server first; they share `.next`); `npm run build` in `backend/` and `frontend/`.
+- **A reskin must not change behaviour:** compare each page's `fetch(` calls, navigations and request
+  bodies against `origin/main` (grep both versions and diff). PR 3 did this for every page.
 

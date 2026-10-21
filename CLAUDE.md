@@ -280,11 +280,11 @@ till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or read
 from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
 `stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
 
-**IN PROGRESS, Oct 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme: completion
-fixes (van-only "All Done" only after a real book-out/collection; crew and People completion; the chaser
-by last day; the customer signs a van collection), then security fixes, the Claude Design reskin, 2FA,
-Earnings (a new session; the plan and the backfill are in §5) and the four freelancer guides. §1 is the
-order and state; read it before touching completion, the chaser, Earnings or the guides.
+**IN PROGRESS, Oct 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme. Done:
+completion fixes, payment terms, security fixes, the Claude Design reskin of the portal (tokens in
+`tailwind.config.js` `hf`/`kind`, shared pieces in `src/components/ui.tsx`). Next: past studio-sitter nights,
+the van screens reskin (freelancer scope only), 2FA, Earnings (plan + backfill in §5), the four guides.
+**§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
