@@ -3,6 +3,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import FreelancerHistorySection from './FreelancerHistorySection';
+import PortalSignInCard from './PortalSignInCard';
 import { openR2Key } from '../lib/openAuthedFile';
 import { filesForSlot } from './drivers/EvidenceGroup';
 
@@ -245,6 +246,9 @@ export default function FreelancerPanel({ person, onChanged, onFilesChanged, onA
           onActivityCreated={onActivityCreated}
         />
       </div>
+
+      {/* Portal sign-in: the office's side of the portal's two-step sign-in */}
+      <PortalSignInCard personId={person.id} />
 
       {/* Assignment history + upcoming */}
       <FreelancerHistorySection entityId={person.id} />

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { SignJWT } from 'jose'
 import { loginToOP } from '@/lib/op-api'
 import { checkRateLimit, recordFailedAttempt, clearFailedAttempts } from '@/lib/login-rate-limit'
+import { readDeviceCookie, clientUserAgent } from '@/lib/portal-session'
 
 // Session secret for JWT signing
 const getSessionSecret = () => {
@@ -53,7 +54,10 @@ export async function POST(request: NextRequest) {
 
     try {
       console.log('Login: trying OP backend for:', normalizedEmail)
-      const opResult = await loginToOP(normalizedEmail, password)
+      const opResult = await loginToOP(normalizedEmail, password, {
+        deviceToken: readDeviceCookie(request),
+        userAgent: clientUserAgent(request),
+      })
 
       if (opResult.success && opResult.user) {
         clearFailedAttempts(normalizedEmail)
@@ -88,6 +92,21 @@ export async function POST(request: NextRequest) {
 
         console.log('Login: OP backend login successful for:', normalizedEmail)
         return response
+      }
+
+      // Right password, but two-step sign-in wants a code first (FREELANCER-
+      // PORTAL-SPEC §7). No session yet: the login page asks for the code and
+      // sends it to /api/auth/login/code with `pending`.
+      if (opResult.pending) {
+        clearFailedAttempts(normalizedEmail)
+        return NextResponse.json({
+          success: false,
+          needsCode: true,
+          pending: opResult.pending,
+          emailHint: opResult.emailHint,
+          codeSent: opResult.codeSent,
+          codeError: opResult.codeError,
+        })
       }
 
       // OP returned 401 — credentials definitively wrong (or account not in

@@ -9,17 +9,18 @@ touching completion, the chaser, Earnings, the guides or anything freelancer-fac
 
 **State on 21 Oct 2026:** PR 1 (completion fixes), the payment-terms PR, PR 2 (security) and PR 3 (the
 portal reskin) are merged and deployed. The "How to invoice Ooosh Tours Ltd" Google Doc and its copy in
-the portal's Resources are updated (§4). Past work on the Completed page (§10) is merged and deployed.
-PR 4, the van screens in the portal look (§11), is built. Nothing is half-built.
+the portal's Resources are updated (§4). Past work on the Completed page (§10) and PR 4, the van screens
+in the portal look (§11), are merged and deployed. PR 5, portal 2FA (§7), is built and **ships OFF**:
+jon sets `portal_2fa_enforced_from` in Settings once the rest of the fix-up work is out, after telling
+freelancers in the WhatsApp group (there is no banner). Nothing is half-built.
 
 **Do next, in this order** (one PR each; jon merges and deploys, then the next starts from fresh main):
 
-1. **PR 5: portal 2FA (§7).** Email code plus a 90-day trusted device; info@ included.
-2. **Earnings (§5).** The data plan, the backfill jon wants, and the read-only SQL to run first. The
+1. **Earnings (§5).** The data plan, the backfill jon wants, and the read-only SQL to run first. The
    Completed page (§10) already lists every kind of work per month; Earnings adds the money view.
-3. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
+2. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
    shop-till guide (`docs/guides/shop-till/`) in the new look at the same time.
-4. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+3. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -35,9 +36,9 @@ them from the recipe there.
 | 2 | Security quick fixes (§6) | merged 21 Oct 2026 |
 | 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`), §9 | merged 21 Oct 2026 |
 | – | Past work on the Completed page (§10) | merged 21 Oct 2026 |
-| 4 | Van screens reskin, freelancer scope only (§11) | built 21 Oct 2026 |
-| 5 | Portal 2FA (§7) | next |
-| 6 | Earnings (§5) | after |
+| 4 | Van screens reskin, freelancer scope only (§11) | merged 21 Oct 2026 |
+| 5 | Portal 2FA (§7) | built 21 Oct 2026, ships off |
+| 6 | Earnings (§5) | next |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
 | – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | any time |
 
@@ -186,6 +187,58 @@ the 5 or 6 phones is trusted once, its code read from the info@ inbox. Staff get
 reset on the freelancer's record, and the login says "Can't get the code? Call the office". An
 enforcement date setting turns it on. The gate lives in OP's `/api/portal/auth/login` (the endpoint
 is public), the device cookie on the portal's domain, passed to OP in the body.
+
+### 7.1 What shipped (21 Oct 2026)
+
+**jon's calls:** "Remember this phone for 90 days" is ticked by default but always shown (code step,
+last step of sign-up, the reset form); anyone on the staff team (`STAFF_ROLES`) may give a code or sign
+someone out, both audit-logged; no banner (jon tells freelancers in WhatsApp); it ships off; existing
+sessions stay signed in when it goes on; no freelancer-side list of phones.
+
+**The switch:** `system_settings.portal_2fa_enforced_from` (Settings › Login security & kiosk, admins,
+beside the staff date). Empty = off; from the date (UK day) on, a phone OP doesn't remember needs the
+code. Settings are cached for up to a minute, so allow that after saving.
+
+**How it works** (`backend/src/services/portal-login-security.ts`; routes in `routes/portal.ts`):
+- `POST /api/portal/auth/login` checks the password and access as before. When the code is owed it
+  answers 200 `{ success: false, pending, emailHint, codeSent, codeError }` with NO `user`, so the
+  Netlify portal mints no session (it only mints on `success && user`). The code email is
+  `portal_login_code` (names the phone from the user agent, greets by `preferred_name`).
+- `POST /auth/login/code { pending, code, trustDevice, userAgent }` is the second step; it re-reads the
+  person (still approved?) before the session. A wrong or expired code is a 400, never a 401. A pending
+  pass that is bad, expired (10 minutes) or for someone no longer approved answers `code: 'pending_expired'`
+  and the page goes back to the password.
+- `POST /auth/login/send-code { pending }`: a new code. 30 seconds apart, 3 emailed codes in 15 minutes
+  per person; a code whose email failed is deleted (it never left, so it holds nothing up). Codes last
+  10 minutes, 5 wrong tries kill one, one live code per person.
+- The code step and send-code have their own per-address limit (30 in 15 minutes): OP sees every
+  freelancer as Netlify's few addresses, so sharing the login's 20 would halve it.
+- A remembered phone: OP signs a `portal_device` pass (audience in `tokens.ts`, 90 days) naming a row in
+  `portal_trusted_devices`; the ROW is the revocation. The portal keeps it in an httpOnly cookie
+  `portal_device` on `/api/auth` (`src/lib/portal-session.ts`), sends it in the login body, and keeps it
+  through signing out (that is the point). A pass for another person (shared phone) is no match.
+- Sign-up (`register/complete`) and reset (`reset-password`) already prove the inbox, so they take
+  `trustDevice` and return `deviceToken` like the code step.
+- The code is only a second step: it never replaces the password, including a code staff read out.
+
+**The office's side:** Address Book › person › Freelancer tab › **Portal sign-in**
+(`frontend/src/components/PortalSignInCard.tsx`; `GET /people/:id/portal-sign-in`, `POST …/code`,
+`POST …/sign-out`). Last signed in, remembered phones (made in the last 90 days, not revoked), whether
+the code is on. "Give them a sign-in code" (only while it's on) shows a 6-digit code to read out; it
+replaces any emailed code, lasts 10 minutes, still needs the password, and is logged with who asked
+(`portal_login_codes.issued_by`; `audit_log` `portal_sign_in_code`, the code itself never). "Sign them
+out everywhere" forgets every remembered phone, voids codes and sets `people.portal_sessions_valid_after`
+(audit `portal_sign_out_everywhere`).
+
+**info@:** one person row, so each office phone is remembered once, its code read from the info@ inbox.
+
+**Deploy order:** an old portal behind a new OP is fine while the switch is off; with it on, an old
+portal would read the code answer as a wrong password. The portal deploys on merge, so switch on after.
+
+**Not built, on purpose:** passkeys, a banner, a freelancer-side list of phones, SMS codes.
+**Follow-up noticed:** the three freelancer auth emails (sign-up code, reset link, sign-in code) use the
+`internal` email frame ("OOOSH OPS" header, "Internal use only" footer). The new one matches the other
+two; moving all three to the `client` frame is a small separate change.
 
 ## 8. The freelancer guides (after the reskin)
 
@@ -348,6 +401,13 @@ module" section; open the `.dc.html` in a browser with `support.js` beside it).
   src/migrations/run.ts up` against it (the full history applies cleanly), a throwaway `redis-server`,
   then a tsx script that mounts the real routers (`routes/portal.ts`, `routes/vehicles.ts`) on an
   express app with `cookie-parser` and drives them with `fetch`. Delete the database afterwards.
+- **PR 5 (2FA):** the OP test server also mounted `routes/people.ts`, patched `emailService.send` to
+  record each email (and render it with `renderPreview()`), and offered a test-only staff token
+  (`signFor('staff', …)`) and a settings-cache reset. Its `app.set('trust proxy', 1)` matches production,
+  so the route script sent a different `X-Forwarded-For` per call to stay under the login limiter. The
+  real portal (`next dev`, `OP_BACKEND_URL` pointing at it) was driven through off / on / remembered /
+  unticked / email down / sign-up / reset in Playwright, and the staff card ran in `vite preview` with
+  `/api/people/**` forwarded (`route.fetch`) to the real OP routes under that staff token.
 - **Before pushing:** `npx tsc --noEmit -p .` in the root, `backend/` and `frontend/`; `next build`
   (stop the dev server first; they share `.next`); `npm run build` in `backend/` and `frontend/`.
 - **A reskin must not change behaviour:** compare each page's `fetch(` calls, navigations and request

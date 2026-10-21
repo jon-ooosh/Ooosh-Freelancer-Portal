@@ -342,6 +342,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '300_hire_form_error_events.sql',
         '301_freelancer_terms_from_approval.sql',
         '302_portal_sessions_valid_after.sql',
+        '303_portal_login_security.sql',
       ];
 
       for (const migration of migrations) {

@@ -10,6 +10,7 @@ import { logAudit } from '../middleware/audit';
 import { getSitterJobsByDate, type ShiftJobRef } from '../services/studio-sitter';
 import { ukToday } from '../services/uk-date';
 import { notAltQuoteLossSql, optionCountSql } from '../services/job-groups';
+import { portalSignInStatus, issuePortalCodeForStaff, portalSignOutEverywhere } from '../services/portal-login-security';
 
 const router = Router();
 
@@ -1138,6 +1139,63 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
     });
   } catch (error) {
     console.error('Freelancer history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Portal sign-in (FREELANCER-PORTAL-SPEC §7): the Freelancer tab's card ──
+// Anyone on the staff team (jon, Oct 2026). Both actions are audit-logged;
+// the code itself never is.
+
+async function portalPerson(id: string) {
+  const r = await query(
+    `SELECT id, is_freelancer, portal_password_hash IS NOT NULL AS has_password
+       FROM people WHERE id = $1 AND is_deleted = false`,
+    [id]
+  );
+  return r.rows[0] as { id: string; is_freelancer: boolean; has_password: boolean } | undefined;
+}
+
+router.get('/:id/portal-sign-in', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    res.json({ data: await portalSignInStatus(person.id) });
+  } catch (error) {
+    console.error('Portal sign-in status error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// "Give them a sign-in code": for a freelancer whose code email isn't arriving.
+// Read it out on the phone; they still need their password.
+router.post('/:id/portal-sign-in/code', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    if (!person.has_password) {
+      res.status(400).json({ error: "They haven't set up a portal login yet, so a code won't help. They need to register first." });
+      return;
+    }
+    const issued = await issuePortalCodeForStaff(person.id, req.user!.id);
+    await logAudit(req.user!.id, 'people', person.id, 'portal_sign_in_code', null, { expires_minutes: issued.expiresMinutes });
+    res.json({ data: issued });
+  } catch (error) {
+    console.error('Portal sign-in code error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// "Sign them out everywhere": forgets every remembered phone and ends every portal session.
+router.post('/:id/portal-sign-in/sign-out', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    await portalSignOutEverywhere(person.id);
+    await logAudit(req.user!.id, 'people', person.id, 'portal_sign_out_everywhere', null, {});
+    res.json({ data: { ok: true } });
+  } catch (error) {
+    console.error('Portal sign-out everywhere error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
