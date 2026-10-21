@@ -9,6 +9,7 @@ import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { getSitterJobsByDate, type ShiftJobRef } from '../services/studio-sitter';
 import { ukToday } from '../services/uk-date';
+import { notAltQuoteLossSql, optionCountSql } from '../services/job-groups';
 
 const router = Router();
 
@@ -733,6 +734,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
                j.job_date, j.job_end, j.return_date, j.job_value,
                j.client_name, j.company_name, j.lost_reason, j.lost_detail,
+               j.option_no, j.group_id,
                jo.role AS link_role, o.name AS link_org_name,
                'organisation' AS link_type
         FROM person_organisation_roles por
@@ -747,6 +749,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
                j.job_date, j.job_end, j.return_date, j.job_value,
                j.client_name, j.company_name, j.lost_reason, j.lost_detail,
+               j.option_no, j.group_id,
                qa.role AS link_role, NULL AS link_org_name,
                'crew' AS link_type
         FROM quote_assignments qa
@@ -761,6 +764,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const jobsResult = await query(
       `${personJobsCTE}
        SELECT pj.*,
+              ${optionCountSql('pj')} AS option_count,
               (SELECT i.content FROM interactions i
                WHERE i.job_id = pj.id AND i.content LIKE 'Job retro:%'
                ORDER BY i.created_at DESC LIMIT 1
@@ -785,10 +789,10 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const statsResult = await query(
       `${personJobsCTE}
        SELECT
-         COUNT(*) AS total_jobs,
+         COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('pj')}) AS total_jobs,
          COUNT(*) FILTER (WHERE pj.pipeline_status = 'completed' OR pj.status = 11) AS completed_jobs,
          COUNT(*) FILTER (WHERE pj.pipeline_status = 'confirmed' OR pj.status = 2) AS confirmed_jobs,
-         COUNT(*) FILTER (WHERE pj.pipeline_status = 'lost') AS lost_jobs,
+         COUNT(*) FILTER (WHERE pj.pipeline_status = 'lost' AND ${notAltQuoteLossSql('pj')}) AS lost_jobs,
          COALESCE(SUM(pj.job_value), 0) AS total_value
        FROM person_jobs pj${filterSql}`,
       [id, ...filterParams]

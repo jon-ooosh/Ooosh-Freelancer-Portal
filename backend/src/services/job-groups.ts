@@ -38,6 +38,18 @@ export function notAltQuoteLossSql(alias = 'j'): string {
 }
 
 /**
+ * SQL: how many options this job's group holds (lost ones included — they were
+ * quoted), or NULL when the job is in no group. Read next to `option_no` for the
+ * "Option 2 of 3" tag on global search and Hire History (spec §6.5). `alias` must
+ * expose `group_id`.
+ */
+export function optionCountSql(alias = 'j'): string {
+  return `(CASE WHEN ${alias}.group_id IS NOT NULL THEN
+             (SELECT COUNT(*)::int FROM jobs og WHERE og.group_id = ${alias}.group_id AND og.is_deleted = false)
+           END)`;
+}
+
+/**
  * SQL for a job_name write from an INBOUND HireHop name that keeps the "(Option N)"
  * suffix when HireHop dropped it (staff renamed the job in HH). `param` is the
  * placeholder holding the inbound name, e.g. '$1' — cast to text on every use so

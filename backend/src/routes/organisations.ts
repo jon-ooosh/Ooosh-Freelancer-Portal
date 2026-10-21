@@ -9,7 +9,7 @@ import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { JOB_OUTCOME_SQL, JOB_LOST_OR_CANCELLED_SQL } from '../services/job-outcomes';
 import { ukToday } from '../services/uk-date';
-import { notAltQuoteLossSql } from '../services/job-groups';
+import { notAltQuoteLossSql, optionCountSql } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
@@ -1431,6 +1431,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
          j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
          j.job_date, j.job_end, j.return_date, j.job_value,
          j.client_name, j.company_name, j.lost_reason, j.lost_detail,
+         j.option_no, ${optionCountSql('j')} AS option_count,
          (SELECT i.content FROM interactions i
           WHERE i.job_id = j.id AND i.content LIKE 'Job retro:%'
           ORDER BY i.created_at DESC LIMIT 1

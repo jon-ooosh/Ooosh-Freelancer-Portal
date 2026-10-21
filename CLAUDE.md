@@ -259,7 +259,7 @@ once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`serv
 `afterOptionConfirmed()` on all four confirmation paths; bells on the unattended ones), the §8 guards
 (`notAltQuoteLossSql`, `bumpSiblingChaseDates`, `jobNameKeepingOptionSuffixSql`), and the portal hand-off
 (`portalOptionsFor()` on `GET /money/job-lookup/:hh` — `payable` is false for a live option whose sibling
-confirmed; the portal repo refuses before any Stripe session). Phase 2 (`part_of` groups) is not built — **spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
+confirmed; the portal repo refuses before any Stripe session). Festival-style grouping is NOT a `part_of` group — it gets its own design (§14 says why: every group read path assumes alternatives). **Spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
 
 **BUILT (all three phases), Oct 2026:** `docs/STAFF-LOGIN-SECURITY-SPEC.md` — two-factor for every OP
