@@ -3,7 +3,8 @@
 /**
  * MuteBanner
  *
- * Sticky red banner across the top of every authenticated portal page.
+ * Sticky amber banner across the top of every authenticated portal page
+ * (the design's warning tone, Oct 2026 refresh).
  * Surfaces the global notification mute state with an inline Resume action.
  *
  * Hidden when:
@@ -19,6 +20,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
+import { BellOff } from 'lucide-react'
 
 interface NotificationSettings {
   globalMuteActive: boolean
@@ -52,7 +54,7 @@ function formatPauseLabel(dateStr: string | null): string {
     day: 'numeric',
     month: 'short',
     year: date.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined,
-  })
+  }).replace(',', '')
   return `paused until ${formatted}`
 }
 
@@ -109,22 +111,22 @@ export function MuteBanner() {
   const label = formatPauseLabel(settings.globalMuteUntil)
 
   return (
-    <div className="sticky top-0 z-50 bg-red-600 text-white shadow-md">
+    <div className="sticky top-0 z-50 bg-hf-amber-bg border-b border-hf-amber-border text-hf-amber-text safe-top">
       <div className="max-w-lg mx-auto px-4 py-2 flex items-center justify-between gap-3">
         <Link
           href="/settings"
-          className="flex items-center gap-2 text-sm font-medium hover:underline min-w-0"
+          className="flex items-center gap-2 text-[14px] font-semibold hover:underline min-w-0"
         >
-          <span aria-hidden="true">🔕</span>
-          <span className="truncate">Notifications {label}</span>
+          <BellOff size={16} strokeWidth={2.2} className="flex-none" aria-hidden="true" />
+          <span className="truncate">Job emails {label}</span>
         </Link>
         <button
           type="button"
           onClick={handleResume}
           disabled={resuming}
-          className="shrink-0 bg-white/20 hover:bg-white/30 disabled:opacity-50 px-3 py-1.5 rounded-md text-sm font-semibold min-h-[36px]"
+          className="shrink-0 bg-white border border-hf-amber-border hover:bg-hf-amber-tile disabled:opacity-50 px-3 rounded-lg text-[14px] font-semibold min-h-[36px]"
         >
-          {resuming ? '…' : 'Resume'}
+          {resuming ? '...' : 'Resume'}
         </button>
       </div>
     </div>

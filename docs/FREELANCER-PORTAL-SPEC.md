@@ -11,8 +11,8 @@ touching completion, the chaser, Earnings or the freelancer guides.
 |---|---|---|
 | 1 | Completion fixes (§2) | merged 21 Oct 2026 |
 | – | Payment terms aligned (§4) | merged 21 Oct 2026 |
-| 2 | Security quick fixes (§6) | this PR |
-| 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`, added with that PR) | after |
+| 2 | Security quick fixes (§6) | merged 21 Oct 2026 |
+| 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`), §9 | this PR |
 | 4 | Van screens reskin, freelancer scope only | after |
 | 5 | Portal 2FA (§7) | after |
 | 6 | Earnings (§5) | **new session**, after the above |
@@ -172,3 +172,28 @@ phone-width), framed by task:
 4. **Delivering and collecting backline**: the checklist, notes, signature or photo, the delivery note.
 
 Each opens with three to five rules (check the plate; tap Resume when asked; complete promptly).
+
+## 9. The reskin (PR 3, Oct 2026)
+
+The portal now follows `docs/design/freelancer-portal-refresh/` (README there = the brief; the
+`.dc.html` opens in a browser with `support.js` beside it; `screenshots/` are the finals).
+
+- **Tokens:** `tailwind.config.js` `hf` (the design's colours by name) and `kind` (job-kind tile
+  colours). The stock `gray`, `green`, `amber`, `red`, `blue` are RE-POINTED at the same palette, so
+  `gray-500` here is the design's warm "muted". The old `ooosh` sky blue is gone. Use `hf-*` in new code.
+- **Removed with it:** the Monday-era in-memory reset-token and verification-code stores in `src/lib`
+  (OP issues and checks both); the portal's "3 resets an hour" check, which never counted anything.
+- **Font:** DM Sans via `next/font` (`--font-dm-sans`). Icons: `lucide-react` (pinned 1.50.0), no emoji.
+- **Shared pieces:** `src/components/ui.tsx` (button/input class strings, IconTile, BackLink,
+  Chevron, SectionLabel, Banner, Segmented, Chip, PageSpinner), `BottomNav.tsx`, `AuthShell.tsx`
+  (register / forgotten / reset).
+- **Jobs (dashboard):** By date (Today / Tomorrow / Later, plus Earlier for a recent shift or yard
+  day) or By type (Deliveries & collections / Studio shifts / Crew / Ooosh work), remembered in
+  `localStorage` `ooosh_portal_jobs_sort`. Yard days needing an answer pinned on top. Whole cards open
+  the job; only Today cards carry Start / Lock up. The kind label and the travel chip ("Driving there &
+  back", "One way · train back", "Train there · drive back") come from `whatIsIt` and the leg: a rule of
+  thumb, not stored data. The card's town is `venueCity` (OP's portal job response, Oct 2026).
+- **Copy:** British English, hyphens not em dashes, "Forgotten it?" on the login (the login error
+  messages name it, so change both together), "Job emails" for the notification settings.
+- **Not built from the mock:** Earnings stays a "Coming soon" page (§5).
+

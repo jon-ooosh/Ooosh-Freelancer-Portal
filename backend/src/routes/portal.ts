@@ -76,7 +76,7 @@ function deriveCrewMoney(rawExpenses: unknown): CrewMoney {
   } else if (pdMode === 'not_included') {
     perDiem = { label: 'Per Diem', message: `The client is paying your Per Diem${pdAmtStr} directly.`, tone: 'client' };
   } else {
-    perDiem = { label: 'Per Diem', message: `We're paying your Per Diem${pdAmtStr} — please include it on your invoice to us.`, tone: 'ooosh' };
+    perDiem = { label: 'Per Diem', message: `We're paying your Per Diem${pdAmtStr}. Please include it on your invoice to us.`, tone: 'ooosh' };
   }
 
   // Other expense lines — only when they apply (mode ≠ na and amount > 0).
@@ -93,13 +93,13 @@ function deriveCrewMoney(rawExpenses: unknown): CrewMoney {
     if (mode === 'not_included') {
       message = CREW_PREBOOKED.has(type)
         ? `The client is arranging & paying the ${lower} directly.`
-        : `The client covers ${lower} directly — nothing for you to pay or claim.`;
+        : `The client covers ${lower} directly, so there's nothing for you to pay or claim.`;
       tone = 'client';
     } else if (CREW_FRONTED.has(type)) {
       message = `Pay for the ${lower} yourself and include it on your invoice to us.`;
       tone = 'claim';
     } else if (CREW_PREBOOKED.has(type)) {
-      message = `${label} is booked & paid by Ooosh — nothing for you to arrange.`;
+      message = `${label} is booked & paid by Ooosh, so there's nothing for you to arrange.`;
       tone = 'ooosh';
     } else {
       message = `Include the ${lower} on your invoice to us.`;
@@ -119,7 +119,7 @@ const router = Router();
 const portalLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
-  message: { error: 'Too many attempts — try again in 15 minutes' },
+  message: { error: 'Too many attempts. Try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -127,7 +127,7 @@ const portalLoginLimiter = rateLimit({
 const portalEmailLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
-  message: { error: 'Too many requests — try again in 15 minutes' },
+  message: { error: 'Too many requests. Try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -300,7 +300,7 @@ router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Respons
     const wait = await portalSecondsBlocked(freelancer.id);
     if (wait > 0) {
       res.status(429).json({
-        error: 'Sign-in is paused after too many attempts. Please reset your password using "Forgot your password?", or try again later.',
+        error: 'Sign-in is paused after too many attempts. Please reset your password using "Forgotten it?", or try again later.',
         retryAfter: wait,
       });
       return;
@@ -463,13 +463,13 @@ router.post('/auth/register/verify', portalLoginLimiter, async (req: Request, re
     );
 
     if (result.rows.length === 0) {
-      res.status(400).json({ error: 'No active code — please request a new one' });
+      res.status(400).json({ error: 'No active code. Please request a new one.' });
       return;
     }
 
     const row = result.rows[0];
     if (row.attempts >= 5) {
-      res.status(429).json({ error: 'Too many attempts — please request a new code' });
+      res.status(429).json({ error: 'Too many attempts. Please request a new code.' });
       return;
     }
 
@@ -1574,7 +1574,7 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
       res.status(409).json({
         error: (await isLockedUp(gate.shiftId))
           ? "You've locked up for the night, so the till is closed. Leave the office a note about anything else."
-          : 'The till for this evening is closed — sales can only be taken on the night.',
+          : 'The till for this evening is closed. Sales can only be taken on the night.',
       });
       return;
     }
@@ -1649,7 +1649,7 @@ router.post('/studio-sitter/shifts/:date/till/sales/:id/receipt', async (req: Po
     if (!own.rows.length) { res.status(404).json({ error: "That isn't one of tonight's sales." }); return; }
     const { sendShopReceipt } = await import('../services/shop-receipts');
     const result = await sendShopReceipt(String(req.params.id), String(req.body?.to ?? ''), { id: null, personId: req.portalUser!.id });
-    if (!result.sent) { res.status(502).json({ error: `The receipt didn't send — ${result.error}` }); return; }
+    if (!result.sent) { res.status(502).json({ error: `The receipt didn't send: ${result.error}` }); return; }
     res.json({ success: true, sent: true });
   } catch (error) {
     // "Not an email address", "their bill — their invoice is the document".
@@ -3380,6 +3380,9 @@ function formatJobForPortal(row: Record<string, unknown>) {
     time: row.arrival_time as string | null,
     venueName: (row.linked_venue_name || row.venue_name) as string | null,
     venueId: row.venue_id as string | null,
+    // The venue's town, for the job cards' "10:00 AM · Islington" line (Oct 2026
+    // refresh). Null when the quote has no linked venue.
+    venueCity: (row.venue_city as string | null) ?? null,
     hhRef: row.hirehop_id ? String(row.hirehop_id) : null,
     status: portalStatus,
     opsStatus,

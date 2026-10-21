@@ -16,10 +16,24 @@ export function ukToday(): string {
   return `${get('year')}-${get('month')}-${get('day')}`
 }
 
+/** The UK date `days` after today (negative for before), as YYYY-MM-DD. */
+export function ukDatePlus(days: number): string {
+  const [y, m, d] = ukToday().split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10)
+}
+
+/** The hour of the day in the UK, 0-23. */
+export function ukHour(): number {
+  return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', hourCycle: 'h23' }).format(new Date()))
+}
+
 /** A YYYY-MM-DD date as "Sun 26 Oct". Unparseable input comes back as-is. */
 export function shortUkDate(ymd: string): string {
   const [y, m, d] = ymd.split('-').map(Number)
   const date = new Date(Date.UTC(y, (m || 1) - 1, d || 1))
   if (Number.isNaN(date.getTime())) return ymd
-  return date.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })
+  // Built by hand: some browsers put a comma after the weekday ("Wed, 21 Oct").
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  return `${DAYS[date.getUTCDay()]} ${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}`
 }

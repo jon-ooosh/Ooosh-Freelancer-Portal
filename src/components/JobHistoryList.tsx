@@ -10,6 +10,8 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import BottomNav from '@/components/BottomNav'
+import { cls, BackLink, Banner, Chevron } from '@/components/ui'
 
 interface HistoryJob {
   id: string
@@ -28,9 +30,10 @@ type Item = (HistoryJob & { isGrouped: false }) | { isGrouped: true; jobs: Histo
 
 function formatDate(dateStr?: string): string {
   if (!dateStr) return ''
-  const d = new Date(dateStr)
-  if (Number.isNaN(d.getTime())) return dateStr
-  return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+  const [y, m, d] = dateStr.slice(0, 10).split('-').map(Number)
+  const date = new Date(Date.UTC(y, (m || 1) - 1, d || 1))
+  if (Number.isNaN(date.getTime())) return dateStr
+  return date.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })
 }
 
 function title(job: HistoryJob): string {
@@ -74,50 +77,44 @@ export default function JobHistoryList({ which }: { which: 'completed' | 'cancel
   const empty = which === 'completed' ? 'No completed jobs in the last 30 days.' : 'No cancelled jobs.'
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-8">
-      <header className="bg-white shadow-sm border-b border-gray-100 sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-4 flex items-center gap-3">
-          <Link href="/dashboard" className="p-2 -ml-2 text-gray-600 hover:text-gray-900 transition-colors" title="Back to jobs">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <div>
-            <h1 className="text-lg font-semibold text-gray-900">{heading}</h1>
-            {which === 'completed' && <p className="text-sm text-gray-500">Last 30 days</p>}
-          </div>
-        </div>
+    <div className="min-h-screen bg-hf-page safe-top pb-32">
+      <header className="max-w-lg mx-auto px-5 pt-3 flex flex-col gap-1">
+        <BackLink href="/dashboard" label="Jobs" />
+        <h1 className={cls.pageTitle}>{heading}</h1>
+        {which === 'completed' && <p className="text-[16px] text-hf-muted">Last 30 days</p>}
       </header>
 
-      <main className="max-w-lg mx-auto px-4 py-6">
-        {error && (
-          <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">{error}</div>
-        )}
+      <main className="max-w-lg mx-auto px-4 pt-4">
+        {error && <Banner tone="error" className="mb-4">{error}</Banner>}
         {loading ? (
-          <div className="bg-white rounded-xl border border-gray-100 p-4 animate-pulse space-y-3">
-            <div className="h-4 bg-gray-200 rounded w-2/3" />
-            <div className="h-4 bg-gray-200 rounded w-1/2" />
+          <div className={`${cls.card} p-4 animate-pulse flex flex-col gap-3`}>
+            <div className="h-4 bg-hf-track rounded w-2/3" />
+            <div className="h-4 bg-hf-track rounded w-1/2" />
           </div>
         ) : jobs.length === 0 ? (
-          <div className="bg-white rounded-xl border border-gray-100 p-6 text-center text-sm text-gray-500">{empty}</div>
+          <div className={`${cls.card} p-6 text-center text-[15px] text-hf-muted`}>{empty}</div>
         ) : (
-          <ul className="bg-white rounded-xl border border-gray-100 divide-y divide-gray-100 overflow-hidden">
-            {jobs.map((job) => {
+          <ul className={`${cls.card} overflow-hidden`}>
+            {jobs.map((job, i) => {
               const fee = job.freelancerFee ?? job.driverPay
               return (
                 <li key={job.id}>
+                  {i > 0 && <div className="h-px bg-hf-divider ml-4" />}
                   <Link
                     href={job.board === 'crew' ? `/job/${job.id}?board=crew` : `/job/${job.id}`}
-                    className="flex items-center justify-between gap-3 px-4 py-3 hover:bg-gray-50"
+                    className="flex items-center justify-between gap-3 px-4 py-3.5 hover:bg-hf-inset"
                   >
                     <span className="min-w-0">
-                      <span className="block truncate text-sm font-medium text-gray-900">{title(job)}</span>
-                      <span className="block text-xs text-gray-500">
+                      <span className="block truncate text-[16px] font-semibold text-hf-ink">{title(job)}</span>
+                      <span className="block text-[14px] text-hf-muted">
                         {formatDate(job.date)}
                         {which === 'completed' && job.completedAtDate ? ` · completed ${formatDate(job.completedAtDate)}` : ''}
                       </span>
                     </span>
-                    {fee ? <span className="shrink-0 text-sm font-semibold tabular-nums text-gray-900">£{Math.round(fee)}</span> : null}
+                    <span className="flex items-center gap-1.5 shrink-0">
+                      {fee ? <span className={cls.money}>£{Math.round(fee)}</span> : null}
+                      <Chevron />
+                    </span>
                   </Link>
                 </li>
               )
@@ -125,6 +122,7 @@ export default function JobHistoryList({ which }: { which: 'completed' | 'cancel
           </ul>
         )}
       </main>
+      <BottomNav active="jobs" />
     </div>
   )
 }

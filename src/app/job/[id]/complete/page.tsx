@@ -18,23 +18,23 @@
  * - Signature capture (when customer present)
  * - Offline detection
  * 
- * Section order:
- * 1. Job summary
- * 2. Equipment checklist
- * 3. Notes
- * 4. Customer not present toggle
- * 5. Photos
- * 6. Client email (for delivery notes)
- * 7. Signature (when customer present)
- * 8. Complete button
+ * Section order (Oct 2026 refresh, design 2c):
+ * 1. Equipment checklist
+ * 2. Sign-off: signature, or "Customer not here" + photo (photos optional otherwise)
+ * 3. Who gets the delivery note / collection confirmation
+ * 4. Your name (Ooosh staff) + notes
+ * 5. Complete button, in a sticky footer
  * 
  * Route: /job/[id]/complete
  */
 
 import { useEffect, useState, useRef, useCallback } from 'react'
+import type { ReactNode } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
+import { Check, Minus, Plus, X, Camera, WifiOff, AlertTriangle, Truck, ChevronDown, ChevronUp } from 'lucide-react'
 import { ukToday, shortUkDate } from '@/lib/ukDate'
+import { cls, BackLink, Banner, PageSpinner } from '@/components/ui'
 
 // =============================================================================
 // TYPES
@@ -103,10 +103,10 @@ function formatDate(dateStr?: string): string {
 }
 
 /**
- * Strip DEL/COL prefix from job name and combine with venue
+ * Strip the DEL/COL/CREW prefix from job name and combine with venue
  */
 function formatJobTitle(jobName: string, venueName?: string): string {
-  const cleanedName = jobName.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
+  const cleanedName = jobName.replace(/^(DEL|COL|CREW)\s*[-:]\s*/i, '').trim()
   
   if (!venueName) return cleanedName
   if (cleanedName.toLowerCase() === venueName.toLowerCase()) {
@@ -293,8 +293,21 @@ function SignatureCanvas({ onSignatureChange }: SignatureCanvasProps) {
       setIsDrawing(false)
       const canvas = canvasRef.current
       if (canvas && hasSignature) {
-        const dataUrl = canvas.toDataURL('image/png')
-        onSignatureChange(dataUrl)
+        // The pad shows on the page's warm inset colour, so the canvas itself
+        // is transparent. The signature still goes to OP on WHITE, exactly as
+        // before the refresh: it's drawn onto a white copy for the export.
+        const out = document.createElement('canvas')
+        out.width = canvas.width
+        out.height = canvas.height
+        const octx = out.getContext('2d')
+        if (octx) {
+          octx.fillStyle = '#ffffff'
+          octx.fillRect(0, 0, out.width, out.height)
+          octx.drawImage(canvas, 0, 0)
+          onSignatureChange(out.toDataURL('image/png'))
+        } else {
+          onSignatureChange(canvas.toDataURL('image/png'))
+        }
       }
     }
   }, [isDrawing, hasSignature, onSignatureChange])
@@ -304,8 +317,7 @@ function SignatureCanvas({ onSignatureChange }: SignatureCanvasProps) {
     const ctx = canvas?.getContext('2d')
     if (!ctx || !canvas) return
 
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
     setHasSignature(false)
     onSignatureChange(null)
   }, [onSignatureChange])
@@ -315,23 +327,32 @@ function SignatureCanvas({ onSignatureChange }: SignatureCanvasProps) {
     const ctx = canvas?.getContext('2d')
     if (!ctx || !canvas) return
 
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-    ctx.strokeStyle = '#1f2937'
-    ctx.lineWidth = 2
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.strokeStyle = '#1d1a1c'
+    ctx.lineWidth = 2.5
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
   }, [])
 
   return (
-    <div className="space-y-2">
-      <div className="border-2 border-gray-300 rounded-lg overflow-hidden bg-white">
+    <div className="flex flex-col gap-1.5">
+      <div className="flex justify-between items-center">
+        <span className="text-[14px] font-semibold text-hf-body">Signature</span>
+        <button
+          type="button"
+          onClick={clearSignature}
+          className="text-[14px] font-semibold text-hf-link hover:text-hf-link-hover"
+        >
+          Clear
+        </button>
+      </div>
+      <div className="relative rounded-xl border-[1.5px] border-dashed border-hf-dashed bg-hf-inset overflow-hidden">
         <canvas
           ref={canvasRef}
           width={600}
           height={200}
-          className="w-full touch-none cursor-crosshair"
-          style={{ height: '150px' }}
+          className="relative z-10 block w-full touch-none cursor-crosshair"
+          style={{ height: '200px' }}
           onMouseDown={startDrawing}
           onMouseMove={draw}
           onMouseUp={stopDrawing}
@@ -340,16 +361,11 @@ function SignatureCanvas({ onSignatureChange }: SignatureCanvasProps) {
           onTouchMove={draw}
           onTouchEnd={stopDrawing}
         />
-      </div>
-      <div className="flex justify-between items-center">
-        <p className="text-xs text-gray-500">Sign above using finger or mouse</p>
-        <button
-          type="button"
-          onClick={clearSignature}
-          className="text-sm text-red-600 hover:text-red-700 font-medium"
-        >
-          Clear
-        </button>
+        {!hasSignature && (
+          <span className="pointer-events-none absolute inset-x-0 bottom-3 text-center text-[14px] text-hf-muted">
+            Sign with your finger
+          </span>
+        )}
       </div>
     </div>
   )
@@ -412,7 +428,7 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       {/* Photo grid */}
       {photos.length > 0 && (
         <div className="grid grid-cols-3 gap-2">
@@ -421,46 +437,46 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
               <img 
                 src={photo} 
                 alt={`Photo ${index + 1}`} 
-                className="w-full h-full object-cover rounded-lg border border-gray-200"
+                className="w-full h-full object-cover rounded-xl border border-hf-border"
               />
               <button
                 type="button"
                 onClick={() => removePhoto(index)}
-                className="absolute -top-2 -right-2 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center hover:bg-red-600 shadow-md"
+                aria-label={`Remove photo ${index + 1}`}
+                className="absolute -top-2 -right-2 bg-hf-ink text-white w-7 h-7 rounded-full flex items-center justify-center shadow-md hover:bg-black"
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+                <X size={15} strokeWidth={2.4} />
               </button>
             </div>
           ))}
         </div>
       )}
 
-      {/* Add photo button or placeholder */}
-      {photos.length < MAX_PHOTOS && (
-        <div className={`border-2 border-dashed rounded-lg p-4 text-center ${
-          required && photos.length === 0 ? 'border-orange-300 bg-orange-50' : 'border-gray-300 bg-gray-50'
+      {/* Empty state: says whether a photo is needed */}
+      {photos.length === 0 && (
+        <div className={`rounded-xl border-[1.5px] border-dashed px-4 py-4 text-center ${
+          required ? 'border-hf-amber-border bg-hf-amber-bg' : 'border-hf-dashed bg-hf-inset'
         }`}>
           {compressing ? (
-            <div className="py-4">
-              <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-              <p className="text-sm text-gray-600">Compressing photo...</p>
+            <div className="py-2">
+              <div className="w-7 h-7 border-[3px] border-hf-tint border-t-hf-accent rounded-full animate-spin mx-auto mb-2"></div>
+              <p className="text-[14px] text-hf-muted">Compressing photo...</p>
             </div>
           ) : (
             <>
-              <svg className="mx-auto h-10 w-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-              <p className="mt-2 text-sm text-gray-600">
-                {photos.length === 0 
-                  ? (required ? 'At least 1 photo required' : 'Photos optional')
-                  : `${photos.length}/${MAX_PHOTOS} photos`
-                }
+              <Camera size={26} strokeWidth={1.6} className={`mx-auto ${required ? 'text-hf-amber-text' : 'text-hf-placeholder'}`} />
+              <p className={`mt-1.5 text-[14px] ${required ? 'text-hf-amber-text font-semibold' : 'text-hf-muted'}`}>
+                {required ? 'At least 1 photo required' : 'Photos optional'}
               </p>
             </>
           )}
+        </div>
+      )}
+
+      {photos.length > 0 && compressing && (
+        <div className="flex items-center gap-2 text-[14px] text-hf-muted">
+          <div className="w-5 h-5 border-2 border-hf-tint border-t-hf-accent rounded-full animate-spin"></div>
+          Compressing photo...
         </div>
       )}
 
@@ -476,17 +492,15 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
             onChange={handleFileSelect}
             className="hidden"
           />
-          <div className="w-full py-3 px-4 bg-purple-500 text-white rounded-lg font-medium text-center hover:bg-purple-600 transition-colors flex items-center justify-center gap-2">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            {photos.length === 0 ? 'Add Photo' : 'Add Another Photo'}
+          <div className={`${cls.btnSecondary} w-full`}>
+            <Camera size={18} strokeWidth={1.9} />
+            {photos.length === 0 ? 'Add photo' : `Add another photo (${photos.length}/${MAX_PHOTOS})`}
           </div>
         </label>
       )}
 
       {photos.length >= MAX_PHOTOS && (
-        <p className="text-center text-sm text-gray-500">Maximum {MAX_PHOTOS} photos reached</p>
+        <p className="text-center text-[14px] text-hf-muted">Maximum {MAX_PHOTOS} photos reached</p>
       )}
     </div>
   )
@@ -561,69 +575,54 @@ function ClientEmailInput({
 
   const typeLabel = jobType === 'delivery' ? 'Delivery Note' : 'Collection Confirmation'
 
+  // Who it's going to, so the driver can see the address they've chosen.
+  const goingTo = Array.from(new Set([
+    ...selectedContactEmails,
+    ...emails.map((e) => e.trim()).filter((e) => e && isValidEmail(e)),
+  ]))
+
   return (
-    <div className="space-y-3">
-      {jobType === 'hire' ? (
+    <div className="flex flex-col gap-2.5">
+      {jobType === 'hire' && (
         /* Crew: opt-in */
-        <label className="flex items-center gap-3 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={!dontSend}
-            onChange={(e) => onDontSendChange(!e.target.checked)}
-            className="w-5 h-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-          />
-          <span className="text-sm text-gray-700">Send the client a note of what&apos;s on the hire</span>
-        </label>
-      ) : (
-        /* Don't send checkbox */
-        <label className="flex items-center gap-3 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={dontSend}
-            onChange={(e) => onDontSendChange(e.target.checked)}
-            className="w-5 h-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-          />
-          <span className="text-sm text-gray-700">Don't send {typeLabel.toLowerCase()} to client</span>
-        </label>
+        <ToggleRow
+          checked={!dontSend}
+          onChange={(on) => onDontSendChange(!on)}
+          title="Send the client a note of what's on the hire"
+          sub="A PDF of the equipment on the hire"
+        />
       )}
 
-      {/* Job contacts to tick (same list as the warehouse collection page) */}
+      {/* Job contacts to pick (same list as the warehouse collection page) */}
       {!dontSend && contacts.length > 0 && (
-        <div className="space-y-2">
+        <div className="flex flex-wrap gap-2">
           {contacts.map((c) => {
             const selected = selectedContactEmails.includes(c.email)
+            const tag = c.isPrimary ? 'lead' : c.role
             return (
               <button
                 key={c.personId}
                 type="button"
                 onClick={() => onToggleContact(c.email)}
-                className={`w-full text-left px-3 py-2 rounded-lg border transition-colors ${
+                aria-pressed={selected}
+                title={c.email}
+                className={`min-h-[40px] max-w-full px-3.5 py-1.5 rounded-full border-[1.5px] text-[15px] flex items-center gap-1.5 text-left transition-colors ${
                   selected
-                    ? 'border-purple-500 bg-purple-50 ring-2 ring-purple-200'
-                    : 'border-gray-200 hover:bg-gray-50'
+                    ? 'bg-hf-tint border-hf-accent text-hf-tint-text font-semibold'
+                    : 'bg-white border-hf-control text-hf-body font-medium hover:bg-hf-inset'
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-gray-800 truncate">
-                      {c.isPrimary && <span className="text-amber-500 mr-1" title="Lead contact">★</span>}
-                      {c.name}
-                      {c.role && <span className="text-gray-400 font-normal"> · {c.role}</span>}
-                    </p>
-                    <p className="text-xs text-gray-500 truncate">{c.email}</p>
-                  </div>
-                  {selected && <span className="text-purple-600 text-lg">✓</span>}
-                </div>
+                {selected && <Check size={16} strokeWidth={2.4} className="flex-none" />}
+                <span className="truncate">{c.name}{tag ? ` · ${tag}` : ''}</span>
               </button>
             )
           })}
-          <p className="text-xs text-gray-500">Tap to choose who gets it — or add another address below.</p>
         </div>
       )}
 
       {/* Email inputs (hidden when don't send is checked) */}
       {!dontSend && (
-        <div className="space-y-2">
+        <div className="flex flex-col gap-2">
           {emails.map((email, index) => (
             <div key={index} className="flex gap-2">
               <div className="flex-1">
@@ -633,24 +632,20 @@ function ClientEmailInput({
                   onChange={(e) => handleEmailChange(index, e.target.value)}
                   onBlur={() => handleEmailBlur(index)}
                   placeholder={index === 0 ? (contacts.length > 0 ? "Another email (optional)" : "Client email address (optional)") : "Additional email"}
-                  className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${
-                    emailErrors[index] ? 'border-red-300 bg-red-50' : 'border-gray-300'
-                  }`}
+                  className={`${cls.input} h-12 !py-0 ${emailErrors[index] ? '!border-hf-error' : ''}`}
                 />
                 {emailErrors[index] && (
-                  <p className="text-red-500 text-xs mt-1">{emailErrors[index]}</p>
+                  <p className="text-hf-error text-[13px] mt-1">{emailErrors[index]}</p>
                 )}
               </div>
               {emails.length > 1 && (
                 <button
                   type="button"
                   onClick={() => removeEmailField(index)}
-                  className="px-2 text-gray-400 hover:text-red-500 transition-colors"
+                  className="w-11 h-12 flex items-center justify-center text-hf-muted hover:text-hf-error transition-colors"
                   title="Remove email"
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  <X size={20} strokeWidth={2} />
                 </button>
               )}
             </div>
@@ -661,27 +656,97 @@ function ClientEmailInput({
             <button
               type="button"
               onClick={addEmailField}
-              className="text-sm text-purple-600 hover:text-purple-700 font-medium flex items-center gap-1"
+              className="self-start min-h-[36px] text-[15px] font-semibold text-hf-link hover:text-hf-link-hover flex items-center gap-1"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
+              <Plus size={16} strokeWidth={2.4} />
               Add another email
             </button>
           )}
 
+          {goingTo.length > 0 && (
+            <p className="text-[14px] text-hf-body break-words">
+              Sending to {goingTo.join(', ')}
+            </p>
+          )}
+
           {/* Info text */}
-          <p className="text-xs text-gray-500">
+          <p className="text-[13px] leading-[1.45] text-hf-muted">
             {jobType === 'delivery' 
-              ? 'A PDF delivery note with equipment list will be emailed to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
+              ? 'A PDF delivery note with the equipment list goes to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
               : jobType === 'hire'
-                ? 'A PDF listing the equipment on the hire will be emailed to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
-                : 'A collection confirmation email will be sent to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
+                ? 'A PDF listing the equipment on the hire goes to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
+                : 'A collection confirmation email goes to the people chosen above. If nobody is chosen, it goes to the client contact we have on file.'
             }
           </p>
         </div>
       )}
+
+      {jobType !== 'hire' && (
+        /* Don't send */
+        <CheckRow
+          checked={dontSend}
+          onChange={onDontSendChange}
+          label={`Don't send ${typeLabel.toLowerCase()} to client`}
+        />
+      )}
     </div>
+  )
+}
+
+// =============================================================================
+// SMALL CONTROLS (toggle row, checkbox row, card)
+// =============================================================================
+
+/** A white card section (design: r16, 1px warm border, 16px padding). */
+function Section({ title, aside, children }: { title?: ReactNode; aside?: ReactNode; children: ReactNode }) {
+  return (
+    <div className={`${cls.card} p-4 flex flex-col gap-2.5`}>
+      {(title || aside) && (
+        <div className="flex items-baseline justify-between gap-3">
+          {title && <h3 className="text-[16px] font-semibold text-hf-ink">{title}</h3>}
+          {aside}
+        </div>
+      )}
+      {children}
+    </div>
+  )
+}
+
+/** Switch row on the inset colour (design: "Customer not here"). A real checkbox underneath. */
+function ToggleRow({ checked, onChange, title, sub }: { checked: boolean; onChange: (on: boolean) => void; title: string; sub?: string }) {
+  return (
+    <label className="min-h-[56px] rounded-xl bg-hf-inset px-3.5 py-2.5 flex items-center gap-3 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="sr-only peer"
+      />
+      <span className="flex-1 flex flex-col gap-0.5">
+        <span className="text-[16px] font-semibold text-hf-ink">{title}</span>
+        {sub && <span className="text-[14px] text-hf-muted">{sub}</span>}
+      </span>
+      <span
+        aria-hidden
+        className={`relative flex-none w-[46px] h-[28px] rounded-full transition-colors peer-focus-visible:ring-4 peer-focus-visible:ring-hf-tint ${checked ? 'bg-hf-accent' : 'bg-hf-toggle-off'}`}
+      >
+        <span className={`absolute top-[3px] left-[3px] w-[22px] h-[22px] rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,0.2)] transition-transform ${checked ? 'translate-x-[18px]' : ''}`} />
+      </span>
+    </label>
+  )
+}
+
+/** Checkbox row: 26px r8 box (design's ticked green / unticked dashed-grey). */
+function CheckRow({ checked, onChange, label }: { checked: boolean; onChange: (on: boolean) => void; label: string }) {
+  return (
+    <label className="min-h-[44px] flex items-center gap-3 cursor-pointer">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="sr-only peer" />
+      <span aria-hidden className={`flex-none w-[26px] h-[26px] rounded-lg flex items-center justify-center peer-focus-visible:ring-4 peer-focus-visible:ring-hf-tint ${
+        checked ? 'bg-hf-green text-white' : 'bg-white border-2 border-hf-dashed'}`}>
+        {checked && <Check size={16} strokeWidth={3} />}
+      </span>
+      <span className="text-[15px] text-hf-body">{label}</span>
+    </label>
   )
 }
 
@@ -793,82 +858,67 @@ function EquipmentChecklist({ hhRef, quoteId, whatIsIt, isDelivery, onChange }: 
     return sum + Math.min(count, item?.quantity || 0)
   }, 0)
 
+  const heading = 'Equipment checklist'
+
   if (loading) {
     return (
-      <div className="bg-white rounded-xl shadow-sm p-4">
-        <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📋</span> Equipment {isDelivery ? 'to Deliver' : 'to Collect'}
-        </h3>
-        <div className="animate-pulse space-y-2">
-          <div className="h-4 bg-gray-200 rounded w-3/4"></div>
-          <div className="h-4 bg-gray-200 rounded w-1/2"></div>
-          <div className="h-4 bg-gray-200 rounded w-2/3"></div>
+      <Section title={heading}>
+        <div className="animate-pulse flex flex-col gap-2">
+          <div className="h-4 bg-hf-track rounded w-3/4"></div>
+          <div className="h-4 bg-hf-track rounded w-1/2"></div>
+          <div className="h-4 bg-hf-track rounded w-2/3"></div>
         </div>
-      </div>
+      </Section>
     )
   }
 
   if (error) {
     return (
-      <div className="bg-white rounded-xl shadow-sm p-4">
-        <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📋</span> Equipment {isDelivery ? 'to Deliver' : 'to Collect'}
-        </h3>
-        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-          <p className="text-red-700 text-sm">{error}</p>
-        </div>
-      </div>
+      <Section title={heading}>
+        <Banner tone="error">{error}</Banner>
+      </Section>
     )
   }
 
   if (items.length === 0) {
     return (
-      <div className="bg-white rounded-xl shadow-sm p-4">
-        <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📋</span> Equipment {isDelivery ? 'to Deliver' : 'to Collect'}
-        </h3>
-        <p className="text-gray-500 text-sm italic">No equipment items found</p>
-      </div>
+      <Section title={heading}>
+        <p className="text-[15px] text-hf-muted">No equipment items found</p>
+      </Section>
     )
   }
 
   const PREVIEW_COUNT = 8
   const hasMoreItems = items.length > PREVIEW_COUNT
   const displayItems = expanded ? items : items.slice(0, PREVIEW_COUNT)
+  const pct = totalItems > 0 ? Math.round((totalChecked / totalItems) * 100) : 0
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-semibold text-gray-900 flex items-center gap-2">
-          <span>📋</span> Equipment {isDelivery ? 'to Deliver' : 'to Collect'}
-          <span className="text-sm font-normal text-gray-500">
-            ({items.length} item{items.length !== 1 ? 's' : ''})
-          </span>
-        </h3>
+    <div className={`${cls.card} flex flex-col overflow-hidden`}>
+      <div className="px-4 pt-3.5 pb-2.5 flex justify-between items-baseline gap-3">
+        <h3 className="text-[16px] font-semibold text-hf-ink">{heading}</h3>
         {/* Progress indicator */}
-        <span className={`text-sm font-medium px-2 py-1 rounded-full ${
-          totalChecked === totalItems 
-            ? 'bg-green-100 text-green-700' 
-            : totalChecked > 0
-              ? 'bg-amber-100 text-amber-700'
-              : 'bg-gray-100 text-gray-500'
-        }`}>
-          {totalChecked}/{totalItems} ✓
+        <span className={`text-[14px] font-semibold tabular whitespace-nowrap ${totalChecked > 0 ? 'text-hf-green-text' : 'text-hf-muted'}`}>
+          {totalChecked} of {totalItems} ticked
         </span>
       </div>
 
+      <p className="px-4 pb-2.5 text-[14px] leading-[1.4] text-hf-muted">
+        Tick every item you&apos;ve {isDelivery ? 'handed over' : 'collected'}, or leave them all unticked if you didn&apos;t check.
+      </p>
+
       {/* Filter indicator */}
       {whatIsIt === 'equipment' && (
-        <p className="text-xs text-gray-400 mb-3">
+        <p className="px-4 pb-2.5 text-[13px] text-hf-placeholder">
           Showing equipment only (vehicles filtered out)
         </p>
       )}
 
-      <p className="text-sm text-gray-500 mb-3">
-        Tick every item you&apos;ve {isDelivery ? 'handed over' : 'collected'}, or leave them all unticked if you didn&apos;t check.
-      </p>
+      <div className="h-1.5 mx-4 mb-1.5 rounded-full bg-hf-track overflow-hidden" aria-hidden>
+        <div className="h-full bg-hf-green transition-[width]" style={{ width: `${pct}%` }} />
+      </div>
 
-      <div className="space-y-1">
+      <div className="flex flex-col">
         {displayItems.map((item, index) => {
           const itemKey = `${item.id}-${index}`
           const checkedCount = checkedCounts[itemKey] || 0
@@ -878,102 +928,73 @@ function EquipmentChecklist({ hhRef, quoteId, whatIsIt, isDelivery, onChange }: 
           return (
             <div 
               key={itemKey} 
-              className={`flex items-center gap-3 py-2 px-2 rounded-lg border-b border-gray-50 last:border-0 transition-colors ${
-                isFullyChecked ? 'bg-gray-50' : ''
-              }`}
+              className="min-h-[52px] px-4 py-2 flex items-center gap-3 border-t border-hf-divider"
             >
-              {/* Checkbox/Counter area */}
-              <div className="flex-shrink-0">
-                {item.quantity <= 5 ? (
-                  // Individual checkboxes for small quantities
-                  <div className="flex gap-1">
-                    {Array.from({ length: item.quantity }).map((_, i) => (
-                      <button
-                        key={i}
-                        onClick={() => {
-                          // Toggle this specific checkbox
-                          const newCount = i < checkedCount ? i : i + 1
-                          setCheckedCounts(prev => ({ ...prev, [itemKey]: newCount }))
-                        }}
-                        className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
-                          i < checkedCount
-                            ? 'bg-green-500 border-green-500 text-white'
-                            : 'border-gray-300 hover:border-green-400'
-                        }`}
-                        title={i < checkedCount ? 'Uncheck' : 'Check'}
-                      >
-                        {i < checkedCount && (
-                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                          </svg>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  // Counter for larger quantities
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handleCheckToggle(itemKey, item.quantity, false)}
-                      disabled={checkedCount === 0}
-                      className="w-7 h-7 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-30 disabled:hover:bg-gray-100 flex items-center justify-center text-gray-600 font-bold"
-                    >
-                      −
-                    </button>
-                    <span className={`min-w-[3rem] text-center text-sm font-medium ${
-                      isFullyChecked ? 'text-green-600' : isPartiallyChecked ? 'text-amber-600' : 'text-gray-500'
-                    }`}>
-                      {checkedCount}/{item.quantity}
-                    </span>
-                    <button
-                      onClick={() => handleCheckToggle(itemKey, item.quantity, true)}
-                      disabled={checkedCount >= item.quantity}
-                      className="w-7 h-7 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-30 disabled:hover:bg-gray-100 flex items-center justify-center text-gray-600 font-bold"
-                    >
-                      +
-                    </button>
-                  </div>
-                )}
-              </div>
+              {/* The box ticks the whole line (and un-ticks it). A line of more
+                  than one keeps a counter on the right for part-quantities. */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (item.quantity === 1) {
+                    setCheckedCounts(prev => ({ ...prev, [itemKey]: checkedCount >= 1 ? 0 : 1 }))
+                  } else {
+                    handleToggleAll(itemKey, item.quantity)
+                  }
+                }}
+                className={`flex-none w-[26px] h-[26px] rounded-lg flex items-center justify-center transition-colors ${
+                  isFullyChecked
+                    ? 'bg-hf-green text-white'
+                    : isPartiallyChecked
+                      ? 'bg-hf-green-tint text-hf-green-text border-2 border-hf-green'
+                      : 'bg-white border-2 border-hf-dashed hover:border-hf-green'
+                }`}
+                title={isFullyChecked ? 'Uncheck' : 'Check'}
+                aria-label={`${isFullyChecked ? 'Untick' : 'Tick'} ${item.name}`}
+              >
+                {isFullyChecked && <Check size={16} strokeWidth={3} />}
+                {isPartiallyChecked && <Minus size={16} strokeWidth={3} />}
+              </button>
 
               {/* Item details */}
               <div className="flex-1 min-w-0">
-                <p className={`text-sm transition-all ${
-                  isFullyChecked 
-                    ? 'text-gray-400 line-through' 
-                    : 'text-gray-900'
-                }`}>
+                <p className="text-[16px] text-hf-ink leading-[1.3]">
                   {item.name}
                 </p>
                 {item.category && (
-                  <p className="text-gray-400 text-xs truncate">{item.category}</p>
+                  <p className="text-hf-placeholder text-[13px] truncate">{item.category}</p>
                 )}
               </div>
 
-              {/* Quantity badge (for items with qty > 5, already shown in counter) */}
-              {item.quantity <= 5 && item.quantity > 1 && (
-                <span className={`text-xs font-medium px-2 py-0.5 rounded ${
-                  isFullyChecked 
-                    ? 'bg-green-100 text-green-600' 
-                    : 'bg-gray-100 text-gray-500'
-                }`}>
-                  ×{item.quantity}
-                </span>
-              )}
-
-              {/* Quick toggle all button for items with quantity > 1 */}
-              {item.quantity > 1 && (
-                <button
-                  onClick={() => handleToggleAll(itemKey, item.quantity)}
-                  className={`text-xs px-2 py-1 rounded transition-colors ${
-                    isFullyChecked
-                      ? 'text-gray-400 hover:text-gray-600'
-                      : 'text-purple-600 hover:bg-purple-50'
-                  }`}
-                  title={isFullyChecked ? 'Uncheck all' : 'Check all'}
-                >
-                  {isFullyChecked ? 'Undo' : 'All'}
-                </button>
+              {item.quantity > 1 ? (
+                <div className="flex-none flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => handleCheckToggle(itemKey, item.quantity, false)}
+                    disabled={checkedCount === 0}
+                    className="w-8 h-8 rounded-full bg-hf-track text-hf-body flex items-center justify-center disabled:opacity-30"
+                    title="Remove one"
+                    aria-label={`One fewer ${item.name}`}
+                  >
+                    <Minus size={16} strokeWidth={2.4} />
+                  </button>
+                  <span className={`min-w-[3rem] text-center text-[15px] tabular ${
+                    isFullyChecked ? 'text-hf-green-text font-semibold' : isPartiallyChecked ? 'text-hf-amber-text font-semibold' : 'text-hf-muted'
+                  }`}>
+                    {checkedCount > 0 ? `${checkedCount}/${item.quantity}` : `×${item.quantity}`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCheckToggle(itemKey, item.quantity, true)}
+                    disabled={checkedCount >= item.quantity}
+                    className="w-8 h-8 rounded-full bg-hf-track text-hf-body flex items-center justify-center disabled:opacity-30"
+                    title="Add one"
+                    aria-label={`One more ${item.name}`}
+                  >
+                    <Plus size={16} strokeWidth={2.4} />
+                  </button>
+                </div>
+              ) : (
+                <span className="flex-none text-[15px] text-hf-muted tabular">×{item.quantity}</span>
               )}
             </div>
           )
@@ -982,36 +1003,33 @@ function EquipmentChecklist({ hhRef, quoteId, whatIsIt, isDelivery, onChange }: 
 
       {hasMoreItems && (
         <button
+          type="button"
           onClick={() => setExpanded(!expanded)}
-          className="mt-3 w-full text-center text-sm font-medium text-purple-600 hover:text-purple-500 py-2 border-t border-gray-100"
+          className="min-h-[48px] w-full flex items-center justify-center gap-1 text-[15px] font-semibold text-hf-link hover:text-hf-link-hover border-t border-hf-divider"
         >
           {expanded 
-            ? '▲ Show less' 
-            : `▼ Show all ${items.length} items (+${items.length - PREVIEW_COUNT} more)`
+            ? <><ChevronUp size={18} strokeWidth={2} />Show less</>
+            : <><ChevronDown size={18} strokeWidth={2} />Show all {items.length} items (+{items.length - PREVIEW_COUNT} more)</>
           }
         </button>
       )}
 
       {/* Partial completion warning */}
       {totalChecked > 0 && totalChecked < totalItems && (
-        <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3">
-          <p className="text-amber-800 text-sm flex items-start gap-2">
-            <span className="flex-shrink-0">⚠️</span>
-            <span>
-              <strong>{totalItems - totalChecked} item{totalItems - totalChecked !== 1 ? 's' : ''} not checked.</strong>
-              {' '}If anything is missing or different, please add a note below.
-            </span>
-          </p>
+        <div className="px-4 pb-4 pt-1 border-t border-hf-divider">
+          <Banner tone="warning" className="mt-3">
+            <strong>{totalItems - totalChecked} item{totalItems - totalChecked !== 1 ? 's' : ''} not ticked.</strong>
+            {' '}If anything is missing or different, please add a note below.
+          </Banner>
         </div>
       )}
 
-      {/* All checked success message */}
+      {/* All checked */}
       {totalChecked === totalItems && totalItems > 0 && (
-        <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-3">
-          <p className="text-green-800 text-sm flex items-center gap-2">
-            <span>✅</span>
-            <span>All {totalItems} items checked off!</span>
-          </p>
+        <div className="px-4 pb-4 pt-1 border-t border-hf-divider">
+          <Banner tone="success" className="mt-3">
+            All {totalItems} items ticked off.
+          </Banner>
         </div>
       )}
     </div>
@@ -1024,10 +1042,20 @@ function EquipmentChecklist({ hhRef, quoteId, whatIsIt, isDelivery, onChange }: 
 
 function OfflineBanner() {
   return (
-    <div className="bg-red-500 text-white px-4 py-2 text-center text-sm font-medium">
-      <span className="mr-2">📡</span>
+    <div className="sticky top-0 z-20 bg-hf-error text-white px-4 py-2.5 text-center text-[14px] font-semibold flex items-center justify-center gap-2">
+      <WifiOff size={16} strokeWidth={2.2} />
       You are offline. Please reconnect to complete this job.
     </div>
+  )
+}
+
+/** "‹ Back" on the left, the page's title on the right (design 2c). */
+function PageHeader({ backHref, title }: { backHref: string; title: string }) {
+  return (
+    <header className="max-w-lg mx-auto px-2 pt-2 safe-top flex items-center justify-between">
+      <div className="px-2.5"><BackLink href={backHref} label="Back" /></div>
+      <h1 className="pr-4 text-[16px] font-semibold text-hf-ink">{title}</h1>
+    </header>
   )
 }
 
@@ -1101,100 +1129,86 @@ function VanOnlyConfirmation({
     }
   }
 
+  const title = `Complete ${isDelivery ? 'delivery' : 'collection'}`
+
   return (
-    <div className="min-h-screen bg-gray-50 pb-8">
+    <div className="min-h-screen bg-hf-page pb-10">
       {!isOnline && <OfflineBanner />}
 
-      <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center">
-          <Link
-            href={`/job/${jobId}`}
-            className="flex items-center text-gray-600 hover:text-gray-900 transition-colors"
-          >
-            <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-            Back
-          </Link>
-          <h1 className="flex-1 text-center font-semibold text-gray-900">
-            Complete {isDelivery ? 'Delivery' : 'Collection'}
-          </h1>
-          <div className="w-16"></div>
-        </div>
-      </header>
+      <PageHeader backHref={`/job/${jobId}`} title={title} />
 
-      <main className="max-w-lg mx-auto p-4 pt-8">
-        <div className="text-center mb-8">
-          <div className="text-5xl mb-4">🚐</div>
-          <h2 className="text-xl font-bold text-gray-900 mb-2">
+      <main className="max-w-lg mx-auto px-4 pt-6 flex flex-col gap-4">
+        <div className="text-center flex flex-col items-center gap-2 mb-2">
+          <div className={`w-16 h-16 rounded-2xl flex items-center justify-center ${
+            alreadyDone || vanDone ? 'bg-hf-green-tint text-hf-green-text' : 'bg-kind-van-bg text-kind-van'}`}>
+            {alreadyDone || vanDone ? <Check size={30} strokeWidth={2.2} /> : <Truck size={30} strokeWidth={1.8} />}
+          </div>
+          <h2 className="text-[22px] font-bold tracking-[-0.02em] text-hf-ink">
             {alreadyDone
               ? 'Job complete'
               : vanDone
                 ? (isDelivery ? 'Van booked out' : 'Van collected')
                 : (isDelivery ? 'Van not booked out yet' : 'Van not collected yet')}
           </h2>
-          <p className="text-gray-500">
+          <p className="text-[16px] text-hf-body">
             {formatJobTitle(job.name, job.venueName)}
           </p>
           {job.date && (
-            <p className="text-sm text-gray-400 mt-1">{formatDate(job.date)}</p>
+            <p className="text-[14px] text-hf-muted">{formatDate(job.date)}</p>
           )}
         </div>
 
         {alreadyDone ? (
-          <div className="bg-white rounded-xl shadow-sm p-6 text-center mb-6">
-            <p className="text-gray-700">This job is already marked complete. Nothing more to do.</p>
+          <div className={`${cls.card} p-5 text-center text-[16px] text-hf-body`}>
+            This job is already marked complete. Nothing more to do.
           </div>
         ) : vanDone ? (
-          <div className="bg-white rounded-xl shadow-sm p-6 text-center mb-6">
-            <p className="text-gray-700 mb-2">
+          <div className={`${cls.card} p-5 text-center`}>
+            <p className="text-[16px] text-hf-body mb-1.5">
               The van {stepName} for this {isDelivery ? 'delivery' : 'collection'} is on the system.
             </p>
-            <p className="text-sm text-gray-500">
+            <p className="text-[14px] text-hf-muted">
               Tap below to mark this job as done.
             </p>
           </div>
         ) : (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 mb-6">
-            <p className="text-amber-900 mb-2">
+          <Banner tone="warning">
+            <p className="mb-1.5">
               We can&apos;t see a van {stepName} for this job on the system yet, so it can&apos;t be marked done.
             </p>
-            <p className="text-sm text-amber-800">
+            <p className="text-[14px]">
               If you&apos;ve only just finished it, wait a moment and refresh. Otherwise go back and start the {stepName} again.
             </p>
-          </div>
+          </Banner>
         )}
 
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
-            <p className="text-red-700 text-sm">{error}</p>
+          <Banner tone="error">
+            <p>{error}</p>
             {error.includes('may have been saved') && (
               <Link
                 href={`/job/${jobId}`}
-                className="inline-block mt-2 text-sm text-purple-600 hover:text-purple-700 font-medium"
+                className={`inline-block mt-2 ${cls.link}`}
               >
                 Check job status
               </Link>
             )}
-          </div>
+          </Banner>
         )}
 
         {alreadyDone ? (
           <Link
             href={`/job/${jobId}`}
-            className="w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center bg-white border border-gray-200 text-gray-700 hover:bg-gray-50"
+            className={`${cls.btnSecondary} w-full !h-[54px]`}
           >
             Back to the job
           </Link>
         ) : vanDone ? (
           <button
+            type="button"
             onClick={handleConfirm}
             disabled={submitting || !isOnline}
-            className={`w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center gap-2 transition-colors ${
-              !submitting && isOnline
-                ? 'bg-green-500 text-white hover:bg-green-600'
-                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-            }`}
+            className={`${cls.btnGreen} w-full`}
           >
             {submitting ? (
               <>
@@ -1203,33 +1217,34 @@ function VanOnlyConfirmation({
               </>
             ) : !isOnline ? (
               <>
-                <span>📡</span>
-                Offline - Cannot Submit
+                <WifiOff size={18} strokeWidth={2.2} />
+                Offline - can&apos;t submit
               </>
             ) : (
               <>
-                <span>✓</span>
-                All Done
+                <Check size={20} strokeWidth={2.4} />
+                All done
               </>
             )}
           </button>
         ) : (
-          <div className="space-y-3">
+          <div className="flex flex-col gap-2.5">
             <Link
               href={`/job/${jobId}/start`}
-              className="w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center bg-purple-500 text-white hover:bg-purple-600"
+              className={`${cls.btnPrimary} w-full`}
             >
               Start the {stepName} again
             </Link>
             <button
+              type="button"
               onClick={() => window.location.reload()}
-              className="w-full py-3 rounded-xl font-medium flex items-center justify-center bg-white border border-gray-200 text-gray-700 hover:bg-gray-50"
+              className={`${cls.btnSecondary} w-full`}
             >
               Refresh
             </button>
             <Link
               href={`/job/${jobId}`}
-              className="block text-center text-sm font-medium text-gray-500 hover:text-gray-700 py-2"
+              className="min-h-[44px] flex items-center justify-center text-[16px] font-semibold text-hf-muted hover:text-hf-body"
             >
               Back to the job
             </Link>
@@ -1442,30 +1457,22 @@ export default function CompletePage() {
 
   // Loading state
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading...</p>
-        </div>
-      </div>
-    )
+    return <PageSpinner />
   }
 
   // Error state
   if (error || !job) {
     return (
-      <div className="min-h-screen bg-gray-50 p-4">
+      <div className="min-h-screen bg-hf-page px-4 pt-10">
         <div className="max-w-lg mx-auto">
-          <div className="bg-white rounded-xl shadow-sm p-6 text-center">
-            <div className="text-red-500 text-5xl mb-4">⚠️</div>
-            <h1 className="text-xl font-semibold text-gray-900 mb-2">Error</h1>
-            <p className="text-gray-600 mb-6">{error || 'Job not found'}</p>
-            <Link
-              href="/dashboard"
-              className="inline-block bg-purple-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-purple-600 transition-colors"
-            >
-              Back to Dashboard
+          <div className={`${cls.card} p-6 text-center flex flex-col items-center gap-3`}>
+            <div className="w-14 h-14 rounded-2xl bg-red-50 text-hf-error flex items-center justify-center">
+              <AlertTriangle size={28} strokeWidth={1.9} />
+            </div>
+            <h1 className="text-[20px] font-bold text-hf-ink">Something went wrong</h1>
+            <p className="text-[15px] text-hf-muted">{error || 'Job not found'}</p>
+            <Link href="/dashboard" className={`${cls.btnPrimary} w-full mt-2`}>
+              Back to jobs
             </Link>
           </div>
         </div>
@@ -1475,7 +1482,6 @@ export default function CompletePage() {
 
   const isDelivery = job.type === 'delivery'
   const typeLabel = mode === 'dc' ? (isDelivery ? 'Delivery' : 'Collection') : 'Job'
-  const typeIcon = mode === 'crew' ? '👷' : mode === 'people' ? '👥' : isDelivery ? '📦' : '📥'
   // Crew / People completed before the last day: a warning, not a block (the
   // job page only offers Complete from the last day; a link can still land here).
   const earlyFor = mode !== 'dc' && job.completeFrom && ukToday() < job.completeFrom
@@ -1499,51 +1505,29 @@ export default function CompletePage() {
   // a crew job has its own opt-in hire note below, a People job none.
   const showClientEmailSection = mode === 'dc' && (job.whatIsIt === 'equipment' || !job.whatIsIt)
 
+  const title = `Complete ${typeLabel.toLowerCase()}`
+  const photosRequired = mode === 'dc' && !customerPresent
+
   return (
-    <div className="min-h-screen bg-gray-50 pb-8">
+    <div className="min-h-screen bg-hf-page pb-[170px]">
       {/* Offline banner */}
       {!isOnline && <OfflineBanner />}
 
       {/* Header */}
-      <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center">
-          <Link
-            href={`/job/${jobId}`}
-            className="flex items-center text-gray-600 hover:text-gray-900 transition-colors"
-          >
-            <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-            Cancel
-          </Link>
-          <h1 className="flex-1 text-center font-semibold text-gray-900">
-            Complete {typeLabel}
-          </h1>
-          <div className="w-16"></div>
-        </div>
-      </header>
+      <PageHeader backHref={`/job/${jobId}`} title={title} />
 
-      <main className="max-w-lg mx-auto p-4 space-y-4">
+      <main className="max-w-lg mx-auto px-4 pt-2 flex flex-col gap-3.5">
         
-        {/* Job Summary */}
-        <div className="bg-white rounded-xl shadow-sm p-4">
-          <div className="flex items-center gap-3">
-            <span className="text-2xl">{typeIcon}</span>
-            <div>
-              <h2 className="font-semibold text-gray-900">
-                {formatJobTitle(job.name, job.venueName)}
-              </h2>
-              <p className="text-sm text-gray-500">{formatDate(job.date)}</p>
-            </div>
-          </div>
-        </div>
+        {/* Which job this is */}
+        <p className="px-1 text-[14px] text-hf-muted">
+          <span className="font-semibold text-hf-body">{formatJobTitle(job.name, job.venueName)}</span>
+          {' · '}{formatDate(job.date)}
+        </p>
 
         {earlyFor && (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-            <p className="text-sm text-amber-900">
-              This job runs until {shortUkDate(earlyFor)}. Only mark it complete once your last day is done.
-            </p>
-          </div>
+          <Banner tone="warning">
+            This job runs until {shortUkDate(earlyFor)}. Only mark it complete once your last day is done.
+          </Banner>
         )}
 
         {/* Equipment Checklist with Tickboxes (hand-overs only) */}
@@ -1557,103 +1541,54 @@ export default function CompletePage() {
           />
         )}
 
-        {/* Ooosh Staff Name (only for @oooshtours.co.uk users) */}
-        {isOooshStaff && (
-          <div className="bg-white rounded-xl shadow-sm p-4">
-            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>👤</span> Your Name
-            </h3>
-            <input
-              type="text"
-              value={staffName}
-              onChange={(e) => setStaffName(e.target.value)}
-              placeholder="Enter your name"
-              className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+        {/* Sign-off (hand-overs): the client's signature, or "Customer not
+            here" and a photo of where it was left. Photos are optional otherwise. */}
+        {mode === 'dc' && (
+          <div className={`${cls.card} p-4 flex flex-col gap-3.5`}>
+            {customerPresent && (
+              <>
+                <p className="text-[14px] text-hf-muted -mb-1">
+                  Ask the client to sign to confirm they&apos;ve {isDelivery ? 'received everything' : 'handed everything back'}.
+                </p>
+                <SignatureCanvas onSignatureChange={setSignature} />
+              </>
+            )}
+            <ToggleRow
+              checked={!customerPresent}
+              onChange={(notHere) => {
+                setCustomerPresent(!notHere)
+                // Clear signature when switching to customer not present
+                if (notHere) {
+                  setSignature(null)
+                }
+              }}
+              title="Customer not here"
+              sub="Take a photo instead of a signature"
             />
-            <p className="text-xs text-gray-400 mt-1">So we know who completed this job</p>
+            <div className="flex flex-col gap-2">
+              <div className="flex items-baseline justify-between">
+                <span className="text-[14px] font-semibold text-hf-body">
+                  {photosRequired ? 'Photo of where you left it' : 'Photos'}
+                </span>
+                <span className={`text-[13px] font-semibold ${photosRequired ? 'text-hf-amber-text' : 'text-hf-placeholder'}`}>
+                  {photosRequired ? 'Required' : 'Optional'}
+                </span>
+              </div>
+              {photosRequired && (
+                <p className="text-[14px] text-hf-muted">Take at least one photo showing where items were left</p>
+              )}
+              <PhotoCapture 
+                photos={photos} 
+                onPhotosChange={setPhotos} 
+                required={photosRequired}
+              />
+            </div>
           </div>
         )}
 
-        {/* Notes */}
-        <div className="bg-white rounded-xl shadow-sm p-4">
-          <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>📝</span> Notes
-          </h3>
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder={mode === 'dc'
-              ? 'Any notes about this delivery/collection... (e.g., items missing, access issues, customer requests)'
-              : 'Anything the office should know about the job? (optional)'}
-            className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 resize-none"
-            rows={3}
-          />
-        </div>
-
-        {/* Customer Present Toggle (hand-overs only) */}
-        {mode === 'dc' && (
-        <div className="bg-white rounded-xl shadow-sm p-4">
-          <label className="flex items-center justify-between cursor-pointer">
-            <div>
-              <span className="font-medium text-gray-900">Customer not present</span>
-              <p className="text-sm text-gray-500">Photo required instead of signature</p>
-            </div>
-            <div className="relative">
-              <input
-                type="checkbox"
-                checked={!customerPresent}
-                onChange={(e) => {
-                  setCustomerPresent(!e.target.checked)
-                  // Clear signature when switching to customer not present
-                  if (e.target.checked) {
-                    setSignature(null)
-                  }
-                }}
-                className="sr-only"
-              />
-              <div className={`w-11 h-6 rounded-full transition-colors ${!customerPresent ? 'bg-purple-500' : 'bg-gray-300'}`}>
-                <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${!customerPresent ? 'translate-x-5' : ''}`}></div>
-              </div>
-            </div>
-          </label>
-        </div>
-        )}
-
-        {/* Photos */}
-        <div className="bg-white rounded-xl shadow-sm p-4">
-          <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>📸</span> Photos
-            {mode === 'dc' && !customerPresent
-              ? <span className="text-red-500 text-sm">*required</span>
-              : <span className="text-gray-400 text-sm">(optional)</span>}
-          </h3>
-          <p className="text-sm text-gray-500 mb-3">
-            {mode !== 'dc'
-              ? 'Add a photo if it helps the office'
-              : customerPresent 
-                ? 'Optionally add photos of the delivery/collection'
-                : 'Take at least one photo showing where items were left'
-            }
-          </p>
-          <PhotoCapture 
-            photos={photos} 
-            onPhotosChange={setPhotos} 
-            required={mode === 'dc' && !customerPresent}
-          />
-        </div>
-
         {/* Client Email Section (for equipment jobs) */}
         {showClientEmailSection && (
-          <div className="bg-white rounded-xl shadow-sm p-4">
-            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>📧</span> {isDelivery ? 'Delivery Note' : 'Collection Confirmation'}
-            </h3>
-            <p className="text-sm text-gray-500 mb-3">
-              {isDelivery 
-                ? 'Send a delivery note with equipment list to the client'
-                : 'Send a collection confirmation to the client'
-              }
-            </p>
+          <Section title={isDelivery ? 'Send the delivery note to' : 'Send the collection confirmation to'}>
             <ClientEmailInput
               contacts={job.clientContacts || []}
               selectedContactEmails={selectedContactEmails}
@@ -1664,15 +1599,12 @@ export default function CompletePage() {
               onDontSendChange={setDontSendClientEmail}
               jobType={job.type}
             />
-          </div>
+          </Section>
         )}
 
         {/* Crew: the opt-in "what's on the hire" note */}
         {mode === 'crew' && job.hhRef && (
-          <div className="bg-white rounded-xl shadow-sm p-4">
-            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>📧</span> Equipment on hire
-            </h3>
+          <Section title="Equipment on hire">
             <ClientEmailInput
               contacts={job.clientContacts || []}
               selectedContactEmails={selectedContactEmails}
@@ -1683,76 +1615,106 @@ export default function CompletePage() {
               onDontSendChange={setDontSendClientEmail}
               jobType="hire"
             />
-          </div>
+          </Section>
         )}
 
-        {/* Signature (hand-overs, when customer present) */}
-        {mode === 'dc' && customerPresent && (
-          <div className="bg-white rounded-xl shadow-sm p-4">
-            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>✍️</span> Client Signature
-              <span className="text-red-500 text-sm">*required</span>
-            </h3>
-            <p className="text-sm text-gray-500 mb-3">
-              Please ask the client to sign below to confirm receipt
-            </p>
-            <SignatureCanvas onSignatureChange={setSignature} />
-          </div>
+        {/* Your name (only for @oooshtours.co.uk users) + notes */}
+        <div className={`${cls.card} p-4 flex flex-col gap-1.5`}>
+          {isOooshStaff && (
+            <>
+              <label htmlFor="staff-name" className="text-[14px] font-semibold text-hf-body">Your name</label>
+              <input
+                id="staff-name"
+                type="text"
+                value={staffName}
+                onChange={(e) => setStaffName(e.target.value)}
+                placeholder="Enter your name"
+                className={`${cls.input} h-[52px] !py-0 !text-[17px]`}
+              />
+              <p className="text-[13px] text-hf-muted mb-2">So we know who completed this job</p>
+            </>
+          )}
+          <label htmlFor="completion-notes" className="text-[14px] font-semibold text-hf-body">Notes</label>
+          <textarea
+            id="completion-notes"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder={mode === 'dc'
+              ? 'Missing items, access issues, anything the office should know...'
+              : 'Anything the office should know about the job? (optional)'}
+            className={`${cls.input} resize-none leading-[1.4]`}
+            rows={3}
+          />
+        </div>
+
+        {/* Photos (crew and People: optional) */}
+        {mode !== 'dc' && (
+          <Section title="Photos" aside={<span className="text-[13px] font-semibold text-hf-placeholder">Optional</span>}>
+            <p className="text-[14px] text-hf-muted -mt-1">Add a photo if it helps the office</p>
+            <PhotoCapture 
+              photos={photos} 
+              onPhotosChange={setPhotos} 
+              required={false}
+            />
+          </Section>
         )}
 
         {/* Submit Error */}
         {submitError && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-            <p className="text-red-700 text-sm">{submitError}</p>
+          <Banner tone="error">
+            <p>{submitError}</p>
             {submitError.includes('may have been saved') && (
               <Link 
                 href={`/job/${jobId}`}
-                className="inline-block mt-2 text-sm text-purple-600 hover:text-purple-700 font-medium"
+                className={`inline-block mt-2 ${cls.link}`}
               >
-                → Check job status
+                Check job status
               </Link>
             )}
-          </div>
+          </Banner>
         )}
-
-        {/* Submit Button */}
-        <button
-          onClick={handleSubmit}
-          disabled={!isValid || submitting || !isOnline}
-          className={`w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center gap-2 transition-colors ${
-            isValid && !submitting && isOnline
-              ? 'bg-green-500 text-white hover:bg-green-600'
-              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-          }`}
-        >
-          {submitting ? (
-            <>
-              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-              Completing...
-            </>
-          ) : !isOnline ? (
-            <>
-              <span>📡</span>
-              Offline - Cannot Submit
-            </>
-          ) : (
-            <>
-              <span>✓</span>
-              Complete {typeLabel}
-            </>
-          )}
-        </button>
-
-        {mode === 'dc' && !isValid && isOnline && (
-          <p className="text-center text-sm text-gray-500">
-            {customerPresent 
-              ? 'Please capture client signature above'
-              : 'Please take at least one photo'
-            }
-          </p>
-        )}
-
       </main>
+
+      {/* Sticky footer: the Complete button */}
+      {/* The fade sits ABOVE a solid strip, so the hint and button never sit over the form. */}
+      <div className="fixed inset-x-0 bottom-0 z-20 pointer-events-none">
+        <div className="h-6 bg-gradient-to-t from-hf-page to-transparent" />
+        <div className="bg-hf-page">
+        <div className="max-w-lg mx-auto px-4 pt-1 pb-[max(20px,env(safe-area-inset-bottom))] pointer-events-auto">
+          {mode === 'dc' && !isValid && isOnline && (
+            <p className="text-center text-[14px] text-hf-muted mb-2">
+              {customerPresent 
+                ? 'Please capture the client signature above'
+                : 'Please take at least one photo'
+              }
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={!isValid || submitting || !isOnline}
+            className={`${cls.btnGreen} w-full !h-14`}
+          >
+            {submitting ? (
+              <>
+                <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                Completing...
+              </>
+            ) : !isOnline ? (
+              <>
+                <WifiOff size={18} strokeWidth={2.2} />
+                Offline - can&apos;t submit
+              </>
+            ) : (
+              <>
+                <Check size={20} strokeWidth={2.4} />
+                {title}
+              </>
+            )}
+          </button>
+        </div>
+        </div>
+      </div>
     </div>
   )
 }
