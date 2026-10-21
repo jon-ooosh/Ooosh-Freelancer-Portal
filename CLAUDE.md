@@ -282,8 +282,9 @@ from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), th
 
 **IN PROGRESS, Oct 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme. Done:
 completion fixes, payment terms, security fixes, the Claude Design reskin of the portal (tokens in
-`tailwind.config.js` `hf`/`kind`, shared pieces in `src/components/ui.tsx`). Next: past studio-sitter nights,
-the van screens reskin (freelancer scope only), 2FA, Earnings (plan + backfill in §5), the four guides.
+`tailwind.config.js` `hf`/`kind`, shared pieces in `src/components/ui.tsx`), past work on the Completed page
+(every kind, one window: `src/lib/history.ts`). Next: the van screens reskin (freelancer scope only), 2FA,
+Earnings (plan + backfill in §5), the four guides.
 **§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×

@@ -31,6 +31,8 @@ import BottomNav from '@/components/BottomNav'
 import { cls, IconTile, Chevron, SectionLabel, Segmented, Banner, Chip, KIND_TEXT, ICON } from '@/components/ui'
 import type { Kind } from '@/components/ui'
 import { ukToday, ukDatePlus, ukHour } from '@/lib/ukDate'
+import { historyStart } from '@/lib/history'
+import { shiftEnvelope, formatFee, yardHours, yardFee } from '@/lib/work-labels'
 
 // =============================================================================
 // TYPES (matching API response)
@@ -111,6 +113,8 @@ interface SitterShift {
 interface ShiftsApiResponse {
   success: boolean
   shifts?: SitterShift[]
+  /** Nights gone by since `historyStart()`: only counted here, listed on Completed. */
+  past?: SitterShift[]
   error?: string
 }
 
@@ -159,29 +163,6 @@ function formatTime(timeStr: string | undefined | null): string {
   if (!match) return timeStr
   const hours = parseInt(match[1])
   return `${hours % 12 || 12}:${match[2]} ${hours >= 12 ? 'PM' : 'AM'}`
-}
-
-/** SQL TIME ("17:00:00") → "5:00pm" (studio shifts). */
-function formatShiftTime(timeStr: string | null): string {
-  if (!timeStr) return ''
-  const match = timeStr.match(/(\d{1,2}):(\d{2})/)
-  if (!match) return ''
-  const hours = parseInt(match[1], 10)
-  return `${hours % 12 || 12}:${match[2]}${hours >= 12 ? 'pm' : 'am'}`
-}
-
-function shiftEnvelope(shift: SitterShift): string {
-  const s = formatShiftTime(shift.planned_start)
-  const e = formatShiftTime(shift.planned_end)
-  if (s && e) return `${s} – ${e}`
-  if (s) return `from ${s}`
-  if (e) return `until ${e}`
-  return 'Studio evening'
-}
-
-function formatFee(amount: number | undefined | null): string {
-  if (amount === undefined || amount === null) return ''
-  return `£${amount.toFixed(0)}`
 }
 
 /** Strip DEL/COL prefix and get clean venue name */
@@ -411,18 +392,6 @@ function LoadingSkeleton() {
 // YARD DAYS
 // =============================================================================
 
-function yardHours(day: PortalDayBooking): string {
-  return day.durationType === 'full_day' ? 'Full day'
-    : day.durationType === 'half_day' ? 'Half day'
-    : day.startTime && day.endTime ? `${day.startTime}–${day.endTime}`
-    : 'Set hours'
-}
-
-function yardFee(day: PortalDayBooking): string | null {
-  if (day.agreedRate === null) return null
-  return day.rateType === 'hourly' ? `${formatFee(day.agreedRate)}/hr` : formatFee(day.agreedRate)
-}
-
 /**
  * An offered yard day still to come: the only thing on this screen that needs
  * them to do something, so it is pinned on top (spec §9.3). Read-only plus
@@ -611,6 +580,8 @@ type DatedEntry =
 
 const itemDate = (item: DisplayItem) => ymdOf(item.date)
 const itemTime = (item: DisplayItem) => (item.isGrouped ? item.jobs[0]?.time : item.time) || ''
+/** How many rows these make on the Completed / Cancelled list, where each stop of a run is its own row. */
+const stopCount = (items: DisplayItem[]) => items.reduce((n, i) => n + (i.isGrouped ? i.jobs.length : 1), 0)
 
 function readStoredSort(): SortMode {
   try {
@@ -641,6 +612,9 @@ export default function DashboardPage() {
   const [upcomingJobs, setUpcomingJobs] = useState<DisplayItem[]>([])
   const [completedJobs, setCompletedJobs] = useState<DisplayItem[]>([])
   const [cancelledJobs, setCancelledJobs] = useState<DisplayItem[]>([])
+  // The rest of what the Completed page lists, for its count (lib/history.ts).
+  const [pastShiftCount, setPastShiftCount] = useState(0)
+  const [yardDoneCount, setYardDoneCount] = useState(0)
 
   // Studio sitter shifts (only populated for freelancers rostered as sitters)
   const [sitterShifts, setSitterShifts] = useState<SitterShift[]>([])
@@ -667,12 +641,14 @@ export default function DashboardPage() {
    */
   const fetchYardDays = useCallback(async () => {
     try {
-      const res = await fetch('/api/day-bookings')
+      const res = await fetch(`/api/day-bookings?since=${historyStart()}`)
       const data: DayBookingsResponse = await res.json()
       setYardDays(res.ok && data.success ? [...(data.upcoming || []), ...(data.past || [])] : [])
+      setYardDoneCount(res.ok && data.success ? (data.done || []).length : 0)
     } catch (err) {
       console.error('Failed to fetch yard days:', err)
       setYardDays([])
+      setYardDoneCount(0)
     }
   }, [])
 
@@ -702,12 +678,14 @@ export default function DashboardPage() {
   /** The sitter's rostered shifts. Independent of the jobs fetch, like yard days. */
   const fetchShifts = useCallback(async () => {
     try {
-      const response = await fetch('/api/studio-sitter/shifts')
+      const response = await fetch(`/api/studio-sitter/shifts?since=${historyStart()}`)
       const data: ShiftsApiResponse = await response.json()
       setSitterShifts(response.ok && data.success ? (data.shifts || []) : [])
+      setPastShiftCount(response.ok && data.success ? (data.past || []).length : 0)
     } catch (err) {
       console.error('Failed to fetch studio shifts:', err)
       setSitterShifts([])
+      setPastShiftCount(0)
     }
   }, [])
 
@@ -715,7 +693,7 @@ export default function DashboardPage() {
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch('/api/jobs')
+      const response = await fetch(`/api/jobs?since=${historyStart()}`)
       const data: JobsApiResponse = await response.json()
       if (!response.ok || !data.success) {
         if (response.status === 401) {
@@ -1029,13 +1007,13 @@ export default function DashboardPage() {
               <Link key="c" href="/completed" className="h-14 px-4 flex items-center gap-3 hover:bg-hf-inset/60">
                 <span className="w-7 h-7 rounded-full bg-hf-green-tint text-hf-green-text flex items-center justify-center"><Check size={16} strokeWidth={2.4} /></span>
                 <span className="flex-1 text-[16px] font-medium text-hf-ink">Completed</span>
-                <span className="text-[15px] text-hf-muted tabular">{completedJobs.length}</span>
+                <span className="text-[15px] text-hf-muted tabular">{stopCount(completedJobs) + pastShiftCount + yardDoneCount}</span>
                 <Chevron />
               </Link>,
               <Link key="x" href="/cancelled" className="h-14 px-4 flex items-center gap-3 hover:bg-hf-inset/60">
                 <span className="w-7 h-7 rounded-full bg-hf-track text-hf-muted flex items-center justify-center"><X size={16} strokeWidth={2.4} /></span>
                 <span className="flex-1 text-[16px] font-medium text-hf-ink">Cancelled</span>
-                <span className="text-[15px] text-hf-muted tabular">{cancelledJobs.length}</span>
+                <span className="text-[15px] text-hf-muted tabular">{stopCount(cancelledJobs)}</span>
                 <Chevron />
               </Link>,
             ]}

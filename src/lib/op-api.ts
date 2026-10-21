@@ -154,6 +154,13 @@ export interface SitterShift {
 export interface SitterShiftsResponse {
   success: boolean
   shifts: SitterShift[]
+  /** Only when asked with `since`: every night before tonight back to that date (the Completed page). */
+  past?: SitterShift[]
+}
+
+/** `?since=` for the three list calls (FREELANCER-PORTAL-SPEC §10). */
+function sinceQuery(since?: string): string {
+  return since ? `?since=${encodeURIComponent(since)}` : ''
 }
 
 export interface SitterShiftDetail {
@@ -173,8 +180,8 @@ export interface SitterShiftDetailResponse extends SitterShiftDetail {
 }
 
 /** The sitter's own upcoming/recent rostered evenings. */
-export async function getSitterShiftsFromOP(sessionToken: string): Promise<SitterShiftsResponse> {
-  return opFetch<SitterShiftsResponse>('/studio-sitter/shifts', sessionToken)
+export async function getSitterShiftsFromOP(sessionToken: string, since?: string): Promise<SitterShiftsResponse> {
+  return opFetch<SitterShiftsResponse>(`/studio-sitter/shifts${sinceQuery(since)}`, sessionToken)
 }
 
 // =============================================================================
@@ -236,10 +243,12 @@ export interface DayBookingsResponse {
   awaitingReply: number
   upcoming: PortalDayBooking[]
   past: PortalDayBooking[]
+  /** Only when asked with `since`: days worked (accepted or completed, gone by) back to that date. */
+  done?: PortalDayBooking[]
 }
 
-export async function getDayBookingsFromOP(sessionToken: string): Promise<DayBookingsResponse> {
-  return opFetch<DayBookingsResponse>('/day-bookings', sessionToken)
+export async function getDayBookingsFromOP(sessionToken: string, since?: string): Promise<DayBookingsResponse> {
+  return opFetch<DayBookingsResponse>(`/day-bookings${sinceQuery(since)}`, sessionToken)
 }
 
 export async function respondToDayBookingFromOP(
@@ -658,8 +667,8 @@ async function opFetch<T>(
  * Fetch all jobs for the logged-in freelancer from OP backend.
  * Returns data in the same shape the dashboard page expects.
  */
-export async function getJobsFromOP(sessionToken: string): Promise<PortalJobsResponse> {
-  return opFetch<PortalJobsResponse>('/jobs', sessionToken)
+export async function getJobsFromOP(sessionToken: string, since?: string): Promise<PortalJobsResponse> {
+  return opFetch<PortalJobsResponse>(`/jobs${sinceQuery(since)}`, sessionToken)
 }
 
 /**

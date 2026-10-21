@@ -22,6 +22,13 @@ export function ukDatePlus(days: number): string {
   return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10)
 }
 
+/** The 1st of the month `monthsBack` months before this one in the UK, as YYYY-MM-DD. */
+export function ukMonthStart(monthsBack: number): string {
+  const [y, m] = ukToday().split('-').map(Number)
+  // Date.UTC rolls a negative month back into the previous year.
+  return new Date(Date.UTC(y, m - 1 - monthsBack, 1)).toISOString().slice(0, 10)
+}
+
 /** The hour of the day in the UK, 0-23. */
 export function ukHour(): number {
   return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: 'numeric', hourCycle: 'h23' }).format(new Date()))

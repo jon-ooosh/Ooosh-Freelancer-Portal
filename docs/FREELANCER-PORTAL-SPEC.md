@@ -9,19 +9,18 @@ touching completion, the chaser, Earnings, the guides or anything freelancer-fac
 
 **State on 21 Oct 2026:** PR 1 (completion fixes), the payment-terms PR, PR 2 (security) and PR 3 (the
 portal reskin) are merged and deployed. The "How to invoice Ooosh Tours Ltd" Google Doc and its copy in
-the portal's Resources are updated (§4). Nothing is half-built.
+the portal's Resources are updated (§4). Past work on the Completed page (§10) is built (its own PR).
+Nothing is half-built.
 
 **Do next, in this order** (one PR each; jon merges and deploys, then the next starts from fresh main):
 
-1. **Past studio-sitter nights in the portal (§10).** Small. A sitter's shifts vanish 14 days after the
-   night, because that is the look-back of OP's `GET /api/portal/studio-sitter/shifts`, and the Completed
-   list only holds quotes. Charlie Stanley asked for his 29 / 30 Sept nights.
-2. **PR 4: van screens reskin, freelancer scope only (§11).**
-3. **PR 5: portal 2FA (§7).** Email code plus a 90-day trusted device; info@ included.
-4. **Earnings (§5).** The data plan, the backfill jon wants, and the read-only SQL to run first.
-5. **The four freelancer guides (§8)**, after PR 4 so the screenshots show the new look. Rebuild the
+1. **PR 4: van screens reskin, freelancer scope only (§11).**
+2. **PR 5: portal 2FA (§7).** Email code plus a 90-day trusted device; info@ included.
+3. **Earnings (§5).** The data plan, the backfill jon wants, and the read-only SQL to run first. The
+   Completed page (§10) already lists every kind of work per month; Earnings adds the money view.
+4. **The four freelancer guides (§8)**, after PR 4 so the screenshots show the new look. Rebuild the
    shop-till guide (`docs/guides/shop-till/`) in the new look at the same time.
-6. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+5. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -36,8 +35,8 @@ them from the recipe there.
 | – | Payment terms aligned (§4) | merged 21 Oct 2026 |
 | 2 | Security quick fixes (§6) | merged 21 Oct 2026 |
 | 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`), §9 | merged 21 Oct 2026 |
-| – | Past studio-sitter nights (§10) | next |
-| 4 | Van screens reskin, freelancer scope only (§11) | after |
+| – | Past work on the Completed page (§10) | built 21 Oct 2026 |
+| 4 | Van screens reskin, freelancer scope only (§11) | next |
 | 5 | Portal 2FA (§7) | after |
 | 6 | Earnings (§5) | after |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
@@ -229,7 +228,7 @@ The portal now follows `docs/design/freelancer-portal-refresh/` (README there = 
   messages name it, so change both together), "Job emails" for the notification settings.
 - **Not built from the mock:** Earnings stays a "Coming soon" page (§5).
 
-## 10. Past studio-sitter nights (next, small)
+## 10. Past studio-sitter nights (built 21 Oct 2026; what shipped is at the end)
 
 **The problem (21 Oct 2026):** a sitter's nights disappear from the portal 14 days after them.
 `GET /api/portal/studio-sitter/shifts` (`backend/src/routes/portal.ts`) asks
@@ -257,6 +256,30 @@ future window unchanged), the portal's `/api/studio-sitter/shifts` passes it thr
 `JobHistoryList` (which = 'completed') adds the person's past nights from that call as rows ("Studio
 sitter · Tue 29 Sep", linking to `/shift/{date}`, "Locked up" when `report_submitted_at` is set), sorted
 in with the jobs by date. Yard days could join the same list later (`/api/day-bookings` `past`).
+
+**Confirmed on production (jon, 21 Oct 2026):** Charlie's 29 / 30 Sep and 5 Oct nights were `assigned`
+under the email he logs in with, so it was the window, not a duplicate record. His 28 Sep assignment was
+`cancelled` and correctly stays hidden.
+
+**What shipped (jon's decisions, 21 Oct 2026), replacing the proposal above:**
+- **One window for every kind of work** (it was 30 days for jobs, 14 for nights, the last 10 yard days):
+  **this month and last** by default, so the oldest month shown is always whole (someone writing last
+  month's invoice sees all of it); **"Show the last 6 months"** at the foot of Completed goes to six
+  months in all. Defined once in `src/lib/history.ts` (`historyStart()` / `historyStartOlder()`). Longer
+  is Earnings' job (§5). Cancelled uses the same default, with no "Show older".
+- **OP:** the three portal list routes take `?since=YYYY-MM-DD` (`parseSince()` in `routes/portal.ts`:
+  malformed is ignored, clamped to the last 200 days and to today). `/jobs` uses it for completed and
+  cancelled (default still 30 days). `/studio-sitter/shifts` adds `past` (nights before tonight, back to
+  `since`) and `/day-bookings` adds `done` (accepted or completed days gone by). The existing `shifts` and
+  `past` lists are unchanged, so the dashboard's own sections are too. `/jobs` now buckets by `ukToday()`.
+- **Portal:** `JobHistoryList.tsx` (Completed) lists jobs, nights and yard days newest first under month
+  headings with a count each. A night opens `/shift/{date}` and says "Locked up" when the report is in; a
+  yard day is a record only (it has no page). A failed nights / yard-days load says so in a banner and
+  never reads as "nothing there". The dashboard's Completed number counts the same rows (each stop of a
+  run is one row), so Charlie's nights show in it.
+- Shared labels for a night, a yard day and a fee moved to `src/lib/work-labels.ts` (unchanged).
+- Tested end to end (§12): the real portal against OP's real routes on a throwaway database seeded like
+  Charlie's case; 32 route checks and 34 screen checks.
 
 ## 11. PR 4: the van screens, freelancer scope only
 

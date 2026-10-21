@@ -283,6 +283,12 @@ Add any new kind of freelancer work here as well as to its own module, and give
 its statuses a `statusLabel` and a `statusPillClass` in
 `FreelancerHistorySection.tsx` or they render raw.
 
+**The portal has the same list, for the freelancer:** the Completed page
+(`src/components/JobHistoryList.tsx`) merges jobs, studio nights and yard days,
+each read through its list route's `?since=` (FREELANCER-PORTAL-SPEC §10). A new
+kind of work goes there too, with the dashboard's Completed count. Until Oct 2026
+it only knew about jobs, and a sitter's nights vanished after 14 days.
+
 ## Bank holidays and company days are different things
 
 A **bank holiday** is computed, and under `use_allowance` is an ordinary
