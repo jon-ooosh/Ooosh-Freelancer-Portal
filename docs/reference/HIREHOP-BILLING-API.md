@@ -501,6 +501,14 @@ nobody chose — fine for two lines, unreadable for forty (16491's two pro-forma
 ❓ Not yet seen: whether a pasted line counts as invoiced for `billing_assign_list.php`'s
 `invoiced_so_far` (it must — staff have invoiced this way for years — but unproven by capture).
 
+⚠️ **Supplying and Billing can price the same line differently** (job 16724, 20 Oct 2026). A
+per-Hour line with £45 typed as its unit price showed "per Hour @ £1.88" (seemingly £45 ÷ 24) in the edit
+dialog: the Supplying grid totalled it £45, while Billing's accrued (kind 0, its own "Quoted net
+total") priced it 3 hours × £1.875 = £5.63. A paste carries the Supplying figure; `all: 1` and
+the kind 0 accrued carry Billing's, as do the portal and the Money tab. The penny check is what
+catches it. Once the line was re-entered, both tabs said £197.50 and the invoice raised cleanly.
+First seen in 5+ years.
+
 ### 10.6 Xero today (checked 9 Oct 2026)
 
 Every OP-pushed deposit sits in Xero as an **unapplied Overpayment** and every

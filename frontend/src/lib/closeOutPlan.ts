@@ -116,6 +116,22 @@ export const fmtWhen = (iso: string) => {
 export const apiError = (e: unknown, fallback: string) =>
   (e as any)?.body?.error || (e as any)?.message || fallback;
 
+/** The steps of raising an invoice (a hire's, or a cancellation fee's) that can stop with a draft still in HireHop. */
+const DRAFT_STEPS = new Set(['invoice_draft', 'invoice_penny', 'vat_split', 'invoice_approve', 'cancel_fee']);
+
+/**
+ * The last press that stopped part-way through raising the invoice, while a draft is still
+ * in HireHop — null once a later press got past that point, or the draft has gone. The plan
+ * is rebuilt from HireHop on every read, so without this a stop's reason vanished as soon as
+ * the page was left: the next person saw "Ready to invoice" beside a draft nobody explained
+ * (job 16724, 20 Oct 2026). `plan.log` is newest first.
+ */
+export function lastInvoiceStop(plan: CloseOutPlan): CloseOutLogEntry | null {
+  if (!plan.invoice.draft) return null;
+  const last = (plan.log ?? []).find(l => DRAFT_STEPS.has(l.step));
+  return last && !last.ok ? last : null;
+}
+
 // ── One view of a plan, for the panel, the Overview card and the tab dot ──
 
 const PENNY = 0.005;

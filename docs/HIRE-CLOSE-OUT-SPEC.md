@@ -677,6 +677,20 @@ invoice ("Invoice the £x added since") stays `all: 1`. **An EU hire** keeps the
 every priced line at £0 and the per-category UK / non-UK lines at the bottom (jon accepted that
 look, 13 Oct). Kill-switch without a deploy: `system_settings.closeout_invoice_layout` = `'flat'`.
 
+**A stop stays on the panel (20 Oct 2026, job 16724).** The panel is rebuilt from HireHop on
+every read, so a press that stopped while raising the invoice vanished once the page was left:
+the next person saw "Ready to invoice" beside a draft nobody explained, and took OP's own stopped
+draft for a colleague's hand-made proforma. Now, while a draft is in HireHop and the newest
+invoice-raising entry in `job_closeout_log` is a stop, the panel shows that stop in red with when
+and who (`lib/closeOutPlan.ts` `lastInvoiceStop()`, read from the plan's `log`; hidden while the
+pressing session's own result is on screen). A later press that gets past it, or the draft
+going, clears it. **The penny stop names both HireHop tabs** (`pennyStopMessage()`): HireHop
+shows a "Quoted net total" on Supplying AND on Billing, the check compares against Billing (kind 0
+accrued), and the two can differ — 16724's per-Hour line with a hand-typed £45 was £45 on
+Supplying and 3 × £1.88 on Billing (£197.50 vs £158.13). A pasted draft carries the Supplying
+figures, so a stop on one means a line priced differently on the two tabs; the portal and the
+Money tab read Billing, so the client was asked for the lower figure.
+
 **Next — parked on purpose until a quiet time (jon, 14 Oct 2026):**
 
 - §10.3 hold-on-account — a To Do to keep a surplus on account instead of refunding it;

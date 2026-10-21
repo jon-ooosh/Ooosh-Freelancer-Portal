@@ -645,10 +645,34 @@ describe('raiseHireInvoice', () => {
     hh.uninvoicedNet = 500;                                   // HireHop bills £500 of a £510 job
     const r = await raiseHireInvoice(JOB.id, 'u1');
     expect(r.done).toBe(false);
-    expect(r.message).toContain('differ by £10.00');
+    expect(r.message).toContain('£10.00 apart');
     expect(posts('/php_functions/billing_save_status.php')).toEqual([]);
     expect(mockSync).not.toHaveBeenCalled();
     expect(hh.invoices[0].status).toBe(0);
+  });
+
+  it('job 16724: a pasted draft that Billing disagrees with names both HireHop tabs', async () => {
+    // Supplying prices the job at £510 (what is pasted); Billing works it out £39.37 lower.
+    uninvoicedJob(); layout = ''; hh.accruedNet = 470.63;
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('Draft 13000 has the Supplying tab\'s lines, £510.00 ex VAT');
+    expect(r.message).toContain('Billing tab says the job comes to £470.63 ex VAT (£39.37 apart)');
+    expect(r.message).toContain('delete draft 13000 in HireHop');
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([]);
+    expect(logRows[0]).toMatchObject({ step: 'invoice_penny', ok: false });
+  });
+
+  it('a draft already on the job that Billing disagrees with says so, and how to clear it', async () => {
+    uninvoicedJob(); hh.uninvoicedNet = 0; hh.accruedNet = 158.13;
+    hh.invoices.push({ id: 12995, status: 0, number: '', gross: 237, paid: 0, accId: '', date: '2026-10-20' });
+    const r = await raiseHireInvoice(JOB.id, 'u1');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('Draft 12995, already on the job, is £197.50 ex VAT');
+    expect(r.message).toContain('(£39.37 apart)');
+    expect(r.message).toContain('or delete draft 12995');
+    expect(posts('/php_functions/billing_save.php')).toEqual([]);
+    expect(posts('/php_functions/billing_save_status.php')).toEqual([]);
   });
 
   it('an EU hire: splits the VAT on the draft, then approves it in the same press like any other invoice', async () => {
@@ -750,7 +774,7 @@ describe('runHireCloseOut (the one button)', () => {
     uninvoicedJob(); hh.uninvoicedNet = 500;
     const first = await runHireCloseOut(JOB.id, 'u1');
     expect(first.done).toBe(false);
-    expect(first.message).toContain('differ by £10.00');
+    expect(first.message).toContain('£10.00 apart');
     expect(posts('/php_functions/billing_payments_save.php')).toEqual([]);
     // Someone fixes the lines in HireHop: the draft now reads £510.
     hh.invoices[0].gross = 612; hh.accruedNet = 510;
