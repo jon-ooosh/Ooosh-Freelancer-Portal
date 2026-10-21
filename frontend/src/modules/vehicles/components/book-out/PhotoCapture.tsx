@@ -3,6 +3,7 @@ import { REQUIRED_PHOTOS } from '../../types/vehicle-event'
 import type { CapturedPhoto, PhotoAngle } from '../../types/vehicle-event'
 import { getPhotoGuide, PHOTO_GUIDE_TIPS } from '../photo/PhotoGuides'
 import { compressImageWithThumb } from '../../lib/image-utils'
+import { FreelancerPhotos } from '../freelancer/FreelancerPhotos'
 
 type ExtendedAngle = CapturedPhoto['angle']
 
@@ -12,6 +13,11 @@ interface PhotoCaptureProps {
   onRemove: (angle: string) => void
   /** Optional — update a photo's metadata (currently used for editing extras' labels). */
   onUpdate?: (angle: string, partial: Partial<Pick<CapturedPhoto, 'label'>>) => void
+  /**
+   * 'freelancer' draws the portal-look layout (components/freelancer/FreelancerPhotos,
+   * FREELANCER-PORTAL-SPEC §11) over the same capture code. Staff never pass it.
+   */
+  look?: 'freelancer'
 }
 
 const GUIDES_KEY = 'ooosh_photo_guides_enabled'
@@ -33,7 +39,7 @@ function getGuidesEnabled(): boolean {
  * full-screen guide overlay with a van diagram and framing instructions
  * before opening the camera. Experienced users can toggle guides off.
  */
-export function PhotoCapture({ photos, onCapture, onRemove, onUpdate }: PhotoCaptureProps) {
+export function PhotoCapture({ photos, onCapture, onRemove, onUpdate, look }: PhotoCaptureProps) {
   const [activeAngle, setActiveAngle] = useState<ExtendedAngle | null>(null)
   const [activeLabel, setActiveLabel] = useState<string | null>(null)
   const [showGuide, setShowGuide] = useState<PhotoAngle | null>(null)
@@ -116,17 +122,36 @@ export function PhotoCapture({ photos, onCapture, onRemove, onUpdate }: PhotoCap
     }
   }
 
+  // Hidden file input — the camera, for both layouts.
+  const fileInput = (
+    <input
+      ref={fileInputRef}
+      type="file"
+      accept="image/*"
+      capture="environment"
+      onChange={handleFileChange}
+      className="hidden"
+    />
+  )
+
+  if (look === 'freelancer') {
+    return (
+      <div>
+        {fileInput}
+        <FreelancerPhotos
+          photos={photos}
+          processingAngle={processingAngle}
+          onTake={(angle, label) => { if (!processingAngle) openCamera(angle, label) }}
+          onRemove={onRemove}
+          onUpdate={onUpdate}
+        />
+      </div>
+    )
+  }
+
   return (
     <div>
-      {/* Hidden file input */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        onChange={handleFileChange}
-        className="hidden"
-      />
+      {fileInput}
 
       {/* Guides toggle */}
       <div className="mb-3 flex items-center justify-end gap-2">

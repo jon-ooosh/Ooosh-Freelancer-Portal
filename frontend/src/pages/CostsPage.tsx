@@ -104,7 +104,7 @@ function dueInfo(c: { due_date?: string | null; cost_date: string | null }) {
 // Human description of a supplier's terms for the Due cell tooltip.
 function termsLabel(t?: SupplierPaymentTerms): string {
   if (!t || t.source === 'default') return `invoice + ${DEFAULT_TERMS_DAYS}d (default)`;
-  if (t.source === 'freelancer') return 'freelancer — first Friday +1wk after approval';
+  if (t.source === 'freelancer') return 'freelancer — first Friday a week after approval (8 to 14 days)';
   const base = t.basis === 'end_of_invoice_month' ? 'end of invoice month' : 'invoice date';
   return `${base} + ${t.days}d${t.source === 'xero' ? ' · from Xero' : ''}`;
 }

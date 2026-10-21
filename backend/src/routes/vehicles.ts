@@ -95,6 +95,24 @@ async function authoriseFreelancerOnQuote(
   }
   const { job_id: jobId, hh_job_number: hhJobNumber, venue_name: venueName } = quoteResult.rows[0];
 
+  // The link is only as good as the portal login that minted it, and it lasts
+  // 24 hours: someone removed or un-approved since must not be able to use one
+  // (Oct 2026). The email is the login person's own, so an approved record
+  // with it is exactly "still allowed in the portal".
+  const activeLogin = await query(
+    `SELECT 1 FROM people
+      WHERE LOWER(email) = LOWER($1) AND is_freelancer = true AND is_approved = true AND is_deleted = false
+      LIMIT 1`,
+    [freelancerEmail]
+  );
+  if (activeLogin.rows.length === 0) {
+    return {
+      ok: false,
+      status: 403,
+      body: { error: 'Your access to the freelancer portal has ended. Please contact the office.', code: 'account_inactive' },
+    };
+  }
+
   const crewResult = await query(
     `SELECT qa.person_id, p.email, p.first_name, p.last_name
        FROM quote_assignments qa
@@ -944,7 +962,9 @@ const FREELANCER_BOOKOUT_ALLOW: Array<{ method: string; pattern: RegExp }> = [
   { method: 'POST',  pattern: /^\/upload-photo$/ },
   { method: 'POST',  pattern: /^\/save-event$/ },
   { method: 'POST',  pattern: /^\/generate-pdf$/ },
-  { method: 'POST',  pattern: /^\/send-email$/ },
+  // NOT /send-email (Oct 2026): it sends any HTML to any address, and no
+  // freelancer screen calls it any more — reports go by send-condition-report,
+  // which builds its own email server-side.
   { method: 'POST',  pattern: /^\/send-condition-report$/ },
   { method: 'GET',   pattern: /^\/jobs\/[^/]+$/ },
   // Walkaround / briefing UI: settings are global (no PII) so freelancer
@@ -4907,6 +4927,19 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       size: 8, color: [146, 64, 14],
     });
     y += 18;
+  } else if (isCollection && data.driverPresent === false) {
+    // The customer signs for the van they hand back (Oct 2026); when nobody was
+    // there, the collecting driver's note leads the NOTES FROM CLIENT section.
+    pdf.setFillColor(255, 251, 235);
+    pdf.setDrawColor(253, 230, 138);
+    pdf.roundedRect(margin, y, contentWidth, 14, 2, 2, 'FD');
+    addText('Customer was not present at collection', margin + 4, y + 5.5, {
+      size: 9, bold: true, color: [146, 64, 14],
+    });
+    addText("The van was collected without the customer there. See the collecting driver's note above.", margin + 4, y + 10.5, {
+      size: 8, color: [146, 64, 14],
+    });
+    y += 18;
   } else if (data.signatureBase64) {
     try {
       const sigProps = pdf.getImageProperties(data.signatureBase64);
@@ -4929,7 +4962,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       });
       y += 25;
     }
-  } else if (data.signatureMissing) {
+  } else if (data.signatureMissing && !isCollection) {
     pdf.setDrawColor(200, 200, 200);
     pdf.setFillColor(250, 250, 250);
     pdf.roundedRect(margin, y, contentWidth, 20, 2, 2, 'FD');
@@ -4947,7 +4980,8 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     y += 25;
   }
 
-  addText('Driver: ' + (data.driverName || '-'), margin, y, { size: 9 });
+  // On a collection the signature is the customer's (the van's hirer).
+  addText((isCollection ? 'Customer: ' : 'Driver: ') + (data.driverName || '-'), margin, y, { size: 9 });
   addText('Date: ' + timestamp, 0, y, { size: 9, align: 'right' });
 
   // -- Footer on every page --

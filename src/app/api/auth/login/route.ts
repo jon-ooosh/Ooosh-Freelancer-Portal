@@ -15,16 +15,16 @@ const getSessionSecret = () => {
 // Shown when the account is already locked out (15-min cooldown). Steers the
 // user to the reset flow rather than letting them keep hammering a 429.
 const LOCKOUT_MESSAGE =
-  'Sign-in is paused after too many attempts. Please reset your password using "Forgot your password?" below, or try again in 15 minutes.'
+  'Sign-in is paused after too many attempts. Please reset your password using "Forgotten it?" above, or try again in 15 minutes.'
 
 // Wrong-password copy. As the user approaches the lockout we tell them how many
 // attempts remain and, on the final one, point them straight at Forgot Password.
 function wrongPasswordMessage(remainingAttempts: number): string {
   if (remainingAttempts <= 0) {
-    return 'Incorrect password. For security we\'ve paused sign-in for this account — please reset your password using "Forgot your password?" below.'
+    return 'Incorrect password. For security we\'ve paused sign-in for this account. Please reset your password using "Forgotten it?" above.'
   }
   const attempts = remainingAttempts === 1 ? '1 attempt' : `${remainingAttempts} attempts`
-  return `Incorrect password — ${attempts} left before you'll need to reset your password.`
+  return `Incorrect password - ${attempts} left before you'll need to reset your password.`
 }
 
 export async function POST(request: NextRequest) {
@@ -101,9 +101,20 @@ export async function POST(request: NextRequest) {
         )
       }
 
+      // OP's own answer is the right one to show for these (Oct 2026): 403 =
+      // right password but no longer an approved freelancer; 429 = this
+      // account is paused after too many wrong passwords (OP counts per
+      // account, which this instance's in-memory counter can't).
+      if (opResult.status === 403 || opResult.status === 429) {
+        return NextResponse.json(
+          { error: opResult.error || LOCKOUT_MESSAGE },
+          { status: opResult.status }
+        )
+      }
+
       // Any other OP failure that wasn't a thrown error.
       return NextResponse.json(
-        { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
+        { error: "Incorrect password. Please try again, or use \"Forgotten it?\" above if you've forgotten it." },
         { status: 401 }
       )
     } catch (opError) {

@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server'
 import { jwtVerify } from 'jose'
 
 // Routes that require authentication
-const protectedRoutes = ['/dashboard', '/earnings', '/settings', '/job']
+const protectedRoutes = ['/dashboard', '/earnings', '/settings', '/job', '/completed', '/cancelled']
 
 // Routes that should redirect to dashboard if already logged in
 const authRoutes = ['/login', '/register']
@@ -77,6 +77,8 @@ export const config = {
     '/earnings/:path*',
     '/settings/:path*',
     '/job/:path*',
+    '/completed/:path*',
+    '/cancelled/:path*',
     '/login',
     '/register',
   ],

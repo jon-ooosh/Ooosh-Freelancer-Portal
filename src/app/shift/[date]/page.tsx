@@ -14,8 +14,11 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { ShoppingCart, FileText, Image as ImageIcon, Paperclip, ChevronDown, Lock, X } from 'lucide-react'
 import FreelancerTaskList from '@/components/FreelancerTaskList'
 import type { PortalFreelancerTask } from '@/lib/op-api'
+import { cls, IconTile, BackLink, Chevron, SectionLabel, Banner, Chip, ICON } from '@/components/ui'
+import { ukToday } from '@/lib/ukDate'
 
 // =============================================================================
 // TYPES (mirror the OP portal response)
@@ -122,7 +125,7 @@ function Linkified({ text }: { text: string }) {
     <>
       {parts.map((part, i) =>
         /^https?:\/\//.test(part) ? (
-          <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-ooosh-600 hover:text-ooosh-500 underline break-all">
+          <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-hf-link hover:text-hf-link-hover underline break-all">
             {part}
           </a>
         ) : (
@@ -133,11 +136,12 @@ function Linkified({ text }: { text: string }) {
   )
 }
 
-function fileIcon(fileType: string | null): string {
+function FileIcon({ fileType, size = 18 }: { fileType: string | null; size?: number }) {
   const t = (fileType || '').toLowerCase()
-  if (t.includes('pdf')) return '📄'
-  if (t.includes('image') || t.includes('png') || t.includes('jpg') || t.includes('jpeg')) return '🖼️'
-  return '📎'
+  const Icon = t.includes('pdf') ? FileText
+    : (t.includes('image') || t.includes('png') || t.includes('jpg') || t.includes('jpeg')) ? ImageIcon
+    : Paperclip
+  return <Icon size={size} strokeWidth={1.8} className="flex-none" />
 }
 
 function isImageFile(file: { name: string; fileType: string | null }): boolean {
@@ -277,184 +281,154 @@ export default function ShiftDetailPage() {
 
   const envelope = shift ? formatEnvelope(shift.planned_start, shift.planned_end) : null
   const isConfirmed = shift?.assignment_status === 'confirmed'
+  const isTonight = !!shift && shift.date === ukToday()
+  // "Tonight, 6:00pm – 11:30pm"; another evening leads with its day.
+  const heading = shift
+    ? (isTonight
+      ? (envelope ? `Tonight, ${envelope}` : 'Tonight')
+      : (envelope ? `${formatLongDate(shift.date).split(' ')[0]}, ${envelope}` : formatLongDate(shift.date)))
+    : ''
 
   return (
-    <div className="min-h-screen bg-gray-50 safe-top safe-bottom pb-10">
-      {/* Header */}
-      <header className="bg-white shadow-sm border-b border-gray-100 sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-4 flex items-center gap-3">
-          <Link
-            href="/dashboard"
-            className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-            title="Back to dashboard"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <div className="flex items-center gap-2">
-            <span className="text-xl">🎸</span>
-            <h1 className="text-lg font-semibold text-gray-900">Studio Shift</h1>
-          </div>
+    <div className="min-h-screen bg-hf-page safe-top pb-36">
+      <header className="max-w-lg mx-auto px-2 pt-2">
+        <div className="px-2.5">
+          <BackLink href="/dashboard" label="Jobs" />
         </div>
       </header>
 
-      <main className="max-w-lg mx-auto px-4 py-6 space-y-6">
+      <main className="max-w-lg mx-auto px-4 pt-1 flex flex-col gap-4">
         {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-            {error}
-            <button onClick={fetchShift} className="ml-2 underline hover:no-underline">
-              Try again
-            </button>
-          </div>
+          <Banner tone="error">
+            {error}{' '}
+            <button type="button" onClick={fetchShift} className="underline font-semibold">Try again</button>
+          </Banner>
         )}
 
         {loading ? (
-          <div className="space-y-3">
-            <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm animate-pulse">
-              <div className="h-5 bg-gray-200 rounded w-2/3 mb-3" />
-              <div className="h-3 bg-gray-200 rounded w-1/2" />
-            </div>
+          <div className={`${cls.card} p-4 animate-pulse`}>
+            <div className="h-5 bg-hf-track rounded w-2/3 mb-3" />
+            <div className="h-3 bg-hf-track rounded w-1/2" />
           </div>
         ) : shift ? (
           <>
-            {/* Overview card */}
-            <section className="bg-white rounded-xl border border-gray-100 p-5 shadow-sm">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-base font-semibold text-gray-900">{formatLongDate(shift.date)}</p>
-                  {envelope && <p className="text-sm text-gray-500 mt-0.5">{envelope}</p>}
-                </div>
-                {shift.fee !== null && (
-                  <span className="text-lg font-semibold text-green-600">{formatFee(shift.fee)}</span>
-                )}
+            {/* Overview */}
+            <section className="px-1 pb-1 flex flex-col gap-1.5">
+              <div className="flex items-center gap-2">
+                <span className={`${cls.kindLabel} text-kind-studio`}>Studio sitter</span>
+                <Chip tone={isConfirmed ? 'green' : 'amber'}>{isConfirmed ? 'Confirmed' : 'Assigned'}</Chip>
               </div>
-              <div className="mt-3 flex items-center gap-2">
-                <span
-                  className={`inline-block text-xs px-2 py-0.5 rounded-full font-medium ${
-                    isConfirmed ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
-                  }`}
-                >
-                  {isConfirmed ? 'Confirmed' : 'Assigned'}
-                </span>
-              </div>
-              <p className="mt-4 text-xs text-gray-500 leading-relaxed">
-                You&apos;re looking after the band(s) below for the evening and locking up the whole
-                building at the end of the night.
+              <h1 className={cls.pageTitle}>{heading}</h1>
+              <p className="text-[16px] text-hf-body">
+                {formatLongDate(shift.date)}
+                {shift.fee !== null && <span className="tabular"> · {formatFee(shift.fee)}</span>}
+              </p>
+              <p className="text-[15px] text-hf-muted leading-[1.45] mt-0.5">
+                Look after the bands below, then lock up the whole building at the end of the night.
               </p>
             </section>
 
             {/* Shop till — price lookup any time, selling on the night */}
             <Link
               href={`/shift/${date}/till`}
-              className="flex items-center justify-between gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm hover:bg-gray-50 transition-colors"
+              className={`${cls.card} min-h-[64px] px-4 py-3 flex items-center gap-3 hover:bg-hf-inset transition-colors`}
             >
-              <span>
-                <span className="block font-medium text-gray-900">🛒 Shop till</span>
-                <span className="block text-xs text-gray-500">Look up a price, or sell strings, leads, gaffa…</span>
+              <IconTile kind="neutral"><ShoppingCart {...ICON} /></IconTile>
+              <span className="flex-1 min-w-0 flex flex-col gap-0.5">
+                <span className="text-[16px] font-semibold text-hf-ink">Shop till</span>
+                <span className="text-[14px] text-hf-muted">Look up a price, or sell strings, leads, gaffa...</span>
               </span>
-              <svg className="w-5 h-5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
+              <Chevron />
             </Link>
 
             {/* Who's in tonight */}
-            <section>
-              <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">
-                Who&apos;s in tonight
-              </h2>
+            <section className="flex flex-col gap-2.5">
+              <SectionLabel>Who&apos;s in tonight</SectionLabel>
               {shift.jobs.length === 0 ? (
-                <div className="bg-white rounded-xl border border-gray-100 p-4 text-center text-sm text-gray-500">
+                <div className={`${cls.card} px-4 py-5 text-center text-[15px] text-hf-muted`}>
                   No rooms booked for this evening yet.
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {shift.jobs.map((job) => (
-                    <div key={job.job_id} className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="font-medium text-gray-900">{job.label}</p>
-                        {job.hh_job_number && (
-                          <span className="text-xs text-gray-400 shrink-0">#{job.hh_job_number}</span>
-                        )}
-                      </div>
-                      {job.rooms.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {job.rooms.map((room) => (
-                            <span
-                              key={room}
-                              className="inline-block text-xs px-2 py-0.5 rounded-full bg-ooosh-50 text-ooosh-700 border border-ooosh-100"
-                            >
-                              {room}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Shared specs / stage plots */}
-                      {job.files && job.files.length > 0 && (
-                        <div className="mt-3 pt-3 border-t border-gray-100">
-                          <p className="text-xs font-medium text-gray-500 mb-2">Shared files</p>
-                          <div className="space-y-1.5">
-                            {job.files.map((file, idx) => (
-                              <a
-                                key={`${job.job_id}-${idx}`}
-                                href={file.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex items-center gap-2 text-sm text-ooosh-600 hover:text-ooosh-500"
-                              >
-                                <span>{fileIcon(file.fileType)}</span>
-                                <span className="truncate">{file.name}</span>
-                              </a>
-                            ))}
-                          </div>
-                        </div>
+                shift.jobs.map((job) => (
+                  <div key={job.job_id} className={`${cls.card} px-4 py-3.5 flex flex-col gap-2.5`}>
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-[16px] font-semibold text-hf-ink">{job.label}</span>
+                      {job.hh_job_number && (
+                        <span className="text-[13px] text-hf-muted shrink-0 tabular">#{job.hh_job_number}</span>
                       )}
                     </div>
-                  ))}
-                </div>
+                    {job.rooms.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {job.rooms.map((room) => (
+                          <span key={room} className="text-[13px] font-semibold bg-kind-studio-bg text-kind-studio rounded-full px-2.5 py-0.5">
+                            {room}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Shared specs / stage plots */}
+                    {job.files && job.files.length > 0 && (
+                      <div className="border-t border-hf-divider pt-2.5 flex flex-col gap-1">
+                        {job.files.map((file, idx) => (
+                          <a
+                            key={`${job.job_id}-${idx}`}
+                            href={file.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="min-h-[40px] flex items-center gap-2.5 text-[15px] font-semibold text-hf-link hover:text-hf-link-hover"
+                          >
+                            <FileIcon fileType={file.fileType} />
+                            <span className="truncate">{file.name}</span>
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))
               )}
             </section>
 
             {/* Recent handover — the last few nights, carried forward (read-only) */}
             {recentNights.length > 0 && (
-              <section>
-                <button type="button" onClick={() => setRecentOpen((o) => !o)}
-                  className="w-full flex items-center justify-between text-left">
-                  <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
-                    Recent handover <span className="text-gray-400 normal-case font-normal">· last {recentNights.length} night{recentNights.length !== 1 ? 's' : ''}</span>
-                  </h2>
-                  <span className="text-gray-400 text-xs">{recentOpen ? '▾ Hide' : '▸ Show'}</span>
+              <section className={`${cls.card} overflow-hidden`}>
+                <button type="button" onClick={() => setRecentOpen((o) => !o)} aria-expanded={recentOpen}
+                  className="w-full h-14 px-4 flex items-center justify-between text-left">
+                  <span className="text-[16px] font-semibold text-hf-ink">Recent handover</span>
+                  <span className="flex items-center gap-1.5 text-[15px] text-hf-muted">
+                    Last {recentNights.length} night{recentNights.length !== 1 ? 's' : ''}
+                    <ChevronDown size={18} strokeWidth={2} className={`text-hf-chevron transition-transform ${recentOpen ? 'rotate-180' : ''}`} />
+                  </span>
                 </button>
                 {recentOpen && (
-                  <div className="mt-3 space-y-4">
+                  <div className="px-4 pb-4 flex flex-col gap-4 border-t border-hf-divider pt-3">
                     {recentNights.map((night) => (
                       <div key={night.date}>
-                        <p className="text-xs font-semibold text-gray-600 mb-1.5">{formatLongDate(night.date)}</p>
-                        <div className="space-y-2">
+                        <p className="text-[13px] font-semibold text-hf-body mb-1.5">{formatLongDate(night.date)}</p>
+                        <div className="flex flex-col gap-2">
                           {night.entries.map((m) => (
-                            <div key={m.id} className={`rounded-lg border p-2.5 ${m.from_staff ? 'bg-ooosh-50/60 border-ooosh-100' : 'bg-gray-50 border-gray-100'}`}>
+                            <div key={m.id} className={`rounded-xl px-3 py-2.5 ${m.from_staff ? 'bg-hf-tint' : 'bg-hf-inset border border-hf-divider'}`}>
                               <div className="flex items-center justify-between gap-2 mb-0.5">
-                                <span className="text-[11px] font-semibold text-gray-600">
+                                <span className="flex items-center gap-1.5 text-[13px] font-semibold text-hf-ink">
                                   {m.author}
-                                  {m.from_staff && <span className="ml-1 text-[9px] px-1 py-0.5 rounded-full bg-ooosh-100 text-ooosh-700 uppercase tracking-wide">Office</span>}
+                                  {m.from_staff && <OfficeBadge />}
                                 </span>
-                                <span className="text-[10px] text-gray-400 shrink-0">{formatMessageTime(m.created_at)}</span>
+                                <span className="text-[12px] text-hf-muted shrink-0">{formatMessageTime(m.created_at)}</span>
                               </div>
                               {m.content && m.content !== '(attachment)' && (
-                                <p className="text-xs text-gray-700 whitespace-pre-wrap break-words"><Linkified text={m.content} /></p>
+                                <p className="text-[14px] text-hf-body whitespace-pre-wrap break-words leading-[1.45]"><Linkified text={m.content} /></p>
                               )}
                               {m.files && m.files.length > 0 && (
                                 <div className="mt-1.5 flex flex-wrap gap-1.5">
                                   {m.files.map((file, idx) => (
                                     isImageFile(file) ? (
                                       <a key={`${m.id}-${idx}`} href={file.url} target="_blank" rel="noopener noreferrer">
-                                        <img src={file.url} alt={file.name} className="w-16 h-16 rounded border border-gray-200 object-cover" />
+                                        <img src={file.url} alt={file.name} className="w-16 h-16 rounded-lg border border-hf-border object-cover" />
                                       </a>
                                     ) : (
                                       <a key={`${m.id}-${idx}`} href={file.url} target="_blank" rel="noopener noreferrer"
-                                        className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border border-gray-200 bg-white text-gray-600">
-                                        {fileIcon(file.fileType)} <span className="max-w-[120px] truncate">{file.name}</span>
+                                        className="inline-flex items-center gap-1 text-[12px] px-2 py-1 rounded-lg border border-hf-border bg-white text-hf-link font-semibold">
+                                        <FileIcon fileType={file.fileType} size={14} /> <span className="max-w-[120px] truncate">{file.name}</span>
                                       </a>
                                     )
                                   ))}
@@ -472,113 +446,105 @@ export default function ShiftDetailPage() {
 
             {/* Tonight's tasks (STAFF-CALENDAR-SPEC §21) — hidden when there are none */}
             {shift.tasks && shift.tasks.some((t) => t.status !== 'cancelled') && (
-              <section className="bg-white rounded-xl border border-sky-100 p-4 shadow-sm">
+              <section className={`${cls.card} p-4`}>
                 <FreelancerTaskList tasks={shift.tasks} heading="Tasks tonight" />
               </section>
             )}
 
             {/* Handover notes (sitter ⇄ staff thread) */}
-            <section>
-              <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                Handover notes
-              </h2>
-              <p className="text-xs text-gray-400 mb-3">
-                Anything the next sitter or the office needs to know — jobs for tonight, money owed,
-                things left undone.
-              </p>
+            <section className="flex flex-col gap-2.5">
+              <div className="px-1 flex flex-col gap-0.5">
+                <span className={cls.sectionLabel}>Handover notes</span>
+                <span className="text-[14px] text-hf-muted">
+                  For the next sitter or the office: jobs for tonight, money owed, things left undone.
+                </span>
+              </div>
 
-              {messages.length > 0 && (
-                <div className="space-y-2 mb-3">
-                  {messages.map((m) => (
-                    <div
-                      key={m.id}
-                      className={`rounded-xl border p-3 shadow-sm ${
-                        m.from_staff
-                          ? 'bg-ooosh-50 border-ooosh-100'
-                          : 'bg-white border-gray-100'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2 mb-1">
-                        <span className="text-xs font-semibold text-gray-700">
-                          {m.mine ? 'You' : m.author}
-                          {m.from_staff && (
-                            <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-ooosh-100 text-ooosh-700 font-medium uppercase tracking-wide">
-                              Ooosh office
-                            </span>
-                          )}
-                        </span>
-                        <span className="text-[11px] text-gray-400 shrink-0">
-                          {formatMessageTime(m.created_at)}
-                        </span>
-                      </div>
-                      {m.content && m.content !== '(attachment)' && (
-                        <p className="text-sm text-gray-800 whitespace-pre-wrap break-words"><Linkified text={m.content} /></p>
-                      )}
-                      {m.files && m.files.length > 0 && (
-                        <div className="mt-2 space-y-1.5">
-                          {m.files.map((file, idx) => (
-                            isImageFile(file) ? (
-                              <a key={`${m.id}-${idx}`} href={file.url} target="_blank" rel="noopener noreferrer" className="block">
-                                <img src={file.url} alt={file.name}
-                                  className="max-w-[240px] max-h-[180px] rounded border border-gray-200 object-cover" />
-                              </a>
-                            ) : (
-                              <a
-                                key={`${m.id}-${idx}`}
-                                href={file.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex items-center gap-2 text-sm text-ooosh-600 hover:text-ooosh-500"
-                              >
-                                <span>{fileIcon(file.fileType)}</span>
-                                <span className="truncate">{file.name}</span>
-                              </a>
-                            )
-                          ))}
-                        </div>
-                      )}
+              {messages.map((m) => (
+                <div
+                  key={m.id}
+                  className={`rounded-[14px] px-3.5 py-3 flex flex-col gap-1 ${
+                    m.from_staff ? 'bg-hf-tint' : 'bg-white border border-hf-border'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-[14px] font-semibold text-hf-ink">
+                      {m.mine ? 'You' : m.author}
+                      {m.from_staff && <OfficeBadge />}
+                    </span>
+                    <span className="text-[13px] text-hf-muted shrink-0">
+                      {formatMessageTime(m.created_at)}
+                    </span>
+                  </div>
+                  {m.content && m.content !== '(attachment)' && (
+                    <p className="text-[15px] text-hf-body leading-[1.45] whitespace-pre-wrap break-words"><Linkified text={m.content} /></p>
+                  )}
+                  {m.files && m.files.length > 0 && (
+                    <div className="mt-1 flex flex-col gap-1.5">
+                      {m.files.map((file, idx) => (
+                        isImageFile(file) ? (
+                          <a key={`${m.id}-${idx}`} href={file.url} target="_blank" rel="noopener noreferrer" className="block">
+                            <img src={file.url} alt={file.name}
+                              className="max-w-[240px] max-h-[180px] rounded-lg border border-hf-border object-cover" />
+                          </a>
+                        ) : (
+                          <a
+                            key={`${m.id}-${idx}`}
+                            href={file.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-2 text-[15px] font-semibold text-hf-link hover:text-hf-link-hover"
+                          >
+                            <FileIcon fileType={file.fileType} />
+                            <span className="truncate">{file.name}</span>
+                          </a>
+                        )
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
-              )}
+              ))}
 
               {/* Composer */}
-              <div className="bg-white rounded-xl border border-gray-100 p-3 shadow-sm">
+              <div className={`${cls.card} p-3 flex flex-col gap-2.5`}>
                 <textarea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  placeholder="Add a note…"
+                  placeholder="Add a note..."
                   rows={3}
-                  className="w-full text-sm border border-gray-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-ooosh-200 focus:border-ooosh-300 resize-y min-h-[64px]"
+                  className={`${cls.input} min-h-[72px] resize-y`}
                 />
                 {pendingFiles.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-2">
+                  <div className="flex flex-wrap gap-2">
                     {pendingFiles.map((p, idx) => (
-                      <span key={idx} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-gray-200 bg-gray-50 text-xs text-gray-700">
+                      <span key={idx} className="inline-flex items-center gap-1.5 pl-2 pr-1 py-1 rounded-lg border border-hf-border bg-hf-inset text-[13px] text-hf-body">
                         {p.preview
                           ? <img src={p.preview} alt={p.file.name} className="w-6 h-6 object-cover rounded" />
-                          : <span>📎</span>}
+                          : <Paperclip size={14} strokeWidth={1.8} />}
                         <span className="max-w-[140px] truncate">{p.file.name}</span>
                         <button type="button" onClick={() => setPendingFiles((prev) => {
                           const found = prev[idx]
                           if (found?.preview) URL.revokeObjectURL(found.preview)
                           return prev.filter((_, i) => i !== idx)
                         })}
-                          className="hover:text-red-600" aria-label={`Remove ${p.file.name}`}>×</button>
+                          className="w-7 h-7 flex items-center justify-center rounded-md text-hf-muted hover:text-hf-error" aria-label={`Remove ${p.file.name}`}>
+                          <X size={14} strokeWidth={2.2} />
+                        </button>
                       </span>
                     ))}
                   </div>
                 )}
                 {(draft.trim() || pendingFiles.length > 0) && !posting && (
-                  <p className="text-xs text-amber-700 mt-1">Not posted yet - tap Post note to send it.</p>
+                  <p className="text-[13px] text-hf-amber-text">Not posted yet - tap Post note to send it.</p>
                 )}
-                {postError && <p className="text-xs text-red-600 mt-1">{postError}</p>}
-                <div className="mt-2 flex justify-between items-center">
+                {postError && <p className="text-[13px] text-hf-error">{postError}</p>}
+                <div className="flex justify-between items-center gap-2.5">
                   {/* Native <label> + visually-hidden (NOT display:none) input so
                       the file picker opens on mobile — iOS/Android silently ignore
                       a programmatic .click() on a display:none input. */}
-                  <label className="text-sm px-3 py-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer">
-                    📎 Attach
+                  <label className="h-11 px-3.5 rounded-xl border-[1.5px] border-hf-control flex items-center gap-1.5 text-[15px] font-semibold text-hf-body hover:bg-hf-inset cursor-pointer">
+                    <Paperclip size={18} strokeWidth={1.8} />
+                    Attach
                     <input type="file" multiple accept="image/*,application/pdf" className="sr-only"
                       onChange={(e) => {
                         // Capture the FileList into a concrete array NOW — reading
@@ -595,40 +561,53 @@ export default function ShiftDetailPage() {
                       }} />
                   </label>
                   <button
+                    type="button"
                     onClick={postNote}
                     disabled={(!draft.trim() && pendingFiles.length === 0) || posting}
-                    className="text-sm font-medium px-4 py-2 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    className="h-11 px-[18px] rounded-xl bg-hf-accent text-white text-[15px] font-semibold hover:bg-hf-accent-pressed disabled:bg-hf-disabled disabled:cursor-not-allowed transition-colors"
                   >
-                    {posting ? 'Posting…' : 'Post note'}
+                    {posting ? 'Posting...' : 'Post note'}
                   </button>
                 </div>
               </div>
             </section>
-
-            {/* Finish for the night → end-of-day lock-up report */}
-            <section className="pt-2">
-              <Link
-                href={`/shift/${date}/lockup`}
-                onClick={async (e) => {
-                  // An unposted handover note would otherwise be left behind here.
-                  if (!draft.trim() && pendingFiles.length === 0) return
-                  e.preventDefault()
-                  if (window.confirm("You've written a handover note but not posted it. Post it now?")) {
-                    if (!(await postNote())) return // error shows under the note box
-                  }
-                  router.push(`/shift/${date}/lockup`)
-                }}
-                className="flex items-center justify-center gap-2 w-full text-sm font-semibold px-4 py-3 rounded-xl bg-ooosh-600 text-white hover:bg-ooosh-500 transition-colors shadow-sm"
-              >
-                🔒 Finish for the night
-              </Link>
-              <p className="mt-2 text-center text-xs text-gray-400">
-                Quick lock-up checklist before you leave.
-              </p>
-            </section>
           </>
         ) : null}
       </main>
+
+      {/* Finish for the night → end-of-day lock-up report. Sticky at the foot. */}
+      {!loading && shift && (
+        <div className="fixed left-0 right-0 bottom-0 z-20 bg-gradient-to-t from-hf-page from-70% to-transparent safe-bottom">
+          <div className="max-w-lg mx-auto px-4 pt-3.5 pb-4">
+            <Link
+              href={`/shift/${date}/lockup`}
+              onClick={async (e) => {
+                // An unposted handover note would otherwise be left behind here.
+                if (!draft.trim() && pendingFiles.length === 0) return
+                e.preventDefault()
+                if (window.confirm("You've written a handover note but not posted it. Post it now?")) {
+                  if (!(await postNote())) return // error shows under the note box
+                }
+                router.push(`/shift/${date}/lockup`)
+              }}
+              className={`${cls.btnDark} w-full !h-14`}
+            >
+              <Lock size={18} strokeWidth={2} />
+              Finish for the night
+            </Link>
+            <p className="mt-1.5 text-center text-[13px] text-hf-muted">Quick lock-up checklist before you leave.</p>
+          </div>
+        </div>
+      )}
     </div>
+  )
+}
+
+/** Small OFFICE tag on a note from staff. */
+function OfficeBadge() {
+  return (
+    <span className="text-[11px] font-bold uppercase tracking-[0.05em] bg-hf-accent text-white rounded-md px-1.5 py-px">
+      Office
+    </span>
   )
 }

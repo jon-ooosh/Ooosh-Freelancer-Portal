@@ -368,10 +368,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // due date (+ the terms that produced it) to each row. Single source of
     // truth for the bill due date — the list, mark-paid modal and Xero push all
     // read these. See docs/COSTS-PAYMENT-AUTOMATION-SPEC.md.
-    const { buildTermsResolver, resolveDueDate } = await import('../services/supplier-terms');
+    const { buildTermsResolver, resolveDueDate, getFreelancerApprovalRuleFrom } = await import('../services/supplier-terms');
     const resolve = await buildTermsResolver(
       result.rows.map((r) => ({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name })),
     );
+    const approvalRuleFrom = await getFreelancerApprovalRuleFrom();
     const rows = result.rows.map((r) => {
       // resolveDueDate picks the rule (staff override → freelancer Friday terms →
       // supplier terms) — don't branch on cost_type out here, or this list drifts
@@ -379,6 +380,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       const { dueDate, derivedDueDate, terms, isOverride } = resolveDueDate(
         r,
         resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name }),
+        approvalRuleFrom,
       );
       return { ...r, terms, due_date: dueDate, due_date_derived: derivedDueDate, due_date_is_override: isOverride };
     });
@@ -569,6 +571,9 @@ router.get('/due-date-preview', async (req: AuthRequest, res: Response) => {
     const { dueDate, terms } = await resolveDueDateForCost({
       cost_type: req.query.cost_type ? String(req.query.cost_type) : null,
       cost_date: req.query.cost_date ? String(req.query.cost_date) : null,
+      // An existing cost's approval time, so a freelancer invoice previews from
+      // the day it was approved rather than "as if approved today".
+      approved_at: req.query.approved_at ? String(req.query.approved_at) : null,
       supplier_name: req.query.supplier_name ? String(req.query.supplier_name) : null,
       xero_contact_id: req.query.xero_contact_id ? String(req.query.xero_contact_id) : null,
     });

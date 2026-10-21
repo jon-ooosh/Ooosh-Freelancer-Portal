@@ -41,6 +41,11 @@ import type { ChecklistItem } from '../lib/settings-api'
 import type { HireHopJob } from '../types/hirehop'
 import { ForSalePill } from '../components/sales/ForSalePill'
 import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
+import { portalJobUrl } from '../lib/safe-url'
+import { Check } from 'lucide-react'
+import { fl, StepHeader, StepTitle, StepFooter, Banner, SummaryRows, FuelMileageStep, plateText, noEmDash } from '../components/freelancer/ui'
+import { VanConfirm, vanSubLine } from '../components/freelancer/VanConfirm'
+import { DoneScreen, isBothJob } from '../components/freelancer/DoneScreen'
 
 /** Per-operation result shown on the success/complete screen */
 interface OpResult {
@@ -347,6 +352,21 @@ export function BookOutPage() {
   // past the pre-check. Pre-fills vehicle + driver + job from freelancerContext
   // so the wizard jumps straight to Vehicle State (mileage / fuel).
   const [freelancerVanConfirmed, setFreelancerVanConfirmed] = useState(false)
+
+  // A freelancer never stands on the staff-only steps (Select Vehicle, Driver &
+  // Hire). Their first step is Vehicle State, and Back from it returns to the van
+  // screen (jon, Oct 2026). Until then Back walked them into both, and a draft
+  // saved there would still resume there, so this puts them back on their own.
+  useEffect(() => {
+    if (!isFreelancer || !freelancerVanConfirmed) return
+    const first = STEPS.indexOf('Vehicle State')
+    if (step < first) setStep(first)
+  }, [isFreelancer, freelancerVanConfirmed, step])
+
+  // The freelancer screens scroll the page, so each step starts at the top.
+  useEffect(() => {
+    if (isFreelancer) window.scrollTo(0, 0)
+  }, [isFreelancer, step])
 
   // Freelancer auto-fill from context (no allocations lookup needed — the
   // resolve endpoint already told us the vehicle + job). Waits for the
@@ -1081,10 +1101,15 @@ export function BookOutPage() {
   // hatch back to the portal if something looks wrong. Only renders
   // before a successful submit — after that the success screen takes over.
   if (isFreelancer && freelancerContext && !freelancerVanConfirmed && !submitSuccess && !queuedOffline) {
+    const who = form.hireHopJobData?.company || (freelancerContext.jobId ? `Job #${freelancerContext.jobId}` : null)
     return (
-      <FreelancerVanConfirmScreen
-        context={freelancerContext}
-        onConfirm={() => {
+      <VanConfirm
+        kindLabel={who ? `Van delivery · ${who}` : 'Van delivery'}
+        reg={freelancerContext.vehicleReg || ''}
+        title={freelancerContext.vehicleMakeModel || null}
+        sub={vanSubLine(vehicles.find(v => v.id === freelancerContext.vehicleId))}
+        backHref={portalJobUrl(freelancerContext.returnUrl)}
+        onYes={() => {
           setFreelancerVanConfirmed(true)
           // Jump past the Select Vehicle + Driver & Hire steps — for D&C
           // deliveries the driver is the freelancer themselves and there
@@ -1098,6 +1123,22 @@ export function BookOutPage() {
   }
 
   // Queued offline screen
+  if (queuedOffline && isFreelancer) {
+    return (
+      <div className="mx-auto flex min-h-screen max-w-lg flex-col justify-center gap-5 px-5 py-10 text-center">
+        <h1 className={fl.pageTitle}>Saved on this phone</h1>
+        <p className="text-[16px] leading-[1.5] text-hf-body">
+          {plateText(form.vehicleReg)}: the book-out, photos and signature are saved and will send by themselves
+          when you&apos;re back online. Keep this page open if you can.
+        </p>
+        {freelancerContext?.returnUrl && (
+          <a href={freelancerContext.returnUrl} className={`${fl.btnPrimary} w-full`}>
+            Back to the portal
+          </a>
+        )}
+      </div>
+    )
+  }
   if (queuedOffline) {
     return (
       <div className="space-y-6 px-4 py-6">
@@ -1148,11 +1189,38 @@ export function BookOutPage() {
         onResume={handleResumeDraft}
         onDiscard={dismissDraft}
         onDiscardAndGoBack={() => { dismissDraft(); window.history.back() }}
+        look={isFreelancer ? 'freelancer' : undefined}
       />
     )
   }
 
   // Success screen
+  if (submitSuccess && isFreelancer) {
+    const allOk = opResults.every(r => r.success)
+    const plate = plateText(form.vehicleReg)
+    const drivers = form.allDrivers?.length ?? 0
+    const who = form.hireHopJobData?.company || form.driverName || 'the customer'
+    const returnUrl = freelancerContext?.returnUrl ?? null
+    const both = isBothJob(returnUrl)
+    return (
+      <DoneScreen
+        allOk={allOk}
+        title="Van booked out"
+        problemTitle="Booked out, with something to check"
+        message={allOk
+          // "Fontaines D.C." already ends in a full stop.
+          ? `${plate} is with ${who.replace(/\.+$/, '')}. The condition report has been emailed to ${drivers > 1 ? `the ${drivers} drivers` : 'the customer'}.`
+          : `${plate} is booked out to ${form.driverName || 'the customer'}. Here's what happened:`}
+        results={opResults}
+        bothNote={both}
+        continueLabel={both ? 'Go to the equipment checklist' : 'Back to the portal'}
+        onContinue={returnUrl ? () => {
+          clearFreelancerSession()
+          window.location.href = returnUrl
+        } : null}
+      />
+    )
+  }
   if (submitSuccess) {
     const allOk = opResults.every(r => r.success)
     const anyFailed = opResults.some(r => !r.success && !r.warning)
@@ -1275,13 +1343,203 @@ export function BookOutPage() {
     )
   }
 
+  // ── Freelancer: the same four steps, in the portal look (FREELANCER-PORTAL-SPEC §11).
+  // Everything here goes through the page's own state and checks (canAdvance,
+  // handleSubmit, the autosave), exactly as the staff screens below do; only the
+  // drawing differs. Staff never reach this branch.
+  if (isFreelancer) {
+    const FL_STEPS = ['Vehicle State', 'Photos', 'Briefing', 'Confirm'] as const
+    const flIndex = Math.max(0, FL_STEPS.indexOf(STEPS[step] as typeof FL_STEPS[number]))
+    const isLast = STEPS[step] === 'Confirm'
+    const ready = canAdvance()
+    const enteredMileage = form.mileage ? parseInt(form.mileage, 10) : null
+    const belowLast = lastKnownMileage != null && enteredMileage != null && !isNaN(enteredMileage) && enteredMileage < lastKnownMileage
+    const highJump = !belowLast
+      ? checkMileagePlausibility({ newReading: enteredMileage, lastReading: lastKnownMileage })
+      : { level: 'ok' as const, message: null }
+    const photosLeft = requiredPhotoCount - capturedRequiredCount
+    const ticksLeft = briefingItems.filter(item => !form.briefingChecked[item.name]).length
+    const washVehicle = vehicles.find(v => v.id === form.vehicleId)
+    const drivers = form.allDrivers ?? []
+
+    // A disabled button says what's missing (design rule).
+    let nextLabel = 'Next'
+    if (STEPS[step] === 'Vehicle State') {
+      nextLabel = ready ? 'Next: photos'
+        : !form.mileage.trim() ? 'Add the mileage'
+        : belowLast ? 'Check the mileage'
+        : 'Pick the fuel level'
+    } else if (STEPS[step] === 'Photos') {
+      nextLabel = ready ? 'Next: briefing' : `${photosLeft} photo${photosLeft === 1 ? '' : 's'} to go`
+    } else if (STEPS[step] === 'Briefing') {
+      nextLabel = ready ? 'Next: sign'
+        : briefingItems.length === 0 ? 'No briefing list'
+        : `${ticksLeft} left to tick`
+    }
+
+    const summary: Array<[string, string]> = [
+      drivers.length > 1 ? ['Drivers', drivers.join(', ')] : ['Driver', form.driverName || '-'],
+      ['Mileage', form.mileage ? `${parseInt(form.mileage, 10).toLocaleString()} mi` : '-'],
+      ['Fuel', form.fuelLevel || '-'],
+      ['Photos', `${form.photos.length} taken`],
+    ]
+    if (form.hireEndDate) summary.push(['Hire ends', `${formatShortDate(form.hireEndDate)}${form.hireEndTime ? `, ${form.hireEndTime}` : ''}`])
+    if (form.notes) summary.push(['Notes', form.notes])
+
+    return (
+      <div className="pb-36">
+        <StepHeader
+          exitHref={portalJobUrl(freelancerContext?.returnUrl)}
+          title={`Book out · ${plateText(form.vehicleReg)}`}
+          step={flIndex + 1}
+          total={FL_STEPS.length}
+        />
+        <main className="mx-auto flex max-w-lg flex-col gap-4 px-4 pt-4">
+          {!isOnline && (
+            <Banner tone="warning" title="No signal">
+              {isSubmitting ? "It'll carry on sending when your signal is back." : "You can carry on, but you'll need signal to finish."}
+            </Banner>
+          )}
+          {washVehicle?.needsExternalWash && (
+            <Banner tone="warning">
+              {plateText(washVehicle.reg)} is flagged as needing an outside wash. Give it a once-over before it goes out. This won&apos;t stop the book-out.
+            </Banner>
+          )}
+
+          {STEPS[step] === 'Vehicle State' && (
+            <FuelMileageStep
+              title="Fuel & mileage"
+              mileage={form.mileage}
+              onMileage={value => updateForm('mileage', value)}
+              fuel={form.fuelLevel}
+              onFuel={level => updateForm('fuelLevel', level)}
+              autoFocus
+              mileageNote={lastKnownMileage != null ? `Last recorded: ${lastKnownMileage.toLocaleString()} mi` : null}
+              mileageError={belowLast
+                ? `That's below the recorded mileage (${lastKnownMileage!.toLocaleString()} mi). If the dashboard really says this, call the office: a manager can correct the van's record, then it will save.`
+                : null}
+              mileageWarning={highJump.level === 'high' && highJump.message ? noEmDash(highJump.message) : null}
+            />
+          )}
+
+          {STEPS[step] === 'Photos' && (
+            <>
+              <StepTitle
+                title="Photos"
+                right={<span className="text-[15px] font-semibold text-hf-green-text tabular-nums">{capturedRequiredCount} of {requiredPhotoCount}</span>}
+              />
+              {isVanAndDriver && (
+                <Banner tone="warning">Van and driver: the photos are optional. Add any you want, or carry on.</Banner>
+              )}
+              <PhotoCapture
+                look="freelancer"
+                photos={form.photos}
+                onCapture={handlePhotoCapture}
+                onRemove={handlePhotoRemove}
+                onUpdate={handlePhotoUpdate}
+              />
+            </>
+          )}
+
+          {STEPS[step] === 'Briefing' && (
+            <>
+              <StepTitle title="Show the driver" sub={`${form.vehicleSimpleType || 'This'} van · tick each one as you go`} />
+              {briefingItems.length === 0 ? (
+                <Banner tone="warning" title="No briefing list for this van">Call the office before you hand it over.</Banner>
+              ) : (
+                <div className={`${fl.card} overflow-hidden`}>
+                  {briefingItems.map((item, i) => {
+                    const on = !!form.briefingChecked[item.name]
+                    return (
+                      <button
+                        key={item.name}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() =>
+                          updateForm('briefingChecked', {
+                            ...form.briefingChecked,
+                            [item.name]: !form.briefingChecked[item.name],
+                          })
+                        }
+                        className={`flex min-h-14 w-full items-center gap-3 px-4 py-2 text-left ${i > 0 ? 'border-t border-hf-divider' : ''}`}
+                      >
+                        <span className={`flex h-[26px] w-[26px] flex-none items-center justify-center rounded-lg ${on ? 'bg-hf-green text-white' : 'border-2 border-hf-dashed bg-white'}`}>
+                          {on && <Check size={15} strokeWidth={3} />}
+                        </span>
+                        <span className="flex flex-col">
+                          <span className="text-[16px]">{item.name}</span>
+                          {item.notes && <span className="text-[14px] text-hf-muted">{item.notes}</span>}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+              <div className={`${fl.card} flex flex-col gap-2 p-4`}>
+                <label htmlFor="fl-notes" className={fl.label}>Notes (optional)</label>
+                <textarea
+                  id="fl-notes"
+                  rows={2}
+                  value={form.notes}
+                  onChange={e => updateForm('notes', e.target.value)}
+                  placeholder="Anything you noticed about the van…"
+                  className={fl.input}
+                />
+              </div>
+            </>
+          )}
+
+          {STEPS[step] === 'Confirm' && (
+            <>
+              <StepTitle title="Check & sign" />
+              {isVanAndDriver && (
+                <Banner tone="warning">Van and driver: the driver&apos;s signature is optional. Fuel and mileage are all it needs.</Banner>
+              )}
+              <SummaryRows rows={summary} />
+              {/* The cert is made at the desk; this confirms the printed copy went with
+                  the van. A reminder, never a gate (as on the staff screen). */}
+              {(form.ve103b || form.ve103bGeneratedAtDesk) && (
+                <label className={`${fl.card} flex items-start gap-3 p-4`}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(form.ve103bHandedOver)}
+                    onChange={e => updateForm('ve103bHandedOver', e.target.checked)}
+                    className="mt-0.5 h-5 w-5 flex-none accent-[#3f9b6b]"
+                  />
+                  <span className="flex flex-col">
+                    <span className="text-[16px]">Printed VE103B handed to the driver</span>
+                    <span className="text-[14px] text-hf-muted">It must travel with the van when it leaves the UK.</span>
+                  </span>
+                </label>
+              )}
+              <SignatureCapture ref={signatureRef} look="freelancer" label="Driver's signature" hint="Hand the phone to the driver" />
+              {submitError && <Banner tone="error">{submitError}</Banner>}
+              <p className="px-1 text-center text-[14px] text-hf-muted">
+                This records the book-out and emails the hire agreement to the driver.
+              </p>
+            </>
+          )}
+        </main>
+
+        <StepFooter
+          onBack={() => (flIndex === 0 ? setFreelancerVanConfirmed(false) : setStep(s => s - 1))}
+          backDisabled={isSubmitting}
+          primary={isLast
+            ? { label: isSubmitting ? (uploadProgress || 'Saving…') : 'Book out van', onClick: handleSubmit, disabled: isSubmitting, tone: 'green', busy: isSubmitting }
+            : { label: nextLabel, onClick: () => setStep(s => s + 1), disabled: !ready }}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="flex min-h-[calc(100vh-8rem)] flex-col">
       {/* Header with progress */}
       <div className="border-b border-gray-200 bg-white px-4 py-3">
         <div className="flex items-center justify-between">
           {isFreelancer && freelancerContext?.returnUrl ? (
-            <a href={freelancerContext.returnUrl} className="text-sm text-gray-500 hover:text-gray-700">
+            // The job page, never the completion screen (see portalJobUrl).
+            <a href={portalJobUrl(freelancerContext.returnUrl) ?? undefined} className="text-sm text-gray-500 hover:text-gray-700">
               ← Back
             </a>
           ) : (
@@ -3117,75 +3375,4 @@ function formatShortDate(dateStr: string): string {
 function nowHHmm(): string {
   const d = new Date()
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
-/* ──────────────────────────────────────────────
- * Freelancer van-confirmation screen
- *
- * Shown on arrival from the portal, before the book-out wizard itself.
- * Surfaces the allocated van reg + make/model + job number so the driver
- * can sanity-check before starting the walkaround. Wrong van → "back to
- * portal" kicks them out to re-click the delivery card, which will mint
- * a fresh token (giving staff a chance to fix the allocation).
- * ────────────────────────────────────────────── */
-
-function FreelancerVanConfirmScreen({
-  context,
-  onConfirm,
-}: {
-  context: {
-    vehicleReg?: string
-    vehicleMakeModel?: string
-    jobId: string
-    driverName?: string
-    returnUrl: string | null
-  }
-  onConfirm: () => void
-}) {
-  return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-gray-50 px-4 py-8">
-      <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-          Book-out · Confirm vehicle
-        </p>
-        <h1 className="mt-2 text-3xl font-bold text-ooosh-navy">
-          {context.vehicleReg || 'Loading…'}
-        </h1>
-        {context.vehicleMakeModel && (
-          <p className="mt-1 text-sm text-gray-700">{context.vehicleMakeModel}</p>
-        )}
-        <dl className="mt-5 space-y-2 border-t border-gray-100 pt-4 text-sm">
-          {context.driverName && (
-            <div className="flex justify-between gap-4">
-              <dt className="text-gray-500">Driver</dt>
-              <dd className="text-gray-900">{context.driverName}</dd>
-            </div>
-          )}
-          <div className="flex justify-between gap-4">
-            <dt className="text-gray-500">HireHop job</dt>
-            <dd className="font-mono text-gray-900">#{context.jobId}</dd>
-          </div>
-        </dl>
-        <p className="mt-5 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
-          Check the reg matches the van you&apos;re taking. If it doesn&apos;t, go back to
-          the portal &mdash; someone&apos;s mis-allocated and we can fix it.
-        </p>
-        <button
-          type="button"
-          onClick={onConfirm}
-          className="mt-5 w-full rounded-lg bg-ooosh-navy py-3 text-base font-semibold text-white active:bg-opacity-90"
-        >
-          Yes, start book-out
-        </button>
-        {context.returnUrl && (
-          <a
-            href={context.returnUrl}
-            className="mt-3 block w-full rounded-lg border border-gray-200 py-3 text-center text-sm font-medium text-gray-700"
-          >
-            Wrong van — back to portal
-          </a>
-        )}
-      </div>
-    </div>
-  )
 }

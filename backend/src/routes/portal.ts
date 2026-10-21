@@ -16,7 +16,7 @@ import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import crypto from 'crypto';
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
 import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline, getJobEmailRecipients } from '../services/money-emails';
@@ -27,6 +27,9 @@ import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo, shiftLinkPat
 import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
 import { greetingName, fullDisplayName } from '../services/display-name';
 import { ukToday } from '../services/uk-date';
+import { isEndKeyed, lastWorkDay } from '../services/quote-schedule';
+import { isVanLegDone } from '../services/quote-completion';
+import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures } from '../services/staff-login-security';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -73,7 +76,7 @@ function deriveCrewMoney(rawExpenses: unknown): CrewMoney {
   } else if (pdMode === 'not_included') {
     perDiem = { label: 'Per Diem', message: `The client is paying your Per Diem${pdAmtStr} directly.`, tone: 'client' };
   } else {
-    perDiem = { label: 'Per Diem', message: `We're paying your Per Diem${pdAmtStr} — please include it on your invoice to us.`, tone: 'ooosh' };
+    perDiem = { label: 'Per Diem', message: `We're paying your Per Diem${pdAmtStr}. Please include it on your invoice to us.`, tone: 'ooosh' };
   }
 
   // Other expense lines — only when they apply (mode ≠ na and amount > 0).
@@ -90,13 +93,13 @@ function deriveCrewMoney(rawExpenses: unknown): CrewMoney {
     if (mode === 'not_included') {
       message = CREW_PREBOOKED.has(type)
         ? `The client is arranging & paying the ${lower} directly.`
-        : `The client covers ${lower} directly — nothing for you to pay or claim.`;
+        : `The client covers ${lower} directly, so there's nothing for you to pay or claim.`;
       tone = 'client';
     } else if (CREW_FRONTED.has(type)) {
       message = `Pay for the ${lower} yourself and include it on your invoice to us.`;
       tone = 'claim';
     } else if (CREW_PREBOOKED.has(type)) {
-      message = `${label} is booked & paid by Ooosh — nothing for you to arrange.`;
+      message = `${label} is booked & paid by Ooosh, so there's nothing for you to arrange.`;
       tone = 'ooosh';
     } else {
       message = `Include the ${lower} on your invoice to us.`;
@@ -116,7 +119,7 @@ const router = Router();
 const portalLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
-  message: { error: 'Too many attempts — try again in 15 minutes' },
+  message: { error: 'Too many attempts. Try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -124,7 +127,7 @@ const portalLoginLimiter = rateLimit({
 const portalEmailLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
-  message: { error: 'Too many requests — try again in 15 minutes' },
+  message: { error: 'Too many requests. Try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -160,6 +163,12 @@ if (PORTAL_SECRET === process.env.JWT_SECRET) {
   throw new Error('FATAL: the portal session secret must differ from JWT_SECRET');
 }
 
+/** May this person use the portal? An approved, current freelancer. */
+function portalAccessAllowed(p: { is_freelancer?: boolean; is_approved?: boolean; is_deleted?: boolean }): boolean {
+  return p.is_freelancer === true && p.is_approved === true && p.is_deleted !== true;
+}
+const PORTAL_ACCESS_ENDED = 'Your access to the freelancer portal has ended. If you think that\'s a mistake, please contact us.';
+
 async function portalAuth(req: PortalRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     // Check session cookie first, then Authorization header
@@ -171,7 +180,13 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
       return;
     }
 
-    const decoded = jwt.verify(token, PORTAL_SECRET) as { id: string; email: string; name: string; iat: number; exp: number };
+    let decoded: { id: string; email: string; name: string; iat: number; exp: number };
+    try {
+      decoded = jwt.verify(token, PORTAL_SECRET) as typeof decoded;
+    } catch {
+      res.status(401).json({ error: 'Invalid or expired session' });
+      return;
+    }
 
     // Shape check kept as a second line even though PORTAL_SECRET is now its
     // own secret: a portal login is { id, email, name } and never carries a
@@ -181,23 +196,45 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
       return;
     }
 
-    // Look up the shared-account flag fresh on every request — the JWT was
-    // minted before the flag existed for some tokens, and this lets us
-    // toggle staff access by updating the DB without forcing re-login.
-    const flagResult = await query(
-      `SELECT is_portal_shared_account FROM people WHERE id = $1`,
+    // Read the person fresh on every request: the shared-account flag (so staff
+    // access can be toggled without a re-login), and whether they may still use
+    // the portal at all. Until Oct 2026 a session kept working for its full 30
+    // days after a freelancer was removed or un-approved.
+    const personResult = await query(
+      `SELECT is_portal_shared_account, is_freelancer, is_approved, is_deleted, portal_sessions_valid_after
+       FROM people WHERE id = $1`,
       [decoded.id]
     );
+    const person = personResult.rows[0];
+    if (!person || !portalAccessAllowed(person)) {
+      res.status(401).json({ error: PORTAL_ACCESS_ENDED, code: 'account_inactive' });
+      return;
+    }
+    // Sessions issued before a password reset are signed out. `iat` is whole
+    // seconds, and the session straight after a reset is minted by the Netlify
+    // app on ITS clock, so the cut-off allows a minute either way rather than
+    // signing someone out of the session their reset just gave them.
+    if (person.portal_sessions_valid_after) {
+      const cutoff = Math.floor(new Date(person.portal_sessions_valid_after).getTime() / 1000) - 60;
+      if (!decoded.iat || decoded.iat < cutoff) {
+        res.status(401).json({ error: 'Please log in again', code: 'session_revoked' });
+        return;
+      }
+    }
 
     req.portalUser = {
       id: decoded.id,
       email: decoded.email,
       name: decoded.name,
-      isStaffShared: flagResult.rows[0]?.is_portal_shared_account === true,
+      isStaffShared: person.is_portal_shared_account === true,
     };
     next();
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired session' });
+  } catch (err) {
+    // Not a session problem (the token was checked above): a database blip.
+    // Never answer 401 here — the portal treats 401 as "logged out" and clears
+    // the cookie, so a hiccup would sign every freelancer out.
+    console.error('[portal-auth] account check failed:', (err as Error).message);
+    res.status(503).json({ error: 'The portal is having trouble right now. Please try again in a moment.' });
   }
 }
 
@@ -235,7 +272,7 @@ router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Respons
     // Find freelancer in people table
     const result = await query(
       `SELECT p.id, p.first_name, p.last_name, p.preferred_name, p.email, p.portal_password_hash,
-              p.is_freelancer, p.is_approved, p.portal_email_verified
+              p.is_freelancer, p.is_approved, p.is_deleted, p.portal_email_verified
        FROM people p
        WHERE LOWER(p.email) = $1 AND p.is_freelancer = true AND p.is_deleted = false
        ORDER BY p.is_approved DESC, p.portal_last_login DESC NULLS LAST
@@ -250,32 +287,37 @@ router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Respons
 
     const freelancer = result.rows[0];
 
-    // Check if they have a portal password set
+    // The portal password only. Until Oct 2026 an account with no portal
+    // password fell back to the person's OP STAFF password, which let it in
+    // without OP's second factor. No portal password = register (or reset).
     if (!freelancer.portal_password_hash) {
-      // Fallback: check if they have a user account in the OP
-      const userResult = await query(
-        `SELECT u.password_hash FROM users u
-         JOIN people p ON p.id = u.person_id
-         WHERE LOWER(u.email) = $1 AND u.is_active = true`,
-        [normalizedEmail]
-      );
+      res.status(401).json({ error: 'Account not set up. Please register first.' });
+      return;
+    }
 
-      if (userResult.rows.length > 0) {
-        const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
-        if (!valid) {
-          res.status(401).json({ error: 'Invalid email or password' });
-          return;
-        }
-      } else {
-        res.status(401).json({ error: 'Account not set up. Please register first.' });
-        return;
-      }
-    } else {
-      const valid = await bcrypt.compare(password, freelancer.portal_password_hash);
-      if (!valid) {
-        res.status(401).json({ error: 'Invalid email or password' });
-        return;
-      }
+    // Per-account slowdown on wrong passwords (the per-IP limiter above sees
+    // every freelancer as Netlify's few addresses). Every 5th failure blocks.
+    const wait = await portalSecondsBlocked(freelancer.id);
+    if (wait > 0) {
+      res.status(429).json({
+        error: 'Sign-in is paused after too many attempts. Please reset your password using "Forgotten it?", or try again later.',
+        retryAfter: wait,
+      });
+      return;
+    }
+    const valid = await bcrypt.compare(password, freelancer.portal_password_hash);
+    if (!valid) {
+      await recordPortalLoginFailure(freelancer.id);
+      res.status(401).json({ error: 'Invalid email or password' });
+      return;
+    }
+    await clearPortalLoginFailures(freelancer.id);
+
+    // Right password, but no longer an approved freelancer: say so, rather
+    // than "wrong password" (they know the password, so this leaks nothing).
+    if (!portalAccessAllowed(freelancer)) {
+      res.status(403).json({ error: PORTAL_ACCESS_ENDED, code: 'account_inactive' });
+      return;
     }
 
     // Display only — the portal dashboard greets from this claim and settings
@@ -373,8 +415,8 @@ router.post('/auth/register/start', portalEmailLimiter, async (req: Request, res
       return;
     }
 
-    // Generate 6-digit code, 15 min TTL
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    // 6-digit code from a secure source, 15 min TTL
+    const code = String(crypto.randomInt(100000, 1000000));
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
     await query(
@@ -421,13 +463,13 @@ router.post('/auth/register/verify', portalLoginLimiter, async (req: Request, re
     );
 
     if (result.rows.length === 0) {
-      res.status(400).json({ error: 'No active code — please request a new one' });
+      res.status(400).json({ error: 'No active code. Please request a new one.' });
       return;
     }
 
     const row = result.rows[0];
     if (row.attempts >= 5) {
-      res.status(429).json({ error: 'Too many attempts — please request a new code' });
+      res.status(429).json({ error: 'Too many attempts. Please request a new code.' });
       return;
     }
 
@@ -503,6 +545,7 @@ router.post('/auth/register/complete', portalLoginLimiter, async (req: Request, 
        WHERE id = $2`,
       [passwordHash, person.id]
     );
+    await clearPortalLoginFailures(person.id);
 
     // Issue session token (same shape as login)
     const name = fullDisplayName(person);
@@ -671,33 +714,43 @@ router.post('/auth/reset-password', portalLoginLimiter, async (req: Request, res
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Transaction: set password + mark token used
-    await query('BEGIN');
+    // Transaction: set password + mark token used. On ONE client — BEGIN /
+    // COMMIT through the shared pool can land on different connections, which
+    // is no transaction at all (and can strand one open on a pooled client).
+    // A new password also signs out every existing session
+    // (portal_sessions_valid_after, read by portalAuth): a reset is what
+    // someone does when they think their login is known to somebody else.
+    const client = await getClient();
     try {
-      await query(
+      await client.query('BEGIN');
+      await client.query(
         `UPDATE people
          SET portal_password_hash = $1,
              portal_email_verified = true,
-             portal_last_login = NOW()
+             portal_last_login = NOW(),
+             portal_sessions_valid_after = NOW()
          WHERE id = $2`,
         [passwordHash, row.person_id]
       );
-      await query(
+      await client.query(
         `UPDATE portal_password_reset_tokens SET used_at = NOW() WHERE id = $1`,
         [row.id]
       );
       // Invalidate all other pending tokens for this person
-      await query(
+      await client.query(
         `UPDATE portal_password_reset_tokens
          SET used_at = NOW()
          WHERE person_id = $1 AND used_at IS NULL AND id != $2`,
         [row.person_id, row.id]
       );
-      await query('COMMIT');
+      await client.query('COMMIT');
     } catch (err) {
-      await query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
       throw err;
+    } finally {
+      client.release();
     }
+    await clearPortalLoginFailures(row.person_id);
 
     // Issue session token so they go straight into the portal
     const name = fullDisplayName(row);
@@ -926,6 +979,29 @@ function addDaysIsoP(iso: string, days: number): string {
   return dt.toISOString().slice(0, 10);
 }
 
+/** The furthest back `?since=` reaches: six whole months is ~186 days. */
+const SINCE_MAX_DAYS = 200;
+
+/**
+ * `?since=YYYY-MM-DD` on the portal's three list routes (jobs, studio-sitter
+ * shifts, day bookings): how far back finished work goes, one rule for every
+ * kind (FREELANCER-PORTAL-SPEC §10). The portal sends the 1st of last month,
+ * or six months back for "Show older". Malformed → null (the route's own
+ * default); clamped to the last SINCE_MAX_DAYS so a hand-typed URL cannot turn
+ * a phone list into a years-long read.
+ */
+function parseSince(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const [y, m, d] = raw.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  // Rejects a date that doesn't exist (2026-02-31 would roll into March).
+  if (Number.isNaN(dt.getTime()) || dt.toISOString().slice(0, 10) !== raw) return null;
+  const today = ukToday();
+  const floor = addDaysIsoP(today, -SINCE_MAX_DAYS);
+  if (raw < floor) return floor;
+  return raw > today ? today : raw;
+}
+
 // GET /api/portal/studio-sitter/shifts — the sitter's upcoming/recent shifts
 router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
   try {
@@ -936,8 +1012,15 @@ router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) =>
     // assignments, so a wide window stays cheap.
     const from = addDaysIsoP(today, -14);
     const to = addDaysIsoP(today, 365);
-    const shifts = await getSitterShifts(req.portalUser!.id, from, to);
-    res.json({ success: true, shifts });
+    // `?since=` adds `past`: every night before tonight back to that date, for
+    // the Completed page and its count (FREELANCER-PORTAL-SPEC §10). `shifts`
+    // keeps its 14-day look-back either way, so the dashboard is unchanged.
+    // Until Oct 2026 a night simply vanished from the portal after 14 days.
+    const since = parseSince(req.query.since);
+    const all = await getSitterShifts(req.portalUser!.id, since && since < from ? since : from, to);
+    const shifts = all.filter(s => s.date >= from);
+    if (!since) { res.json({ success: true, shifts }); return; }
+    res.json({ success: true, shifts, past: all.filter(s => s.date >= since && s.date < today) });
   } catch (error) {
     console.error('Portal sitter shifts error:', error);
     res.status(500).json({ error: 'Failed to load shifts' });
@@ -1521,7 +1604,7 @@ router.post('/studio-sitter/shifts/:date/till/sales', async (req: PortalRequest,
       res.status(409).json({
         error: (await isLockedUp(gate.shiftId))
           ? "You've locked up for the night, so the till is closed. Leave the office a note about anything else."
-          : 'The till for this evening is closed — sales can only be taken on the night.',
+          : 'The till for this evening is closed. Sales can only be taken on the night.',
       });
       return;
     }
@@ -1596,7 +1679,7 @@ router.post('/studio-sitter/shifts/:date/till/sales/:id/receipt', async (req: Po
     if (!own.rows.length) { res.status(404).json({ error: "That isn't one of tonight's sales." }); return; }
     const { sendShopReceipt } = await import('../services/shop-receipts');
     const result = await sendShopReceipt(String(req.params.id), String(req.body?.to ?? ''), { id: null, personId: req.portalUser!.id });
-    if (!result.sent) { res.status(502).json({ error: `The receipt didn't send — ${result.error}` }); return; }
+    if (!result.sent) { res.status(502).json({ error: `The receipt didn't send: ${result.error}` }); return; }
     res.json({ success: true, sent: true });
   } catch (error) {
     // "Not an email address", "their bill — their invoice is the document".
@@ -2107,12 +2190,23 @@ router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
       return { ...presentDayBooking(b), tasks };
     }));
 
+    // `?since=` adds `done`: the days they worked (accepted or completed, the
+    // day gone) back to that date, for the Completed page and its count
+    // (FREELANCER-PORTAL-SPEC §10). `past` above keeps its own rule, unanswered
+    // offers included, so the dashboard is unchanged.
+    const since = parseSince(req.query.since);
+    const done = since
+      ? all.filter(b => b.bookingDate >= since && b.bookingDate < today
+          && ['accepted', 'completed'].includes(b.status))
+      : null;
+
     res.json({
       success: true,
       // The one they have to DO something about, so the portal can lead with it.
       awaitingReply: upcoming.filter(b => b.status === 'offered').length,
       upcoming: upcomingWithTasks,
       past: past.map(presentDayBooking),
+      ...(done ? { done: done.map(presentDayBooking) } : {}),
     });
   } catch (error) {
     console.error('Portal day-bookings error:', error);
@@ -2237,14 +2331,13 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         q.id, q.job_id, q.job_type, q.calculation_mode,
         q.venue_name, q.venue_id, q.distance_miles, q.drive_time_mins,
         q.arrival_time, q.job_date, q.job_finish_date, q.is_multi_day,
-        q.work_duration_hrs, q.num_days,
+        q.work_duration_hrs, q.num_days, q.crew_count,
         q.what_is_it, q.status, q.ops_status,
         q.client_introduction,
         q.work_type, q.work_type_other, q.work_description,
         q.freelancer_notes, q.freelancer_fee, q.freelancer_fee_rounded,
         q.run_group, q.run_order, q.run_group_fee,
         rg.combined_freelancer_fee as run_combined_freelancer_fee,
-        rg.combined_client_fee as run_combined_client_fee,
         rg.notes as run_notes,
         q.is_local, q.completed_at, q.completion_notes,
         q.client_name,
@@ -2289,10 +2382,13 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
       [personId]
     );
 
-    // Categorise into today/upcoming/completed/cancelled
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    // Categorise into today/upcoming/completed/cancelled. Completed and
+    // cancelled go back to `?since=` (the portal sends the 1st of last month,
+    // or six months back for "Show older": FREELANCER-PORTAL-SPEC §10), else
+    // 30 days. Today is the UK date: the UTC one filed today's jobs under
+    // "Later" between midnight and 1am in summer.
+    const todayStr = ukToday();
+    const since = parseSince(req.query.since) ?? addDaysIsoP(todayStr, -30);
 
     const today: unknown[] = [];
     const upcoming: unknown[] = [];
@@ -2311,11 +2407,11 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         : (typeof row.job_date === 'string' ? row.job_date.split('T')[0] : null);
 
       if (row.ops_status === 'completed' || row.status === 'completed') {
-        if (jobDateStr && jobDateStr >= thirtyDaysAgo) {
+        if (jobDateStr && jobDateStr >= since) {
           completed.push(item);
         }
       } else if (row.ops_status === 'cancelled' || row.status === 'cancelled') {
-        if (jobDateStr && jobDateStr >= thirtyDaysAgo) {
+        if (jobDateStr && jobDateStr >= since) {
           cancelled.push(item);
         }
       } else if (jobDateStr === todayStr) {
@@ -2369,7 +2465,6 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
       `SELECT
         q.*,
         rg.combined_freelancer_fee as run_combined_freelancer_fee,
-        rg.combined_client_fee as run_combined_client_fee,
         rg.notes as run_notes,
         qa.id as assignment_id, qa.role as assignment_role,
         qa.agreed_rate, qa.rate_type,
@@ -2419,7 +2514,18 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     }
 
     const row = result.rows[0];
-    const job = formatJobForPortal(row);
+    const job = {
+      ...formatJobForPortal(row),
+      // Has the van leg really happened? The van-only "All Done" screen shows
+      // "not yet" instead of a button when it hasn't (the /complete route
+      // refuses it too). Same check the server closes the quote on.
+      vanLegDone: await isVanLegDone({
+        van_leg_done_at: row.van_leg_done_at,
+        job_type: row.job_type,
+        job_id: row.job_id,
+        hh_job_number: row.hirehop_id,
+      }).catch(() => false),
+    };
 
     // Client contacts for the completion page's delivery-note picker — the
     // same list the warehouse collection page offers (jon, Oct 2026: the
@@ -2430,7 +2536,7 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     let clientEmail: string | null = null;
     const contactJobDate = row.job_date ? new Date(row.job_date) : null;
     const contactHoursUntilJob = contactJobDate ? (contactJobDate.getTime() - Date.now()) / (1000 * 60 * 60) : 999;
-    if (row.job_id && contactHoursUntilJob <= 48 && (row.job_type === 'delivery' || row.job_type === 'collection')) {
+    if (row.job_id && contactHoursUntilJob <= 48 && (row.job_type === 'delivery' || row.job_type === 'collection' || row.job_type === 'crewed')) {
       try {
         const [contacts, recipients] = await Promise.all([
           resolveJobEmailContacts(row.job_id),
@@ -2602,6 +2708,42 @@ router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response)
   }
 });
 
+// ── GET /api/portal/jobs/:quoteId/hirehop-ref — the job's HireHop number ──
+//
+// The portal's kit-list route (src/app/api/hirehop/items/[jobId]) reads
+// HireHop itself with the portal's own token, and until Oct 2026 handed ANY
+// job's list to any logged-in freelancer. It now asks this first: same access
+// rule as /equipment, nothing but the number back.
+
+router.get('/jobs/:quoteId/hirehop-ref', async (req: PortalRequest, res: Response) => {
+  try {
+    const quoteId = req.params.quoteId;
+    if (!isUuidLike(quoteId)) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const result = await query(
+      `SELECT j.hh_job_number
+       FROM quote_assignments qa
+       JOIN quotes q ON q.id = qa.quote_id
+       LEFT JOIN jobs j ON j.id = q.job_id
+       WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
+         AND q.is_deleted = false
+       LIMIT 1`,
+      [quoteId, req.portalUser!.id, req.portalUser!.isStaffShared]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const hh = result.rows[0].hh_job_number;
+    res.json({ success: true, hhRef: hh != null ? String(hh) : null });
+  } catch (error) {
+    console.error('Portal hirehop-ref error:', error);
+    res.status(500).json({ error: 'Failed to load job' });
+  }
+});
+
 // ── POST /api/portal/jobs/:quoteId/legs — declare which legs the job has ──
 //
 // The /start wizard ("van only / backline only / both") is the declaration of
@@ -2687,6 +2829,9 @@ const completionSchema = z.object({
   // equipment delivery note PDF + client email since there's no
   // equipment changing hands.
   vanOnly: z.preprocess((v) => v === 'true' || v === true, z.boolean()).default(false),
+  // Crew jobs only: the freelancer ticked "send the client a note of what's on
+  // the hire" (Oct 2026). Opt-in, unlike the delivery note.
+  sendHireNote: z.preprocess((v) => v === 'true' || v === true, z.boolean()).default(false),
 });
 
 router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next: NextFunction) => {
@@ -2716,6 +2861,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const accessCheck = await query(
       `SELECT qa.id AS assignment_id,
               q.id AS quote_id, q.ops_status, q.job_type, q.what_is_it,
+              q.van_leg_done_at,
               q.venue_name, q.venue_id, q.job_date,
               q.client_name AS quote_client_name,
               j.id AS job_id, j.job_name, j.hh_job_number AS hirehop_id, j.client_name AS job_client_name,
@@ -2744,8 +2890,31 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       return;
     }
 
-    const { notes, customerPresent, equipmentChecklist, clientEmails, sendClientEmail, staffName, vanOnly } = parsed.data;
+    const { notes, customerPresent, equipmentChecklist, clientEmails, sendClientEmail, staffName, vanOnly, sendHireNote } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+
+    // Van-only "All Done" is only true once the van has actually gone out (a
+    // delivery) or been collected (a collection). The portal used to land the
+    // freelancer on that screen from ANY back button on the van pages, and this
+    // completed the job — stopping the chaser — with nothing done (Oct 2026).
+    if (vanOnly) {
+      const { isVanLegDone } = await import('../services/quote-completion');
+      const done = await isVanLegDone({
+        van_leg_done_at: ctx.van_leg_done_at,
+        job_type: ctx.job_type,
+        job_id: ctx.job_id,
+        hh_job_number: ctx.hirehop_id,
+      });
+      if (!done) {
+        res.status(409).json({
+          error: ctx.job_type === 'collection'
+            ? "The van hasn't been collected on the system yet. Go back to the job and start the collection."
+            : "The van hasn't been booked out on the system yet. Go back to the job and start the book-out.",
+          code: 'van_leg_pending',
+        });
+        return;
+      }
+    }
 
     // ── Upload photos + signature to R2 (preferred storage) ────────
     // completion_photos / completion_signature store either an R2 key
@@ -2803,11 +2972,23 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       fullNotes = `[Customer not present] ${fullNotes}`.trim();
     }
 
-    // Parse equipment checklist if provided
-    let checklistData: Record<string, boolean> | null = null;
+    // The freelancer's equipment ticks, [{ name, quantity, checked }] (Oct 2026:
+    // kept for the first time; they used to be a screen-only aid). A bad list
+    // is never a reason to fail the completion.
+    let checklistItems: Array<{ name: string; quantity: number; checked: number }> = [];
     if (equipmentChecklist) {
       try {
-        checklistData = JSON.parse(equipmentChecklist);
+        const list = JSON.parse(equipmentChecklist);
+        if (Array.isArray(list)) {
+          checklistItems = list
+            .map((it: { name?: unknown; quantity?: unknown; checked?: unknown }) => ({
+              name: String(it?.name ?? '').trim().slice(0, 200),
+              quantity: Math.max(0, Math.floor(Number(it?.quantity) || 0)),
+              checked: Math.max(0, Math.floor(Number(it?.checked) || 0)),
+            }))
+            .filter((it) => it.name && it.quantity > 0)
+            .slice(0, 300);
+        }
       } catch {
         // ignore parse errors
       }
@@ -2834,7 +3015,8 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         completion_signature = $3,
         completion_photos = $4::jsonb,
         customer_present = $5,
-        equipment_leg_done_at = COALESCE(equipment_leg_done_at, NOW()),
+        equipment_leg_done_at = CASE WHEN $7::boolean THEN equipment_leg_done_at
+                                     ELSE COALESCE(equipment_leg_done_at, NOW()) END,
         updated_at = NOW()
        WHERE id = $6`,
       [
@@ -2844,6 +3026,9 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         JSON.stringify(photoRefs),
         customerPresent,
         quoteId,
+        // A van-only call is not an equipment hand-over; its van leg was
+        // stamped by the book-out / collection itself.
+        vanOnly,
       ]
     );
 
@@ -2859,17 +3044,31 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const { maybeCloseQuote } = await import('../services/quote-completion');
     await maybeCloseQuote(quoteId as string, { triggeringLeg: 'equipment', actorLabel: completedBy });
 
-    if (checklistData) {
+    // What was ticked at the hand-over, on the job's Activity Timeline. Nothing
+    // ticked means they didn't use the list (the page says that's fine), so no
+    // entry. (The insert this replaces named columns `interactions` doesn't have
+    // and would have failed the completion — the portal just never sent a list.)
+    const tickedCount = checklistItems.reduce((n, it) => n + Math.min(it.checked, it.quantity), 0);
+    if (ctx.job_id && tickedCount > 0) {
+      const totalCount = checklistItems.reduce((n, it) => n + it.quantity, 0);
+      const shown = checklistItems.slice(0, 80).map((it) => {
+        const got = Math.min(it.checked, it.quantity);
+        const mark = got >= it.quantity ? '✓' : got > 0 ? '◐' : '✗';
+        const qty = it.quantity === 1 ? ''
+          : got > 0 && got < it.quantity ? ` (${got} of ${it.quantity})` : ` ×${it.quantity}`;
+        return `${mark} ${it.name}${qty}`;
+      });
+      const more = checklistItems.length > shown.length ? `\n…and ${checklistItems.length - shown.length} more` : '';
+      const legLabel = ctx.job_type === 'collection' ? 'collection' : 'delivery';
       await query(
-        `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata, source)
-         VALUES ('completion', $1, 'quote', $2, $3, $4, 'system')`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
         [
-          `Job completed by ${completionName}`,
-          quoteId,
-          personId,
-          JSON.stringify({ equipmentChecklist: checklistData }),
+          `Equipment checklist at ${legLabel} by ${completionName}: ${tickedCount} of ${totalCount} ticked\n${shown.join('\n')}${more}`,
+          ctx.job_id,
+          SYSTEM_USER_ID,
         ]
-      );
+      ).catch((err) => console.error('[portal completion] checklist timeline note failed:', err));
     }
 
     // Return success IMMEDIATELY, fire PDF + emails in background
@@ -2878,8 +3077,15 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     // ── Background: PDF + client email + staff alert ──────────────
     (async () => {
       const jobType: string = ctx.job_type;
-      const isDelivery = jobType === 'delivery';
-      const isCollection = jobType === 'collection';
+      // A People job (driver + van with passengers) is a delivery/collection
+      // quote, but no equipment changes hands: no delivery note, no collection
+      // confirmation. A crew job sends a "what's on your hire" note only when
+      // the freelancer ticked it.
+      const isPeople = ctx.what_is_it === 'people';
+      const isDelivery = jobType === 'delivery' && !isPeople;
+      const isCollection = jobType === 'collection' && !isPeople;
+      const isCrewHireNote = jobType === 'crewed' && sendHireNote;
+      const noteTemplate = isCrewHireNote ? 'equipment_on_hire_note' : 'delivery_note';
       const jobName: string = ctx.job_name || ctx.linked_venue_name || ctx.venue_name || 'Ooosh Job';
       const clientName: string | null = ctx.job_client_name || ctx.quote_client_name || null;
       const venueName: string = ctx.linked_venue_name || ctx.venue_name || '';
@@ -2905,7 +3111,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // banner so the team can forward to the right person and update the
       // address book. Without this the delivery note silently disappears.
       let completionFallback: { jobId: string; clientName: string | null; jobNumber: string | null; jobName: string | null } | null = null;
-      const clientEmailDue = (isDelivery && !vanOnly) || isCollection;
+      const clientEmailDue = (isDelivery && !vanOnly) || isCollection || isCrewHireNote;
       if (clientEmailDue && sendClientEmail) {
         if (clientEmails) {
           clientEmails.split(',').map(e => e.trim()).filter(Boolean).forEach(e => recipients.add(e));
@@ -2914,7 +3120,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         if (recipients.size === 0 && ctx.job_id) {
           const target = await resolveClientEmailTarget(
             ctx.job_id,
-            isCollection ? 'collection_confirmation' : 'delivery_note',
+            isCollection ? 'collection_confirmation' : noteTemplate,
           );
           if (!target.isFallback) {
             recipients.add(target.primaryEmail);
@@ -2937,7 +3143,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // Skip for van-only book-outs — there's no equipment to acknowledge,
       // and the OP book-out flow emits its own vehicle condition report
       // which IS the relevant artefact.
-      if (isDelivery && !vanOnly && recipients.size > 0 && ctx.hirehop_id) {
+      if (((isDelivery && !vanOnly) || isCrewHireNote) && recipients.size > 0 && ctx.hirehop_id) {
         try {
           // Pull equipment from HireHop via broker.
           // Line items live on /frames/items_to_supply_list.php (not job_data.php).
@@ -2982,14 +3188,15 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
             deliveryAddress: [ctx.venue_address, ctx.venue_city, ctx.venue_postcode]
               .filter(Boolean).join(', ') || undefined,
             items,
-            signature: signatureBuffer,
+            signature: isCrewHireNote ? null : signatureBuffer,
             photos: photoUploads.map(p => p.buffer),
             driverName: completionName,
+            variant: isCrewHireNote ? 'hire' : 'delivery',
           });
 
           // Store the PDF in R2 for future re-access
           if (isR2Configured()) {
-            const pdfKey = `delivery-notes/${quoteId}/delivery-note-${Date.now()}.pdf`;
+            const pdfKey = `delivery-notes/${quoteId}/${isCrewHireNote ? 'hire-note' : 'delivery-note'}-${Date.now()}.pdf`;
             try {
               await uploadToR2(pdfKey, pdfBuffer, 'application/pdf');
             } catch (err) {
@@ -3000,7 +3207,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
           // Email each recipient
           for (const to of recipients) {
             try {
-              await emailService.send('delivery_note', {
+              await emailService.send(noteTemplate, {
                 to,
                 variables: {
                   clientName: clientName || 'there',
@@ -3013,7 +3220,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
                 },
                 prependBanner: completionFallback ? buildFallbackBanner(completionFallback) : undefined,
                 attachments: [{
-                  filename: `delivery-note-${ctx.hirehop_id}.pdf`,
+                  filename: `${isCrewHireNote ? 'equipment-on-hire' : 'delivery-note'}-${ctx.hirehop_id}.pdf`,
                   content: pdfBuffer,
                   contentType: 'application/pdf',
                 }],
@@ -3023,7 +3230,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
             }
           }
           if (completionFallback) {
-            await logFallbackToTimeline({ jobId: completionFallback.jobId, templateId: 'delivery_note' });
+            await logFallbackToTimeline({ jobId: completionFallback.jobId, templateId: noteTemplate });
           }
         } catch (err) {
           console.error('[portal completion] Delivery note PDF/email failed:', err);
@@ -3169,49 +3376,23 @@ router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => 
   }
 });
 
-// ── GET /api/portal/venues/:id — venue detail for portal ─────────────
-
-router.get('/venues/:id', async (req: PortalRequest, res: Response) => {
-  try {
-    const result = await query(
-      `SELECT v.id, v.name, v.address, v.city, v.postcode,
-              v.w3w_address AS what_three_words,
-              COALESCE(v.approach_notes, v.general_notes) AS notes,
-              v.files
-       FROM venues v WHERE v.id = $1`,
-      [req.params.id]
-    );
-
-    if (result.rows.length === 0) {
-      res.status(404).json({ error: 'Venue not found' });
-      return;
-    }
-
-    const v = result.rows[0];
-    res.json({
-      success: true,
-      venue: {
-        id: v.id,
-        name: v.name,
-        address: v.address,
-        city: v.city,
-        postcode: v.postcode,
-        whatThreeWords: v.what_three_words,
-        // Venue contacts not stored on venues table — surfaced via org people link
-        contact1: null,
-        phone: null,
-        email: null,
-        accessNotes: v.notes,
-        files: v.files || [],
-      },
-    });
-  } catch (error) {
-    console.error('Portal venue error:', error);
-    res.status(500).json({ error: 'Failed to load venue' });
-  }
-});
-
 // ── Helper: format a quote row into portal-friendly shape ────────────
+
+/**
+ * This freelancer's fee on a quote: their own agreed rate when staff set one,
+ * else the quote's fee. A crewed quote for more than one person stores the
+ * WHOLE crew's fee (applyCrewMultiplier), so without a personal rate it is split
+ * evenly — each of a crew of three used to be shown the full three-person figure
+ * (Oct 2026). Per-person rates by role are a later piece of work (Earnings).
+ */
+function personalFee(row: Record<string, unknown>): number {
+  // Any rate staff typed wins, even £0 (NUMERIC arrives as a string, so the old
+  // `agreed_rate || fee` honoured an explicit '0.00' too).
+  if (row.agreed_rate != null && String(row.agreed_rate).trim() !== '') return Number(row.agreed_rate) || 0;
+  const quoteFee = Number(row.freelancer_fee_rounded || row.freelancer_fee || 0);
+  const crew = row.job_type === 'crewed' ? Math.max(1, Math.floor(Number(row.crew_count) || 1)) : 1;
+  return Math.round((quoteFee / crew) * 100) / 100;
+}
 
 function formatJobForPortal(row: Record<string, unknown>) {
   const jobType = row.job_type as string;
@@ -3243,6 +3424,9 @@ function formatJobForPortal(row: Record<string, unknown>) {
     time: row.arrival_time as string | null,
     venueName: (row.linked_venue_name || row.venue_name) as string | null,
     venueId: row.venue_id as string | null,
+    // The venue's town, for the job cards' "10:00 AM · Islington" line (Oct 2026
+    // refresh). Null when the quote has no linked venue.
+    venueCity: (row.venue_city as string | null) ?? null,
     hhRef: row.hirehop_id ? String(row.hirehop_id) : null,
     status: portalStatus,
     opsStatus,
@@ -3262,13 +3446,13 @@ function formatJobForPortal(row: Record<string, unknown>) {
     runGroupFee: row.run_group_fee as number | null,
     runCombinedFreelancerFee: row.run_combined_freelancer_fee != null
       ? Number(row.run_combined_freelancer_fee) : null,
-    runCombinedClientFee: row.run_combined_client_fee != null
-      ? Number(row.run_combined_client_fee) : null,
+    // The run's CLIENT price is deliberately not sent: the portal never showed
+    // it, and a freelancer has no business seeing what the client pays (Oct 2026).
     runNotes: row.run_notes as string | null,
     // Fee info — individual quote fee, NOT the run combined fee. The
     // portal consumer (Next.js) sums driverPay across siblings and
     // replaces with runCombinedFreelancerFee at display time when set.
-    driverPay: Number(row.agreed_rate || row.freelancer_fee_rounded || row.freelancer_fee || 0),
+    driverPay: personalFee(row),
     // Freelancer notes
     freelancerNotes: row.freelancer_notes as string | null,
     // Who to call on this leg. Staff-picked from the people already on the
@@ -3321,6 +3505,10 @@ function formatJobForPortal(row: Record<string, unknown>) {
     })(),
     // Plain-English "your money on this job" for the freelancer (fee is separate).
     crewMoney: deriveCrewMoney(row.expenses),
+    // Crew and People work: the freelancer completes it from the start of its
+    // last day (services/quote-schedule.ts, shared with the chaser). Null for
+    // ordinary deliveries/collections, which complete via Start as before.
+    completeFrom: isEndKeyed(row) ? lastWorkDay(row) : null,
   };
 
   if (isCrew) {
@@ -3334,7 +3522,7 @@ function formatJobForPortal(row: Record<string, unknown>) {
       workDescription: row.work_description as string | null,
       numberOfDays: row.num_days as number | null,
       finishDate: row.job_finish_date as string | null,
-      freelancerFee: Number(row.agreed_rate || row.freelancer_fee_rounded || row.freelancer_fee || 0),
+      freelancerFee: personalFee(row),
       distanceMiles: row.distance_miles as number | null,
       driveTimeMinutes: row.drive_time_mins as number | null,
       expenses: row.expenses || [],

@@ -426,3 +426,54 @@ the way it came without jon.
 - **Left, deliberately:** §9.5 (online pre-auth with extended authorisation — the portal repo);
   cancelling Worldpay/Amex in March 2027; Tap to Pay, offline mode and tips (§10).
 
+
+## 17. After the first live excess (21 Oct 2026)
+
+Job 16564 (a 4-day hire): the excess was taken on the reader as a **payment** when a pre-auth was
+offered. Checked against the data: the dates gave exactly 4 days, the record was untouched, so
+"Pre-auth on card reader" was the green first option and the payment was picked below it. Not a
+bug. What changed:
+
+- **Failsafe.** "Excess payment on card reader" asks first (`window.confirm`) whenever the reader
+  would take a pre-auth on that record. A prompt, never a block (`ExcessPaymentModal.tsx`).
+- **"Record Pre-Auth" (admin only) is hidden on a known hire of 5+ days**, from the page's job dates
+  or the reader's own `long_hire` verdict (`excessReaderOptions()` reads the job's dates when the
+  modal opens, so a hire changed in HireHop is reflected once the sync has it). Length unknown —
+  screens that don't pass `hireDays` — keeps the old behaviour.
+- **A Stripe hold is worded "release it when the van is back"**, not "it releases on its own —
+  nothing to do" (`lib/preauth.ts` `describePreauth()`, so the Money tab row, the Manage modal and
+  the post-hire excess card all say it). A reader hold uses extended authorisation (§1.5) and can sit
+  on the client's card for up to 30 days; the old wording was right only for the short online hold.
+  Card-machine holds keep the old wording (we can't release those). The action reads
+  **"Release hold (no claim - frees the client's card)"**, the counterpart to Capture.
+- **Spinner** on "Waiting for card..." and "Card approved - recording..." (`CardReaderPayment.tsx`).
+  The recording wait is the HireHop deposit push, which the broker throttles.
+- **"Send receipt?" re-ticks today's addresses.** `defaultReceiptRecipients()` adds anyone a person
+  sent a reader receipt to on the same job earlier the same UK day (`terminal_sessions.receipt_sent_to`,
+  `receipt_status = 'sent'`), after the usual recipients, once each. So an address typed for the hire
+  payment is ticked again for the excess. Today only, on purpose: a payer at the desk is not a job
+  contact. Nothing is saved to the address book. The 15-minute sweep still sends to the usual
+  recipient only.
+- **Parked:** whether the reader's 30-day window should widen the "4 days or fewer" rule (§1.5, §9.5).
+
+## 18. A deploy restart straight after a card receipt (21 Oct 2026)
+
+Job 16169: the excess was taken on the reader and "Send receipt" answered 200 (the email went), then a
+deploy restart 4 seconds later cut off the Money tab's reload. nginx answered 502 with its own page, the
+app could only say "Request failed", and the whole Money tab turned into a red box until the page was
+refreshed. Nothing was wrong with the payment or the receipt. What changed:
+
+- **The Money tab asks again** (3s, then 10s) when no reply came back (`api.ts` `isNoReply()` — nginx's
+  page, not one of our own JSON 502/503s), and a refresh that still fails keeps the figures on screen
+  under an amber "Couldn't refresh - these figures may be out of date" line with a Refresh button. The
+  red box is only for a first load with nothing to show.
+- **No reply reads as no reply:** "No reply from the server - it may be restarting, or still working.
+  Refresh the page to check before trying again." instead of "Request failed", everywhere.
+- **The server finishes what it is doing before it stops** (`index.ts`, SIGTERM, up to 60s): a card
+  payment being recorded (the webhook or the screen's own status check — both inside a request) is no
+  longer cut off half-way. New requests are refused while it drains, as before.
+- **`deploy/safe-restart.sh`** (OPTIONAL — the plain `systemctl restart` stays the normal restart, jon's call) waits
+  for any reader payment in progress (`pending` / `recording`, started in the last 20 minutes) before
+  restarting — up to 5 minutes, then stops without restarting and says which payment. `FORCE=1` overrides.
+- **Not built:** an alert for a session stuck in `recording` (a crash, or a recording longer than the 60s grace, could still leave one; nothing
+  picks it up), and the post-response hooks `recordPayment()` starts are still not waited for.

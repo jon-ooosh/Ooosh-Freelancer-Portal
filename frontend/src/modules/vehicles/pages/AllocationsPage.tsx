@@ -21,7 +21,7 @@ import { useAllocations, useSaveAllocations } from '../hooks/useAllocations'
 import { useDriverHireForms } from '../hooks/useDriverHireForms'
 import { extractVanRequirements } from '../lib/hirehop-api'
 import { findMatchingVehicles, formatVanType, getVehicleGearboxLabel, vehicleNeedsPrepWarning } from '../lib/van-matching'
-import { useAvailability } from '../hooks/useAvailability'
+import { useAvailability, type UnavailableAssignment } from '../hooks/useAvailability'
 import type { HireHopJob, VanAllocation, VanRequirement } from '../types/hirehop'
 import type { Vehicle } from '../types/vehicle'
 import { ForSalePill } from '../components/sales/ForSalePill'
@@ -567,6 +567,19 @@ function RequirementSlots({
     [vehicles, requirement, unavailableIds],
   )
 
+  // Vans of the right type that ARE held on another job over these dates.
+  // Shown greyed out under the free ones with what's holding them, so a
+  // "missing" van explains itself (RX72TKO / HH 16768, Oct 2026: the van
+  // was simply absent and it took a DB query to find the hold).
+  const heldVehicles = useMemo<HeldVehicle[]>(() => {
+    const holds = new Map((availability?.unavailable ?? []).map(u => [u.vehicleId, u]))
+    if (holds.size === 0) return []
+    return findMatchingVehicles(vehicles, requirement, new Set())
+      .filter(v => holds.has(v.id))
+      .map(v => ({ vehicle: v, hold: holds.get(v.id)! }))
+  }, [vehicles, requirement, availability])
+  const heldNote = heldVehicles.length > 0 ? `, ${heldVehicles.length} held` : ''
+
   /**
    * Cascade-link a van to this driver AND to every other hire-form
    * assignment that's on the same job + same van-requirement slot and
@@ -806,6 +819,7 @@ function RequirementSlots({
                 {linkPickerForId === allocation.id ? (
                   <VanPicker
                     vehicles={matchingVehicles}
+                    held={heldVehicles}
                     onSelect={(vehicle) => linkVehicleToHireForm(allocation.id, vehicle)}
                     onCancel={() => setLinkPickerForId(null)}
                   />
@@ -820,7 +834,7 @@ function RequirementSlots({
                         const ready = matchingVehicles.filter(v => v.hireStatus === 'Available').length
                         return ready < matchingVehicles.length ? `, ${ready} ready` : ''
                       })()
-                    })
+                    }{heldNote})
                   </button>
                 )}
               </div>
@@ -838,6 +852,7 @@ function RequirementSlots({
                 {changeVanForId === allocation.id ? (
                   <VanPicker
                     vehicles={matchingVehicles}
+                    held={heldVehicles}
                     onSelect={(vehicle) => changeVanOnHireForm(allocation.id, vehicle)}
                     onCancel={() => setChangeVanForId(null)}
                   />
@@ -915,11 +930,12 @@ function RequirementSlots({
                   const ready = matchingVehicles.filter(v => v.hireStatus === 'Available').length
                   return ready < matchingVehicles.length ? `, ${ready} ready` : ''
                 })()
-              })
+              }{heldNote})
             </button>
           ) : (
             <VanPicker
               vehicles={matchingVehicles}
+              held={heldVehicles}
               onSelect={(vehicle) => {
                 onAllocate(job, requirementIndex, vehicle, 'Staff')
                 setShowPicker(false)
@@ -937,23 +953,47 @@ function RequirementSlots({
  * Van Picker — shows matching available vehicles
  * ────────────────────────────────────────────── */
 
+/** A van of the right type that's held on another job over these dates. */
+type HeldVehicle = { vehicle: Vehicle; hold: UnavailableAssignment }
+
+/** What the hold is, in plain words. */
+function holdLabel(status: string): string {
+  if (status === 'soft') return 'Pencilled in'
+  if (status === 'confirmed') return 'Allocated'
+  if (status === 'booked_out' || status === 'active') return 'Out on hire'
+  return status
+}
+
+/** "Mon 19 Oct 09:00" from a YYYY-MM-DD date + optional HH:MM, or null. */
+function formatHoldPoint(date: string | null, time?: string | null): string | null {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
+  const d = new Date(`${date}T00:00:00`)
+  if (Number.isNaN(d.getTime())) return null
+  const day = d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+  return time ? `${day} ${time}` : day
+}
+
 function VanPicker({
   vehicles,
+  held = [],
   onSelect,
   onCancel,
 }: {
   vehicles: Vehicle[]
+  held?: HeldVehicle[]
   onSelect: (vehicle: Vehicle) => void
   onCancel: () => void
 }) {
   const [search, setSearch] = useState('')
   const openSales = useOpenSalesByVehicle()
 
-  const filtered = vehicles.filter(v => {
+  const matchesSearch = (v: Vehicle) => {
     if (!search) return true
     const term = search.toLowerCase()
     return `${v.reg} ${v.make} ${v.model}`.toLowerCase().includes(term)
-  })
+  }
+  const filtered = vehicles.filter(matchesSearch)
+  const filteredHeld = held.filter(h => matchesSearch(h.vehicle))
 
   const availableCount = vehicles.filter(v => v.hireStatus === 'Available').length
 
@@ -972,7 +1012,7 @@ function VanPicker({
         </button>
       </div>
 
-      {vehicles.length > 3 && (
+      {vehicles.length + held.length > 3 && (
         <input
           type="text"
           placeholder="Search reg..."
@@ -984,7 +1024,9 @@ function VanPicker({
       )}
 
       {filtered.length === 0 ? (
-        <p className="py-3 text-center text-sm text-gray-400">No matching vehicles</p>
+        <p className="py-3 text-center text-sm text-gray-400">
+          {filteredHeld.length > 0 ? 'No free vans of this type for these dates' : 'No matching vehicles'}
+        </p>
       ) : (
         <div className="max-h-64 space-y-1 overflow-y-auto">
           {filtered.map(v => {
@@ -1036,6 +1078,64 @@ function VanPicker({
               </button>
             )
           })}
+        </div>
+      )}
+
+      {/* Held elsewhere — not selectable (the save would refuse the clash),
+          but says what's holding the van and links to it. */}
+      {filteredHeld.length > 0 && (
+        <div className="mt-2 border-t border-gray-100 pt-2">
+          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
+            Held on other jobs for these dates
+          </p>
+          <div className="space-y-1">
+            {filteredHeld.map(({ vehicle: v, hold }) => {
+              const jobNo = hold.hhJobNumber ?? hold.hirehopJobId
+              const jobRef = [jobNo ? `#${jobNo}` : null, hold.jobName].filter(Boolean).join(' ') || 'another job'
+              const from = formatHoldPoint(hold.effectiveStart, hold.effectiveStartTime)
+              const until = formatHoldPoint(hold.effectiveEnd, hold.effectiveEndTime)
+              const when = from && until ? `${from} → ${until}` : until ? `until ${until}` : null
+              return (
+                <div
+                  key={v.id}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-dashed border-gray-200 bg-gray-50 p-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-sm font-bold text-gray-500">{v.reg}</span>
+                      <span className="inline-flex items-center rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-bold text-gray-600">
+                        {holdLabel(hold.status)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      {jobRef}
+                      {hold.driverName ? ` · ${hold.driverName}` : ''}
+                    </p>
+                    {when && <p className="text-xs text-gray-400">{when}</p>}
+                  </div>
+                  {hold.opJobId ? (
+                    <a
+                      href={`/jobs/${hold.opJobId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="shrink-0 text-xs font-medium text-ooosh-navy underline"
+                    >
+                      Open job →
+                    </a>
+                  ) : jobNo ? (
+                    <a
+                      href={`https://myhirehop.com/job.php?id=${jobNo}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="shrink-0 text-xs font-medium text-blue-600 underline"
+                    >
+                      HH #{jobNo} →
+                    </a>
+                  ) : null}
+                </div>
+              )
+            })}
+          </div>
         </div>
       )}
     </div>

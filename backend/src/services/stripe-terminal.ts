@@ -934,12 +934,41 @@ export async function sendTerminalReceipt(
 
 /**
  * Who "Send receipt?" pre-ticks: whoever the email would go to by itself
- * (`resolveClientEmailTarget`, the one recipient rule). Empty when that would only be
- * the info@ safety net, so staff pick or type an address instead.
+ * (`resolveClientEmailTarget`, the one recipient rule), plus anyone staff sent a
+ * reader receipt to on this job earlier today. The usual list is empty when it would
+ * only be the info@ safety net, so staff pick or type an address instead.
+ *
+ * Earlier today only (jon, 21 Oct 2026): the address typed for the hire payment is
+ * ticked again for the excess a minute later, but a payer at the desk is not a job
+ * contact, so a receipt weeks later doesn't go to them unasked. Only receipts a person
+ * sent (`sent`), never the sweep's `auto_sent` to the usual recipient.
  */
 export async function defaultReceiptRecipients(id: string): Promise<string[]> {
   const session = await getSession(id);
   if (!session?.job_id) return [];
+  const usual = await usualReceiptRecipients(session);
+  const earlier = await query(
+    `SELECT receipt_sent_to FROM terminal_sessions
+      WHERE job_id = $1 AND id <> $2 AND receipt_status = 'sent' AND receipt_sent_to IS NOT NULL
+        AND (receipt_at AT TIME ZONE 'Europe/London')::date = (NOW() AT TIME ZONE 'Europe/London')::date
+      ORDER BY receipt_at`,
+    [session.job_id, session.id],
+  );
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const e of [...usual, ...earlier.rows.flatMap((r) => String(r.receipt_sent_to).split(','))]) {
+    const email = e.trim();
+    if (email && !seen.has(email.toLowerCase())) {
+      seen.add(email.toLowerCase());
+      out.push(email);
+    }
+  }
+  return out;
+}
+
+/** Whoever this payment's email would go to by itself. */
+async function usualReceiptRecipients(session: TerminalSession): Promise<string[]> {
+  if (!session.job_id) return [];
   if (session.excess_id && (session.payment_type === 'excess' || session.payment_type === 'excess_preauth')) {
     // Excess emails go to the driver with the job's contacts copied — the same rule
     // sendExcessEmail sends by.

@@ -14,7 +14,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { verifyApiKey } from '../middleware/api-key';
+import { verifyApiKey, apiKeyMayCall } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
@@ -70,6 +70,11 @@ async function authenticateFlexible(req: Request, res: Response, next: NextFunct
       const matched = await verifyApiKey(apiKey);
       if (!matched) {
         res.status(403).json({ error: 'Invalid API key' });
+        return;
+      }
+      if (!apiKeyMayCall(matched.permissions, req.path)) {
+        console.warn(`[money] API key "${matched.name}" (${matched.service}) refused for ${req.method} ${req.path}: not in its permissions`);
+        res.status(403).json({ error: 'API key not permitted for this operation' });
         return;
       }
       (req as any).user = { id: matched.id, role: 'service', name: matched.service };

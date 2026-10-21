@@ -240,7 +240,7 @@ Stripe account, money on HireHop bank 267, recording ONLY through `services/reco
 pre-auths via extended authorisation (30 days — the account is "Car rentals", §9.1), no phone card
 payments (policy), shop + sitter till in Phase 3. Read it before building anything that takes a card
 in person; **§11 is what Phases 0–1 built and where they differ from the plan** (recorded as `stripe_gbp`,
-not a new method; Record Payment → Method → Card reader; polling, not Socket.io); **§12 is "Send receipt?"** (the client email waits for staff; a booking confirmation can't be skipped; 15-minute safety net). **§13 is Phase 2** — excess payments + pre-auths on the reader from the excess Manage modal; the pre-auth rule is the portal's, copied (`excess-preauth.ts` `preauthEligibility()`); a reader pre-auth is recorded by `recordPreauthHold()`, the Manage modal's own code. **§14 is Phase 3** — tender "Card reader" (`card_reader`, bank 267) on the shop and sitter tills; the card is taken FIRST and the sale created after (`validateShopSale()` before, `createShopSale()` after, which refuses `card_reader` without a PaymentIntent); refunds go back to the card through Stripe. **§15–16 are Phase 4 and the close**: the reader for everyone; every NEW payment method but the reader, Wise and Cash is admin-only — Stripe (Online), Worldpay, Amex, PayPal, Lloyds (`services/payment-methods.ts` ↔ `lib/paymentMethods.ts`); refunds keep every method, labelled as the money came in (Stripe - Card reader / Stripe (PayPal) / Stripe (Online)); sitter till = reader + cash (+ their bill). The week's payments work it builds on (PayPal via
+not a new method; Record Payment → Method → Card reader; polling, not Socket.io); **§12 is "Send receipt?"** (the client email waits for staff; a booking confirmation can't be skipped; 15-minute safety net). **§13 is Phase 2** — excess payments + pre-auths on the reader from the excess Manage modal; the pre-auth rule is the portal's, copied (`excess-preauth.ts` `preauthEligibility()`); a reader pre-auth is recorded by `recordPreauthHold()`, the Manage modal's own code. **§14 is Phase 3** — tender "Card reader" (`card_reader`, bank 267) on the shop and sitter tills; the card is taken FIRST and the sale created after (`validateShopSale()` before, `createShopSale()` after, which refuses `card_reader` without a PaymentIntent); refunds go back to the card through Stripe. **§15–16 are Phase 4 and the close**: the reader for everyone; every NEW payment method but the reader, Wise and Cash is admin-only — Stripe (Online), Worldpay, Amex, PayPal, Lloyds (`services/payment-methods.ts` ↔ `lib/paymentMethods.ts`); refunds keep every method, labelled as the money came in (Stripe - Card reader / Stripe (PayPal) / Stripe (Online)); sitter till = reader + cash (+ their bill). **§17 is after the first live excess** (21 Oct 2026): a reader payment asks first when a pre-auth would do; a Stripe hold is worded "release it when the van is back" (a reader hold can last 30 days); "Send receipt?" re-ticks today's addresses on the job. The week's payments work it builds on (PayPal via
 Stripe, portal redesign, portal link, Wise matcher) is in `MONEY-AND-EXCESS.md` "Payments, Oct 2026".
 
 **BUILT (PRs 1–4), Oct 2026:** `docs/QUOTE-VERSIONS-SPEC.md` — alternative quotes for one enquiry
@@ -279,6 +279,14 @@ recovery codes are admins only, shown once. The banner's "Set up now" opens the 
 till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or reader, each naming a person
 from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
 `stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
+
+**IN PROGRESS, Oct 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme. Done:
+completion fixes, payment terms, security fixes, the Claude Design reskin of the portal (tokens in
+`tailwind.config.js` `hf`/`kind`, shared pieces in `src/components/ui.tsx`), past work on the Completed page
+(every kind, one window: `src/lib/history.ts`), the van screens in the portal look for freelancers only
+(`frontend/src/modules/vehicles/components/freelancer/`, colours from `shared/design/freelancer-tokens.cjs`).
+Next: 2FA, Earnings (plan + backfill in §5), the four guides.
+**§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
@@ -340,9 +348,11 @@ existing definition:
 | Who could we contact on this job? | `services/job-contact-candidates.ts` |
 | What's this van's hire status? | `services/fleet-hire-status-sync.ts` |
 | Is this job genuinely returning? | `services/hire-lifecycle.ts` |
+| When does a quote's work end? When does the completion chaser start? | `services/quote-schedule.ts` — crew and People jobs by their LAST day (complete from it, chased 09:00 UK the day after), deliveries/collections from arrival time in UK time; shared by the chaser and the portal (`docs/FREELANCER-PORTAL-SPEC.md` §2) |
+| Has a quote's van leg actually happened (booked out / collected)? | `services/quote-completion.ts` `isVanLegDone()` — by direction; "out on hire" is NOT a collection. The portal's van-only "All Done" and `maybeCloseQuote` both ask it |
 | What happens to transport when a job dies? | `services/job-close-cascade.ts` |
 | What happens to requirements when a job dies? | `services/requirement-close-sweep.ts` |
-| When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` |
+| When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` — a freelancer invoice: the first Friday a week after APPROVAL, 8 to 14 days (jon, Oct 2026, final — it had moved to the invoice date and back); bills approved before the switch (`system_settings.freelancer_terms_approval_from`) keep the invoice-date rule |
 | What are this job's costs? | `GET /costs/by-job/:jobId` |
 | Money coming BACK from a supplier? | `services/cost-credit.ts` |
 | What does this held item need next? | `services/held-item-query.ts` |
@@ -575,6 +585,13 @@ journalctl -u ooosh-portal -n 50 --no-pager
   with the Netlify portal app) **and it must differ from `JWT_SECRET`** — the service
   refuses to start otherwise (Oct 2026). Production has it; a fresh server needs it.
 - **`RESEND_WEBHOOK_SECRET`** (backend `.env`, Oct 2026) is the signing secret of the Resend webhook pointed at `https://staff.oooshtours.co.uk/api/webhooks/resend` (events: email bounced / suppressed / complained / failed / delivered). Without it the endpoint answers 503 and delivery problems go unseen.
+- **A restart finishes the requests in progress first** (`index.ts`, up to 60s — Oct 2026), so
+  `systemctl restart` can sit for a few seconds when a slow request is running; it isn't hung. Job
+  16169: a restart landed 4 seconds after a card receipt and cut off the Money tab's reload.
+  **The plain `systemctl restart` is the restart command (jon's call, Oct 2026).**
+  `deploy/safe-restart.sh` is an OPTIONAL extra — it waits for a card-reader payment in progress
+  first (up to 5 minutes, then stops without restarting; `FORCE=1` overrides). Don't make it the
+  default or put it in `deploy.sh`.
 - **`npm install` before building is not optional** on the manual path — a PR that added
   a dependency fails the build with "Cannot find module …". `deploy.sh` always installs.
 - Run `npm run db:migrate` from `backend/` if there are new migrations. Re-running is

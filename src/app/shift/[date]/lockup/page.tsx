@@ -15,7 +15,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { Camera, ChevronDown, Image as ImageIcon, Paperclip, X, Lock, Check, AlertTriangle, Plus } from 'lucide-react'
 import type { LockupItem } from '@/lib/op-api'
+import { cls, BackLink, Banner } from '@/components/ui'
 
 interface LockupContext {
   success: boolean
@@ -66,21 +68,28 @@ const YESNO = [
 function FileChips({ files, onRemove }: { files: File[]; onRemove: (i: number) => void }) {
   if (files.length === 0) return null
   return (
-    <div className="flex flex-wrap gap-1.5 mt-1.5">
+    <div className="flex flex-wrap gap-1.5">
       {files.map((f, i) => (
-        <span key={i} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-gray-200 bg-gray-50 text-[11px] text-gray-600">
-          {f.type.startsWith('image/') ? '🖼️' : '📎'}<span className="max-w-[110px] truncate">{f.name}</span>
-          <button type="button" onClick={() => onRemove(i)} className="hover:text-red-600" aria-label="Remove">×</button>
+        <span key={i} className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-lg border border-hf-border bg-white text-[12px] text-hf-body">
+          {f.type.startsWith('image/') ? <ImageIcon size={14} strokeWidth={1.8} /> : <Paperclip size={14} strokeWidth={1.8} />}
+          <span className="max-w-[110px] truncate">{f.name}</span>
+          <button type="button" onClick={() => onRemove(i)} className="w-7 h-7 flex items-center justify-center text-hf-muted hover:text-hf-error" aria-label="Remove">
+            <X size={14} strokeWidth={2.2} />
+          </button>
         </span>
       ))}
     </div>
   )
 }
 
-function AttachButton({ onFiles }: { onFiles: (files: File[]) => void }) {
+/** "+ Add photo": amber inside the Why? box, plain elsewhere. */
+function AttachButton({ onFiles, tone = 'plain' }: { onFiles: (files: File[]) => void; tone?: 'plain' | 'amber' }) {
+  const t = tone === 'amber'
+    ? 'border-hf-amber-border text-hf-amber-text'
+    : 'border-hf-control text-hf-body'
   return (
-    <label className="inline-block text-xs px-2 py-1 rounded border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer mt-1.5">
-      📎 Add photo
+    <label className={`self-start inline-flex items-center gap-1.5 h-10 px-3 rounded-[10px] bg-white border-[1.5px] text-[14px] font-semibold cursor-pointer hover:bg-hf-inset ${t}`}>
+      <Plus size={16} strokeWidth={2.2} /> Add photo
       <input type="file" multiple accept="image/*,application/pdf" className="sr-only"
         onChange={(e) => {
           const picked = e.target.files ? Array.from(e.target.files) : []
@@ -262,69 +271,75 @@ export default function LockupPage() {
   // ── Success screen ────────────────────────────────────────────────────────
   if (done) {
     return (
-      <div className="min-h-screen bg-gray-50 safe-top safe-bottom flex items-center justify-center px-4">
-        <div className="max-w-lg w-full bg-white rounded-2xl border border-gray-100 p-6 shadow-sm text-center">
-          <div className="text-4xl mb-3">{done.exceptions > 0 ? '⚠️' : '✅'}</div>
-          <h1 className="text-lg font-semibold text-gray-900">Locked up — thanks!</h1>
-          <p className="mt-2 text-sm text-gray-600">
+      <div className="min-h-screen bg-hf-page safe-top safe-bottom flex items-center justify-center px-4">
+        <div className={`max-w-lg w-full ${cls.card} p-6 text-center`}>
+          <div className={`w-14 h-14 mx-auto mb-3 rounded-full flex items-center justify-center ${done.exceptions > 0 ? 'bg-hf-amber-tile text-hf-amber-text' : 'bg-hf-green-tint text-hf-green-text'}`}>
+            {done.exceptions > 0 ? <AlertTriangle size={26} strokeWidth={2} /> : <Check size={28} strokeWidth={2.4} />}
+          </div>
+          <h1 className="text-[22px] font-bold tracking-[-0.02em] text-hf-ink">Locked up. Thanks!</h1>
+          <p className="mt-2 text-[15px] text-hf-body leading-[1.45]">
             {done.exceptions > 0
               ? `The office has been alerted about ${done.exceptions} thing${done.exceptions !== 1 ? 's' : ''} that need attention.`
               : 'All clear. The office has been notified you’ve finished for the night.'}
           </p>
           <div className="mt-5 flex flex-col gap-2">
-            <Link href={`/shift/${date}`} className="text-sm font-medium px-4 py-2.5 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-500 transition-colors">Back to shift</Link>
-            <Link href="/dashboard" className="text-sm text-gray-500 hover:text-gray-700">Back to dashboard</Link>
+            <Link href={`/shift/${date}`} className={`${cls.btnPrimary} w-full`}>Back to shift</Link>
+            <Link href="/dashboard" className="h-11 flex items-center justify-center text-[15px] font-semibold text-hf-link hover:text-hf-link-hover">Back to jobs</Link>
           </div>
         </div>
       </div>
     )
   }
 
+  const answeredCount = visibleItems.length - unansweredCount
+  const yesNoBtn = 'h-[46px] rounded-[11px] text-[15px] transition-colors'
   let lastSection: string | undefined
   return (
-    <div className="min-h-screen bg-gray-50 safe-top safe-bottom pb-24">
-      <header className="bg-white shadow-sm border-b border-gray-100 sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-4 flex items-center gap-3">
-          <Link href={`/shift/${date}`} className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" title="Back to shift">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
-          </Link>
-          <div className="flex items-center gap-2"><span className="text-xl">🔒</span><h1 className="text-lg font-semibold text-gray-900">Finish for the night</h1></div>
-        </div>
+    <div className="min-h-screen bg-hf-page safe-top pb-44">
+      <header className="max-w-lg mx-auto px-2 pt-2 flex items-center justify-between">
+        <div className="px-2.5"><BackLink href={`/shift/${date}`} label="Shift" /></div>
+        {ctx && ctx.has_shift && !loading && (
+          <span className="text-[14px] text-hf-muted pr-[18px] tabular">{answeredCount} of {visibleItems.length} answered</span>
+        )}
       </header>
 
-      <main className="max-w-lg mx-auto px-4 py-6 space-y-5">
+      <main className="max-w-lg mx-auto px-4 pt-1 flex flex-col gap-3.5">
+        <div className="px-1 flex flex-col gap-1">
+          <h1 className={cls.pageTitle}>Finish for the night</h1>
+          {ctx && <p className="text-[16px] text-hf-muted">{formatLongDate(ctx.date)}</p>}
+        </div>
+
         {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-            {error}<button onClick={fetchCtx} className="ml-2 underline hover:no-underline">Try again</button>
-          </div>
+          <Banner tone="error">
+            {error}{' '}<button type="button" onClick={fetchCtx} className="underline font-semibold">Try again</button>
+          </Banner>
         )}
 
         {loading ? (
-          <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm animate-pulse"><div className="h-5 bg-gray-200 rounded w-2/3 mb-3" /><div className="h-3 bg-gray-200 rounded w-1/2" /></div>
+          <div className={`${cls.card} p-4 animate-pulse`}><div className="h-5 bg-hf-track rounded w-2/3 mb-3" /><div className="h-3 bg-hf-track rounded w-1/2" /></div>
         ) : ctx && !ctx.has_shift ? (
-          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">This evening isn&apos;t set up as a shift yet — please contact the office before locking up.</div>
+          <Banner tone="warning">This evening isn&apos;t set up as a shift yet. Please contact the office before locking up.</Banner>
         ) : ctx ? (
           <>
-            <div className="text-sm text-gray-500">{formatLongDate(ctx.date)}</div>
-            {ctx.submitted && <div className="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg text-xs">Already submitted. You can update your answers and re-submit if something changed.</div>}
-            {ctx.template.intro && <p className="text-sm text-gray-600 leading-relaxed">{ctx.template.intro}</p>}
+            {ctx.submitted && <Banner tone="success">Already submitted. You can update your answers and re-submit if something changed.</Banner>}
+            {ctx.template.intro && <p className="px-1 text-[15px] text-hf-body leading-[1.45]">{ctx.template.intro}</p>}
 
             {/* Tonight's till takings — the till records what WAS paid, so the
                 checklist only asks about what wasn't ("any money outstanding?"). */}
             {ctx.shop && (
-              <section className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Shop till tonight</p>
+              <section className={`${cls.card} px-4 py-3.5 flex flex-col gap-0.5`}>
+                <p className="text-[13px] font-bold uppercase tracking-[0.06em] text-hf-muted">Shop till tonight</p>
                 {ctx.shop.sales === 0 ? (
-                  <p className="mt-1 text-sm text-gray-600">
+                  <p className="text-[15px] text-hf-body leading-[1.45]">
                     Nothing sold through the till tonight.{' '}
-                    <Link href={`/shift/${date}/till`} className="text-ooosh-600 underline">Open the till</Link> if you sold something.
+                    <Link href={`/shift/${date}/till`} className={cls.link}>Open the till</Link> if you sold something.
                   </p>
                 ) : (
                   <>
-                    <p className="mt-1 text-base font-semibold text-gray-900">
+                    <p className="text-[17px] font-semibold text-hf-ink tabular">
                       {ctx.shop.sales} sale{ctx.shop.sales === 1 ? '' : 's'} · £{ctx.shop.taken.toFixed(2)} taken
                     </p>
-                    <p className="mt-0.5 text-xs text-gray-500">
+                    <p className="text-[14px] text-hf-muted tabular">
                       {ctx.shop.byTender.map((t) => `${t.label} £${t.amount.toFixed(2)}`).join(' · ')}
                       {ctx.shop.onTheirBill > 0
                         ? `${ctx.shop.byTender.length ? ' · ' : ''}on bands' bills £${ctx.shop.onTheirBill.toFixed(2)}`
@@ -336,154 +351,176 @@ export default function LockupPage() {
             )}
 
             {/* Continuing tomorrow? (derived, overridable) */}
-            <section className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-              <p className="text-sm font-medium text-gray-900">Is the studio in use again tomorrow?</p>
-              <p className="text-xs text-gray-500 mt-0.5">
-                {ctx.continuing_derived ? 'Looks like there’s a session booked tomorrow — the end-of-night deep-clean items are hidden.' : 'Looks like this is the last night — the deep-clean items are included below.'}
-              </p>
-              <div className="mt-3 flex gap-2">
-                {[{ v: true, l: 'Yes, back tomorrow' }, { v: false, l: 'No, all done' }].map((opt) => (
-                  <button key={String(opt.v)} type="button" onClick={() => setContinuing(opt.v)}
-                    className={`flex-1 text-sm px-3 py-2 rounded-lg border transition-colors ${continuing === opt.v ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'}`}>{opt.l}</button>
-                ))}
+            <section className={`${cls.card} p-4 flex flex-col gap-2.5`}>
+              <div className="flex flex-col gap-0.5">
+                <p className="text-[16px] font-semibold text-hf-ink">Is the studio in use again tomorrow?</p>
+                <p className="text-[14px] text-hf-muted leading-[1.4]">
+                  {ctx.continuing_derived ? 'Looks like there’s a session booked tomorrow, so the end-of-night deep-clean items are hidden.' : 'Looks like this is the last night, so the deep-clean items are included below.'}
+                </p>
+              </div>
+              <div className="bg-hf-track rounded-xl p-1 grid grid-cols-2 gap-1" role="radiogroup">
+                {[{ v: true, l: 'Yes, back tomorrow' }, { v: false, l: 'No, all done' }].map((opt) => {
+                  const on = continuing === opt.v
+                  return (
+                    <button key={String(opt.v)} type="button" role="radio" aria-checked={on} onClick={() => setContinuing(opt.v)}
+                      className={`h-[42px] rounded-[9px] text-[15px] transition-colors ${on ? 'bg-white font-semibold text-hf-ink shadow-[0_1px_2px_rgba(0,0,0,0.08)]' : 'font-medium text-hf-muted'}`}>
+                      {opt.l}
+                    </button>
+                  )
+                })}
               </div>
             </section>
 
             {/* Checklist (grouped by section) */}
-            <section className="space-y-2">
-              {visibleItems.map((item) => {
-                const val = answers[item.id] ?? ''
-                const off = isOffExpected(item, val)
-                const showSection = item.section && item.section !== lastSection
-                if (item.section) lastSection = item.section
-                return (
-                  <div key={item.id}>
-                    {showSection && (
-                      <h2 className="text-lg font-bold text-gray-800 mt-6 mb-2">{item.section}</h2>
-                    )}
-                    <div className={`bg-white rounded-xl border p-3.5 shadow-sm ${off ? 'border-amber-300 bg-amber-50/40' : 'border-gray-100'}`}>
-                      <p className="text-sm text-gray-900">{item.label}</p>
+            {visibleItems.map((item) => {
+              const val = answers[item.id] ?? ''
+              const off = isOffExpected(item, val)
+              const showSection = item.section && item.section !== lastSection
+              if (item.section) lastSection = item.section
+              return (
+                <div key={item.id} className="flex flex-col gap-3.5">
+                  {showSection && (
+                    <h2 className="pt-2 px-1 text-[20px] font-bold text-hf-ink">{item.section}</h2>
+                  )}
+                  <div className={`bg-white rounded-2xl px-4 py-3.5 flex flex-col gap-2.5 ${off ? 'border-[1.5px] border-hf-amber-border' : 'border border-hf-border'}`}>
+                    <p className="text-[16px] leading-[1.35] text-hf-ink">{item.label}</p>
 
-                      {/* Reference: "what it should look like" */}
-                      {item.reference && (item.reference.photos.length > 0 || item.reference.text) && (
-                        <div className="mt-1.5">
-                          <button type="button" onClick={() => toggleRef(item.id)} className="text-xs text-ooosh-600 hover:text-ooosh-500">
-                            {openRef.has(item.id) ? '▾' : '▸'} 📷 What it should look like
-                          </button>
-                          {openRef.has(item.id) && (
-                            <div className="mt-2 rounded-lg border border-gray-100 bg-gray-50 p-2">
-                              {item.reference.text && <p className="text-xs text-gray-600 mb-2">{item.reference.text}</p>}
-                              <div className="grid grid-cols-3 gap-2">
-                                {item.reference.photos.map((p, i) => (
-                                  <button key={i} type="button" onClick={() => setLightbox(p)} className="block" aria-label="View larger">
-                                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                                    <img src={p} alt="reference" loading="lazy" className="w-full h-20 object-cover rounded border border-gray-200" />
-                                  </button>
-                                ))}
-                              </div>
-                              <p className="text-[11px] text-gray-400 mt-1.5">Tap a photo to enlarge.</p>
+                    {/* Reference: "what it should look like" */}
+                    {item.reference && (item.reference.photos.length > 0 || item.reference.text) && (
+                      <div>
+                        <button type="button" onClick={() => toggleRef(item.id)} aria-expanded={openRef.has(item.id)}
+                          className="flex items-center gap-1.5 text-[14px] font-semibold text-hf-link hover:text-hf-link-hover">
+                          <Camera size={16} strokeWidth={1.8} />
+                          What it should look like
+                          <ChevronDown size={16} strokeWidth={2} className={`transition-transform ${openRef.has(item.id) ? 'rotate-180' : ''}`} />
+                        </button>
+                        {openRef.has(item.id) && (
+                          <div className="mt-2 rounded-xl bg-hf-inset border border-hf-divider p-2.5">
+                            {item.reference.text && <p className="text-[14px] text-hf-body mb-2 leading-[1.4]">{item.reference.text}</p>}
+                            <div className="grid grid-cols-3 gap-2">
+                              {item.reference.photos.map((p, i) => (
+                                <button key={i} type="button" onClick={() => setLightbox(p)} className="block" aria-label="View larger">
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img src={p} alt="reference" loading="lazy" className="w-full h-20 object-cover rounded-lg border border-hf-border" />
+                                </button>
+                              ))}
                             </div>
-                          )}
-                        </div>
-                      )}
+                            <p className="text-[12px] text-hf-muted mt-1.5">Tap a photo to enlarge.</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
-                      {item.type === 'yesno' ? (
-                        <div className="mt-2 flex gap-2">
-                          {YESNO.map((o) => (
-                            <button key={o.value} type="button" onClick={() => setAnswer(item.id, o.value)}
-                              className={`flex-1 text-sm px-3 py-2 rounded-lg border transition-colors ${val === o.value
-                                ? o.value === 'yes' ? 'bg-green-600 text-white border-green-600'
-                                  : o.value === 'no' ? 'bg-red-500 text-white border-red-500'
-                                    : 'bg-gray-500 text-white border-gray-500'
-                                : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'}`}>{o.label}</button>
-                          ))}
-                        </div>
-                      ) : (
-                        <input type={item.type === 'number' ? 'number' : 'text'} value={val} onChange={(e) => setAnswer(item.id, e.target.value)}
-                          className="mt-2 w-full text-sm border border-gray-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-ooosh-200 focus:border-ooosh-300" />
-                      )}
+                    {item.type === 'yesno' ? (
+                      <div className="grid grid-cols-3 gap-2">
+                        {YESNO.map((o) => {
+                          const on = val === o.value
+                          const chosen = o.value === 'yes' ? 'bg-hf-green text-white font-semibold'
+                            : o.value === 'no' ? 'bg-hf-error text-white font-semibold'
+                              : 'bg-hf-body text-white font-semibold'
+                          return (
+                            <button key={o.value} type="button" onClick={() => setAnswer(item.id, o.value)} aria-pressed={on}
+                              className={`${yesNoBtn} ${on ? chosen : 'bg-white border-[1.5px] border-hf-control text-hf-ink font-medium hover:bg-hf-inset'}`}>
+                              {o.label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ) : (
+                      <input type={item.type === 'number' ? 'number' : 'text'} value={val} onChange={(e) => setAnswer(item.id, e.target.value)}
+                        className={cls.input} />
+                    )}
 
-                      {/* note_prompt items: always-on note box. Otherwise the "why?" box on off-expected. */}
-                      {item.note_prompt ? (
-                        <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50 p-2">
-                          <label className="text-xs font-medium text-gray-600">{item.note_prompt}</label>
-                          <textarea value={itemNotes[item.id] ?? ''} onChange={(e) => setItemNotes((p) => ({ ...p, [item.id]: e.target.value }))}
-                            rows={2} placeholder="Optional note…"
-                            className="mt-1 w-full text-sm border border-gray-200 rounded-lg p-2 bg-white focus:outline-none focus:ring-2 focus:ring-ooosh-200" />
-                          <AttachButton onFiles={(f) => setItemPhotos((p) => ({ ...p, [item.id]: [...(p[item.id] ?? []), ...f] }))} />
-                          <FileChips files={itemPhotos[item.id] ?? []} onRemove={(i) => setItemPhotos((p) => ({ ...p, [item.id]: (p[item.id] ?? []).filter((_, idx) => idx !== i) }))} />
-                        </div>
-                      ) : off ? (
-                        <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2">
-                          <label className="text-xs font-medium text-amber-800">Why? (optional, but helpful)</label>
-                          <textarea value={whyNotes[item.id] ?? ''} onChange={(e) => setWhyNotes((p) => ({ ...p, [item.id]: e.target.value }))}
-                            rows={2} placeholder="What happened / what's outstanding…"
-                            className="mt-1 w-full text-sm border border-amber-200 rounded-lg p-2 bg-white focus:outline-none focus:ring-2 focus:ring-amber-200" />
-                          <AttachButton onFiles={(f) => setWhyPhotos((p) => ({ ...p, [item.id]: [...(p[item.id] ?? []), ...f] }))} />
-                          <FileChips files={whyPhotos[item.id] ?? []} onRemove={(i) => setWhyPhotos((p) => ({ ...p, [item.id]: (p[item.id] ?? []).filter((_, idx) => idx !== i) }))} />
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                )
-              })}
-            </section>
-
-            {/* Lost property → Holding */}
-            <section className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-              <p className="text-sm font-medium text-gray-900">Lost property</p>
-              {ctx.template.lost_property_prompt && <p className="text-xs text-gray-500 mt-0.5">{ctx.template.lost_property_prompt}</p>}
-              {lpLogged.length > 0 && (
-                <ul className="mt-2 space-y-1">
-                  {lpLogged.map((d, i) => <li key={i} className="text-xs text-green-700">✓ {d}</li>)}
-                </ul>
-              )}
-              {lpOpen ? (
-                <div className="mt-2 rounded-lg border border-gray-100 bg-gray-50 p-2.5">
-                  <input value={lpDesc} onChange={(e) => setLpDesc(e.target.value)} placeholder="What is it? (e.g. black jacket, phone charger)"
-                    className="w-full text-sm border border-gray-200 rounded-lg p-2 bg-white" />
-                  <input value={lpLocation} onChange={(e) => setLpLocation(e.target.value)} placeholder="Where did you find it? (optional)"
-                    className="mt-2 w-full text-sm border border-gray-200 rounded-lg p-2 bg-white" />
-                  <AttachButton onFiles={(f) => setLpPhotos((p) => [...p, ...f])} />
-                  <FileChips files={lpPhotos} onRemove={(i) => setLpPhotos((p) => p.filter((_, idx) => idx !== i))} />
-                  {lpError && <p className="text-xs text-red-600 mt-1">{lpError}</p>}
-                  <div className="mt-2 flex gap-2">
-                    <button onClick={submitLostProperty} disabled={lpSaving || !lpDesc.trim()}
-                      className="text-sm px-3 py-1.5 rounded-lg bg-ooosh-600 text-white disabled:opacity-40">{lpSaving ? 'Logging…' : 'Log item'}</button>
-                    <button onClick={() => { setLpOpen(false); setLpError(null) }} className="text-sm px-3 py-1.5 rounded-lg border border-gray-200 text-gray-500">Cancel</button>
+                    {/* note_prompt items: always-on note box. Otherwise the "why?" box on off-expected. */}
+                    {item.note_prompt ? (
+                      <div className="rounded-xl bg-hf-inset border border-hf-divider p-3 flex flex-col gap-2">
+                        <label className="text-[14px] font-semibold text-hf-body">{item.note_prompt}</label>
+                        <textarea value={itemNotes[item.id] ?? ''} onChange={(e) => setItemNotes((p) => ({ ...p, [item.id]: e.target.value }))}
+                          rows={2} placeholder="Optional note..."
+                          className={`${cls.input} !text-[15px] !py-2.5`} />
+                        <AttachButton onFiles={(f) => setItemPhotos((p) => ({ ...p, [item.id]: [...(p[item.id] ?? []), ...f] }))} />
+                        <FileChips files={itemPhotos[item.id] ?? []} onRemove={(i) => setItemPhotos((p) => ({ ...p, [item.id]: (p[item.id] ?? []).filter((_, idx) => idx !== i) }))} />
+                      </div>
+                    ) : off ? (
+                      <div className="rounded-xl bg-hf-amber-bg p-3 flex flex-col gap-2">
+                        <label className="text-[14px] font-semibold text-hf-amber-text">Why? Optional, but it helps</label>
+                        <textarea value={whyNotes[item.id] ?? ''} onChange={(e) => setWhyNotes((p) => ({ ...p, [item.id]: e.target.value }))}
+                          rows={2} placeholder="What happened / what's outstanding..."
+                          className="w-full min-h-[52px] rounded-[10px] bg-white border-[1.5px] border-hf-amber-border px-3 py-2.5 text-[15px] text-hf-body placeholder:text-hf-placeholder outline-none focus:ring-4 focus:ring-hf-amber-tile" />
+                        <AttachButton tone="amber" onFiles={(f) => setWhyPhotos((p) => ({ ...p, [item.id]: [...(p[item.id] ?? []), ...f] }))} />
+                        <FileChips files={whyPhotos[item.id] ?? []} onRemove={(i) => setWhyPhotos((p) => ({ ...p, [item.id]: (p[item.id] ?? []).filter((_, idx) => idx !== i) }))} />
+                      </div>
+                    ) : null}
                   </div>
                 </div>
-              ) : (
-                <button onClick={() => setLpOpen(true)} className="mt-2 text-sm px-3 py-1.5 rounded-lg border border-gray-200 text-ooosh-600 hover:bg-gray-50">＋ Log lost property</button>
+              )
+            })}
+
+            {/* Lost property → Holding */}
+            <section className={`${cls.card} px-4 ${lpOpen || lpLogged.length > 0 || ctx.template.lost_property_prompt ? 'py-3.5' : 'min-h-[60px] py-2.5'} flex flex-col gap-2.5 justify-center`}>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[16px] font-semibold text-hf-ink">Lost property</span>
+                {!lpOpen && (
+                  <button type="button" onClick={() => setLpOpen(true)}
+                    className="h-10 px-3.5 rounded-[10px] border-[1.5px] border-hf-control flex items-center gap-1 text-[14px] font-semibold text-hf-link hover:bg-hf-inset">
+                    <Plus size={16} strokeWidth={2.2} /> Log an item
+                  </button>
+                )}
+              </div>
+              {ctx.template.lost_property_prompt && <p className="text-[14px] text-hf-muted -mt-1">{ctx.template.lost_property_prompt}</p>}
+              {lpLogged.length > 0 && (
+                <ul className="flex flex-col gap-1">
+                  {lpLogged.map((d, i) => (
+                    <li key={i} className="flex items-center gap-1.5 text-[14px] text-hf-green-text"><Check size={15} strokeWidth={2.4} /> {d}</li>
+                  ))}
+                </ul>
+              )}
+              {lpOpen && (
+                <div className="rounded-xl bg-hf-inset border border-hf-divider p-3 flex flex-col gap-2">
+                  <input value={lpDesc} onChange={(e) => setLpDesc(e.target.value)} placeholder="What is it? (e.g. black jacket, phone charger)"
+                    className={`${cls.input} !text-[15px] !py-2.5`} />
+                  <input value={lpLocation} onChange={(e) => setLpLocation(e.target.value)} placeholder="Where did you find it? (optional)"
+                    className={`${cls.input} !text-[15px] !py-2.5`} />
+                  <AttachButton onFiles={(f) => setLpPhotos((p) => [...p, ...f])} />
+                  <FileChips files={lpPhotos} onRemove={(i) => setLpPhotos((p) => p.filter((_, idx) => idx !== i))} />
+                  {lpError && <p className="text-[13px] text-hf-error">{lpError}</p>}
+                  <div className="flex gap-2">
+                    <button type="button" onClick={submitLostProperty} disabled={lpSaving || !lpDesc.trim()}
+                      className="h-11 px-4 rounded-xl bg-hf-accent text-white text-[15px] font-semibold hover:bg-hf-accent-pressed disabled:bg-hf-disabled">{lpSaving ? 'Logging...' : 'Log item'}</button>
+                    <button type="button" onClick={() => { setLpOpen(false); setLpError(null) }}
+                      className="h-11 px-4 rounded-xl border-[1.5px] border-hf-control text-[15px] font-semibold text-hf-body bg-white">Cancel</button>
+                  </div>
+                </div>
               )}
             </section>
 
             {/* Notes */}
-            <section className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-              <label className="text-sm font-medium text-gray-900">{ctx.template.notes_label || 'Anything we need to know?'}</label>
+            <section className={`${cls.card} p-4 flex flex-col gap-2`}>
+              <label className="text-[16px] font-semibold text-hf-ink">{ctx.template.notes_label || 'Anything we need to know?'}</label>
               <textarea value={notesText} onChange={(e) => setNotesText(e.target.value)} rows={4}
-                placeholder="Money owed, items taken, jobs for tomorrow, anything left undone…"
-                className="mt-2 w-full text-sm border border-gray-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-ooosh-200 focus:border-ooosh-300 resize-y min-h-[80px]" />
+                placeholder="Money owed, items taken, jobs for tomorrow, anything left undone..."
+                className={`${cls.input} resize-y min-h-[88px]`} />
               <AttachButton onFiles={(f) => setNotesPhotos((p) => [...p, ...f])} />
               <FileChips files={notesPhotos} onRemove={(i) => setNotesPhotos((p) => p.filter((_, idx) => idx !== i))} />
             </section>
 
-            {submitError && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">{submitError}</div>}
+            {submitError && <Banner tone="error">{submitError}</Banner>}
           </>
         ) : null}
       </main>
 
       {ctx && ctx.has_shift && !loading && (
-        <div className="fixed bottom-0 inset-x-0 bg-white border-t border-gray-100 safe-bottom">
-          <div className="max-w-lg mx-auto px-4 py-3">
+        <div className="fixed bottom-0 inset-x-0 z-20 bg-white border-t border-hf-border safe-bottom">
+          <div className="max-w-lg mx-auto px-4 pt-3 pb-4 flex flex-col gap-2">
             {confirmUnanswered && unansweredCount > 0 && (
-              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2">
+              <p className="text-[14px] text-hf-amber-text bg-hf-amber-bg border border-hf-amber-border rounded-[10px] px-3 py-2">
                 {unansweredCount} item{unansweredCount !== 1 ? 's' : ''} still unanswered. Tap again to submit anyway.
               </p>
             )}
-            <button onClick={() => submit()} disabled={submitting}
-              className="w-full text-sm font-semibold px-4 py-3 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              {submitting ? 'Submitting…' : confirmUnanswered && unansweredCount > 0 ? `Submit anyway (${unansweredCount} left)` : '🔒 Submit & finish for the night'}
+            <button type="button" onClick={() => submit()} disabled={submitting}
+              className={`${cls.btnDark} w-full !h-14`}>
+              {!submitting && <Lock size={18} strokeWidth={2} />}
+              {submitting ? 'Submitting...' : confirmUnanswered && unansweredCount > 0 ? `Submit anyway (${unansweredCount} left)` : 'Submit & finish for the night'}
             </button>
           </div>
         </div>
@@ -493,14 +530,14 @@ export default function LockupPage() {
       {resubmitAt !== null && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setResubmitAt(null)}>
           <div className="max-w-sm w-full bg-white rounded-2xl p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-base font-semibold text-gray-900">Already submitted</h2>
-            <p className="mt-2 text-sm text-gray-600">
+            <h2 className="text-[17px] font-semibold text-hf-ink">Already submitted</h2>
+            <p className="mt-2 text-[15px] text-hf-body leading-[1.45]">
               This shift was already submitted{resubmitAt ? ` at ${new Date(resubmitAt).toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}` : ''}. Re-submit and overwrite the previous answers?
             </p>
-            <div className="mt-4 flex gap-2">
-              <button onClick={() => { setResubmitAt(null); submit(true) }} disabled={submitting}
-                className="flex-1 text-sm font-medium px-4 py-2.5 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-500 disabled:opacity-50">Re-submit</button>
-              <button onClick={() => setResubmitAt(null)} className="flex-1 text-sm px-4 py-2.5 rounded-lg border border-gray-200 text-gray-600">Cancel</button>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => { setResubmitAt(null); submit(true) }} disabled={submitting}
+                className="h-12 rounded-xl bg-hf-accent text-white text-[15px] font-semibold hover:bg-hf-accent-pressed disabled:bg-hf-disabled">Re-submit</button>
+              <button type="button" onClick={() => setResubmitAt(null)} className={cls.btnSecondary}>Cancel</button>
             </div>
           </div>
         </div>
@@ -512,7 +549,9 @@ export default function LockupPage() {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={lightbox} alt="reference" className="max-w-full max-h-full object-contain rounded" onClick={(e) => e.stopPropagation()} />
           <button type="button" onClick={() => setLightbox(null)}
-            className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/90 text-gray-800 text-lg leading-none flex items-center justify-center" aria-label="Close">×</button>
+            className="absolute top-4 right-4 w-11 h-11 rounded-full bg-white/90 text-hf-ink flex items-center justify-center" aria-label="Close">
+            <X size={20} strokeWidth={2.2} />
+          </button>
         </div>
       )}
     </div>

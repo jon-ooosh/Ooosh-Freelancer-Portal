@@ -203,8 +203,8 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Once you've submitted the form we'll process your details and reply to confirm whether you've been accepted,
         if we need more information, or otherwise. If accepted, you'll get a link to join the WhatsApp group and our
-        payment/invoicing procedure - in brief, we aim to pay approved invoices on the first Friday one week after
-        submission (normally paid within 7-14 days).
+        payment/invoicing procedure - in brief, we aim to pay invoices on the first Friday one week after we approve
+        them (usually 8-14 days after approval).
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         Any questions in the meantime, just reply to this email. If the button above doesn't work, copy and paste
@@ -274,8 +274,9 @@ const templates: Record<string, EmailTemplate> = {
       {{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         <strong>Getting paid.</strong> Agree your rate with us before each job, then invoice us for the work you've
-        done. We aim to pay approved invoices on the first Friday one week after submission (normally within 7-14
-        days). You're responsible for your own tax and National Insurance.
+        done. We aim to pay invoices on the first Friday one week after we approve them, so usually 8-14 days after
+        approval. Please don't chase us for payment until 30 days after you sent your invoice. You're responsible
+        for your own tax and National Insurance.
       </p>
       {{#if invoiceGuideUrl}}
         <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
@@ -1991,6 +1992,41 @@ const templates: Record<string, EmailTemplate> = {
       </table>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         We'll be in touch if anything needs your attention. Thanks for hiring with Ooosh!
+      </p>
+    `,
+  },
+
+  // A crew job's optional "what's on your hire" note (Oct 2026): sent from the
+  // portal's crew completion only when the freelancer ticks it. Same PDF layout
+  // as the delivery note, without a signature (delivery-note-pdf.ts 'hire').
+  equipment_on_hire_note: {
+    variant: 'client',
+    preheader: 'A note of the equipment on your Ooosh Tours hire',
+    subject: 'Equipment on your hire - {{jobName}} (#{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Equipment on your hire</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Attached is a note of the equipment on your hire for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>), from {{driverName}}, who has been working with you.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Job</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}} (#{{jobNumber}})</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Venue</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{venueName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">From</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If anything doesn't match what you have, let us know on
+        <a href="mailto:info@oooshtours.co.uk" style="color:#7B5EA7;">info@oooshtours.co.uk</a>
+        or call <strong>+44 (0) 1273 911382</strong>.
       </p>
     `,
   },

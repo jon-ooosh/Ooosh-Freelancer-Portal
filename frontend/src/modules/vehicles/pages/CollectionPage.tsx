@@ -27,6 +27,11 @@ import { FUEL_LEVELS, REQUIRED_PHOTOS, isFuelReduction } from '../types/vehicle-
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
+import { portalJobUrl } from '../lib/safe-url'
+import { LoaderCircle } from 'lucide-react'
+import { fl, StepHeader, StepTitle, StepFooter, Banner, SummaryRows, FuelMileageStep, plateText, CentredSpinner } from '../components/freelancer/ui'
+import { VanConfirm, vanSubLine } from '../components/freelancer/VanConfirm'
+import { DoneScreen, isBothJob } from '../components/freelancer/DoneScreen'
 
 interface OpResult {
   label: string
@@ -67,6 +72,10 @@ export function CollectionPage() {
   // them: the van + job + customer come pre-filled from the resolve context.
   const { data: allAllocations } = useAllocations({ enabled: !isFreelancer })
   const [step, setStep] = useState(0)
+  // The freelancer screens scroll the page, so each step starts at the top.
+  useEffect(() => {
+    if (isFreelancer) window.scrollTo(0, 0)
+  }, [isFreelancer, step])
   const [form, setForm] = useState<CollectionFormState>(INITIAL_FORM)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitSuccess, setSubmitSuccess] = useState(false)
@@ -81,6 +90,11 @@ export function CollectionPage() {
   const [bookOutJob, setBookOutJob] = useState<string | null>(null)
   const signatureRef = useRef<SignatureCaptureHandle>(null!)
   const [queuedOffline, setQueuedOffline] = useState(false)
+  // The CUSTOMER signs for the van they hand back (jon, Oct 2026 — it used to be
+  // an optional pad with nobody named). Nobody there: a short note instead.
+  const [customerPresent, setCustomerPresent] = useState(true)
+  const [absentNote, setAbsentNote] = useState('')
+  const [submitError, setSubmitError] = useState<string | null>(null)
 
   // Form autosave
   const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft, acceptDraft } = useFormAutosave({
@@ -317,6 +331,34 @@ export function CollectionPage() {
   }
 
   async function handleSubmit() {
+    setSubmitError(null)
+    // Signed by the customer, or "not here" with a note: checked BEFORE anything
+    // is written, so a missing signature never leaves half a collection behind.
+    let sigBlob: Blob | null = null
+    if (customerPresent) {
+      sigBlob = signatureRef.current?.hasSignature() ? (await signatureRef.current.getBlob()) : null
+      if (!sigBlob) {
+        setSubmitError('Ask the customer to sign above, or switch on "Customer not here".')
+        return
+      }
+    } else if (!absentNote.trim()) {
+      setSubmitError('Customer not here: add a short note (where you found the keys, anything else we should know).')
+      return
+    }
+    let signatureBase64: string | undefined
+    if (sigBlob) {
+      try {
+        signatureBase64 = await blobToBase64(sigBlob)
+      } catch {
+        console.warn('Failed to convert signature to base64')
+      }
+    }
+    // The absent-customer note rides with the client notes, so every record of
+    // the collection (event, staff check-in data, report, offline queue) has it.
+    const clientNotes = customerPresent
+      ? form.damageNotes
+      : [`Customer not present at collection: ${absentNote.trim()}`, form.damageNotes.trim()].filter(Boolean).join('\n')
+
     setIsSubmitting(true)
     setUploadProgress(null)
     setOpResults([])
@@ -338,13 +380,17 @@ export function CollectionPage() {
             `Collection by: ${form.driverName}`,
             `HireHop Job: ${form.hireHopJob}`,
             `Photos: ${form.photos.length} captured`,
-            form.damageNotes ? `Client notes: ${form.damageNotes}` : null,
+            customerPresent ? 'Signed by the customer' : 'Customer not present',
+            clientNotes ? `Client notes: ${clientNotes}` : null,
           ]
             .filter(Boolean)
             .join('\n'),
           hireHopJob: form.hireHopJob || null,
           clientEmail: form.clientEmail || null,
           hireStatus: 'Collected',
+          // Stored with the event, so a regenerated report shows this signature
+          // (it used to fall back to "Signed in person at book-out").
+          signatureBase64: signatureBase64 ?? null,
         }),
       'R2 event creation',
     )
@@ -410,7 +456,7 @@ export function CollectionPage() {
       clientEmail: form.clientEmail,
       mileage: mileageNum,
       fuelLevel: form.fuelLevel!,
-      damageNotes: form.damageNotes,
+      damageNotes: clientNotes,
       collectedAt: new Date().toISOString(),
       collectedBy: form.driverName,
       eventId,
@@ -450,16 +496,7 @@ export function CollectionPage() {
       }
     }
 
-    // Signature
-    let signatureBase64: string | undefined
-    try {
-      const sigBlob = await signatureRef.current?.getBlob()
-      if (sigBlob) {
-        signatureBase64 = await blobToBase64(sigBlob)
-      }
-    } catch {
-      console.warn('Failed to convert signature to base64')
-    }
+    // (The signature was read and checked at the top of handleSubmit.)
 
     // ── Steps 4+5: PDF + email — ONE server-side call. The server builds
     // the report and emails it directly; the multi-MB base64 PDF never
@@ -510,6 +547,9 @@ export function CollectionPage() {
               photos: photoBase64s,
               briefingItems: [],
               signatureBase64,
+              // false = nobody there to sign; the report says so instead of
+              // printing an empty signature box.
+              driverPresent: customerPresent,
               isCheckIn: false,
               isCollection: true,
               bookOutMileage: boMileage,
@@ -517,7 +557,7 @@ export function CollectionPage() {
               bookOutDate: bookOutIsThisJob ? bookOutDate : null,
               // Anything the client mentioned at collection — the point of
               // this report is "it was like this when we picked it up"
-              bookOutNotes: form.damageNotes || undefined,
+              bookOutNotes: clientNotes || undefined,
             },
             recipients,
             { fuelDifference: fuelDiff, milesDriven: clientMiles },
@@ -572,10 +612,12 @@ export function CollectionPage() {
               clientEmail: form.clientEmail,
               mileage: form.mileage,
               fuelLevel: form.fuelLevel,
-              damageNotes: form.damageNotes,
+              damageNotes: clientNotes,
             },
             photos: form.photos,
-            signatureBlob: form.signatureBlob,
+            // form.signatureBlob was never set, so a queued collection lost its
+            // signature; the pad's own blob is what was drawn.
+            signatureBlob: sigBlob ?? form.signatureBlob,
             vehicleReg: form.vehicleReg,
           })
           clearAutosave()
@@ -594,6 +636,22 @@ export function CollectionPage() {
   }
 
   // ── Queued Offline Screen ──
+  if (queuedOffline && isFreelancer) {
+    return (
+      <div className="mx-auto flex min-h-screen max-w-lg flex-col justify-center gap-5 px-5 py-10 text-center">
+        <h1 className={fl.pageTitle}>Saved on this phone</h1>
+        <p className="text-[16px] leading-[1.5] text-hf-body">
+          {plateText(form.vehicleReg)}: the collection, photos and signature are saved and will send by themselves
+          when you&apos;re back online. Keep this page open if you can.
+        </p>
+        {freelancerContext?.returnUrl && (
+          <a href={freelancerContext.returnUrl} className={`${fl.btnPrimary} w-full`}>
+            Back to the portal
+          </a>
+        )}
+      </div>
+    )
+  }
   if (queuedOffline) {
     return (
       <div className="space-y-6 px-4 py-6">
@@ -641,11 +699,32 @@ export function CollectionPage() {
         onResume={handleResumeDraft}
         onDiscard={dismissDraft}
         onDiscardAndGoBack={() => { dismissDraft(); window.history.back() }}
+        look={isFreelancer ? 'freelancer' : undefined}
       />
     )
   }
 
   // ── Success Screen ──
+  if (submitSuccess && isFreelancer) {
+    const allOk = opResults.every(r => r.success)
+    const plate = plateText(form.vehicleReg)
+    const returnUrl = freelancerContext?.returnUrl ?? null
+    const both = isBothJob(returnUrl)
+    return (
+      <DoneScreen
+        allOk={allOk}
+        title="Van collected"
+        problemTitle="Collected, with something to check"
+        message={allOk
+          ? `${plate} is collected and its condition recorded. The warehouse does the full check-in when it's back.`
+          : `${plate} is collected. Here's what happened:`}
+        results={opResults}
+        bothNote={both}
+        continueLabel={both ? 'Go to the equipment checklist' : 'Back to the portal'}
+        onContinue={returnUrl ? () => { window.location.href = returnUrl } : null}
+      />
+    )
+  }
   if (submitSuccess) {
     const allOk = opResults.every(r => r.success)
 
@@ -722,10 +801,208 @@ export function CollectionPage() {
   }
 
   // ── Loading ──
+  if (vehiclesLoading && isFreelancer) {
+    return <CentredSpinner text="Finding the van…" />
+  }
   if (vehiclesLoading) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
         <p className="text-gray-500">Loading fleet data...</p>
+      </div>
+    )
+  }
+
+  // ── Freelancer: the same steps, in the portal look (FREELANCER-PORTAL-SPEC §11).
+  // Step 0 (Vehicle & Job) is "Is this the van in front of you?"; the other three
+  // are numbered 1 to 3. Every check is the page's own canAdvance / handleSubmit,
+  // exactly as for staff below; only the drawing differs.
+  if (isFreelancer) {
+    if (STEPS[step] === 'Vehicle & Job') {
+      return (
+        <VanConfirm
+          kindLabel={form.hireHopJob ? `Van collection · Job #${form.hireHopJob}` : 'Van collection'}
+          reg={form.vehicleReg || freelancerContext?.vehicleReg || ''}
+          title={freelancerContext?.vehicleMakeModel || null}
+          sub={vanSubLine(vehicles.find(v => v.id === form.vehicleId))}
+          backHref={portalJobUrl(freelancerContext?.returnUrl)}
+          onYes={() => setStep(s => s + 1)}
+          yesDisabled={!canAdvance()}
+        >
+          {!form.vehicleId && (
+            <Banner tone="warning" title="We can't find this van yet">
+              It needs allocating to your job. Call the office and we&apos;ll sort it.
+            </Banner>
+          )}
+          {form.vehicleId && !form.driverName.trim() && (
+            <div className={`${fl.card} flex flex-col gap-2 p-4`}>
+              <label htmlFor="fl-name" className={fl.label}>Your name</label>
+              <input
+                id="fl-name"
+                type="text"
+                value={form.driverName}
+                onChange={e => updateForm('driverName', e.target.value)}
+                className={fl.input}
+              />
+            </div>
+          )}
+        </VanConfirm>
+      )
+    }
+
+    const FL_STEPS = ['Vehicle State', 'Photos', 'Notes & Confirm'] as const
+    const flIndex = Math.max(0, FL_STEPS.indexOf(STEPS[step] as typeof FL_STEPS[number]))
+    const isLast = STEPS[step] === 'Notes & Confirm'
+    const ready = canAdvance()
+    const entered = parseInt(form.mileage, 10)
+    const tooLow = bookOutMileage != null && !isNaN(entered) && entered < bookOutMileage
+    const requiredTaken = form.photos.filter(p => REQUIRED_PHOTOS.some(r => r.angle === p.angle)).length
+    // The Photos gate counts every photo (canAdvance above), so the label does too.
+    const photosLeft = Math.max(0, REQUIRED_PHOTOS.length - form.photos.length)
+    const fuelDropped = isFuelReduction(bookOutFuelLevel, form.fuelLevel)
+
+    let nextLabel = 'Next'
+    if (STEPS[step] === 'Vehicle State') {
+      nextLabel = ready ? 'Next: photos'
+        : !form.mileage.trim() ? 'Add the mileage'
+        : tooLow ? 'Check the mileage'
+        : 'Pick the fuel level'
+    } else if (STEPS[step] === 'Photos') {
+      nextLabel = ready ? 'Next: notes & sign' : `${photosLeft} photo${photosLeft === 1 ? '' : 's'} to go`
+    }
+
+    return (
+      <div className="pb-36">
+        <StepHeader
+          exitHref={portalJobUrl(freelancerContext?.returnUrl)}
+          title={`Collect · ${plateText(form.vehicleReg)}`}
+          step={flIndex + 1}
+          total={FL_STEPS.length}
+        />
+        <main className="mx-auto flex max-w-lg flex-col gap-4 px-4 pt-4">
+          {STEPS[step] === 'Vehicle State' && (
+            <FuelMileageStep
+              title="Fuel & mileage"
+              mileage={form.mileage}
+              onMileage={value => updateForm('mileage', value)}
+              fuel={form.fuelLevel}
+              onFuel={level => updateForm('fuelLevel', level)}
+              reference={(bookOutMileage != null || bookOutFuelLevel) ? (
+                <Banner tone="info" title="When it went out">
+                  {[
+                    bookOutMileage != null ? `${bookOutMileage.toLocaleString()} mi` : null,
+                    bookOutFuelLevel ? `fuel ${bookOutFuelLevel}` : null,
+                  ].filter(Boolean).join(' · ')}
+                </Banner>
+              ) : null}
+              mileageError={tooLow
+                ? `That's below the book-out reading (${bookOutMileage!.toLocaleString()} mi). Check the dashboard: it can't be lower.`
+                : null}
+            />
+          )}
+
+          {STEPS[step] === 'Photos' && (
+            <>
+              <StepTitle
+                title="Photos"
+                right={<span className="text-[15px] font-semibold text-hf-green-text tabular-nums">{requiredTaken} of {REQUIRED_PHOTOS.length}</span>}
+              />
+              <Banner tone="info">
+                Photograph the van as you find it. These are compared with the book-out photos when it&apos;s checked in.
+              </Banner>
+              <PhotoCapture
+                look="freelancer"
+                photos={form.photos}
+                onCapture={handlePhotoCapture}
+                onRemove={handlePhotoRemove}
+              />
+            </>
+          )}
+
+          {STEPS[step] === 'Notes & Confirm' && (
+            <>
+              <StepTitle title="Notes & sign" />
+              {fuelDropped && (
+                <Banner tone="warning" title="Less fuel than it went out with">
+                  Out at {bookOutFuelLevel} · now {form.fuelLevel}
+                </Banner>
+              )}
+              <SummaryRows rows={[
+                ['Mileage', (
+                  <>
+                    {isNaN(entered) ? '-' : `${entered.toLocaleString()} mi`}
+                    {bookOutMileage != null && !isNaN(entered) && (
+                      <span className="font-normal text-hf-muted"> ({entered - bookOutMileage >= 0 ? '+' : ''}{(entered - bookOutMileage).toLocaleString()})</span>
+                    )}
+                  </>
+                )],
+                ['Fuel', form.fuelLevel || '-'],
+                ['Photos', `${form.photos.length} taken`],
+              ]} />
+              <div className={`${fl.card} flex flex-col gap-2 p-4`}>
+                <label htmlFor="fl-damage" className={fl.label}>Any damage or problems?</label>
+                <p className="text-[14px] text-hf-muted">Anything the customer mentioned: damage, warning lights, anything else.</p>
+                <textarea
+                  id="fl-damage"
+                  rows={3}
+                  value={form.damageNotes}
+                  onChange={e => updateForm('damageNotes', e.target.value)}
+                  placeholder="e.g. Customer mentioned a scrape on the rear bumper"
+                  className={fl.input}
+                />
+              </div>
+
+              {/* The customer signs for the van they hand back; if nobody's there,
+                  a short note instead (jon, Oct 2026). */}
+              <label className={`${fl.card} flex cursor-pointer items-center justify-between gap-3 p-4`}>
+                <span className="flex flex-col">
+                  <span className="text-[16px] font-semibold">Customer not here</span>
+                  <span className="text-[14px] text-hf-muted">Add a short note instead of a signature</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={!customerPresent}
+                  onChange={e => { setCustomerPresent(!e.target.checked); setSubmitError(null) }}
+                  className="h-6 w-6 flex-none accent-[#A75390]"
+                />
+              </label>
+
+              {customerPresent ? (
+                <SignatureCapture ref={signatureRef} look="freelancer" label="Customer's signature" hint="Hand the phone to the customer" />
+              ) : (
+                <div className={`${fl.card} flex flex-col gap-2 p-4`}>
+                  <label htmlFor="fl-absent" className={fl.label}>Note for the office <span className="text-hf-error">*</span></label>
+                  <p className="text-[14px] text-hf-muted">Where did you find the keys? Anything else we should know?</p>
+                  <textarea
+                    id="fl-absent"
+                    rows={3}
+                    value={absentNote}
+                    onChange={e => { setAbsentNote(e.target.value); setSubmitError(null) }}
+                    placeholder="e.g. Keys left with the venue's stage door, van parked in bay 4"
+                    className={fl.input}
+                  />
+                </div>
+              )}
+              {submitError && <Banner tone="error">{submitError}</Banner>}
+            </>
+          )}
+        </main>
+
+        {isSubmitting && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6">
+            <div className="flex w-full max-w-xs flex-col items-center gap-3 rounded-2xl bg-white p-6 text-center">
+              <LoaderCircle size={32} className="animate-spin text-hf-accent" />
+              <p className="text-[15px] font-semibold">{uploadProgress || 'Sending…'}</p>
+            </div>
+          </div>
+        )}
+
+        <StepFooter
+          onBack={() => setStep(s => s - 1)}
+          backDisabled={isSubmitting}
+          primary={isLast
+            ? { label: 'Van collected', onClick: handleSubmit, disabled: isSubmitting, tone: 'green' }
+            : { label: nextLabel, onClick: () => setStep(s => s + 1), disabled: !ready }}
+        />
       </div>
     )
   }
@@ -740,7 +1017,8 @@ export function CollectionPage() {
           <p className="text-xs text-gray-500">Record vehicle condition at pickup</p>
         </div>
         {isFreelancer && freelancerContext?.returnUrl ? (
-          <a href={freelancerContext.returnUrl} className="text-sm text-gray-500 hover:text-gray-700">
+          // The job page, never the completion screen (see portalJobUrl).
+          <a href={portalJobUrl(freelancerContext.returnUrl) ?? undefined} className="text-sm text-gray-500 hover:text-gray-700">
             Cancel
           </a>
         ) : (
@@ -821,10 +1099,18 @@ export function CollectionPage() {
           onUpdate={updateForm}
           signatureRef={signatureRef}
           bookOutFuelLevel={bookOutFuelLevel}
+          customerPresent={customerPresent}
+          onCustomerPresentChange={(present) => { setCustomerPresent(present); setSubmitError(null) }}
+          absentNote={absentNote}
+          onAbsentNoteChange={(note) => { setAbsentNote(note); setSubmitError(null) }}
         />
       )}
 
       {/* Navigation */}
+      {submitError && step === STEPS.length - 1 && (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{submitError}</p>
+      )}
+
       <div className="flex gap-3 pt-2">
         {step > 0 && (
           <button
@@ -1080,11 +1366,19 @@ function StepConfirm({
   onUpdate,
   signatureRef,
   bookOutFuelLevel,
+  customerPresent,
+  onCustomerPresentChange,
+  absentNote,
+  onAbsentNoteChange,
 }: {
   form: CollectionFormState
   onUpdate: <K extends keyof CollectionFormState>(key: K, value: CollectionFormState[K]) => void
   signatureRef: React.RefObject<SignatureCaptureHandle>
   bookOutFuelLevel: string | null
+  customerPresent: boolean
+  onCustomerPresentChange: (present: boolean) => void
+  absentNote: string
+  onAbsentNoteChange: (note: string) => void
 }) {
   // Only a reduction is worth flagging — more fuel coming back is fine.
   const fuelChanged = isFuelReduction(bookOutFuelLevel, form.fuelLevel)
@@ -1133,8 +1427,40 @@ function StepConfirm({
         </div>
       )}
 
-      {/* Signature */}
-      <SignatureCapture ref={signatureRef} label="Collection Signature" />
+      {/* Sign-off: the customer signs for the van they're handing back; if
+          nobody's there, a short note instead (jon, Oct 2026). */}
+      <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white p-3">
+        <span>
+          <span className="block text-sm font-medium text-gray-900">Customer not here</span>
+          <span className="block text-xs text-gray-500">Add a short note instead of a signature</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={!customerPresent}
+          onChange={e => onCustomerPresentChange(!e.target.checked)}
+          className="h-5 w-5"
+        />
+      </label>
+
+      {customerPresent ? (
+        <SignatureCapture ref={signatureRef} label="Customer's signature" />
+      ) : (
+        <div>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Note for the office <span className="text-red-600">*</span>
+          </label>
+          <p className="mb-2 text-xs text-gray-500">
+            Where did you find the keys? Anything else we should know?
+          </p>
+          <textarea
+            value={absentNote}
+            onChange={e => onAbsentNoteChange(e.target.value)}
+            rows={3}
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+            placeholder="e.g. Keys left with the venue's stage door, van parked in bay 4"
+          />
+        </div>
+      )}
     </div>
   )
 }

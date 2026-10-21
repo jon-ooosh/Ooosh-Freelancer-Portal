@@ -33,6 +33,7 @@ export interface PortalJob {
   time: string | null
   venueName: string | null
   venueId: string | null
+  venueCity?: string | null
   driverPay: number
   runGroup: string | null
   runOrder: number | null
@@ -40,7 +41,6 @@ export interface PortalJob {
   // When set, this is the combined fee the freelancer is offered for
   // the whole run (overrides summing individual driverPay values).
   runCombinedFreelancerFee: number | null
-  runCombinedClientFee: number | null
   runNotes: string | null
   hhRef: string | null
   status: string
@@ -53,6 +53,11 @@ export interface PortalJob {
   completionNotes: string | null
   isLocal: boolean
   isGrouped: false
+  // Crew and People work: YYYY-MM-DD the freelancer can complete it from (its
+  // last day — OP services/quote-schedule.ts). Null for ordinary D&C.
+  completeFrom?: string | null
+  // Job detail only: has the van leg really happened (booked out / collected)?
+  vanLegDone?: boolean
   // D&C specific
   whatIsIt?: string
   clientEmail?: string | null
@@ -149,6 +154,13 @@ export interface SitterShift {
 export interface SitterShiftsResponse {
   success: boolean
   shifts: SitterShift[]
+  /** Only when asked with `since`: every night before tonight back to that date (the Completed page). */
+  past?: SitterShift[]
+}
+
+/** `?since=` for the three list calls (FREELANCER-PORTAL-SPEC §10). */
+function sinceQuery(since?: string): string {
+  return since ? `?since=${encodeURIComponent(since)}` : ''
 }
 
 export interface SitterShiftDetail {
@@ -168,8 +180,8 @@ export interface SitterShiftDetailResponse extends SitterShiftDetail {
 }
 
 /** The sitter's own upcoming/recent rostered evenings. */
-export async function getSitterShiftsFromOP(sessionToken: string): Promise<SitterShiftsResponse> {
-  return opFetch<SitterShiftsResponse>('/studio-sitter/shifts', sessionToken)
+export async function getSitterShiftsFromOP(sessionToken: string, since?: string): Promise<SitterShiftsResponse> {
+  return opFetch<SitterShiftsResponse>(`/studio-sitter/shifts${sinceQuery(since)}`, sessionToken)
 }
 
 // =============================================================================
@@ -231,10 +243,12 @@ export interface DayBookingsResponse {
   awaitingReply: number
   upcoming: PortalDayBooking[]
   past: PortalDayBooking[]
+  /** Only when asked with `since`: days worked (accepted or completed, gone by) back to that date. */
+  done?: PortalDayBooking[]
 }
 
-export async function getDayBookingsFromOP(sessionToken: string): Promise<DayBookingsResponse> {
-  return opFetch<DayBookingsResponse>('/day-bookings', sessionToken)
+export async function getDayBookingsFromOP(sessionToken: string, since?: string): Promise<DayBookingsResponse> {
+  return opFetch<DayBookingsResponse>(`/day-bookings${sinceQuery(since)}`, sessionToken)
 }
 
 export async function respondToDayBookingFromOP(
@@ -568,6 +582,22 @@ async function fetchWithTimeout(
 }
 
 /**
+ * OP refused the session: the freelancer was removed or un-approved, or a
+ * password reset signed this device out (Oct 2026). Drop the cookie. Otherwise
+ * the pages' "401 → /login" meets the middleware's "valid cookie → /dashboard"
+ * (it can only check the signature) and the two bounce for ever.
+ * Only works inside a route handler, which is where opFetch runs.
+ */
+async function clearSessionCookie(): Promise<void> {
+  try {
+    const { cookies } = await import('next/headers')
+    cookies().delete('session')
+  } catch {
+    // Not in a route handler: nothing to set the cookie on.
+  }
+}
+
+/**
  * Make an authenticated request to the OP backend portal API.
  * Forwards the session cookie from the incoming request.
  *
@@ -612,6 +642,7 @@ async function opFetch<T>(
           await new Promise((r) => setTimeout(r, 300))
           continue
         }
+        if (response.status === 401) await clearSessionCookie()
         throw err
       }
 
@@ -636,8 +667,8 @@ async function opFetch<T>(
  * Fetch all jobs for the logged-in freelancer from OP backend.
  * Returns data in the same shape the dashboard page expects.
  */
-export async function getJobsFromOP(sessionToken: string): Promise<PortalJobsResponse> {
-  return opFetch<PortalJobsResponse>('/jobs', sessionToken)
+export async function getJobsFromOP(sessionToken: string, since?: string): Promise<PortalJobsResponse> {
+  return opFetch<PortalJobsResponse>(`/jobs${sinceQuery(since)}`, sessionToken)
 }
 
 /**
@@ -658,6 +689,17 @@ export async function getEquipmentFromOP(
   quoteId: string
 ): Promise<PortalEquipmentResponse> {
   return opFetch<PortalEquipmentResponse>(`/jobs/${quoteId}/equipment`, sessionToken)
+}
+
+/**
+ * The HireHop job number behind one of the freelancer's jobs, or a 404 if the
+ * job isn't theirs. The kit-list route asks this before it reads HireHop.
+ */
+export async function getHireHopRefFromOP(
+  sessionToken: string,
+  quoteId: string
+): Promise<{ success: boolean; hhRef: string | null }> {
+  return opFetch(`/jobs/${encodeURIComponent(quoteId)}/hirehop-ref`, sessionToken)
 }
 
 /**
@@ -716,7 +758,10 @@ export async function submitCompletionToOP(
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
-    throw new Error(body.error || `Completion failed: ${response.status}`)
+    // An OpApiError, so the route can tell OP's own refusal (a 4xx: "the van
+    // hasn't been booked out yet") from an outage — a plain Error made every
+    // refusal read "Unable to submit completion" (Oct 2026).
+    throw new OpApiError(body.error || `Completion failed: ${response.status}`, response.status, body)
   }
 
   return response.json()

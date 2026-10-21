@@ -2,19 +2,37 @@
 
 /**
  * Job Details Page
- * 
+ *
  * Displays full details for a single job including venue information.
  * Supports both D&C jobs and Crew jobs.
  * Route: /job/[id]
- * 
+ *
  * Query params:
- * - ?board=crew → fetch from Crewed Jobs board
+ * - ?board=crew → open as a crew job before the data arrives (the job's own
+ *   boardType from OP decides once it does — links without the param, like the
+ *   completion reminder email, used to render a crew job as a delivery)
  * - ?run=X → multi-drop run view (D&C only)
+ *
+ * Look: the Oct 2026 refresh (design 1c). Kind label + HH number, the venue as
+ * the title, key notes in amber, an address card with Directions / Copy, one
+ * "Who to contact" card, the equipment list as an expandable row with the fee,
+ * and Start as a sticky button at the bottom. Behaviour is unchanged.
  */
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
+import {
+  AlertTriangle, Search, RefreshCw, MapPin, Navigation, Copy, Check, Phone, Mail,
+  FileText, Image as ImageIcon, Paperclip, ExternalLink, ChevronDown, Play, CalendarPlus,
+  Bell, BellOff, Receipt, PoundSterling, User, Minus, Plus, Timer, Users, X,
+} from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import { downloadIcs } from '@/lib/calendar'
+import { ukToday, ukDatePlus } from '@/lib/ukDate'
+import { cls, BackLink, Banner, Chip, IconTile, PageSpinner, KIND_TEXT, ICON } from '@/components/ui'
+import type { Kind } from '@/components/ui'
 
 // =============================================================================
 // TYPES
@@ -37,6 +55,8 @@ interface Job {
   driverPay?: number
   completedAtDate?: string
   completionNotes?: string
+  // Crew and People work: YYYY-MM-DD it can be completed from (its last day)
+  completeFrom?: string | null
   // Crew job fields
   board?: 'dc' | 'crew'
   jobType?: string                    // "Transport + Crew" or "Crew Only"
@@ -121,23 +141,39 @@ function formatDate(dateStr?: string): string {
   })
 }
 
-function formatShortDate(dateStr?: string): string {
-  if (!dateStr) return 'TBC'
-  const date = new Date(dateStr)
-  if (isNaN(date.getTime())) return dateStr
-  return date.toLocaleDateString('en-GB', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short',
-  })
-}
-
+/** "10:00" / "10:00:00" → "10:00 AM" (as on the job cards); already-formatted passes through. */
 function formatTime(timeStr?: string): string {
-  if (!timeStr) return 'TBC'
-  return timeStr
+  if (!timeStr) return ''
+  if (/[AP]M/i.test(timeStr)) return timeStr
+  const match = timeStr.match(/(\d{1,2}):(\d{2})/)
+  if (!match) return timeStr
+  const hours = parseInt(match[1], 10)
+  return `${hours % 12 || 12}:${match[2]} ${hours >= 12 ? 'PM' : 'AM'}`
 }
 
-function getGoogleMapsUrl(address?: string): string | null {
+const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** YYYY-MM-DD → "Tue 21 Oct" (built by hand: browsers disagree on the comma). */
+function shortDay(dateStr?: string | null): string {
+  if (!dateStr) return ''
+  const [y, m, d] = dateStr.slice(0, 10).split('-').map(Number)
+  const date = new Date(Date.UTC(y, (m || 1) - 1, d || 1))
+  if (Number.isNaN(date.getTime())) return dateStr
+  return `${DAYS_SHORT[date.getUTCDay()]} ${date.getUTCDate()} ${MONTHS_SHORT[date.getUTCMonth()]}`
+}
+
+/** "Today, Tue 21 Oct" / "Tomorrow, Wed 22 Oct" / "Thu 23 Oct" (UK days). */
+function dayLabel(dateStr?: string): string {
+  if (!dateStr) return 'Date TBC'
+  const ymd = dateStr.slice(0, 10)
+  const short = shortDay(ymd)
+  if (ymd === ukToday()) return `Today, ${short}`
+  if (ymd === ukDatePlus(1)) return `Tomorrow, ${short}`
+  return short
+}
+
+function getGoogleMapsUrl(address?: string | null): string | null {
   if (!address) return null
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
 }
@@ -153,31 +189,47 @@ function getWhat3WordsUrl(w3w?: string): string | null {
  * Translate Monday.com status to user-friendly display
  * Works for both D&C and Crew job statuses
  */
-function translateStatus(status: string): { label: string; style: string; icon: string } {
+function translateStatus(status: string): { label: string; tone: 'green' | 'plum' | 'neutral' | 'red'; Icon: LucideIcon | null } {
   const normalised = status.toLowerCase().trim()
-  
+
   // Confirmed / Arranged (matches both "email driver" and "email crew")
   if (normalised.includes('arranged')) {
-    return { label: 'Confirmed', style: 'bg-green-100 text-green-800', icon: '✓' }
+    return { label: 'Confirmed', tone: 'green', Icon: Check }
   }
-  
+
   // In Progress / Working on it
   if (normalised.includes('working on it')) {
-    return { label: 'In Progress', style: 'bg-blue-100 text-blue-800', icon: '🔄' }
+    return { label: 'In Progress', tone: 'plum', Icon: RefreshCw }
   }
-  
+
   // Completed / All done
   if (normalised.includes('done') || normalised.includes('completed')) {
-    return { label: 'Completed', style: 'bg-gray-100 text-gray-600', icon: '✓' }
+    return { label: 'Completed', tone: 'neutral', Icon: Check }
   }
-  
+
   // Cancelled / Not needed
   if (normalised.includes('not needed') || normalised.includes('cancelled')) {
-    return { label: 'Cancelled', style: 'bg-red-100 text-red-800', icon: '✗' }
+    return { label: 'Cancelled', tone: 'red', Icon: X }
   }
-  
+
+  // Still being set up by the office ('TO DO!' / 'Arranging' are office
+  // labels from the Monday days; a freelancer shouldn't see them raw).
+  if (normalised.includes('to do') || normalised.includes('arranging')) {
+    return { label: 'Being arranged', tone: 'neutral', Icon: null }
+  }
+
   // Default - show raw status
-  return { label: status, style: 'bg-gray-100 text-gray-800', icon: '•' }
+  return { label: status, tone: 'neutral', Icon: null }
+}
+
+function StatusChip({ status }: { status: string }) {
+  const s = translateStatus(status)
+  return (
+    <Chip tone={s.tone}>
+      {s.Icon && <s.Icon size={12} strokeWidth={2.6} />}
+      {s.label}
+    </Chip>
+  )
 }
 
 /**
@@ -225,31 +277,262 @@ function getDisplayWorkType(workType?: string, workDescription?: string): string
   return workType
 }
 
+function titleCase(s: string): string {
+  return s.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+/** Kind label for a D&C job, the same rule as the dashboard's cards (design 2a). */
+function describeDcJob(job: Job): { kind: Kind; label: string } {
+  const leg = job.type === 'collection' ? 'collection' : 'delivery'
+  if (job.whatIsIt === 'equipment') return { kind: 'backline', label: `Backline ${leg}` }
+  if (job.whatIsIt === 'vehicle') return { kind: 'van', label: `Van ${leg}` }
+  if (job.whatIsIt === 'people') return { kind: 'van', label: `People ${leg}` }
+  return { kind: 'backline', label: leg === 'delivery' ? 'Delivery' : 'Collection' }
+}
+
 // =============================================================================
-// SIMPLE EQUIPMENT LIST COMPONENT (Read-only, no tickboxes)
+// SHARED LAYOUT PIECES (this page only)
+// =============================================================================
+
+/** Kind label · HH n, the title, the date line, and any chips. */
+function JobHeading({ kind, label, hhRef, title, dateLine, chips }: {
+  kind: Kind
+  label: string
+  hhRef?: string
+  title: string
+  dateLine: string
+  chips?: ReactNode
+}) {
+  return (
+    <div className="px-1 pb-1.5 flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`${cls.kindLabel} ${KIND_TEXT[kind]}`}>{label}</span>
+        {hhRef && <span className="text-[13px] text-hf-muted">· HH {hhRef}</span>}
+      </div>
+      <h1 className={cls.pageTitle}>{title}</h1>
+      <p className="text-[16px] text-hf-body">{dateLine}</p>
+      {chips && <div className="flex flex-wrap gap-1.5 pt-0.5">{chips}</div>}
+    </div>
+  )
+}
+
+/** The amber "Key notes" card (also used for access info). */
+function NoteCard({ title, text, tone = 'amber' }: { title: string; text: string; tone?: 'amber' | 'plain' }) {
+  const box = tone === 'amber'
+    ? 'bg-hf-amber-bg border border-hf-amber-border'
+    : 'bg-white border border-hf-border'
+  const head = tone === 'amber' ? 'text-hf-amber-text' : 'text-hf-muted'
+  return (
+    <div className={`${box} rounded-[14px] px-3.5 py-3 flex flex-col gap-1`}>
+      <div className={`${cls.kindLabel} ${head}`}>{title}</div>
+      <p className="text-[15px] leading-[1.45] text-hf-body whitespace-pre-wrap">{text}</p>
+    </div>
+  )
+}
+
+/** A card with a section label and free text. */
+function TextCard({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className={`${cls.card} p-4 flex flex-col gap-2`}>
+      <div className={`${cls.kindLabel} text-hf-muted`}>{title}</div>
+      {children}
+    </div>
+  )
+}
+
+/**
+ * The venue's address: first line bold, the rest muted, then Directions / Copy.
+ * Load-in address and what3words stay alongside (never instead of the postal
+ * address: a note like "round the back via Mill Lane" won't geocode).
+ */
+function AddressCard({ venue }: { venue: Venue }) {
+  const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle')
+  const googleMapsUrl = getGoogleMapsUrl(venue.address)
+  const what3WordsUrl = getWhat3WordsUrl(venue.whatThreeWords)
+  const parts = (venue.address || '').split(',').map((p) => p.trim()).filter(Boolean)
+  const firstLine = parts[0] || ''
+  const rest = parts.slice(1).join(', ')
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(venue.address || '')
+      setCopied('done')
+    } catch {
+      setCopied('failed')
+    }
+    setTimeout(() => setCopied('idle'), 2000)
+  }
+
+  return (
+    <div className={`${cls.card} p-4 flex flex-col gap-3.5`}>
+      {venue.address && (
+        <div className="flex gap-3">
+          <div className="w-9 h-9 flex-none rounded-[10px] bg-hf-track text-hf-body flex items-center justify-center">
+            <MapPin size={18} strokeWidth={1.8} />
+          </div>
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <div className="text-[16px] font-semibold text-hf-ink">{firstLine}</div>
+            {rest && <div className="text-[15px] text-hf-muted">{rest}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* Load-in address (loading dock, stage door…) sits alongside the postal
+          address, never instead of it. */}
+      {venue.loadInAddress && (
+        <p className="text-[15px] text-hf-body">
+          <span className="font-semibold">Load-in:</span> {venue.loadInAddress}{' '}
+          <a
+            href={getGoogleMapsUrl(venue.loadInAddress) || '#'}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`${cls.link} whitespace-nowrap`}
+          >
+            (map)
+          </a>
+        </p>
+      )}
+
+      {venue.whatThreeWords && (
+        <p className="text-[14px] text-hf-muted font-mono">///{venue.whatThreeWords}</p>
+      )}
+
+      {(googleMapsUrl || venue.address) && (
+        <div className="grid grid-cols-2 gap-2.5">
+          {googleMapsUrl ? (
+            <a href={googleMapsUrl} target="_blank" rel="noopener noreferrer"
+              className="h-12 rounded-xl border-[1.5px] border-hf-control flex items-center justify-center gap-2 text-[15px] font-semibold text-hf-ink hover:bg-hf-inset">
+              <Navigation size={18} strokeWidth={1.8} />Directions
+            </a>
+          ) : <span />}
+          {venue.address ? (
+            <button type="button" onClick={copy}
+              className="h-12 rounded-xl border-[1.5px] border-hf-control flex items-center justify-center gap-2 text-[15px] font-semibold text-hf-ink hover:bg-hf-inset">
+              {copied === 'done' ? <Check size={18} strokeWidth={2} /> : <Copy size={18} strokeWidth={1.8} />}
+              {copied === 'done' ? 'Copied' : copied === 'failed' ? 'Copy failed' : 'Copy'}
+            </button>
+          ) : <span />}
+        </div>
+      )}
+
+      {what3WordsUrl && (
+        <a href={what3WordsUrl} target="_blank" rel="noopener noreferrer"
+          className="h-11 rounded-xl border-[1.5px] border-hf-control flex items-center justify-center gap-2 text-[15px] font-semibold text-hf-ink hover:bg-hf-inset">
+          <span className="font-bold text-hf-error">///</span>What3Words
+        </a>
+      )}
+    </div>
+  )
+}
+
+/** Green round call button (design: 44×44, green tint). */
+function CallButton({ phone, label }: { phone: string; label?: string }) {
+  return (
+    <a href={`tel:${phone.replace(/\s+/g, '')}`} aria-label={label ? `Call ${label}` : `Call ${phone}`}
+      className="w-11 h-11 flex-none rounded-full bg-hf-green-tint text-hf-green-text flex items-center justify-center hover:brightness-95">
+      <Phone size={18} strokeWidth={1.8} />
+    </a>
+  )
+}
+
+/**
+ * "Who to contact": the venue's own contacts (phone numbers only from 48 hours
+ * before the job: `phoneHidden` / `phoneVisibleFrom` come from OP) and the
+ * on-site contacts staff picked for this leg (quote_contacts, OP migration 223).
+ * Numbers are tel: links: this page is read on a phone at a loading bay, and
+ * making someone copy a number out by hand is the reason drivers ring the office.
+ */
+function ContactsCard({ venue, contacts }: { venue: Venue | null; contacts?: Job['contacts'] }) {
+  type Row = { key: string; name: string; sub?: string | null; phone?: string | null; email?: string | null; hiddenNote?: string | null }
+  const rows: Row[] = []
+
+  if (venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email)) {
+    const hidden = venue.phoneHidden
+      ? `Phone available from ${venue.phoneVisibleFrom || 'closer to the day'}`
+      : null
+    if (venue.contact1) rows.push({ key: 'v1', name: venue.contact1, sub: hidden ? null : venue.phone, phone: hidden ? null : venue.phone, hiddenNote: hidden })
+    if (venue.contact2) rows.push({ key: 'v2', name: venue.contact2, sub: hidden ? null : venue.phone2, phone: hidden ? null : venue.phone2, hiddenNote: hidden })
+    // Numbers with no named contact: show them as the venue's own line.
+    if (!venue.contact1 && (venue.phone || hidden)) {
+      rows.push({ key: 'vp', name: venue.name || 'Venue', sub: hidden ? null : venue.phone, phone: hidden ? null : venue.phone, hiddenNote: hidden })
+    }
+    if (!venue.contact2 && venue.phone2 && !hidden && venue.contact1) {
+      rows.push({ key: 'vp2', name: venue.name || 'Venue', sub: venue.phone2, phone: venue.phone2 })
+    }
+    if (venue.email) rows.push({ key: 've', name: rows.length ? 'Venue email' : (venue.name || 'Venue'), email: venue.email })
+  }
+
+  ;(contacts || []).forEach((c, i) => {
+    rows.push({ key: `c${i}`, name: c.name, sub: c.label || c.phone || null, phone: c.phone, email: c.email })
+  })
+
+  if (rows.length === 0) return null
+
+  return (
+    <div className={`${cls.card} flex flex-col`}>
+      <div className={`px-4 pt-3.5 pb-1 ${cls.kindLabel} text-hf-muted`}>Who to contact</div>
+      {rows.map((r, i) => (
+        <div key={r.key}>
+          {i > 0 && <div className="h-px bg-hf-divider mx-4" />}
+          <div className={`px-4 py-2.5 ${i === rows.length - 1 ? 'pb-3.5' : ''} flex items-center gap-3`}>
+            <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+              <div className="text-[16px] font-semibold text-hf-ink">{r.name}</div>
+              {r.sub && <div className="text-[14px] text-hf-muted">{r.sub}</div>}
+              {r.hiddenNote && <div className="text-[14px] text-hf-muted italic">{r.hiddenNote}</div>}
+              {r.email && (
+                <a href={`mailto:${r.email}`} className={`${cls.link} text-[14px] break-all inline-flex items-center gap-1`}>
+                  <Mail size={14} strokeWidth={1.8} />{r.email}
+                </a>
+              )}
+            </div>
+            {r.phone && <CallButton phone={r.phone} label={r.name} />}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** Sticky bottom action (design 1c): page-coloured fade, 56px button. */
+function StickyAction({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="fixed inset-x-0 bottom-0 z-20 safe-bottom"
+      style={{ background: 'linear-gradient(to top, #f6f4f2 70%, rgba(246,244,242,0))' }}
+    >
+      <div className="max-w-lg mx-auto px-4 pt-3.5 pb-8">{children}</div>
+    </div>
+  )
+}
+
+// =============================================================================
+// EQUIPMENT LIST (read-only, no tickboxes) — an expandable row
 // =============================================================================
 
 interface EquipmentListProps {
   hhRef: string
+  /** The OP job this list is shown on: the kit-list route checks it is the freelancer's. */
+  quoteId: string
   whatIsIt?: 'equipment' | 'vehicle' | 'people'
-  isReference?: boolean             // If true, label as "Equipment Reference" instead of "Equipment List"
+  isReference?: boolean             // If true, label as "Equipment reference" instead of "Equipment list"
+  /** Extra rows in the same card, under a divider (the D&C page's "Your fee"). */
+  children?: ReactNode
 }
 
-function EquipmentList({ hhRef, whatIsIt, isReference = false }: EquipmentListProps) {
+function EquipmentList({ hhRef, quoteId, whatIsIt, isReference = false, children }: EquipmentListProps) {
   const [items, setItems] = useState<EquipmentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
 
-  const title = isReference ? 'Equipment Reference' : 'Equipment List'
-  const icon = isReference ? '📋' : '📦'
+  const title = isReference ? 'Equipment reference' : 'Equipment list'
 
   useEffect(() => {
     async function fetchItems() {
       try {
         // Determine filter based on job type
         const filterMode = getFilterMode(whatIsIt)
-        const response = await fetch(`/api/hirehop/items/${hhRef}?filter=${filterMode}`)
+        const response = await fetch(`/api/hirehop/items/${encodeURIComponent(hhRef)}?job=${encodeURIComponent(quoteId)}&filter=${filterMode}`)
         const data = await response.json()
 
         if (!response.ok) {
@@ -271,112 +554,83 @@ function EquipmentList({ hhRef, whatIsIt, isReference = false }: EquipmentListPr
       setLoading(false)
       setError('No HireHop reference available')
     }
-  }, [hhRef, whatIsIt])
+  }, [hhRef, quoteId, whatIsIt])
 
-  if (loading) {
-    return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>{icon}</span> {title}
-        </h2>
-        <div className="animate-pulse space-y-2">
-          <div className="h-4 bg-gray-200 rounded w-3/4"></div>
-          <div className="h-4 bg-gray-200 rounded w-1/2"></div>
-          <div className="h-4 bg-gray-200 rounded w-2/3"></div>
-        </div>
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>{icon}</span> {title}
-        </h2>
-        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-          <p className="text-red-700 text-sm">{error}</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (items.length === 0) {
-    return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>{icon}</span> {title}
-        </h2>
-        <p className="text-gray-500 text-sm">No equipment items found for this job.</p>
-      </div>
-    )
-  }
-
-  const PREVIEW_COUNT = 5
-  const hasMoreItems = items.length > PREVIEW_COUNT
-  const displayItems = expanded ? items : items.slice(0, PREVIEW_COUNT)
+  const summary = loading ? 'Loading...'
+    : error ? "Couldn't load"
+    : items.length === 0 ? 'None'
+    : `${items.length} item${items.length !== 1 ? 's' : ''}`
+  const canExpand = !loading && (items.length > 0 || !!error)
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="font-semibold text-gray-900 flex items-center gap-2">
-          <span>{icon}</span> {title}
-          <span className="text-sm font-normal text-gray-500">
-            ({items.length} item{items.length !== 1 ? 's' : ''})
-          </span>
-        </h2>
-      </div>
+    <div className={`${cls.card} flex flex-col overflow-hidden`}>
+      <button
+        type="button"
+        onClick={() => canExpand && setExpanded(!expanded)}
+        disabled={!canExpand}
+        aria-expanded={expanded}
+        className="h-[54px] px-4 flex items-center justify-between gap-3 text-left hover:bg-hf-inset/60 disabled:hover:bg-transparent"
+      >
+        <span className="text-[16px] font-semibold text-hf-ink">{title}</span>
+        <span className="flex items-center gap-1.5 text-[15px] text-hf-muted">
+          {summary}
+          {canExpand && (
+            <ChevronDown size={18} strokeWidth={2} className={`text-hf-chevron transition-transform ${expanded ? 'rotate-180' : '-rotate-90'}`} />
+          )}
+        </span>
+      </button>
 
-      {/* Filter indicator */}
-      {whatIsIt === 'equipment' && !isReference && (
-        <p className="text-xs text-gray-400 mb-3">
-          Showing equipment only (vehicles filtered out)
-        </p>
-      )}
-
-      {isReference && (
-        <p className="text-xs text-gray-400 mb-3">
-          For reference — equipment on this HireHop job
-        </p>
-      )}
-
-      <div className="space-y-2">
-        {displayItems.map((item, index) => (
-          <div 
-            key={item.id || index} 
-            className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"
-          >
-            <div className="flex-1">
-              <p className="text-gray-900 text-sm">{item.name}</p>
-              {item.category && (
-                <p className="text-gray-400 text-xs">{item.category}</p>
-              )}
+      {expanded && (
+        <div className="px-4 pb-3">
+          {/* Filter indicator */}
+          {whatIsIt === 'equipment' && !isReference && (
+            <p className="text-[13px] text-hf-muted mb-1">Showing equipment only (vehicles filtered out)</p>
+          )}
+          {isReference && (
+            <p className="text-[13px] text-hf-muted mb-1">For reference: equipment on this HireHop job</p>
+          )}
+          {error ? (
+            <Banner tone="error">{error}</Banner>
+          ) : (
+            <div className="flex flex-col">
+              {items.map((item, index) => (
+                <div key={item.id || index} className="flex items-center justify-between gap-3 py-2.5 border-b border-hf-divider last:border-0">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[15px] text-hf-ink">{item.name}</p>
+                    {item.category && <p className="text-[13px] text-hf-muted">{item.category}</p>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="tabular text-[15px] text-hf-muted">×{item.quantity}</span>
+                    {item.isVirtual && (
+                      <span className="text-[12px] text-hf-muted" title="Virtual item">(V)</span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="flex items-center gap-2">
-              <span className="bg-gray-100 text-gray-700 px-2 py-1 rounded text-sm font-medium">
-                × {item.quantity}
-              </span>
-              {item.isVirtual && (
-                <span className="text-xs text-gray-400" title="Virtual item">
-                  (V)
-                </span>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {hasMoreItems && (
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="mt-3 w-full text-center text-sm font-medium text-purple-600 hover:text-purple-500 py-2 border-t border-gray-100"
-        >
-          {expanded 
-            ? '▲ Show less' 
-            : `▼ Show all ${items.length} items (+${items.length - PREVIEW_COUNT} more)`
-          }
-        </button>
+          )}
+        </div>
       )}
+
+      {children && (
+        <>
+          <div className="h-px bg-hf-divider mx-4" />
+          {children}
+        </>
+      )}
+    </div>
+  )
+}
+
+/** "Your fee" row (design: 54px, fee in ink, tabular). */
+function FeeRow({ fee, sub }: { fee: number; sub?: string }) {
+  return (
+    <div className="min-h-[54px] px-4 py-2 flex items-center justify-between gap-3">
+      <div className="flex flex-col">
+        <span className="text-[16px] font-semibold text-hf-ink">Your fee</span>
+        {sub && <span className="text-[14px] text-hf-muted">{sub}</span>}
+      </div>
+      <span className="tabular text-[16px] font-semibold text-hf-ink">£{fee.toFixed(0)}</span>
     </div>
   )
 }
@@ -434,23 +688,28 @@ function NotificationMuteToggle({ jobId }: { jobId: string }) {
     return null // Don't show anything while loading
   }
 
+  const on = !isMuted
   return (
-    <button
-      onClick={toggleMute}
-      disabled={saving}
-      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
-        isMuted 
-          ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200'
-          : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200'
-      }`}
-    >
-      {saving ? (
-        <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
-      ) : (
-        <span>{isMuted ? '🔕' : '🔔'}</span>
-      )}
-      {isMuted ? 'Notifications off for this job' : 'Notifications on'}
-    </button>
+    <div className={`${cls.card} px-4 py-3.5 flex items-center gap-3`}>
+      <IconTile kind="neutral">{on ? <Bell {...ICON} /> : <BellOff {...ICON} />}</IconTile>
+      <div className="flex-1 min-w-0">
+        <div className="text-[16px] font-semibold text-hf-ink">Emails about this job</div>
+        <div className="text-[14px] text-hf-muted">
+          {on ? 'Turn off to stop email updates about this job' : 'Off for this job'}
+        </div>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={on ? 'Turn off emails about this job' : 'Turn on emails about this job'}
+        onClick={toggleMute}
+        disabled={saving}
+        className={`relative w-[51px] h-[31px] flex-none rounded-full transition-colors disabled:opacity-50 ${on ? 'bg-hf-green' : 'bg-hf-toggle-off'}`}
+      >
+        <span className={`absolute top-[2px] left-[2px] w-[27px] h-[27px] rounded-full bg-white shadow transition-transform ${on ? 'translate-x-5' : ''}`} />
+      </button>
+    </div>
   )
 }
 
@@ -458,7 +717,7 @@ function NotificationMuteToggle({ jobId }: { jobId: string }) {
 // VENUE FILES COMPONENT
 // =============================================================================
 
-function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; title?: string }) {
+function VenueFiles({ files, title = 'Venue files' }: { files: VenueFile[]; title?: string }) {
   if (!files || files.length === 0) return null
 
   const handleFileClick = (file: VenueFile) => {
@@ -469,44 +728,43 @@ function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; titl
     }
   }
 
-  // Get a file icon based on file name
-  const getFileIcon = (name: string, fileType?: string): string => {
-    if (fileType === 'GOOGLE_DRIVE') return '📄'
+  // Pick a file icon based on file name
+  const getFileIcon = (name: string, fileType?: string): LucideIcon => {
+    if (fileType === 'GOOGLE_DRIVE') return FileText
     const lower = name.toLowerCase()
-    if (lower.endsWith('.pdf')) return '📕'
-    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')) return '🖼️'
-    if (lower.endsWith('.doc') || lower.endsWith('.docx')) return '📄'
-    return '📎'
+    if (lower.endsWith('.pdf')) return FileText
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')) return ImageIcon
+    if (lower.endsWith('.doc') || lower.endsWith('.docx')) return FileText
+    return Paperclip
   }
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
-      <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-        <span>📁</span> {title}
-        <span className="text-sm font-normal text-gray-500">
-          ({files.length} file{files.length !== 1 ? 's' : ''})
-        </span>
-      </h2>
-      <div className="space-y-2">
-        {files.map((file, index) => (
-          <button
-            key={file.assetId || index}
-            onClick={() => handleFileClick(file)}
-            className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors text-left"
-          >
-            <span className="text-xl">{getFileIcon(file.name, file.fileType)}</span>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-gray-900 truncate">{file.name}</p>
-              {file.fileType && file.fileType !== 'ASSET' && (
-                <p className="text-xs text-gray-400">{file.fileType === 'GOOGLE_DRIVE' ? 'Google Drive' : file.fileType}</p>
-              )}
-            </div>
-            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-            </svg>
-          </button>
-        ))}
+    <div className={`${cls.card} flex flex-col`}>
+      <div className={`px-4 pt-3.5 pb-1 ${cls.kindLabel} text-hf-muted`}>
+        {title} · {files.length}
       </div>
+      {files.map((file, index) => {
+        const Icon = getFileIcon(file.name, file.fileType)
+        return (
+          <div key={file.assetId || index}>
+            {index > 0 && <div className="h-px bg-hf-divider mx-4" />}
+            <button
+              type="button"
+              onClick={() => handleFileClick(file)}
+              className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-hf-inset/60"
+            >
+              <Icon size={20} strokeWidth={1.8} className="text-hf-link flex-none" />
+              <div className="flex-1 min-w-0">
+                <p className="text-[15px] font-semibold text-hf-link truncate">{file.name}</p>
+                {file.fileType && file.fileType !== 'ASSET' && (
+                  <p className="text-[13px] text-hf-muted">{file.fileType === 'GOOGLE_DRIVE' ? 'Google Drive' : file.fileType}</p>
+                )}
+              </div>
+              <ExternalLink size={16} strokeWidth={1.8} className="text-hf-chevron flex-none" />
+            </button>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -515,319 +773,165 @@ function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; titl
 // CREW JOB DETAIL VIEW
 // =============================================================================
 
+/** "Add to Calendar": hand the phone an .ics for this job. */
+function addJobToCalendar(job: Job, venue: Venue | null, isCrew: boolean) {
+  const place = venue?.name || job.destination || job.venueName || ''
+  const kind = isCrew
+    ? 'Crew'
+    : job.type === 'delivery' ? 'Delivery' : 'Collection'
+  const ok = job.date && downloadIcs({
+    uid: `job-${job.id}`,
+    title: place ? `Ooosh ${kind}: ${place}` : `Ooosh ${kind}`,
+    date: job.date,
+    time: job.time || null,
+    durationHours: isCrew ? job.workDurationHours || null : 1,
+    endDate: isCrew ? job.finishDate || null : null,
+    location: venue?.address || place || null,
+    description: [
+      job.hhRef ? `HireHop job ${job.hhRef}` : null,
+      `Details: https://freelancer.oooshtours.co.uk/job/${job.id}`,
+    ].filter(Boolean).join('\n'),
+  }, `ooosh-${job.hhRef || job.id}.ics`)
+  if (!ok) alert('This job has no date yet, so it can\'t go in your calendar.')
+}
+
+function CalendarButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className={`${cls.btnSecondary} w-full`}>
+      <CalendarPlus size={18} strokeWidth={1.8} />Add to Calendar
+    </button>
+  )
+}
+
+function CompletedBanner({ date }: { date: string }) {
+  return (
+    <Banner tone="success" className="flex items-center justify-center gap-2 font-semibold">
+      <Check size={18} strokeWidth={2.4} />Completed on {formatDate(date)}
+    </Banner>
+  )
+}
+
+/** One "Expenses & Per Diem" line: what to do about it, coloured by who pays. */
+function MoneyLine({ line }: { line: { label: string; message: string; tone: 'ooosh' | 'client' | 'claim' | 'none' } }) {
+  const tone = line.tone === 'claim' ? 'text-hf-amber-text'
+    : line.tone === 'ooosh' ? 'text-hf-green-text'
+    : line.tone === 'client' ? 'text-hf-body' : 'text-hf-muted'
+  const Icon = line.tone === 'claim' ? Receipt : line.tone === 'ooosh' ? PoundSterling
+    : line.tone === 'client' ? User : Minus
+  return (
+    <li className="flex items-start gap-2.5 text-[15px] leading-[1.4]">
+      <Icon size={16} strokeWidth={1.8} className={`mt-[3px] flex-none ${tone}`} />
+      <span><span className="font-semibold text-hf-ink">{line.label}:</span>{' '}
+        <span className={tone}>{line.message}</span></span>
+    </li>
+  )
+}
+
 function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
   const displayWorkType = getDisplayWorkType(job.workType, job.workDescription)
   const displayJobType = translateJobType(job.jobType)
   const duration = formatDuration(job.workDurationHours, job.numberOfDays)
-  const statusInfo = translateStatus(job.status)
-  const googleMapsUrl = getGoogleMapsUrl(venue?.address)
-  const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
-  
+
   // Multi-day date display
   const isMultiDay = job.finishDate && job.finishDate !== job.date
   const dateDisplay = isMultiDay
-    ? `${formatDate(job.date)} – ${formatShortDate(job.finishDate)}`
-    : formatDate(job.date)
+    ? `${dayLabel(job.date)} – ${shortDay(job.finishDate)}`
+    : dayLabel(job.date)
+  const time = formatTime(job.time)
 
   // Fee — crew jobs use freelancerFee directly
   const fee = job.freelancerFee || job.driverPay
+  const hasMoney = (fee && fee > 0) || job.expenseBreakdown || job.crewMoney
 
   return (
     <>
-      {/* Job Header */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <div className="flex items-start gap-3 mb-4">
-          <span className="text-3xl">👷</span>
-          <div className="flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-semibold text-yellow-700 uppercase tracking-wide">
-                {displayWorkType}
-              </span>
-              {displayJobType && (
-                <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
-                  {displayJobType}
-                </span>
-              )}
-              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.style}`}>
-                <span>{statusInfo.icon}</span>
-                {statusInfo.label}
-              </span>
-            </div>
-            <h1 className="text-xl font-bold text-gray-900 mt-1">
-              {venue?.name || job.destination || job.venueName || job.name}
-            </h1>
-          </div>
-        </div>
+      <JobHeading
+        kind="crew"
+        label={`Crew · ${titleCase(displayWorkType)}`}
+        hhRef={job.hhRef}
+        title={venue?.name || job.destination || job.venueName || job.name}
+        dateLine={[dateDisplay, time ? `arrive by ${time}` : ''].filter(Boolean).join(' · ')}
+        chips={<>
+          <StatusChip status={job.status} />
+          {displayJobType && <Chip tone="neutral"><Users size={12} strokeWidth={2.2} />{displayJobType}</Chip>}
+          {duration && <Chip tone="neutral"><Timer size={12} strokeWidth={2.2} />{duration}</Chip>}
+        </>}
+      />
 
-        <hr className="my-4 border-gray-100" />
-
-        <div className="space-y-3">
-          {/* Date */}
-          <div className="flex items-center gap-3">
-            <span className="text-gray-400 w-6 text-center">📅</span>
-            <div>
-              <p className="text-sm text-gray-500">Date</p>
-              <p className="font-medium text-gray-900">{dateDisplay}</p>
-            </div>
-          </div>
-
-          {/* Arrival time */}
-          <div className="flex items-center gap-3">
-            <span className="text-gray-400 w-6 text-center">⏰</span>
-            <div>
-              <p className="text-sm text-gray-500">Arrive by</p>
-              <p className="font-medium text-gray-900">{formatTime(job.time)}</p>
-            </div>
-          </div>
-
-          {/* Duration */}
-          {duration && (
-            <div className="flex items-center gap-3">
-              <span className="text-gray-400 w-6 text-center">⏱️</span>
-              <div>
-                <p className="text-sm text-gray-500">Duration</p>
-                <p className="font-medium text-gray-900">{duration}</p>
-              </div>
-            </div>
-          )}
-
-          {/* HireHop Reference */}
-          {job.hhRef && (
-            <div className="flex items-center gap-3">
-              <span className="text-gray-400 w-6 text-center">🔗</span>
-              <div>
-                <p className="text-sm text-gray-500">HireHop Job</p>
-                <p className="font-mono font-medium text-gray-900">#{job.hhRef}</p>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Fee & Expenses — combined section */}
-        {(fee && fee > 0) || job.expenseBreakdown || job.crewMoney ? (
-          <>
-            <hr className="my-4 border-gray-100" />
-            <div className="space-y-3">
-              {/* Fee */}
-              {fee && fee > 0 && (
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">💷</span>
-                  <div>
-                    <p className="text-sm text-gray-500">Agreed fee</p>
-                    <p className="font-medium text-green-600">£{fee.toFixed(0)}</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Your money on this job — plain-English pay/reimburse breakdown */}
-              {job.crewMoney ? (
-                <div className="mt-1 rounded-lg border border-gray-200 p-3">
-                  <p className="mb-2 text-sm font-medium text-gray-700">Expenses &amp; Per Diem — what to do</p>
-                  <ul className="space-y-1.5">
-                    {[job.crewMoney.perDiem, ...job.crewMoney.expenses].map((line, i) => {
-                      const tone = line.tone === 'claim' ? 'text-amber-700'
-                        : line.tone === 'ooosh' ? 'text-green-700'
-                        : line.tone === 'client' ? 'text-gray-600' : 'text-gray-400'
-                      const icon = line.tone === 'claim' ? '🧾' : line.tone === 'ooosh' ? '💷'
-                        : line.tone === 'client' ? '👤' : '—'
-                      return (
-                        <li key={i} className="flex items-start gap-2 text-sm">
-                          <span className="w-5 shrink-0 text-center">{icon}</span>
-                          <span><span className="font-medium text-gray-800">{line.label}:</span>{' '}
-                            <span className={tone}>{line.message}</span></span>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </div>
-              ) : (
-                <>
-                  {job.expensesIncluded !== undefined && job.expensesIncluded > 0 && (
-                    <div className="flex items-center gap-3">
-                      <span className="text-gray-400 w-6 text-center">✓</span>
-                      <div>
-                        <p className="text-sm text-gray-500">Expenses included in fee</p>
-                        <p className="font-medium text-gray-900">£{job.expensesIncluded.toFixed(0)}</p>
-                      </div>
-                    </div>
-                  )}
-                  {job.expensesNotIncluded !== undefined && job.expensesNotIncluded > 0 && (
-                    <div className="flex items-center gap-3">
-                      <span className="text-gray-400 w-6 text-center">+</span>
-                      <div>
-                        <p className="text-sm text-gray-500">Additional expenses (on top)</p>
-                        <p className="font-medium text-orange-600">£{job.expensesNotIncluded.toFixed(0)}</p>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-
-              {/* Expense breakdown detail */}
-              {job.expenseBreakdown && (
-                <div className="mt-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
-                  <p className="text-gray-700 whitespace-pre-wrap text-sm">{job.expenseBreakdown}</p>
-                </div>
-              )}
-            </div>
-          </>
-        ) : null}
-      </div>
+      {/* Key Notes — the quote's freelancer_notes from OP. The D&C layout has
+          always rendered this card; the crew layout never did, so notes staff
+          wrote for crewed jobs were invisible to the freelancer (Jul 2026). */}
+      {job.keyNotes && <NoteCard title="Key notes" text={job.keyNotes} />}
 
       {/* Work Description — always shown, with fallback if empty */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>🔧</span> Work Details
-        </h2>
+      <TextCard title="Work details">
         {job.workDescription ? (
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <p className="text-gray-700 whitespace-pre-wrap">{job.workDescription}</p>
-          </div>
+          <p className="text-[15px] leading-[1.45] text-hf-body whitespace-pre-wrap">{job.workDescription}</p>
         ) : (
-          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-            <p className="text-gray-500 italic">No additional details in the system yet — please contact Ooosh if you need more information.</p>
-          </div>
+          <p className="text-[15px] leading-[1.45] text-hf-muted italic">No additional details in the system yet. Please contact Ooosh if you need more information.</p>
         )}
-      </div>
-
+      </TextCard>
 
       {/* Location */}
       {venue && (venue.address || venue.loadInAddress || venue.whatThreeWords) && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <span>📍</span> Location
-          </h2>
-          
-          <div className="space-y-2">
-            {venue.address && (
-              <p className="text-gray-700">{venue.address}</p>
-            )}
-            
-            {/* Load-in address (loading dock, stage door…) sits alongside the postal
-                address, never instead of it: a note like "round the back via Mill
-                Lane" won't geocode on its own. */}
-            {venue.loadInAddress && (
-              <p className="text-gray-700">
-                <span className="font-medium">Load-in:</span> {venue.loadInAddress}{' '}
-                <a
-                  href={getGoogleMapsUrl(venue.loadInAddress) || '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-700 hover:underline text-sm whitespace-nowrap"
-                >
-                  (map)
-                </a>
-              </p>
-            )}
-            
-            {venue.whatThreeWords && (
-              <p className="text-gray-500 text-sm font-mono">
-                ///{venue.whatThreeWords}
-              </p>
-            )}
-          </div>
-          
-          <div className="mt-4 flex flex-wrap gap-3">
-            {googleMapsUrl && (
-              <a
-                href={googleMapsUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-                Google Maps
-              </a>
-            )}
-            
-            {what3WordsUrl && (
-              <a
-                href={what3WordsUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm"
-              >
-                <span className="font-bold">///</span>
-                What3Words
-              </a>
-            )}
-          </div>
-        </div>
+        <AddressCard venue={venue} />
       )}
 
-      {/* Contact */}
-      {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <span>👤</span> Contact
-            {venue.phoneHidden && venue.phoneVisibleFrom && (
-              <span className="text-xs font-normal text-gray-400 ml-2">
-                (phone visible from {venue.phoneVisibleFrom})
-              </span>
-            )}
-          </h2>
-          
-          <div className="space-y-3">
-            {venue.contact1 && (
-              <div className="flex items-center gap-3">
-                <span className="text-gray-400 w-6 text-center">👤</span>
-                <span className="text-gray-700">{venue.contact1}</span>
+      {/* Contacts — the venue's own and the on-site ones staff picked for this
+          leg (quote_contacts, OP migration 223). These used to be typed by hand
+          into Key Notes, which is why that card still renders: nothing
+          backfills older jobs. */}
+      <ContactsCard venue={venue} contacts={job.contacts} />
+
+      {/* Fee & Expenses — combined section */}
+      {hasMoney ? (
+        <div className={`${cls.card} flex flex-col`}>
+          {fee && fee > 0 ? <FeeRow fee={fee} /> : null}
+
+          {/* Your money on this job — plain-English pay/reimburse breakdown */}
+          {job.crewMoney ? (
+            <div className={`px-4 pb-4 ${fee && fee > 0 ? 'pt-1' : 'pt-4'}`}>
+              {fee && fee > 0 ? <div className="h-px bg-hf-divider mb-3" /> : null}
+              <p className={`${cls.kindLabel} text-hf-muted mb-2.5`}>Expenses &amp; Per Diem: what to do</p>
+              <ul className="flex flex-col gap-2">
+                {[job.crewMoney.perDiem, ...job.crewMoney.expenses].map((line, i) => (
+                  <MoneyLine key={i} line={line} />
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <>
+              {job.expensesIncluded !== undefined && job.expensesIncluded > 0 && (
+                <>
+                  <div className="h-px bg-hf-divider mx-4" />
+                  <div className="min-h-[50px] px-4 py-2 flex items-center justify-between gap-3">
+                    <span className="flex items-center gap-2 text-[15px] text-hf-body"><Check size={16} strokeWidth={2} className="text-hf-green-text" />Expenses included in fee</span>
+                    <span className="tabular text-[16px] font-semibold text-hf-ink">£{job.expensesIncluded.toFixed(0)}</span>
+                  </div>
+                </>
+              )}
+              {job.expensesNotIncluded !== undefined && job.expensesNotIncluded > 0 && (
+                <>
+                  <div className="h-px bg-hf-divider mx-4" />
+                  <div className="min-h-[50px] px-4 py-2 flex items-center justify-between gap-3">
+                    <span className="flex items-center gap-2 text-[15px] text-hf-body"><Plus size={16} strokeWidth={2} className="text-hf-amber-text" />Additional expenses (on top)</span>
+                    <span className="tabular text-[16px] font-semibold text-hf-ink">£{job.expensesNotIncluded.toFixed(0)}</span>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {/* Expense breakdown detail */}
+          {job.expenseBreakdown && (
+            <div className="px-4 pb-4">
+              <div className="bg-hf-amber-bg border border-hf-amber-border rounded-xl p-3">
+                <p className="text-[15px] text-hf-body whitespace-pre-wrap">{job.expenseBreakdown}</p>
               </div>
-            )}
-            
-            {venue.contact2 && (
-              <div className="flex items-center gap-3">
-                <span className="text-gray-400 w-6 text-center">👤</span>
-                <span className="text-gray-700">{venue.contact2}</span>
-              </div>
-            )}
-            
-            {venue.phoneHidden ? (
-              <div className="flex items-center gap-3">
-                <span className="text-gray-400 w-6 text-center">📞</span>
-                <span className="text-gray-400 italic">
-                  Available from {venue.phoneVisibleFrom}
-                </span>
-              </div>
-            ) : (
-              <>
-                {venue.phone && (
-                  <a
-                    href={`tel:${venue.phone}`}
-                    className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
-                  >
-                    <span className="w-6 text-center">📞</span>
-                    <span className="font-medium">{venue.phone}</span>
-                  </a>
-                )}
-                
-                {venue.phone2 && (
-                  <a
-                    href={`tel:${venue.phone2}`}
-                    className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
-                  >
-                    <span className="w-6 text-center">📞</span>
-                    <span className="font-medium">{venue.phone2}</span>
-                  </a>
-                )}
-              </>
-            )}
-            
-            {venue.email && (
-              <a
-                href={`mailto:${venue.email}`}
-                className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
-              >
-                <span className="w-6 text-center">✉️</span>
-                <span className="font-medium">{venue.email}</span>
-              </a>
-            )}
-          </div>
+            </div>
+          )}
         </div>
-      )}
+      ) : null}
 
       {/* Venue Files — shared from the venue board */}
       {venue?.files && venue.files.length > 0 && (
@@ -836,116 +940,41 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
 
       {/* Job Files — tagged "share_with_freelancer" on the job in OP */}
       {job.files && job.files.length > 0 && (
-        <VenueFiles files={job.files} title="Job Files" />
+        <VenueFiles files={job.files} title="Job files" />
       )}
 
       {/* Equipment Reference — same HireHop integration, labelled as reference */}
       {job.hhRef && (
-        <EquipmentList hhRef={job.hhRef} isReference={true} />
+        <EquipmentList hhRef={job.hhRef} quoteId={job.id} isReference={true} />
       )}
 
       {/* Access Info */}
-      {venue?.accessNotes && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>🚪</span> Access Info
-          </h2>
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-            <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
-          </div>
-        </div>
-      )}
-
-      {/* On-site contacts — staff-picked from the people already on the job's
-          organisations (quote_contacts, OP migration 223). These used to be
-          typed by hand into Key Notes below, which is why that card still
-          renders: nothing backfills older jobs.
-
-          Numbers are tel: links — this page is read on a phone at a loading
-          bay, and making someone copy a number out by hand is the reason
-          drivers ring the office instead. */}
-      {job.contacts && job.contacts.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>📞</span> Who to contact
-          </h2>
-          <div className="space-y-2">
-            {job.contacts.map((c, i) => (
-              <div
-                key={i}
-                className="border border-gray-200 rounded-lg p-3 flex items-start justify-between gap-3"
-              >
-                <div className="min-w-0">
-                  <p className="font-medium text-gray-900">{c.name}</p>
-                  {c.label && <p className="text-sm text-gray-500">{c.label}</p>}
-                  {c.email && (
-                    <a
-                      href={`mailto:${c.email}`}
-                      className="text-sm text-blue-600 break-all hover:underline"
-                    >
-                      {c.email}
-                    </a>
-                  )}
-                </div>
-                {c.phone && (
-                  <a
-                    href={`tel:${c.phone.replace(/\s+/g, '')}`}
-                    className="shrink-0 px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-medium"
-                  >
-                    Call {c.phone}
-                  </a>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Key Notes — the quote's freelancer_notes from OP. The D&C layout has
-          always rendered this card; the crew layout never did, so notes staff
-          wrote for crewed jobs were invisible to the freelancer (Jul 2026). */}
-      {job.keyNotes && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>📋</span> Key Notes
-          </h2>
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
-          </div>
-        </div>
-      )}
+      {venue?.accessNotes && <NoteCard title="Access info" text={venue.accessNotes} tone="plain" />}
 
       {/* Stage Notes */}
       {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>🎭</span> Stage Notes
-          </h2>
-          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-            <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
-          </div>
-        </div>
+        <NoteCard title="Stage notes" text={venue.stageNotes} tone="plain" />
       )}
 
       {/* Notification Toggle */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>🔔</span> Notifications
-        </h2>
-        <NotificationMuteToggle jobId={job.id} />
-        <p className="text-xs text-gray-500 mt-2">
-          Turn off to stop receiving email updates about this specific job
-        </p>
-      </div>
+      <NotificationMuteToggle jobId={job.id} />
 
-      {/* Action Buttons — no "Start delivery" for crew jobs */}
-      <div className="space-y-3 pt-2">
-        <button
-          className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
-          onClick={() => alert('Calendar export coming soon!')}
-        >
-          <span>📅</span> Add to Calendar
-        </button>
+      {/* Action Buttons — no "Start" for crew jobs; Complete from the last day
+          (Oct 2026: crew complete in the portal, chased the day after). */}
+      <div className="flex flex-col gap-2.5 pt-1">
+        <CalendarButton onClick={() => addJobToCalendar(job, venue, true)} />
+
+        {job.completedAtDate ? (
+          <CompletedBanner date={job.completedAtDate} />
+        ) : job.completeFrom && ukToday() >= job.completeFrom ? (
+          <Link href={`/job/${job.id}/complete`} className={`${cls.btnGreen} w-full`}>
+            <Check size={20} strokeWidth={2.4} />Complete job
+          </Link>
+        ) : job.completeFrom ? (
+          <p className="text-center text-[15px] text-hf-muted px-2">
+            You can mark this job complete from {shortDay(job.completeFrom)}, its last day.
+          </p>
+        ) : null}
       </div>
     </>
   )
@@ -965,9 +994,12 @@ export default function JobDetailsPage() {
 
   const [job, setJob] = useState<Job | null>(null)
   const [venue, setVenue] = useState<Venue | null>(null)
+  // The job's own board from OP ('crew' | 'dc'); the ?board= param only covers
+  // the moment before it arrives.
+  const [apiBoardType, setApiBoardType] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  
+
   // Multi-drop run state (D&C only)
   const [runJobs, setRunJobs] = useState<Job[]>([])
   const [runVenues, setRunVenues] = useState<Map<string, Venue>>(new Map())
@@ -985,10 +1017,10 @@ export default function JobDetailsPage() {
     async function fetchJob() {
       try {
         // Build API URL with board type parameter
-        const apiUrl = boardType === 'crew' 
+        const apiUrl = boardType === 'crew'
           ? `/api/jobs/${jobId}?board=crew`
           : `/api/jobs/${jobId}`
-        
+
         const response = await fetch(apiUrl)
         const data: JobApiResponse = await response.json()
 
@@ -1002,9 +1034,10 @@ export default function JobDetailsPage() {
 
         setJob(data.job || null)
         setVenue(data.venue || null)
-        
+        setApiBoardType(data.boardType || null)
+
         // If this is a grouped run (D&C only), fetch all jobs in the run
-        if (runGroup && data.job?.date && boardType !== 'crew') {
+        if (runGroup && data.job?.date && (data.boardType || boardType) !== 'crew') {
           fetchRunJobs(runGroup, data.job.date)
         }
       } catch (err) {
@@ -1026,7 +1059,7 @@ export default function JobDetailsPage() {
     try {
       const res = await fetch(`/api/jobs/run?group=${group}&date=${date}`)
       const data = await res.json()
-      
+
       if (data.success && data.jobs) {
         setRunJobs(data.jobs)
         // Expand first stop by default
@@ -1062,30 +1095,18 @@ export default function JobDetailsPage() {
   }
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading job details...</p>
-        </div>
-      </div>
-    )
+    return <PageSpinner label="Loading job details..." />
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-50 p-4">
-        <div className="max-w-lg mx-auto">
-          <div className="bg-white rounded-xl shadow-sm p-6 text-center">
-            <div className="text-red-500 text-5xl mb-4">⚠️</div>
-            <h1 className="text-xl font-semibold text-gray-900 mb-2">Error</h1>
-            <p className="text-gray-600 mb-6">{error}</p>
-            <Link
-              href="/dashboard"
-              className="inline-block bg-purple-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-purple-600 transition-colors"
-            >
-              Back to Dashboard
-            </Link>
+      <div className="min-h-screen bg-hf-page p-4">
+        <div className="max-w-lg mx-auto mt-16">
+          <div className={`${cls.card} p-6 text-center`}>
+            <AlertTriangle size={40} strokeWidth={1.8} className="mx-auto mb-3 text-hf-error" />
+            <h1 className="text-[20px] font-bold text-hf-ink mb-2">Something went wrong</h1>
+            <p className="text-[15px] text-hf-body mb-6">{error}</p>
+            <Link href="/dashboard" className={`${cls.btnPrimary} w-full`}>Back to jobs</Link>
           </div>
         </div>
       </div>
@@ -1094,18 +1115,13 @@ export default function JobDetailsPage() {
 
   if (!job) {
     return (
-      <div className="min-h-screen bg-gray-50 p-4">
-        <div className="max-w-lg mx-auto">
-          <div className="bg-white rounded-xl shadow-sm p-6 text-center">
-            <div className="text-gray-400 text-5xl mb-4">🔍</div>
-            <h1 className="text-xl font-semibold text-gray-900 mb-2">Job Not Found</h1>
-            <p className="text-gray-600 mb-6">This job doesn&apos;t exist or isn&apos;t assigned to you.</p>
-            <Link
-              href="/dashboard"
-              className="inline-block bg-purple-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-purple-600 transition-colors"
-            >
-              Back to Dashboard
-            </Link>
+      <div className="min-h-screen bg-hf-page p-4">
+        <div className="max-w-lg mx-auto mt-16">
+          <div className={`${cls.card} p-6 text-center`}>
+            <Search size={40} strokeWidth={1.8} className="mx-auto mb-3 text-hf-muted" />
+            <h1 className="text-[20px] font-bold text-hf-ink mb-2">Job not found</h1>
+            <p className="text-[15px] text-hf-body mb-6">This job doesn&apos;t exist or isn&apos;t assigned to you.</p>
+            <Link href="/dashboard" className={`${cls.btnPrimary} w-full`}>Back to jobs</Link>
           </div>
         </div>
       </div>
@@ -1113,276 +1129,90 @@ export default function JobDetailsPage() {
   }
 
   // ── Crew Job View ──────────────────────────────────────────────────────────
-  const isCrewJob = boardType === 'crew'
-  
+  const isCrewJob = (apiBoardType || boardType) === 'crew'
+
   // D&C job variables (only used for D&C rendering)
   const isDelivery = job.type === 'delivery'
-  const typeIcon = isDelivery ? '📦' : '📥'
-  const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
-  const googleMapsUrl = getGoogleMapsUrl(venue?.address)
-  const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
-  const statusInfo = translateStatus(job.status)
+  const dc = describeDcJob(job)
   const isMultiStop = runGroup && runJobs.length > 1
+  // Start sits at the bottom of a single D&C job that isn't done yet (as before).
+  const showStart = !isCrewJob && !isMultiStop && !job.completedAtDate
+
+  // A run's kind: backline unless every stop is a van (as on the job cards).
+  const runAllVan = runJobs.length > 0 && runJobs.every((j) => j.whatIsIt === 'vehicle')
+  const runAllBackline = runJobs.length > 0 && runJobs.every((j) => j.whatIsIt === 'equipment')
+  const runKind: Kind = runAllVan ? 'van' : 'backline'
+  const runWord = runAllVan ? 'Van run' : runAllBackline ? 'Backline run' : 'Run'
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-8">
-      <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
-          <Link
-            href="/dashboard"
-            className="flex items-center text-gray-600 hover:text-gray-900 transition-colors"
-          >
-            <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-            Back
-          </Link>
-          <button
-            onClick={() => window.location.reload()}
-            className="text-gray-600 hover:text-gray-900 transition-colors"
-            title="Refresh"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          </button>
+    <div className={`min-h-screen bg-hf-page safe-top ${showStart ? 'pb-36' : 'pb-10'}`}>
+      <header className="max-w-lg mx-auto px-2 pt-2 flex items-center justify-between">
+        <div className="px-2.5">
+          <BackLink href="/dashboard" label="Jobs" />
         </div>
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="w-11 h-11 mr-1 flex items-center justify-center text-hf-body rounded-xl hover:bg-hf-track"
+          title="Refresh"
+          aria-label="Refresh"
+        >
+          <RefreshCw size={20} strokeWidth={1.8} />
+        </button>
       </header>
 
-      <main className="max-w-lg mx-auto p-4 space-y-4">
-        
+      <main className="max-w-lg mx-auto px-4 pt-1 flex flex-col gap-3.5">
+
         {/* ── CREW JOB DETAIL ── */}
         {isCrewJob && (
           <CrewJobDetail job={job} venue={venue} />
         )}
 
-        {/* ── D&C JOB DETAIL (existing) ── */}
+        {/* ── D&C JOB DETAIL ── */}
         {!isCrewJob && (
           <>
             {/* Multi-stop header */}
             {isMultiStop && (
-              <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
-                <h2 className="font-semibold text-purple-800 mb-1">
-                  📦 Multi-drop Run ({runJobs.length} stops)
-                </h2>
-                <p className="text-sm text-purple-600">
-                  {formatDate(job.date)}
-                </p>
-              </div>
+              <JobHeading
+                kind={runKind}
+                label={`${runWord} · ${runJobs.length} stops`}
+                title="Multi-drop run"
+                dateLine={dayLabel(job.date)}
+              />
             )}
 
             {/* Single job or first stop header */}
             {!isMultiStop && (
               <>
-                {/* Job Header */}
-                <div className="bg-white rounded-xl shadow-sm p-6">
-                  <div className="flex items-start gap-3 mb-4">
-                    <span className="text-3xl">{typeIcon}</span>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">
-                          {typeLabel}
-                        </span>
-                        {job.whatIsIt && (
-                          <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                            job.whatIsIt === 'vehicle' 
-                              ? 'bg-blue-100 text-blue-700' 
-                              : 'bg-gray-100 text-gray-600'
-                          }`}>
-                            {job.whatIsIt === 'vehicle' ? '🚐 Vehicle' : job.whatIsIt === 'people' ? '🧑 People' : '🎸 Equipment'}
-                          </span>
-                        )}
-                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.style}`}>
-                          <span>{statusInfo.icon}</span>
-                          {statusInfo.label}
-                        </span>
-                      </div>
-                      <h1 className="text-xl font-bold text-gray-900 mt-1">
-                        {venue?.name || job.venueName || job.name}
-                      </h1>
-                    </div>
-                  </div>
+                <JobHeading
+                  kind={dc.kind}
+                  label={dc.label}
+                  hhRef={job.hhRef}
+                  title={venue?.name || job.venueName || job.name}
+                  dateLine={[dayLabel(job.date), formatTime(job.time) || 'time TBC'].join(' · ')}
+                  chips={<StatusChip status={job.status} />}
+                />
 
-                  <hr className="my-4 border-gray-100" />
-
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-3">
-                      <span className="text-gray-400 w-6 text-center">📅</span>
-                      <div>
-                        <p className="text-sm text-gray-500">Date</p>
-                        <p className="font-medium text-gray-900">{formatDate(job.date)}</p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <span className="text-gray-400 w-6 text-center">⏰</span>
-                      <div>
-                        <p className="text-sm text-gray-500">Arrive by</p>
-                        <p className="font-medium text-gray-900">{formatTime(job.time)}</p>
-                      </div>
-                    </div>
-
-                    {job.driverPay && job.driverPay > 0 && (
-                      <div className="flex items-center gap-3">
-                        <span className="text-gray-400 w-6 text-center">💷</span>
-                        <div>
-                          <p className="text-sm text-gray-500">Agreed fee</p>
-                          <p className="font-medium text-green-600">£{job.driverPay.toFixed(0)} + expenses</p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Reference */}
-                {job.hhRef && (
-                  <div className="bg-white rounded-xl shadow-sm p-6">
-                    <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                      <span>🔗</span> Reference
-                    </h2>
-                    <p className="text-gray-600">
-                      HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
-                    </p>
-                  </div>
-                )}
+                {/* Key Notes */}
+                {job.keyNotes && <NoteCard title="Key notes" text={job.keyNotes} />}
 
                 {/* Location */}
                 {venue && (venue.address || venue.loadInAddress || venue.whatThreeWords) && (
-                  <div className="bg-white rounded-xl shadow-sm p-6">
-                    <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                      <span>📍</span> Location
-                    </h2>
-                    
-                    <div className="space-y-2">
-                      {venue.address && (
-                        <p className="text-gray-700">{venue.address}</p>
-                      )}
-                      
-                      {/* Load-in address (loading dock, stage door…) sits alongside the postal
-                          address, never instead of it: a note like "round the back via Mill
-                          Lane" won't geocode on its own. */}
-                      {venue.loadInAddress && (
-                        <p className="text-gray-700">
-                          <span className="font-medium">Load-in:</span> {venue.loadInAddress}{' '}
-                          <a
-                            href={getGoogleMapsUrl(venue.loadInAddress) || '#'}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-700 hover:underline text-sm whitespace-nowrap"
-                          >
-                            (map)
-                          </a>
-                        </p>
-                      )}
-                      
-                      {venue.whatThreeWords && (
-                        <p className="text-gray-500 text-sm font-mono">
-                          ///{venue.whatThreeWords}
-                        </p>
-                      )}
-                    </div>
-                    
-                    <div className="mt-4 flex flex-wrap gap-3">
-                      {googleMapsUrl && (
-                        <a
-                          href={googleMapsUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                          </svg>
-                          Google Maps
-                        </a>
-                      )}
-                      
-                      {what3WordsUrl && (
-                        <a
-                          href={what3WordsUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm"
-                        >
-                          <span className="font-bold">///</span>
-                          What3Words
-                        </a>
-                      )}
-                    </div>
-                  </div>
+                  <AddressCard venue={venue} />
                 )}
 
-                {/* Contact */}
-                {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
-                  <div className="bg-white rounded-xl shadow-sm p-6">
-                    <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                      <span>👤</span> Contact
-                      {venue.phoneHidden && venue.phoneVisibleFrom && (
-                        <span className="text-xs font-normal text-gray-400 ml-2">
-                          (phone visible from {venue.phoneVisibleFrom})
-                        </span>
-                      )}
-                    </h2>
-                    
-                    <div className="space-y-3">
-                      {venue.contact1 && (
-                        <div className="flex items-center gap-3">
-                          <span className="text-gray-400 w-6 text-center">👤</span>
-                          <span className="text-gray-700">{venue.contact1}</span>
-                        </div>
-                      )}
-                      
-                      {venue.contact2 && (
-                        <div className="flex items-center gap-3">
-                          <span className="text-gray-400 w-6 text-center">👤</span>
-                          <span className="text-gray-700">{venue.contact2}</span>
-                        </div>
-                      )}
-                      
-                      {venue.phoneHidden ? (
-                        <div className="flex items-center gap-3">
-                          <span className="text-gray-400 w-6 text-center">📞</span>
-                          <span className="text-gray-400 italic">
-                            Available from {venue.phoneVisibleFrom}
-                          </span>
-                        </div>
-                      ) : (
-                        <>
-                          {venue.phone && (
-                            <a
-                              href={`tel:${venue.phone}`}
-                              className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
-                            >
-                              <span className="w-6 text-center">📞</span>
-                              <span className="font-medium">{venue.phone}</span>
-                            </a>
-                          )}
-                          
-                          {venue.phone2 && (
-                            <a
-                              href={`tel:${venue.phone2}`}
-                              className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
-                            >
-                              <span className="w-6 text-center">📞</span>
-                              <span className="font-medium">{venue.phone2}</span>
-                            </a>
-                          )}
-                        </>
-                      )}
-                      
-                      {venue.email && (
-                        <a
-                          href={`mailto:${venue.email}`}
-                          className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
-                        >
-                          <span className="w-6 text-center">✉️</span>
-                          <span className="font-medium">{venue.email}</span>
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                )}
+                {/* Contacts — the venue's own (phone from 48 hours before) and the
+                    on-site contacts staff picked for this leg. */}
+                <ContactsCard venue={venue} contacts={job.contacts} />
+
+                {/* Equipment List (read-only, filtered by job type) + the fee */}
+                {job.hhRef ? (
+                  <EquipmentList hhRef={job.hhRef} quoteId={job.id} whatIsIt={job.whatIsIt}>
+                    {job.driverPay && job.driverPay > 0 ? <FeeRow fee={job.driverPay} sub="Plus expenses" /> : null}
+                  </EquipmentList>
+                ) : job.driverPay && job.driverPay > 0 ? (
+                  <div className={cls.card}><FeeRow fee={job.driverPay} sub="Plus expenses" /></div>
+                ) : null}
 
                 {/* Venue Files — shared from the venue board */}
                 {venue?.files && venue.files.length > 0 && (
@@ -1391,197 +1221,121 @@ export default function JobDetailsPage() {
 
                 {/* Job Files — tagged "share_with_freelancer" on the job in OP */}
                 {job.files && job.files.length > 0 && (
-                  <VenueFiles files={job.files} title="Job Files" />
-                )}
-
-                {/* Equipment List - simple read-only with filtering */}
-                {job.hhRef && (
-                  <EquipmentList hhRef={job.hhRef} whatIsIt={job.whatIsIt} />
+                  <VenueFiles files={job.files} title="Job files" />
                 )}
 
                 {/* Access Info */}
-                {venue?.accessNotes && (
-                  <div className="bg-white rounded-xl shadow-sm p-6">
-                    <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                      <span>🚪</span> Access Info
-                    </h2>
-                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                      <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Key Notes */}
-                {job.keyNotes && (
-                  <div className="bg-white rounded-xl shadow-sm p-6">
-                    <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                      <span>📋</span> Key Notes
-                    </h2>
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                      <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
-                    </div>
-                  </div>
-                )}
+                {venue?.accessNotes && <NoteCard title="Access info" text={venue.accessNotes} tone="plain" />}
 
                 {/* Stage Notes */}
                 {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
-                  <div className="bg-white rounded-xl shadow-sm p-6">
-                    <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                      <span>🎭</span> Stage Notes
-                    </h2>
-                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                      <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
-                    </div>
-                  </div>
+                  <NoteCard title="Stage notes" text={venue.stageNotes} tone="plain" />
                 )}
 
                 {/* Notification Toggle */}
-                <div className="bg-white rounded-xl shadow-sm p-6">
-                  <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                    <span>🔔</span> Notifications
-                  </h2>
-                  <NotificationMuteToggle jobId={job.id} />
-                  <p className="text-xs text-gray-500 mt-2">
-                    Turn off to stop receiving email updates about this specific job
-                  </p>
-                </div>
+                <NotificationMuteToggle jobId={job.id} />
 
                 {/* Action Buttons */}
-                <div className="space-y-3 pt-2">
-                  <button
-                    className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
-                    onClick={() => alert('Calendar export coming soon!')}
-                  >
-                    <span>📅</span> Add to Calendar
-                  </button>
-
-                  {!job.completedAtDate && (
-                    <Link
-                      href={`/job/${job.id}/start`}
-                      className="w-full bg-purple-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-purple-600 transition-colors flex items-center justify-center gap-2 text-lg"
-                    >
-                      <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
-                    </Link>
-                  )}
-
-                  {job.completedAtDate && (
-                    <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
-                      <span className="text-green-600 font-medium">
-                        ✅ Completed on {formatDate(job.completedAtDate)}
-                      </span>
-                    </div>
-                  )}
+                <div className="flex flex-col gap-2.5 pt-1">
+                  <CalendarButton onClick={() => addJobToCalendar(job, venue, false)} />
+                  {job.completedAtDate && <CompletedBanner date={job.completedAtDate} />}
                 </div>
               </>
             )}
 
             {/* Multi-stop accordion view */}
             {isMultiStop && !loadingRun && (
-              <div className="space-y-3">
+              <div className="flex flex-col gap-2.5">
                 {runJobs.map((stopJob, index) => {
                   const stopVenue = runVenues.get(stopJob.venueId || '') || null
                   const isExpanded = expandedStops.has(stopJob.id)
-                  const stopStatusInfo = translateStatus(stopJob.status)
-                  
+                  const stopStatus = translateStatus(stopJob.status)
+                  const stopMaps = getGoogleMapsUrl(stopVenue?.address)
+
                   return (
-                    <div key={stopJob.id} className="bg-white rounded-xl shadow-sm overflow-hidden">
+                    <div key={stopJob.id} className={`${cls.card} overflow-hidden`}>
                       {/* Stop header - always visible */}
                       <button
+                        type="button"
                         onClick={() => toggleStopExpanded(stopJob.id)}
-                        className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                        aria-expanded={isExpanded}
+                        className="w-full px-4 py-3.5 flex items-center gap-3 text-left hover:bg-hf-inset/60 transition-colors"
                       >
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center font-bold text-sm">
-                            {index + 1}
-                          </div>
-                          <div className="text-left">
-                            <p className="font-medium text-gray-900">
-                              {stopVenue?.name || stopJob.venueName || stopJob.name}
-                            </p>
-                            <p className="text-sm text-gray-500">
-                              {stopJob.time || 'TBC'} · {stopJob.type === 'delivery' ? 'Delivery' : 'Collection'}
-                            </p>
-                          </div>
+                        <div className="w-9 h-9 flex-none rounded-full bg-hf-tint text-hf-tint-text flex items-center justify-center font-bold text-[15px] tabular">
+                          {index + 1}
                         </div>
-                        <div className="flex items-center gap-2">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${stopStatusInfo.style}`}>
-                            {stopStatusInfo.icon}
-                          </span>
-                          <svg 
-                            className={`w-5 h-5 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} 
-                            fill="none" 
-                            stroke="currentColor" 
-                            viewBox="0 0 24 24"
-                          >
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                          </svg>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[16px] font-semibold text-hf-ink truncate">
+                            {stopVenue?.name || stopJob.venueName || stopJob.name}
+                          </p>
+                          <p className="text-[14px] text-hf-muted">
+                            {formatTime(stopJob.time) || 'TBC'} · {stopJob.type === 'delivery' ? 'Delivery' : 'Collection'}
+                          </p>
                         </div>
+                        <Chip tone={stopStatus.tone}>
+                          {stopStatus.Icon ? <stopStatus.Icon size={12} strokeWidth={2.6} /> : stopStatus.label}
+                        </Chip>
+                        <ChevronDown size={18} strokeWidth={2} className={`text-hf-chevron flex-none transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
-                      
+
                       {/* Expanded details */}
                       {isExpanded && (
-                        <div className="px-6 pb-4 border-t border-gray-100">
-                          <div className="pt-4 space-y-4">
+                        <div className="px-4 pb-4 border-t border-hf-divider">
+                          <div className="pt-3.5 flex flex-col gap-3.5">
                             {/* Location */}
                             {stopVenue?.address && (
                               <div>
-                                <p className="text-sm text-gray-500 mb-1">📍 Location</p>
-                                <p className="text-gray-700">{stopVenue.address}</p>
+                                <p className={`${cls.kindLabel} text-hf-muted mb-1 flex items-center gap-1`}><MapPin size={13} strokeWidth={2} />Location</p>
+                                <p className="text-[15px] text-hf-body">{stopVenue.address}</p>
                                 {stopVenue.whatThreeWords && (
-                                  <p className="text-gray-500 text-sm font-mono mt-1">
+                                  <p className="text-[14px] text-hf-muted font-mono mt-1">
                                     ///{stopVenue.whatThreeWords}
                                   </p>
                                 )}
-                                <div className="mt-2 flex gap-2">
-                                  {getGoogleMapsUrl(stopVenue.address) && (
-                                    <a
-                                      href={getGoogleMapsUrl(stopVenue.address)!}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-sm text-blue-600 hover:underline"
-                                    >
-                                      Open in Maps →
-                                    </a>
-                                  )}
-                                </div>
-                              </div>
-                            )}
-                            
-                            {/* Contact */}
-                            {(stopVenue?.contact1 || stopVenue?.phone) && (
-                              <div>
-                                <p className="text-sm text-gray-500 mb-1">👤 Contact</p>
-                                {stopVenue.contact1 && <p className="text-gray-700">{stopVenue.contact1}</p>}
-                                {stopVenue.phone && (
-                                  <a href={`tel:${stopVenue.phone}`} className="text-purple-600 hover:underline">
-                                    {stopVenue.phone}
+                                {stopMaps && (
+                                  <a href={stopMaps} target="_blank" rel="noopener noreferrer"
+                                    className={`${cls.link} mt-2 inline-flex items-center gap-1.5 text-[15px]`}>
+                                    <Navigation size={16} strokeWidth={1.8} />Directions
                                   </a>
                                 )}
                               </div>
                             )}
-                            
+
+                            {/* Contact */}
+                            {(stopVenue?.contact1 || stopVenue?.phone) && (
+                              <div className="flex items-center gap-3">
+                                <div className="flex-1 min-w-0">
+                                  <p className={`${cls.kindLabel} text-hf-muted mb-1`}>Contact</p>
+                                  {stopVenue.contact1 && <p className="text-[15px] font-semibold text-hf-ink">{stopVenue.contact1}</p>}
+                                  {stopVenue.phone && <p className="text-[14px] text-hf-muted">{stopVenue.phone}</p>}
+                                </div>
+                                {stopVenue.phone && <CallButton phone={stopVenue.phone} label={stopVenue.contact1 || stopVenue.name} />}
+                              </div>
+                            )}
+
                             {/* Access Notes */}
                             {stopVenue?.accessNotes && (
                               <div>
-                                <p className="text-sm text-gray-500 mb-1">🚪 Access</p>
-                                <p className="text-gray-700 text-sm">{stopVenue.accessNotes}</p>
+                                <p className={`${cls.kindLabel} text-hf-muted mb-1`}>Access</p>
+                                <p className="text-[15px] text-hf-body whitespace-pre-wrap">{stopVenue.accessNotes}</p>
                               </div>
                             )}
-                            
+
                             {/* Key Notes */}
                             {stopJob.keyNotes && (
-                              <div>
-                                <p className="text-sm text-gray-500 mb-1">📋 Notes</p>
-                                <p className="text-gray-700 text-sm">{stopJob.keyNotes}</p>
+                              <div className="bg-hf-amber-bg border border-hf-amber-border rounded-xl px-3 py-2.5">
+                                <p className={`${cls.kindLabel} text-hf-amber-text mb-1`}>Notes</p>
+                                <p className="text-[15px] text-hf-body whitespace-pre-wrap">{stopJob.keyNotes}</p>
                               </div>
                             )}
-                            
+
                             {/* View full details link */}
                             <Link
                               href={`/job/${stopJob.id}`}
-                              className="inline-block text-sm font-medium text-purple-600 hover:text-purple-500"
+                              className={`${cls.link} inline-flex items-center gap-1 text-[15px]`}
                             >
-                              View full details →
+                              View full details
+                              <ChevronDown size={16} strokeWidth={2.2} className="-rotate-90" />
                             </Link>
                           </div>
                         </div>
@@ -1589,29 +1343,27 @@ export default function JobDetailsPage() {
                     </div>
                   )
                 })}
-                
+
                 {/* Total fee for run. Prefer combined fee when set —
                     that's the single contractual fee for the whole run;
                     the per-stop driverPay sum is shown struck through as
                     a reference. */}
                 {runJobs.length > 0 && (
-                  <div className="bg-white rounded-xl shadow-sm p-4 flex items-center justify-between">
-                    <div>
-                      <span className="text-gray-600">Total agreed fee</span>
+                  <div className={`${cls.card} px-4 py-3.5 flex items-center justify-between gap-3`}>
+                    <div className="min-w-0">
+                      <span className="text-[16px] font-semibold text-hf-ink">Total agreed fee</span>
                       {runNotes && (
-                        <p className="text-xs text-gray-500 mt-0.5">{runNotes}</p>
+                        <p className="text-[14px] text-hf-muted mt-0.5">{runNotes}</p>
                       )}
                     </div>
                     {runCombinedFee != null ? (
                       <div className="text-right">
-                        <div>
-                          <span className="text-xs text-gray-400 line-through mr-2">£{runStandaloneFee.toFixed(0)}</span>
-                          <span className="font-bold text-green-600 text-lg">£{runCombinedFee.toFixed(0)}</span>
-                        </div>
-                        <div className="text-[10px] text-violet-600 font-medium">combined run fee</div>
+                        <div className="tabular text-[16px] font-semibold text-hf-ink">£{runCombinedFee.toFixed(0)}</div>
+                        <div className="tabular text-[13px] text-hf-muted line-through">£{runStandaloneFee.toFixed(0)}</div>
+                        <div className="text-[12px] font-semibold text-hf-link">combined run fee</div>
                       </div>
                     ) : (
-                      <span className="font-bold text-green-600">
+                      <span className="tabular text-[16px] font-semibold text-hf-ink">
                         £{runJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0).toFixed(0)}
                       </span>
                     )}
@@ -1622,14 +1374,27 @@ export default function JobDetailsPage() {
 
             {loadingRun && (
               <div className="text-center py-8">
-                <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-                <p className="text-gray-600">Loading run details...</p>
+                <div className="w-10 h-10 border-[3px] border-hf-tint border-t-hf-accent rounded-full animate-spin mx-auto mb-3" />
+                <p className="text-[15px] text-hf-muted">Loading run details...</p>
               </div>
             )}
           </>
         )}
 
       </main>
+
+      {/* Start — sticky at the bottom of a D&C job that isn't done (design 1c). */}
+      {showStart && (
+        <StickyAction>
+          <Link
+            href={`/job/${job.id}/start`}
+            className={`${cls.btnPrimary} w-full !h-14 shadow-[0_8px_20px_-8px_rgba(167,83,144,0.6)]`}
+          >
+            <Play size={18} fill="currentColor" strokeWidth={0} />Start {isDelivery ? 'delivery' : 'collection'}
+          </Link>
+        </StickyAction>
+      )}
     </div>
   )
 }
+

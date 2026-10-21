@@ -1,9 +1,11 @@
 import type { Metadata, Viewport } from 'next'
-import { Inter } from 'next/font/google'
+import { DM_Sans } from 'next/font/google'
 import './globals.css'
 import { MuteBanner } from '@/components/MuteBanner'
 
-const inter = Inter({ subsets: ['latin'] })
+// DM Sans, as the hire form and payment portal (Oct 2026 refresh). Variable,
+// with the optical-size axis the design uses.
+const dmSans = DM_Sans({ subsets: ['latin'], axes: ['opsz'], variable: '--font-dm-sans', display: 'swap' })
 
 export const metadata: Metadata = {
   title: 'Ooosh Freelancer Portal',
@@ -20,7 +22,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  themeColor: '#0ea5e9',
+  themeColor: '#f6f4f2',
 }
 
 export default function RootLayout({
@@ -29,8 +31,8 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
-      <body className={`${inter.className} antialiased`}>
+    <html lang="en" className={dmSans.variable}>
+      <body className="font-sans antialiased bg-hf-page text-hf-ink">
         <MuteBanner />
         {children}
       </body>

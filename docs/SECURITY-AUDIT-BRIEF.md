@@ -89,12 +89,48 @@ the general `authenticate` middleware checked the signature and nothing else.
 11. **Production dependency advisories.** A semver-safe `npm audit fix` cleared
     every high/critical advisory in the backend's production tree except the
     known `xlsx` one (no fix exists; trusted admin uploads only).
+12. **The freelancer portal (21 Oct 2026, `docs/FREELANCER-PORTAL-SPEC.md` §6).**
+    - Login needed no approval, and a session kept working for its full 30 days
+      after a freelancer was removed. `portalAuth` now re-reads the person on
+      every request (`is_freelancer`, `is_approved`, not deleted) and answers 401
+      `account_inactive`; the portal clears its cookie on any 401 from OP
+      (`src/lib/op-api.ts`), so the pages' "401 → /login" can't loop against the
+      middleware's "valid cookie → /dashboard". A database error there is a 503,
+      never a 401 (a 401 signs the freelancer out).
+    - An account with no portal password fell back to the person's OP STAFF
+      password, i.e. an OP password opened the portal without OP's second
+      factor. Removed.
+    - Wrong passwords now slow the ACCOUNT, not just the IP (every freelancer is
+      a Netlify address): `staff-login-security.ts` `portalSecondsBlocked()` etc.,
+      the staff thresholds, Redis, fail-open.
+    - A password reset signs out every other session
+      (`people.portal_sessions_valid_after`, migration 302; a minute's grace for
+      the Netlify clock). The reset's "transaction" was BEGIN/COMMIT through the
+      shared pool, i.e. none; it is on one client now. Four other places still do
+      that (`cost-lines.ts`, `routes/costs.ts`, `routes/pipeline.ts` ×2) — open.
+    - The registration code came from `Math.random()`; now `crypto.randomInt`.
+    - `src/app/api/hirehop/items/[jobId]` (the portal's kit list, read with its
+      own HireHop token) served any job to any login, and a Monday-era secret
+      header skipped the login. It now needs `?job=<quote>`, and OP's
+      `GET /portal/jobs/:quoteId/hirehop-ref` must say that job is theirs and has
+      that HireHop number.
+    - `GET /portal/venues/:id` (unscoped, unused) is gone; portal job responses no
+      longer carry the run's CLIENT price (`runCombinedClientFee`).
+    - The van screens: `/vehicles/send-email` (any HTML to any address, "checked"
+      by the reg being in the subject) is off the freelancer allow-list — nothing
+      freelancer-side calls it; and the book-out / collection link resolver
+      refuses a login that is no longer an approved freelancer (the links last
+      24 hours).
 
 A.1–A.7 were exercised over HTTP against a migrated + seeded scratch database
 on 9 Oct 2026 (22 checks plus the limiter counts); A.9 with 18 unit checks on
 the freelancer and claim middleware and 20 HTTP checks across staff, refresh,
 kiosk, hire-form and socket paths, including that a pre-`aud` token is refused
 everywhere. Both portal-secret guards were seen to refuse startup.
+A.12 was exercised over HTTP against a fully migrated scratch database and Redis
+(37 checks on the real portal and vehicles routers), then through the portal app
+itself, including a browser check that a removed freelancer lands on the login
+page without a redirect loop.
 
 ## B. Open
 
@@ -138,12 +174,36 @@ everywhere. Both portal-secret guards were seen to refuse startup.
    Everything else ungated is reads or everyday desk work; every route that moves
    money in `costs.ts` is already admin-only. `vehicles.ts` and `hire-forms.ts` were
    left alone on purpose (mixed audience).
+4. **The payment portal's API key is scoped — 20 Oct 2026** (portal audit B.6,
+   `netlify-functions` `docs/SECURITY-AUDIT-BRIEF.md`). `authenticateFlexible` in
+   `routes/money.ts` gave any valid `api_keys` row `role: 'service'`, and every money route
+   without an `authorize()` accepted it — `refund-payment` (Stripe refund + HireHop + Xero),
+   `record-payment`, `summary`, `payments`, `payment-link`, `sync-values`. A leaked Netlify
+   env was money out. Now `api_keys.permissions` is honoured (`middleware/api-key.ts`
+   `apiKeyMayCall()`): a row naming `money:job-lookup`, `money:excess-info`,
+   `money:stripe-event`, `money:payment-event` reaches exactly those; `money:*` or an EMPTY
+   row (the column default, every key today) stays unrestricted so nothing changes until the
+   portal's row is set — do that once the code is live:
+   `UPDATE api_keys SET permissions = '["money:job-lookup","money:excess-info","money:stripe-event","money:payment-event"]' WHERE service = 'payment_portal';`
+   (check `SELECT name, service, key_prefix, permissions FROM api_keys WHERE is_active` first
+   — the portal's row is the one whose prefix matches Netlify's `OP_API_KEY`). The
+   `webhooks.ts` `external/status-transition` key check is untouched.
+
 3. **Tokens in URLs.** Reviewed and left as is. The book-out / check-in pages
    strip `freelancerToken` / `hubToken` with `replaceState` straight after
    redeeming (`modules/vehicles/hooks/useAuth.tsx`); the prep page strips its
    redeem token; nginx sets `Referrer-Policy: strict-origin-when-cross-origin`.
    The one remaining sink is the nginx access log, which records query strings.
    The HMAC tokens are single-purpose and expire, so this is accepted.
+
+5. **Transactions run through the shared pool — open (found 21 Oct 2026, A.12).**
+   `await query('BEGIN')` / `query('COMMIT')` sends each statement to whichever
+   pooled connection is free, so it is no transaction at all, and a BEGIN can be
+   left open on a connection that later requests then write through. The portal's
+   password reset was one (fixed in A.12, now on `getClient()`). Four remain:
+   `services/cost-lines.ts`, `routes/costs.ts`, and `routes/pipeline.ts` (two).
+   Fix: `const client = await getClient()`, BEGIN/COMMIT/ROLLBACK on that client,
+   `client.release()` in a `finally`. Its own PR, with a test per path.
 
 ## C. Public-route inventory (9 Oct 2026)
 

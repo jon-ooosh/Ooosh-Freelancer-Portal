@@ -3,6 +3,8 @@
  * Offers to resume from where the user left off or start fresh.
  */
 
+import { fl, plateText } from '../freelancer/ui'
+
 interface DraftResumePromptProps {
   vehicleReg: string
   savedAt: string
@@ -13,6 +15,8 @@ interface DraftResumePromptProps {
   onDiscard: () => void
   /** Permanently discard the draft and go back (don't start fresh) */
   onDiscardAndGoBack?: () => void
+  /** 'freelancer': the portal look (FREELANCER-PORTAL-SPEC §11). Same three actions. */
+  look?: 'freelancer'
 }
 
 export function DraftResumePrompt({
@@ -24,9 +28,36 @@ export function DraftResumePrompt({
   onResume,
   onDiscard,
   onDiscardAndGoBack,
+  look,
 }: DraftResumePromptProps) {
   const savedDate = new Date(savedAt)
   const timeAgo = getTimeAgo(savedDate)
+
+  if (look === 'freelancer') {
+    // No "step 3 of 6": a freelancer only ever sees four steps (or three).
+    return (
+      <div className="mx-auto flex max-w-lg flex-col gap-4 px-4 py-10">
+        <div className="flex flex-col gap-1.5 px-1">
+          <h1 className={fl.pageTitle}>Resume where you left off?</h1>
+          <p className="text-[16px] leading-[1.5] text-hf-body">
+            {plateText(vehicleReg) || 'This van'}, saved {timeAgo}
+            {photoCount > 0 ? `, with ${photoCount} photo${photoCount !== 1 ? 's' : ''} on this phone` : ''}.
+          </p>
+        </div>
+        <button type="button" onClick={onResume} className={`${fl.btnPrimary} w-full`}>
+          Resume
+        </button>
+        <button type="button" onClick={onDiscard} className={`${fl.btnSecondary} w-full`}>
+          Start again
+        </button>
+        {onDiscardAndGoBack && (
+          <button type="button" onClick={onDiscardAndGoBack} className="h-11 text-[15px] font-semibold text-hf-muted hover:text-hf-error">
+            Throw it away and go back
+          </button>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="mx-4 my-6 rounded-xl border-2 border-blue-200 bg-blue-50 p-5 shadow-sm">
