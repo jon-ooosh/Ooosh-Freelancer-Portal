@@ -320,7 +320,7 @@ export async function insertOptionCopy(
        chase_interval_days, next_chase_date,
        status, status_name, pipeline_status, pipeline_status_changed_at,
        group_id, option_no, option_label,
-       created_by
+       created_by, job_project_id
      ) VALUES (
        $1, $2, $3,
        $4, $5, $6, $7, $8,
@@ -334,7 +334,7 @@ export async function insertOptionCopy(
        $34::int, COALESCE($35::date, (CURRENT_DATE + (COALESCE($34::int, 5) || ' days')::interval)::date),
        0, 'Enquiry', 'quoting', NOW(),
        $36, $37, $38,
-       $39
+       $39, $40
      ) RETURNING *`,
     [
       opts.hhJobNumber, jobName, source.job_type,
@@ -349,7 +349,8 @@ export async function insertOptionCopy(
       JSON.stringify(source.email_routing ?? {}),
       source.chase_interval_days, source.next_chase_date,
       opts.groupId, opts.optionNo, opts.optionLabel,
-      opts.actorId,
+      // Another option of a festival spot-hire is still part of the festival.
+      opts.actorId, source.job_project_id ?? null,
     ],
   );
   const job = inserted.rows[0];

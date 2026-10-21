@@ -116,7 +116,11 @@ const SELECT_TASKS = `
          CASE WHEN t.source_type = 'vehicle_sale' THEN (
            SELECT '/vehicles/fleet/' || vs.vehicle_id || '/sale'
              FROM vehicle_sales vs WHERE vs.id = t.source_id
-         ) END AS source_link,
+         )
+         -- An option confirmed with nobody on the page → the job, with the
+         -- Confirm panel open (services/option-confirm.ts).
+         WHEN t.source_type = 'quote_option' THEN '/jobs/' || t.source_id || '?group_prompt=1'
+         END AS source_link,
          t.created_at, t.completed_at,
          t.created_by, t.is_private,
          t.follow_up_on::text AS follow_up_on,

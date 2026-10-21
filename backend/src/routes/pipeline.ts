@@ -252,7 +252,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
                                         AND m.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional'))
                        ) ORDER BY m.option_no)
                        FROM jobs m WHERE m.group_id = g.id AND m.is_deleted = false)
-         ) FROM job_groups g WHERE g.id = j.group_id) AS group_summary
+         ) FROM job_groups g WHERE g.id = j.group_id) AS group_summary,
+        -- The card's project chip (docs/JOB-PROJECTS-SPEC.md). Not project_name:
+        -- that column is HireHop's own, unused.
+        (SELECT jp.name FROM job_projects jp WHERE jp.id = j.job_project_id) AS job_project_name
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id

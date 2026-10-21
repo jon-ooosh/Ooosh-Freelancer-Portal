@@ -11,6 +11,7 @@ import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PER
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
 import { stripOptionSuffix } from '../lib/quoteOptions';
+import { PROJECT_COPY } from '../lib/projectCopy';
 import { ukToday } from '../lib/ukDate';
 import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 
@@ -453,6 +454,20 @@ interface ReqProgress {
   blocked: number;
 }
 
+/** "Part of a project" chip (docs/JOB-PROJECTS-SPEC.md) — card and list row. */
+function ProjectChip({ name }: { name: string }) {
+  return (
+    <div className="mb-1">
+      <span
+        className="inline-flex max-w-full items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-ooosh-50 text-ooosh-700 border border-ooosh-200 truncate"
+        title={PROJECT_COPY.chipTitle(name)}
+      >
+        {name}
+      </span>
+    </div>
+  );
+}
+
 function PipelineCard({
   job,
   onDragStart,
@@ -551,6 +566,7 @@ function PipelineCard({
       <div className="text-xs text-gray-500 truncate mb-1">
         {jobDisplayOrgNameOr(job)}
       </div>
+      {job.job_project_name && <ProjectChip name={job.job_project_name} />}
 
       {/* Row 4: Dates */}
       {job.job_date && (
@@ -872,12 +888,15 @@ function NewEnquiryModal({
   onCreated,
   prefillClientId,
   prefillContactId,
+  prefillProjectId,
 }: {
   isOpen: boolean;
   onClose: () => void;
   onCreated: (jobId?: string) => void;
   prefillClientId?: string | null;
   prefillContactId?: string | null;
+  /** "+ New job in this project" — its dates are filled in and the new job joins it. */
+  prefillProjectId?: string | null;
 }) {
   const [clientName, setClientName] = useState('');
   const [clientId, setClientId] = useState<string | null>(null);
@@ -1222,6 +1241,35 @@ function NewEnquiryModal({
       }
     })();
   }, [isOpen, prefillClientId, prefillContactId, fetchClientHistory]);
+
+  // "+ New job in this project" (docs/JOB-PROJECTS-SPEC.md): the project's
+  // default dates fill the four date fields, and the job joins the project
+  // once created. Its client arrives as ?client= (the effect above). A
+  // project with no dates leaves the fields alone.
+  const [project, setProject] = useState<{ id: string; name: string } | null>(null);
+  const projectAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!isOpen) { projectAppliedRef.current = false; setProject(null); return; }
+    if (projectAppliedRef.current || !prefillProjectId) return;
+    projectAppliedRef.current = true;
+    (async () => {
+      try {
+        const res = await api.get<{ data: { id: string; name: string; out_date: string | null; job_date: string | null; job_end: string | null; return_date: string | null } }>(`/job-projects/${prefillProjectId}`);
+        const p = res.data;
+        setProject({ id: p.id, name: p.name });
+        if (p.job_date) setJobDate(p.job_date);
+        if (p.job_end) setJobEnd(p.job_end);
+        if (p.out_date) setOutDate(p.out_date);
+        if (p.return_date) setReturnDate(p.return_date);
+        // Out / Return differ from Start / End on a festival (out 5 days,
+        // charged for 1) — unlink them so editing Start doesn't drag them.
+        if (p.out_date && p.out_date !== p.job_date) setOutLinked(false);
+        if (p.return_date && p.return_date !== p.job_end) setReturnLinked(false);
+      } catch {
+        // Project not found — the form works as a plain new enquiry.
+      }
+    })();
+  }, [isOpen, prefillProjectId]);
 
   // Escape key to close
   useEffect(() => {
@@ -1756,6 +1804,19 @@ function NewEnquiryModal({
         }
       }
 
+      // "+ New job in this project": the new job joins it. Never blocks — a
+      // failure is said after the modal closes, and the job's own
+      // "+ Add to a project" link puts it right.
+      let projectLinkFailed: string | null = null;
+      if (project) {
+        try {
+          await api.post(`/job-projects/${project.id}/jobs`, { job_id: created.id });
+        } catch (projErr) {
+          console.error('Adding the enquiry to its project failed:', projErr);
+          projectLinkFailed = project.name;
+        }
+      }
+
       // Reset form
       setClientName(''); setClientId(null); setIsNewClient(false); setDetails('');
       setOutDate(''); setJobDate(''); setJobEnd(''); setReturnDate('');
@@ -1781,6 +1842,10 @@ function NewEnquiryModal({
       // can race with the navigate and bounce us back to /pipeline.
       onClose();
       onCreated(created.id);
+      if (projectLinkFailed) {
+        const name = projectLinkFailed;
+        setTimeout(() => alert(PROJECT_COPY.enquiryLinkFailed(name)), 100);
+      }
 
       // Defensive alert if any sub-creations silently failed (contacts /
       // linked orgs). The enquiry itself was created, so we don't want to
@@ -1820,6 +1885,11 @@ function NewEnquiryModal({
         {/* Left side: form */}
         <div className="flex-1 min-w-0 p-6 overflow-y-auto">
         <h3 className="text-lg font-semibold mb-4">New Enquiry</h3>
+        {project && (
+          <div className="mb-4 px-3 py-2 rounded-lg bg-ooosh-50 border border-ooosh-200 text-xs text-ooosh-800">
+            {PROJECT_COPY.enquiryBanner(project.name)}
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
@@ -3848,6 +3918,7 @@ export default function PipelinePage() {
                         Option {job.option_no}{job.option_label ? ` · ${job.option_label}` : ''}
                       </div>
                     )}
+                    {job.job_project_name && <ProjectChip name={job.job_project_name} />}
                     <div className="text-xs font-mono">
                       {job.hh_job_number ? (
                         <a
@@ -4008,13 +4079,15 @@ export default function PipelinePage() {
         isOpen={showNewEnquiry}
         prefillClientId={searchParams.get('client')}
         prefillContactId={searchParams.get('contact')}
+        prefillProjectId={searchParams.get('project')}
         onClose={() => {
           setShowNewEnquiry(false);
-          if (searchParams.get('newEnquiry') || searchParams.get('client') || searchParams.get('contact')) {
+          if (searchParams.get('newEnquiry') || searchParams.get('client') || searchParams.get('contact') || searchParams.get('project')) {
             const next = new URLSearchParams(searchParams);
             next.delete('newEnquiry');
             next.delete('client');
             next.delete('contact');
+            next.delete('project');
             setSearchParams(next, { replace: true });
           }
         }}
