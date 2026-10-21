@@ -10,7 +10,8 @@
 import { useState, useEffect, Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
-import Image from 'next/image'
+import { cls, Banner } from '@/components/ui'
+import { AuthShell, AuthResult, authInput, authLabel } from '@/components/AuthShell'
 
 function ResetPasswordForm() {
   const searchParams = useSearchParams()
@@ -102,8 +103,8 @@ function ResetPasswordForm() {
   if (tokenValid === null) {
     return (
       <div className="text-center py-8">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600 mx-auto"></div>
-        <p className="mt-4 text-sm text-gray-600">Verifying reset link...</p>
+        <div className="w-8 h-8 border-[3px] border-hf-tint border-t-hf-accent rounded-full animate-spin mx-auto" />
+        <p className="mt-4 text-[15px] text-hf-muted">Checking your reset link...</p>
       </div>
     )
   }
@@ -111,65 +112,43 @@ function ResetPasswordForm() {
   // Invalid or expired token
   if (tokenValid === false) {
     return (
-      <div className="text-center">
-        <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 mb-4">
-          <svg className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </div>
-        <h3 className="text-lg font-medium text-gray-900 mb-2">Invalid or expired link</h3>
-        <p className="text-sm text-gray-600 mb-6">
-          This password reset link is invalid or has expired. Please request a new one.
-        </p>
-        <Link
-          href="/forgot-password"
-          className="inline-flex justify-center rounded-lg bg-ooosh-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ooosh-500 transition-colors"
-        >
-          Request new link
-        </Link>
-      </div>
+      <AuthResult
+        tone="error"
+        title="Invalid or expired link"
+        action={<Link href="/forgot-password" className={`${cls.btnPrimary} w-full`}>Request a new link</Link>}
+      >
+        <p>This password reset link is invalid or has expired. Please request a new one.</p>
+      </AuthResult>
     )
   }
 
   // Success state
   if (success) {
     return (
-      <div className="text-center">
-        <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 mb-4">
-          <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-          </svg>
-        </div>
-        <h3 className="text-lg font-medium text-gray-900 mb-2">Password reset successful</h3>
-        <p className="text-sm text-gray-600 mb-6">
+      <AuthResult
+        tone="success"
+        title="Password reset"
+        action={<Link href={loggedIn ? '/dashboard' : '/login'} className={`${cls.btnPrimary} w-full`}>{loggedIn ? 'Go to your jobs' : 'Sign in'}</Link>}
+      >
+        <p>
           {loggedIn
             ? "Your password has been updated and you're now signed in."
             : 'Your password has been updated. You can now sign in with your new password.'}
         </p>
-        <Link
-          href={loggedIn ? '/dashboard' : '/login'}
-          className="inline-flex justify-center rounded-lg bg-ooosh-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ooosh-500 transition-colors"
-        >
-          {loggedIn ? 'Go to dashboard' : 'Sign in'}
-        </Link>
-      </div>
+      </AuthResult>
     )
   }
 
+  const input = `${cls.input} ${authInput}`
+
   // Password reset form
   return (
-    <form className="space-y-6" onSubmit={handleSubmit}>
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-          {error}
-        </div>
-      )}
+    <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+      {error && <Banner tone="error">{error}</Banner>}
 
-      <div>
-        <label htmlFor="password" className="block text-sm font-medium text-gray-700">
-          New password
-        </label>
-        <div className="mt-1 relative">
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="password" className={authLabel}>New password</label>
+        <div className="relative">
           <input
             id="password"
             name="password"
@@ -179,96 +158,55 @@ function ResetPasswordForm() {
             minLength={8}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="block w-full appearance-none rounded-lg border border-gray-300 px-3 py-2 pr-10 placeholder-gray-400 shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-ooosh-500 sm:text-sm"
-            placeholder="••••••••"
+            className={`${input} pr-16`}
           />
           <button
             type="button"
             onClick={() => setShowPassword(!showPassword)}
-            className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-gray-600"
-            tabIndex={-1}
+            className="absolute inset-y-0 right-0 px-3.5 text-[14px] font-semibold text-hf-muted hover:text-hf-body"
+            aria-label={showPassword ? 'Hide password' : 'Show password'}
           >
-            {showPassword ? (
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-            )}
+            {showPassword ? 'Hide' : 'Show'}
           </button>
         </div>
-        <p className="mt-1 text-xs text-gray-500">Must be at least 8 characters</p>
+        <p className="text-[13px] text-hf-muted">Must be at least 8 characters</p>
       </div>
 
-      <div>
-        <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700">
-          Confirm new password
-        </label>
-        <div className="mt-1">
-          <input
-            id="confirmPassword"
-            name="confirmPassword"
-            type={showPassword ? 'text' : 'password'}
-            autoComplete="new-password"
-            required
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            className="block w-full appearance-none rounded-lg border border-gray-300 px-3 py-2 placeholder-gray-400 shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-ooosh-500 sm:text-sm"
-            placeholder="••••••••"
-          />
-        </div>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="confirmPassword" className={authLabel}>Confirm new password</label>
+        <input
+          id="confirmPassword"
+          name="confirmPassword"
+          type={showPassword ? 'text' : 'password'}
+          autoComplete="new-password"
+          required
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          className={input}
+        />
       </div>
 
-      <div>
-        <button
-          type="submit"
-          disabled={loading}
-          className="flex w-full justify-center rounded-lg bg-ooosh-600 px-3 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-ooosh-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ooosh-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {loading ? 'Resetting...' : 'Reset password'}
-        </button>
-      </div>
+      <button type="submit" disabled={loading} className={`${cls.btnPrimary} w-full`}>
+        {loading ? 'Resetting...' : 'Reset password'}
+      </button>
     </form>
   )
 }
 
 export default function ResetPasswordPage() {
   return (
-    <div className="min-h-screen flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8 bg-gradient-to-b from-ooosh-50 to-white">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md">
-        {/* Ooosh Logo */}
-        <div className="flex justify-center">
-          <Image
-            src="/ooosh-tours-logo-small.png"
-            alt="Ooosh Tours"
-            width={80}
-            height={80}
-            className="rounded-xl"
-            priority
-          />
+    <AuthShell
+      title="Set a new password"
+      subtitle="Choose a strong password for your account"
+      footer={<Link href="/login" className={cls.link}>Back to sign in</Link>}
+    >
+      <Suspense fallback={
+        <div className="text-center py-8">
+          <div className="w-8 h-8 border-[3px] border-hf-tint border-t-hf-accent rounded-full animate-spin mx-auto" />
         </div>
-        <h2 className="mt-6 text-center text-3xl font-bold tracking-tight text-gray-900">
-          Set new password
-        </h2>
-        <p className="mt-2 text-center text-sm text-gray-600">
-          Choose a strong password for your account
-        </p>
-      </div>
-
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="bg-white py-8 px-4 shadow-lg sm:rounded-xl sm:px-10 border border-gray-100">
-          <Suspense fallback={
-            <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600 mx-auto"></div>
-            </div>
-          }>
-            <ResetPasswordForm />
-          </Suspense>
-        </div>
-      </div>
-    </div>
+      }>
+        <ResetPasswordForm />
+      </Suspense>
+    </AuthShell>
   )
 }

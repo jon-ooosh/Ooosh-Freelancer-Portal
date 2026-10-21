@@ -196,6 +196,15 @@ page without a redirect loop.
    The one remaining sink is the nginx access log, which records query strings.
    The HMAC tokens are single-purpose and expire, so this is accepted.
 
+5. **Transactions run through the shared pool — open (found 21 Oct 2026, A.12).**
+   `await query('BEGIN')` / `query('COMMIT')` sends each statement to whichever
+   pooled connection is free, so it is no transaction at all, and a BEGIN can be
+   left open on a connection that later requests then write through. The portal's
+   password reset was one (fixed in A.12, now on `getClient()`). Four remain:
+   `services/cost-lines.ts`, `routes/costs.ts`, and `routes/pipeline.ts` (two).
+   Fix: `const client = await getClient()`, BEGIN/COMMIT/ROLLBACK on that client,
+   `client.release()` in a `finally`. Its own PR, with a test per path.
+
 ## C. Public-route inventory (9 Oct 2026)
 
 Everything reachable without a staff login. Each should stay a deliberate,

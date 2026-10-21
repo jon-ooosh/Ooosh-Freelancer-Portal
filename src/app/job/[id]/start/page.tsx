@@ -25,8 +25,11 @@
  */
 
 import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { AlertTriangle, Speaker, Truck, Users, Shapes } from 'lucide-react'
+import { cls, IconTile, BackLink, Banner, PageSpinner, ICON } from '@/components/ui'
 
 // =============================================================================
 // TYPES
@@ -157,28 +160,18 @@ export default function StartDeliveryPage() {
   }
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading...</p>
-        </div>
-      </div>
-    )
+    return <PageSpinner />
   }
 
   if (error || !job) {
     return (
-      <div className="min-h-screen bg-gray-50 p-4">
+      <div className="min-h-screen bg-hf-page p-4">
         <div className="max-w-md mx-auto mt-20">
-          <div className="bg-white rounded-xl shadow-sm p-6 text-center">
-            <div className="text-red-500 text-4xl mb-4">⚠️</div>
-            <p className="text-gray-600 mb-4">{error || 'Job not found'}</p>
-            <Link
-              href="/dashboard"
-              className="inline-block bg-purple-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-purple-600 transition-colors"
-            >
-              Back to Dashboard
+          <div className={`${cls.card} p-6 text-center`}>
+            <AlertTriangle size={36} strokeWidth={1.8} className="mx-auto mb-3 text-hf-error" />
+            <p className="text-hf-body text-[15px] mb-4">{error || 'Job not found'}</p>
+            <Link href="/dashboard" className={`${cls.btnPrimary} w-full`}>
+              Back to jobs
             </Link>
           </div>
         </div>
@@ -200,144 +193,133 @@ export default function StartDeliveryPage() {
   // One definition, two positions — top of the list on a backline job,
   // otherwise its usual middle slot.
   const backlineButton = (
-    <button
+    <OptionCard
       onClick={handleBacklineOnly}
       disabled={bookoutLoading}
-      className={`w-full flex items-center gap-4 p-5 rounded-xl border-2 bg-white hover:border-purple-400 hover:bg-purple-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm ${
-        expectsBackline ? 'border-purple-400' : 'border-gray-200'
-      }`}
-    >
-      <span className="text-3xl">🎸</span>
-      <div className="flex-1">
-        <p className="font-semibold text-gray-900">Backline only</p>
-        <p className="text-sm text-gray-500">Equipment checklist &amp; sign-off</p>
-      </div>
-      {expectsBackline && (
-        <span className="rounded-full bg-purple-100 px-2 py-1 text-xs font-medium text-purple-700">
-          Expected
-        </span>
-      )}
-    </button>
+      expected={expectsBackline}
+      tile={<IconTile kind="backline" size={44}><Speaker {...ICON} /></IconTile>}
+      title="Backline only"
+      sub="Equipment checklist & sign-off"
+    />
   )
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white shadow-sm">
-        <div className="max-w-md mx-auto px-4 py-3 flex items-center">
-          <Link
-            href={`/job/${jobId}`}
-            className="flex items-center text-gray-600 hover:text-gray-900 transition-colors"
-          >
-            <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-            Back
-          </Link>
+    <div className="min-h-screen bg-hf-page safe-top pb-10">
+      <header className="max-w-md mx-auto px-2 pt-2">
+        <div className="px-2.5">
+          <BackLink href={`/job/${jobId}`} label={job.venueName || 'Job'} />
         </div>
       </header>
 
-      <main className="max-w-md mx-auto p-4 pt-8">
-        <div className="text-center mb-8">
-          <h1 className="text-xl font-bold text-gray-900 mb-2">
-            What are you {isDelivery ? 'delivering' : 'collecting'} today?
-          </h1>
-          <p className="text-sm text-gray-500">
-            This helps us run the right process for you
-          </p>
-        </div>
+      <main className="max-w-md mx-auto px-4 pt-2 flex flex-col gap-4">
+        <h1 className="px-1 text-[26px] font-bold tracking-[-0.02em] leading-[1.2] text-hf-ink">
+          What are you {isDelivery ? 'delivering' : 'collecting'} today?
+        </h1>
 
         {expectsBackline && (
-          <div className="mb-4 rounded-lg border border-purple-200 bg-purple-50 p-3">
-            <p className="text-sm text-purple-900">
-              <span className="font-semibold">This job is booked as backline.</span>{' '}
-              Only pick a van option if you&apos;re also {verb} an Ooosh hire van for the
-              customer.
-            </p>
-          </div>
+          <Banner tone="info">
+            <strong className="font-bold">This job is booked as backline.</strong>{' '}
+            Only pick a van option if you&apos;re also {verb} an Ooosh hire van for the
+            customer.
+          </Banner>
         )}
 
         {isPeopleJob && (
-          <div className="mb-4 rounded-lg border border-purple-200 bg-purple-50 p-3">
-            <p className="text-sm text-purple-900">
-              <span className="font-semibold">This job is booked as People.</span>{' '}
-              Only pick another option if you&apos;re also {verb} a hire van or equipment.
-            </p>
-          </div>
+          <Banner tone="info">
+            <strong className="font-bold">This job is booked as People.</strong>{' '}
+            Only pick another option if you&apos;re also {verb} a hire van or equipment.
+          </Banner>
         )}
 
-        <div className="space-y-3">
+        <div className="flex flex-col gap-2.5">
           {/* People — only on a job booked as People */}
           {isPeopleJob && (
-            <button
+            <OptionCard
               onClick={handlePeople}
               disabled={bookoutLoading}
-              className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-purple-400 bg-white hover:bg-purple-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-            >
-              <span className="text-3xl">👥</span>
-              <div className="flex-1">
-                <p className="font-semibold text-gray-900">People</p>
-                <p className="text-sm text-gray-500">Passengers: a quick note and you&apos;re done</p>
-              </div>
-              <span className="rounded-full bg-purple-100 px-2 py-1 text-xs font-medium text-purple-700">
-                Expected
-              </span>
-            </button>
+              expected
+              tile={<IconTile kind="crew" size={44}><Users {...ICON} /></IconTile>}
+              title="People"
+              sub="Passengers: a quick note and you're done"
+            />
           )}
 
           {/* Backline only — first when the job is booked as backline */}
           {expectsBackline && backlineButton}
 
           {/* Van only */}
-          <button
+          <OptionCard
             onClick={() => handleVanLeg(true)}
             disabled={bookoutLoading}
-            className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-blue-400 hover:bg-blue-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-          >
-            <span className="text-3xl">🚐</span>
-            <div className="flex-1">
-              <p className="font-semibold text-gray-900">Van only</p>
-              <p className="text-sm text-gray-500">{isDelivery ? 'Vehicle book-out process' : 'Vehicle check-in / return process'}</p>
-            </div>
-            {bookoutLoading && (
-              <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-            )}
-          </button>
+            busy={bookoutLoading}
+            tile={<IconTile kind="van" size={44}><Truck {...ICON} /></IconTile>}
+            title="Van only"
+            sub={isDelivery ? 'Vehicle book-out' : 'Vehicle check-in / return'}
+          />
 
           {/* Backline only — normal position when we can't tell */}
           {!expectsBackline && backlineButton}
 
           {/* Both */}
-          <button
+          <OptionCard
             onClick={() => handleVanLeg(false)}
             disabled={bookoutLoading}
-            className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-green-400 hover:bg-green-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-          >
-            <span className="text-3xl">🚐🎸</span>
-            <div className="flex-1">
-              <p className="font-semibold text-gray-900">Both</p>
-              <p className="text-sm text-gray-500">{isDelivery ? 'Vehicle book-out, then equipment checklist' : 'Vehicle check-in, then equipment checklist'}</p>
-            </div>
-            {bookoutLoading && (
-              <div className="w-5 h-5 border-2 border-green-500 border-t-transparent rounded-full animate-spin"></div>
-            )}
-          </button>
+            busy={bookoutLoading}
+            tile={<IconTile kind="neutral" size={44}><Shapes {...ICON} /></IconTile>}
+            title="Both"
+            sub={isDelivery ? 'Vehicle book-out, then equipment checklist' : 'Vehicle check-in, then equipment checklist'}
+          />
         </div>
 
-        {bookoutError && (
-          <div className="mt-4 bg-red-50 border border-red-200 rounded-lg p-3 text-center">
-            <p className="text-red-600 text-sm">{bookoutError}</p>
-          </div>
-        )}
+        {bookoutError && <Banner tone="error" className="text-center">{bookoutError}</Banner>}
 
-        <div className="mt-6 text-center">
-          <Link
-            href={`/job/${jobId}`}
-            className="text-gray-500 text-sm font-medium hover:text-gray-700 transition-colors"
-          >
-            Cancel
-          </Link>
-        </div>
+        <Link
+          href={`/job/${jobId}`}
+          className="h-12 flex items-center justify-center text-[16px] font-semibold text-hf-muted hover:text-hf-body transition-colors"
+        >
+          Cancel
+        </Link>
       </main>
     </div>
+  )
+}
+
+/**
+ * One choice on the Start page (design 2b): icon tile, title, one line of
+ * what happens next. The option the job is booked as is outlined in plum and
+ * marked Expected — a steer, never a gate.
+ */
+function OptionCard({ onClick, disabled, expected = false, busy = false, tile, title, sub }: {
+  onClick: () => void
+  disabled?: boolean
+  expected?: boolean
+  busy?: boolean
+  tile: ReactNode
+  title: string
+  sub: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`w-full min-h-[80px] flex items-center gap-3.5 p-4 rounded-2xl bg-white text-left transition-colors hover:bg-hf-inset disabled:opacity-50 disabled:cursor-not-allowed ${
+        expected ? 'border-2 border-hf-accent' : 'border-[1.5px] border-hf-control'
+      }`}
+    >
+      {tile}
+      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[17px] font-semibold text-hf-ink">{title}</span>
+          {expected && (
+            <span className="text-[12px] font-bold bg-hf-accent text-white rounded-full px-2 py-0.5">Expected</span>
+          )}
+        </div>
+        <div className="text-[14px] text-hf-muted">{sub}</div>
+      </div>
+      {busy && (
+        <div className="w-5 h-5 border-2 border-hf-accent border-t-transparent rounded-full animate-spin flex-none" />
+      )}
+    </button>
   )
 }

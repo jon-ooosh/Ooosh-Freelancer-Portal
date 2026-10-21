@@ -33,6 +33,7 @@ export interface PortalJob {
   time: string | null
   venueName: string | null
   venueId: string | null
+  venueCity?: string | null
   driverPay: number
   runGroup: string | null
   runOrder: number | null
