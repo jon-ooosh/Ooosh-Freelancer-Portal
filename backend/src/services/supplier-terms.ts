@@ -10,6 +10,8 @@
  * when known, else lowercased supplier name.
  */
 import { query } from '../config/database';
+import { getSystemSetting } from '../routes/system-settings';
+import { ukDateOf, ukToday } from './uk-date';
 
 export type TermBasis = 'invoice_date' | 'end_of_invoice_month';
 
@@ -23,17 +25,12 @@ export const DEFAULT_TERMS_DAYS = 30;
 export const DEFAULT_TERMS: SupplierTerms = { basis: 'invoice_date', days: DEFAULT_TERMS_DAYS, source: 'default' };
 
 /**
- * Ooosh freelancer terms: "paid on the first Friday one week after the
- * freelancer's INVOICE date". So the due date is the first Friday on or after
- * (invoice date + 7 days) — landing payment 8–14 days after they submit,
- * depending on the invoice weekday. Returns YYYY-MM-DD, or null with no anchor
- * date. UTC throughout to avoid day-shift.
+ * The OLD freelancer rule (Sep to Oct 2026), kept for bills approved before the
+ * switch below: the first Friday on or after (invoice date + 7 days). Those
+ * bills went to Xero with this date, so they keep it.
  *
- * ⚠️ This used to anchor on `approved_at`, which meant the due date did not
- * exist until a manager approved the cost — so it could never be shown at
- * upload, which is exactly what staff wanted (Sep 2026). jon confirmed the real
- * rule is invoice-date-based, so the anchor moved. `resolveDueDate` passes
- * cost_date, falling back to approved_at only for a cost with no invoice date.
+ * Returns YYYY-MM-DD, or null with no anchor date. UTC throughout to avoid
+ * day-shift.
  */
 export function freelancerDueDate(invoiceDate: string | Date | null | undefined): string | null {
   const iso = toIsoDate(invoiceDate);
@@ -48,6 +45,66 @@ export function freelancerDueDate(invoiceDate: string | Date | null | undefined)
 
 /** Ooosh freelancer terms, as a SupplierTerms for display alongside a due date. */
 export const FREELANCER_TERMS: SupplierTerms = { basis: 'invoice_date', days: 0, source: 'freelancer' };
+
+/**
+ * Ooosh freelancer terms (jon, Oct 2026): paid on the first Friday one week
+ * after the invoice is APPROVED, so 8 to 14 days after approval. A Friday
+ * approval waits for the Friday after next (14 days); that is what makes
+ * "8 to 14 days" true. This is what the "How to invoice Ooosh Tours Ltd" guide
+ * and the freelancer welcome email say (FREELANCER-PORTAL-SPEC.md §4).
+ *
+ * `approvalDay` is the UK calendar day of the approval, YYYY-MM-DD.
+ */
+export function freelancerDueDateFromApproval(approvalDay: string | null | undefined): string | null {
+  if (!approvalDay) return null;
+  const d = new Date(`${approvalDay.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() + 7);                       // one week after approval
+  const daysToFriday = ((5 - d.getUTCDay() + 7) % 7) || 7; // the Friday AFTER that; a Friday moves on a week
+  d.setUTCDate(d.getUTCDate() + daysToFriday);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * When the approval rule took over: an ISO instant in system_settings, stamped
+ * by migration 301 when it ran (i.e. at deploy). Bills approved before it keep
+ * the old invoice-date rule, so nobody's payment moves and OP still agrees with
+ * the due date already sent to Xero. Missing or unreadable = the switch hasn't
+ * happened, and every bill stays on the old rule.
+ */
+export const FREELANCER_APPROVAL_RULE_KEY = 'freelancer_terms_approval_from';
+
+export async function getFreelancerApprovalRuleFrom(): Promise<Date | null> {
+  try {
+    const v = await getSystemSetting(FREELANCER_APPROVAL_RULE_KEY);
+    if (!v) return null;
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  } catch (err) {
+    console.warn('[supplier-terms] approval rule date unreadable, using the invoice-date rule:', (err as Error).message);
+    return null;
+  }
+}
+
+function toInstant(v: string | Date | null | undefined): Date | null {
+  if (!v) return null;
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** A freelancer invoice's due date under whichever rule applies to it. */
+function freelancerDerivedDueDate(cost: DueDateCost, approvalRuleFrom: Date | null): string | null {
+  const approvedAt = toInstant(cost.approved_at);
+  if (!approvalRuleFrom || (approvedAt && approvedAt < approvalRuleFrom)) {
+    // Old rule: invoice date, falling back to approved_at for a legacy cost
+    // captured with no invoice date.
+    return freelancerDueDate(cost.cost_date ?? cost.approved_at);
+  }
+  // Not approved yet: shown as if approved today, so staff still see a date at
+  // upload. It settles on the day it is actually approved, before it reaches
+  // Xero (bills are pushed on approval).
+  return freelancerDueDateFromApproval(approvedAt ? ukDateOf(approvedAt) : ukToday());
+}
 
 /**
  * Normalise a date-ish value to YYYY-MM-DD. node-postgres returns DATE columns
@@ -90,16 +147,20 @@ export interface ResolvedDueDate {
  * and Xero end up disagreeing about when a bill is due.
  *
  * `supplierTerms` is ignored for a freelancer invoice; pass whatever the batch
- * resolver gave you and this picks the right rule.
+ * resolver gave you and this picks the right rule. `approvalRuleFrom` is
+ * `getFreelancerApprovalRuleFrom()`, read once per request; leave it out and
+ * freelancer invoices get the old invoice-date rule.
  */
-export function resolveDueDate(cost: DueDateCost, supplierTerms: SupplierTerms): ResolvedDueDate {
+export function resolveDueDate(
+  cost: DueDateCost,
+  supplierTerms: SupplierTerms,
+  approvalRuleFrom: Date | null = null,
+): ResolvedDueDate {
   const override = toIsoDate(cost.due_date_override);
   const isFreelancer = cost.cost_type === 'freelancer_invoice';
   const terms = isFreelancer ? FREELANCER_TERMS : supplierTerms;
   const derived = isFreelancer
-    // Invoice date is the anchor; approved_at is a fallback for legacy costs
-    // captured with no invoice date on them.
-    ? freelancerDueDate(cost.cost_date ?? cost.approved_at)
+    ? freelancerDerivedDueDate(cost, approvalRuleFrom)
     : computeDueDate(cost.cost_date, terms);
   return { dueDate: override ?? derived, derivedDueDate: derived, terms, isOverride: Boolean(override) };
 }
@@ -112,10 +173,10 @@ export function resolveDueDate(cost: DueDateCost, supplierTerms: SupplierTerms):
 export async function resolveDueDateForCost(
   cost: DueDateCost & { xero_contact_id?: string | null; supplier_name?: string | null },
 ): Promise<ResolvedDueDate> {
-  const terms = cost.cost_type === 'freelancer_invoice'
-    ? FREELANCER_TERMS
-    : await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name);
-  return resolveDueDate(cost, terms);
+  if (cost.cost_type === 'freelancer_invoice') {
+    return resolveDueDate(cost, FREELANCER_TERMS, await getFreelancerApprovalRuleFrom());
+  }
+  return resolveDueDate(cost, await resolveTermsForSupplier(cost.xero_contact_id, cost.supplier_name));
 }
 
 /**

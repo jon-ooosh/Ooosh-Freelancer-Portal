@@ -203,8 +203,8 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Once you've submitted the form we'll process your details and reply to confirm whether you've been accepted,
         if we need more information, or otherwise. If accepted, you'll get a link to join the WhatsApp group and our
-        payment/invoicing procedure - in brief, we aim to pay approved invoices on the first Friday one week after
-        submission (normally paid within 7-14 days).
+        payment/invoicing procedure - in brief, we aim to pay invoices on the first Friday one week after we approve
+        them (usually 8-14 days after approval).
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         Any questions in the meantime, just reply to this email. If the button above doesn't work, copy and paste
@@ -274,8 +274,9 @@ const templates: Record<string, EmailTemplate> = {
       {{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         <strong>Getting paid.</strong> Agree your rate with us before each job, then invoice us for the work you've
-        done. We aim to pay approved invoices on the first Friday one week after submission (normally within 7-14
-        days). You're responsible for your own tax and National Insurance.
+        done. We aim to pay invoices on the first Friday one week after we approve them, so usually 8-14 days after
+        approval. Please don't chase us for payment until 30 days after you sent your invoice. You're responsible
+        for your own tax and National Insurance.
       </p>
       {{#if invoiceGuideUrl}}
         <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">

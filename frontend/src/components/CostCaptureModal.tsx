@@ -105,7 +105,7 @@ const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
 // WHY the default is what it is (and whether it's worth correcting).
 function describeTerms(t?: { basis: string; days: number; source: string } | null): string {
   if (!t) return '';
-  if (t.source === 'freelancer') return 'Ooosh freelancer terms — first Friday a week after the invoice date';
+  if (t.source === 'freelancer') return 'Ooosh freelancer terms — first Friday a week after approval (8 to 14 days). Until it is approved, this assumes today';
   const base = t.basis === 'end_of_invoice_month' ? 'end of invoice month' : 'invoice date';
   const when = t.days === 0 ? base : `${base} + ${t.days} days`;
   if (t.source === 'manual') return `Supplier terms (set by us) — ${when}`;
@@ -423,6 +423,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
         if (costType) params.set('cost_type', costType);
         if (supplierName.trim()) params.set('supplier_name', supplierName.trim());
         if (xeroContactId) params.set('xero_contact_id', xeroContactId);
+        if (existing?.approved_at) params.set('approved_at', existing.approved_at);
         const r = await api.get<{ data: { due_date: string | null; terms: { basis: string; days: number; source: string } } }>(
           `/costs/due-date-preview?${params}`,
         );
@@ -434,7 +435,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
       }
     }, 350);
     return () => clearTimeout(t);
-  }, [costDate, supplierName, xeroContactId, categoryCode]);
+  }, [costDate, supplierName, xeroContactId, categoryCode, existing?.approved_at]);
 
   // Fleet list (small, ~20 vans) — fetched once for the vehicle picker, filtered
   // client-side. Active vehicles only.
