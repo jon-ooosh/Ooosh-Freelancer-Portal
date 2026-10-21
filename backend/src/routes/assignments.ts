@@ -16,6 +16,7 @@ import { validate } from '../middleware/validate';
 import {
   findOverlappingAssignments,
   buildConflictPayload,
+  holdOccupiesSql,
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { syncVehicleRequirementStatus } from '../services/vehicle-requirement-sync';
@@ -218,6 +219,12 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
     // window uses the same 09:00 default so back-to-back hires (one ending
     // 9am, next starting 9am) are not treated as overlapping. See
     // services/assignment-overlap.ts for the full rationale.
+    //
+    // A hold on a finished job doesn't count (holdOccupiesSql — the same rule
+    // findOverlappingAssignments applies, so the picker and the save agree).
+    // Dates go out as text from SQL, not via toISOString() on a DATE, so the
+    // picker's "held until" can't slip a day; the times are the ones the
+    // overlap test uses, so staff can see exactly when the hold ends.
     const result = await query(
       `SELECT DISTINCT ON (vha.vehicle_id)
          vha.vehicle_id,
@@ -225,10 +232,13 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
          vha.status,
          vha.job_id,
          vha.hirehop_job_id,
+         j.id AS op_job_id,
          j.job_name,
          j.hh_job_number,
-         COALESCE(vha.hire_start, j.job_date::DATE) AS effective_start,
-         COALESCE(vha.hire_end, j.job_end::DATE) AS effective_end,
+         COALESCE(vha.hire_start, j.job_date::DATE)::text AS effective_start,
+         COALESCE(vha.hire_end, j.job_end::DATE)::text AS effective_end,
+         to_char(COALESCE(j.out_time, TIME '09:00'), 'HH24:MI') AS effective_start_time,
+         to_char(COALESCE(j.end_time, TIME '09:00'), 'HH24:MI') AS effective_end_time,
          d.full_name AS driver_name,
          fv.reg AS vehicle_reg
        FROM vehicle_hire_assignments vha
@@ -238,6 +248,7 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
        LEFT JOIN drivers d ON d.id = vha.driver_id
        WHERE vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
          AND vha.vehicle_id IS NOT NULL
+         AND ${holdOccupiesSql('vha', 'j')}
          AND ($3::integer IS NULL OR vha.hirehop_job_id IS DISTINCT FROM $3::integer)
          AND ($4::uuid IS NULL OR vha.job_id IS DISTINCT FROM $4::uuid)
          AND (COALESCE(vha.hire_start, j.job_date::DATE) + COALESCE(j.out_time, TIME '09:00'))
@@ -259,10 +270,13 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
           status: r.status,
           jobId: r.job_id,
           hirehopJobId: r.hirehop_job_id,
+          opJobId: r.op_job_id ?? null,
           jobName: r.job_name,
           hhJobNumber: r.hh_job_number,
-          effectiveStart: r.effective_start ? new Date(r.effective_start).toISOString().slice(0, 10) : null,
-          effectiveEnd: r.effective_end ? new Date(r.effective_end).toISOString().slice(0, 10) : null,
+          effectiveStart: r.effective_start ? String(r.effective_start).slice(0, 10) : null,
+          effectiveEnd: r.effective_end ? String(r.effective_end).slice(0, 10) : null,
+          effectiveStartTime: r.effective_start_time ?? null,
+          effectiveEndTime: r.effective_end_time ?? null,
           driverName: r.driver_name,
         })),
       },
