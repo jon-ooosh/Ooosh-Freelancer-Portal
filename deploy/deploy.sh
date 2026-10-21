@@ -83,8 +83,10 @@ cd "${APP_DIR}/backend"
 npm run db:migrate
 
 # --- Restart the service (a few seconds' blip) ---
-sudo systemctl restart ooosh-portal
+# Not in the middle of a card payment: safe-restart.sh waits for one to finish,
+# and stops without restarting (saying why) if it doesn't within 5 minutes.
 trap - ERR
+bash "${APP_DIR}/deploy/safe-restart.sh"
 
 echo ""
 echo "============================================"
