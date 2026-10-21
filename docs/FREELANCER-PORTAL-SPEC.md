@@ -10,8 +10,8 @@ touching completion, the chaser, Earnings or the freelancer guides.
 | # | PR | State |
 |---|---|---|
 | 1 | Completion fixes (§2) | merged 21 Oct 2026 |
-| – | Payment terms aligned (§4) | this PR |
-| 2 | Security quick fixes (§6) | next |
+| – | Payment terms aligned (§4) | merged 21 Oct 2026 |
+| 2 | Security quick fixes (§6) | this PR |
 | 3 | Portal reskin to the Claude Design handoff (`docs/design/freelancer-portal-refresh/`, added with that PR) | after |
 | 4 | Van screens reskin, freelancer scope only | after |
 | 5 | Portal 2FA (§7) | after |
@@ -134,7 +134,9 @@ switch, a total, a Paid / Invoiced / To invoice bar, "N jobs need an invoice", a
 
 ## 6. Security quick fixes (PR 2)
 
-All confirmed in the code (Oct 2026):
+All fixed in PR 2; what was done is `docs/SECURITY-AUDIT-BRIEF.md` A.12. Before deploying it,
+anyone who logged in with their STAFF password (no portal password) has to set one with
+"Forgot your password?", or they are locked out. The findings, as confirmed in the code (Oct 2026):
 - Portal login doesn't require `is_approved`, and sessions keep working after a freelancer is removed.
 - It falls back to the OP staff password (`users.password_hash`) when the portal password is unset,
   which skips OP's own 2FA.

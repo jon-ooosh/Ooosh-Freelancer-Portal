@@ -89,12 +89,48 @@ the general `authenticate` middleware checked the signature and nothing else.
 11. **Production dependency advisories.** A semver-safe `npm audit fix` cleared
     every high/critical advisory in the backend's production tree except the
     known `xlsx` one (no fix exists; trusted admin uploads only).
+12. **The freelancer portal (21 Oct 2026, `docs/FREELANCER-PORTAL-SPEC.md` §6).**
+    - Login needed no approval, and a session kept working for its full 30 days
+      after a freelancer was removed. `portalAuth` now re-reads the person on
+      every request (`is_freelancer`, `is_approved`, not deleted) and answers 401
+      `account_inactive`; the portal clears its cookie on any 401 from OP
+      (`src/lib/op-api.ts`), so the pages' "401 → /login" can't loop against the
+      middleware's "valid cookie → /dashboard". A database error there is a 503,
+      never a 401 (a 401 signs the freelancer out).
+    - An account with no portal password fell back to the person's OP STAFF
+      password, i.e. an OP password opened the portal without OP's second
+      factor. Removed.
+    - Wrong passwords now slow the ACCOUNT, not just the IP (every freelancer is
+      a Netlify address): `staff-login-security.ts` `portalSecondsBlocked()` etc.,
+      the staff thresholds, Redis, fail-open.
+    - A password reset signs out every other session
+      (`people.portal_sessions_valid_after`, migration 302; a minute's grace for
+      the Netlify clock). The reset's "transaction" was BEGIN/COMMIT through the
+      shared pool, i.e. none; it is on one client now. Four other places still do
+      that (`cost-lines.ts`, `routes/costs.ts`, `routes/pipeline.ts` ×2) — open.
+    - The registration code came from `Math.random()`; now `crypto.randomInt`.
+    - `src/app/api/hirehop/items/[jobId]` (the portal's kit list, read with its
+      own HireHop token) served any job to any login, and a Monday-era secret
+      header skipped the login. It now needs `?job=<quote>`, and OP's
+      `GET /portal/jobs/:quoteId/hirehop-ref` must say that job is theirs and has
+      that HireHop number.
+    - `GET /portal/venues/:id` (unscoped, unused) is gone; portal job responses no
+      longer carry the run's CLIENT price (`runCombinedClientFee`).
+    - The van screens: `/vehicles/send-email` (any HTML to any address, "checked"
+      by the reg being in the subject) is off the freelancer allow-list — nothing
+      freelancer-side calls it; and the book-out / collection link resolver
+      refuses a login that is no longer an approved freelancer (the links last
+      24 hours).
 
 A.1–A.7 were exercised over HTTP against a migrated + seeded scratch database
 on 9 Oct 2026 (22 checks plus the limiter counts); A.9 with 18 unit checks on
 the freelancer and claim middleware and 20 HTTP checks across staff, refresh,
 kiosk, hire-form and socket paths, including that a pre-`aud` token is refused
 everywhere. Both portal-secret guards were seen to refuse startup.
+A.12 was exercised over HTTP against a fully migrated scratch database and Redis
+(37 checks on the real portal and vehicles routers), then through the portal app
+itself, including a browser check that a removed freelancer lands on the login
+page without a redirect loop.
 
 ## B. Open
 

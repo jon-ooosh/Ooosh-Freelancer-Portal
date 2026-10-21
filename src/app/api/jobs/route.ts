@@ -33,7 +33,6 @@ interface OrganisedJob {
   // of summing individual driverPay values — the combined fee is what
   // the freelancer is actually being paid for the whole run.
   runCombinedFreelancerFee?: number | null
-  runCombinedClientFee?: number | null
   runNotes?: string | null
   hhRef?: string
   keyNotes?: string

@@ -101,6 +101,17 @@ export async function POST(request: NextRequest) {
         )
       }
 
+      // OP's own answer is the right one to show for these (Oct 2026): 403 =
+      // right password but no longer an approved freelancer; 429 = this
+      // account is paused after too many wrong passwords (OP counts per
+      // account, which this instance's in-memory counter can't).
+      if (opResult.status === 403 || opResult.status === 429) {
+        return NextResponse.json(
+          { error: opResult.error || LOCKOUT_MESSAGE },
+          { status: opResult.status }
+        )
+      }
+
       // Any other OP failure that wasn't a thrown error.
       return NextResponse.json(
         { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },

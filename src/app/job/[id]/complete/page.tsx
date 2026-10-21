@@ -698,13 +698,15 @@ interface ChecklistLine {
 
 interface EquipmentChecklistProps {
   hhRef: string
+  /** The OP job this list is shown on: the kit-list route checks it is the freelancer's. */
+  quoteId: string
   whatIsIt?: 'equipment' | 'vehicle' | 'people'
   isDelivery: boolean
   /** Told every time a tick changes, so the page can send the ticks with the completion. */
   onChange?: (lines: ChecklistLine[]) => void
 }
 
-function EquipmentChecklist({ hhRef, whatIsIt, isDelivery, onChange }: EquipmentChecklistProps) {
+function EquipmentChecklist({ hhRef, quoteId, whatIsIt, isDelivery, onChange }: EquipmentChecklistProps) {
   const [items, setItems] = useState<EquipmentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -718,7 +720,7 @@ function EquipmentChecklist({ hhRef, whatIsIt, isDelivery, onChange }: Equipment
       try {
         // Determine filter based on job type
         const filterMode = getFilterMode(whatIsIt)
-        const response = await fetch(`/api/hirehop/items/${hhRef}?filter=${filterMode}`)
+        const response = await fetch(`/api/hirehop/items/${encodeURIComponent(hhRef)}?job=${encodeURIComponent(quoteId)}&filter=${filterMode}`)
         const data = await response.json()
 
         if (!response.ok) {
@@ -746,7 +748,7 @@ function EquipmentChecklist({ hhRef, whatIsIt, isDelivery, onChange }: Equipment
     } else {
       setLoading(false)
     }
-  }, [hhRef, whatIsIt])
+  }, [hhRef, quoteId, whatIsIt])
 
   // Handle incrementing/decrementing check count for an item
   const handleCheckToggle = (itemKey: string, quantity: number, increment: boolean) => {
@@ -1548,6 +1550,7 @@ export default function CompletePage() {
         {mode === 'dc' && job.hhRef && (
           <EquipmentChecklist 
             hhRef={job.hhRef} 
+            quoteId={job.id}
             whatIsIt={job.whatIsIt}
             isDelivery={isDelivery}
             onChange={setChecklist}
