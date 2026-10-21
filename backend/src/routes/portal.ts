@@ -979,6 +979,29 @@ function addDaysIsoP(iso: string, days: number): string {
   return dt.toISOString().slice(0, 10);
 }
 
+/** The furthest back `?since=` reaches: six whole months is ~186 days. */
+const SINCE_MAX_DAYS = 200;
+
+/**
+ * `?since=YYYY-MM-DD` on the portal's three list routes (jobs, studio-sitter
+ * shifts, day bookings): how far back finished work goes, one rule for every
+ * kind (FREELANCER-PORTAL-SPEC §10). The portal sends the 1st of last month,
+ * or six months back for "Show older". Malformed → null (the route's own
+ * default); clamped to the last SINCE_MAX_DAYS so a hand-typed URL cannot turn
+ * a phone list into a years-long read.
+ */
+function parseSince(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const [y, m, d] = raw.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  // Rejects a date that doesn't exist (2026-02-31 would roll into March).
+  if (Number.isNaN(dt.getTime()) || dt.toISOString().slice(0, 10) !== raw) return null;
+  const today = ukToday();
+  const floor = addDaysIsoP(today, -SINCE_MAX_DAYS);
+  if (raw < floor) return floor;
+  return raw > today ? today : raw;
+}
+
 // GET /api/portal/studio-sitter/shifts — the sitter's upcoming/recent shifts
 router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) => {
   try {
@@ -989,8 +1012,15 @@ router.get('/studio-sitter/shifts', async (req: PortalRequest, res: Response) =>
     // assignments, so a wide window stays cheap.
     const from = addDaysIsoP(today, -14);
     const to = addDaysIsoP(today, 365);
-    const shifts = await getSitterShifts(req.portalUser!.id, from, to);
-    res.json({ success: true, shifts });
+    // `?since=` adds `past`: every night before tonight back to that date, for
+    // the Completed page and its count (FREELANCER-PORTAL-SPEC §10). `shifts`
+    // keeps its 14-day look-back either way, so the dashboard is unchanged.
+    // Until Oct 2026 a night simply vanished from the portal after 14 days.
+    const since = parseSince(req.query.since);
+    const all = await getSitterShifts(req.portalUser!.id, since && since < from ? since : from, to);
+    const shifts = all.filter(s => s.date >= from);
+    if (!since) { res.json({ success: true, shifts }); return; }
+    res.json({ success: true, shifts, past: all.filter(s => s.date >= since && s.date < today) });
   } catch (error) {
     console.error('Portal sitter shifts error:', error);
     res.status(500).json({ error: 'Failed to load shifts' });
@@ -2160,12 +2190,23 @@ router.get('/day-bookings', async (req: PortalRequest, res: Response) => {
       return { ...presentDayBooking(b), tasks };
     }));
 
+    // `?since=` adds `done`: the days they worked (accepted or completed, the
+    // day gone) back to that date, for the Completed page and its count
+    // (FREELANCER-PORTAL-SPEC §10). `past` above keeps its own rule, unanswered
+    // offers included, so the dashboard is unchanged.
+    const since = parseSince(req.query.since);
+    const done = since
+      ? all.filter(b => b.bookingDate >= since && b.bookingDate < today
+          && ['accepted', 'completed'].includes(b.status))
+      : null;
+
     res.json({
       success: true,
       // The one they have to DO something about, so the portal can lead with it.
       awaitingReply: upcoming.filter(b => b.status === 'offered').length,
       upcoming: upcomingWithTasks,
       past: past.map(presentDayBooking),
+      ...(done ? { done: done.map(presentDayBooking) } : {}),
     });
   } catch (error) {
     console.error('Portal day-bookings error:', error);
@@ -2341,10 +2382,13 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
       [personId]
     );
 
-    // Categorise into today/upcoming/completed/cancelled
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    // Categorise into today/upcoming/completed/cancelled. Completed and
+    // cancelled go back to `?since=` (the portal sends the 1st of last month,
+    // or six months back for "Show older": FREELANCER-PORTAL-SPEC §10), else
+    // 30 days. Today is the UK date: the UTC one filed today's jobs under
+    // "Later" between midnight and 1am in summer.
+    const todayStr = ukToday();
+    const since = parseSince(req.query.since) ?? addDaysIsoP(todayStr, -30);
 
     const today: unknown[] = [];
     const upcoming: unknown[] = [];
@@ -2363,11 +2407,11 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         : (typeof row.job_date === 'string' ? row.job_date.split('T')[0] : null);
 
       if (row.ops_status === 'completed' || row.status === 'completed') {
-        if (jobDateStr && jobDateStr >= thirtyDaysAgo) {
+        if (jobDateStr && jobDateStr >= since) {
           completed.push(item);
         }
       } else if (row.ops_status === 'cancelled' || row.status === 'cancelled') {
-        if (jobDateStr && jobDateStr >= thirtyDaysAgo) {
+        if (jobDateStr && jobDateStr >= since) {
           cancelled.push(item);
         }
       } else if (jobDateStr === todayStr) {
