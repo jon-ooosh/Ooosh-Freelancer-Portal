@@ -137,6 +137,7 @@ interface ExcessInfo {
     excess_amount_taken: number;
     amount_held?: number;
     held_expires_at?: string | null;
+    payment_method?: string | null;
     excess_status: string;
     requires_referral: boolean;
   }>;
@@ -1082,6 +1083,11 @@ export default function RequirementCard({
                 excess_status: 'pre_auth',
                 amount_held: preAuthTotal,
                 held_expires_at: earliestExpiry ?? null,
+                // Any Stripe hold in the group gets the "release it when the van is
+                // back" wording — those are the ones we can (and should) release.
+                payment_method: preAuths.some(d => d.payment_method === 'stripe_gbp')
+                  ? 'stripe_gbp'
+                  : (preAuths[0]?.payment_method ?? null),
               });
               if (unresolved.length === 0 && preAuths.length === 0) return null;
               return (
