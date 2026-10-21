@@ -40,7 +40,6 @@ export interface PortalJob {
   // When set, this is the combined fee the freelancer is offered for
   // the whole run (overrides summing individual driverPay values).
   runCombinedFreelancerFee: number | null
-  runCombinedClientFee: number | null
   runNotes: string | null
   hhRef: string | null
   status: string
@@ -573,6 +572,22 @@ async function fetchWithTimeout(
 }
 
 /**
+ * OP refused the session: the freelancer was removed or un-approved, or a
+ * password reset signed this device out (Oct 2026). Drop the cookie. Otherwise
+ * the pages' "401 → /login" meets the middleware's "valid cookie → /dashboard"
+ * (it can only check the signature) and the two bounce for ever.
+ * Only works inside a route handler, which is where opFetch runs.
+ */
+async function clearSessionCookie(): Promise<void> {
+  try {
+    const { cookies } = await import('next/headers')
+    cookies().delete('session')
+  } catch {
+    // Not in a route handler: nothing to set the cookie on.
+  }
+}
+
+/**
  * Make an authenticated request to the OP backend portal API.
  * Forwards the session cookie from the incoming request.
  *
@@ -617,6 +632,7 @@ async function opFetch<T>(
           await new Promise((r) => setTimeout(r, 300))
           continue
         }
+        if (response.status === 401) await clearSessionCookie()
         throw err
       }
 
@@ -663,6 +679,17 @@ export async function getEquipmentFromOP(
   quoteId: string
 ): Promise<PortalEquipmentResponse> {
   return opFetch<PortalEquipmentResponse>(`/jobs/${quoteId}/equipment`, sessionToken)
+}
+
+/**
+ * The HireHop job number behind one of the freelancer's jobs, or a 404 if the
+ * job isn't theirs. The kit-list route asks this before it reads HireHop.
+ */
+export async function getHireHopRefFromOP(
+  sessionToken: string,
+  quoteId: string
+): Promise<{ success: boolean; hhRef: string | null }> {
+  return opFetch(`/jobs/${encodeURIComponent(quoteId)}/hirehop-ref`, sessionToken)
 }
 
 /**

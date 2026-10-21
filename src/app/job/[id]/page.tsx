@@ -237,11 +237,13 @@ function getDisplayWorkType(workType?: string, workDescription?: string): string
 
 interface EquipmentListProps {
   hhRef: string
+  /** The OP job this list is shown on: the kit-list route checks it is the freelancer's. */
+  quoteId: string
   whatIsIt?: 'equipment' | 'vehicle' | 'people'
   isReference?: boolean             // If true, label as "Equipment Reference" instead of "Equipment List"
 }
 
-function EquipmentList({ hhRef, whatIsIt, isReference = false }: EquipmentListProps) {
+function EquipmentList({ hhRef, quoteId, whatIsIt, isReference = false }: EquipmentListProps) {
   const [items, setItems] = useState<EquipmentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -255,7 +257,7 @@ function EquipmentList({ hhRef, whatIsIt, isReference = false }: EquipmentListPr
       try {
         // Determine filter based on job type
         const filterMode = getFilterMode(whatIsIt)
-        const response = await fetch(`/api/hirehop/items/${hhRef}?filter=${filterMode}`)
+        const response = await fetch(`/api/hirehop/items/${encodeURIComponent(hhRef)}?job=${encodeURIComponent(quoteId)}&filter=${filterMode}`)
         const data = await response.json()
 
         if (!response.ok) {
@@ -277,7 +279,7 @@ function EquipmentList({ hhRef, whatIsIt, isReference = false }: EquipmentListPr
       setLoading(false)
       setError('No HireHop reference available')
     }
-  }, [hhRef, whatIsIt])
+  }, [hhRef, quoteId, whatIsIt])
 
   if (loading) {
     return (
@@ -869,7 +871,7 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
 
       {/* Equipment Reference — same HireHop integration, labelled as reference */}
       {job.hhRef && (
-        <EquipmentList hhRef={job.hhRef} isReference={true} />
+        <EquipmentList hhRef={job.hhRef} quoteId={job.id} isReference={true} />
       )}
 
       {/* Access Info */}
@@ -1448,7 +1450,7 @@ export default function JobDetailsPage() {
 
                 {/* Equipment List - simple read-only with filtering */}
                 {job.hhRef && (
-                  <EquipmentList hhRef={job.hhRef} whatIsIt={job.whatIsIt} />
+                  <EquipmentList hhRef={job.hhRef} quoteId={job.id} whatIsIt={job.whatIsIt} />
                 )}
 
                 {/* Access Info */}

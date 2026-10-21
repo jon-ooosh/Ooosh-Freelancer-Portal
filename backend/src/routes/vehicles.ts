@@ -95,6 +95,24 @@ async function authoriseFreelancerOnQuote(
   }
   const { job_id: jobId, hh_job_number: hhJobNumber, venue_name: venueName } = quoteResult.rows[0];
 
+  // The link is only as good as the portal login that minted it, and it lasts
+  // 24 hours: someone removed or un-approved since must not be able to use one
+  // (Oct 2026). The email is the login person's own, so an approved record
+  // with it is exactly "still allowed in the portal".
+  const activeLogin = await query(
+    `SELECT 1 FROM people
+      WHERE LOWER(email) = LOWER($1) AND is_freelancer = true AND is_approved = true AND is_deleted = false
+      LIMIT 1`,
+    [freelancerEmail]
+  );
+  if (activeLogin.rows.length === 0) {
+    return {
+      ok: false,
+      status: 403,
+      body: { error: 'Your access to the freelancer portal has ended. Please contact the office.', code: 'account_inactive' },
+    };
+  }
+
   const crewResult = await query(
     `SELECT qa.person_id, p.email, p.first_name, p.last_name
        FROM quote_assignments qa
@@ -944,7 +962,9 @@ const FREELANCER_BOOKOUT_ALLOW: Array<{ method: string; pattern: RegExp }> = [
   { method: 'POST',  pattern: /^\/upload-photo$/ },
   { method: 'POST',  pattern: /^\/save-event$/ },
   { method: 'POST',  pattern: /^\/generate-pdf$/ },
-  { method: 'POST',  pattern: /^\/send-email$/ },
+  // NOT /send-email (Oct 2026): it sends any HTML to any address, and no
+  // freelancer screen calls it any more — reports go by send-condition-report,
+  // which builds its own email server-side.
   { method: 'POST',  pattern: /^\/send-condition-report$/ },
   { method: 'GET',   pattern: /^\/jobs\/[^/]+$/ },
   // Walkaround / briefing UI: settings are global (no PII) so freelancer

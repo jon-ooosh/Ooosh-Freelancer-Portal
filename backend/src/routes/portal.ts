@@ -16,7 +16,7 @@ import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import crypto from 'crypto';
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
 import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline, getJobEmailRecipients } from '../services/money-emails';
@@ -29,6 +29,7 @@ import { greetingName, fullDisplayName } from '../services/display-name';
 import { ukToday } from '../services/uk-date';
 import { isEndKeyed, lastWorkDay } from '../services/quote-schedule';
 import { isVanLegDone } from '../services/quote-completion';
+import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures } from '../services/staff-login-security';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -162,6 +163,12 @@ if (PORTAL_SECRET === process.env.JWT_SECRET) {
   throw new Error('FATAL: the portal session secret must differ from JWT_SECRET');
 }
 
+/** May this person use the portal? An approved, current freelancer. */
+function portalAccessAllowed(p: { is_freelancer?: boolean; is_approved?: boolean; is_deleted?: boolean }): boolean {
+  return p.is_freelancer === true && p.is_approved === true && p.is_deleted !== true;
+}
+const PORTAL_ACCESS_ENDED = 'Your access to the freelancer portal has ended. If you think that\'s a mistake, please contact us.';
+
 async function portalAuth(req: PortalRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     // Check session cookie first, then Authorization header
@@ -173,7 +180,13 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
       return;
     }
 
-    const decoded = jwt.verify(token, PORTAL_SECRET) as { id: string; email: string; name: string; iat: number; exp: number };
+    let decoded: { id: string; email: string; name: string; iat: number; exp: number };
+    try {
+      decoded = jwt.verify(token, PORTAL_SECRET) as typeof decoded;
+    } catch {
+      res.status(401).json({ error: 'Invalid or expired session' });
+      return;
+    }
 
     // Shape check kept as a second line even though PORTAL_SECRET is now its
     // own secret: a portal login is { id, email, name } and never carries a
@@ -183,23 +196,45 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
       return;
     }
 
-    // Look up the shared-account flag fresh on every request — the JWT was
-    // minted before the flag existed for some tokens, and this lets us
-    // toggle staff access by updating the DB without forcing re-login.
-    const flagResult = await query(
-      `SELECT is_portal_shared_account FROM people WHERE id = $1`,
+    // Read the person fresh on every request: the shared-account flag (so staff
+    // access can be toggled without a re-login), and whether they may still use
+    // the portal at all. Until Oct 2026 a session kept working for its full 30
+    // days after a freelancer was removed or un-approved.
+    const personResult = await query(
+      `SELECT is_portal_shared_account, is_freelancer, is_approved, is_deleted, portal_sessions_valid_after
+       FROM people WHERE id = $1`,
       [decoded.id]
     );
+    const person = personResult.rows[0];
+    if (!person || !portalAccessAllowed(person)) {
+      res.status(401).json({ error: PORTAL_ACCESS_ENDED, code: 'account_inactive' });
+      return;
+    }
+    // Sessions issued before a password reset are signed out. `iat` is whole
+    // seconds, and the session straight after a reset is minted by the Netlify
+    // app on ITS clock, so the cut-off allows a minute either way rather than
+    // signing someone out of the session their reset just gave them.
+    if (person.portal_sessions_valid_after) {
+      const cutoff = Math.floor(new Date(person.portal_sessions_valid_after).getTime() / 1000) - 60;
+      if (!decoded.iat || decoded.iat < cutoff) {
+        res.status(401).json({ error: 'Please log in again', code: 'session_revoked' });
+        return;
+      }
+    }
 
     req.portalUser = {
       id: decoded.id,
       email: decoded.email,
       name: decoded.name,
-      isStaffShared: flagResult.rows[0]?.is_portal_shared_account === true,
+      isStaffShared: person.is_portal_shared_account === true,
     };
     next();
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired session' });
+  } catch (err) {
+    // Not a session problem (the token was checked above): a database blip.
+    // Never answer 401 here — the portal treats 401 as "logged out" and clears
+    // the cookie, so a hiccup would sign every freelancer out.
+    console.error('[portal-auth] account check failed:', (err as Error).message);
+    res.status(503).json({ error: 'The portal is having trouble right now. Please try again in a moment.' });
   }
 }
 
@@ -237,7 +272,7 @@ router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Respons
     // Find freelancer in people table
     const result = await query(
       `SELECT p.id, p.first_name, p.last_name, p.preferred_name, p.email, p.portal_password_hash,
-              p.is_freelancer, p.is_approved, p.portal_email_verified
+              p.is_freelancer, p.is_approved, p.is_deleted, p.portal_email_verified
        FROM people p
        WHERE LOWER(p.email) = $1 AND p.is_freelancer = true AND p.is_deleted = false
        ORDER BY p.is_approved DESC, p.portal_last_login DESC NULLS LAST
@@ -252,32 +287,37 @@ router.post('/auth/login', portalLoginLimiter, async (req: Request, res: Respons
 
     const freelancer = result.rows[0];
 
-    // Check if they have a portal password set
+    // The portal password only. Until Oct 2026 an account with no portal
+    // password fell back to the person's OP STAFF password, which let it in
+    // without OP's second factor. No portal password = register (or reset).
     if (!freelancer.portal_password_hash) {
-      // Fallback: check if they have a user account in the OP
-      const userResult = await query(
-        `SELECT u.password_hash FROM users u
-         JOIN people p ON p.id = u.person_id
-         WHERE LOWER(u.email) = $1 AND u.is_active = true`,
-        [normalizedEmail]
-      );
+      res.status(401).json({ error: 'Account not set up. Please register first.' });
+      return;
+    }
 
-      if (userResult.rows.length > 0) {
-        const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
-        if (!valid) {
-          res.status(401).json({ error: 'Invalid email or password' });
-          return;
-        }
-      } else {
-        res.status(401).json({ error: 'Account not set up. Please register first.' });
-        return;
-      }
-    } else {
-      const valid = await bcrypt.compare(password, freelancer.portal_password_hash);
-      if (!valid) {
-        res.status(401).json({ error: 'Invalid email or password' });
-        return;
-      }
+    // Per-account slowdown on wrong passwords (the per-IP limiter above sees
+    // every freelancer as Netlify's few addresses). Every 5th failure blocks.
+    const wait = await portalSecondsBlocked(freelancer.id);
+    if (wait > 0) {
+      res.status(429).json({
+        error: 'Sign-in is paused after too many attempts. Please reset your password using "Forgot your password?", or try again later.',
+        retryAfter: wait,
+      });
+      return;
+    }
+    const valid = await bcrypt.compare(password, freelancer.portal_password_hash);
+    if (!valid) {
+      await recordPortalLoginFailure(freelancer.id);
+      res.status(401).json({ error: 'Invalid email or password' });
+      return;
+    }
+    await clearPortalLoginFailures(freelancer.id);
+
+    // Right password, but no longer an approved freelancer: say so, rather
+    // than "wrong password" (they know the password, so this leaks nothing).
+    if (!portalAccessAllowed(freelancer)) {
+      res.status(403).json({ error: PORTAL_ACCESS_ENDED, code: 'account_inactive' });
+      return;
     }
 
     // Display only — the portal dashboard greets from this claim and settings
@@ -375,8 +415,8 @@ router.post('/auth/register/start', portalEmailLimiter, async (req: Request, res
       return;
     }
 
-    // Generate 6-digit code, 15 min TTL
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    // 6-digit code from a secure source, 15 min TTL
+    const code = String(crypto.randomInt(100000, 1000000));
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
     await query(
@@ -505,6 +545,7 @@ router.post('/auth/register/complete', portalLoginLimiter, async (req: Request, 
        WHERE id = $2`,
       [passwordHash, person.id]
     );
+    await clearPortalLoginFailures(person.id);
 
     // Issue session token (same shape as login)
     const name = fullDisplayName(person);
@@ -673,33 +714,43 @@ router.post('/auth/reset-password', portalLoginLimiter, async (req: Request, res
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Transaction: set password + mark token used
-    await query('BEGIN');
+    // Transaction: set password + mark token used. On ONE client — BEGIN /
+    // COMMIT through the shared pool can land on different connections, which
+    // is no transaction at all (and can strand one open on a pooled client).
+    // A new password also signs out every existing session
+    // (portal_sessions_valid_after, read by portalAuth): a reset is what
+    // someone does when they think their login is known to somebody else.
+    const client = await getClient();
     try {
-      await query(
+      await client.query('BEGIN');
+      await client.query(
         `UPDATE people
          SET portal_password_hash = $1,
              portal_email_verified = true,
-             portal_last_login = NOW()
+             portal_last_login = NOW(),
+             portal_sessions_valid_after = NOW()
          WHERE id = $2`,
         [passwordHash, row.person_id]
       );
-      await query(
+      await client.query(
         `UPDATE portal_password_reset_tokens SET used_at = NOW() WHERE id = $1`,
         [row.id]
       );
       // Invalidate all other pending tokens for this person
-      await query(
+      await client.query(
         `UPDATE portal_password_reset_tokens
          SET used_at = NOW()
          WHERE person_id = $1 AND used_at IS NULL AND id != $2`,
         [row.person_id, row.id]
       );
-      await query('COMMIT');
+      await client.query('COMMIT');
     } catch (err) {
-      await query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
       throw err;
+    } finally {
+      client.release();
     }
+    await clearPortalLoginFailures(row.person_id);
 
     // Issue session token so they go straight into the portal
     const name = fullDisplayName(row);
@@ -2246,7 +2297,6 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         q.freelancer_notes, q.freelancer_fee, q.freelancer_fee_rounded,
         q.run_group, q.run_order, q.run_group_fee,
         rg.combined_freelancer_fee as run_combined_freelancer_fee,
-        rg.combined_client_fee as run_combined_client_fee,
         rg.notes as run_notes,
         q.is_local, q.completed_at, q.completion_notes,
         q.client_name,
@@ -2371,7 +2421,6 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
       `SELECT
         q.*,
         rg.combined_freelancer_fee as run_combined_freelancer_fee,
-        rg.combined_client_fee as run_combined_client_fee,
         rg.notes as run_notes,
         qa.id as assignment_id, qa.role as assignment_role,
         qa.agreed_rate, qa.rate_type,
@@ -2612,6 +2661,42 @@ router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response)
   } catch (error) {
     console.error('Portal equipment error:', error);
     res.status(500).json({ error: 'Failed to load equipment' });
+  }
+});
+
+// ── GET /api/portal/jobs/:quoteId/hirehop-ref — the job's HireHop number ──
+//
+// The portal's kit-list route (src/app/api/hirehop/items/[jobId]) reads
+// HireHop itself with the portal's own token, and until Oct 2026 handed ANY
+// job's list to any logged-in freelancer. It now asks this first: same access
+// rule as /equipment, nothing but the number back.
+
+router.get('/jobs/:quoteId/hirehop-ref', async (req: PortalRequest, res: Response) => {
+  try {
+    const quoteId = req.params.quoteId;
+    if (!isUuidLike(quoteId)) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const result = await query(
+      `SELECT j.hh_job_number
+       FROM quote_assignments qa
+       JOIN quotes q ON q.id = qa.quote_id
+       LEFT JOIN jobs j ON j.id = q.job_id
+       WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
+         AND q.is_deleted = false
+       LIMIT 1`,
+      [quoteId, req.portalUser!.id, req.portalUser!.isStaffShared]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const hh = result.rows[0].hh_job_number;
+    res.json({ success: true, hhRef: hh != null ? String(hh) : null });
+  } catch (error) {
+    console.error('Portal hirehop-ref error:', error);
+    res.status(500).json({ error: 'Failed to load job' });
   }
 });
 
@@ -3247,48 +3332,6 @@ router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => 
   }
 });
 
-// ── GET /api/portal/venues/:id — venue detail for portal ─────────────
-
-router.get('/venues/:id', async (req: PortalRequest, res: Response) => {
-  try {
-    const result = await query(
-      `SELECT v.id, v.name, v.address, v.city, v.postcode,
-              v.w3w_address AS what_three_words,
-              COALESCE(v.approach_notes, v.general_notes) AS notes,
-              v.files
-       FROM venues v WHERE v.id = $1`,
-      [req.params.id]
-    );
-
-    if (result.rows.length === 0) {
-      res.status(404).json({ error: 'Venue not found' });
-      return;
-    }
-
-    const v = result.rows[0];
-    res.json({
-      success: true,
-      venue: {
-        id: v.id,
-        name: v.name,
-        address: v.address,
-        city: v.city,
-        postcode: v.postcode,
-        whatThreeWords: v.what_three_words,
-        // Venue contacts not stored on venues table — surfaced via org people link
-        contact1: null,
-        phone: null,
-        email: null,
-        accessNotes: v.notes,
-        files: v.files || [],
-      },
-    });
-  } catch (error) {
-    console.error('Portal venue error:', error);
-    res.status(500).json({ error: 'Failed to load venue' });
-  }
-});
-
 // ── Helper: format a quote row into portal-friendly shape ────────────
 
 /**
@@ -3356,8 +3399,8 @@ function formatJobForPortal(row: Record<string, unknown>) {
     runGroupFee: row.run_group_fee as number | null,
     runCombinedFreelancerFee: row.run_combined_freelancer_fee != null
       ? Number(row.run_combined_freelancer_fee) : null,
-    runCombinedClientFee: row.run_combined_client_fee != null
-      ? Number(row.run_combined_client_fee) : null,
+    // The run's CLIENT price is deliberately not sent: the portal never showed
+    // it, and a freelancer has no business seeing what the client pays (Oct 2026).
     runNotes: row.run_notes as string | null,
     // Fee info — individual quote fee, NOT the run combined fee. The
     // portal consumer (Next.js) sums driverPay across siblings and

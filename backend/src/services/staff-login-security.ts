@@ -298,6 +298,44 @@ export async function clearLoginFailures(userId: string): Promise<void> {
   } catch { /* fail-open */ }
 }
 
+// The freelancer portal's login (routes/portal.ts) gets the same slowdown,
+// keyed by people.id under its own prefix (a portal account is a person, not a
+// users row). Same thresholds; no bell, which is for staff accounts. Fail-open.
+const portalFailKey = (personId: string) => `portal_login_fail:${personId}`;
+const portalBlockKey = (personId: string) => `portal_login_block:${personId}`;
+
+export async function portalSecondsBlocked(personId: string): Promise<number> {
+  try {
+    if (!redisClient.isOpen) return 0;
+    const ttl = await redisClient.ttl(portalBlockKey(personId));
+    return ttl > 0 ? ttl : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function recordPortalLoginFailure(personId: string): Promise<void> {
+  try {
+    if (!redisClient.isOpen) return;
+    const n = await redisClient.incr(portalFailKey(personId));
+    if (n === 1) await redisClient.expire(portalFailKey(personId), FAIL_WINDOW_SECONDS);
+    if (n % FAIL_THRESHOLD === 0) {
+      const level = n / FAIL_THRESHOLD;
+      const minutes = Math.min(FAIL_BLOCK_MINUTES * 2 ** (level - 1), FAIL_BLOCK_CAP_MINUTES);
+      await redisClient.set(portalBlockKey(personId), String(n), { EX: minutes * 60 });
+    }
+  } catch (e) {
+    console.warn('[login-security] portal failure counter unavailable:', (e as Error).message);
+  }
+}
+
+export async function clearPortalLoginFailures(personId: string): Promise<void> {
+  try {
+    if (!redisClient.isOpen) return;
+    await redisClient.del([portalFailKey(personId), portalBlockKey(personId)]);
+  } catch { /* fail-open */ }
+}
+
 async function bellOnAttack(user: { id: string; email: string }): Promise<void> {
   const admins = await query(`SELECT id FROM users WHERE role = 'admin' AND is_active = true AND login_disabled = false`);
   const targets = new Set<string>([user.id, ...admins.rows.map((r: { id: string }) => r.id)]);
