@@ -472,7 +472,7 @@ refreshed. Nothing was wrong with the payment or the receipt. What changed:
 - **The server finishes what it is doing before it stops** (`index.ts`, SIGTERM, up to 60s): a card
   payment being recorded (the webhook or the screen's own status check — both inside a request) is no
   longer cut off half-way. New requests are refused while it drains, as before.
-- **`deploy/safe-restart.sh`** (used by `deploy.sh`; use it instead of `systemctl restart` by hand) waits
+- **`deploy/safe-restart.sh`** (OPTIONAL — the plain `systemctl restart` stays the normal restart, jon's call) waits
   for any reader payment in progress (`pending` / `recording`, started in the last 20 minutes) before
   restarting — up to 5 minutes, then stops without restarting and says which payment. `FORCE=1` overrides.
 - **Not built:** an alert for a session stuck in `recording` (a crash, or a recording longer than the 60s grace, could still leave one; nothing

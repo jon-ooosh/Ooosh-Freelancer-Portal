@@ -19,7 +19,8 @@
 # block every deploy. If the database can't be asked, it says so and restarts
 # anyway — this is a safety net, not a gate.
 #
-# Used by deploy.sh; use it instead of `systemctl restart ooosh-portal` by hand.
+# OPTIONAL: the plain `sudo systemctl restart ooosh-portal` is the normal restart
+# (jon, Oct 2026). Nothing calls this script; run it by hand when you want the check.
 # =============================================================
 
 set -uo pipefail

@@ -576,7 +576,7 @@ git status                     # investigate unexpected local changes BEFORE pul
 git pull origin <branch>
 cd backend  && npm install && npm run build
 cd ../frontend && npm install && npm run build
-bash /var/www/ooosh-portal/deploy/safe-restart.sh
+sudo systemctl restart ooosh-portal
 sudo systemctl status ooosh-portal
 journalctl -u ooosh-portal -n 50 --no-pager
 ```
@@ -585,11 +585,13 @@ journalctl -u ooosh-portal -n 50 --no-pager
   with the Netlify portal app) **and it must differ from `JWT_SECRET`** — the service
   refuses to start otherwise (Oct 2026). Production has it; a fresh server needs it.
 - **`RESEND_WEBHOOK_SECRET`** (backend `.env`, Oct 2026) is the signing secret of the Resend webhook pointed at `https://staff.oooshtours.co.uk/api/webhooks/resend` (events: email bounced / suppressed / complained / failed / delivered). Without it the endpoint answers 503 and delivery problems go unseen.
-- **Restart with `deploy/safe-restart.sh`, not a bare `systemctl restart`** (Oct 2026). It waits
-  for a card-reader payment in progress to finish (up to 5 minutes, then stops WITHOUT restarting
-  and says why; `FORCE=1` overrides), and the server itself finishes the requests it is handling
-  before it stops (`index.ts`, up to 60s) — so a restart can take a little while. Job 16169: a
-  restart landed 4 seconds after a card receipt and cut off the Money tab's reload.
+- **A restart finishes the requests in progress first** (`index.ts`, up to 60s — Oct 2026), so
+  `systemctl restart` can sit for a few seconds when a slow request is running; it isn't hung. Job
+  16169: a restart landed 4 seconds after a card receipt and cut off the Money tab's reload.
+  **The plain `systemctl restart` is the restart command (jon's call, Oct 2026).**
+  `deploy/safe-restart.sh` is an OPTIONAL extra — it waits for a card-reader payment in progress
+  first (up to 5 minutes, then stops without restarting; `FORCE=1` overrides). Don't make it the
+  default or put it in `deploy.sh`.
 - **`npm install` before building is not optional** on the manual path — a PR that added
   a dependency fails the build with "Cannot find module …". `deploy.sh` always installs.
 - Run `npm run db:migrate` from `backend/` if there are new migrations. Re-running is
