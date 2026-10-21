@@ -165,4 +165,31 @@ async function start() {
 
 start();
 
+// Stopping (a deploy's `systemctl restart` sends SIGTERM): stop taking new requests
+// and let the ones already in flight finish, instead of cutting them off half-way —
+// a card payment being recorded, a Money tab reload. Job 16169, 21 Oct 2026: a
+// restart 4 seconds after a card receipt killed the Money tab's reload, and the tab
+// said the request had failed. Socket.io clients are dropped at once; they reconnect
+// to the new process by themselves. Gives up after SHUTDOWN_GRACE_MS (nginx stops
+// waiting for an ordinary request at 60s anyway), inside systemd's own 90s limit.
+const SHUTDOWN_GRACE_MS = 60_000;
+let stopping = false;
+function stopGracefully(signal: string): void {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal} received - finishing requests in progress (up to ${SHUTDOWN_GRACE_MS / 1000}s) before stopping`);
+  setTimeout(() => {
+    console.warn('Requests still running after the grace period - stopping anyway');
+    process.exit(0);
+  }, SHUTDOWN_GRACE_MS).unref();
+  // Disconnects every socket, then closes the HTTP server: no new requests, and the
+  // callback runs once the last one in flight has answered.
+  void io.close(() => {
+    console.log('Requests in progress finished - stopping');
+    process.exit(0);
+  });
+}
+process.on('SIGTERM', () => stopGracefully('SIGTERM'));
+process.on('SIGINT', () => stopGracefully('SIGINT'));
+
 export { io };

@@ -455,3 +455,25 @@ bug. What changed:
   contact. Nothing is saved to the address book. The 15-minute sweep still sends to the usual
   recipient only.
 - **Parked:** whether the reader's 30-day window should widen the "4 days or fewer" rule (§1.5, §9.5).
+
+## 18. A deploy restart straight after a card receipt (21 Oct 2026)
+
+Job 16169: the excess was taken on the reader and "Send receipt" answered 200 (the email went), then a
+deploy restart 4 seconds later cut off the Money tab's reload. nginx answered 502 with its own page, the
+app could only say "Request failed", and the whole Money tab turned into a red box until the page was
+refreshed. Nothing was wrong with the payment or the receipt. What changed:
+
+- **The Money tab asks again** (3s, then 10s) when no reply came back (`api.ts` `isNoReply()` — nginx's
+  page, not one of our own JSON 502/503s), and a refresh that still fails keeps the figures on screen
+  under an amber "Couldn't refresh - these figures may be out of date" line with a Refresh button. The
+  red box is only for a first load with nothing to show.
+- **No reply reads as no reply:** "No reply from the server - it may be restarting, or still working.
+  Refresh the page to check before trying again." instead of "Request failed", everywhere.
+- **The server finishes what it is doing before it stops** (`index.ts`, SIGTERM, up to 60s): a card
+  payment being recorded (the webhook or the screen's own status check — both inside a request) is no
+  longer cut off half-way. New requests are refused while it drains, as before.
+- **`deploy/safe-restart.sh`** (used by `deploy.sh`; use it instead of `systemctl restart` by hand) waits
+  for any reader payment in progress (`pending` / `recording`, started in the last 20 minutes) before
+  restarting — up to 5 minutes, then stops without restarting and says which payment. `FORCE=1` overrides.
+- **Not built:** an alert for a session stuck in `recording` (a crash, or a recording longer than the 60s grace, could still leave one; nothing
+  picks it up), and the post-response hooks `recordPayment()` starts are still not waited for.
