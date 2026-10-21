@@ -7,10 +7,11 @@
  * which uploads the artefacts, marks the job complete, and handles client
  * delivery-note / confirmation emails and staff alerts on its side.
  *
- * Validation:
+ * Validation (deliveries and collections — mode 'dc'):
  * - Customer present: signature required, photos optional (0-5)
  * - Customer not present: at least 1 photo required (up to 5), no signature
- * - Van-only book-out: signature/photo validation skipped
+ * Van-only book-out, crew and People completions: no signature or photo rule
+ * (Oct 2026 — crew and People complete with notes and optional photos).
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -30,6 +31,10 @@ interface CompleteJobRequest {
   sendClientEmail?: boolean // Whether to send client email
   vanOnly?: boolean         // True for van-only book-out (no signature/photos required)
   staffName?: string        // Name of Ooosh staff member completing (for @oooshtours.co.uk users)
+  mode?: 'dc' | 'crew' | 'people' // Which completion form was used (default 'dc')
+  // What the freelancer ticked off the equipment list; OP puts it on the job's timeline.
+  equipmentChecklist?: Array<{ name: string; quantity: number; checked: number }>
+  sendHireNote?: boolean    // Crew only: send the client a note of what's on the hire
 }
 
 // =============================================================================
@@ -71,10 +76,12 @@ export async function POST(
       )
     }
 
-    const { notes, signature, photos, customerPresent, vanOnly, staffName, clientEmails, sendClientEmail } = body
+    const { notes, signature, photos, customerPresent, vanOnly, staffName, clientEmails, sendClientEmail,
+      mode, equipmentChecklist, sendHireNote } = body
 
-    // Van-only completions skip signature/photo validation
-    if (!vanOnly) {
+    // Only a delivery/collection hand-over needs a signature (or a photo when
+    // nobody was there). Van-only, crew and People completions don't.
+    if (!vanOnly && (mode ?? 'dc') === 'dc') {
       // Validate required fields based on customerPresent
       if (customerPresent && !signature) {
         return NextResponse.json(
@@ -126,6 +133,10 @@ export async function POST(
       const typedEmails = (clientEmails || []).map(e => e.trim()).filter(Boolean)
       if (typedEmails.length > 0) formData.append('clientEmails', typedEmails.join(','))
       if (sendClientEmail === false) formData.append('sendClientEmail', 'false')
+      if (mode === 'crew' && sendHireNote) formData.append('sendHireNote', 'true')
+      if (Array.isArray(equipmentChecklist) && equipmentChecklist.length > 0) {
+        formData.append('equipmentChecklist', JSON.stringify(equipmentChecklist.slice(0, 300)))
+      }
 
       // Convert base64 photos to blobs
       if (photos) {
@@ -162,8 +173,9 @@ export async function POST(
       // legit response — propagate without alerting.
       if (isOpClientError(opError)) {
         const status = (opError as OpApiError).status
+        const code = ((opError as OpApiError).body as { code?: string } | undefined)?.code
         return NextResponse.json(
-          { success: false, error: opError.message },
+          { success: false, error: opError.message, ...(code ? { code } : {}) },
           { status }
         )
       }

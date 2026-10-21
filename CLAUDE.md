@@ -280,6 +280,12 @@ till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or read
 from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
 `stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
 
+**IN PROGRESS, Oct 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme: completion
+fixes (van-only "All Done" only after a real book-out/collection; crew and People completion; the chaser
+by last day; the customer signs a van collection), then security fixes, the Claude Design reskin, 2FA,
+Earnings (a new session; the plan and the backfill are in §5) and the four freelancer guides. §1 is the
+order and state; read it before touching completion, the chaser, Earnings or the guides.
+
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
 Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
@@ -340,6 +346,8 @@ existing definition:
 | Who could we contact on this job? | `services/job-contact-candidates.ts` |
 | What's this van's hire status? | `services/fleet-hire-status-sync.ts` |
 | Is this job genuinely returning? | `services/hire-lifecycle.ts` |
+| When does a quote's work end? When does the completion chaser start? | `services/quote-schedule.ts` — crew and People jobs by their LAST day (complete from it, chased 09:00 UK the day after), deliveries/collections from arrival time in UK time; shared by the chaser and the portal (`docs/FREELANCER-PORTAL-SPEC.md` §2) |
+| Has a quote's van leg actually happened (booked out / collected)? | `services/quote-completion.ts` `isVanLegDone()` — by direction; "out on hire" is NOT a collection. The portal's van-only "All Done" and `maybeCloseQuote` both ask it |
 | What happens to transport when a job dies? | `services/job-close-cascade.ts` |
 | What happens to requirements when a job dies? | `services/requirement-close-sweep.ts` |
 | When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` |

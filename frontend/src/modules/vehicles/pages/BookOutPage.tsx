@@ -41,6 +41,7 @@ import type { ChecklistItem } from '../lib/settings-api'
 import type { HireHopJob } from '../types/hirehop'
 import { ForSalePill } from '../components/sales/ForSalePill'
 import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
+import { portalJobUrl } from '../lib/safe-url'
 
 /** Per-operation result shown on the success/complete screen */
 interface OpResult {
@@ -1281,7 +1282,8 @@ export function BookOutPage() {
       <div className="border-b border-gray-200 bg-white px-4 py-3">
         <div className="flex items-center justify-between">
           {isFreelancer && freelancerContext?.returnUrl ? (
-            <a href={freelancerContext.returnUrl} className="text-sm text-gray-500 hover:text-gray-700">
+            // The job page, never the completion screen (see portalJobUrl).
+            <a href={portalJobUrl(freelancerContext.returnUrl) ?? undefined} className="text-sm text-gray-500 hover:text-gray-700">
               ← Back
             </a>
           ) : (
@@ -3179,7 +3181,7 @@ function FreelancerVanConfirmScreen({
         </button>
         {context.returnUrl && (
           <a
-            href={context.returnUrl}
+            href={portalJobUrl(context.returnUrl) ?? undefined}
             className="mt-3 block w-full rounded-lg border border-gray-200 py-3 text-center text-sm font-medium text-gray-700"
           >
             Wrong van — back to portal

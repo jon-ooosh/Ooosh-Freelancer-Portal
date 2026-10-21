@@ -8,13 +8,17 @@
  * Route: /job/[id]
  * 
  * Query params:
- * - ?board=crew → fetch from Crewed Jobs board
+ * - ?board=crew → open as a crew job before the data arrives (the job's own
+ *   boardType from OP decides once it does — links without the param, like the
+ *   completion reminder email, used to render a crew job as a delivery)
  * - ?run=X → multi-drop run view (D&C only)
  */
 
 import { useEffect, useState, useCallback } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
+import { downloadIcs } from '@/lib/calendar'
+import { ukToday, shortUkDate } from '@/lib/ukDate'
 
 // =============================================================================
 // TYPES
@@ -37,6 +41,8 @@ interface Job {
   driverPay?: number
   completedAtDate?: string
   completionNotes?: string
+  // Crew and People work: YYYY-MM-DD it can be completed from (its last day)
+  completeFrom?: string | null
   // Crew job fields
   board?: 'dc' | 'crew'
   jobType?: string                    // "Transport + Crew" or "Crew Only"
@@ -515,6 +521,28 @@ function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; titl
 // CREW JOB DETAIL VIEW
 // =============================================================================
 
+/** "Add to Calendar": hand the phone an .ics for this job. */
+function addJobToCalendar(job: Job, venue: Venue | null, isCrew: boolean) {
+  const place = venue?.name || job.destination || job.venueName || ''
+  const kind = isCrew
+    ? 'Crew'
+    : job.type === 'delivery' ? 'Delivery' : 'Collection'
+  const ok = job.date && downloadIcs({
+    uid: `job-${job.id}`,
+    title: place ? `Ooosh ${kind}: ${place}` : `Ooosh ${kind}`,
+    date: job.date,
+    time: job.time || null,
+    durationHours: isCrew ? job.workDurationHours || null : 1,
+    endDate: isCrew ? job.finishDate || null : null,
+    location: venue?.address || place || null,
+    description: [
+      job.hhRef ? `HireHop job ${job.hhRef}` : null,
+      `Details: https://freelancer.oooshtours.co.uk/job/${job.id}`,
+    ].filter(Boolean).join('\n'),
+  }, `ooosh-${job.hhRef || job.id}.ics`)
+  if (!ok) alert('This job has no date yet, so it can\'t go in your calendar.')
+}
+
 function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
   const displayWorkType = getDisplayWorkType(job.workType, job.workDescription)
   const displayJobType = translateJobType(job.jobType)
@@ -938,14 +966,34 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
         </p>
       </div>
 
-      {/* Action Buttons — no "Start delivery" for crew jobs */}
+      {/* Action Buttons — no "Start" for crew jobs; Complete from the last day
+          (Oct 2026: crew complete in the portal, chased the day after). */}
       <div className="space-y-3 pt-2">
         <button
           className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
-          onClick={() => alert('Calendar export coming soon!')}
+          onClick={() => addJobToCalendar(job, venue, true)}
         >
           <span>📅</span> Add to Calendar
         </button>
+
+        {job.completedAtDate ? (
+          <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
+            <span className="text-green-600 font-medium">
+              ✅ Completed on {formatDate(job.completedAtDate)}
+            </span>
+          </div>
+        ) : job.completeFrom && ukToday() >= job.completeFrom ? (
+          <Link
+            href={`/job/${job.id}/complete`}
+            className="w-full bg-green-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-green-600 transition-colors flex items-center justify-center gap-2 text-lg"
+          >
+            <span>✓</span> Complete job
+          </Link>
+        ) : job.completeFrom ? (
+          <p className="text-center text-sm text-gray-500">
+            You can mark this job complete from {shortUkDate(job.completeFrom)}, its last day.
+          </p>
+        ) : null}
       </div>
     </>
   )
@@ -965,6 +1013,9 @@ export default function JobDetailsPage() {
 
   const [job, setJob] = useState<Job | null>(null)
   const [venue, setVenue] = useState<Venue | null>(null)
+  // The job's own board from OP ('crew' | 'dc'); the ?board= param only covers
+  // the moment before it arrives.
+  const [apiBoardType, setApiBoardType] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   
@@ -1002,9 +1053,10 @@ export default function JobDetailsPage() {
 
         setJob(data.job || null)
         setVenue(data.venue || null)
-        
+        setApiBoardType(data.boardType || null)
+
         // If this is a grouped run (D&C only), fetch all jobs in the run
-        if (runGroup && data.job?.date && boardType !== 'crew') {
+        if (runGroup && data.job?.date && (data.boardType || boardType) !== 'crew') {
           fetchRunJobs(runGroup, data.job.date)
         }
       } catch (err) {
@@ -1113,7 +1165,7 @@ export default function JobDetailsPage() {
   }
 
   // ── Crew Job View ──────────────────────────────────────────────────────────
-  const isCrewJob = boardType === 'crew'
+  const isCrewJob = (apiBoardType || boardType) === 'crew'
   
   // D&C job variables (only used for D&C rendering)
   const isDelivery = job.type === 'delivery'
@@ -1450,7 +1502,7 @@ export default function JobDetailsPage() {
                 <div className="space-y-3 pt-2">
                   <button
                     className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
-                    onClick={() => alert('Calendar export coming soon!')}
+                    onClick={() => addJobToCalendar(job, venue, false)}
                   >
                     <span>📅</span> Add to Calendar
                   </button>
