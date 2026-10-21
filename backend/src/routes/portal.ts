@@ -27,6 +27,8 @@ import { getSitterShifts, getSitterShiftDetail, isSitterAssignedTo, shiftLinkPat
 import { getLockupContext, submitLockupReport, logShiftLostProperty, LockupAlreadySubmittedError } from '../services/studio-sitter-lockup';
 import { greetingName, fullDisplayName } from '../services/display-name';
 import { ukToday } from '../services/uk-date';
+import { isEndKeyed, lastWorkDay } from '../services/quote-schedule';
+import { isVanLegDone } from '../services/quote-completion';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -2237,7 +2239,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         q.id, q.job_id, q.job_type, q.calculation_mode,
         q.venue_name, q.venue_id, q.distance_miles, q.drive_time_mins,
         q.arrival_time, q.job_date, q.job_finish_date, q.is_multi_day,
-        q.work_duration_hrs, q.num_days,
+        q.work_duration_hrs, q.num_days, q.crew_count,
         q.what_is_it, q.status, q.ops_status,
         q.client_introduction,
         q.work_type, q.work_type_other, q.work_description,
@@ -2419,7 +2421,18 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     }
 
     const row = result.rows[0];
-    const job = formatJobForPortal(row);
+    const job = {
+      ...formatJobForPortal(row),
+      // Has the van leg really happened? The van-only "All Done" screen shows
+      // "not yet" instead of a button when it hasn't (the /complete route
+      // refuses it too). Same check the server closes the quote on.
+      vanLegDone: await isVanLegDone({
+        van_leg_done_at: row.van_leg_done_at,
+        job_type: row.job_type,
+        job_id: row.job_id,
+        hh_job_number: row.hirehop_id,
+      }).catch(() => false),
+    };
 
     // Client contacts for the completion page's delivery-note picker — the
     // same list the warehouse collection page offers (jon, Oct 2026: the
@@ -2430,7 +2443,7 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     let clientEmail: string | null = null;
     const contactJobDate = row.job_date ? new Date(row.job_date) : null;
     const contactHoursUntilJob = contactJobDate ? (contactJobDate.getTime() - Date.now()) / (1000 * 60 * 60) : 999;
-    if (row.job_id && contactHoursUntilJob <= 48 && (row.job_type === 'delivery' || row.job_type === 'collection')) {
+    if (row.job_id && contactHoursUntilJob <= 48 && (row.job_type === 'delivery' || row.job_type === 'collection' || row.job_type === 'crewed')) {
       try {
         const [contacts, recipients] = await Promise.all([
           resolveJobEmailContacts(row.job_id),
@@ -2687,6 +2700,9 @@ const completionSchema = z.object({
   // equipment delivery note PDF + client email since there's no
   // equipment changing hands.
   vanOnly: z.preprocess((v) => v === 'true' || v === true, z.boolean()).default(false),
+  // Crew jobs only: the freelancer ticked "send the client a note of what's on
+  // the hire" (Oct 2026). Opt-in, unlike the delivery note.
+  sendHireNote: z.preprocess((v) => v === 'true' || v === true, z.boolean()).default(false),
 });
 
 router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next: NextFunction) => {
@@ -2716,6 +2732,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const accessCheck = await query(
       `SELECT qa.id AS assignment_id,
               q.id AS quote_id, q.ops_status, q.job_type, q.what_is_it,
+              q.van_leg_done_at,
               q.venue_name, q.venue_id, q.job_date,
               q.client_name AS quote_client_name,
               j.id AS job_id, j.job_name, j.hh_job_number AS hirehop_id, j.client_name AS job_client_name,
@@ -2744,8 +2761,31 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       return;
     }
 
-    const { notes, customerPresent, equipmentChecklist, clientEmails, sendClientEmail, staffName, vanOnly } = parsed.data;
+    const { notes, customerPresent, equipmentChecklist, clientEmails, sendClientEmail, staffName, vanOnly, sendHireNote } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+
+    // Van-only "All Done" is only true once the van has actually gone out (a
+    // delivery) or been collected (a collection). The portal used to land the
+    // freelancer on that screen from ANY back button on the van pages, and this
+    // completed the job — stopping the chaser — with nothing done (Oct 2026).
+    if (vanOnly) {
+      const { isVanLegDone } = await import('../services/quote-completion');
+      const done = await isVanLegDone({
+        van_leg_done_at: ctx.van_leg_done_at,
+        job_type: ctx.job_type,
+        job_id: ctx.job_id,
+        hh_job_number: ctx.hirehop_id,
+      });
+      if (!done) {
+        res.status(409).json({
+          error: ctx.job_type === 'collection'
+            ? "The van hasn't been collected on the system yet. Go back to the job and start the collection."
+            : "The van hasn't been booked out on the system yet. Go back to the job and start the book-out.",
+          code: 'van_leg_pending',
+        });
+        return;
+      }
+    }
 
     // ── Upload photos + signature to R2 (preferred storage) ────────
     // completion_photos / completion_signature store either an R2 key
@@ -2803,11 +2843,23 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       fullNotes = `[Customer not present] ${fullNotes}`.trim();
     }
 
-    // Parse equipment checklist if provided
-    let checklistData: Record<string, boolean> | null = null;
+    // The freelancer's equipment ticks, [{ name, quantity, checked }] (Oct 2026:
+    // kept for the first time; they used to be a screen-only aid). A bad list
+    // is never a reason to fail the completion.
+    let checklistItems: Array<{ name: string; quantity: number; checked: number }> = [];
     if (equipmentChecklist) {
       try {
-        checklistData = JSON.parse(equipmentChecklist);
+        const list = JSON.parse(equipmentChecklist);
+        if (Array.isArray(list)) {
+          checklistItems = list
+            .map((it: { name?: unknown; quantity?: unknown; checked?: unknown }) => ({
+              name: String(it?.name ?? '').trim().slice(0, 200),
+              quantity: Math.max(0, Math.floor(Number(it?.quantity) || 0)),
+              checked: Math.max(0, Math.floor(Number(it?.checked) || 0)),
+            }))
+            .filter((it) => it.name && it.quantity > 0)
+            .slice(0, 300);
+        }
       } catch {
         // ignore parse errors
       }
@@ -2834,7 +2886,8 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         completion_signature = $3,
         completion_photos = $4::jsonb,
         customer_present = $5,
-        equipment_leg_done_at = COALESCE(equipment_leg_done_at, NOW()),
+        equipment_leg_done_at = CASE WHEN $7::boolean THEN equipment_leg_done_at
+                                     ELSE COALESCE(equipment_leg_done_at, NOW()) END,
         updated_at = NOW()
        WHERE id = $6`,
       [
@@ -2844,6 +2897,9 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         JSON.stringify(photoRefs),
         customerPresent,
         quoteId,
+        // A van-only call is not an equipment hand-over; its van leg was
+        // stamped by the book-out / collection itself.
+        vanOnly,
       ]
     );
 
@@ -2859,17 +2915,31 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const { maybeCloseQuote } = await import('../services/quote-completion');
     await maybeCloseQuote(quoteId as string, { triggeringLeg: 'equipment', actorLabel: completedBy });
 
-    if (checklistData) {
+    // What was ticked at the hand-over, on the job's Activity Timeline. Nothing
+    // ticked means they didn't use the list (the page says that's fine), so no
+    // entry. (The insert this replaces named columns `interactions` doesn't have
+    // and would have failed the completion — the portal just never sent a list.)
+    const tickedCount = checklistItems.reduce((n, it) => n + Math.min(it.checked, it.quantity), 0);
+    if (ctx.job_id && tickedCount > 0) {
+      const totalCount = checklistItems.reduce((n, it) => n + it.quantity, 0);
+      const shown = checklistItems.slice(0, 80).map((it) => {
+        const got = Math.min(it.checked, it.quantity);
+        const mark = got >= it.quantity ? '✓' : got > 0 ? '◐' : '✗';
+        const qty = it.quantity === 1 ? ''
+          : got > 0 && got < it.quantity ? ` (${got} of ${it.quantity})` : ` ×${it.quantity}`;
+        return `${mark} ${it.name}${qty}`;
+      });
+      const more = checklistItems.length > shown.length ? `\n…and ${checklistItems.length - shown.length} more` : '';
+      const legLabel = ctx.job_type === 'collection' ? 'collection' : 'delivery';
       await query(
-        `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata, source)
-         VALUES ('completion', $1, 'quote', $2, $3, $4, 'system')`,
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
         [
-          `Job completed by ${completionName}`,
-          quoteId,
-          personId,
-          JSON.stringify({ equipmentChecklist: checklistData }),
+          `Equipment checklist at ${legLabel} by ${completionName}: ${tickedCount} of ${totalCount} ticked\n${shown.join('\n')}${more}`,
+          ctx.job_id,
+          SYSTEM_USER_ID,
         ]
-      );
+      ).catch((err) => console.error('[portal completion] checklist timeline note failed:', err));
     }
 
     // Return success IMMEDIATELY, fire PDF + emails in background
@@ -2878,8 +2948,15 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     // ── Background: PDF + client email + staff alert ──────────────
     (async () => {
       const jobType: string = ctx.job_type;
-      const isDelivery = jobType === 'delivery';
-      const isCollection = jobType === 'collection';
+      // A People job (driver + van with passengers) is a delivery/collection
+      // quote, but no equipment changes hands: no delivery note, no collection
+      // confirmation. A crew job sends a "what's on your hire" note only when
+      // the freelancer ticked it.
+      const isPeople = ctx.what_is_it === 'people';
+      const isDelivery = jobType === 'delivery' && !isPeople;
+      const isCollection = jobType === 'collection' && !isPeople;
+      const isCrewHireNote = jobType === 'crewed' && sendHireNote;
+      const noteTemplate = isCrewHireNote ? 'equipment_on_hire_note' : 'delivery_note';
       const jobName: string = ctx.job_name || ctx.linked_venue_name || ctx.venue_name || 'Ooosh Job';
       const clientName: string | null = ctx.job_client_name || ctx.quote_client_name || null;
       const venueName: string = ctx.linked_venue_name || ctx.venue_name || '';
@@ -2905,7 +2982,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // banner so the team can forward to the right person and update the
       // address book. Without this the delivery note silently disappears.
       let completionFallback: { jobId: string; clientName: string | null; jobNumber: string | null; jobName: string | null } | null = null;
-      const clientEmailDue = (isDelivery && !vanOnly) || isCollection;
+      const clientEmailDue = (isDelivery && !vanOnly) || isCollection || isCrewHireNote;
       if (clientEmailDue && sendClientEmail) {
         if (clientEmails) {
           clientEmails.split(',').map(e => e.trim()).filter(Boolean).forEach(e => recipients.add(e));
@@ -2914,7 +2991,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         if (recipients.size === 0 && ctx.job_id) {
           const target = await resolveClientEmailTarget(
             ctx.job_id,
-            isCollection ? 'collection_confirmation' : 'delivery_note',
+            isCollection ? 'collection_confirmation' : noteTemplate,
           );
           if (!target.isFallback) {
             recipients.add(target.primaryEmail);
@@ -2937,7 +3014,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // Skip for van-only book-outs — there's no equipment to acknowledge,
       // and the OP book-out flow emits its own vehicle condition report
       // which IS the relevant artefact.
-      if (isDelivery && !vanOnly && recipients.size > 0 && ctx.hirehop_id) {
+      if (((isDelivery && !vanOnly) || isCrewHireNote) && recipients.size > 0 && ctx.hirehop_id) {
         try {
           // Pull equipment from HireHop via broker.
           // Line items live on /frames/items_to_supply_list.php (not job_data.php).
@@ -2982,14 +3059,15 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
             deliveryAddress: [ctx.venue_address, ctx.venue_city, ctx.venue_postcode]
               .filter(Boolean).join(', ') || undefined,
             items,
-            signature: signatureBuffer,
+            signature: isCrewHireNote ? null : signatureBuffer,
             photos: photoUploads.map(p => p.buffer),
             driverName: completionName,
+            variant: isCrewHireNote ? 'hire' : 'delivery',
           });
 
           // Store the PDF in R2 for future re-access
           if (isR2Configured()) {
-            const pdfKey = `delivery-notes/${quoteId}/delivery-note-${Date.now()}.pdf`;
+            const pdfKey = `delivery-notes/${quoteId}/${isCrewHireNote ? 'hire-note' : 'delivery-note'}-${Date.now()}.pdf`;
             try {
               await uploadToR2(pdfKey, pdfBuffer, 'application/pdf');
             } catch (err) {
@@ -3000,7 +3078,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
           // Email each recipient
           for (const to of recipients) {
             try {
-              await emailService.send('delivery_note', {
+              await emailService.send(noteTemplate, {
                 to,
                 variables: {
                   clientName: clientName || 'there',
@@ -3013,7 +3091,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
                 },
                 prependBanner: completionFallback ? buildFallbackBanner(completionFallback) : undefined,
                 attachments: [{
-                  filename: `delivery-note-${ctx.hirehop_id}.pdf`,
+                  filename: `${isCrewHireNote ? 'equipment-on-hire' : 'delivery-note'}-${ctx.hirehop_id}.pdf`,
                   content: pdfBuffer,
                   contentType: 'application/pdf',
                 }],
@@ -3023,7 +3101,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
             }
           }
           if (completionFallback) {
-            await logFallbackToTimeline({ jobId: completionFallback.jobId, templateId: 'delivery_note' });
+            await logFallbackToTimeline({ jobId: completionFallback.jobId, templateId: noteTemplate });
           }
         } catch (err) {
           console.error('[portal completion] Delivery note PDF/email failed:', err);
@@ -3213,6 +3291,22 @@ router.get('/venues/:id', async (req: PortalRequest, res: Response) => {
 
 // ── Helper: format a quote row into portal-friendly shape ────────────
 
+/**
+ * This freelancer's fee on a quote: their own agreed rate when staff set one,
+ * else the quote's fee. A crewed quote for more than one person stores the
+ * WHOLE crew's fee (applyCrewMultiplier), so without a personal rate it is split
+ * evenly — each of a crew of three used to be shown the full three-person figure
+ * (Oct 2026). Per-person rates by role are a later piece of work (Earnings).
+ */
+function personalFee(row: Record<string, unknown>): number {
+  // Any rate staff typed wins, even £0 (NUMERIC arrives as a string, so the old
+  // `agreed_rate || fee` honoured an explicit '0.00' too).
+  if (row.agreed_rate != null && String(row.agreed_rate).trim() !== '') return Number(row.agreed_rate) || 0;
+  const quoteFee = Number(row.freelancer_fee_rounded || row.freelancer_fee || 0);
+  const crew = row.job_type === 'crewed' ? Math.max(1, Math.floor(Number(row.crew_count) || 1)) : 1;
+  return Math.round((quoteFee / crew) * 100) / 100;
+}
+
 function formatJobForPortal(row: Record<string, unknown>) {
   const jobType = row.job_type as string;
   const isCrew = jobType === 'crewed';
@@ -3268,7 +3362,7 @@ function formatJobForPortal(row: Record<string, unknown>) {
     // Fee info — individual quote fee, NOT the run combined fee. The
     // portal consumer (Next.js) sums driverPay across siblings and
     // replaces with runCombinedFreelancerFee at display time when set.
-    driverPay: Number(row.agreed_rate || row.freelancer_fee_rounded || row.freelancer_fee || 0),
+    driverPay: personalFee(row),
     // Freelancer notes
     freelancerNotes: row.freelancer_notes as string | null,
     // Who to call on this leg. Staff-picked from the people already on the
@@ -3321,6 +3415,10 @@ function formatJobForPortal(row: Record<string, unknown>) {
     })(),
     // Plain-English "your money on this job" for the freelancer (fee is separate).
     crewMoney: deriveCrewMoney(row.expenses),
+    // Crew and People work: the freelancer completes it from the start of its
+    // last day (services/quote-schedule.ts, shared with the chaser). Null for
+    // ordinary deliveries/collections, which complete via Start as before.
+    completeFrom: isEndKeyed(row) ? lastWorkDay(row) : null,
   };
 
   if (isCrew) {
@@ -3334,7 +3432,7 @@ function formatJobForPortal(row: Record<string, unknown>) {
       workDescription: row.work_description as string | null,
       numberOfDays: row.num_days as number | null,
       finishDate: row.job_finish_date as string | null,
-      freelancerFee: Number(row.agreed_rate || row.freelancer_fee_rounded || row.freelancer_fee || 0),
+      freelancerFee: personalFee(row),
       distanceMiles: row.distance_miles as number | null,
       driveTimeMinutes: row.drive_time_mins as number | null,
       expenses: row.expenses || [],

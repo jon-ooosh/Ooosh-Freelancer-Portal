@@ -13,6 +13,8 @@
  * hand in the end). Hence the steer below when the job is booked as backline.
  *
  * Routes:
+ * - People (only on a job booked as People in OP) → short completion
+ *   (/job/[id]/complete?mode=people: notes, optional photo; Oct 2026)
  * - Van only → vehicle book-out (vehicle management app)
  * - Backline only → equipment checklist (/job/[id]/complete)
  * - Both → vehicle book-out first, then returns to /job/[id]/complete
@@ -113,9 +115,17 @@ export default function StartDeliveryPage() {
   }
 
   // Backline only → equipment leg, no van. Declare then go to the checklist.
+  // mode=dc so a People job whose driver picks this gets the full hand-over.
   const handleBacklineOnly = async () => {
     await declareLegs(false, true)
-    router.push(`/job/${jobId}/complete`)
+    router.push(`/job/${jobId}/complete?mode=dc`)
+  }
+
+  // People → no van leg and no equipment hand-over to wait for: declare neither,
+  // so the short completion closes the job on its own.
+  const handlePeople = async () => {
+    await declareLegs(false, false)
+    router.push(`/job/${jobId}/complete?mode=people`)
   }
 
   // Handle the VAN leg. For a delivery this is a book-out; for a collection
@@ -183,6 +193,9 @@ export default function StartDeliveryPage() {
   // what_is_it is null on roughly a third of jobs, and a backline job can
   // legitimately involve a hire van, so all three options stay live.
   const expectsBackline = job.whatIsIt === 'equipment'
+  // Booked as People (driver + van with passengers). The People option only
+  // exists for these jobs, first and marked Expected; the rest stay below.
+  const isPeopleJob = job.whatIsIt === 'people'
 
   // One definition, two positions — top of the list on a backline job,
   // otherwise its usual middle slot.
@@ -243,7 +256,34 @@ export default function StartDeliveryPage() {
           </div>
         )}
 
+        {isPeopleJob && (
+          <div className="mb-4 rounded-lg border border-purple-200 bg-purple-50 p-3">
+            <p className="text-sm text-purple-900">
+              <span className="font-semibold">This job is booked as People.</span>{' '}
+              Only pick another option if you&apos;re also {verb} a hire van or equipment.
+            </p>
+          </div>
+        )}
+
         <div className="space-y-3">
+          {/* People — only on a job booked as People */}
+          {isPeopleJob && (
+            <button
+              onClick={handlePeople}
+              disabled={bookoutLoading}
+              className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-purple-400 bg-white hover:bg-purple-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            >
+              <span className="text-3xl">👥</span>
+              <div className="flex-1">
+                <p className="font-semibold text-gray-900">People</p>
+                <p className="text-sm text-gray-500">Passengers: a quick note and you&apos;re done</p>
+              </div>
+              <span className="rounded-full bg-purple-100 px-2 py-1 text-xs font-medium text-purple-700">
+                Expected
+              </span>
+            </button>
+          )}
+
           {/* Backline only — first when the job is booked as backline */}
           {expectsBackline && backlineButton}
 

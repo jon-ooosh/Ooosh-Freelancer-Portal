@@ -53,6 +53,11 @@ export interface PortalJob {
   completionNotes: string | null
   isLocal: boolean
   isGrouped: false
+  // Crew and People work: YYYY-MM-DD the freelancer can complete it from (its
+  // last day — OP services/quote-schedule.ts). Null for ordinary D&C.
+  completeFrom?: string | null
+  // Job detail only: has the van leg really happened (booked out / collected)?
+  vanLegDone?: boolean
   // D&C specific
   whatIsIt?: string
   clientEmail?: string | null
@@ -716,7 +721,10 @@ export async function submitCompletionToOP(
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
-    throw new Error(body.error || `Completion failed: ${response.status}`)
+    // An OpApiError, so the route can tell OP's own refusal (a 4xx: "the van
+    // hasn't been booked out yet") from an outage — a plain Error made every
+    // refusal read "Unable to submit completion" (Oct 2026).
+    throw new OpApiError(body.error || `Completion failed: ${response.status}`, response.status, body)
   }
 
   return response.json()

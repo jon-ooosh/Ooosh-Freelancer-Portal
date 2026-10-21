@@ -27,6 +27,7 @@ import { FUEL_LEVELS, REQUIRED_PHOTOS, isFuelReduction } from '../types/vehicle-
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
+import { portalJobUrl } from '../lib/safe-url'
 
 interface OpResult {
   label: string
@@ -81,6 +82,11 @@ export function CollectionPage() {
   const [bookOutJob, setBookOutJob] = useState<string | null>(null)
   const signatureRef = useRef<SignatureCaptureHandle>(null!)
   const [queuedOffline, setQueuedOffline] = useState(false)
+  // The CUSTOMER signs for the van they hand back (jon, Oct 2026 — it used to be
+  // an optional pad with nobody named). Nobody there: a short note instead.
+  const [customerPresent, setCustomerPresent] = useState(true)
+  const [absentNote, setAbsentNote] = useState('')
+  const [submitError, setSubmitError] = useState<string | null>(null)
 
   // Form autosave
   const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft, acceptDraft } = useFormAutosave({
@@ -317,6 +323,34 @@ export function CollectionPage() {
   }
 
   async function handleSubmit() {
+    setSubmitError(null)
+    // Signed by the customer, or "not here" with a note: checked BEFORE anything
+    // is written, so a missing signature never leaves half a collection behind.
+    let sigBlob: Blob | null = null
+    if (customerPresent) {
+      sigBlob = signatureRef.current?.hasSignature() ? (await signatureRef.current.getBlob()) : null
+      if (!sigBlob) {
+        setSubmitError('Ask the customer to sign above, or switch on "Customer not here".')
+        return
+      }
+    } else if (!absentNote.trim()) {
+      setSubmitError('Customer not here: add a short note (where you found the keys, anything else we should know).')
+      return
+    }
+    let signatureBase64: string | undefined
+    if (sigBlob) {
+      try {
+        signatureBase64 = await blobToBase64(sigBlob)
+      } catch {
+        console.warn('Failed to convert signature to base64')
+      }
+    }
+    // The absent-customer note rides with the client notes, so every record of
+    // the collection (event, staff check-in data, report, offline queue) has it.
+    const clientNotes = customerPresent
+      ? form.damageNotes
+      : [`Customer not present at collection: ${absentNote.trim()}`, form.damageNotes.trim()].filter(Boolean).join('\n')
+
     setIsSubmitting(true)
     setUploadProgress(null)
     setOpResults([])
@@ -338,13 +372,17 @@ export function CollectionPage() {
             `Collection by: ${form.driverName}`,
             `HireHop Job: ${form.hireHopJob}`,
             `Photos: ${form.photos.length} captured`,
-            form.damageNotes ? `Client notes: ${form.damageNotes}` : null,
+            customerPresent ? 'Signed by the customer' : 'Customer not present',
+            clientNotes ? `Client notes: ${clientNotes}` : null,
           ]
             .filter(Boolean)
             .join('\n'),
           hireHopJob: form.hireHopJob || null,
           clientEmail: form.clientEmail || null,
           hireStatus: 'Collected',
+          // Stored with the event, so a regenerated report shows this signature
+          // (it used to fall back to "Signed in person at book-out").
+          signatureBase64: signatureBase64 ?? null,
         }),
       'R2 event creation',
     )
@@ -410,7 +448,7 @@ export function CollectionPage() {
       clientEmail: form.clientEmail,
       mileage: mileageNum,
       fuelLevel: form.fuelLevel!,
-      damageNotes: form.damageNotes,
+      damageNotes: clientNotes,
       collectedAt: new Date().toISOString(),
       collectedBy: form.driverName,
       eventId,
@@ -450,16 +488,7 @@ export function CollectionPage() {
       }
     }
 
-    // Signature
-    let signatureBase64: string | undefined
-    try {
-      const sigBlob = await signatureRef.current?.getBlob()
-      if (sigBlob) {
-        signatureBase64 = await blobToBase64(sigBlob)
-      }
-    } catch {
-      console.warn('Failed to convert signature to base64')
-    }
+    // (The signature was read and checked at the top of handleSubmit.)
 
     // ── Steps 4+5: PDF + email — ONE server-side call. The server builds
     // the report and emails it directly; the multi-MB base64 PDF never
@@ -510,6 +539,9 @@ export function CollectionPage() {
               photos: photoBase64s,
               briefingItems: [],
               signatureBase64,
+              // false = nobody there to sign; the report says so instead of
+              // printing an empty signature box.
+              driverPresent: customerPresent,
               isCheckIn: false,
               isCollection: true,
               bookOutMileage: boMileage,
@@ -517,7 +549,7 @@ export function CollectionPage() {
               bookOutDate: bookOutIsThisJob ? bookOutDate : null,
               // Anything the client mentioned at collection — the point of
               // this report is "it was like this when we picked it up"
-              bookOutNotes: form.damageNotes || undefined,
+              bookOutNotes: clientNotes || undefined,
             },
             recipients,
             { fuelDifference: fuelDiff, milesDriven: clientMiles },
@@ -572,10 +604,12 @@ export function CollectionPage() {
               clientEmail: form.clientEmail,
               mileage: form.mileage,
               fuelLevel: form.fuelLevel,
-              damageNotes: form.damageNotes,
+              damageNotes: clientNotes,
             },
             photos: form.photos,
-            signatureBlob: form.signatureBlob,
+            // form.signatureBlob was never set, so a queued collection lost its
+            // signature; the pad's own blob is what was drawn.
+            signatureBlob: sigBlob ?? form.signatureBlob,
             vehicleReg: form.vehicleReg,
           })
           clearAutosave()
@@ -740,7 +774,8 @@ export function CollectionPage() {
           <p className="text-xs text-gray-500">Record vehicle condition at pickup</p>
         </div>
         {isFreelancer && freelancerContext?.returnUrl ? (
-          <a href={freelancerContext.returnUrl} className="text-sm text-gray-500 hover:text-gray-700">
+          // The job page, never the completion screen (see portalJobUrl).
+          <a href={portalJobUrl(freelancerContext.returnUrl) ?? undefined} className="text-sm text-gray-500 hover:text-gray-700">
             Cancel
           </a>
         ) : (
@@ -821,10 +856,18 @@ export function CollectionPage() {
           onUpdate={updateForm}
           signatureRef={signatureRef}
           bookOutFuelLevel={bookOutFuelLevel}
+          customerPresent={customerPresent}
+          onCustomerPresentChange={(present) => { setCustomerPresent(present); setSubmitError(null) }}
+          absentNote={absentNote}
+          onAbsentNoteChange={(note) => { setAbsentNote(note); setSubmitError(null) }}
         />
       )}
 
       {/* Navigation */}
+      {submitError && step === STEPS.length - 1 && (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{submitError}</p>
+      )}
+
       <div className="flex gap-3 pt-2">
         {step > 0 && (
           <button
@@ -1080,11 +1123,19 @@ function StepConfirm({
   onUpdate,
   signatureRef,
   bookOutFuelLevel,
+  customerPresent,
+  onCustomerPresentChange,
+  absentNote,
+  onAbsentNoteChange,
 }: {
   form: CollectionFormState
   onUpdate: <K extends keyof CollectionFormState>(key: K, value: CollectionFormState[K]) => void
   signatureRef: React.RefObject<SignatureCaptureHandle>
   bookOutFuelLevel: string | null
+  customerPresent: boolean
+  onCustomerPresentChange: (present: boolean) => void
+  absentNote: string
+  onAbsentNoteChange: (note: string) => void
 }) {
   // Only a reduction is worth flagging — more fuel coming back is fine.
   const fuelChanged = isFuelReduction(bookOutFuelLevel, form.fuelLevel)
@@ -1133,8 +1184,40 @@ function StepConfirm({
         </div>
       )}
 
-      {/* Signature */}
-      <SignatureCapture ref={signatureRef} label="Collection Signature" />
+      {/* Sign-off: the customer signs for the van they're handing back; if
+          nobody's there, a short note instead (jon, Oct 2026). */}
+      <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white p-3">
+        <span>
+          <span className="block text-sm font-medium text-gray-900">Customer not here</span>
+          <span className="block text-xs text-gray-500">Add a short note instead of a signature</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={!customerPresent}
+          onChange={e => onCustomerPresentChange(!e.target.checked)}
+          className="h-5 w-5"
+        />
+      </label>
+
+      {customerPresent ? (
+        <SignatureCapture ref={signatureRef} label="Customer's signature" />
+      ) : (
+        <div>
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Note for the office <span className="text-red-600">*</span>
+          </label>
+          <p className="mb-2 text-xs text-gray-500">
+            Where did you find the keys? Anything else we should know?
+          </p>
+          <textarea
+            value={absentNote}
+            onChange={e => onAbsentNoteChange(e.target.value)}
+            rows={3}
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+            placeholder="e.g. Keys left with the venue's stage door, van parked in bay 4"
+          />
+        </div>
+      )}
     </div>
   )
 }
