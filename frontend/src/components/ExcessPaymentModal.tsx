@@ -1018,7 +1018,13 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   if (readerAccess?.enabled && readerOptions?.payment.allowed) {
     availableActions.push({ action: 'reader_payment', label: `Excess payment on card reader${readerMode}`, icon: '£' });
   }
-  if (preAuthAvailable && isShortHire && isAdminUser) {
+  // The manual "Record Pre-Auth" (admin only) is hidden once we KNOW the hire is over
+  // 4 days — no pre-auth counts there (jon, 21 Oct 2026). Known from the page's job
+  // dates, or from the reader's own check, which reads the job's current dates on the
+  // server (some screens — driver page, excess ledger — don't pass the hire length).
+  // Unknown length keeps the old behaviour.
+  const knownLongHire = (hireDays != null && hireDays > 4) || readerOptions?.preauth.code === 'long_hire';
+  if (preAuthAvailable && isShortHire && !knownLongHire && isAdminUser) {
     // Badged only when the reader isn't answering for the record: if it is, it either
     // carries the badge itself or has said the pre-auth window isn't open yet.
     availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth', icon: '◫', recommended: readerAccess?.enabled && readerOptions ? undefined : 'Recommended · short hire' });
@@ -1026,9 +1032,9 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
     availableActions.push({ action: 'payment', label: 'Record Excess Payment', icon: '£' });
   }
-  // Non-short hires (or when it wasn't surfaced first): the pre-auth option
-  // still appears here in its usual position.
-  if (preAuthAvailable && !isShortHire && isAdminUser) {
+  // Hire length unknown here (or it wasn't surfaced first): the pre-auth option
+  // still appears in its usual position — but never on a known long hire.
+  if (preAuthAvailable && !isShortHire && !knownLongHire && isAdminUser) {
     availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth', icon: '◫' });
   }
   // Pre-auth holds: capture (→ taken). For held money you can't claim/reimburse,
@@ -1042,7 +1048,9 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
     // release them, they auto-void on the card company's clock. Showing a
     // "Release" button there is misleading, so hide it for those.
     if (excess.payment_method === 'stripe_gbp') {
-      availableActions.push({ action: 'release', label: 'Release Hold (Stripe)', icon: '○' });
+      // Worded as the counterpart to Capture: a reader hold lasts up to 30 days, so
+      // "let it expire" is no longer the habit to keep (jon, 21 Oct 2026).
+      availableActions.push({ action: 'release', label: 'Release hold (no claim - frees the client\'s card)', icon: '○' });
     }
   }
   if ((s === 'taken' || s === 'partially_paid') && amountHeld > 0) {
@@ -1271,7 +1279,13 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
               {availableActions.map((a) => (
                 <button
                   key={a.action}
-                  onClick={() => { setAction(a.action); setActionDone(false); setCaptureWarning(null); setPayHHPushError(null); setReaderAmount(null); setReaderNotes(''); }}
+                  onClick={() => {
+                    // Failsafe (jon, 21 Oct 2026, after job 16564): a payment on the reader
+                    // when a pre-auth would do asks first. A prompt, never a block.
+                    if (a.action === 'reader_payment' && readerOptions?.preauth.allowed
+                      && !window.confirm('This hire can take a pre-auth on the card reader instead (recommended for hires of 4 days or fewer): the money is held on the card, not taken.\n\nTake it as a payment anyway?')) return;
+                    setAction(a.action); setActionDone(false); setCaptureWarning(null); setPayHHPushError(null); setReaderAmount(null); setReaderNotes('');
+                  }}
                   className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
                     a.recommended
                       ? 'border-emerald-300 bg-emerald-50 hover:border-emerald-400 hover:bg-emerald-100'

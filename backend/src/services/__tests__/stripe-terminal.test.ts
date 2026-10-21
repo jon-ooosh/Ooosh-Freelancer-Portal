@@ -37,16 +37,17 @@ jest.mock('../../config/stripe', () => ({
 import { query } from '../../config/database';
 import { recordPayment } from '../record-payment';
 import { emailService } from '../email-service';
-import { sendPaymentEmail, sendExcessEmail } from '../money-emails';
+import { sendPaymentEmail, sendExcessEmail, resolveClientEmailTarget } from '../money-emails';
 import { recordPreauthHold, preauthEligibility } from '../excess-preauth';
 import { createShopSale } from '../shop-sales';
-import { handleTerminalWebhookEvent, checkSession, canUseTerminal, sendTerminalReceipt, sweepTerminalReceipts } from '../stripe-terminal';
+import { handleTerminalWebhookEvent, checkSession, canUseTerminal, sendTerminalReceipt, sweepTerminalReceipts, defaultReceiptRecipients } from '../stripe-terminal';
 
 const mockQuery = query as jest.Mock;
 const mockRecord = recordPayment as jest.Mock;
 const mockEmail = (emailService as unknown as { sendRaw: jest.Mock }).sendRaw;
 const mockPaymentEmail = sendPaymentEmail as jest.Mock;
 const mockExcessEmail = sendExcessEmail as jest.Mock;
+const mockClientTarget = resolveClientEmailTarget as jest.Mock;
 const mockRecordPreauth = recordPreauthHold as jest.Mock;
 const mockCreateShopSale = createShopSale as jest.Mock;
 
@@ -70,6 +71,14 @@ function fakeQuery(sql: string, params: unknown[] = []) {
   }
   if (s.startsWith('SELECT id FROM terminal_sessions WHERE status')) {
     return { rows: sessions.filter((r) => r.status === 'succeeded' && r.receipt_status === 'pending' && r.overdue).map((r) => ({ id: r.id })) };
+  }
+  if (s.startsWith('SELECT receipt_sent_to FROM terminal_sessions')) {
+    // Same job, not this session, sent by a person, earlier today (`receipt_today`).
+    return {
+      rows: sessions
+        .filter((r) => r.job_id === params[0] && r.id !== params[1] && r.receipt_status === 'sent' && r.receipt_sent_to && r.receipt_today)
+        .map((r) => ({ receipt_sent_to: r.receipt_sent_to })),
+    };
   }
   if (s.startsWith('SELECT * FROM terminal_sessions WHERE id')) {
     return { rows: sessions.filter((r) => r.id === params[0]).map((r) => ({ ...r })) };
@@ -263,6 +272,30 @@ describe('Send receipt?', () => {
     mockPaymentEmail.mockResolvedValue({ sent: false, reason: 'error', error: 'SMTP down' });
     await expect(sendTerminalReceipt('sess-1', { recipients: [{ email: 'a@client.test' }] })).rejects.toThrow(/SMTP down/);
     expect(sessions[0]!.receipt_status).toBe('pending');
+  });
+
+  it('ticks again anyone a receipt went to on this job earlier today, after the usual people, once each', async () => {
+    mockClientTarget.mockResolvedValue({ isFallback: false, primaryEmail: 'a@client.test', ccEmails: [] });
+    sessions = [
+      session({ id: 'sess-0', payment_intent_id: 'pi_0', status: 'succeeded', receipt_status: 'sent',
+        receipt_sent_to: 'payer@desk.test, A@client.test', receipt_today: true }),
+      session({ id: 'sess-other-job', job_id: 'job-2', payment_intent_id: 'pi_2', status: 'succeeded', receipt_status: 'sent',
+        receipt_sent_to: 'someone@else.test', receipt_today: true }),
+      session({ id: 'sess-last-week', payment_intent_id: 'pi_3', status: 'succeeded', receipt_status: 'sent',
+        receipt_sent_to: 'old@payer.test', receipt_today: false }),
+      session({ status: 'succeeded', receipt_status: 'pending', confirmed_booking: false }),
+    ];
+    expect(await defaultReceiptRecipients('sess-1')).toEqual(['a@client.test', 'payer@desk.test']);
+  });
+
+  it('with no usual recipient, ticks today\'s earlier ones alone', async () => {
+    mockClientTarget.mockResolvedValue({ isFallback: true, primaryEmail: 'info@oooshtours.co.uk', ccEmails: [] });
+    sessions = [
+      session({ id: 'sess-0', payment_intent_id: 'pi_0', status: 'succeeded', receipt_status: 'sent',
+        receipt_sent_to: 'payer@desk.test', receipt_today: true }),
+      session({ status: 'succeeded', receipt_status: 'pending', confirmed_booking: false }),
+    ];
+    expect(await defaultReceiptRecipients('sess-1')).toEqual(['payer@desk.test']);
   });
 
   it('the sweep sends an unanswered receipt to the usual recipient', async () => {

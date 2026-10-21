@@ -228,13 +228,13 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
     <div className="space-y-3">
       {session.status === 'pending' && (
         <div className="px-3 py-3 text-sm bg-blue-50 border border-blue-200 rounded-md text-blue-900">
-          <div className="font-semibold">Waiting for card...</div>
+          <div className="font-semibold flex items-center gap-2"><Spinner /> Waiting for card...</div>
           <div className="text-xs mt-1">{amt} is showing on {session.reader_label || 'the reader'}. Ask the client to tap, insert or swipe.</div>
         </div>
       )}
       {session.status === 'recording' && (
         <div className="px-3 py-3 text-sm bg-blue-50 border border-blue-200 rounded-md text-blue-900">
-          <div className="font-semibold">Card approved - recording...</div>
+          <div className="font-semibold flex items-center gap-2"><Spinner /> Card approved - recording...</div>
         </div>
       )}
       {session.status === 'failed' && (
@@ -352,5 +352,16 @@ export default function CardReaderPayment({ jobId, access, amount, paymentType, 
         )}
       </div>
     </div>
+  );
+}
+
+/** A small turning ring while we wait on the reader or the recording (jon, 21 Oct
+ *  2026: ten still seconds looked like nothing was happening). */
+function Spinner() {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-blue-200 border-t-blue-700"
+    />
   );
 }
