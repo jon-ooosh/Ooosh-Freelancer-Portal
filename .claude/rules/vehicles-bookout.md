@@ -37,6 +37,7 @@ invariants and multi-van scramble write-up in `docs/reference/SHARED-UTILITIES.m
 
 ## Freelancer mode
 
+- **A freelancer sees the portal look; staff never do** (FREELANCER-PORTAL-SPEC §11, Oct 2026). In freelancer scope `BookOutPage` / `CollectionPage` draw their screens from `components/freelancer/` over the SAME state, `canAdvance` and `handleSubmit`; never fork the logic into the freelancer branch, and never import `components/freelancer/` into a staff screen (shared components take `look="freelancer"`, default unchanged). A freelancer never reaches the staff steps (Select Vehicle, Driver & Hire): Back from their first step goes to the van screen. Text a freelancer reads has no em dashes (`noEmDash()` for text shared with staff).
 - **Any vehicle-module page that runs in freelancer mode MUST seed its form from `freelancerContext`.** The staff data hooks (`useAllocations`, `useDriverHireForms`, `useVehicleIssues`) are 403-gated for freelancer sessions, so gating a hook off without adding the context pre-fill silently strands the flow on "Waiting for vehicle allocation…".
 - **A freelancer collection is a SOFT check-in** — stamp `soft_checked_in_at`, do NOT flip status to `returned`. The warehouse owns the final check-in, and the server enforces this per session mode.
 - **A van swapped out mid-hire is still "out" for a collection** until it is collected (`soft_checked_in_at`) or checked in (`checked_in_at`): the collection resolver offers `status = 'swapped'` rows on those terms, and the row stays `swapped`. The book-out resolver never offers them.

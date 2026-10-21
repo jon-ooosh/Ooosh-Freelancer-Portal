@@ -28,6 +28,10 @@ import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
 import { portalJobUrl } from '../lib/safe-url'
+import { LoaderCircle } from 'lucide-react'
+import { fl, StepHeader, StepTitle, StepFooter, Banner, SummaryRows, FuelMileageStep, plateText, CentredSpinner } from '../components/freelancer/ui'
+import { VanConfirm, vanSubLine } from '../components/freelancer/VanConfirm'
+import { DoneScreen, isBothJob } from '../components/freelancer/DoneScreen'
 
 interface OpResult {
   label: string
@@ -68,6 +72,10 @@ export function CollectionPage() {
   // them: the van + job + customer come pre-filled from the resolve context.
   const { data: allAllocations } = useAllocations({ enabled: !isFreelancer })
   const [step, setStep] = useState(0)
+  // The freelancer screens scroll the page, so each step starts at the top.
+  useEffect(() => {
+    if (isFreelancer) window.scrollTo(0, 0)
+  }, [isFreelancer, step])
   const [form, setForm] = useState<CollectionFormState>(INITIAL_FORM)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitSuccess, setSubmitSuccess] = useState(false)
@@ -628,6 +636,22 @@ export function CollectionPage() {
   }
 
   // ── Queued Offline Screen ──
+  if (queuedOffline && isFreelancer) {
+    return (
+      <div className="mx-auto flex min-h-screen max-w-lg flex-col justify-center gap-5 px-5 py-10 text-center">
+        <h1 className={fl.pageTitle}>Saved on this phone</h1>
+        <p className="text-[16px] leading-[1.5] text-hf-body">
+          {plateText(form.vehicleReg)}: the collection, photos and signature are saved and will send by themselves
+          when you&apos;re back online. Keep this page open if you can.
+        </p>
+        {freelancerContext?.returnUrl && (
+          <a href={freelancerContext.returnUrl} className={`${fl.btnPrimary} w-full`}>
+            Back to the portal
+          </a>
+        )}
+      </div>
+    )
+  }
   if (queuedOffline) {
     return (
       <div className="space-y-6 px-4 py-6">
@@ -675,11 +699,32 @@ export function CollectionPage() {
         onResume={handleResumeDraft}
         onDiscard={dismissDraft}
         onDiscardAndGoBack={() => { dismissDraft(); window.history.back() }}
+        look={isFreelancer ? 'freelancer' : undefined}
       />
     )
   }
 
   // ── Success Screen ──
+  if (submitSuccess && isFreelancer) {
+    const allOk = opResults.every(r => r.success)
+    const plate = plateText(form.vehicleReg)
+    const returnUrl = freelancerContext?.returnUrl ?? null
+    const both = isBothJob(returnUrl)
+    return (
+      <DoneScreen
+        allOk={allOk}
+        title="Van collected"
+        problemTitle="Collected, with something to check"
+        message={allOk
+          ? `${plate} is collected and its condition recorded. The warehouse does the full check-in when it's back.`
+          : `${plate} is collected. Here's what happened:`}
+        results={opResults}
+        bothNote={both}
+        continueLabel={both ? 'Go to the equipment checklist' : 'Back to the portal'}
+        onContinue={returnUrl ? () => { window.location.href = returnUrl } : null}
+      />
+    )
+  }
   if (submitSuccess) {
     const allOk = opResults.every(r => r.success)
 
@@ -756,10 +801,208 @@ export function CollectionPage() {
   }
 
   // ── Loading ──
+  if (vehiclesLoading && isFreelancer) {
+    return <CentredSpinner text="Finding the van…" />
+  }
   if (vehiclesLoading) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
         <p className="text-gray-500">Loading fleet data...</p>
+      </div>
+    )
+  }
+
+  // ── Freelancer: the same steps, in the portal look (FREELANCER-PORTAL-SPEC §11).
+  // Step 0 (Vehicle & Job) is "Is this the van in front of you?"; the other three
+  // are numbered 1 to 3. Every check is the page's own canAdvance / handleSubmit,
+  // exactly as for staff below; only the drawing differs.
+  if (isFreelancer) {
+    if (STEPS[step] === 'Vehicle & Job') {
+      return (
+        <VanConfirm
+          kindLabel={form.hireHopJob ? `Van collection · Job #${form.hireHopJob}` : 'Van collection'}
+          reg={form.vehicleReg || freelancerContext?.vehicleReg || ''}
+          title={freelancerContext?.vehicleMakeModel || null}
+          sub={vanSubLine(vehicles.find(v => v.id === form.vehicleId))}
+          backHref={portalJobUrl(freelancerContext?.returnUrl)}
+          onYes={() => setStep(s => s + 1)}
+          yesDisabled={!canAdvance()}
+        >
+          {!form.vehicleId && (
+            <Banner tone="warning" title="We can't find this van yet">
+              It needs allocating to your job. Call the office and we&apos;ll sort it.
+            </Banner>
+          )}
+          {form.vehicleId && !form.driverName.trim() && (
+            <div className={`${fl.card} flex flex-col gap-2 p-4`}>
+              <label htmlFor="fl-name" className={fl.label}>Your name</label>
+              <input
+                id="fl-name"
+                type="text"
+                value={form.driverName}
+                onChange={e => updateForm('driverName', e.target.value)}
+                className={fl.input}
+              />
+            </div>
+          )}
+        </VanConfirm>
+      )
+    }
+
+    const FL_STEPS = ['Vehicle State', 'Photos', 'Notes & Confirm'] as const
+    const flIndex = Math.max(0, FL_STEPS.indexOf(STEPS[step] as typeof FL_STEPS[number]))
+    const isLast = STEPS[step] === 'Notes & Confirm'
+    const ready = canAdvance()
+    const entered = parseInt(form.mileage, 10)
+    const tooLow = bookOutMileage != null && !isNaN(entered) && entered < bookOutMileage
+    const requiredTaken = form.photos.filter(p => REQUIRED_PHOTOS.some(r => r.angle === p.angle)).length
+    // The Photos gate counts every photo (canAdvance above), so the label does too.
+    const photosLeft = Math.max(0, REQUIRED_PHOTOS.length - form.photos.length)
+    const fuelDropped = isFuelReduction(bookOutFuelLevel, form.fuelLevel)
+
+    let nextLabel = 'Next'
+    if (STEPS[step] === 'Vehicle State') {
+      nextLabel = ready ? 'Next: photos'
+        : !form.mileage.trim() ? 'Add the mileage'
+        : tooLow ? 'Check the mileage'
+        : 'Pick the fuel level'
+    } else if (STEPS[step] === 'Photos') {
+      nextLabel = ready ? 'Next: notes & sign' : `${photosLeft} photo${photosLeft === 1 ? '' : 's'} to go`
+    }
+
+    return (
+      <div className="pb-36">
+        <StepHeader
+          exitHref={portalJobUrl(freelancerContext?.returnUrl)}
+          title={`Collect · ${plateText(form.vehicleReg)}`}
+          step={flIndex + 1}
+          total={FL_STEPS.length}
+        />
+        <main className="mx-auto flex max-w-lg flex-col gap-4 px-4 pt-4">
+          {STEPS[step] === 'Vehicle State' && (
+            <FuelMileageStep
+              title="Fuel & mileage"
+              mileage={form.mileage}
+              onMileage={value => updateForm('mileage', value)}
+              fuel={form.fuelLevel}
+              onFuel={level => updateForm('fuelLevel', level)}
+              reference={(bookOutMileage != null || bookOutFuelLevel) ? (
+                <Banner tone="info" title="When it went out">
+                  {[
+                    bookOutMileage != null ? `${bookOutMileage.toLocaleString()} mi` : null,
+                    bookOutFuelLevel ? `fuel ${bookOutFuelLevel}` : null,
+                  ].filter(Boolean).join(' · ')}
+                </Banner>
+              ) : null}
+              mileageError={tooLow
+                ? `That's below the book-out reading (${bookOutMileage!.toLocaleString()} mi). Check the dashboard: it can't be lower.`
+                : null}
+            />
+          )}
+
+          {STEPS[step] === 'Photos' && (
+            <>
+              <StepTitle
+                title="Photos"
+                right={<span className="text-[15px] font-semibold text-hf-green-text tabular-nums">{requiredTaken} of {REQUIRED_PHOTOS.length}</span>}
+              />
+              <Banner tone="info">
+                Photograph the van as you find it. These are compared with the book-out photos when it&apos;s checked in.
+              </Banner>
+              <PhotoCapture
+                look="freelancer"
+                photos={form.photos}
+                onCapture={handlePhotoCapture}
+                onRemove={handlePhotoRemove}
+              />
+            </>
+          )}
+
+          {STEPS[step] === 'Notes & Confirm' && (
+            <>
+              <StepTitle title="Notes & sign" />
+              {fuelDropped && (
+                <Banner tone="warning" title="Less fuel than it went out with">
+                  Out at {bookOutFuelLevel} · now {form.fuelLevel}
+                </Banner>
+              )}
+              <SummaryRows rows={[
+                ['Mileage', (
+                  <>
+                    {isNaN(entered) ? '-' : `${entered.toLocaleString()} mi`}
+                    {bookOutMileage != null && !isNaN(entered) && (
+                      <span className="font-normal text-hf-muted"> ({entered - bookOutMileage >= 0 ? '+' : ''}{(entered - bookOutMileage).toLocaleString()})</span>
+                    )}
+                  </>
+                )],
+                ['Fuel', form.fuelLevel || '-'],
+                ['Photos', `${form.photos.length} taken`],
+              ]} />
+              <div className={`${fl.card} flex flex-col gap-2 p-4`}>
+                <label htmlFor="fl-damage" className={fl.label}>Any damage or problems?</label>
+                <p className="text-[14px] text-hf-muted">Anything the customer mentioned: damage, warning lights, anything else.</p>
+                <textarea
+                  id="fl-damage"
+                  rows={3}
+                  value={form.damageNotes}
+                  onChange={e => updateForm('damageNotes', e.target.value)}
+                  placeholder="e.g. Customer mentioned a scrape on the rear bumper"
+                  className={fl.input}
+                />
+              </div>
+
+              {/* The customer signs for the van they hand back; if nobody's there,
+                  a short note instead (jon, Oct 2026). */}
+              <label className={`${fl.card} flex cursor-pointer items-center justify-between gap-3 p-4`}>
+                <span className="flex flex-col">
+                  <span className="text-[16px] font-semibold">Customer not here</span>
+                  <span className="text-[14px] text-hf-muted">Add a short note instead of a signature</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={!customerPresent}
+                  onChange={e => { setCustomerPresent(!e.target.checked); setSubmitError(null) }}
+                  className="h-6 w-6 flex-none accent-[#A75390]"
+                />
+              </label>
+
+              {customerPresent ? (
+                <SignatureCapture ref={signatureRef} look="freelancer" label="Customer's signature" hint="Hand the phone to the customer" />
+              ) : (
+                <div className={`${fl.card} flex flex-col gap-2 p-4`}>
+                  <label htmlFor="fl-absent" className={fl.label}>Note for the office <span className="text-hf-error">*</span></label>
+                  <p className="text-[14px] text-hf-muted">Where did you find the keys? Anything else we should know?</p>
+                  <textarea
+                    id="fl-absent"
+                    rows={3}
+                    value={absentNote}
+                    onChange={e => { setAbsentNote(e.target.value); setSubmitError(null) }}
+                    placeholder="e.g. Keys left with the venue's stage door, van parked in bay 4"
+                    className={fl.input}
+                  />
+                </div>
+              )}
+              {submitError && <Banner tone="error">{submitError}</Banner>}
+            </>
+          )}
+        </main>
+
+        {isSubmitting && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6">
+            <div className="flex w-full max-w-xs flex-col items-center gap-3 rounded-2xl bg-white p-6 text-center">
+              <LoaderCircle size={32} className="animate-spin text-hf-accent" />
+              <p className="text-[15px] font-semibold">{uploadProgress || 'Sending…'}</p>
+            </div>
+          </div>
+        )}
+
+        <StepFooter
+          onBack={() => setStep(s => s - 1)}
+          backDisabled={isSubmitting}
+          primary={isLast
+            ? { label: 'Van collected', onClick: handleSubmit, disabled: isSubmitting, tone: 'green' }
+            : { label: nextLabel, onClick: () => setStep(s => s + 1), disabled: !ready }}
+        />
       </div>
     )
   }

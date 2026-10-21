@@ -19,6 +19,8 @@
  */
 
 import type { FreelancerVanCandidate } from '../adapters/freelancer-session'
+import { ChevronRight, LoaderCircle } from 'lucide-react'
+import { Banner, fl, plateText, OFFICE_PHONE_DISPLAY, OFFICE_PHONE_TEL } from './freelancer/ui'
 
 function formatDoneAt(iso: string): string {
   const d = new Date(iso)
@@ -60,59 +62,56 @@ export function FreelancerVanPicker({
   const busy = !!busyAssignmentId
 
   return (
-    <div className="mx-auto max-w-md space-y-4 px-4 py-8">
-      <div className="text-center">
-        <h1 className="text-xl font-bold text-gray-900">
+    <div className="mx-auto flex max-w-lg flex-col gap-4 px-4 py-10">
+      <div className="flex flex-col gap-1.5 px-1">
+        <div className={`${fl.kindLabel} text-kind-van`}>
+          {isCheckin ? 'Van collection' : 'Van delivery'} · {candidates.length} vans
+        </div>
+        <h1 className={fl.pageTitle}>
           Which van are you {isCheckin ? 'collecting' : 'taking'}?
         </h1>
-        <p className="mt-2 text-sm text-gray-600">
-          This job has {candidates.length} vans. Check the number plate on the van in front of
-          you and tap it below.
+        <p className="text-[16px] leading-[1.5] text-hf-body">
+          Check the number plate on the van in front of you and tap it below.
         </p>
       </div>
 
-      {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>
-      )}
+      {error && <Banner tone="error">{error}</Banner>}
 
-      <div className="space-y-3">
+      <div className="flex flex-col gap-2.5">
         {ordered.map(c => {
           const done = c.alreadyDoneAt ? formatDoneAt(c.alreadyDoneAt) : null
           const isBusy = busyAssignmentId === c.assignmentId
           return (
             <button
               key={c.assignmentId}
+              type="button"
               onClick={() => onSelect(c)}
               disabled={busy}
-              className={`w-full rounded-xl border-2 p-4 text-left transition-colors disabled:cursor-not-allowed ${
-                done
-                  ? 'border-amber-200 bg-amber-50/60'
-                  : 'border-gray-200 bg-white active:border-ooosh-navy active:bg-gray-50'
+              className={`${fl.card} w-full p-4 text-left transition-colors disabled:cursor-not-allowed ${
+                done ? '!border-hf-amber-border !bg-hf-amber-bg' : 'hover:bg-hf-inset'
               } ${busy && !isBusy ? 'opacity-40' : ''}`}
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-2xl font-bold tracking-wide text-gray-900">
-                    {c.registration || 'Unknown reg'}
-                  </p>
-                  <p className="mt-0.5 truncate text-sm text-gray-600">
-                    {[c.makeModel, c.vehicleType].filter(Boolean).join(' — ') || 'Vehicle details unavailable'}
-                  </p>
+                <div className="flex min-w-0 flex-col items-start gap-2">
+                  <span className="rounded-md border-2 border-hf-ink bg-[#f7d11e] px-2.5 py-0.5 text-[20px] font-bold tracking-[0.06em] text-hf-ink">
+                    {plateText(c.registration) || 'Unknown reg'}
+                  </span>
+                  <span className="truncate text-[15px] text-hf-body">
+                    {[c.makeModel, c.vehicleType].filter(Boolean).join(' · ') || 'Van details not available'}
+                  </span>
                   {c.customerDriverName && (
-                    <p className="mt-1 truncate text-xs text-gray-500">Hirer: {c.customerDriverName}</p>
+                    <span className="truncate text-[14px] text-hf-muted">Hirer: {c.customerDriverName}</span>
                   )}
                 </div>
                 {isBusy ? (
-                  <div className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-ooosh-navy border-t-transparent" />
+                  <LoaderCircle size={22} className="shrink-0 animate-spin text-hf-accent" />
                 ) : (
-                  <svg className="h-5 w-5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
+                  <ChevronRight size={20} strokeWidth={2} className="shrink-0 text-hf-chevron" />
                 )}
               </div>
               {done && (
-                <p className="mt-2 rounded bg-amber-100 px-2 py-1 text-xs font-medium text-amber-900">
-                  {doneVerb} at {done} — only pick this one if you&apos;re sure
+                <p className="mt-3 rounded-lg bg-hf-amber-tile px-2.5 py-1.5 text-[14px] font-medium text-hf-amber-text">
+                  {doneVerb} at {done}. Only pick this one if you&apos;re sure.
                 </p>
               )}
             </button>
@@ -120,10 +119,10 @@ export function FreelancerVanPicker({
         })}
       </div>
 
-      <p className="text-center text-xs text-gray-500">
+      <p className="px-1 text-center text-[14px] text-hf-muted">
         Not sure? Call the office on{' '}
-        <a href="tel:+441273911382" className="font-medium text-ooosh-navy">
-          01273 911382
+        <a href={OFFICE_PHONE_TEL} className={fl.link}>
+          {OFFICE_PHONE_DISPLAY}
         </a>{' '}
         before you start.
       </p>

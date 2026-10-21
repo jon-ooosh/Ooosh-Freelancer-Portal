@@ -11,6 +11,15 @@ interface SignatureCaptureProps {
   onClear?: () => void
   /** Label shown above the pad. Defaults to "Driver Signature". */
   label?: string
+  /**
+   * 'freelancer' frames the same pad in the portal look (FREELANCER-PORTAL-SPEC
+   * §11): a card, a dashed 200px pad, "Clear" top right, `hint` in the pad until
+   * they start. The canvas drawing (white, faint baseline) is unchanged, so the
+   * signature image in the PDF looks the same. Staff never pass it.
+   */
+  look?: 'freelancer'
+  /** Freelancer look only: "Hand the phone to the driver". */
+  hint?: string
 }
 
 /**
@@ -18,7 +27,7 @@ interface SignatureCaptureProps {
  * Parent grabs the signature via ref.getBlob() at submit time.
  */
 export const SignatureCapture = forwardRef<SignatureCaptureHandle, SignatureCaptureProps>(
-  function SignatureCapture({ onClear, label = 'Driver Signature' }, ref) {
+  function SignatureCapture({ onClear, label = 'Driver Signature', look, hint }, ref) {
     const canvasRef = useRef<HTMLCanvasElement>(null)
     const [isDrawing, setIsDrawing] = useState(false)
     const [hasStrokes, setHasStrokes] = useState(false)
@@ -148,6 +157,42 @@ export const SignatureCapture = forwardRef<SignatureCaptureHandle, SignatureCapt
       onClear?.()
     }, [onClear])
 
+    const canvas = (
+      <canvas
+        ref={canvasRef}
+        className="w-full touch-none"
+        style={{ height: look === 'freelancer' ? '200px' : '140px' }}
+        onMouseDown={startDrawing}
+        onMouseMove={draw}
+        onMouseUp={stopDrawing}
+        onMouseLeave={stopDrawing}
+        onTouchStart={startDrawing}
+        onTouchMove={draw}
+        onTouchEnd={stopDrawing}
+      />
+    )
+
+    if (look === 'freelancer') {
+      return (
+        <div className="flex flex-col gap-2 rounded-2xl border border-hf-border bg-white p-4">
+          <div className="flex items-baseline justify-between">
+            <span className="text-[14px] font-semibold text-hf-body">{label}</span>
+            {hasStrokes && (
+              <button type="button" onClick={handleClear} className="text-[14px] font-semibold text-hf-link hover:text-hf-link-hover">
+                Clear
+              </button>
+            )}
+          </div>
+          <div className={`relative overflow-hidden rounded-xl border-[1.5px] border-dashed bg-white ${hasStrokes ? 'border-hf-green' : 'border-hf-dashed'}`}>
+            {canvas}
+            {!hasStrokes && hint && (
+              <span className="pointer-events-none absolute inset-x-0 bottom-8 text-center text-[14px] text-hf-muted">{hint}</span>
+            )}
+          </div>
+        </div>
+      )
+    }
+
     return (
       <div className="space-y-2">
         <label className="block text-sm font-medium text-gray-700">
@@ -160,18 +205,7 @@ export const SignatureCapture = forwardRef<SignatureCaptureHandle, SignatureCapt
         <div className={`rounded-lg border-2 overflow-hidden ${
           hasStrokes ? 'border-green-300' : 'border-gray-300'
         } bg-white`}>
-          <canvas
-            ref={canvasRef}
-            className="w-full touch-none"
-            style={{ height: '140px' }}
-            onMouseDown={startDrawing}
-            onMouseMove={draw}
-            onMouseUp={stopDrawing}
-            onMouseLeave={stopDrawing}
-            onTouchStart={startDrawing}
-            onTouchMove={draw}
-            onTouchEnd={stopDrawing}
-          />
+          {canvas}
         </div>
 
         {hasStrokes && (
