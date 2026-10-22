@@ -286,7 +286,7 @@ completion fixes, payment terms, security fixes, the Claude Design reskin of the
 (every kind, one window: `src/lib/history.ts`), the van screens in the portal look for freelancers only
 (`frontend/src/modules/vehicles/components/freelancer/`, colours from `shared/design/freelancer-tokens.cjs`),
 portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1),
-freelancer invoices linked to the freelancer and their work in Costs (§5.1; a ONE-OFF backfill page to delete once used).
+freelancer invoices linked to the freelancer and their work in Costs (§5.1; the past ones linked by hand, Oct 2026).
 Next: the Earnings tab in the portal (§5.2), the four guides.
 **§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
