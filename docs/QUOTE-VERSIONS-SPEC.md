@@ -526,8 +526,9 @@ netlify-functions #34 and the note-position follow-up). Test group on the live s
 
 1. **Festival-style grouping is NOT Phase 2 of this module** (jon, 20 Oct 2026). Options are
    "the client picks ONE"; a festival is "all of these belong together" (core backline, outlier
-   stages, a small PA, a dozen band spot-hires). Opposite rules, so it will be its own small
-   design — a "project" link with its own table and column, never `job_groups.kind = 'part_of'`.
+   stages, a small PA, a dozen band spot-hires). Opposite rules, so it is its own module —
+   **BUILT 21 Oct 2026 as job projects, `docs/JOB-PROJECTS-SPEC.md`** — a link with its own table
+   and column, never `job_groups.kind = 'part_of'`.
    **Do not build `part_of` on `job_groups`:** `OPTION_GROUP_KIND` is only checked where a group is
    CREATED (add-option, link-existing). Every READ path treats any group as alternatives —
    `portalOptionsFor()` (would refuse a band's payment once another band confirmed),
@@ -543,12 +544,20 @@ netlify-functions #34 and the note-position follow-up). Test group on the live s
    losses too (only the org one did).
 3. ~~"Mark lost" from a Compare row~~ **Dropped** (jon, 20 Oct 2026). Compare disappears once an
    option confirms, and before that the job's own Lost modal does it.
-4. **The bell path has not been exercised live.** It is for when an option confirms with NOBODY
-   on the job page: the client pays through the portal, someone sets Booked in HireHop, or the
-   Wise matcher records a transfer. `services/option-confirm.ts` bells the job's managers; the
-   link opens the job with `?group_prompt=1` and the Confirm panel. Nothing is ever auto-lost
-   (§1.6). The test group's #16843 was confirmed by hand in OP, so only the attended path is
-   proven. To test: on a fresh test group set an option to Booked IN HIREHOP and watch the bell.
+4. **The unattended path: bell + To Do (21 Oct 2026), not yet exercised live.** For when an
+   option confirms with NOBODY on the job page: the client pays through the portal, someone sets
+   Booked in HireHop, or the Wise matcher records a transfer. `services/option-confirm.ts` bells
+   the job's managers AND gives each a To Do due today (`staff_tasks.source_type = 'quote_option'`,
+   `source_id` = the confirmed job; badge "Quote options" links to `/jobs/:id?group_prompt=1`) —
+   jon: bells get missed. One open To Do per person per job; both are cleared by
+   `markOptionPromptHandled()`, and by the 5-minute bell sweep once no other option is live
+   (`closeDoneOptionTodos()` reads the bell's own rule, `bell-rules.ts` `option_siblings_open`,
+   so the To Do and the bell can't disagree). Fallback recipients (no job manager with
+   a login) skip `login_disabled` users, so the system@ service login gets neither. **The bell had
+   never worked until this fix:** its INSERT reused uncast parameters in two type contexts and
+   Postgres refused it (42P08), caught and logged. Proven against a scratch database; not yet
+   live. Nothing is ever auto-lost (§1.6). To test live: on a fresh test group set an option to
+   Booked IN HIREHOP and watch the bell and Me › To Do.
 
 **Decided, not to build:** an option lost BEFORE the client chose (e.g. "no Twin, too dear",
 lost as Price) keeps its reason and counts as a real loss even if a sibling later confirms. Rare,

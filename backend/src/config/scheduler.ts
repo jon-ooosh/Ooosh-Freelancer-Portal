@@ -709,6 +709,10 @@ export function startScheduler() {
       const { sweepDoneBells } = await import('../services/notification-resolve');
       const retired = await sweepDoneBells();
       if (retired > 0) console.log(`Scheduler: Bell sweep — ${retired} retired`);
+      // The "mark the other options lost?" To Dos follow their bell's rule.
+      const { closeDoneOptionTodos } = await import('../services/option-confirm');
+      const todos = await closeDoneOptionTodos();
+      if (todos > 0) console.log(`Scheduler: Bell sweep — ${todos} option To Do(s) done`);
     } catch (err) {
       console.error('Scheduler: Bell sweep failed:', err instanceof Error ? err.message : err);
     }
