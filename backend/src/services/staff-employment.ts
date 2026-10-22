@@ -20,6 +20,7 @@
 import { query, getClient } from '../config/database';
 import { addDaysYmd, shiftMinutes, DATE_RE } from './staff-day-status';
 import { ukToday } from './uk-date';
+import { retireDoneBells } from './notification-resolve';
 
 /**
  * Who may manage staff records. Admin only for now (jon, Sep 2026) — but named
@@ -117,6 +118,8 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
       personParams
     );
   }
+  // Left? No review is owed (bell-rules.ts review_due); a no-op otherwise.
+  await retireDoneBells('review_due', personId);
   return r.rows[0];
 }
 
@@ -537,6 +540,8 @@ export async function upsertReview(
     'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
     [personId]
   );
+  // Booked or recorded — "A staff review is due" is done (bell-rules.ts).
+  await retireDoneBells('review_due', personId);
 
   // Tell the person, with the prep questions (spec §5.2). Once per review —
   // sendReviewInvite owns the invited_at stamp, so editing a note later does
@@ -622,6 +627,8 @@ export async function recordReviewOutcome(
     'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
     [personId]
   );
+  // Booked or recorded — "A staff review is due" is done (bell-rules.ts).
+  await retireDoneBells('review_due', personId);
 
   // The write-up, carrying the agreed summary, the actions and — the point of
   // deciding pay afterwards rather than in the room (§5.1) — the new figure.

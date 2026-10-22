@@ -36,6 +36,7 @@ import {
 } from '../services/job-issues';
 import { notifyVehicleSaleOfIssue } from '../services/vehicle-sales';
 import { autoLinkIssueToOpenClaim } from '../services/incident-claims';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -368,6 +369,7 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       issueId, req.user!.id, body.severity,
       `New issue: ${body.summary.slice(0, 80)}`,
       `${body.category} — ${body.severity}`,
+      { resolveKey: 'problem_open' },
     );
     // Van for sale with chosen photos → "check its sale photos" (VEHICLE-SALES-SPEC D6).
     await notifyVehicleSaleOfIssue(issueId, req.user!.id);
@@ -496,8 +498,14 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
         id, req.user!.id, effectiveSeverity,
         `You've been assigned an issue: ${before.summary?.slice(0, 80) || 'Issue'}`,
         `Assigned by issue update`,
+        { resolveKey: 'problem_open' },
       );
     }
+
+    // Closed? Its "New issue" / "re-flagged" / "assigned" bells are done with,
+    // for everyone (bell-rules.ts problem_open). The rule decides — this is a
+    // no-op while the Problem is still open. Never throws.
+    await retireDoneBells('problem_open', id);
 
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [id]);
     res.json({ data: full.rows[0] });
@@ -631,7 +639,7 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
         issueId, req.user!.id, body.severity,
         `Issue re-flagged: ${body.summary.slice(0, 80)}`,
         eventBody,
-        { includeReporter: true }
+        { includeReporter: true, resolveKey: 'problem_open' }
       );
       await notifyVehicleSaleOfIssue(issueId, req.user!.id);
 
@@ -689,6 +697,7 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       issueId, req.user!.id, body.severity,
       `New issue: ${body.summary.slice(0, 80)}`,
       `${body.category} — flagged from ${body.source_module}`,
+      { resolveKey: 'problem_open' },
     );
     await notifyVehicleSaleOfIssue(issueId, req.user!.id);
 

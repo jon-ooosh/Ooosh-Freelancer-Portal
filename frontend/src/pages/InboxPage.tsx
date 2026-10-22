@@ -326,6 +326,20 @@ export default function InboxPage() {
       });
     });
 
+    // Bells changed elsewhere — the thing was done (a reply, a reaction, an
+    // approval: `done`), or the page it sits on was opened (read only).
+    // Patched in place, like the Done button does, rather than reloaded: a
+    // reload would collapse the thread you have just replied in. Tab counts
+    // catch up on the next load.
+    socket.on('notifications_resolved', (msg: { ids?: string[]; done?: boolean }) => {
+      const ids = new Set(msg?.ids ?? []);
+      if (ids.size === 0) return;
+      const now = new Date().toISOString();
+      setNotifications((prev) => prev.map((n) => (ids.has(n.id)
+        ? { ...n, is_read: true, ...(msg.done ? { acknowledged_at: n.acknowledged_at ?? now } : {}) }
+        : n)));
+    });
+
     socketRef.current = socket;
     return () => { socket.disconnect(); };
   }, [user, tab, page, debouncedQ]);

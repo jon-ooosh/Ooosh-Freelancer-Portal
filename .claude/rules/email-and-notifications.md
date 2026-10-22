@@ -105,23 +105,35 @@ Adding a scanner: copy the shape, add a marker column, wire the clear into every
 
 ## A bell that asks someone to act retires itself when the thing is done
 
-`services/notification-resolve.ts` `resolveActionBells()` (jon, Oct 2026). Until then a bell was a copy of
-a fact frozen at the moment it happened — approving a holiday left every admin's "X has requested holiday"
-lit until each of them clicked it.
+Until Oct 2026 a bell was a copy of a fact frozen at the moment it happened — approving a holiday left every
+admin's "X has requested holiday" lit until each of them clicked it. Now (jon, Oct 2026):
 
-- **Call it from the code that FINISHES the thing** (the service, not the route), for every way it can
-  finish. Leave requests: approve, decline and withdraw in `staff-leave.ts` via `retireLeaveRequestBells()`,
-  which sits next to `notifyLeaveRequested()` so the bell's type and row are named in one place. Day swaps
-  the same: `staff-swaps.ts` via `retireSwapRequestBells()` (entity `staff_pattern_swap`, the swap's group id).
-- **Match on row AND bell type.** The requester's outcome bell ("Time off approved", `system`) is on the
-  SAME row as the approvers' `follow_up` bells — clearing by row alone would swallow it unseen.
-- **Everyone's copy, read AND done.** Once somebody has dealt with it nobody else is needed. The bell stays
-  in the dropdown greyed with "✓ Done"; the Inbox hides it like any Done item.
-- **Never let it fail the action** — the helper never throws.
-- **Only for bells that ask for something.** An FYI bell ("Lock-up submitted — all clear") is done when read.
-- **Next: mentions** (jon's decisions): your reply or reaction in that thread marks YOUR mention bell done;
-  opening the timeline where it sits only marks it read. Overtime and WFH requests are the same shape as leave
-  (day swaps are already wired).
+- **A bell that ASKS for something carries `notifications.resolve_key`** (migration 310), and
+  `services/bell-rules.ts` holds ONE rule per key: "still needed while …", SQL over the bell row `n`.
+  **Set the key at insert. Never on an FYI bell** ("Issue resolved", "Approved", "Renewal coming up") — an FYI
+  bell is done when it is read, and FYI and action bells often share a type and a record, which is exactly why
+  `type` can't be the test (it also drives the Inbox tabs and delivery preferences, so don't split it).
+- **The rule decides; callers only nudge.** Call `retireDoneBells(key, recordId)` from the code that FINISHES
+  the thing (after COMMIT) so the bell goes at once; `sweepDoneBells()` runs every 5 minutes and before each
+  escalation, so a path nobody wired only delays a bell — it never strands one, and a finished thing is never
+  emailed. Don't add a second "is it done?" test anywhere else.
+- **Read AND done, for whoever the rule says is finished** — everyone by default; per person where the rule
+  reads `n.user_id` (a to-do's owner, a document's signer). Done bells stay in the dropdown greyed "✓ Done";
+  the Inbox hides them like any Done item. Never throws.
+- **`latestOnly`** for a reminder that is sent again while still waiting (a digest, a re-armed chase, "due" then
+  "overdue"): only the newest copy to each person stays lit.
+- **A rule is a parameter-free EXISTS** (`bell-rules.test.ts` checks): no `$n`; `[0-9]` not `\d`; guard any cast
+  with CASE. A deleted record reads as done. A rule that needs a module that loads auth or email keeps a copy
+  of the number and the test checks it matches (`HOLD_UNTIL_LEAD_DAYS`, `PIN_ROTATE_DAYS`).
+- **Older wiring, same idea:** leave / overtime / WFH requests and day swaps retire their approvers' `follow_up`
+  bells by type (`retire…Bells()` beside each `notify…Requested()` in `staff-notifications.ts`; day swaps from
+  `staff-swaps.ts` via `retireSwapRequestBells()`, entity `staff_pattern_swap`, the swap's group id). **Mentions are one
+  person's:** a reply or a reaction in the thread marks the replier's own mention bells done
+  (`resolveMyThreadMentions`); opening the timeline or the Problem marks them READ only
+  (`POST /notifications/seen`, `markMentionsSeen`).
+- **Not keyed yet, waiting on jon's decisions:** chase alerts, requirement chases, compliance, mid-tour
+  drivers, claim check-ins / client chases, the staff-document escalation, storage access requests, and the
+  bells with no state to test (failed hooks, payroll, company days, receipts digest, delivery problems).
 
 ## Timelines & threads
 

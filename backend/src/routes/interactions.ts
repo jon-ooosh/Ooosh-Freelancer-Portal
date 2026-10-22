@@ -9,6 +9,7 @@ import { frontendLink } from '../config/app-urls';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
 import { shiftLinkPath } from '../services/studio-sitter';
 import { bumpSiblingChaseDates } from '../services/job-groups';
+import { resolveMyThreadMentions } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -708,6 +709,13 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       }
     }
 
+    // 3) Replying answers whatever the thread asked of YOU — your own mention
+    //    bells on it are done (jon, Oct 2026; notification-resolve.ts). Only
+    //    yours: everyone else's stay until they answer. Never throws.
+    if (parent_interaction_id) {
+      await resolveMyThreadMentions(req.user!.id, result.rows[0].id);
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('Create interaction error:', error);
@@ -811,7 +819,9 @@ router.put('/:id/move', validate(moveInteractionSchema), async (req: AuthRequest
 // the surface tidy and avoid arbitrary emoji proliferation.
 //
 // No notifications fire on reactions — this is intentionally the
-// lightweight "I saw it, no follow-up needed" pattern.
+// lightweight "I saw it, no follow-up needed" pattern. For the same reason,
+// ADDING a reaction marks the reactor's own mention bells on that thread done
+// (jon, Oct 2026); taking one off changes nothing.
 
 const REACTION_PALETTE = ['👍', '❤️', '✅', '😂', '🎉', '👀'] as const;
 
@@ -836,7 +846,8 @@ router.post('/:id/reactions', validate(reactionSchema), async (req: AuthRequest,
     }
     const reactions = (current.rows[0].reactions || {}) as Record<string, string[]>;
     const existing = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
-    if (existing.includes(userId)) {
+    const added = !existing.includes(userId);
+    if (!added) {
       reactions[emoji] = existing.filter((u) => u !== userId);
       // Drop the key entirely when the last reactor removes themselves —
       // keeps the JSONB clean instead of accumulating empty arrays.
@@ -849,6 +860,9 @@ router.post('/:id/reactions', validate(reactionSchema), async (req: AuthRequest,
       `UPDATE interactions SET reactions = $1::jsonb WHERE id = $2 RETURNING reactions`,
       [JSON.stringify(reactions), req.params.id]
     );
+
+    // "I saw it" — the reactor's own mention bells on this thread are done.
+    if (added) await resolveMyThreadMentions(userId, req.params.id as string);
 
     res.json({ reactions: result.rows[0].reactions });
   } catch (error) {

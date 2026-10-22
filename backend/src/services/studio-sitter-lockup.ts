@@ -25,6 +25,7 @@ import { getSystemSetting } from '../routes/system-settings';
 import { emailService } from './email-service';
 import { getPresignedDownloadUrl } from '../config/r2';
 import { greetingName, fullDisplayName } from './display-name';
+import { retireDoneBells } from './notification-resolve';
 
 // ── Template types ──────────────────────────────────────────────────────────
 
@@ -526,6 +527,10 @@ export async function submitLockupReport(
     client.release();
   }
 
+  // A late report: the office's "Lock-up not submitted" bells are done
+  // (bell-rules.ts lockup_missing). After COMMIT; never throws.
+  await retireDoneBells('lockup_missing', shiftId);
+
   notifyStaffOfLockup(date, shiftId, sitterName, exceptions, notesText).catch((err) =>
     console.error('[studio-lockup] staff notify failed (non-fatal):', err)
   );
@@ -641,8 +646,8 @@ export async function runLockupChase(): Promise<number> {
       );
       for (const u of staff.rows) {
         await query(
-          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, $5, 'normal', NOW())`,
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, $5, 'normal', NOW(), 'lockup_missing')`,
           [u.id,
            `🔒 Lock-up not submitted — ${formatLongDate(dateIso)} (${sitterName})`,
            `${sitterName} hasn't submitted a lock-up report for ${formatLongDate(dateIso)}. A reminder has been sent.`,

@@ -433,12 +433,17 @@ export async function approveRequest(requestId: string, note: string | null, use
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const upd = await client.query(
       `UPDATE staff_leave_requests
           SET status='approved', decided_by=$2, decided_at=NOW(), decision_note=$3, updated_at=NOW()
-        WHERE id=$1 AND status='pending'`,
+        WHERE id=$1 AND status='pending'
+        RETURNING id`,
       [requestId, userId, note]
     );
+    // The status check above ran before the transaction. Two presses at once
+    // both pass it; only one of them flips the row, and the other must not go
+    // on to post a second debit (Oct 2026). Throwing rolls it back.
+    if (upd.rows.length === 0) throw new Error('That request has already been decided');
 
     if (account) {
       // The debit type is PER ACCOUNT: spending the overtime bank on a day off
@@ -513,13 +518,17 @@ export async function cancelRequest(requestId: string, reason: string, userId: s
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const upd = await client.query(
       `UPDATE staff_leave_requests
           SET status='cancelled', cancelled_by=$2, cancelled_at=NOW(),
               cancellation_reason=$3, updated_at=NOW()
-        WHERE id=$1 AND status='approved'`,
+        WHERE id=$1 AND status='approved'
+        RETURNING id`,
       [requestId, userId, reason]
     );
+    // Same race as approveRequest: only the press that flips the row gives
+    // the time back, or it is credited twice.
+    if (upd.rows.length === 0) throw new Error('That request has already been cancelled');
     if (account) {
       for (const d of req.days) {
         await client.query(

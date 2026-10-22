@@ -12,6 +12,15 @@ import {
 import Reactions, { type ReactionsMap } from './messaging/Reactions';
 import ConversationSummary from './ConversationSummary';
 import QuoteVersions from './QuoteVersions';
+import { markMentionsSeen, type MentionAnchor } from '../lib/mentionsSeen';
+
+/** The timeline's key → the record a mention bell on it points at. */
+const TIMELINE_ANCHOR: Record<'person_id' | 'organisation_id' | 'venue_id' | 'job_id', MentionAnchor> = {
+  person_id: 'people',
+  organisation_id: 'organisations',
+  venue_id: 'venues',
+  job_id: 'jobs',
+};
 
 interface Interaction {
   id: string;
@@ -180,6 +189,12 @@ function emailToLabel(header: string | null | undefined): string {
 
 export default function ActivityTimeline({ entityType, entityId, interactions, onInteractionAdded, pipelineStatus }: ActivityTimelineProps) {
   const user = useAuthStore((s) => s.user);
+
+  // The timeline is on screen (every page mounts it only on its own tab), so
+  // my mention bells for this record are read — not done (lib/mentionsSeen.ts).
+  useEffect(() => {
+    markMentionsSeen(TIMELINE_ANCHOR[entityType], entityId);
+  }, [entityType, entityId]);
 
   const [content, setContent] = useState('');
   const [interactionType, setInteractionType] = useState<string>('note');

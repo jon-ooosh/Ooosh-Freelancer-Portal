@@ -213,6 +213,22 @@ export async function getPatternPeriods(personId: string, year: number): Promise
 }
 
 /**
+ * SQL boolean: somebody still employed has overtime banked in the leave year
+ * that the SQL expression `yearExpr` gives. For the cash-out reminder's bell
+ * rule (bell-rules.ts overtime_cashout) — written here because this module is
+ * the only reader of v_staff_balances. Same set as runCashOutReminder's.
+ */
+export function overtimeStillBankedSql(yearExpr: string): string {
+  return `EXISTS (SELECT 1 FROM staff_employment se
+                    JOIN people p ON p.id = se.person_id
+                    JOIN v_staff_balances b ON b.person_id = se.person_id
+                  WHERE se.employment_status = 'employed' AND p.is_deleted = false
+                    AND b.account = 'overtime'
+                    AND b.leave_year = ${yearExpr}
+                    AND b.balance_minutes > 0)`;
+}
+
+/**
  * The balance, with the entries that produced it.
  *
  * `entries` is the explainability payload — the whole reason a derived balance
