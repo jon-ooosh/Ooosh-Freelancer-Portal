@@ -40,6 +40,17 @@ export interface FreelancerWorkItem {
 
 export interface PickedPerson { id: string; name: string }
 
+/**
+ * Why a freelancer invoice was saved with no work ticked: asked on save, not
+ * required (jon, Oct 2026). Stored on `costs.work_unmatched_reason` and shown
+ * in the Costs list. "Later" is asked again on the next save.
+ */
+export const UNMATCHED_REASONS: { code: string; label: string; short: string }[] = [
+  { code: 'person_not_in_op', label: 'The freelancer isn’t in OP', short: 'Not matched: freelancer not in OP' },
+  { code: 'work_not_in_op', label: 'The work isn’t in OP', short: 'Not matched: work not in OP' },
+  { code: 'later', label: 'I’ll match it later', short: 'Not matched yet' },
+];
+
 interface Suggestion { person: { id: string; name: string; email: string | null } | null; source: 'remembered' | 'remittance' | 'name' | 'none' }
 
 const SOURCE_NOTE: Record<string, string> = {
@@ -233,15 +244,17 @@ export default function FreelancerInvoiceLinks({
                 return (
                   <label key={it.key} className={`flex items-start gap-2 px-2.5 py-2 text-sm cursor-pointer ${on ? 'bg-purple-50' : 'hover:bg-gray-50'}`}>
                     <input type="checkbox" className="mt-0.5" checked={on} onChange={() => toggle(it.key)} />
+                    {/* Date with the job number under it, always in this column, so the
+                        numbers line up to match against the invoice (jon, Oct 2026). */}
+                    <span className="w-[5.5rem] shrink-0 tabular-nums">
+                      <span className="block text-gray-500">{fmtDay(it.date)}</span>
+                      {it.hhJobNumber && <span className="block text-xs text-purple-700" title={it.jobName || undefined}>#{it.hhJobNumber}</span>}
+                    </span>
                     <span className="flex-1 min-w-0">
-                      <span className="flex items-baseline gap-2 flex-wrap">
-                        <span className="text-gray-500 tabular-nums w-[5.5rem] shrink-0">{fmtDay(it.date)}</span>
-                        <span className="font-medium text-gray-800">{it.title}</span>
-                        {it.hhJobNumber && <span className="text-xs text-purple-700" title={it.jobName || undefined}>#{it.hhJobNumber}</span>}
-                      </span>
-                      {it.detail && <span className="block text-xs text-gray-500 pl-[6rem] truncate">{it.detail}</span>}
+                      <span className="block font-medium text-gray-800">{it.title}</span>
+                      {it.detail && <span className="block text-xs text-gray-500 truncate">{it.detail}</span>}
                       {it.invoicedOn.length > 0 && (
-                        <span className="block text-xs text-amber-700 pl-[6rem]">
+                        <span className="block text-xs text-amber-700">
                           Already on {it.invoicedOn.map((o) => o.invoiceNumber ? `#${o.invoiceNumber}` : (o.supplierName || 'another invoice')).join(', ')}
                         </span>
                       )}

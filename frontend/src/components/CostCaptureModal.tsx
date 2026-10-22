@@ -15,7 +15,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
-import FreelancerInvoiceLinks, { shareInvoice, type FreelancerWorkItem, type PickedPerson } from './costs/FreelancerInvoiceLinks';
+import FreelancerInvoiceLinks, { shareInvoice, UNMATCHED_REASONS, type FreelancerWorkItem, type PickedPerson } from './costs/FreelancerInvoiceLinks';
 import { openR2Key } from '../lib/openAuthedFile';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { Cost, CostDocument, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
@@ -263,6 +263,8 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
   const [flTicksTouched, setFlTicksTouched] = useState(false);
   const [flWork, setFlWork] = useState<FreelancerWorkItem[]>([]);
   const [flJobNote, setFlJobNote] = useState('');
+  // Saving one with no work ticked asks why first, never blocks (jon, Oct 2026).
+  const [unmatchedAsk, setUnmatchedAsk] = useState<{ approve: boolean } | null>(null);
   const existingQuery = existing?.queried_at ? (existing.query_note || '') : '';
   const [queryNote, setQueryNote] = useState(existingQuery);
   const [linkedJobLabel, setLinkedJobLabel] = useState<string>(initialJobLabel);
@@ -539,18 +541,25 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
         setJobRechargesRunningCosts(flagged);
         // A recharge-running-costs job defaults new costs to Extra + recharge;
         // otherwise fall back to the quote-based default (part-of-quote if quoted).
+        // Never a freelancer invoice: it is mostly their fee, which the quote
+        // already charges, and a full recharge would bill it to the client again.
+        // Any fuel or tolls on it are recharged by choosing Extra + Partial.
+        const freelance = COST_CATEGORIES.find((c) => c.xeroCode === categoryCode)?.costType === 'freelancer_invoice';
         if (!intentTouched) {
-          if (flagged) {
+          if (flagged && !freelance) {
             setCostIntent('extra');
             setRechargeMode((m) => (m === 'none' ? 'full' : m));
           } else {
             setCostIntent(quotes.length > 0 ? 'quote_actual' : 'extra');
+            // Undo the running-costs default if it was applied before the
+            // category said "freelancer invoice".
+            if (flagged) setRechargeMode('none');
           }
         }
       } catch { /* leave defaults */ }
     })();
     return () => { cancelled = true; };
-  }, [linkedJobId, intentTouched, existing?.id]);
+  }, [linkedJobId, intentTouched, existing?.id, categoryCode]);
 
   // Confirm an AI-spotted job number → resolve it to a real job and link it.
   async function linkSuggestedJob() {
@@ -991,8 +1000,9 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
     onClose();
   }
 
-  async function handleSave(approveOnSave = false) {
+  async function handleSave(approveOnSave = false, unmatchedAnswer?: string) {
     setError('');
+    setUnmatchedAsk(null);
     if (vatMode === 'reclaim') {
       if (!amountNet || Number(amountNet) <= 0) { setError('Enter the No-VAT (net) amount, e.g. the excess.'); return; }
       if (!amountVat || Number(amountVat) <= 0) { setError('Enter the reclaimable VAT amount.'); return; }
@@ -1027,6 +1037,18 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
     if (approveOnSave && isFreelanceCategory && queryNote.trim()) {
       setError('This has a question for the freelancer. Save it without approving, or clear the question first.');
       return;
+    }
+    // No work ticked on a freelancer invoice: ask why, then save whatever the
+    // answer. Not asked again once answered "not in OP", nor for one already
+    // paid (history). Before the work list loads, the list's count stands in.
+    if (isFreelanceCategory && !unmatchedAnswer) {
+      const hasWork = flTicked.length > 0 || (!flTicksTouched && Number(existing?.work_item_count || 0) > 0);
+      const settledWhy = existing?.work_unmatched_reason === 'work_not_in_op'
+        || (existing?.work_unmatched_reason === 'person_not_in_op' && !flPerson);
+      if (!hasWork && !settledWhy && existing?.payment_status !== 'paid') {
+        setUnmatchedAsk({ approve: approveOnSave });
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -1126,15 +1148,18 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
       // of the freelancer category drops both.
       if (isFreelanceCategory) {
         payload.person_id = flPerson?.id ?? null;
+        // Why no work is ticked (cleared server-side once some is).
+        if (unmatchedAnswer) payload.work_unmatched_reason = unmatchedAnswer;
         // Re-sent whenever any are ticked, so an edited total re-shares them.
         if (flTicksTouched || flTicked.length > 0) {
           const ticked = flWork.filter((it) => flTicked.includes(it.key));
           const shares = shareInvoice(ticked, Number(amountGross) || 0);
           payload.work_items = ticked.map((it) => ({ key: it.key, amount: shares[it.key] ?? 0 }));
         }
-      } else if (existing?.person_id) {
+      } else if (existing?.person_id || existing?.work_unmatched_reason) {
         payload.person_id = null;
         payload.work_items = [];
+        payload.work_unmatched_reason = null;
       }
 
       // Lines ride in the SAME request as the header — the backend writes them
@@ -1824,14 +1849,18 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
                 <div>Costs logged against the quote: <strong>£{jobSummary.actuals.toFixed(2)}</strong>{jobSummary.extra > 0 && <span> · extras: <strong>£{jobSummary.extra.toFixed(2)}</strong></span>}</div>
                 {(jobRechargesRunningCosts || jobSummary.rechargeExpected.length > 0) && (
                   <div className="text-amber-700">
-                    ⛽ Expecting to recharge{jobSummary.rechargeExpected.length > 0 ? <>: <strong>{jobSummary.rechargeExpected.join(', ')}</strong></> : ' running costs'} — billed at actual + 20%. This receipt is likely one of them (set to <strong>Extra</strong>).
+                    ⛽ Expecting to recharge{jobSummary.rechargeExpected.length > 0 ? <>: <strong>{jobSummary.rechargeExpected.join(', ')}</strong></> : ' running costs'} — billed at actual + 20%.{' '}
+                    {isFreelanceCategory
+                      ? <>If this invoice includes any of them, choose <strong>Extra</strong> and recharge that part (Partial).</>
+                      : <>This receipt is likely one of them{costIntent === 'extra' ? <> (set to <strong>Extra</strong>)</> : null}.</>}
                   </div>
                 )}
                 <div className="text-gray-400">Use this to decide if this cost is covered by the quote (Part of the quote) or above-and-beyond (Extra).</div>
               </div>
             )}
 
-            {linkedJobId && jobRechargesRunningCosts && (
+            {/* Only while it's true: the default was applied and nobody has changed it. */}
+            {linkedJobId && jobRechargesRunningCosts && !intentTouched && !isFreelanceCategory && costIntent === 'extra' && rechargeMode !== 'none' && (
               <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
                 ⛽ This job recharges running costs — defaulted to <strong>Extra + recharge</strong>. Resolve it to the client at actual + 20% post-hire.
               </p>
@@ -2084,6 +2113,32 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
           </div>
           </div>
         </div>
+
+        {/* "No work ticked: why?" Asked on save, answered with one click, and
+            every answer but "Go back" saves (jon, Oct 2026). */}
+        {unmatchedAsk && (
+          <div className="fixed inset-0 z-[60] bg-black/30 flex items-center justify-center p-4" onClick={() => setUnmatchedAsk(null)}>
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-sm p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-base font-semibold text-gray-900">No work ticked</h3>
+              <p className="text-sm text-gray-600">
+                Ticking the work an invoice covers is how we check the price, and it&apos;s what the freelancer sees in their portal. Why isn&apos;t any ticked?
+              </p>
+              <div className="space-y-2">
+                <p className="text-xs text-gray-500">Save it anyway, because:</p>
+                {UNMATCHED_REASONS.filter((r) => r.code !== 'person_not_in_op' || !flPerson).map((r) => (
+                  <button key={r.code} type="button" onClick={() => handleSave(unmatchedAsk.approve, r.code)}
+                    className="w-full text-left px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50">
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+              <button type="button" onClick={() => setUnmatchedAsk(null)}
+                className="w-full px-3 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md">
+                {flPerson ? 'Go back and tick the work' : 'Go back and pick the freelancer'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
