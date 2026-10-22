@@ -25,6 +25,7 @@ import { query } from '../config/database';
 import { emailService } from './email-service';
 import { ukToday } from './uk-date';
 import { resolveActionBells } from './notification-resolve';
+import type { BellKey } from './bell-rules';
 
 const STAFF_URL = '/staff/admin';
 const ABSENCE_URL = '/staff/absence';
@@ -116,11 +117,16 @@ async function notify(
    * for them.
    */
   emailedDirectly = false,
+  /**
+   * What this bell ASKS for — its rule in bell-rules.ts retires it once that
+   * is done. Leave null for an FYI bell (done when read).
+   */
+  resolveKey: BellKey | null = null,
 ) {
   await query(
-    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CASE WHEN $9::boolean THEN NOW() END)`,
-    [userId, type, title, content, entityType, entityId, actionUrl, priority, emailedDirectly]
+    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CASE WHEN $9::boolean THEN NOW() END, $10)`,
+    [userId, type, title, content, entityType, entityId, actionUrl, priority, emailedDirectly, resolveKey]
   ).catch(e => console.error(`[staff-notifications] notify failed (${type}, ${entityType}):`, e));
 }
 

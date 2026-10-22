@@ -34,6 +34,7 @@
  */
 import { query } from '../config/database';
 import { emitToUser } from '../config/socket';
+import { BELL_RULES, type BellKey } from './bell-rules';
 
 /** Tell each affected person's open browsers which of their bells changed. */
 function tellOwners(rows: { id: string; user_id: string }[], done: boolean): void {
@@ -73,6 +74,57 @@ export async function resolveActionBells(opts: {
       `[notification-resolve] ${opts.type} bells on ${opts.entityType} ${opts.entityId} failed (non-fatal):`, e);
     return 0;
   }
+}
+
+/**
+ * Retire the keyed bells whose thing is done (bell-rules.ts holds the rule —
+ * this only applies it). With an `entityId`, just that record's: the instant
+ * call from the code that finished it. Without, every bell of the key: the
+ * sweep. Read AND done, for everyone the rule says is finished with it.
+ * Never throws.
+ */
+export async function retireDoneBells(key: BellKey, entityId?: string | null): Promise<number> {
+  const rule = BELL_RULES[key];
+  if (!rule) return 0;
+  try {
+    const params: unknown[] = [key];
+    let oneRecord = '';
+    if (entityId) {
+      params.push(entityId);
+      oneRecord = 'AND n.entity_id = $2';
+    }
+    const r = await query(
+      `UPDATE notifications n
+          SET is_read = true,
+              read_at = COALESCE(n.read_at, NOW()),
+              acknowledged_at = NOW()
+        WHERE n.resolve_key = $1
+          AND n.acknowledged_at IS NULL
+          ${oneRecord}
+          AND NOT (${(rule as { stillWaiting: string }).stillWaiting})
+        RETURNING n.id, n.user_id`,
+      params,
+    );
+    const rows = r.rows as { id: string; user_id: string }[];
+    tellOwners(rows, true);
+    return rows.length;
+  } catch (e) {
+    console.error(`[notification-resolve] retiring ${key} bells${entityId ? ` on ${entityId}` : ''} failed (non-fatal):`, e);
+    return 0;
+  }
+}
+
+/**
+ * Every key's rule, every open bell — the 5-minute sweep (config/scheduler.ts),
+ * also run just before the escalator so a finished thing is never emailed.
+ * One broken rule logs and the rest still run.
+ */
+export async function sweepDoneBells(): Promise<number> {
+  let retired = 0;
+  for (const key of Object.keys(BELL_RULES) as BellKey[]) {
+    retired += await retireDoneBells(key);
+  }
+  return retired;
 }
 
 /**
