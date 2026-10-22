@@ -109,6 +109,11 @@ Also: real Completed / Cancelled "View all" pages, "Add to Calendar" downloads a
 - Crew multi-day jobs: Complete is offered from the last day; a link can still reach the form earlier,
   and the form warns (warnings, not gates).
 - A "9am to 9am" one-off ticked as multi-day in the calculator has its last day as the next day.
+- The approval email's "Set up your portal login" button is `system_settings.freelancer_portal_url`
+  (Settings › Freelancer welcome links). It was seeded as `https://www.freelancer.oooshtours.co.uk`,
+  a host with no DNS record, so from 21 Sep to 22 Oct 2026 the button led to "This site can't be
+  reached". Migration 313 points it at `https://freelancer.oooshtours.co.uk/register`. The portal has
+  no `www.` address; never type one.
 
 ## 4. Decisions log (jon, Oct 2026)
 
