@@ -114,7 +114,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     // Chase status filter
-    if (chase_status === 'overdue') {
+    if (chase_status === 'due') {
+      // Overdue OR due today — what the dashboard's "Chases due" card counts.
+      conditions.push(`j.next_chase_date <= CURRENT_DATE`);
+    } else if (chase_status === 'overdue') {
       conditions.push(`j.next_chase_date < CURRENT_DATE`);
     } else if (chase_status === 'due_today') {
       conditions.push(`j.next_chase_date = CURRENT_DATE`);
@@ -308,7 +311,9 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       ORDER BY pipeline_status
     `, [nonLeads]);
 
-    // Chase stats
+    // Chase stats — enquiry stages only, the same as the list below them. The
+    // previous blacklist counted dispatched / completed jobs still carrying an
+    // old chase date, so the header said "29 overdue" over an empty list.
     const chaseStats = await query(`
       SELECT
         COUNT(*) FILTER (WHERE next_chase_date < CURRENT_DATE) as overdue,
@@ -317,7 +322,7 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       FROM jobs
       WHERE is_deleted = false
         AND dismissed_at IS NULL
-        AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
+        AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
         AND next_chase_date IS NOT NULL
         AND NOT (id = ANY($1::uuid[]))
     `, [nonLeads]);

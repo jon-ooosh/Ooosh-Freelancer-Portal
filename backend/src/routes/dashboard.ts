@@ -432,7 +432,15 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
             OR (return_date IS NOT NULL AND return_date::date = CURRENT_DATE + 1)
           )) as coming_back_count,
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (4, 5) AND return_date IS NOT NULL AND return_date::date < CURRENT_DATE) as overdue_count,
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status NOT IN ('confirmed', 'lost') AND next_chase_date IS NOT NULL AND next_chase_date <= CURRENT_DATE) as chases_due_count,
+          -- Chases due: the same rule as the Pipeline list the card links to
+          -- (/pipeline?chase=due) — enquiry stages only, dismissed hidden, one
+          -- per quote group, overdue or due today. The previous blacklist
+          -- counted dispatched and completed jobs still carrying an old chase
+          -- date (29 of 33 on 22 Oct 2026), which the list never showed.
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+             AND dismissed_at IS NULL
+             AND next_chase_date IS NOT NULL AND next_chase_date <= CURRENT_DATE
+             AND NOT (id = ANY($1::uuid[]))) as chases_due_count,
           -- Pre-confirmation statuses only. Whitelist matches the Pipeline page
           -- columns (Enquiries / Chasing-derived / Provisional / Paused) and the
           -- chase-model definition in CLAUDE.md. The previous blacklist swept in
