@@ -7,20 +7,22 @@ touching completion, the chaser, Earnings, the guides or anything freelancer-fac
 
 ## 0. Start here (next session)
 
-**State on 21 Oct 2026:** PR 1 (completion fixes), the payment-terms PR, PR 2 (security) and PR 3 (the
+**State on 22 Oct 2026:** PR 1 (completion fixes), the payment-terms PR, PR 2 (security) and PR 3 (the
 portal reskin) are merged and deployed. The "How to invoice Ooosh Tours Ltd" Google Doc and its copy in
-the portal's Resources are updated (§4). Past work on the Completed page (§10) and PR 4, the van screens
-in the portal look (§11), are merged and deployed. PR 5, portal 2FA (§7), is built and **ships OFF**:
-jon sets `portal_2fa_enforced_from` in Settings once the rest of the fix-up work is out, after telling
-freelancers in the WhatsApp group (there is no banner). Nothing is half-built.
+the portal's Resources are updated (§4). Past work on the Completed page (§10), PR 4 (the van screens in
+the portal look, §11) and PR 5 (portal 2FA, §7) are merged and deployed; 2FA **ships OFF** until jon
+sets `portal_2fa_enforced_from` in Settings, after telling freelancers in the WhatsApp group (there is no
+banner). Earnings part 1, freelancer invoices linked in Costs (§5.1), is built. Nothing is half-built.
 
 **Do next, in this order** (one PR each; jon merges and deploys, then the next starts from fresh main):
 
-1. **Earnings (§5).** The data plan, the backfill jon wants, and the read-only SQL to run first. The
-   Completed page (§10) already lists every kind of work per month; Earnings adds the money view.
-2. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
+1. **jon links the past invoices** (Costs › "Link past freelancer invoices", §5.1), then a tiny PR
+   **deletes that one-off page** (§5.1 lists its five pieces).
+2. **Earnings tab in the portal (§5.2).** Reads what §5.1 links: invoices with their status and dates,
+   and finished work marked "To invoice" or "Invoiced".
+3. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
    shop-till guide (`docs/guides/shop-till/`) in the new look at the same time.
-3. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+4. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -38,7 +40,9 @@ them from the recipe there.
 | – | Past work on the Completed page (§10) | merged 21 Oct 2026 |
 | 4 | Van screens reskin, freelancer scope only (§11) | merged 21 Oct 2026 |
 | 5 | Portal 2FA (§7) | built 21 Oct 2026, ships off |
-| 6 | Earnings (§5) | next |
+| 6a | Earnings part 1: freelancer invoices linked in Costs (§5.1) | built 22 Oct 2026 |
+| – | Calculator: setup premium charged to the client, crew fuel once (`PLATFORM-CONVENTIONS.md`) | merged 22 Oct 2026 |
+| 6b | Earnings part 2: the portal tab (§5.2) | next, after jon links the past invoices |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
 | – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | any time |
 
@@ -170,6 +174,57 @@ SELECT COUNT(*) FROM cost_allocations WHERE quote_assignment_id IS NOT NULL;
 
 The design mock (`docs/design/freelancer-portal-refresh/screenshots/10-earnings.png`): month / tax-year
 switch, a total, a Paid / Invoiced / To invoice bar, "N jobs need an invoice", a list with status chips.
+
+### 5.1 Part 1, what shipped (22 Oct 2026): freelancer invoices linked in Costs
+
+**jon's calls (22 Oct):** freelancers keep emailing their invoice (PDF) to whoever booked them; the office
+links it in OP and the freelancer sees it in their portal. Uploading through the portal is **parked**
+(it would rarely be used, and an email to a person doesn't vanish the way a portal upload can). Fees are
+per JOB divided by the people on it, which is what `personalFee()` already does: no per-person rate card,
+a role paid differently is its own crewed job. Expenses are estimates: within the larger of £10 or 25% of
+the estimate is "about right" (`system_settings.freelancer_invoice_tolerance_gbp` / `_pct`). A query sends
+no email (the office contacts the freelancer anyway). Who can query: managers and admins, and whoever
+uploaded it. The "invoice received" ticks on yard days and crew bookings were left as they are (jon).
+Backfill from 6 April 2026 only (OP went live around then): 93 freelancer invoices, 37 letterheads, 19 of
+which match one freelancer by name.
+
+**What it does** (migration 306):
+- `costs.person_id` (whose invoice) and `cost_work_items` (which work: one row per booking / sitter
+  evening / yard day, with this invoice's share). Kept apart from `cost_allocations`, so job costs on the
+  Money tab (`GET /costs/by-job`) are unchanged; the job split stays by hand ("covers several jobs").
+- The upload form, for "Freelance crew invoices" (320): **Whose invoice?** filled in from the letterhead
+  (`services/freelancer-invoice-person.ts`: remembered from an earlier linked invoice, then an earlier
+  remittance address, then one freelancer by name, compared as supplier matching does) and **Which work
+  does it cover?** (`services/freelancer-work.ts`: finished work in the last 12 months, newest first, each
+  with the booked fee and the quote's expense estimate; a multi-drop run is one item at its combined fee;
+  work already on another invoice behind a tick box). Staff only tick: each item's share of the invoice is
+  in proportion to what was booked (`shareInvoice()`), re-shared on every save. Booked vs invoiced is
+  compared before VAT and never blocks. Ticked work all on one job links that job if none is picked.
+- `services/freelancer-fees.ts` `personalFee()` is now THE fee rule, shared by the portal's "Your fee"
+  and the work list (it moved out of `routes/portal.ts` unchanged).
+- **Query** (`POST/DELETE /costs/:id/query`): a note; "Queried" pill and an amber Query / Edit query
+  button beside Verify / Approve on the Bills to pay tab, and a "Question for the freelancer?" box on the
+  form. Approving clears it; refused once approved. Audit-logged (`cost_queried`, `cost_query_cleared`).
+- Remittance goes to the linked freelancer first (`source: 'freelancer_linked'`); sending one to an
+  address that names exactly one freelancer links an unlinked freelancer invoice.
+- The Costs list shows the freelancer under the supplier ("Linked · 3 jobs" when the letterhead is their
+  own name).
+
+**ONE-OFF, delete once used:** Costs › "Link past freelancer invoices" (`/money/costs/link-freelancers`):
+unlinked freelancer invoices since 6 April 2026 grouped by letterhead, each with a suggestion and one
+"Link to …" button; then the unpaid ones with no work ticked, opened in the edit form. Five pieces to
+delete: `backend/src/routes/freelancer-invoice-backlog.ts`, its mount in `routes/index.ts`,
+`frontend/src/pages/LinkFreelancerInvoicesPage.tsx`, its route in `App.tsx`, and the button on
+`CostsPage.tsx`.
+
+### 5.2 Part 2, next: the Earnings tab
+
+Reads only what §5.1 links. Invoices: the freelancer's own invoice number, date, amount, the work it
+covers, and a status with its date: With us (`verified`), Queried (with the note), Approved, paid Fri X
+(`resolveDueDate()`), Paying on X (a future `paid_value_date`), Paid X. Work: finished work marked "To
+invoice" or "Invoiced (#FL-101)"; work before 6 April 2026 carries no label. Tax year (6 Apr to 5 Apr) or
+month view, totals Paid / Approved / With us / To invoice, and "Email your invoice (PDF) to whoever booked
+you". Uses `listFreelancerWork()` and `personalFee()` so the figures match Costs and the job pages.
 
 ## 6. Security quick fixes (PR 2)
 

@@ -1234,6 +1234,15 @@ export interface Cost {
   /** Remittance advice sent to the payee for this cost (audit + "sent" pip). */
   remittance_sent_at?: string | null;
   remittance_email?: string | null;
+  /** The freelancer a freelancer invoice is from (FREELANCER-PORTAL-SPEC §5). */
+  person_id?: string | null;
+  person_name?: string | null;
+  /** How many pieces of their work it covers (list only). */
+  work_item_count?: number;
+  /** "Queried": the office has a question about this freelancer invoice. Approving clears it. */
+  queried_at?: string | null;
+  queried_by?: string | null;
+  query_note?: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
   /**

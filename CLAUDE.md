@@ -285,8 +285,9 @@ completion fixes, payment terms, security fixes, the Claude Design reskin of the
 `tailwind.config.js` `hf`/`kind`, shared pieces in `src/components/ui.tsx`), past work on the Completed page
 (every kind, one window: `src/lib/history.ts`), the van screens in the portal look for freelancers only
 (`frontend/src/modules/vehicles/components/freelancer/`, colours from `shared/design/freelancer-tokens.cjs`),
-portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1).
-Next: Earnings (plan + backfill in §5), the four guides.
+portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1),
+freelancer invoices linked to the freelancer and their work in Costs (§5.1; a ONE-OFF backfill page to delete once used).
+Next: the Earnings tab in the portal (§5.2), the four guides.
 **§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
@@ -312,7 +313,7 @@ the band / tour managers — not promoters or agents.
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
 that answers it — new bells should link that way, not at the bare page. **Exception:
-anything waiting for an approval** (leave, overtime, WFH requests) links to the bare page,
+anything waiting for an approval** (leave, overtime, WFH requests, day swaps) links to the bare page,
 because the "Waiting for you" panel there is the approvals surface; the person's Time
 off tab is not reliable for it (jon, Oct 2026 — see `staff-notifications.ts`). The page is
 manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
@@ -349,6 +350,8 @@ existing definition:
 | Who could we contact on this job? | `services/job-contact-candidates.ts` |
 | What's this van's hire status? | `services/fleet-hire-status-sync.ts` |
 | Is this job genuinely returning? | `services/hire-lifecycle.ts` |
+| What is a freelancer paid for a delivery / collection / crew booking? | `services/freelancer-fees.ts` `personalFee()` — their agreed rate, else the quote's fee (a crew's fee split evenly). The portal's "Your fee", Costs and Earnings all use it |
+| Which of a freelancer's work is finished, what was it booked at, which invoice covers it? | `services/freelancer-work.ts` (`listFreelancerWork()`, `cost_work_items`; a run is one item at its combined fee). Whose invoice: `services/freelancer-invoice-person.ts`. Not `cost_allocations` — job costs stay as they are (`FREELANCER-PORTAL-SPEC.md` §5.1) |
 | When does a quote's work end? When does the completion chaser start? | `services/quote-schedule.ts` — crew and People jobs by their LAST day (complete from it, chased 09:00 UK the day after), deliveries/collections from arrival time in UK time; shared by the chaser and the portal (`docs/FREELANCER-PORTAL-SPEC.md` §2) |
 | Has a quote's van leg actually happened (booked out / collected)? | `services/quote-completion.ts` `isVanLegDone()` — by direction; "out on hire" is NOT a collection. The portal's van-only "All Done" and `maybeCloseQuote` both ask it |
 | What happens to transport when a job dies? | `services/job-close-cascade.ts` |
@@ -359,7 +362,7 @@ existing definition:
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |
 | Sending any email | `services/email-service.ts` |
-| The thing a bell asked for is done — clear the bell | `services/notification-resolve.ts` `resolveActionBells()` — for everyone who got it, read AND done, by row AND bell type (the requester's outcome bell on the same row survives); open bells refresh live (`notifications_resolved`). Wired: leave requests (`retireLeaveRequestBells()`). Services push to browsers through `config/socket.ts` `emitToUser()` |
+| The thing a bell asked for is done — clear the bell | `services/notification-resolve.ts` `resolveActionBells()` — for everyone who got it, read AND done, by row AND bell type (the requester's outcome bell on the same row survives); open bells refresh live (`notifications_resolved`). Wired: leave requests (`retireLeaveRequestBells()`), day swaps (`retireSwapRequestBells()`). Services push to browsers through `config/socket.ts` `emitToUser()` |
 | Did this email actually arrive? Is this address bouncing / blocked by Resend? | `services/email-delivery.ts` (Resend webhook → `email_delivery_events`, `email_address_problems`); frontend `hooks/useEmailProblems.ts` + `components/EmailProblemFlag.tsx`. `email_log` 'sent' only means Resend accepted it |
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
@@ -418,6 +421,7 @@ existing definition:
 | When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` — the record's own `action_on` fires; the per-type intervals only pre-fill it (never `driver-validity.ts` — different people) |
 | What staff data has expired? | `services/staff-retention.ts` |
 | Is this person in the building / working from home? | `services/staff-day-status.ts` (`StaffDay.location`; requests in `services/staff-wfh.ts`) |
+| A staff member swapping a day ("work Friday instead of Saturday") — may they, ask, approve, what the calendar shows | `services/staff-swaps.ts` — two `staff_pattern_exceptions` legs sharing a `swap_group_id`, which is the swap's id; asked for on My Time, approved like holiday, nothing on the calendar until approved; no ledger (`docs/STAFF-CALENDAR-SPEC.md` §8.2) |
 | What goes in a person's calendar feed? | `services/staff-ical.ts` — own time only, never a colleague's |
 | Building or restyling a tab on the Staff page | `frontend/src/components/StaffCard.tsx` — Card, StatCard, InfoRow, Pill, button classes (the Time off look) |
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |

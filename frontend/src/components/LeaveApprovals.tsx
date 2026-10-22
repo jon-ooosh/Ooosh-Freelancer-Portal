@@ -73,25 +73,36 @@ interface WfhRequest {
   id: string; personName: string; startDate: string; endDate: string; requestNote: string | null;
 }
 
+/** A day swap (spec §8.2) — a day off, and a usual day off worked instead. */
+interface DaySwap {
+  id: string; personName: string; offDate: string; workDate: string;
+  startTime: string; endTime: string; minutes: number; usualMinutes: number | null;
+  requestNote: string | null;
+}
+
 export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }) {
   const [pending, setPending] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [wfh, setWfh] = useState<WfhRequest[]>([]);
+  const [swaps, setSwaps] = useState<DaySwap[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [leave, ot, wf] = await Promise.all([
+      const [leave, ot, wf, sw] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave?status=pending'),
         api.get<{ data: OvertimeEntry[] }>('/staff-calendar/overtime?status=pending'),
         api.get<{ data: WfhRequest[] }>('/staff-calendar/wfh?status=pending')
           .catch(() => ({ data: [] as WfhRequest[] })),
+        api.get<{ data: DaySwap[] }>('/staff-calendar/swaps?status=pending')
+          .catch(() => ({ data: [] as DaySwap[] })),
       ]);
       setPending(leave.data);
       setOvertime(ot.data);
       setWfh(wf.data ?? []);
+      setSwaps(sw.data ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load requests');
     } finally { setLoaded(true); }
@@ -115,9 +126,13 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
       {error && <div className="mb-2 p-2.5 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
 
       {pending.length === 0 ? (
-        <div className="p-3 rounded border border-dashed border-gray-300 text-sm text-gray-500">
-          Nothing waiting for a decision.
-        </div>
+        // Only when NOTHING is waiting — overtime, home days and swaps are
+        // listed below, and "nothing waiting" above them read as a contradiction.
+        pending.length + overtime.length + wfh.length + swaps.length === 0 && (
+          <div className="p-3 rounded border border-dashed border-gray-300 text-sm text-gray-500">
+            Nothing waiting for a decision.
+          </div>
+        )
       ) : (
         <div className="space-y-2">
           {pending.map(r => (
@@ -173,7 +188,84 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
           </div>
         </div>
       )}
+
+      {swaps.length > 0 && (
+        <div className="mt-4">
+          <div className="flex items-baseline gap-2 mb-2">
+            <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Day swaps</h3>
+            <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
+              {swaps.length} waiting
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 mb-2">
+            Costs no holiday — it moves which day they&apos;re in. The calendar changes only once you approve.
+            Check it for both days.
+          </p>
+          <div className="space-y-2">
+            {swaps.map(sw => (
+              <SwapApprovalRow key={sw.id} swap={sw}
+                onDecided={async () => { setError(null); await load(); onChanged?.(); }}
+                onError={setError} />
+            ))}
+          </div>
+        </div>
+      )}
     </section>
+  );
+}
+
+function SwapApprovalRow({ swap, onDecided, onError }: {
+  swap: DaySwap; onDecided: () => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function decide(action: 'approve' | 'decline') {
+    let body: Record<string, string> = {};
+    if (action === 'decline') {
+      const note = prompt(`Why are you declining ${swap.personName}'s swap?`);
+      if (!note?.trim()) return;
+      body = { note };
+    }
+    setBusy(true);
+    try {
+      await api.post(`/staff-calendar/swaps/${swap.id}/${action}`, body);
+      await onDecided();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally { setBusy(false); }
+  }
+
+  // Their hours on the new day against the day given up — the one thing the
+  // calendar cannot show.
+  const diff = swap.usualMinutes === null ? null : swap.minutes - swap.usualMinutes;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-white">
+      <div className="min-w-0">
+        <div className="font-medium text-gray-900">
+          {swap.personName}
+          <span className="ml-2 text-sm font-normal text-gray-600">
+            off {fmtDate(swap.offDate)} · working {fmtDate(swap.workDate)} {swap.startTime}–{swap.endTime} instead
+          </span>
+        </div>
+        <div className="text-xs text-gray-500">
+          {fmtH(swap.minutes)}
+          {diff !== null && (diff === 0
+            ? ' — the same as the day given up'
+            : ` — ${fmtH(Math.abs(diff))} ${diff > 0 ? 'longer' : 'shorter'} than the day given up`)}
+          {swap.requestNote && ` · ${swap.requestNote}`}
+        </div>
+      </div>
+      <div className="flex gap-2 shrink-0">
+        <button onClick={() => void decide('approve')} disabled={busy}
+          className="px-2.5 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+          Approve
+        </button>
+        <button onClick={() => void decide('decline')} disabled={busy}
+          className="px-2.5 py-1.5 text-sm rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50">
+          Decline
+        </button>
+      </div>
+    </div>
   );
 }
 

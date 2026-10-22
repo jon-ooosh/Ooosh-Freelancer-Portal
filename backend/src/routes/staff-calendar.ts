@@ -55,8 +55,12 @@ import {
   type AbsenceType, type CreateAbsenceInput,
 } from '../services/staff-absence';
 import {
-  notifyLeaveRequested, notifyOvertimeLogged, notifyDecision, notifyRtwDue,
+  notifyLeaveRequested, notifyOvertimeLogged, notifyDecision, notifyRtwDue, notifySwapRequested,
 } from '../services/staff-notifications';
+import {
+  checkSwap, createSwapRequest, decideSwap, withdrawSwap, cancelSwap, getSwap, listSwaps,
+  type DaySwap, type SwapStatus,
+} from '../services/staff-swaps';
 import {
   getBankHolidaysInRange, getBankHolidays, getBankHolidayPolicy,
 } from '../services/staff-settings';
@@ -1683,6 +1687,133 @@ router.post('/wfh/:id/cancel', adminOnly, async (req: AuthRequest, res: Response
     res.json({ data: w });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
+  }
+});
+
+// ── Swapping a day (spec §8.2) ──────────────────────────────────────────────
+//
+// "Work Friday instead of Saturday": asked for on My Time, approved like a
+// home day (services/staff-swaps.ts). The :id in every URL is the swap's
+// group id. Same "whose?" rule as /wfh: an admin with no personId gets
+// everybody's, `mine=1` gets your own. Nothing reaches the calendar until it
+// is approved.
+
+const SWAP_STATUSES: SwapStatus[] = ['pending', 'approved', 'declined', 'withdrawn', 'cancelled'];
+
+/** What the person is told — the routes pass ISO dates; notifyDecision words them. */
+function swapSummary(s: DaySwap): string {
+  return `off ${s.offDate}, working ${s.workDate}`;
+}
+
+router.get('/swaps', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    const requested = req.query.personId ? String(req.query.personId) : undefined;
+    const personId = req.query.mine === '1' ? (own ?? '__none__') : isAdmin(req) ? requested : (own ?? '__none__');
+    if (personId === '__none__') { res.json({ data: [] }); return; }
+    const status = SWAP_STATUSES.includes(String(req.query.status) as SwapStatus)
+      ? String(req.query.status) as SwapStatus : undefined;
+    res.json({
+      data: await listSwaps({
+        personId,
+        status,
+        from: DATE_RE.test(String(req.query.from)) ? String(req.query.from) : undefined,
+        to: DATE_RE.test(String(req.query.to)) ? String(req.query.to) : undefined,
+      }),
+    });
+  } catch (err) {
+    console.error('[staff-calendar] list swaps error:', err);
+    res.status(500).json({ error: 'Failed to load day swaps' });
+  }
+});
+
+// GET /api/staff-calendar/swaps/preview?offDate=&workDate=&personId=
+// For the form while it is filled in: what is wrong with the two days so far,
+// and the day given up's usual hours to pre-fill the day worked instead.
+router.get('/swaps/preview', async (req: AuthRequest, res: Response) => {
+  const offDate = req.query.offDate ? String(req.query.offDate) : null;
+  const workDate = req.query.workDate ? String(req.query.workDate) : null;
+  if ((offDate && !DATE_RE.test(offDate)) || (workDate && !DATE_RE.test(workDate))) {
+    res.status(400).json({ error: 'Dates must be YYYY-MM-DD' }); return;
+  }
+  const target = await resolveLeaveTarget(req, req.query.personId ? String(req.query.personId) : undefined);
+  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+  try {
+    res.json({ data: await checkSwap(target.personId, offDate, workDate) });
+  } catch (err) {
+    console.error('[staff-calendar] swap preview error:', err);
+    res.status(500).json({ error: 'Failed to check those days' });
+  }
+});
+
+router.post('/swaps', async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({
+    personId: z.string().uuid().optional(),
+    offDate: dateStr, workDate: dateStr,
+    startTime: timeStr, endTime: timeStr,
+    note: z.string().max(500).nullish(),
+  }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  const target = await resolveLeaveTarget(req, parsed.data.personId);
+  if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+  try {
+    const id = await createSwapRequest({
+      personId: target.personId, offDate: parsed.data.offDate, workDate: parsed.data.workDate,
+      startTime: parsed.data.startTime, endTime: parsed.data.endTime, note: parsed.data.note ?? null,
+    }, req.user!.id);
+    void notifySwapRequested(id);
+    res.status(201).json({ data: await getSwap(id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to ask for it' });
+  }
+});
+
+router.post('/swaps/:id/approve', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const s = await decideSwap(req.params.id as string, 'approved',
+      typeof req.body?.note === 'string' && req.body.note.trim() ? req.body.note.trim() : null, req.user!.id);
+    void notifyDecision({ personId: s.personId, kind: 'swap', outcome: 'approved',
+      summary: swapSummary(s), note: s.decisionNote, entityId: s.id });
+    res.json({ data: s });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to approve' });
+  }
+});
+
+router.post('/swaps/:id/decline', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ note: z.string().trim().min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required when declining' }); return; }
+  try {
+    const s = await decideSwap(req.params.id as string, 'declined', parsed.data.note, req.user!.id);
+    void notifyDecision({ personId: s.personId, kind: 'swap', outcome: 'declined',
+      summary: swapSummary(s), note: s.decisionNote, entityId: s.id });
+    res.json({ data: s });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to decline' });
+  }
+});
+
+router.post('/swaps/:id/withdraw', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    await withdrawSwap(req.params.id as string, own);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to withdraw' });
+  }
+});
+
+router.post('/swaps/:id/cancel', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ reason: z.string().trim().min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Say why it is being called off' }); return; }
+  try {
+    const s = await cancelSwap(req.params.id as string, parsed.data.reason, req.user!.id);
+    void notifyDecision({ personId: s.personId, kind: 'swap', outcome: 'cancelled',
+      summary: swapSummary(s), note: s.decisionNote, entityId: s.id });
+    res.json({ data: s });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to call it off' });
   }
 });
 

@@ -111,7 +111,8 @@ lit until each of them clicked it.
 
 - **Call it from the code that FINISHES the thing** (the service, not the route), for every way it can
   finish. Leave requests: approve, decline and withdraw in `staff-leave.ts` via `retireLeaveRequestBells()`,
-  which sits next to `notifyLeaveRequested()` so the bell's type and row are named in one place.
+  which sits next to `notifyLeaveRequested()` so the bell's type and row are named in one place. Day swaps
+  the same: `staff-swaps.ts` via `retireSwapRequestBells()` (entity `staff_pattern_swap`, the swap's group id).
 - **Match on row AND bell type.** The requester's outcome bell ("Time off approved", `system`) is on the
   SAME row as the approvers' `follow_up` bells — clearing by row alone would swallow it unseen.
 - **Everyone's copy, read AND done.** Once somebody has dealt with it nobody else is needed. The bell stays
@@ -119,7 +120,8 @@ lit until each of them clicked it.
 - **Never let it fail the action** — the helper never throws.
 - **Only for bells that ask for something.** An FYI bell ("Lock-up submitted — all clear") is done when read.
 - **Next: mentions** (jon's decisions): your reply or reaction in that thread marks YOUR mention bell done;
-  opening the timeline where it sits only marks it read. Overtime and WFH requests are the same shape as leave.
+  opening the timeline where it sits only marks it read. Overtime and WFH requests are the same shape as leave
+  (day swaps are already wired).
 
 ## Timelines & threads
 
