@@ -42,6 +42,7 @@ import {
 } from '../services/job-groups';
 import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 import { forClientContext } from '../services/endorsements';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -709,6 +710,8 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       `UPDATE jobs SET ${updates.join(', ')} WHERE id = $${pIdx} RETURNING *`,
       updateParams
     );
+    // Out of the enquiry stages, or a new chase date: "Chase due" is done (bell-rules.ts).
+    await retireDoneBells('chase_due', jobId);
 
     // Resurrection: reverse the Lost / Cancelled requirement sweep when moving
     // OUT of lost/cancelled. Marker-gated so staff-cancelled rows stay cancelled.
@@ -970,6 +973,8 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
       `UPDATE jobs SET ${updates.join(', ')} WHERE id = $${pIdx} RETURNING *`,
       params
     );
+    // A rescheduled chase (ChaseModal) finishes "Chase due" (bell-rules.ts).
+    if ('next_chase_date' in fields) await retireDoneBells('chase_due', jobId);
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', current.rows[0], result.rows[0]);
 
@@ -3711,6 +3716,9 @@ router.post('/:id/dismiss', validate(dismissSchema), async (req: AuthRequest, re
     );
 
     await client.query('COMMIT');
+
+    // Dismissed: its "Chase due" bells are done (bell-rules.ts).
+    await retireDoneBells('chase_due', jobId);
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', job, updated.rows[0]);
 

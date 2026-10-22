@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { z } from 'zod';
-import { markMentionsSeen } from '../services/notification-resolve';
+import { markMentionsSeen, retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -390,6 +390,8 @@ router.post('/:id/acknowledge', async (req: AuthRequest, res: Response) => {
              AND status NOT IN ('done', 'cancelled')`,
           [notif.entity_id]
         );
+        // A reminder just marked done: the other copies of its bell are done too.
+        await retireDoneBells('requirement_due', notif.entity_id);
       } catch (cascadeErr) {
         console.warn('[Notifications] Reminder ack cascade failed:', cascadeErr);
       }
@@ -793,6 +795,8 @@ router.post('/:id/action', async (req: AuthRequest, res: Response) => {
          WHERE id = $1`,
         [jobId]
       );
+      // Everyone's "Chase due" copies on the job, not just this one (bell-rules.ts).
+      await retireDoneBells('chase_due', jobId);
       summary = `Logged chase on job (interaction ${interactionResult.rows[0].id}).`;
     }
 
@@ -814,6 +818,8 @@ router.post('/:id/action', async (req: AuthRequest, res: Response) => {
       if (updateResult.rows.length === 0) {
         return res.status(409).json({ error: 'Requirement already done or not found' });
       }
+      // Everyone's copies of its "Overdue" / "Reminder" bell (bell-rules.ts).
+      await retireDoneBells('requirement_due', requirementId);
       summary = 'Requirement marked done.';
     }
 

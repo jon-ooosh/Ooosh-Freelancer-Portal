@@ -20,6 +20,7 @@ import { defaultFormData } from './claim-form-fields';
 import { estimateVehicleValue } from './vehicle-value';
 import { ukDatePlus } from './uk-date';
 import type { BellKey } from './bell-rules';
+import { retireDoneBells } from './notification-resolve';
 
 type DbClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
@@ -85,6 +86,18 @@ export function nextWorkingDay(): string {
     if (dow !== 0 && dow !== 6) return s;
   }
   return ukDatePlus(1);
+}
+
+/**
+ * A claim's bells that ask for something — "Claim form submitted", "Check in
+ * on claim", "Client form not coming back" — retired once their thing is done
+ * (bell-rules.ts). Call it after anything that moves the stage, the check
+ * date or the client chase; the 5-minute sweep catches any path that doesn't.
+ */
+export async function retireClaimBells(claimId: string): Promise<void> {
+  await retireDoneBells('claim_review', claimId);
+  await retireDoneBells('claim_check_in', claimId);
+  await retireDoneBells('claim_form_chase', claimId);
 }
 
 /**
@@ -310,7 +323,8 @@ export async function runClaimCheckReminders(): Promise<{ belled: number }> {
       c.id, null,
       `Check in on claim — ${claimLabel(c)}`,
       `${STAGE_LABEL[c.stage as ClaimStage] || c.stage}; last update ${days === 0 ? 'today' : `${days} day${days === 1 ? '' : 's'} ago`}.`,
-      { onlyUserIds: recipients },
+      // Retires once the check date moves or the claim closes (bell-rules.ts).
+      { onlyUserIds: recipients, resolveKey: 'claim_check_in' },
     );
     belled++;
   }

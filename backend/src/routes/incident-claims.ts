@@ -27,7 +27,7 @@ import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r
 import {
   CLAIM_STAGES, CLAIM_OUTCOMES, STAGE_LABEL, NOTIFIED_VIA, SHARED_BY_DEFAULT,
   createClaimFromIssue, logClaimEvent, notifyClaimFollowers, claimLabel, notifyClaimMentions,
-  nextWorkingDay, ukDatePlus, stageNeedsCheckDate, getDefaultClaimWatchers,
+  nextWorkingDay, ukDatePlus, stageNeedsCheckDate, getDefaultClaimWatchers, retireClaimBells,
 } from '../services/incident-claims';
 import {
   logIssueEvent, getDefaultVehicleIssueWatchers, notifyIssueRecipients,
@@ -39,7 +39,6 @@ import { getRouteForReg } from '../services/traccar-server';
 import { incidentWindow, saveGpsTrace, csvToPoints, MAX_WINDOW_HOURS } from '../services/claim-gps';
 import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
-import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 
@@ -550,6 +549,8 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
     if (sets.length === 0) { res.status(400).json({ error: 'Nothing to update' }); return; }
     sets.push('updated_at = NOW()');
     await query(`UPDATE incident_claims SET ${sets.join(', ')} WHERE id = $1`, params);
+    // A moved check date finishes its "Check in on claim" bell (bell-rules.ts).
+    if ('next_check_on' in body) await retireClaimBells(id);
 
     // Timeline — one event per meaningful change.
     if ('notified_via' in body && (body.notified_via ?? null) !== before.notified_via) {
@@ -632,6 +633,7 @@ router.post('/:id/updates', validate(updateSchema), async (req: AuthRequest, res
     if (mentioned.length) await notifyClaimMentions(id, req.user!.id, mentioned, body.note);
     if (body.next_check_on !== undefined) {
       await query(`UPDATE incident_claims SET next_check_on = $2::date, updated_at = NOW() WHERE id = $1`, [id, body.next_check_on]);
+      await retireClaimBells(id);
       await logClaimEvent(id, req.user!.id, 'next_check',
         body.next_check_on ? `Next check ${ukd(body.next_check_on)}` : 'Next check date cleared',
         { to: body.next_check_on });
@@ -745,8 +747,9 @@ router.post('/:id/stage', validate(stageSchema), async (req: AuthRequest, res: R
       if (body.stage === 'with_broker' && !c.broker_sent_at) sets.push('broker_sent_at = NOW()');
     }
     await query(`UPDATE incident_claims SET ${sets.join(', ')} WHERE id = $1`, params);
-    // Moved on from Submitted — the "Claim form submitted" bells are done (bell-rules.ts).
-    await retireDoneBells('claim_review', id);
+    // Moved on from Submitted — the "Claim form submitted" bells are done; a
+    // closed case or a new check date finishes the others (bell-rules.ts).
+    await retireClaimBells(id);
 
     const label = STAGE_LABEL[body.stage];
     await logClaimEvent(id, req.user!.id, 'stage_change',
@@ -1123,7 +1126,7 @@ router.post('/:id/send-to-broker', authorize(...MANAGER_ROLES), validate(sendSch
        WHERE id = $1`,
       [id, pdfKey, ukDatePlus(14)],
     );
-    await retireDoneBells('claim_review', id);
+    await retireClaimBells(id);
     await logClaimEvent(id, req.user!.id, 'broker_sent',
       `Sent to ${to}${attached.length ? ` with ${attached.length} document${attached.length === 1 ? '' : 's'}` : ''}${tooBig.length ? ` (${tooBig.length} too large to attach)` : ''}`,
       { pdf_key: pdfKey, from_stage: c.stage, attached, too_big: tooBig });
@@ -1215,6 +1218,8 @@ router.post('/:id/links', validate(sendLinksSchema), async (req: AuthRequest, re
           WHERE id = $1`,
         [id, ukDatePlus(3), fresh],
       );
+      // A restarted chase answers "Client form not coming back" (bell-rules.ts).
+      await retireClaimBells(id);
       await logClaimEvent(id, req.user!.id, 'form_sent', `Form sent to ${sent.map((r) => r.name).join(', ')}`,
         { recipients: sent.map((r) => r.email) });
       if (c.stage === 'open') {
@@ -1331,6 +1336,7 @@ router.post('/:id/chase/pause', validate(z.object({ reason: z.string().trim().mi
       [id, reason, ukDatePlus(7)],
     );
     if (!r.rowCount) { res.status(409).json({ error: 'Chasing is not running on this case' }); return; }
+    await retireClaimBells(id);
     await logClaimEvent(id, req.user!.id, 'chase_paused', `Reminders paused — ${reason}`);
     res.json({ data: { ok: true } });
   } catch (err) {
@@ -1351,6 +1357,7 @@ router.post('/:id/chase/restart', validate(z.object({ reason: z.string().trim().
       [id],
     );
     if (!r.rowCount) { res.status(409).json({ error: 'The form is not out on this case' }); return; }
+    await retireClaimBells(id);
     await logClaimEvent(id, req.user!.id, 'chase_restarted', `Reminders restarted from 1${reason ? ` — ${reason}` : ''}`);
     res.json({ data: { ok: true } });
   } catch (err) {

@@ -88,8 +88,10 @@ async function escalate(job: { id: string; hh_job_number: number | null; job_nam
   for (const r of recipients) {
     try {
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, 'normal')`,
+        // Asks for a human chase: retires once the chase date moves on or the
+        // job leaves the enquiry stages (bell-rules.ts chase_due).
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, 'normal', 'chase_due')`,
         [
           r.id,
           `Auto-chase stopped: ${label}`,

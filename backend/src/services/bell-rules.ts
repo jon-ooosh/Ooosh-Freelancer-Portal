@@ -35,6 +35,9 @@
 
 import { SUPERSEDING_TYPES } from './staff-doc-cycles';
 import { overtimeStillBankedSql } from './staff-balance';
+import { COMPLIANCE_DEFAULTS } from './compliance-checker';
+import { holdOccupiesSql } from './assignment-overlap';
+import { RECEIPT_GRACE_DAYS } from './cost-receipt-chaser';
 
 export interface BellRule {
   /** One line: what the bell asks for, and when that is done. */
@@ -60,6 +63,33 @@ const PROBLEM_OPEN = `NOT IN ('resolved','written_off','cancelled')`;
  */
 export const HOLD_UNTIL_LEAD_DAYS = 3;   // services/holding-reminders.ts
 export const PIN_ROTATE_DAYS = 91;       // services/kiosk-till.ts
+export const CLAIM_CHASE_ESCALATED = 5;  // services/claim-chase.ts CHASE_ESCALATED
+
+/**
+ * A van compliance setting, read the way compliance-checker.ts
+ * getComplianceSettings() reads it: `Number(value) || default` — so a blank,
+ * zero or non-number setting falls back to the default.
+ */
+function complianceSetting(key: keyof typeof COMPLIANCE_DEFAULTS): string {
+  return `COALESCE((SELECT CASE WHEN btrim(s.value #>> '{}') ~ '^-?[0-9]+([.][0-9]+)?$'
+                                THEN NULLIF(btrim(s.value #>> '{}')::numeric, 0) END
+                      FROM vehicle_compliance_settings s WHERE s.key = '${key}'), ${COMPLIANCE_DEFAULTS[key]})`;
+}
+
+/**
+ * The checker's own test, item by item (runComplianceCheck). It must never be
+ * NARROWER than the checker, or a bell would retire while the checker still
+ * calls the item due. Same vans: active and not old/sold.
+ */
+const COMPLIANCE_VAN = `v.id = n.entity_id AND v.is_active = true AND v.fleet_group <> 'old_sold'`;
+/** A service booked in for today or later quiets Service and Rossetts. */
+const SERVICE_NOT_BOOKED = `(v.service_booked_in_date IS NULL OR v.service_booked_in_date < CURRENT_DATE)`;
+function complianceDateDue(column: string, warningKey: keyof typeof COMPLIANCE_DEFAULTS): string {
+  return `EXISTS (SELECT 1 FROM fleet_vehicles v
+                   WHERE ${COMPLIANCE_VAN}
+                     AND v.${column} IS NOT NULL
+                     AND v.${column} - CURRENT_DATE <= ${complianceSetting(warningKey)})`;
+}
 
 /** "Is THIS the bell's user still the owner of the to-do?" */
 const TASK_STILL_MINE = `EXISTS (SELECT 1 FROM staff_tasks t JOIN users u ON u.id = n.user_id
@@ -76,6 +106,27 @@ export const BELL_RULES = {
     about: '"Claim form submitted" — a manager to review it; done once the claim moves on from Submitted',
     stillWaiting: `EXISTS (SELECT 1 FROM incident_claims c
                     WHERE c.id = n.entity_id AND c.stage = 'submitted' AND c.is_deleted = false)`,
+  },
+  claim_check_in: {
+    about: '"Check in on claim" — done once the claim\'s check date moves (or is cleared), or the claim is closed',
+    // runClaimCheckReminders stamps next_check_sent_for = next_check_on as it
+    // bells, so "the date it belled for is still the date" means not moved.
+    stillWaiting: `EXISTS (SELECT 1 FROM incident_claims c
+                    WHERE c.id = n.entity_id AND c.is_deleted = false AND c.stage <> 'closed'
+                      AND c.next_check_on IS NOT NULL
+                      AND c.next_check_on = c.next_check_sent_for
+                      AND c.next_check_on <= CURRENT_DATE)`,
+    // Which date a bell was about isn't on the bell: only the newest stays lit.
+    latestOnly: true,
+  },
+  claim_form_chase: {
+    about: '"Client form not coming back" — done once the form is submitted (the claim leaves Form out), or chasing is paused or restarted',
+    // The same test as the claim's Needs Attention "chasing has stopped".
+    stillWaiting: `EXISTS (SELECT 1 FROM incident_claims c
+                    WHERE c.id = n.entity_id AND c.is_deleted = false
+                      AND c.stage = 'form_out' AND c.chase_paused_at IS NULL
+                      AND c.chase_level >= ${CLAIM_CHASE_ESCALATED})`,
+    latestOnly: true,
   },
   sale_photos: {
     about: '"<reg> is for sale — check its sale photos" — done once the sale page has nothing to re-check (the same test as loadRecheck in vehicle-sales.ts) or the sale is over',
@@ -110,7 +161,91 @@ export const BELL_RULES = {
                       AND sib.pipeline_status IN ('new_enquiry','quoting','chasing','paused','provisional'))`,
   },
 
+  // ── Jobs: chases and requirements ────────────────────────────────────────
+  chase_due: {
+    about: '"Chase due", "Auto-chase stopped" — done once the job\'s chase date moves into the future (or is cleared), or the job leaves the enquiry stages',
+    // The 08:00 chase scanner's own test, less who it tells. NOT the "Chase
+    // reminder" bell New Enquiry sends at once with a future date — that one
+    // would read as done the moment it was sent, so it stays un-keyed.
+    stillWaiting: `EXISTS (SELECT 1 FROM jobs j
+                    WHERE j.id = n.entity_id AND j.is_deleted = false AND j.dismissed_at IS NULL
+                      AND j.pipeline_status IN ('new_enquiry','quoting','paused','provisional')
+                      AND j.next_chase_date IS NOT NULL
+                      AND j.next_chase_date <= CURRENT_DATE)`,
+    // Re-sent every day or two while it waits: only the newest stays lit.
+    latestOnly: true,
+  },
+  requirement_due: {
+    about: '"Overdue: <requirement> — <job>", "Reminder: <label>" — done once the requirement is done or cancelled (blocked still waits; a suspended one is not required), or its job is lost / cancelled without keep-after-close',
+    stillWaiting: `EXISTS (SELECT 1 FROM job_requirements jr
+                      JOIN jobs j ON j.id = jr.job_id AND j.is_deleted = false
+                    WHERE jr.id = n.entity_id
+                      AND jr.status NOT IN ('done','cancelled')
+                      AND COALESCE(jr.notes, '') NOT LIKE '%[Suspended:%'
+                      AND (COALESCE(j.pipeline_status, '') NOT IN ('lost','cancelled') OR jr.keep_after_close = true))`,
+    // Both scanners re-send daily while it waits: only the newest stays lit.
+    latestOnly: true,
+  },
+
+  // ── Vans: compliance (one key per item, so MOT never retires Tax) ─────────
+  compliance_mot: {
+    about: '"OVERDUE / Due soon: MOT — <reg>" — done once the MOT date is outside its warning window, or the van leaves the fleet',
+    stillWaiting: complianceDateDue('mot_due', 'mot_warning_days'),
+    // "Due soon", then "OVERDUE" daily: only the newest stays lit.
+    latestOnly: true,
+  },
+  compliance_tax: {
+    about: '"OVERDUE / Due soon: Tax — <reg>" — done once the tax date is outside its warning window, or the van leaves the fleet',
+    stillWaiting: complianceDateDue('tax_due', 'tax_warning_days'),
+    latestOnly: true,
+  },
+  compliance_insurance: {
+    about: '"OVERDUE / Due soon: Insurance — <reg>" — done once the insurance date is outside its warning window, or the van leaves the fleet',
+    stillWaiting: complianceDateDue('insurance_due', 'insurance_warning_days'),
+    latestOnly: true,
+  },
+  compliance_tfl: {
+    about: '"OVERDUE / Due soon: TFL — <reg>" — done once the TFL date is outside its warning window, or the van leaves the fleet',
+    stillWaiting: complianceDateDue('tfl_due', 'tfl_warning_days'),
+    latestOnly: true,
+  },
+  compliance_service: {
+    about: '"OVERDUE / Due soon: Service — <reg>" — done once the van is more than the warning mileage from its next service, a service is booked in, or the van leaves the fleet',
+    stillWaiting: `EXISTS (SELECT 1 FROM fleet_vehicles v
+                    WHERE ${COMPLIANCE_VAN} AND ${SERVICE_NOT_BOOKED}
+                      AND v.next_service_due > 0 AND v.current_mileage IS NOT NULL
+                      AND v.next_service_due - v.current_mileage <= ${complianceSetting('service_mileage_warning_miles')})`,
+    latestOnly: true,
+  },
+  compliance_rossetts: {
+    about: '"OVERDUE / Due soon: Rossetts Service — <reg>" — done once the next Rossetts service is outside its warning window, a service is booked in, or the van leaves the fleet',
+    // Postgres clamps a month end (29 Feb + 12 months = 28 Feb) where the
+    // checker's setMonth rolls on (1 Mar): never later, so never narrower.
+    stillWaiting: `EXISTS (SELECT 1 FROM fleet_vehicles v
+                    WHERE ${COMPLIANCE_VAN} AND ${SERVICE_NOT_BOOKED}
+                      AND v.rossetts_applicable = true
+                      AND COALESCE(v.last_rossetts_service_date, v.date_first_reg) IS NOT NULL
+                      AND CASE WHEN v.last_rossetts_service_date IS NOT NULL
+                               THEN (v.last_rossetts_service_date
+                                     + make_interval(months => trunc(${complianceSetting('rossetts_interval_months')})::int))::date
+                               ELSE (v.date_first_reg
+                                     + make_interval(years => trunc(${complianceSetting('rossetts_first_service_years')})::int))::date
+                          END - CURRENT_DATE <= ${complianceSetting('rossetts_warning_days')})`,
+    latestOnly: true,
+  },
+
   // ── Drivers ──────────────────────────────────────────────────────────────
+  mid_tour_driver: {
+    about: '"Mid-tour driver — <name>" — done once the driver is added to the van (booked out), the row is cancelled, or the job is finished',
+    // Add to Hire books THIS row out. A soft / confirmed hold on a finished
+    // job is dead (assignment-overlap.ts holdOccupiesSql) — nobody adds to it.
+    stillWaiting: `EXISTS (SELECT 1 FROM vehicle_hire_assignments a
+                      LEFT JOIN jobs j ON (a.job_id IS NOT NULL AND j.id = a.job_id)
+                                       OR (a.job_id IS NULL AND j.hh_job_number = a.hirehop_job_id)
+                    WHERE a.id = n.entity_id AND a.status IN ('soft','confirmed')
+                      AND ${holdOccupiesSql('a', 'j')})`,
+    latestOnly: true,
+  },
   referral_needed: {
     about: '"Referral needed" — done once the referral has an outcome (approved, waived or declined) or the driver is removed',
     stillWaiting: `EXISTS (SELECT 1 FROM drivers d
@@ -180,6 +315,26 @@ export const BELL_RULES = {
                                THEN btrim(ss.value)::date <= CURRENT_DATE - ${PIN_ROTATE_DAYS}
                                ELSE false END)`,
     latestOnly: true,
+  },
+  cot_receipts: {
+    about: '"N company-card purchases need a receipt" (a weekly digest) — done once none of the bell\'s person\'s card purchases is waiting for a receipt',
+    // runCostReceiptChase's own test, for the person it was sent to.
+    stillWaiting: `EXISTS (SELECT 1 FROM costs c
+                    WHERE c.uploaded_by = n.user_id
+                      AND c.payment_method = 'cot_card'
+                      AND c.receipt_r2_key IS NULL
+                      AND c.cost_date <= CURRENT_DATE - ${RECEIPT_GRACE_DAYS})`,
+    latestOnly: true,
+  },
+  email_undelivered: {
+    about: '"Email not delivered to <address>" (bounced / blocked / complained) — done once the address is marked fixed, or a later email to it is delivered',
+    // The address is the one in the title; email_address_problems holds it
+    // lower-cased, as raiseAlert writes it. A problem re-opened after the
+    // bell (first_seen_at later) is a new one with its own bell.
+    stillWaiting: `EXISTS (SELECT 1 FROM email_address_problems p
+                    WHERE p.email = substring(n.title from '^Email not delivered to ([^ ]+)')
+                      AND p.resolved_at IS NULL
+                      AND p.first_seen_at <= n.created_at)`,
   },
   overtime_cashout: {
     about: '"Overtime to pay in January payroll — <year> banked hours" — done once nobody employed has banked overtime left in that year (v_staff_balances, as getBalance reads it)',
@@ -285,6 +440,25 @@ export const BELL_RULES = {
     stillWaiting: `EXISTS (SELECT 1 FROM staff_documents d
                     WHERE d.id = n.entity_id AND d.approval_status = 'draft' AND d.is_active)`,
   },
+  staff_doc_escalation: {
+    about: '"Outstanding staff document" (to managers) — done once THAT person completes it, leaves, or the document is retired / made read-only',
+    // This bell points at the person's ASSIGNMENT, not the document, so one
+    // person completing doesn't clear the bells about the others. The scanner
+    // stamps escalated_at just before it bells: a later stamp is a newer rung.
+    stillWaiting: `EXISTS (SELECT 1 FROM staff_document_assignments a
+                      JOIN staff_documents d ON d.id = a.document_id
+                      JOIN users u ON u.id = a.user_id
+                    WHERE a.id = n.entity_id AND a.status = 'pending' AND u.is_active = true
+                      AND d.is_active = true AND d.completion_mode <> 'read_only'
+                      AND a.escalated_at IS NOT NULL AND a.escalated_at <= n.created_at)`,
+    latestOnly: true,
+  },
 } as const satisfies Record<string, BellRule>;
 
 export type BellKey = keyof typeof BELL_RULES;
+
+/** The six van compliance keys, one per item the daily checker raises. */
+export const COMPLIANCE_BELL_KEYS = [
+  'compliance_mot', 'compliance_tax', 'compliance_insurance',
+  'compliance_tfl', 'compliance_service', 'compliance_rossetts',
+] as const satisfies readonly BellKey[];

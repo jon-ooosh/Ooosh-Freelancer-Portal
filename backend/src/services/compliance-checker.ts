@@ -14,6 +14,9 @@
  */
 
 import { query } from '../config/database';
+// Type only: bell-rules.ts imports COMPLIANCE_DEFAULTS from here, so this
+// module must not load bell-rules / notification-resolve at runtime.
+import type { BellKey } from './bell-rules';
 
 interface ComplianceAlert {
   vehicleId: string;
@@ -43,6 +46,36 @@ interface ComplianceSettings {
   rossetts_warning_days: number;
 }
 
+/**
+ * The thresholds used when a setting is blank, zero or not a number. Also
+ * read by bell-rules.ts, whose compliance rules say when a bell is done by the
+ * same numbers.
+ */
+export const COMPLIANCE_DEFAULTS = {
+  mot_warning_days: 30,
+  mot_urgent_days: 7,
+  tax_warning_days: 30,
+  tax_urgent_days: 7,
+  insurance_warning_days: 30,
+  insurance_urgent_days: 7,
+  tfl_warning_days: 30,
+  tfl_urgent_days: 7,
+  service_mileage_warning_miles: 2000,
+  rossetts_first_service_years: 3,
+  rossetts_interval_months: 12,
+  rossetts_warning_days: 30,
+} as const;
+
+/** Each item's bell key (bell-rules.ts): it retires once the item is out of its window. */
+const ITEM_BELL_KEY: Record<string, BellKey> = {
+  'MOT': 'compliance_mot',
+  'Tax': 'compliance_tax',
+  'Insurance': 'compliance_insurance',
+  'TFL': 'compliance_tfl',
+  'Service': 'compliance_service',
+  'Rossetts Service': 'compliance_rossetts',
+};
+
 async function getComplianceSettings(): Promise<ComplianceSettings> {
   const result = await query('SELECT key, value FROM vehicle_compliance_settings');
   const settings: Record<string, unknown> = {};
@@ -55,19 +88,19 @@ async function getComplianceSettings(): Promise<ComplianceSettings> {
   }
 
   return {
-    mot_warning_days: Number(settings.mot_warning_days) || 30,
-    mot_urgent_days: Number(settings.mot_urgent_days) || 7,
-    tax_warning_days: Number(settings.tax_warning_days) || 30,
-    tax_urgent_days: Number(settings.tax_urgent_days) || 7,
-    insurance_warning_days: Number(settings.insurance_warning_days) || 30,
-    insurance_urgent_days: Number(settings.insurance_urgent_days) || 7,
-    tfl_warning_days: Number(settings.tfl_warning_days) || 30,
-    tfl_urgent_days: Number(settings.tfl_urgent_days) || 7,
+    mot_warning_days: Number(settings.mot_warning_days) || COMPLIANCE_DEFAULTS.mot_warning_days,
+    mot_urgent_days: Number(settings.mot_urgent_days) || COMPLIANCE_DEFAULTS.mot_urgent_days,
+    tax_warning_days: Number(settings.tax_warning_days) || COMPLIANCE_DEFAULTS.tax_warning_days,
+    tax_urgent_days: Number(settings.tax_urgent_days) || COMPLIANCE_DEFAULTS.tax_urgent_days,
+    insurance_warning_days: Number(settings.insurance_warning_days) || COMPLIANCE_DEFAULTS.insurance_warning_days,
+    insurance_urgent_days: Number(settings.insurance_urgent_days) || COMPLIANCE_DEFAULTS.insurance_urgent_days,
+    tfl_warning_days: Number(settings.tfl_warning_days) || COMPLIANCE_DEFAULTS.tfl_warning_days,
+    tfl_urgent_days: Number(settings.tfl_urgent_days) || COMPLIANCE_DEFAULTS.tfl_urgent_days,
     notification_roles: Array.isArray(settings.notification_roles) ? settings.notification_roles : ['admin', 'manager'],
-    service_mileage_warning_miles: Number(settings.service_mileage_warning_miles) || 2000,
-    rossetts_first_service_years: Number(settings.rossetts_first_service_years) || 3,
-    rossetts_interval_months: Number(settings.rossetts_interval_months) || 12,
-    rossetts_warning_days: Number(settings.rossetts_warning_days) || 30,
+    service_mileage_warning_miles: Number(settings.service_mileage_warning_miles) || COMPLIANCE_DEFAULTS.service_mileage_warning_miles,
+    rossetts_first_service_years: Number(settings.rossetts_first_service_years) || COMPLIANCE_DEFAULTS.rossetts_first_service_years,
+    rossetts_interval_months: Number(settings.rossetts_interval_months) || COMPLIANCE_DEFAULTS.rossetts_interval_months,
+    rossetts_warning_days: Number(settings.rossetts_warning_days) || COMPLIANCE_DEFAULTS.rossetts_warning_days,
   };
 }
 
@@ -254,8 +287,8 @@ export async function runComplianceCheck(createNotifications = true): Promise<{
       const contentDate = alert.date ? ` (${alert.date})` : '';
       for (const userId of targets.bellUserIds) {
         await query(
-          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
-           VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, $5, $6, NOW())`,
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at, resolve_key)
+           VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, $5, $6, NOW(), $7)`,
           [
             userId,
             `${urgencyLabel}: ${alert.item} — ${alert.reg}`,
@@ -263,6 +296,7 @@ export async function runComplianceCheck(createNotifications = true): Promise<{
             alert.vehicleId,
             alert.urgency === 'overdue' ? 'high' : 'normal',
             `/vehicles/fleet/${alert.vehicleId}`,
+            ITEM_BELL_KEY[alert.item] ?? null,
           ]
         );
         notificationsCreated++;

@@ -49,11 +49,18 @@ import { getSystemSetting } from './system-settings';
 import { getVehicleMot, refreshVehicleMot, DvsaError, explainDvsaError, markMotDueEdited, useDvsaMotDue, startRefreshAll, markAdvisory } from '../services/dvsa-mot';
 import { closeOpenSaleOnRemoval } from '../services/vehicle-sales';
 import { ukToday } from '../services/uk-date';
+import { retireDoneBells } from '../services/notification-resolve';
+import { COMPLIANCE_BELL_KEYS } from '../services/bell-rules';
 import {
   TrackerError, listTrackers, createTracker, updateTracker, fitTracker, removeTracker, getTrackerHistory,
 } from '../services/gps-trackers';
 
 const router = Router();
+
+/** A van's compliance bells (MOT, Tax, …) whose item is no longer due — or every van's, without an id. */
+async function retireComplianceBells(vehicleId?: string): Promise<void> {
+  for (const key of COMPLIANCE_BELL_KEYS) await retireDoneBells(key, vehicleId);
+}
 
 // Default low-tread alert threshold (mm). Staff-tweakable via the
 // `tyre_tread_amber_threshold` system_settings key. Keep in step with the
@@ -1397,6 +1404,10 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
       await closeOpenSaleOnRemoval(String(id), req.user?.id ?? null);
     }
 
+    // A renewed date, a booked-in service or a van leaving the fleet may
+    // finish its "Due soon / OVERDUE" bells.
+    await retireComplianceBells(String(id));
+
     res.json(mapDbRowToVehicle(result.rows[0], { includeFinance: financeAllowed }));
   } catch (error) {
     console.error('[vehicles/fleet] Update error:', error);
@@ -1462,6 +1473,9 @@ router.patch('/fleet/:id/current-mileage', async (req: FlexibleVehicleRequest, r
         JSON.stringify({ current_mileage: mileageVal, reason: reason || null }),
       ]
     ).catch(err => console.warn('[vehicles/current-mileage] audit insert failed:', err));
+
+    // A lower reading can take the van back out of its service window.
+    await retireDoneBells('compliance_service', String(id));
 
     res.json(mapDbRowToVehicle(result.rows[0], { includeFinance: canViewVehicleFinance(req.user?.role) }));
   } catch (error) {
@@ -1874,6 +1888,9 @@ router.post('/fleet/:vehicleId/service-log', async (req: AuthRequest, res: Respo
           [service_date, mileage, vehicleId]
         );
       }
+
+      // A renewed date or a new service threshold may finish its bell.
+      await retireComplianceBells(String(vehicleId));
     }
 
     res.status(201).json(mapServiceLogRow(record));
@@ -7509,6 +7526,9 @@ router.put('/compliance/settings', async (req: AuthRequest, res: Response) => {
         [key, JSON.stringify(value), userId]
       );
     }
+
+    // A shorter warning window can take items out of it on every van.
+    await retireComplianceBells();
 
     res.json({ ok: true });
   } catch (error) {

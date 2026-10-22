@@ -19,6 +19,7 @@ import { fetchCostLines, validateCostLines, replaceCostLines, headerVatFromLines
 import { listFreelancerWork, getInvoiceTolerance, planWorkLinks, writeWorkLinks, WorkLinkError, type WorkLinkRow } from '../services/freelancer-work';
 import { suggestInvoicePerson, personIdByEmail } from '../services/freelancer-invoice-person';
 import { fullDisplayName } from '../services/display-name';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -1252,6 +1253,11 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
     if (workRows) await writeWorkLinks(String(req.params.id), workRows, req.user!.id);
+    // A receipt attached (or the purchase changed) may finish someone's
+    // "company-card purchases need a receipt" bell.
+    if (['receipt_r2_key', 'payment_method', 'cost_date'].some((f) => data[f] !== undefined)) {
+      await retireDoneBells('cot_receipts');
+    }
 
     const updated = result.rows[0];
     // Same ordering rule as create: lines land before any push reads them.
@@ -1368,6 +1374,7 @@ router.delete('/:id', authorize(...VERIFY_ROLES), async (req: AuthRequest, res: 
   try {
     const result = await query('DELETE FROM costs WHERE id = $1 RETURNING id', [req.params.id]);
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+    await retireDoneBells('cot_receipts');
     res.json({ data: { id: req.params.id, deleted: true } });
   } catch (err) {
     console.error('[costs] delete error:', err);

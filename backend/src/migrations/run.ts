@@ -351,6 +351,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '309_retire_answered_mention_bells.sql',
         '310_notifications_resolve_key.sql',
         '311_tag_open_action_bells.sql',
+        '312_tag_open_action_bells_round2.sql',
       ];
 
       for (const migration of migrations) {
