@@ -795,7 +795,7 @@ Admin sets each person's pattern: per weekday, working or not, start/end/break. 
 cycles supported for alternating patterns. Changing a pattern closes the current row
 (`effective_to`) and opens a new one — it never edits in place.
 
-### 8.2 Self-swap — BUILT (Oct 2026, migration 306)
+### 8.2 Self-swap — BUILT (Oct 2026, migration 307)
 
 Staff request "work Wed instead of Tue this week". Two exception rows, one
 `swap_group_id`, one approval. No ledger involvement — a swap costs no allowance, it just
@@ -826,7 +826,7 @@ have the Saturday off"). `services/staff-swaps.ts` is THE definition.
   longer calls a working day.
 - **The group is the unit.** The group id is the swap's id in every URL, bell and email;
   approve / decline / withdraw / call off update both legs in one statement.
-- Migration 306 added `decided_by` / `decided_at` / `decision_note`, `usual_minutes` and the
+- Migration 307 added `decided_by` / `decided_at` / `decision_note`, `usual_minutes` and the
   `withdrawn` status to `staff_pattern_exceptions`. The admin-only `POST /exceptions`
   (auto-approved, no UI) is unchanged.
 
@@ -1433,7 +1433,7 @@ Where things are, for troubleshooting:
 | — | Staff page restyle: every person tab (Overview, Employment, Time off, Records, Reviews, Access) in the Time off look, on shared `components/StaffCard.tsx`; Employment's allowance-days box fixed | — |
 | **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
 | — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
-| **§8.2** | Swap a day — asked for on My Time, approved like holiday; nothing on the calendar until approved, then "Swap" on the day given up; changeable hours on the day worked, break copied, the day given up's minutes snapshotted; approval re-checks both days | 306 |
+| **§8.2** | Swap a day — asked for on My Time, approved like holiday; nothing on the calendar until approved, then "Swap" on the day given up; changeable hours on the day worked, break copied, the day given up's minutes snapshotted; approval re-checks both days | 307 |
 
 ### Decisions taken during the build that CHANGE this spec
 

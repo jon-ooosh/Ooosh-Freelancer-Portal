@@ -15,6 +15,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
+import FreelancerInvoiceLinks, { shareInvoice, type FreelancerWorkItem, type PickedPerson } from './costs/FreelancerInvoiceLinks';
 import { openR2Key } from '../lib/openAuthedFile';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { Cost, CostDocument, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
@@ -252,6 +253,18 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
     : existingRow?.job_name ? existingRow.job_name
     : existingRow?.job_id ? 'Linked job (no HireHop number)' : '';
   const [linkedJobId, setLinkedJobId] = useState<string | null>(existing?.job_id || presetJobId || null);
+  // A freelancer invoice: whose it is and which of their work it covers, and
+  // any question for them (FREELANCER-PORTAL-SPEC §5). Their portal's Earnings
+  // page reads these.
+  const [flPerson, setFlPerson] = useState<PickedPerson | null>(
+    existing?.person_id ? { id: existing.person_id, name: existing.person_name || 'Linked freelancer' } : null);
+  const [flPersonTouched, setFlPersonTouched] = useState(Boolean(existing?.person_id));
+  const [flTicked, setFlTicked] = useState<string[]>([]);
+  const [flTicksTouched, setFlTicksTouched] = useState(false);
+  const [flWork, setFlWork] = useState<FreelancerWorkItem[]>([]);
+  const [flJobNote, setFlJobNote] = useState('');
+  const existingQuery = existing?.queried_at ? (existing.query_note || '') : '';
+  const [queryNote, setQueryNote] = useState(existingQuery);
   const [linkedJobLabel, setLinkedJobLabel] = useState<string>(initialJobLabel);
   const [jobSearch, setJobSearch] = useState('');
   const [jobSuggestions, setJobSuggestions] = useState<JobSuggestion[]>([]);
@@ -856,6 +869,33 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
   // quote_actual cost is already billed via its quote.
   const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
 
+  // A freelancer invoice gets "Whose invoice? Which work?" (FREELANCER-PORTAL-SPEC §5).
+  const isFreelanceCategory = COST_CATEGORIES.find((c) => c.xeroCode === categoryCode)?.costType === 'freelancer_invoice';
+  const alreadyApproved = existing?.approval_state === 'approved' || existing?.approval_state === 'paid';
+
+  // Ticked work that is all on ONE job and no job picked yet: link the job too,
+  // as staff would have (Money tab, recharge). Several jobs: say how to split.
+  useEffect(() => {
+    if (!isFreelanceCategory || !flTicksTouched) { setFlJobNote(''); return; }
+    const jobs = new Map<string, string>();
+    for (const it of flWork) {
+      if (flTicked.includes(it.key) && it.jobId) {
+        jobs.set(it.jobId, it.hhJobNumber ? `#${it.hhJobNumber}${it.jobName ? ' – ' + it.jobName : ''}` : (it.jobName || 'Linked job'));
+      }
+    }
+    if (jobs.size === 1 && !linkedJobId) {
+      const [[id, label]] = [...jobs.entries()];
+      setLinkedJobId(id);
+      setLinkedJobLabel(label);
+      setFlJobNote('Job linked from the ticked work.');
+    } else if (jobs.size > 1) {
+      setFlJobNote(`The ticked work is on ${jobs.size} jobs. To spread this cost across them on each job's Money tab, ${
+        isEdit ? 'split it with ⑂ on the Costs list' : 'tick "This invoice covers several jobs" below'}.`);
+    } else {
+      setFlJobNote('');
+    }
+  }, [flTicked, flWork, flTicksTouched, isFreelanceCategory]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Service-record creation is offered when a vehicle is linked, the cost has no
   // service record yet, AND the category is a genuine servicing/repair event —
   // at create OR in a later edit (the "van link added after first save" hole,
@@ -982,6 +1022,12 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
       setError('Every line needs an amount greater than zero — remove the empty one or fill it in.');
       return;
     }
+    // A question for the freelancer is the alternative to approving (jon).
+    const wantsQueryChange = isFreelanceCategory && !alreadyApproved && queryNote.trim() !== existingQuery.trim();
+    if (approveOnSave && isFreelanceCategory && queryNote.trim()) {
+      setError('This has a question for the freelancer. Save it without approving, or clear the question first.');
+      return;
+    }
     setSaving(true);
     try {
       let receiptKey = existing?.receipt_r2_key ?? null;
@@ -1075,6 +1121,22 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
         vehicle_id: vehicleId || null,
       };
 
+      // Whose invoice and which work (FREELANCER-PORTAL-SPEC §5). The ticks are
+      // sent once touched, each with its share of the invoice; moving a cost OUT
+      // of the freelancer category drops both.
+      if (isFreelanceCategory) {
+        payload.person_id = flPerson?.id ?? null;
+        // Re-sent whenever any are ticked, so an edited total re-shares them.
+        if (flTicksTouched || flTicked.length > 0) {
+          const ticked = flWork.filter((it) => flTicked.includes(it.key));
+          const shares = shareInvoice(ticked, Number(amountGross) || 0);
+          payload.work_items = ticked.map((it) => ({ key: it.key, amount: shares[it.key] ?? 0 }));
+        }
+      } else if (existing?.person_id) {
+        payload.person_id = null;
+        payload.work_items = [];
+      }
+
       // Lines ride in the SAME request as the header — the backend writes them
       // before it fires the Xero push, so the bill is built from them. A
       // separate call would race that push onto a one-line bill. Only sent once
@@ -1122,10 +1184,24 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
           return;
         }
       }
-      if (splitAfterSave && !isEdit && onSavedAndSplit && res.data) {
-        onSavedAndSplit(res.data);
+      // The question for the freelancer, if it changed. After the save, never
+      // instead of it: a refusal here must not lose the cost (and a retry from
+      // an open create form would capture it twice), so it is reported, not thrown.
+      let saved = res.data;
+      if (wantsQueryChange && saved) {
+        try {
+          const q = queryNote.trim()
+            ? await api.post<{ data: Cost }>(`/costs/${saved.id}/query`, { note: queryNote.trim() })
+            : await api.delete<{ data: Cost }>(`/costs/${saved.id}/query`);
+          saved = { ...saved, ...q.data };
+        } catch (qErr) {
+          alert(`Saved, but the question for the freelancer wasn't recorded: ${qErr instanceof Error ? qErr.message : 'unknown error'}`);
+        }
+      }
+      if (splitAfterSave && !isEdit && onSavedAndSplit && saved) {
+        onSavedAndSplit(saved);
       } else {
-        onSaved(res.data);
+        onSaved(saved);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save cost');
@@ -1650,10 +1726,38 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
               <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400 border-b border-gray-100 pb-1">Where it goes</h3>
             </div>
 
+            {isFreelanceCategory && (
+              <FreelancerInvoiceLinks
+                costId={existing?.id ?? null}
+                supplierName={supplierName}
+                person={flPerson}
+                personTouched={flPersonTouched}
+                onPersonChange={(p, byUser) => { setFlPerson(p); if (byUser) setFlPersonTouched(true); }}
+                ticked={flTicked}
+                ticksTouched={flTicksTouched}
+                onTickedChange={(keys, byUser) => { setFlTicked(keys); if (byUser) setFlTicksTouched(true); }}
+                invoiceGross={Number(amountGross) || 0}
+                invoiceNet={Number(amountNet) || Number(amountGross) || 0}
+                onWorkLoaded={setFlWork}
+              />
+            )}
+
+            {isFreelanceCategory && !alreadyApproved && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Question for the freelancer? <span className="text-gray-400 font-normal">(optional: marks it Queried until it&apos;s approved)</span>
+                </label>
+                <textarea className={`${inputCls} min-h-[56px]`} value={queryNote} onChange={(e) => setQueryNote(e.target.value)}
+                  placeholder="e.g. The £80 train looks high. Can you send the ticket?" maxLength={2000} />
+                <p className="text-xs text-gray-400 mt-1">Shown on the invoice in Costs and, soon, in their portal. No email is sent: contact them yourself.</p>
+              </div>
+            )}
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Link to job <span className="text-gray-400 font-normal">(optional — needed to recharge)</span>
               </label>
+              {flJobNote && <p className="text-xs text-purple-700 mb-1.5">{flJobNote}</p>}
               {/* The split lives HERE, not in the footer: it's a statement about
                   which job(s) this invoice covers, so it belongs with the job
                   picker. The picker still seeds the first allocation line at the

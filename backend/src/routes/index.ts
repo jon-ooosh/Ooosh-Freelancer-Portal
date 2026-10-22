@@ -44,6 +44,7 @@ import mobileUploadRouter from './mobile-upload';
 import preHireBriefingRouter from './pre-hire-briefing';
 import fillGapRouter from './fill-gap';
 import costsRouter from './costs';
+import freelancerInvoiceBacklogRouter from './freelancer-invoice-backlog';
 import storageRouter from './storage';
 import holdingRouter from './holding';
 import pcnsRouter from './pcns';
@@ -102,6 +103,7 @@ router.use('/cancellations', cancellationsRouter);
 router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
 router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute). The old /issues platform tracker was retired Sep 2026; its tables remain.
 router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing receipt/cost workflow
+router.use('/freelancer-invoice-backlog', freelancerInvoiceBacklogRouter);  // ONE-OFF: link past freelancer invoices to their freelancer (FREELANCER-PORTAL-SPEC §5). Delete once used.
 router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)
 router.use('/claim-form', claimFormRouter);  // PUBLIC token-authenticated client claim form (Phase 2)

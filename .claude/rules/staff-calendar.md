@@ -2,7 +2,7 @@
 paths:
   - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-swaps,staff-ical,freelancer-days,freelancer-tasks}.ts"
   - "backend/src/routes/{staff-calendar,staff-calendar-feed,freelancer-tasks}.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,306}_*.sql"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,307}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
   - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel,FreelancerTasksPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
@@ -478,7 +478,7 @@ pattern's `at_home` tick (a regular day, admin-set) or an APPROVED
 
 ## Swapping a day is a pair of pattern exceptions, asked for like holiday
 
-Spec §8.2 (jon, Oct 2026, migration 306). `services/staff-swaps.ts` is THE
+Spec §8.2 (jon, Oct 2026, migration 307). `services/staff-swaps.ts` is THE
 definition. "Work Friday instead of Saturday" = two `staff_pattern_exceptions`
 rows sharing a `swap_group_id`: the day OFF and the day IN.
 
