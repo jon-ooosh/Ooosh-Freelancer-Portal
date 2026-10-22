@@ -259,8 +259,8 @@ greyed, "✓ Done", and open bells / the Inbox update over the socket (`notifica
     fixed or a later email arrives. A send failure or a soft bounce keeps its Done button.
 - [ ] **Deliberately not keyed** (they clear as before):
   - New Enquiry's "Chase reminder", an FYI sent at once: "You're down to chase … on <date>". Since
-    migration 313 the enquiry saves its "Alert: X" person (with delivery `bell`), so the real "Chase due"
-    follows on the day. Before that it was never saved, and X never got one. 313 filled it in for open
+    migration 314 the enquiry saves its "Alert: X" person (with delivery `bell`), so the real "Chase due"
+    follows on the day. Before that it was never saved, and X never got one. 314 filled it in for open
     enquiries whose chase alert nobody had set since.
   - Storage access requests (jon: not used).
   - The prep-flag and low-tread van bells.

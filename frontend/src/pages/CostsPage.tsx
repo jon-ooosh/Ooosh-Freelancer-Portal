@@ -523,19 +523,10 @@ export default function CostsPage() {
     <div className="p-4 sm:p-6 max-w-7xl mx-auto">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Costs</h1>
-        <div className="flex items-center gap-2">
-          {/* ONE-OFF (FREELANCER-PORTAL-SPEC §5): goes with LinkFreelancerInvoicesPage once used. */}
-          {isManager && (
-            <Link to="/money/costs/link-freelancers"
-              className="px-3 py-2 text-sm text-purple-700 border border-purple-200 hover:bg-purple-50 rounded-md">
-              Link past freelancer invoices
-            </Link>
-          )}
-          <button onClick={() => setShowCapture(true)}
-            className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md">
-            + Capture cost
-          </button>
-        </div>
+        <button onClick={() => setShowCapture(true)}
+          className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md">
+          + Capture cost
+        </button>
       </div>
 
       {/* Stat cards — these are the view switcher; there is no separate tab row. */}

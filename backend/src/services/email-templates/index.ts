@@ -263,8 +263,8 @@ const templates: Record<string, EmailTemplate> = {
       {{#if portalUrl}}
         <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
           <strong>Your freelancer portal.</strong> Set up your login and you'll be able to see the days we offer you,
-          accept or decline them, and keep your documents up to date. Choose <strong>Register</strong> and use this
-          email address ({{portalEmail}}) - we'll send you a code to confirm it's you.
+          accept or decline them, and keep your documents up to date. Sign up with this email address
+          ({{portalEmail}}) - we'll send you a code to confirm it's you.
         </p>
         <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
           <tr><td style="border-radius:8px;border:1px solid #7B5EA7;">

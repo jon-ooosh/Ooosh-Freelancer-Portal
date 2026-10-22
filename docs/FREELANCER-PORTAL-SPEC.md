@@ -12,17 +12,17 @@ portal reskin) are merged and deployed. The "How to invoice Ooosh Tours Ltd" Goo
 the portal's Resources are updated (§4). Past work on the Completed page (§10), PR 4 (the van screens in
 the portal look, §11) and PR 5 (portal 2FA, §7) are merged and deployed; 2FA **ships OFF** until jon
 sets `portal_2fa_enforced_from` in Settings, after telling freelancers in the WhatsApp group (there is no
-banner). Earnings part 1, freelancer invoices linked in Costs (§5.1), is built. Nothing is half-built.
+banner). Earnings part 1, freelancer invoices linked in Costs (§5.1), is merged and deployed, and jon
+linked the past invoices (one, Glenn Saggers, isn't in OP and stays unlinked); the one-off page is
+removed. Nothing is half-built.
 
 **Do next, in this order** (one PR each; jon merges and deploys, then the next starts from fresh main):
 
-1. **jon links the past invoices** (Costs › "Link past freelancer invoices", §5.1), then a tiny PR
-   **deletes that one-off page** (§5.1 lists its five pieces).
-2. **Earnings tab in the portal (§5.2).** Reads what §5.1 links: invoices with their status and dates,
+1. **Earnings tab in the portal (§5.2).** Reads what §5.1 links: invoices with their status and dates,
    and finished work marked "To invoice" or "Invoiced".
-3. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
+2. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
    shop-till guide (`docs/guides/shop-till/`) in the new look at the same time.
-4. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+3. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -40,9 +40,9 @@ them from the recipe there.
 | – | Past work on the Completed page (§10) | merged 21 Oct 2026 |
 | 4 | Van screens reskin, freelancer scope only (§11) | merged 21 Oct 2026 |
 | 5 | Portal 2FA (§7) | built 21 Oct 2026, ships off |
-| 6a | Earnings part 1: freelancer invoices linked in Costs (§5.1) | built 22 Oct 2026 |
+| 6a | Earnings part 1: freelancer invoices linked in Costs (§5.1) | merged 22 Oct 2026; past invoices linked, one-off page removed |
 | – | Calculator: setup premium charged to the client, crew fuel once (`PLATFORM-CONVENTIONS.md`) | merged 22 Oct 2026 |
-| 6b | Earnings part 2: the portal tab (§5.2) | next, after jon links the past invoices |
+| 6b | Earnings part 2: the portal tab (§5.2) | next |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
 | – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | any time |
 
@@ -109,6 +109,11 @@ Also: real Completed / Cancelled "View all" pages, "Add to Calendar" downloads a
 - Crew multi-day jobs: Complete is offered from the last day; a link can still reach the form earlier,
   and the form warns (warnings, not gates).
 - A "9am to 9am" one-off ticked as multi-day in the calculator has its last day as the next day.
+- The approval email's "Set up your portal login" button is `system_settings.freelancer_portal_url`
+  (Settings › Freelancer welcome links). It was seeded as `https://www.freelancer.oooshtours.co.uk`,
+  a host with no DNS record, so from 21 Sep to 22 Oct 2026 the button led to "This site can't be
+  reached". Migration 313 points it at `https://freelancer.oooshtours.co.uk/register`. The portal has
+  no `www.` address; never type one.
 
 ## 4. Decisions log (jon, Oct 2026)
 
@@ -210,12 +215,10 @@ which match one freelancer by name.
 - The Costs list shows the freelancer under the supplier ("Linked · 3 jobs" when the letterhead is their
   own name).
 
-**ONE-OFF, delete once used:** Costs › "Link past freelancer invoices" (`/money/costs/link-freelancers`):
-unlinked freelancer invoices since 6 April 2026 grouped by letterhead, each with a suggestion and one
-"Link to …" button; then the unpaid ones with no work ticked, opened in the edit form. Five pieces to
-delete: `backend/src/routes/freelancer-invoice-backlog.ts`, its mount in `routes/index.ts`,
-`frontend/src/pages/LinkFreelancerInvoicesPage.tsx`, its route in `App.tsx`, and the button on
-`CostsPage.tsx`.
+**The one-off backfill (used and removed, Oct 2026):** a Costs page grouped the unlinked freelancer
+invoices since 6 April 2026 by letterhead for jon to link once. Done; the page, its route and its
+backend router are gone. An invoice from someone not in OP (Glenn Saggers) stays unlinked: it is paid
+as normal and shows on nobody's Earnings. Anything missed is linked from the ordinary edit form.
 
 ### 5.2 Part 2, next: the Earnings tab
 
