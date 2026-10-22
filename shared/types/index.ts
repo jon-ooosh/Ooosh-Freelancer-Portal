@@ -1239,7 +1239,7 @@ export interface Cost {
   person_name?: string | null;
   /** How many pieces of their work it covers (list only). */
   work_item_count?: number;
-  /** Why it was saved with no work ticked: 'person_not_in_op' | 'work_not_in_op' | 'later' (migration 313). */
+  /** Why it was saved with no work ticked: 'person_not_in_op' | 'work_not_in_op' | 'later' (migration 315). */
   work_unmatched_reason?: string | null;
   /** "Queried": the office has a question about this freelancer invoice. Approving clears it. */
   queried_at?: string | null;

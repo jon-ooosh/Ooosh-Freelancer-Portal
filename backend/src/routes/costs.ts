@@ -167,7 +167,7 @@ const createSchema = z.object({
     key: z.string().trim().min(3).max(80),
     amount: money,
   })).max(200).optional(),
-  // Why it was saved with no work ticked (migration 313). Cleared server-side
+  // Why it was saved with no work ticked (migration 315). Cleared server-side
   // whenever work is ticked.
   work_unmatched_reason: z.enum(['person_not_in_op', 'work_not_in_op', 'later']).optional().nullable(),
 });
@@ -1084,7 +1084,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
         throw e;
       }
     }
-    // Work ticked: no "why not?" to keep (migration 313).
+    // Work ticked: no "why not?" to keep (migration 315).
     if (workRows?.length) data.work_unmatched_reason = null;
 
     const cols = ['uploaded_by', 'approval_state'];
@@ -1176,7 +1176,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         workRows = [];
       }
     }
-    // Work ticked: no "why not?" to keep (migration 313).
+    // Work ticked: no "why not?" to keep (migration 315).
     if (workRows?.length) data.work_unmatched_reason = null;
 
     // Amounts arrive as positive magnitudes from every client, so an edited

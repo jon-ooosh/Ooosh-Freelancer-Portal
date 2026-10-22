@@ -352,7 +352,9 @@ async function runMigrations(direction: 'up' | 'down') {
         '310_notifications_resolve_key.sql',
         '311_tag_open_action_bells.sql',
         '312_tag_open_action_bells_round2.sql',
-        '313_freelancer_invoice_unmatched_reason.sql',
+        '313_freelancer_portal_url_fix.sql',
+        '314_save_new_enquiry_chase_alert.sql',
+        '315_freelancer_invoice_unmatched_reason.sql',
       ];
 
       for (const migration of migrations) {
