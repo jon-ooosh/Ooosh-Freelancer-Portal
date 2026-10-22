@@ -1,0 +1,124 @@
+/*
+ * The freelancer guides' look (docs/guides/README.md): the portal's Oct 2026
+ * refresh. DM Sans, the plum accent and warm neutrals, the same colours as
+ * shared/design/freelancer-tokens.cjs. Phone-width pages (105 x 220 mm),
+ * because freelancers read these on their phones.
+ *
+ * DM Sans is bundled as a web font (an installed copy embeds as blurry Type 3
+ * glyphs). Licence: fonts/OFL.txt.
+ */
+@page { size: 105mm 220mm; margin: 0; }
+@font-face {
+  font-family: 'DM Sans Guide';
+  font-weight: 100 1000;
+  src: url('fonts/dm-sans-latin-wght-normal.woff2') format('woff2');
+}
+:root {
+  --accent: #A75390;
+  --link: #8c3f77;
+  --tint: #f6eaf2;
+  --tint-text: #7d3569;
+  --ink: #1d1a1c;
+  --body: #3d373a;
+  --muted: #6f6569;
+  --page: #f6f4f2;
+  --border: #e8e3df;
+  --amber-bg: #fff8e6;
+  --amber-border: #f2dca6;
+  --amber-text: #8a5a10;
+  --green-tint: #e4f3ea;
+  --green-text: #2a7049;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #fff; }
+body {
+  font-family: 'DM Sans Guide', sans-serif;
+  color: var(--body);
+  font-size: 14.5px;
+  line-height: 1.5;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+  counter-reset: page;
+}
+.page {
+  width: 105mm;
+  height: 220mm;
+  padding: 22px 18px 34px;
+  position: relative;
+  overflow: hidden;
+  page-break-after: always;
+  break-after: page;
+  counter-increment: page;
+}
+.page:last-child { page-break-after: auto; break-after: auto; }
+/* The footer text is --footer, set in each guide's own <style> (e.g. :root { --footer: "Getting started"; }). */
+.page::after {
+  content: var(--footer) "  ·  " counter(page);
+  position: absolute;
+  left: 18px; right: 18px; bottom: 12px;
+  font-size: 10px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.step { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
+.step .n {
+  flex: none;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  font-weight: 700; font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+}
+h2 { margin: 0; font-size: 21px; line-height: 1.2; color: var(--ink); font-weight: 700; letter-spacing: -0.01em; }
+h3 { margin: 14px 0 6px; font-size: 16px; color: var(--ink); font-weight: 700; }
+p { margin: 0 0 10px; }
+b { color: var(--ink); font-weight: 600; }
+ul, ol { margin: 0 0 10px; padding-left: 18px; }
+li { margin-bottom: 5px; }
+.shot {
+  display: block; width: 100%;
+  border: 1px solid var(--border); border-radius: 14px;
+  margin: 4px 0 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+.shot.narrow { width: 86%; margin-left: auto; margin-right: auto; }
+.tip {
+  background: var(--tint);
+  border-radius: 12px;
+  padding: 9px 12px;
+  margin: 0 0 12px;
+  font-size: 13.5px;
+  color: #5e2a50;
+}
+.tip b { color: #5e2a50; }
+.tip p:last-child { margin-bottom: 0; }
+.warn { background: var(--amber-bg); border: 1px solid var(--amber-border); color: var(--amber-text); }
+.warn b { color: var(--amber-text); }
+.chip {
+  display: inline-block; border-radius: 999px; padding: 0 8px;
+  font-size: 12px; font-weight: 600; line-height: 1.6;
+  background: #f3f0ed; color: var(--body); white-space: nowrap;
+}
+.chip.green { background: var(--green-tint); color: var(--green-text); }
+.chip.amber { background: var(--amber-bg); color: var(--amber-text); }
+.chip.plum { background: var(--tint); color: var(--tint-text); }
+
+/* Cover */
+.cover { display: flex; flex-direction: column; }
+.cover .logo { width: 74px; margin: 2px 0 18px; }
+.cover h1 { margin: 0 0 4px; font-size: 30px; line-height: 1.12; color: var(--ink); font-weight: 800; letter-spacing: -0.02em; }
+.cover .sub { margin: 0 0 16px; font-size: 16px; color: var(--link); font-weight: 600; }
+.rules { border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px 4px; margin-top: 4px; }
+.rules h3 { margin: 0 0 8px; font-size: 15px; }
+.rules ol { margin: 0; padding-left: 20px; font-size: 13.5px; }
+.rules li { margin-bottom: 7px; }
+
+/* Question and answer lists */
+dl { margin: 0; }
+dt { font-weight: 600; color: var(--ink); margin-top: 10px; }
+dd { margin: 2px 0 0; }
+
+/* A small two-column table (status words and what they mean) */
+table.key { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 0 0 12px; }
+table.key td { padding: 5px 0; vertical-align: top; border-bottom: 1px solid var(--border); }
+table.key td:first-child { width: 42%; padding-right: 8px; }
