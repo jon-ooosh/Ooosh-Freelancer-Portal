@@ -67,6 +67,14 @@ Start page offers a People option only on these jobs. It declares no van and no 
 opens a short completion (notes, optional photo). No delivery note or collection email goes to the
 client (one used to, with the HireHop item list).
 
+**Delivery notes are filed on the job** (22 Oct 2026), the same as a warehouse collection sign-off.
+The PDF a delivery completion makes (and a ticked crew "Equipment on hire" note) goes on the job's
+Files tab (`jobs.files`, R2 key under `delivery-notes/`), and the Activity Timeline says who it was
+emailed to, which sends failed, or that it wasn't sent. A delivery's note is now made even when
+"Don't send" is ticked, so the office has a copy to send on (Files tab › Email). If the PDF can't be
+made, the timeline says so. A further copy for a client otherwise comes from HireHop (jon's call: no
+"make one now" button in OP).
+
 **When it ends, when we chase** (jon): `services/quote-schedule.ts` is THE definition, shared by the
 chaser and the portal.
 - Crew and People: complete from the start of the LAST day; chased from 09:00 UK the day after it.

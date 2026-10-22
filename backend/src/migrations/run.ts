@@ -343,6 +343,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '301_freelancer_terms_from_approval.sql',
         '302_portal_sessions_valid_after.sql',
         '303_portal_login_security.sql',
+        '304_clear_chase_outside_enquiry.sql',
       ];
 
       for (const migration of migrations) {

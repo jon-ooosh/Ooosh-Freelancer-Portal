@@ -3133,7 +3133,7 @@ export default function PipelinePage() {
   // Filters — chase filter can be deep-linked via ?chase= so dashboard cards
   // can drop the user straight onto the right view.
   const [filterLikelihood, setFilterLikelihood] = useState<string>(initialPrefs.filterLikelihood);
-  const VALID_CHASE_FILTERS = ['', 'overdue', 'due_today', 'due_this_week'];
+  const VALID_CHASE_FILTERS = ['', 'due', 'overdue', 'due_today', 'due_this_week'];
   const chaseParam = searchParams.get('chase');
   const initialChase = VALID_CHASE_FILTERS.includes(chaseParam || '')
     ? (chaseParam as string)
@@ -3560,6 +3560,7 @@ export default function PipelinePage() {
             className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
           >
             <option value="">All chases</option>
+            <option value="due">Overdue or due today</option>
             <option value="overdue">Overdue</option>
             <option value="due_today">Due today</option>
             <option value="due_this_week">Due this week</option>
