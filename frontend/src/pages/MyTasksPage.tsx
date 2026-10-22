@@ -687,6 +687,7 @@ const DUE_GROUPS: { id: string; label: string; tone: string; test: (days: number
 const SOURCE_LABEL: Record<string, string> = {
   staff_review: 'From your review',
   vehicle_sale: 'Van sale',
+  quote_option: 'Quote options',
 };
 
 const SERIES = 'staff_task_series';

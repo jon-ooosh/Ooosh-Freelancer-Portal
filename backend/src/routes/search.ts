@@ -96,11 +96,38 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       jobParams
     );
 
+    // Search projects (docs/JOB-PROJECTS-SPEC.md) — a project has no page of
+    // its own, so the result opens one of its jobs, where the panel lives:
+    // the festival's own (same client as the project) first, then a live one,
+    // then the oldest.
+    const projectResults = await query(
+      `SELECT * FROM (
+         SELECT (SELECT j.id FROM jobs j
+                  WHERE j.job_project_id = jp.id AND j.is_deleted = false
+                  ORDER BY (j.client_id IS DISTINCT FROM jp.client_id),
+                           (j.pipeline_status IN ('lost', 'cancelled')), j.created_at
+                  LIMIT 1) AS id,
+                jp.name,
+                CONCAT_WS(' · ',
+                  o.name,
+                  (SELECT COUNT(*) FROM jobs j WHERE j.job_project_id = jp.id AND j.is_deleted = false) || ' jobs'
+                ) AS subtitle,
+                'project' AS type
+           FROM job_projects jp
+           LEFT JOIN organisations o ON o.id = jp.client_id
+          WHERE jp.name ILIKE $1
+          ORDER BY jp.created_at DESC
+          LIMIT $2
+       ) p WHERE p.id IS NOT NULL`,
+      [searchTerm, perType]
+    );
+
     res.json({
       results: [
         ...peopleResults.rows,
         ...orgResults.rows,
         ...venueResults.rows,
+        ...projectResults.rows,
         ...jobResults.rows,
       ],
     });

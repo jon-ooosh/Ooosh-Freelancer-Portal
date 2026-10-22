@@ -438,6 +438,11 @@ export interface Job {
   // GET /api/pipeline only: the group this job belongs to, with its lead
   // resolved, so the board can collapse the options onto one card.
   group_summary?: JobGroupSummary | null;
+  // Job projects (migration 316, docs/JOB-PROJECTS-SPEC.md): "these jobs all
+  // belong to the same festival". NOT hh_project_id / project_name (HireHop's
+  // own, unused). job_project_name is on GET /api/pipeline only (the card chip).
+  job_project_id?: string | null;
+  job_project_name?: string | null;
   // Source
   enquiry_source: EnquirySource | null;
   // HireHop status (separate from pipeline_status)

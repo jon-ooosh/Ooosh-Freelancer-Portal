@@ -256,7 +256,7 @@ is by INVOICE, because invoices are complete from April and work links are not:
   value date is "Paying Fri X" and still counts as Invoiced.
 - **Invoiced:** invoices dated in the period and not paid yet.
 - **To invoice:** finished work in the period on no invoice, dated on or after
-  `system_settings.freelancer_earnings_labels_from` (migration 316, default 2026-10-22; move it back if
+  `system_settings.freelancer_earnings_labels_from` (migration 317, default 2026-10-22; move it back if
   older invoices get their work ticked). Fees only; the office's expense estimate is never sent.
 - An unpaid invoice dated before the period is listed under "Still waiting from before" and not added to
   the period, so "where is my money?" is answered on every view.

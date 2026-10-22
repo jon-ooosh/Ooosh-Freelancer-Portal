@@ -259,8 +259,17 @@ once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`serv
 `afterOptionConfirmed()` on all four confirmation paths; bells on the unattended ones), the §8 guards
 (`notAltQuoteLossSql`, `bumpSiblingChaseDates`, `jobNameKeepingOptionSuffixSql`), and the portal hand-off
 (`portalOptionsFor()` on `GET /money/job-lookup/:hh` — `payable` is false for a live option whose sibling
-confirmed; the portal repo refuses before any Stripe session). Festival-style grouping is NOT a `part_of` group — it gets its own design (§14 says why: every group read path assumes alternatives). **Spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
+confirmed; the portal repo refuses before any Stripe session). Festival-style grouping is NOT a `part_of` group — it is job projects, below (§14 says why: every group read path assumes alternatives). An option confirmed with nobody on the page gets a bell AND a To Do (`source_type = 'quote_option'`). **Spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
+
+**BUILT, 21 Oct 2026:** `docs/JOB-PROJECTS-SPEC.md` — job projects: "these jobs all belong to the same
+festival" (core backline, outlier stages, band spot-hires). A panel top right on Job Detail (name, client,
+lead Ooosh-er, roll-ups, every job), "+ Add to a project" in the header, a chip on Kanban cards, project
+names in global search, "+ New job in this project" = a blank New Enquiry with the project's client and
+dates. **Its own table (`job_projects`) and column (`jobs.job_project_id`) — never `job_groups`**, and not
+`jobs.hh_project_id`/`project_name` (HireHop's, unused). **The project's dates are defaults for NEW jobs
+only — never pushed into existing jobs** (Start/End are what HireHop charges). All logic in
+`services/job-projects.ts`; copy in `frontend/src/lib/projectCopy.ts`.
 
 **BUILT (all three phases), Oct 2026:** `docs/STAFF-LOGIN-SECURITY-SPEC.md` — two-factor for every OP
 staff login. Phase 1: a 6-digit email code as the second factor, **trusted devices** (the
@@ -446,6 +455,7 @@ existing definition:
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
 | The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
 | A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
+| Which jobs belong to the same festival? Its value, lead, default dates | `services/job-projects.ts` (`getProject()` roll-ups; quote options inside count once) |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
 | A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee |
 
