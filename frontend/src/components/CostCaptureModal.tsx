@@ -1774,7 +1774,7 @@ export default function CostCaptureModal({ onClose, onSaved, onSavedAndSplit, on
                 </label>
                 <textarea className={`${inputCls} min-h-[56px]`} value={queryNote} onChange={(e) => setQueryNote(e.target.value)}
                   placeholder="e.g. The £80 train looks high. Can you send the ticket?" maxLength={2000} />
-                <p className="text-xs text-gray-400 mt-1">Shown on the invoice in Costs and, soon, in their portal. No email is sent: contact them yourself.</p>
+                <p className="text-xs text-gray-400 mt-1">They&apos;ll see this in their portal (Earnings). No email is sent: contact them yourself.</p>
               </div>
             )}
 
