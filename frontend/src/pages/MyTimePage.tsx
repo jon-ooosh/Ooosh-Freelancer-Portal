@@ -5,6 +5,7 @@ import { splitBankHolidays } from '../lib/companyCalendar';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { QuarterHourSelect } from '../components/QuarterHourSelect';
+import { ukToday } from '../lib/ukDate';
 
 /**
  * My Time — book time off, see your balances, track your requests.
@@ -945,7 +946,13 @@ function SwapForm({ onClose, onDone, onError }: {
   const usual = check?.usual ?? null;
   const paid = usual && startTime && endTime ? toMin(endTime) - toMin(startTime) - usual.breakMinutes : null;
   const timesBad = !!(startTime && endTime && toMin(endTime) <= toMin(startTime));
-  const problems = check?.problems ?? [];
+  // Forward-looking only (jon, Oct 2026). `min` stops the picker going back,
+  // but a date typed by hand can still land before it, so say so here too.
+  // The server deliberately allows past dates: approving a swap whose day
+  // has just gone by must still work.
+  const today = ukToday();
+  const pastDate = [offDate, workDate].some(d => d && d < today);
+  const problems = [...(pastDate ? ['Pick today or a later date'] : []), ...(check?.problems ?? [])];
   const diff = paid !== null && usual ? paid - usual.minutes : 0;
   const ready = !!(offDate && workDate && usual && paid !== null && paid > 0 && !timesBad
     && problems.length === 0 && !checking);
@@ -962,7 +969,10 @@ function SwapForm({ onClose, onDone, onError }: {
 
   const input = 'w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm bg-white';
   return (
-    <div ref={panelRef} className="p-5 rounded-2xl sm:rounded-xl border border-indigo-200 bg-white">
+    // Two-thirds width on a desktop (jon, Oct 2026) — the same three-column
+    // grid as the cards above, so its edge lines up with the overtime card.
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    <div ref={panelRef} className="lg:col-span-2 p-5 rounded-2xl sm:rounded-xl border border-indigo-200 bg-white">
       <div className="flex items-center justify-between mb-1">
         <h2 className="text-[17px] font-semibold text-gray-900">Swap a day</h2>
         <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
@@ -974,11 +984,11 @@ function SwapForm({ onClose, onDone, onError }: {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Day you&apos;ll have off <span className="text-gray-400">— one you normally work</span></span>
-          <input type="date" value={offDate} onChange={e => setOffDate(e.target.value)} className={input} />
+          <input type="date" value={offDate} min={today} onChange={e => setOffDate(e.target.value)} className={input} />
         </label>
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Day you&apos;ll work instead <span className="text-gray-400">— one you normally don&apos;t</span></span>
-          <input type="date" value={workDate} onChange={e => setWorkDate(e.target.value)} className={input} />
+          <input type="date" value={workDate} min={today} onChange={e => setWorkDate(e.target.value)} className={input} />
         </label>
       </div>
 
@@ -1008,9 +1018,7 @@ function SwapForm({ onClose, onDone, onError }: {
             Filled in from the day you&apos;re giving up — change them if that day runs differently.
           </p>
         </div>
-      ) : !problems.length && (
-        <p className="mb-3 text-xs text-gray-500">Pick the day you&apos;re giving up and its hours will be filled in.</p>
-      )}
+      ) : null}
 
       {problems.length > 0 && (
         <ul className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700 list-disc list-inside">
@@ -1027,6 +1035,7 @@ function SwapForm({ onClose, onDone, onError }: {
         className="px-4 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-sm font-semibold disabled:opacity-50">
         {saving ? 'Sending…' : checking ? 'Checking…' : 'Ask to swap'}
       </button>
+    </div>
     </div>
   );
 }
