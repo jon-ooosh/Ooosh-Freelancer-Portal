@@ -4,7 +4,8 @@
  *
  * The office uploads a freelancer's invoice in Costs and ticks the work it
  * covers ("Which jobs?"). This lists that work and records the ticks in
- * `cost_work_items`; the portal's Earnings tab will read the same rows.
+ * `cost_work_items`; the portal's Earnings tab reads the same rows
+ * (services/freelancer-earnings.ts).
  *
  * Three kinds of work, each with the fee the freelancer was booked at:
  *   - a delivery / collection / crew booking (quote_assignments): the shared

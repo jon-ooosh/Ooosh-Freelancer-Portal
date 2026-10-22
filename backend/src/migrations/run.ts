@@ -356,6 +356,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '314_save_new_enquiry_chase_alert.sql',
         '315_freelancer_invoice_unmatched_reason.sql',
         '316_job_projects.sql',
+        '317_freelancer_earnings_labels_from.sql',
       ];
 
       for (const migration of migrations) {

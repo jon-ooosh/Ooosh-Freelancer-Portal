@@ -14,18 +14,19 @@ the portal look, §11) and PR 5 (portal 2FA, §7) are merged and deployed; 2FA *
 sets `portal_2fa_enforced_from` in Settings, after telling freelancers in the WhatsApp group (there is no
 banner). Earnings part 1, freelancer invoices linked in Costs (§5.1), is merged and deployed, and jon
 linked the past invoices (one, Glenn Saggers, isn't in OP and stays unlinked); the one-off page is
-removed. Nothing is half-built.
+removed. The Costs follow-ups (§5.1) are merged and deployed. Earnings part 2, the portal tab (§5.2), is
+built, with the portal's favicon. Nothing is half-built.
 
 **Do next, in this order** (one PR each; jon merges and deploys, then the next starts from fresh main):
 
-1. **Earnings tab in the portal (§5.2).** Reads what §5.1 links: invoices with their status and dates,
-   and finished work marked "To invoice" or "Invoiced".
-2. **Simplify the cost capture form** (jon, 22 Oct 2026: "very heavy, very wordy"; even he couldn't tell
-   what the "This job so far / Is this part of a quote? / recharge" block was asking). Agree the shape
-   first (a written proposal or a mock-up), then build. Not part of this programme, but raised here.
-3. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
-   shop-till guide (`docs/guides/shop-till/`) in the new look at the same time.
-4. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+1. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
+   shop-till guide (`docs/guides/shop-till/`) in the new look at the same time. The invoicing guide can now
+   point at the Earnings tab.
+2. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+3. **Simplify the cost capture form, last** (jon, 22 Oct 2026: "very heavy, very wordy"; even he couldn't
+   tell what the "This job so far / Is this part of a quote? / recharge" block was asking). jon's call:
+   once everything else is done, start with a clickable mock-up and go from there. Not part of this
+   programme, but raised here.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -44,9 +45,9 @@ them from the recipe there.
 | 4 | Van screens reskin, freelancer scope only (§11) | merged 21 Oct 2026 |
 | 5 | Portal 2FA (§7) | built 21 Oct 2026, ships off |
 | 6a | Earnings part 1: freelancer invoices linked in Costs (§5.1) | merged 22 Oct 2026; past invoices linked, one-off page removed |
-| – | Costs follow-ups: job numbers in the work list, "no work ticked" prompt, recharge default (§5.1) | built 22 Oct 2026 |
+| – | Costs follow-ups: job numbers in the work list, "no work ticked" prompt, recharge default (§5.1) | merged 22 Oct 2026 |
 | – | Calculator: setup premium charged to the client, crew fuel once (`PLATFORM-CONVENTIONS.md`) | merged 22 Oct 2026 |
-| 6b | Earnings part 2: the portal tab (§5.2) | next |
+| 6b | Earnings part 2: the portal tab (§5.2), plus the portal favicon | built 22 Oct 2026 |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
 | – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | any time |
 
@@ -239,14 +240,40 @@ invoices since 6 April 2026 by letterhead for jon to link once. Done; the page, 
 backend router are gone. An invoice from someone not in OP (Glenn Saggers) stays unlinked: it is paid
 as normal and shows on nobody's Earnings. Anything missed is linked from the ordinary edit form.
 
-### 5.2 Part 2, next: the Earnings tab
+### 5.2 Part 2, what shipped (22 Oct 2026): the Earnings tab
 
-Reads only what §5.1 links. Invoices: the freelancer's own invoice number, date, amount, the work it
-covers, and a status with its date: With us (`verified`), Queried (with the note), Approved, paid Fri X
-(`resolveDueDate()`), Paying on X (a future `paid_value_date`), Paid X. Work: finished work marked "To
-invoice" or "Invoiced (#FL-101)"; work before 6 April 2026 carries no label. Tax year (6 Apr to 5 Apr) or
-month view, totals Paid / Approved / With us / To invoice, and "Email your invoice (PDF) to whoever booked
-you". Uses `listFreelancerWork()` and `personalFee()` so the figures match Costs and the job pages.
+**jon's calls (22 Oct):** "To invoice" labels start from 22 Oct 2026, when the office began ticking work,
+not back to April (the past invoices were linked to the person but not to their work, so April to October
+would all have read "To invoice"). The office's query note is shown to the freelancer, and the staff hints
+say so. Status words: Received · Queried (with the note) · Approved, due Fri X · Paying Fri X · Paid X. No
+"Send invoice" button: invoices are still emailed (PDF) to whoever booked them, and the page points at
+Resources for the "How to invoice" guide. Periods: last month, this month, tax year, and last tax year
+once there is a whole OP year (from 6 April 2027). The shared info@ login gets a note, nothing else.
+
+**How it counts** (`services/freelancer-earnings.ts`, `GET /api/portal/earnings?period=`, read-only). Money
+is by INVOICE, because invoices are complete from April and work links are not:
+- **Paid:** invoices paid in the period, by `paid_value_date` (else `paid_at`). Marked paid with a future
+  value date is "Paying Fri X" and still counts as Invoiced.
+- **Invoiced:** invoices dated in the period and not paid yet.
+- **To invoice:** finished work in the period on no invoice, dated on or after
+  `system_settings.freelancer_earnings_labels_from` (migration 317, default 2026-10-22; move it back if
+  older invoices get their work ticked). Fees only; the office's expense estimate is never sent.
+- An unpaid invoice dated before the period is listed under "Still waiting from before" and not added to
+  the period, so "where is my money?" is answered on every view.
+- So a job done in September and paid on 3 October is October's money; the September view lists the
+  job with a "Paid 3 Oct" chip. The card says the period's name, not "Earned", for that reason.
+- "Next payment" is the earliest upcoming date across all invoices (an approved one's `resolveDueDate()`,
+  or a booked payment's value date), with everything due that day added up.
+- Only `cost_type = 'freelancer_invoice'` costs with this `person_id`; credits are left out.
+
+**The page** (`src/app/earnings/page.tsx`, `src/app/api/earnings/route.ts`) follows the design mock
+(`docs/design/freelancer-portal-refresh/screenshots/10-earnings.png`): the period card with a Paid /
+Invoiced / To invoice bar, "N jobs need an invoice" with the Resources link instead of the button, the
+invoices (each opens to the work it covers, with job numbers), and the work with To invoice / Invoiced /
+Paid X chips. Titles use the Completed page's wording ("Delivery - The Lexington", "Studio sitter").
+
+**Favicon:** the portal had none. It now uses the staff app's Ooosh record icon (`src/app/favicon.ico`,
+`icon.png`, `apple-icon.png`; Next serves them by file name, outside the login check).
 
 ## 6. Security quick fixes (PR 2)
 

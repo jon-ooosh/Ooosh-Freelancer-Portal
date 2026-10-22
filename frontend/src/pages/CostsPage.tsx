@@ -1735,7 +1735,7 @@ function QueryInvoiceModal({ cost, onClose, onSaved }: { cost: Cost; onClose: ()
         <textarea className="w-full min-h-[90px] rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
           value={note} onChange={(e) => setNote(e.target.value)} maxLength={2000} autoFocus
           placeholder="e.g. The £80 train looks high. Can you send the ticket?" />
-        <p className="mt-1 text-xs text-gray-400">It stays Queried until it&apos;s approved or you remove the query. No email is sent: contact them yourself.</p>
+        <p className="mt-1 text-xs text-gray-400">They&apos;ll see this in their portal (Earnings). It stays Queried until it&apos;s approved or you remove the query. No email is sent: contact them yourself.</p>
         {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
         <div className="mt-4 flex items-center justify-between gap-2">
           {cost.queried_at ? (

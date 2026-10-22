@@ -30,6 +30,7 @@ import { ukToday } from '../services/uk-date';
 import { isEndKeyed, lastWorkDay } from '../services/quote-schedule';
 import { isVanLegDone } from '../services/quote-completion';
 import { personalFee } from '../services/freelancer-fees';
+import { getFreelancerEarnings } from '../services/freelancer-earnings';
 import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures, deviceLabelFrom } from '../services/staff-login-security';
 import {
   isPortalEnforcedNow, portalEmailHint, signPortalPending, readPortalPending, sendPortalLoginCode,
@@ -1954,6 +1955,28 @@ router.post('/studio-sitter/shifts/:date/lost-property', lockupUploadMw, async (
   } catch (error) {
     console.error('Portal sitter lost-property error:', error);
     res.status(500).json({ error: 'Failed to log lost property' });
+  }
+});
+
+// ── Earnings (FREELANCER-PORTAL-SPEC §5.2) ────────────────────────────
+//
+// GET /api/portal/earnings?period=this_month|last_month|tax_year|last_tax_year
+//
+// Their invoices (as the office linked them in Costs) and their finished work
+// for the period: services/freelancer-earnings.ts. The shared staff login has
+// no invoices of its own, so it gets `shared: true` and nothing else.
+router.get('/earnings', async (req: PortalRequest, res: Response) => {
+  try {
+    if (req.portalUser!.isStaffShared) {
+      res.json({ success: true, shared: true });
+      return;
+    }
+    const period = typeof req.query.period === 'string' ? req.query.period : undefined;
+    const earnings = await getFreelancerEarnings(req.portalUser!.id, period);
+    res.json({ success: true, shared: false, ...earnings });
+  } catch (err) {
+    console.error('[portal] earnings failed:', err);
+    res.status(500).json({ error: 'Could not load your earnings. Please try again.' });
   }
 });
 
