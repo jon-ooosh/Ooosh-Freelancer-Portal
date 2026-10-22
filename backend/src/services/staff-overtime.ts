@@ -20,6 +20,7 @@ import { query, getClient } from '../config/database';
 import { DATE_RE } from './staff-day-status';
 import { getBalance, postEntry } from './staff-balance';
 import { retireOvertimeBells } from './staff-notifications';
+import { retireDoneBells } from './notification-resolve';
 
 export type OvertimeStatus = 'pending' | 'approved' | 'declined' | 'cancelled';
 
@@ -205,6 +206,9 @@ export async function yearEndCashOut(year: number, userId: string | null) {
     }, userId);
     results.push({ personId: row.person_id, name: row.name, minutes: bal.balanceMinutes });
   }
+  // Paid out: "Overtime to pay in January payroll" is done once nothing is
+  // left banked for the year (bell-rules.ts overtime_cashout). Never throws.
+  await retireDoneBells('overtime_cashout');
   return results;
 }
 

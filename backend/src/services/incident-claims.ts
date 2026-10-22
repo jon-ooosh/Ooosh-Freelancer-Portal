@@ -19,6 +19,7 @@ import { logIssueEvent } from './job-issues';
 import { defaultFormData } from './claim-form-fields';
 import { estimateVehicleValue } from './vehicle-value';
 import { ukDatePlus } from './uk-date';
+import type { BellKey } from './bell-rules';
 
 type DbClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
@@ -97,7 +98,12 @@ export async function notifyClaimFollowers(
   actorUserId: string | null,
   title: string,
   content: string,
-  opts: { priority?: 'low' | 'normal' | 'high' | 'urgent'; onlyUserIds?: string[] } = {},
+  opts: {
+    priority?: 'low' | 'normal' | 'high' | 'urgent';
+    onlyUserIds?: string[];
+    /** Set on a bell that ASKS for something — bell-rules.ts retires it once done. */
+    resolveKey?: BellKey;
+  } = {},
 ): Promise<void> {
   try {
     let recipients: Set<string>;
@@ -114,9 +120,10 @@ export async function notifyClaimFollowers(
     for (const userId of recipients) {
       await query(
         `INSERT INTO notifications
-           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-         VALUES ($1, 'system', $2, $3, 'incident_claims', $4, $5, $6, $7)`,
-        [userId, title, content, claimId, `/vehicles/claims/${claimId}`, opts.priority || 'normal', actorUserId],
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id, resolve_key)
+         VALUES ($1, 'system', $2, $3, 'incident_claims', $4, $5, $6, $7, $8)`,
+        [userId, title, content, claimId, `/vehicles/claims/${claimId}`, opts.priority || 'normal', actorUserId,
+         opts.resolveKey ?? null],
       );
     }
   } catch (err) {
@@ -408,7 +415,7 @@ export async function notifyClaimSubmitted(claimId: string, byName: string): Pro
     const label = claimLabel(c.rows[0]);
     const title = `Claim form submitted — ${label}`;
     const content = `${byName} has submitted the incident form. It needs a manager to review it.`;
-    await notifyClaimFollowers(claimId, null, title, content, { priority: 'high' });
+    await notifyClaimFollowers(claimId, null, title, content, { priority: 'high', resolveKey: 'claim_review' });
     const to = c.rows[0].owner_user_id ? [c.rows[0].owner_user_id as string] : await getDefaultClaimWatchers();
     if (!to.length) return;
     const users = await query(

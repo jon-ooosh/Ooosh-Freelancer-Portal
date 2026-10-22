@@ -25,6 +25,7 @@
 import { query } from '../config/database';
 import { getFrontendUrl } from '../config/app-urls';
 import { liveSiblingOptions, noteOnTimeline } from './job-groups';
+import { resolveActionBells } from './notification-resolve';
 
 export const OPTION_CONFIRMED_BELL_TYPE = 'quote_option_confirmed';
 
@@ -79,8 +80,8 @@ export async function afterOptionConfirmed(
       // One live bell per user per job — a second unattended confirmation
       // event (a retried webhook, say) must not stack them.
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-         SELECT $1, $2, $3, $4, 'jobs', $5, $6, 'normal'
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+         SELECT $1, $2, $3, $4, 'jobs', $5, $6, 'normal', 'option_siblings_open'
           WHERE NOT EXISTS (
             SELECT 1 FROM notifications
              WHERE user_id = $1 AND type = $2 AND entity_id = $5 AND is_read = false
@@ -93,15 +94,19 @@ export async function afterOptionConfirmed(
   }
 }
 
-/** The bells for this group's confirmation prompt are done with — mark them read for everyone. */
+/**
+ * The bells for this group's confirmation prompt are done with — read AND
+ * done for everyone, and open bells refresh (notification-resolve.ts). Until
+ * Oct 2026 this only marked them read. The 5-minute sweep also retires them
+ * once no other option is live (bell-rules.ts option_siblings_open).
+ */
 export async function markOptionPromptHandled(groupId: string): Promise<number> {
-  const r = await query(
-    `UPDATE notifications SET is_read = true, read_at = NOW()
-      WHERE type = $1 AND is_read = false
-        AND entity_id IN (SELECT id FROM jobs WHERE group_id = $2)`,
-    [OPTION_CONFIRMED_BELL_TYPE, groupId],
-  );
-  return r.rowCount ?? 0;
+  const jobs = await query(`SELECT id FROM jobs WHERE group_id = $1`, [groupId]);
+  let retired = 0;
+  for (const j of jobs.rows) {
+    retired += await resolveActionBells({ entityType: 'jobs', entityId: j.id as string, type: OPTION_CONFIRMED_BELL_TYPE });
+  }
+  return retired;
 }
 
 function sourceLabel(s: 'pipeline' | 'payment_portal' | 'hirehop_webhook' | 'record_payment'): string {

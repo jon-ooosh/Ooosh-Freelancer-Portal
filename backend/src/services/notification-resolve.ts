@@ -34,7 +34,7 @@
  */
 import { query } from '../config/database';
 import { emitToUser } from '../config/socket';
-import { BELL_RULES, type BellKey } from './bell-rules';
+import { BELL_RULES, type BellKey, type BellRule } from './bell-rules';
 
 /** Tell each affected person's open browsers which of their bells changed. */
 function tellOwners(rows: { id: string; user_id: string }[], done: boolean): void {
@@ -84,7 +84,7 @@ export async function resolveActionBells(opts: {
  * Never throws.
  */
 export async function retireDoneBells(key: BellKey, entityId?: string | null): Promise<number> {
-  const rule = BELL_RULES[key];
+  const rule: BellRule | undefined = BELL_RULES[key];
   if (!rule) return 0;
   try {
     const params: unknown[] = [key];
@@ -93,6 +93,15 @@ export async function retireDoneBells(key: BellKey, entityId?: string | null): P
       params.push(entityId);
       oneRecord = 'AND n.entity_id = $2';
     }
+    // A reminder sent again (latestOnly): an older copy of the same key,
+    // record and person is retired as soon as a newer one exists.
+    const superseded = rule.latestOnly
+      ? `OR EXISTS (SELECT 1 FROM notifications newer
+                     WHERE newer.resolve_key = n.resolve_key
+                       AND newer.user_id = n.user_id
+                       AND newer.entity_id IS NOT DISTINCT FROM n.entity_id
+                       AND newer.created_at > n.created_at)`
+      : '';
     const r = await query(
       `UPDATE notifications n
           SET is_read = true,
@@ -101,7 +110,7 @@ export async function retireDoneBells(key: BellKey, entityId?: string | null): P
         WHERE n.resolve_key = $1
           AND n.acknowledged_at IS NULL
           ${oneRecord}
-          AND NOT (${(rule as { stillWaiting: string }).stillWaiting})
+          AND (NOT (${rule.stillWaiting}) ${superseded})
         RETURNING n.id, n.user_id`,
       params,
     );

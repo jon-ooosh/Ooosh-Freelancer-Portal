@@ -52,6 +52,13 @@ router.put('/', authorize('admin', 'manager'), validate(updateSchema), async (re
       );
     }
     invalidateSystemSettingsCache();
+    // "PIN changed today" — the admins' "Rotate the warehouse PIN" bells are
+    // done once the date is inside the rotation period (bell-rules.ts). Lazy
+    // import: this router is loaded by services the rules module must not pull in.
+    if ('kiosk_pin_rotated_at' in settings) {
+      const { retireDoneBells } = await import('../services/notification-resolve');
+      await retireDoneBells('kiosk_pin_rotation');
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('[system-settings] update error:', error);

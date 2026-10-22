@@ -769,7 +769,7 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
   for (const u of await approverUserIds()) {
     await notify(u.id, 'follow_up', title,
       `${people.length} ${people.length === 1 ? 'person has' : 'people have'} ${fmtH(totalMinutes)} between them`,
-      'staff_overtime_entry', null, STAFF_URL, 'high', true);
+      'staff_overtime_entry', null, STAFF_URL, 'high', true, 'overtime_cashout');
   }
 
   await emailApprovers(title, title,
