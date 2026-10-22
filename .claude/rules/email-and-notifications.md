@@ -103,6 +103,24 @@ Warning emails that used to fire inline follow one shape (`services/sanity-check
 
 Adding a scanner: copy the shape, add a marker column, wire the clear into every status-write path. **Don't put the send back inline "just for the urgent case"** — the spam always comes back.
 
+## A bell that asks someone to act retires itself when the thing is done
+
+`services/notification-resolve.ts` `resolveActionBells()` (jon, Oct 2026). Until then a bell was a copy of
+a fact frozen at the moment it happened — approving a holiday left every admin's "X has requested holiday"
+lit until each of them clicked it.
+
+- **Call it from the code that FINISHES the thing** (the service, not the route), for every way it can
+  finish. Leave requests: approve, decline and withdraw in `staff-leave.ts` via `retireLeaveRequestBells()`,
+  which sits next to `notifyLeaveRequested()` so the bell's type and row are named in one place.
+- **Match on row AND bell type.** The requester's outcome bell ("Time off approved", `system`) is on the
+  SAME row as the approvers' `follow_up` bells — clearing by row alone would swallow it unseen.
+- **Everyone's copy, read AND done.** Once somebody has dealt with it nobody else is needed. The bell stays
+  in the dropdown greyed with "✓ Done"; the Inbox hides it like any Done item.
+- **Never let it fail the action** — the helper never throws.
+- **Only for bells that ask for something.** An FYI bell ("Lock-up submitted — all clear") is done when read.
+- **Next: mentions** (jon's decisions): your reply or reaction in that thread marks YOUR mention bell done;
+  opening the timeline where it sits only marks it read. Overtime and WFH requests are the same shape as leave.
+
 ## Timelines & threads
 
 - **Scoping guards are load-bearing:** entity timeline reads filter `issue_id IS NULL` / `shift_id IS NULL`. Issue chatter and shift handovers must NOT bubble onto the linked vehicle / driver / organisation timelines.

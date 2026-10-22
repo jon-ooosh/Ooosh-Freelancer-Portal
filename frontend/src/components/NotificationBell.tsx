@@ -57,6 +57,13 @@ export default function NotificationBell() {
       setUnreadCount((prev) => prev + 1);
     });
 
+    // The thing a bell asked for was done — by you on another page, or by a
+    // colleague — and the server retired it (services/notification-resolve.ts).
+    // Reload rather than patch, so the count comes from the server.
+    socket.on('notifications_resolved', () => {
+      loadNotifications();
+    });
+
     socketRef.current = socket;
 
     return () => {
@@ -205,12 +212,17 @@ export default function NotificationBell() {
                       <span className="w-2 h-2 rounded-full bg-ooosh-500 mt-1.5 flex-shrink-0" />
                     )}
                     <div className={`flex-1 min-w-0 ${notif.is_read ? 'ml-4' : ''}`}>
-                      <p className="text-sm font-medium text-gray-900">{notif.title}</p>
+                      {/* Dealt with (Done in the Inbox, or the thing itself was
+                          done) stays listed, greyed out — jon, Oct 2026. */}
+                      <p className={`text-sm font-medium ${notif.acknowledged_at ? 'text-gray-400' : 'text-gray-900'}`}>{notif.title}</p>
                       {notif.content && (
-                        <p className="text-xs text-gray-500 mt-0.5 truncate">{notif.content}</p>
+                        <p className={`text-xs mt-0.5 truncate ${notif.acknowledged_at ? 'text-gray-400' : 'text-gray-500'}`}>{notif.content}</p>
                       )}
                       <div className="flex items-center gap-2 mt-1">
                         <span className="text-xs text-gray-400">{formatTimeAgo(notif.created_at)}</span>
+                        {notif.acknowledged_at && (
+                          <span className="text-xs text-gray-400">✓ Done</span>
+                        )}
                         {/* Inline action — first one only. Inbox shows the full list. */}
                         {!notif.acknowledged_at && notif.actions && notif.actions.length > 0 && (
                           <span

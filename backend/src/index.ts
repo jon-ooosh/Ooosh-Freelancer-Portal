@@ -18,6 +18,7 @@ import { connectRedis } from './config/redis';
 import { startScheduler } from './config/scheduler';
 import { handleStripeWebhook } from './services/stripe-webhook';
 import { handleResendWebhook } from './services/email-delivery';
+import { setSocketServer } from './config/socket';
 
 dotenv.config({ quiet: true });
 
@@ -91,6 +92,8 @@ app.use(express.urlencoded({ extended: true }));
 
 // Make io accessible to routes
 app.set('io', io);
+// …and to services, which have no `req` (config/socket.ts).
+setSocketServer(io);
 
 // Routes
 app.use('/api', routes);

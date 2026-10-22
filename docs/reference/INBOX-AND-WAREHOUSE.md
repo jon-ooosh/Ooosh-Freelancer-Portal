@@ -216,6 +216,25 @@ Closes the "one-way" gap in the current inbox: rolling conversations with replie
 
 Phased plan in `docs/MESSAGING-SPEC.md`. Phase G (email reply ingestion via `reply+<id>@oooshtours.co.uk`) is captured in spec but deferred.
 
+**Bells joined to the thing they ask for (Oct 2026, in progress).** A bell used to clear only when its
+recipient clicked it, pressed Mark all read or Done — never when the thing itself was done, and never for
+the other people who got a copy. `services/notification-resolve.ts` `resolveActionBells()` now retires a
+bell for everyone (read + `acknowledged_at`) when the code that finishes the thing calls it, matching on
+row AND bell type; open bells refresh over the socket (`notifications_resolved`, sent through
+`config/socket.ts`). Dealt-with bells stay in the dropdown, greyed, "✓ Done". Rules:
+`.claude/rules/email-and-notifications.md`.
+- [x] **Leave requests** — approve / decline / withdraw (`staff-leave.ts` → `retireLeaveRequestBells()`).
+  Migration 305 cleared the bells of requests decided before it shipped.
+- [ ] **Mentions** (jon's decisions, Oct 2026): a reply or a reaction in that thread marks YOUR mention bell
+  done; opening the timeline where it sits marks it read only. NB the "Reply marks notification as Done"
+  item under Phase C above is not true of the current Inbox — `ThreadView`'s `onReplied` is not wired
+  there — so this round restores it.
+- [ ] **Overtime and WFH requests** — the same shape as leave.
+- [ ] **Sort the rest** — the ~35 places that create bells into "for information" (done when read) and
+  "needs action" (needs wiring).
+- The Inbox page does not listen for `notifications_resolved` yet; an open Inbox shows a retired bell
+  until it next loads.
+
 **Round 4 backlog (captured, not shipped):**
 - Real-time updates in Inbox for the Sent tab (currently Sent doesn't refresh on socket events — minor).
 - Sender-side reply tracking from Sent tab using `<ThreadView>` (currently Sent shows only nudge button, not the thread).
