@@ -39,7 +39,7 @@ export const PROJECT_COPY = {
   addNone: 'No projects yet - start one below.',
   addPick: 'Add to this project',
   addNew: 'Start a new project',
-  addNewIntro: "Its client and dates start as this job's - change them if the festival's differ.",
+  addNewIntro: "Its client and dates start as this job's - change them if the project's differ.",
   addBack: 'Back',
   saving: 'Saving...',
   cancel: 'Cancel',
