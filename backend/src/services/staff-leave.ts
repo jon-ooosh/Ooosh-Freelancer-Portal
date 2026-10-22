@@ -24,6 +24,7 @@ import { query, getClient } from '../config/database';
 import { DATE_RE, dateRange, getStaffCalendar, weekdayIndex } from './staff-day-status';
 import { getBalance, postEntry, ensureEntitlement, type LedgerAccount } from './staff-balance';
 import { ukToday } from './uk-date';
+import { retireLeaveRequestBells } from './staff-notifications';
 
 export type LeaveType = 'holiday' | 'toil' | 'unpaid';
 export type LeaveStatus = 'pending' | 'approved' | 'declined' | 'cancelled' | 'withdrawn';
@@ -467,6 +468,8 @@ export async function approveRequest(requestId: string, note: string | null, use
   } finally {
     client.release();
   }
+  // No longer waiting — every approver's bell for it is done with.
+  await retireLeaveRequestBells(requestId);
 }
 
 export async function declineRequest(requestId: string, note: string, userId: string) {
@@ -478,6 +481,7 @@ export async function declineRequest(requestId: string, note: string, userId: st
     [requestId, userId, note]
   );
   if (r.rows.length === 0) throw new Error('That request is no longer pending');
+  await retireLeaveRequestBells(requestId);
 }
 
 /** Withdraw a request of your own that has not been decided yet. */
@@ -490,6 +494,7 @@ export async function withdrawRequest(requestId: string, personId: string) {
     [requestId, personId]
   );
   if (r.rows.length === 0) throw new Error('That request is no longer pending');
+  await retireLeaveRequestBells(requestId);
 }
 
 /**

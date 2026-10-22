@@ -24,6 +24,7 @@
 import { query } from '../config/database';
 import { emailService } from './email-service';
 import { ukToday } from './uk-date';
+import { resolveActionBells } from './notification-resolve';
 
 const STAFF_URL = '/staff/admin';
 const ABSENCE_URL = '/staff/absence';
@@ -107,10 +108,12 @@ async function notify(
    * 15-minute escalator does not email it a second time four hours later —
    * which is exactly what happened with every TOIL request (jon, Oct 2026):
    * requested → emailed → approved → the still-unread bell escalated as
-   * "X has requested TOIL" again. Approving never marks the bell read, so
-   * the stamp is the only thing that stops it (email-and-notifications
-   * rules). Bells WITHOUT a direct email (the task and review chases) leave
-   * this false so the escalator still does its job for them.
+   * "X has requested TOIL" again. Deciding a leave request now retires its
+   * bell (`retireLeaveRequestBells`, Oct 2026), but a request can sit unread
+   * for hours before anyone decides, so the stamp is still what stops it
+   * (email-and-notifications rules). Bells WITHOUT a direct email (the task
+   * and review chases) leave this false so the escalator still does its job
+   * for them.
    */
   emailedDirectly = false,
 ) {
@@ -152,6 +155,17 @@ export async function notifyLeaveRequested(requestId: string) {
       ],
       link);
   } catch (e) { console.error('[staff-notifications] leave requested:', e); }
+}
+
+/**
+ * The request is no longer waiting (approved, declined or withdrawn), so the
+ * approvers' "X has requested holiday" bells above are done with — for every
+ * approver, not just the one who acted. Only the `follow_up` bells: the
+ * requester's "Time off approved" bell is `system` on the same request and
+ * must survive. Called by staff-leave.ts; never throws (notification-resolve.ts).
+ */
+export async function retireLeaveRequestBells(requestId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_leave_request', entityId: requestId, type: 'follow_up' });
 }
 
 export async function notifyOvertimeLogged(entryId: string) {

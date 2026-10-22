@@ -359,6 +359,7 @@ existing definition:
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |
 | Sending any email | `services/email-service.ts` |
+| The thing a bell asked for is done — clear the bell | `services/notification-resolve.ts` `resolveActionBells()` — for everyone who got it, read AND done, by row AND bell type (the requester's outcome bell on the same row survives); open bells refresh live (`notifications_resolved`). Wired: leave requests (`retireLeaveRequestBells()`). Services push to browsers through `config/socket.ts` `emitToUser()` |
 | Did this email actually arrive? Is this address bouncing / blocked by Resend? | `services/email-delivery.ts` (Resend webhook → `email_delivery_events`, `email_address_problems`); frontend `hooks/useEmailProblems.ts` + `components/EmailProblemFlag.tsx`. `email_log` 'sent' only means Resend accepted it |
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
