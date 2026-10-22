@@ -39,6 +39,7 @@ import { getRouteForReg } from '../services/traccar-server';
 import { incidentWindow, saveGpsTrace, csvToPoints, MAX_WINDOW_HOURS } from '../services/claim-gps';
 import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 
@@ -211,7 +212,8 @@ router.post('/out-of-the-blue', validate(outOfTheBlueSchema), async (req: AuthRe
     await logIssueEvent(issueId, userId, 'created', body.summary, {
       category: 'dispute', severity: 'normal', source_module: 'manual', alleged_date: body.alleged_date,
     });
-    await notifyIssueRecipients(issueId, userId, 'normal', `New issue: ${body.summary.slice(0, 80)}`, 'dispute — third-party claim');
+    await notifyIssueRecipients(issueId, userId, 'normal', `New issue: ${body.summary.slice(0, 80)}`, 'dispute — third-party claim',
+      { resolveKey: 'problem_open' });
     await notifyVehicleSaleOfIssue(issueId, userId);
     if (body.job_id) {
       await query(
@@ -743,6 +745,8 @@ router.post('/:id/stage', validate(stageSchema), async (req: AuthRequest, res: R
       if (body.stage === 'with_broker' && !c.broker_sent_at) sets.push('broker_sent_at = NOW()');
     }
     await query(`UPDATE incident_claims SET ${sets.join(', ')} WHERE id = $1`, params);
+    // Moved on from Submitted — the "Claim form submitted" bells are done (bell-rules.ts).
+    await retireDoneBells('claim_review', id);
 
     const label = STAGE_LABEL[body.stage];
     await logClaimEvent(id, req.user!.id, 'stage_change',
@@ -1119,6 +1123,7 @@ router.post('/:id/send-to-broker', authorize(...MANAGER_ROLES), validate(sendSch
        WHERE id = $1`,
       [id, pdfKey, ukDatePlus(14)],
     );
+    await retireDoneBells('claim_review', id);
     await logClaimEvent(id, req.user!.id, 'broker_sent',
       `Sent to ${to}${attached.length ? ` with ${attached.length} document${attached.length === 1 ? '' : 's'}` : ''}${tooBig.length ? ` (${tooBig.length} too large to attach)` : ''}`,
       { pdf_key: pdfKey, from_stage: c.stage, attached, too_big: tooBig });

@@ -334,7 +334,12 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
 
   // Admin only — the same approve / decline calls the approvals list makes.
   // A decline needs a reason; the person is told it.
+  // One decision at a time: these are plain text links with no disabled
+  // state, so a double click sent the approval twice (Oct 2026). The server
+  // refuses the second now as well; this stops it being sent.
+  const deciding = useRef(false);
   async function decide(kind: DecideKind, id: string, action: 'approve' | 'decline' | 'cancel') {
+    if (deciding.current) return;
     let note: string | null = null;
     if (action !== 'approve') {
       note = window.prompt(action === 'cancel'
@@ -344,6 +349,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         : 'Why is this declined? They will see this.');
       if (!note?.trim()) return;
     }
+    deciding.current = true;
     try {
       await api.post(`/staff-calendar/${kind}/${id}/${action}`,
         action === 'decline' ? { note } : action === 'cancel' ? { reason: note } : {});
@@ -352,6 +358,8 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally {
+      deciding.current = false;
     }
   }
 

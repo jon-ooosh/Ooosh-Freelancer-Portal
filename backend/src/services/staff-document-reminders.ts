@@ -32,6 +32,7 @@
  * See docs/STAFF-DOCUMENTS-SPEC.md §5.
  */
 import { query } from '../config/database';
+import type { BellKey } from './bell-rules';
 
 const RENEWAL_LEAD_DAYS = 14;
 const CONTENT_REVIEW_CHASE_DAYS = 7;
@@ -39,11 +40,17 @@ const CONTENT_REVIEW_CHASE_DAYS = 7;
 async function notifyUser(
   userId: string, title: string, content: string, documentId: string,
   priority: 'low' | 'normal' | 'high' = 'normal',
+  /**
+   * What it asks for — bell-rules.ts retires it once done. Null for a
+   * heads-up ("Renewal coming up": nothing can be done until it lapses) and
+   * for the managers' escalation, which waits on a decision (jon).
+   */
+  resolveKey: BellKey | null = null,
 ): Promise<void> {
   await query(
-    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-     VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, '/staff/documents', $5)`,
-    [userId, title, content, documentId, priority],
+    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+     VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, '/staff/documents', $5, $6)`,
+    [userId, title, content, documentId, priority, resolveKey],
   ).catch((e) => console.error('[staff-doc-reminders] notify failed:', e));
 }
 
@@ -75,7 +82,8 @@ export async function runStaffDocumentReminders(): Promise<StaffDocReminderResul
     result.lapsed += 1;
     const verb = r.completion_mode === 'sign' ? 're-sign' : 'review and re-acknowledge';
     await notifyUser(r.user_id, `Renewal due: ${r.title}`,
-      `“${r.title}” is due for renewal — please ${verb} it in your Staff Documents.`, r.document_id);
+      `“${r.title}” is due for renewal — please ${verb} it in your Staff Documents.`, r.document_id,
+      'normal', 'staff_doc_to_complete');
   }
 
   // ── 2. Renewal nudge (approaching expiry) ─────────────────────────────────
@@ -125,7 +133,8 @@ export async function runStaffDocumentReminders(): Promise<StaffDocReminderResul
     result.chased += 1;
     const verb = r.completion_mode === 'sign' ? 'sign' : 'review and acknowledge';
     await notifyUser(r.user_id, `Reminder: ${r.title}`,
-      `Please ${verb} “${r.title}” in your Staff Documents.`, r.document_id);
+      `Please ${verb} “${r.title}” in your Staff Documents.`, r.document_id,
+      'normal', 'staff_doc_to_complete');
   }
 
   // ── 4. Escalate stale pending to managers (laddered — re-escalates) ───────
@@ -208,7 +217,7 @@ export async function runStaffDocumentReminders(): Promise<StaffDocReminderResul
         for (const t of targets) {
           await notifyUser(t.id, `Review due: ${d.title}`,
             `“${d.title}” is due for a content review — please check it's still accurate, then mark it reviewed (or publish a new version if it needs updating).`,
-            d.id);
+            d.id, 'normal', 'staff_doc_content_review');
         }
         result.contentReviewChased += 1;
       }
@@ -229,7 +238,7 @@ export async function runStaffDocumentReminders(): Promise<StaffDocReminderResul
         for (const m of mgrsForReview) {
           await notifyUser(m.id, `Overdue content review: ${d.title}`,
             `“${d.title}” has been due for a content review since ${due} and hasn't been reviewed.`,
-            d.id, 'high');
+            d.id, 'high', 'staff_doc_content_review');
         }
         result.contentReviewEscalated += 1;
       }

@@ -25,6 +25,20 @@
 import { query } from '../config/database';
 import { STAFF_ADMIN_ROLES } from './staff-employment';
 import { ukToday } from './uk-date';
+import { retireDoneBells } from './notification-resolve';
+
+/**
+ * A write that can settle a to-do's bells — closed, reassigned, handed back,
+ * taken off a list, put back, follow-up moved. bell-rules.ts decides for each
+ * bell (per person: whoever is no longer its owner is done with it). Exported
+ * for staff-task-series.ts, which closes occurrences with its own SQL.
+ * Never throws.
+ */
+export async function retireTaskBells(taskId: string): Promise<void> {
+  await retireDoneBells('task_owner', taskId);
+  await retireDoneBells('task_list_item', taskId);
+  await retireDoneBells('task_follow_up', taskId);
+}
 
 export const TASK_STATUSES = ['open', 'done', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -446,6 +460,7 @@ export async function updateTask(
     const { onOccurrenceClosed } = await import('./staff-task-series');
     await onOccurrenceClosed(taskId).catch(e => console.error('[staff-tasks] next occurrence failed:', e));
   }
+  await retireTaskBells(taskId);
   return row;
 }
 
@@ -493,6 +508,7 @@ export async function handBackTask(taskId: string, reason: string, userId: strin
   } catch (e) {
     console.error('[staff-tasks] handed-back bell failed:', e);
   }
+  await retireTaskBells(taskId);
   return row;
 }
 
@@ -528,6 +544,7 @@ export async function takeTask(taskId: string, userId: string) {
     [taskId, mine]
   );
   if (!r.rows.length) throw new Error('Somebody’s already on it — or it’s gone');
+  await retireTaskBells(taskId);
   return taskFacts(taskId);
 }
 
@@ -541,6 +558,7 @@ export async function releaseTask(taskId: string, userId: string, role: string |
       WHERE id = $1 AND status = 'open'`,
     [taskId]
   );
+  await retireTaskBells(taskId);
   return taskFacts(taskId);
 }
 
@@ -612,6 +630,7 @@ export async function cancelTask(taskId: string, userId: string, role: string | 
     const { onOccurrenceClosed } = await import('./staff-task-series');
     await onOccurrenceClosed(taskId).catch(e => console.error('[staff-tasks] next occurrence failed:', e));
   }
+  await retireTaskBells(taskId);
   return { id: taskId };
 }
 

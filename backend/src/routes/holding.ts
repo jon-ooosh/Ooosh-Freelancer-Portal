@@ -24,6 +24,7 @@ import { frontendLink } from '../config/app-urls';
 import { buildMerchLabelPdf } from '../services/holding-label-pdf';
 import { syncMerchRequirementStatus } from '../services/holding-requirement-sync';
 import { HELD_ITEM_SELECT } from '../services/held-item-query';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 
@@ -468,6 +469,7 @@ router.put('/:id', validate(createSchema.partial()), async (req: AuthRequest, re
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
   if (result.rows[0].job_id) await syncMerchRequirementStatus(result.rows[0].job_id);
+  await retireDoneBells('held_item_review', req.params.id as string);
   res.json({ data: result.rows[0] });
 });
 
@@ -579,6 +581,7 @@ router.post('/:id/collected', validate(collectedSchema), async (req: AuthRequest
     await logToJobTimeline(result.rows[0], req.user!.id, status === 'given_to_client' ? 'given to client' : 'collected');
     await syncMerchRequirementStatus(result.rows[0].job_id);
   }
+  await retireDoneBells('held_item_review', req.params.id as string);
   res.json({ data: result.rows[0] });
 });
 
@@ -627,6 +630,7 @@ router.post('/:id/ship-back', validate(shipBackSchema), async (req: AuthRequest,
     await logToJobTimeline(result.rows[0], req.user!.id, emailed ? `shipped back, tracking emailed (${to})` : 'shipped back');
     await syncMerchRequirementStatus(result.rows[0].job_id);
   }
+  await retireDoneBells('held_item_review', req.params.id as string);
   res.json({ data: result.rows[0], emailed, notified_to: emailed ? to : null });
 });
 
@@ -639,6 +643,7 @@ router.post('/:id/dispose', async (req: AuthRequest, res: Response) => {
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
   if (result.rows[0].job_id) await syncMerchRequirementStatus(result.rows[0].job_id);
+  await retireDoneBells('held_item_review', req.params.id as string);
   res.json({ data: result.rows[0] });
 });
 
@@ -838,6 +843,8 @@ router.post('/:id/chase', async (req: AuthRequest, res: Response) => {
   );
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
   if (result.rows[0].job_id) await logToJobTimeline(result.rows[0], req.user!.id, `chase ${tier} sent (${recipient.to})`);
+  // Chased — the daily "N chases ready to review" digest may be done.
+  await retireDoneBells('lost_property_chases');
   res.json({ data: result.rows[0], emailed: true, tier, notified_to: recipient.to });
 });
 

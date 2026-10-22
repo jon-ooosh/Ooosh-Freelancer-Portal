@@ -26,7 +26,8 @@ import { listAssignablePeople } from './assignable-staff';
 export const KIOSK_IPS_SETTING = 'kiosk_allowed_ips';
 export const KIOSK_READER_SETTING = 'stripe_terminal_kiosk';
 export const KIOSK_PIN_ROTATED_SETTING = 'kiosk_pin_rotated_at';
-const PIN_ROTATE_DAYS = 91;
+// bell-rules.ts keeps a copy for its rule; bell-rules.test.ts checks they match.
+export const PIN_ROTATE_DAYS = 91;
 const PIN_BELL_EVERY_DAYS = 14;
 
 export interface KioskSession { sessionId: string; scopes: string[] }
@@ -152,8 +153,8 @@ export async function runKioskPinRotationCheck(): Promise<{ belled: boolean }> {
   const admins = await query(`SELECT id FROM users WHERE role = 'admin' AND is_active = true AND login_disabled = false`);
   for (const a of admins.rows as { id: string }[]) {
     await query(
-      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-       VALUES ($1, 'kiosk_pin_rotation', 'Rotate the warehouse PIN', $2, 'system_settings', NULL, '/settings', 'normal')`,
+      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+       VALUES ($1, 'kiosk_pin_rotation', 'Rotate the warehouse PIN', $2, 'system_settings', NULL, '/settings', 'normal', 'kiosk_pin_rotation')`,
       [a.id, `The warehouse kiosk PIN was last changed on ${rotated} (${ageDays} days ago). Change WAREHOUSE_PIN on the server, then press "PIN changed today" in Settings › Login security & kiosk.`],
     ).catch((e) => console.error('[kiosk] PIN rotation bell failed:', e));
   }

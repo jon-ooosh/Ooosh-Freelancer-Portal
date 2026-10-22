@@ -696,10 +696,34 @@ export function startScheduler() {
   });
   console.log('Scheduler: Held-return reconciliation scheduled hourly at :15');
 
+  // ── Bells that are done with ─────────────────────────────────────────
+  // Every 5 minutes — retire every bell whose thing has been done, by the one
+  // rule per kind in services/bell-rules.ts. The code that finishes a thing
+  // retires its bells straight away; this catches every other path.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { sweepDoneBells } = await import('../services/notification-resolve');
+      const retired = await sweepDoneBells();
+      if (retired > 0) console.log(`Scheduler: Bell sweep — ${retired} retired`);
+    } catch (err) {
+      console.error('Scheduler: Bell sweep failed:', err instanceof Error ? err.message : err);
+    }
+  });
+  console.log('Scheduler: Bell sweep scheduled every 5 minutes');
+
   // ── Notification Escalation ──────────────────────────────────────────
   // Every 15 minutes — check unread notifications and escalate to email
   cron.schedule('*/15 * * * *', async () => {
     try {
+      // Retire finished bells first, so the escalator never emails somebody
+      // about a thing that has already been done. A failure here must not
+      // stop the escalator.
+      try {
+        const { sweepDoneBells } = await import('../services/notification-resolve');
+        await sweepDoneBells();
+      } catch (sweepErr) {
+        console.error('Scheduler: Bell sweep before escalation failed:', sweepErr instanceof Error ? sweepErr.message : sweepErr);
+      }
       const { runNotificationEscalation } = await import('../services/notification-escalation');
       const result = await runNotificationEscalation();
       if (result.emailed > 0) {

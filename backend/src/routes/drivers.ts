@@ -24,6 +24,7 @@ import { DISPLAY_NAME_SQL } from '../services/display-name';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { applyAccountAutoCover } from '../services/hh-requirement-derivation';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -620,6 +621,10 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
 
     // Dual-write encrypted PII companions for whichever PII fields changed.
     await encryptDriverPiiInto({ query }, String(id), updates);
+    // An edit can settle a referral or record a check date — the rules decide
+    // (bell-rules.ts); a no-op otherwise. Never throws.
+    await retireDoneBells('referral_needed', String(id));
+    await retireDoneBells('dva_check_needed', String(id));
     const updated = decryptDriverRow(result.rows[0]);
     res.json({ data: updated });
   } catch (error) {
@@ -1015,6 +1020,8 @@ router.post(
         (excess.requiresReferral ? 'REFERRAL' : `£${excess.amount}`),
       );
 
+      // A check is on file: "NI licence check needed" is done (bell-rules.ts).
+      await retireDoneBells('dva_check_needed', String(id));
       res.json({ data: decryptDriverRow(result.rows[0]), excess });
     } catch (error) {
       console.error('[drivers] Licence record check error:', error);
@@ -1299,6 +1306,11 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
     }
 
     console.log(`[drivers] Referral resolved: driver=${id}, outcome=${outcome}`);
+    // The referral has an outcome (or an extended check date): the driver's
+    // "Referral needed" / "NI licence check needed" bells are done if the
+    // rules say so (bell-rules.ts). Never throws.
+    await retireDoneBells('referral_needed', String(id));
+    await retireDoneBells('dva_check_needed', String(id));
     res.json({ data: result.rows[0] });
   } catch (error) {
     console.error('[drivers] Resolve referral error:', error);

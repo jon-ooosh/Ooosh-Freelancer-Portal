@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { z } from 'zod';
+import { markMentionsSeen } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -81,6 +82,28 @@ router.post('/read', async (req: AuthRequest, res: Response) => {
     console.error('Mark read error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// ── POST /api/notifications/seen — the page a mention sits on is open ──
+//
+// The record's timeline (or the problem's thread) is on screen, so the
+// caller's OWN mention bells for it are marked READ — the dot goes — but not
+// done: seeing a question is not answering it (jon, Oct 2026). Replying or
+// reacting marks them done (routes/interactions.ts). The types are the
+// anchors routes/interactions.ts gives a mention bell.
+const seenSchema = z.object({
+  entity_type: z.enum(['jobs', 'people', 'organisations', 'venues', 'job_issues']),
+  entity_id: z.string().uuid(),
+});
+
+router.post('/seen', async (req: AuthRequest, res: Response) => {
+  const parsed = seenSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+  // Never throws — a bell left unread is not worth an error on the page.
+  const read = await markMentionsSeen(req.user!.id, parsed.data.entity_type, parsed.data.entity_id);
+  res.json({ read });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

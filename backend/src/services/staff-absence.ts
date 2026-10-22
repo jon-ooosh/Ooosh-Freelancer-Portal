@@ -38,6 +38,7 @@ import {
 import { postEntry } from './staff-balance';
 import { minutesBetweenTimes } from './staff-leave';
 import { ukToday } from './uk-date';
+import { retireDoneBells } from './notification-resolve';
 
 export type AbsenceType =
   | 'sickness' | 'maternity' | 'paternity' | 'shared_parental' | 'adoption'
@@ -503,6 +504,8 @@ export async function cancelAbsence(absenceId: string, reason: string, userId: s
       WHERE id = $1`,
     [absenceId, userId, reason]
   );
+  // No return-to-work owed for a cancelled absence (bell-rules.ts rtw_due).
+  await retireDoneBells('rtw_due', absenceId);
 }
 
 // ── Return to work (spec §7.3) ──────────────────────────────────────────────
@@ -538,6 +541,8 @@ export async function recordRtw(absenceId: string, input: RtwInput, userId: stri
      input.adjustments ?? null, input.notes ?? null,
      input.fitNoteReceived ?? null, input.fitNoteExpiry ?? null]
   );
+  // Recorded — the "Return-to-work due / still outstanding" bells are done.
+  await retireDoneBells('rtw_due', absenceId);
 
   const out = await getAbsence(absenceId);
   if (!out) throw new Error('Absence not found after recording the return to work');
