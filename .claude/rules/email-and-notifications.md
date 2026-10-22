@@ -124,16 +124,23 @@ admin's "X has requested holiday" lit until each of them clicked it. Now (jon, O
   "overdue"): only the newest copy to each person stays lit.
 - **A rule is a parameter-free EXISTS** (`bell-rules.test.ts` checks): no `$n`; `[0-9]` not `\d`; guard any cast
   with CASE. A deleted record reads as done. A rule that needs a module that loads auth or email keeps a copy
-  of the number and the test checks it matches (`HOLD_UNTIL_LEAD_DAYS`, `PIN_ROTATE_DAYS`).
+  of the number and the test checks it matches (`HOLD_UNTIL_LEAD_DAYS`, `PIN_ROTATE_DAYS`,
+  `CLAIM_CHASE_ESCALATED`); a light module's number is imported (`COMPLIANCE_DEFAULTS`, `RECEIPT_GRACE_DAYS`)
+  — and that module must then never load `bell-rules` / `notification-resolve` at runtime (`import type` only).
+- **A rule mirroring a scanner must never be NARROWER than the scanner** (the van compliance rules copy
+  `runComplianceCheck` item by item): a bell retired while the scanner still calls it due just comes back.
+- **A scanner's dedup that reads `acknowledged_at` must not mistake a `latestOnly` retirement for a person
+  handling it** — count only the person's newest bell (the requirement Reminder scanner, `scheduler.ts`).
 - **Older wiring, same idea:** leave / overtime / WFH requests and day swaps retire their approvers' `follow_up`
   bells by type (`retire…Bells()` beside each `notify…Requested()` in `staff-notifications.ts`; day swaps from
   `staff-swaps.ts` via `retireSwapRequestBells()`, entity `staff_pattern_swap`, the swap's group id). **Mentions are one
   person's:** a reply or a reaction in the thread marks the replier's own mention bells done
   (`resolveMyThreadMentions`); opening the timeline or the Problem marks them READ only
   (`POST /notifications/seen`, `markMentionsSeen`).
-- **Not keyed yet, waiting on jon's decisions:** chase alerts, requirement chases, compliance, mid-tour
-  drivers, claim check-ins / client chases, the staff-document escalation, storage access requests, and the
-  bells with no state to test (failed hooks, payroll, company days, receipts digest, delivery problems).
+- **Deliberately NOT keyed:** New Enquiry's "Chase reminder" (sent at once with a future date — it would read
+  as done straight away), storage access requests (jon: unused), the prep-flag and low-tread van bells, a send
+  failure / soft-bounce "Email not delivered", and bells with no state to test (failed hooks, payroll, company
+  days). The full keyed list is `BELL_RULES`; what each round covered is in `INBOX-AND-WAREHOUSE.md`.
 
 ## Timelines & threads
 

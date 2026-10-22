@@ -69,6 +69,9 @@ async function retireDocumentBells(documentId: string): Promise<void> {
   await retireDoneBells('staff_doc_content_review', documentId);
   await retireDoneBells('staff_doc_approval', documentId);
   await retireDoneBells('staff_doc_changes', documentId);
+  // The managers' "Outstanding staff document" bells point at a person's
+  // assignment, not the document, so check them all (only a handful are open).
+  await retireDoneBells('staff_doc_escalation');
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

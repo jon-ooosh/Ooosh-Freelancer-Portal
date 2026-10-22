@@ -20,10 +20,14 @@ jest.mock('../../config/socket', () => ({ emitToUser: jest.fn() }));
 jest.mock('../email-service', () => ({ emailService: {}, default: {} }));
 
 import { query } from '../../config/database';
-import { BELL_RULES, HOLD_UNTIL_LEAD_DAYS, PIN_ROTATE_DAYS, type BellKey } from '../bell-rules';
+import {
+  BELL_RULES, HOLD_UNTIL_LEAD_DAYS, PIN_ROTATE_DAYS, CLAIM_CHASE_ESCALATED, COMPLIANCE_BELL_KEYS, type BellKey,
+} from '../bell-rules';
 import { retireDoneBells, sweepDoneBells } from '../notification-resolve';
 import * as holdingReminders from '../holding-reminders';
 import * as kioskTill from '../kiosk-till';
+import * as claimChase from '../claim-chase';
+import { COMPLIANCE_DEFAULTS } from '../compliance-checker';
 
 const mockQuery = query as jest.MockedFunction<any>;
 const KEYS = Object.keys(BELL_RULES) as BellKey[];
@@ -55,6 +59,25 @@ describe('copied numbers match the scanners', () => {
   });
   it('PIN rotation period', () => {
     expect(PIN_ROTATE_DAYS).toBe(kioskTill.PIN_ROTATE_DAYS);
+  });
+  it('claim chase "has run out" level', () => {
+    expect(CLAIM_CHASE_ESCALATED).toBe(claimChase.CHASE_ESCALATED);
+  });
+});
+
+describe('van compliance rules', () => {
+  it('one key per item the checker raises, each keeping only the newest copy', () => {
+    expect([...COMPLIANCE_BELL_KEYS].sort()).toEqual(
+      (Object.keys(BELL_RULES) as BellKey[]).filter((k) => k.startsWith('compliance_')).sort());
+    for (const key of COMPLIANCE_BELL_KEYS) {
+      expect((BELL_RULES[key] as { latestOnly?: boolean }).latestOnly).toBe(true);
+    }
+  });
+  it('fall back to the checker\'s own defaults for a blank setting', () => {
+    const mot = BELL_RULES.compliance_mot.stillWaiting.replace(/\s+/g, ' ');
+    expect(mot).toContain(`WHERE s.key = 'mot_warning_days'), ${COMPLIANCE_DEFAULTS.mot_warning_days})`);
+    const service = BELL_RULES.compliance_service.stillWaiting.replace(/\s+/g, ' ');
+    expect(service).toContain(`WHERE s.key = 'service_mileage_warning_miles'), ${COMPLIANCE_DEFAULTS.service_mileage_warning_miles})`);
   });
 });
 

@@ -7,6 +7,7 @@ import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { ensureBacklineProblemIssue } from '../services/job-issues';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -419,6 +420,10 @@ router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest,
         );
       }
     }
+
+    // Done or cancelled: its "Overdue" / "Reminder" bells are done too
+    // (bell-rules.ts requirement_due). The cascade above goes on the sweep.
+    await retireDoneBells('requirement_due', updated.id);
 
     // ── Backline flagged as Problem → register issue ────────────────────────
     // A backline requirement in "Problem" (blocked) status is a real

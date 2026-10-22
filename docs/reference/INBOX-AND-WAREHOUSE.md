@@ -219,7 +219,7 @@ Phased plan in `docs/MESSAGING-SPEC.md`. Phase G (email reply ingestion via `rep
 **Bells joined to the thing they ask for (Oct 2026).** A bell used to clear only when its recipient
 clicked it, pressed Mark all read or Done — never when the thing itself was done, and never for the other
 people who got a copy. Now a bell that ASKS for something carries `notifications.resolve_key` (migration
-308) and `services/bell-rules.ts` holds one rule per key ("still needed while …"); `notification-resolve.ts`
+310) and `services/bell-rules.ts` holds one rule per key ("still needed while …"); `notification-resolve.ts`
 retires it — straight away from the code that finishes the thing, and on a 5-minute sweep (also run before
 each escalation) for every other path. Read + `acknowledged_at`; dealt-with bells stay in the dropdown,
 greyed, "✓ Done", and open bells / the Inbox update over the socket (`notifications_resolved`
@@ -235,10 +235,35 @@ greyed, "✓ Done", and open bells / the Inbox update over the socket (`notifica
   lost-property digest, kiosk PIN, overtime cash-out, return-to-work, freelancer not confirmed, To Do (needs
   you / given / handed back / list item / follow-up), repeating to-do proposed, review due, staff record
   action / deletion, staff documents (to sign, content review, awaiting approval, changes requested).
-- [ ] **Waiting on jon's decisions** (not keyed — they clear as before): chase alerts, requirement chases,
-  compliance, mid-tour drivers, claim check-ins and client chases, the staff-document escalation, storage
-  access requests, and the bells with no state to test (failed hooks, payroll, company days, receipts
-  digest, refund tidy-ups, lock-up flagged items, delivery problems).
+- [x] **Round 2 (jon's decisions, Oct 2026), migration 312 labelled the open ones:**
+  - Chase due / Auto-chase stopped (`chase_due`): done once the chase date moves into the future or the
+    job leaves the enquiry stages. One live copy per person.
+  - Overdue requirement / Reminder (`requirement_due`): done once the requirement is done or cancelled.
+    Blocked still waits; a `[Suspended:` one counts as done. One live copy. The reminder scanner's
+    "already handled" check now counts only the person's newest bell, so an older copy cleared
+    automatically doesn't stop the daily nag.
+  - Van compliance, one key per item (`compliance_mot` / `_tax` / `_insurance` / `_tfl` / `_service` /
+    `_rossetts`): done once the item is out of its warning window, by the checker's own numbers
+    (`COMPLIANCE_DEFAULTS`), or the van leaves the fleet.
+  - Mid-tour driver (`mid_tour_driver`): done once the row is booked out (Add to Hire), cancelled, or
+    the job is finished (`holdOccupiesSql`).
+  - Claim check-in (`claim_check_in`): done once the check date moves or the claim closes.
+  - Client form not coming back (`claim_form_chase`): done once the form is in, or chasing is paused or
+    restarted.
+  - The managers' "Outstanding staff document" (`staff_doc_escalation`): now points at the person's
+    ASSIGNMENT. Done once that person completes it. Old ones are re-pointed by the name in their wording
+    where it is unambiguous.
+  - The company-card receipts digest (`cot_receipts`): done once none of that person's purchases is
+    waiting.
+  - "Email not delivered" for a flagged address (`email_undelivered`): done once the address is marked
+    fixed or a later email arrives. A send failure or a soft bounce keeps its Done button.
+- [ ] **Deliberately not keyed** (they clear as before):
+  - New Enquiry's "Chase reminder". It is sent at once with a future date, and the enquiry never saves
+    its "Alert: X" person, so no "Chase due" ever follows.
+  - Storage access requests (jon: not used).
+  - The prep-flag and low-tread van bells.
+  - Bells with no state to test: failed hooks, payroll, company days, refund tidy-ups, lock-up flagged
+    items.
 
 **Round 4 backlog (captured, not shipped):**
 - Real-time updates in Inbox for the Sent tab (currently Sent doesn't refresh on socket events — minor).

@@ -42,15 +42,22 @@ async function notifyUser(
   priority: 'low' | 'normal' | 'high' = 'normal',
   /**
    * What it asks for — bell-rules.ts retires it once done. Null for a
-   * heads-up ("Renewal coming up": nothing can be done until it lapses) and
-   * for the managers' escalation, which waits on a decision (jon).
+   * heads-up ("Renewal coming up": nothing can be done until it lapses).
    */
   resolveKey: BellKey | null = null,
+  /**
+   * The managers' escalation is about ONE person's assignment, so it points
+   * at that, not the document — then one person completing clears only the
+   * bells about them (bell-rules.ts staff_doc_escalation).
+   */
+  assignmentId: string | null = null,
 ): Promise<void> {
   await query(
     `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
-     VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, '/staff/documents', $5, $6)`,
-    [userId, title, content, documentId, priority, resolveKey],
+     VALUES ($1, 'follow_up', $2, $3, $4, $5, '/staff/documents', $6, $7)`,
+    [userId, title, content,
+      assignmentId ? 'staff_document_assignments' : 'staff_documents', assignmentId ?? documentId,
+      priority, resolveKey],
   ).catch((e) => console.error('[staff-doc-reminders] notify failed:', e));
 }
 
@@ -174,7 +181,7 @@ export async function runStaffDocumentReminders(): Promise<StaffDocReminderResul
       for (const m of mgrs.rows) {
         await notifyUser(m.id, `Outstanding staff document: ${r.title}`,
           `${r.staff_name} still hasn’t completed “${r.title}” (assigned ${days} day${days === 1 ? '' : 's'} ago).`,
-          r.document_id, 'high');
+          r.document_id, 'high', 'staff_doc_escalation', r.id);
       }
     }
   }

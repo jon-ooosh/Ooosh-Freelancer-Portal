@@ -35,6 +35,7 @@ import { query } from '../config/database';
 import { frontendLink } from '../config/app-urls';
 import { MANAGER_ROLES } from '../middleware/auth';
 import { emailService } from './email-service';
+import { retireDoneBells } from './notification-resolve';
 
 const ALERT_EMAIL = 'info@oooshtours.co.uk';
 const OWN_DOMAIN = '@oooshtours.co.uk';
@@ -352,6 +353,9 @@ function actionPath(ctx: FailureContext): string | null {
   return null;
 }
 
+/** The kinds that flag the address in email_address_problems (flagAddress). */
+const FLAGGED_KINDS: AlertKind[] = ['bounced', 'suppressed', 'complained'];
+
 /** Bell every manager + email info@. The bell is pre-stamped `email_sent_at`
  *  because info@ is emailed directly (email rules: one event, one email). */
 async function raiseAlert(ctx: FailureContext): Promise<void> {
@@ -374,13 +378,17 @@ async function raiseAlert(ctx: FailureContext): Promise<void> {
     );
     for (const u of users.rows as Array<{ id: string }>) {
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-         VALUES ($1, 'system', $2, $3, $4, $5, $6, 'high', NOW())`,
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+         VALUES ($1, 'system', $2, $3, $4, $5, $6, 'high', NOW(), $7)`,
         [
           u.id, title.slice(0, 500), content,
           ctx.job ? 'job' : ctx.personId ? 'person' : ctx.orgId ? 'organisation' : null,
           ctx.job?.id || ctx.personId || ctx.orgId || null,
           path,
+          // A flagged address: the bell asks for it to be sorted, and retires
+          // once it is (bell-rules.ts). A soft bounce or a send failure flags
+          // nothing — those keep their Done button.
+          FLAGGED_KINDS.includes(ctx.kind) ? 'email_undelivered' : null,
         ],
       );
     }
@@ -475,7 +483,7 @@ async function recordFailure(
 async function clearOnDelivery(recipient: string, event: ResendEmailEvent): Promise<void> {
   const createdAt = event.data?.created_at;
   if (!createdAt || Number.isNaN(new Date(createdAt).getTime())) return;
-  await query(
+  const cleared = await query(
     `UPDATE email_address_problems
         SET resolved_at = NOW(), resolved_how = 'delivered', resolved_by = NULL, updated_at = NOW()
       WHERE email = $1
@@ -484,9 +492,11 @@ async function clearOnDelivery(recipient: string, event: ResendEmailEvent): Prom
         AND NOT EXISTS (
           SELECT 1 FROM email_delivery_events
            WHERE recipient = $1 AND provider_email_id = $3
-        )`,
+        )
+      RETURNING email`,
     [recipient, createdAt, event.data?.email_id || ''],
   );
+  if (cleared.rows.length) await retireDoneBells('email_undelivered');
 }
 
 /** Handle one verified event. Exported for tests. */
@@ -582,5 +592,6 @@ export async function markProblemFixed(email: string, userId: string): Promise<b
       RETURNING email`,
     [normaliseAddress(email), userId],
   );
+  if (r.rows.length > 0) await retireDoneBells('email_undelivered');
   return r.rows.length > 0;
 }

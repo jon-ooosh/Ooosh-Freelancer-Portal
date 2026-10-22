@@ -9,7 +9,7 @@ import { frontendLink } from '../config/app-urls';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
 import { shiftLinkPath } from '../services/studio-sitter';
 import { bumpSiblingChaseDates } from '../services/job-groups';
-import { resolveMyThreadMentions } from '../services/notification-resolve';
+import { resolveMyThreadMentions, retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -476,6 +476,12 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       );
       // Quote options: the same bump for the enquiry's other live options.
       bumpSiblingChaseDates(job_id, null).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
+    }
+
+    // A logged chase (or contact) moves the chase date on: its "Chase due"
+    // bells are done (bell-rules.ts chase_due). Siblings' go on the sweep.
+    if (job_id && (type === 'chase' || CONTACT_BUMP_TYPES.has(type))) {
+      await retireDoneBells('chase_due', job_id);
     }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
