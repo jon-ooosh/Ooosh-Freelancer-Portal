@@ -16,6 +16,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
+import { UNMATCHED_REASONS } from '../components/costs/FreelancerInvoiceLinks';
 import CostAllocationModal from '../components/CostAllocationModal';
 import RechargeResolveModal, { RechargeSlot } from '../components/RechargeResolveModal';
 import RecordRefundModal from '../components/RecordRefundModal';
@@ -726,6 +727,12 @@ export default function CostsPage() {
                             {/* Their own name is usually the letterhead already: don't say it twice. */}
                             {(c.person_name || '').trim().toLowerCase() === (c.supplier_name || '').trim().toLowerCase() ? 'Linked' : c.person_name}
                             {c.work_item_count ? ` · ${c.work_item_count} job${c.work_item_count === 1 ? '' : 's'}` : ''}
+                          </div>
+                        )}
+                        {/* Saved with no work ticked, and why (the save asks). */}
+                        {c.cost_type === 'freelancer_invoice' && !c.work_item_count && c.work_unmatched_reason && (
+                          <div className="text-xs text-amber-700 truncate max-w-[150px]" title="Saved without ticking the work it covers">
+                            {UNMATCHED_REASONS.find((r) => r.code === c.work_unmatched_reason)?.short || 'Not matched'}
                           </div>
                         )}
                         {/* "Uploaded by" used to be its own column on the All costs tab,

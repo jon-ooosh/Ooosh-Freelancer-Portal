@@ -167,6 +167,9 @@ const createSchema = z.object({
     key: z.string().trim().min(3).max(80),
     amount: money,
   })).max(200).optional(),
+  // Why it was saved with no work ticked (migration 315). Cleared server-side
+  // whenever work is ticked.
+  work_unmatched_reason: z.enum(['person_not_in_op', 'work_not_in_op', 'later']).optional().nullable(),
 });
 
 // Update accepts the same fields, all optional.
@@ -196,8 +199,9 @@ const WRITABLE = [
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'job_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
-  // The freelancer a freelancer invoice is from (FREELANCER-PORTAL-SPEC §5).
-  'person_id',
+  // The freelancer a freelancer invoice is from (FREELANCER-PORTAL-SPEC §5),
+  // and why no work is ticked on it, when none is.
+  'person_id', 'work_unmatched_reason',
   'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename',
   'supporting_documents', 'status', 'notes',
   // Credits — money coming back. The SIGN is applied by applyCreditSign()
@@ -1080,6 +1084,8 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
         throw e;
       }
     }
+    // Work ticked: no "why not?" to keep (migration 315).
+    if (workRows?.length) data.work_unmatched_reason = null;
 
     const cols = ['uploaded_by', 'approval_state'];
     const vals: unknown[] = [req.user!.id, approvalState];
@@ -1170,6 +1176,8 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         workRows = [];
       }
     }
+    // Work ticked: no "why not?" to keep (migration 315).
+    if (workRows?.length) data.work_unmatched_reason = null;
 
     // Amounts arrive as positive magnitudes from every client, so an edited
     // credit has to be re-signed or it flips to a purchase on save. Which kind

@@ -20,9 +20,12 @@ removed. Nothing is half-built.
 
 1. **Earnings tab in the portal (§5.2).** Reads what §5.1 links: invoices with their status and dates,
    and finished work marked "To invoice" or "Invoiced".
-2. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
+2. **Simplify the cost capture form** (jon, 22 Oct 2026: "very heavy, very wordy"; even he couldn't tell
+   what the "This job so far / Is this part of a quote? / recharge" block was asking). Agree the shape
+   first (a written proposal or a mock-up), then build. Not part of this programme, but raised here.
+3. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
    shop-till guide (`docs/guides/shop-till/`) in the new look at the same time.
-3. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+4. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -41,6 +44,7 @@ them from the recipe there.
 | 4 | Van screens reskin, freelancer scope only (§11) | merged 21 Oct 2026 |
 | 5 | Portal 2FA (§7) | built 21 Oct 2026, ships off |
 | 6a | Earnings part 1: freelancer invoices linked in Costs (§5.1) | merged 22 Oct 2026; past invoices linked, one-off page removed |
+| – | Costs follow-ups: job numbers in the work list, "no work ticked" prompt, recharge default (§5.1) | built 22 Oct 2026 |
 | – | Calculator: setup premium charged to the client, crew fuel once (`PLATFORM-CONVENTIONS.md`) | merged 22 Oct 2026 |
 | 6b | Earnings part 2: the portal tab (§5.2) | next |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
@@ -214,6 +218,21 @@ which match one freelancer by name.
   address that names exactly one freelancer links an unlinked freelancer invoice.
 - The Costs list shows the freelancer under the supplier ("Linked · 3 jobs" when the letterhead is their
   own name).
+
+**Follow-ups after first use (22 Oct 2026, migration 315):**
+- The work list puts each job number under its date, in the left column, so the numbers line up against
+  the invoice (jon).
+- Saving a freelancer invoice with no work ticked asks why, and never blocks: "The freelancer isn't in
+  OP" (only when nobody is picked), "The work isn't in OP" or "I'll match it later", or go back and tick.
+  The answer is `costs.work_unmatched_reason` and shows in the Costs list as "Not matched: …"; ticking
+  work clears it (server-side). "Later" is asked again on the next save; the two "not in OP" answers and
+  an already-paid invoice are not asked again.
+- **A freelancer invoice never defaults to Extra + recharge**, even on a job flagged "recharge running
+  costs". It is mostly their fee, which the quote already charges; the old default would have put the
+  whole invoice on the Recharges tab, and linking the job from the ticked work made that the usual path.
+  It defaults like any other cost (Part of the quote when the job has a quote), and the hint says to choose
+  Extra and recharge the fronted part (Partial) if the invoice includes fuel or tolls. The "defaulted to
+  Extra + recharge" banner and "(set to Extra)" now show only while they are true.
 
 **The one-off backfill (used and removed, Oct 2026):** a Costs page grouped the unlinked freelancer
 invoices since 6 April 2026 by letterhead for jon to link once. Done; the page, its route and its

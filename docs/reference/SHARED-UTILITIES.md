@@ -397,7 +397,9 @@ update request as the header and are checked before anything is written. Booked 
 (`freelancer_invoice_tolerance_gbp` / `_pct`), never a gate. **Query** (`POST/DELETE /costs/:id/query`,
 `queried_at` / `query_note`) is the alternative to approving; approving clears it. Work links are NOT
 `cost_allocations`: the by-job read is unchanged and the job split stays by hand. The portal's Earnings tab
-reads these links.
+reads these links. Saving one with nothing ticked asks why (never blocks) and keeps the answer in
+`work_unmatched_reason` (migration 315). A freelancer invoice is never defaulted to Extra + recharge on a
+"recharge running costs" job: that default is for receipts, not a freelancer's fee.
 
 **Due dates — `resolveDueDate()` in `services/supplier-terms.ts` is THE definition (Sep 2026, migration 198).** The bill due date is DERIVED, not stored, and was being re-derived independently at five sites (the costs list, get-one, the bill push, the bill re-sync, and by extension the mark-paid modal via the list payload) — each carrying its own copy of the freelancer-vs-supplier branch. Every one of those now calls `resolveDueDate(cost, supplierTerms)` (or the terms-resolving `resolveDueDateForCost(cost)` for a single row), so OP and Xero cannot disagree about when a bill is due.
 
