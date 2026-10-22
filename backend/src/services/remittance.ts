@@ -25,7 +25,7 @@ export interface RemittanceContact {
   name: string | null;
   mode: RemittanceMode;
   /** Where the address came from - drives the modal's pre-fill note. */
-  source: 'reimbursement_staff' | 'freelancer_assignment' | 'remembered' | 'person_match' | 'supplier_org' | 'none';
+  source: 'reimbursement_staff' | 'freelancer_linked' | 'freelancer_assignment' | 'remembered' | 'person_match' | 'supplier_org' | 'none';
 }
 
 interface CostForRemittance {
@@ -33,6 +33,9 @@ interface CostForRemittance {
   payment_method: string | null;
   uploaded_by: string | null;
   quote_assignment_id: string | null;
+  /** The freelancer a freelancer invoice is linked to (FREELANCER-PORTAL-SPEC §5). */
+  person_id?: string | null;
+  cost_type?: string | null;
   xero_contact_id: string | null;
   supplier_name: string | null;
   invoice_number?: string | null;
@@ -90,6 +93,16 @@ export async function resolveRemittanceContact(cost: CostForRemittance): Promise
       return { email: cleanName(row?.email), name: cleanName(row?.name), mode, source: 'reimbursement_staff' };
     }
     return { email: null, name: null, mode, source: 'reimbursement_staff' };
+  }
+
+  // The freelancer the office linked this invoice to: the surest answer.
+  if (cost.person_id) {
+    const r = await query(
+      `SELECT email, CONCAT(first_name, ' ', last_name) AS name FROM people WHERE id = $1`,
+      [cost.person_id],
+    );
+    const row = r.rows[0];
+    if (row?.email) return { email: cleanName(row.email), name: cleanName(row.name), mode, source: 'freelancer_linked' };
   }
 
   if (cost.quote_assignment_id) {
@@ -165,7 +178,7 @@ export async function resolveRemittanceContact(cost: CostForRemittance): Promise
 /** Load the fields the resolver + send need in one go. */
 export async function getCostForRemittance(costId: string): Promise<(CostForRemittance & { uploaded_by_name: string | null }) | null> {
   const r = await query(
-    `SELECT c.id, c.payment_method, c.uploaded_by, c.quote_assignment_id, c.xero_contact_id,
+    `SELECT c.id, c.payment_method, c.uploaded_by, c.quote_assignment_id, c.person_id, c.cost_type, c.xero_contact_id,
             c.supplier_name, c.invoice_number, c.description, c.amount_gross,
             c.paid_method, c.paid_value_date, c.job_id,
             CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name
