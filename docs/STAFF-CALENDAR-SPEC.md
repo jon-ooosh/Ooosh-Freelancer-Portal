@@ -795,13 +795,47 @@ Admin sets each person's pattern: per weekday, working or not, start/end/break. 
 cycles supported for alternating patterns. Changing a pattern closes the current row
 (`effective_to`) and opens a new one — it never edits in place.
 
-### 8.2 Self-swap
+### 8.2 Self-swap — BUILT (Oct 2026, migration 306)
 
 Staff request "work Wed instead of Tue this week". Two exception rows, one
 `swap_group_id`, one approval. No ledger involvement — a swap costs no allowance, it just
 moves which day is contracted.
 
+**As built** (jon, 22 Oct 2026 — "works Saturday to Tuesday, wants to work the Friday and
+have the Saturday off"). `services/staff-swaps.ts` is THE definition.
+
+- **Asked for, approved like holiday.** My Time › "Want some time off?" › **⇄ Swap a day**:
+  the day you'll have off (must be a day you normally work, with nothing on it) and the
+  day you'll work instead (must be a day you normally don't, and not a company day).
+  Same approvers, bell + email, "Waiting for you" panel, decision emails, daily digest.
+  The person withdraws while it waits; an admin declines with a reason, or calls off an
+  approved one (until both days have passed).
+- **Nothing shows until it is approved** (jon). `staff-day-status.ts` reads approved
+  exceptions only, so a waiting swap changes no calendar, no headcount and no "can I book
+  this?" answer. Once approved, the team calendar draws the day worked with the one-off
+  outline and the day given up as an outlined **Swap** rather than a blank (a blank on
+  somebody's usual Saturday reads as a no-show); both carry `StaffDay.swapWith`, the other
+  date, for the hover text.
+- **The hours on the day worked are changeable** (jon), pre-filled from the day given up.
+  The unpaid break is copied from the day given up and not asked for — My Time does not
+  show breaks. The day given up's paid minutes are snapshotted on the request
+  (`usual_minutes`), so the approver sees "1h longer than the day given up" and a later
+  hours change cannot rewrite it.
+- **Approval re-checks both days.** Holiday booked on the day being given up while the
+  swap waited would otherwise end up as a paid-for leave day on a date the calendar no
+  longer calls a working day.
+- **The group is the unit.** The group id is the swap's id in every URL, bell and email;
+  approve / decline / withdraw / call off update both legs in one statement.
+- Migration 306 added `decided_by` / `decided_at` / `decision_note`, `usual_minutes` and the
+  `withdrawn` status to `staff_pattern_exceptions`. The admin-only `POST /exceptions`
+  (auto-approved, no UI) is unchanged.
+
 ### 8.3 Person-to-person swap
+
+**Settled (jon, 22 Oct 2026): not a thing of its own.** Two people trading days each ask
+for their own swap (§8.2) and the approver, who knows they belong together, approves
+both. Nothing links the two — if one is declined or withdrawn, OP does not warn about
+the other. The original note follows.
 
 Modelled (four rows, one group) but **not built as a self-service workflow in v1**. Two
 people agree it between themselves; admin creates the swap in one action; both see it on
@@ -1220,9 +1254,9 @@ needs a season of real data to calibrate against, so it is correctly last.
 
 ## 16. Deferred, with reasons
 
-- **Person-to-person swap consent workflow** (§8.3). Modelled, not built. Four legs, two
-  consents, one approval, any leg unwindable. Admin creates both sides in v1. Revisit if
-  it happens more than monthly.
+- **Person-to-person swap consent workflow** (§8.3). Not built, and no longer wanted
+  (jon, Oct 2026): two people swapping each ask for their own self-swap (§8.2), which
+  shipped.
 - **Team iCal export.** A team feed in a personal Google account exports colleagues'
   absence data outside the company and cannot be recalled. The personal feed
   that DID ship (§10) carries the person's own time only.
@@ -1363,6 +1397,7 @@ Where things are, for troubleshooting:
 |---|---|
 | Is somebody in / home / off on a date | `services/staff-day-status.ts` (`getStaffCalendar`, the merge layers) |
 | Working from home | `services/staff-wfh.ts`, routes `/staff-calendar/wfh*` |
+| Swapping a day | `services/staff-swaps.ts`, routes `/staff-calendar/swaps*` (the id is the swap's group id) |
 | Personal calendar feed | `services/staff-ical.ts`, `routes/staff-calendar-feed.ts` |
 | Your working hours (My Time card) | `GET /staff-calendar/me/patterns` — current pattern + scheduled changes, days and times only; never notes, breaks or history (jon, Oct 2026). Pattern notes are also stripped from `/employees/:id/patterns` for a non-admin reading their own |
 | Emails and bells (requests, decisions, digest, cash-out, payroll) | `services/staff-notifications.ts` |
@@ -1398,6 +1433,7 @@ Where things are, for troubleshooting:
 | — | Staff page restyle: every person tab (Overview, Employment, Time off, Records, Reviews, Access) in the Time off look, on shared `components/StaffCard.tsx`; Employment's allowance-days box fixed | — |
 | **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
 | — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
+| **§8.2** | Swap a day — asked for on My Time, approved like holiday; nothing on the calendar until approved, then "Swap" on the day given up; changeable hours on the day worked, break copied, the day given up's minutes snapshotted; approval re-checks both days | 306 |
 
 ### Decisions taken during the build that CHANGE this spec
 

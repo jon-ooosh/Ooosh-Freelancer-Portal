@@ -139,6 +139,13 @@ export interface StaffDay {
   /** True when a pattern exception (incl. a swap leg) applies to this date. */
   isException: boolean;
   /**
+   * Set on both days of an approved day swap (services/staff-swaps.ts): the
+   * OTHER date. The day given up reads `not_scheduled` like any day off, and
+   * this is what lets the calendar draw it as "Swap" rather than a blank that
+   * looks like a no-show. Not special-category; reaches every viewer.
+   */
+  swapWith?: string;
+  /**
    * Set when the company has granted this day to everyone (spec §20).
    *
    * The day reads as `not_scheduled` — nobody is contracted — so leave cannot
@@ -202,6 +209,8 @@ interface ExceptionRow {
   start_time: string | null;
   end_time: string | null;
   minutes: number;
+  /** The other day of an approved swap, when this row is one leg of one. */
+  swap_with?: string | null;
 }
 
 // ── The resolver (pure — exported for tests) ────────────────────────────────
@@ -226,6 +235,7 @@ export function resolveScheduledDay(
       startTime: exception.start_time,
       endTime: exception.end_time,
       isException: true,
+      ...(exception.swap_with ? { swapWith: exception.swap_with } : {}),
     };
   }
 
@@ -604,15 +614,29 @@ export async function getStaffCalendar(
     }
   }
 
+  // A swap leg also carries the OTHER leg's date (swapWith), which may fall
+  // outside the range being read — hence the join is not range-limited.
   const excRes = await query(
-    `SELECT person_id, exception_date::text AS exception_date, is_working,
-            start_time::text AS start_time,
-            end_time::text   AS end_time,
-            minutes
-       FROM staff_pattern_exceptions
-      WHERE person_id = ANY($1::uuid[])
-        AND status = 'approved'
-        AND exception_date BETWEEN $2::date AND $3::date`,
+    `SELECT e.person_id, e.exception_date::text AS exception_date, e.is_working,
+            e.start_time::text AS start_time,
+            e.end_time::text   AS end_time,
+            e.minutes,
+            o.exception_date::text AS swap_with
+       FROM staff_pattern_exceptions e
+       LEFT JOIN LATERAL (
+         SELECT x.exception_date
+           FROM staff_pattern_exceptions x
+          WHERE e.swap_group_id IS NOT NULL
+            AND x.swap_group_id = e.swap_group_id
+            AND x.person_id = e.person_id
+            AND x.id <> e.id
+            AND x.status = 'approved'
+          ORDER BY x.exception_date
+          LIMIT 1
+       ) o ON true
+      WHERE e.person_id = ANY($1::uuid[])
+        AND e.status = 'approved'
+        AND e.exception_date BETWEEN $2::date AND $3::date`,
     [ids, from, to]
   );
   const exceptions = new Map<string, ExceptionRow>();

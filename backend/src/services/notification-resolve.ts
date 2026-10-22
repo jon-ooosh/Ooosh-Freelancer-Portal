@@ -25,7 +25,8 @@
  *
  * Wired up so far: leave requests (`retireLeaveRequestBells()` in
  * staff-notifications.ts, called by approve / decline / withdraw in
- * staff-leave.ts). Mentions are next — INBOX-AND-WAREHOUSE.md.
+ * staff-leave.ts) and day swaps (`retireSwapRequestBells()`, called the same
+ * way from staff-swaps.ts). Mentions are next — INBOX-AND-WAREHOUSE.md.
  */
 import { query } from '../config/database';
 import { emitToUser } from '../config/socket';
