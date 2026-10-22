@@ -809,7 +809,9 @@ have the Saturday off"). `services/staff-swaps.ts` is THE definition.
   day you'll work instead (must be a day you normally don't, and not a company day).
   Same approvers, bell + email, "Waiting for you" panel, decision emails, daily digest.
   The person withdraws while it waits; an admin declines with a reason, or calls off an
-  approved one (until both days have passed).
+  approved one (until both days have passed). The form's dates are forward-looking only
+  (jon); the server still accepts a past date, so a swap approved after its day has gone
+  by is not refused.
 - **Nothing shows until it is approved** (jon). `staff-day-status.ts` reads approved
   exceptions only, so a waiting swap changes no calendar, no headcount and no "can I book
   this?" answer. Once approved, the team calendar draws the day worked with the one-off

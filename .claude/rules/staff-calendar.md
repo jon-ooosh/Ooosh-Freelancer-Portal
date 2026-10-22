@@ -502,6 +502,10 @@ rows sharing a `swap_group_id`: the day OFF and the day IN.
   request time, like a leave day's minutes.
 - **Nothing here touches the ledger.** If a swap change needs
   `staff-balance.ts`, something has gone wrong.
+- **Forward-looking dates are the FORM's rule, not the server's** (jon). The
+  pickers start at today; `swapProblems()` deliberately has no past-date
+  refusal, because approval re-runs it and a swap approved the morning after
+  its day would then be refused.
 - **Two people swapping is two swaps** (jon) — nothing links them.
 - On the team calendar both days carry `StaffDay.swapWith` (the other date);
   the day given up is drawn as an outlined **Swap**, not a blank.
