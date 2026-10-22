@@ -392,7 +392,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         FROM fleet_vehicles
       `),
 
-      // 13. Pipeline stats
+      // 13. Pipeline stats — enquiry stages only, dismissed hidden, one per
+      // quote group: the same jobs as the Pipeline page header. The previous
+      // blacklist (everything but confirmed / lost) put 1,581 completed jobs
+      // and every prepped / dispatched / returned one on this card.
       query(`
         SELECT
           pipeline_status,
@@ -400,20 +403,22 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           COALESCE(SUM(job_value), 0) as total_value
         FROM jobs
         WHERE is_deleted = false
-          AND pipeline_status IS NOT NULL
-          AND pipeline_status NOT IN ('confirmed', 'lost')
+          AND dismissed_at IS NULL
+          AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+          AND NOT (id = ANY($1::uuid[]))
         GROUP BY pipeline_status
         ORDER BY pipeline_status
-      `),
+      `, [nonLeadOptionIds]),
 
-      // 14. Pipeline total active value
+      // 14. Pipeline total active value — the same jobs as 13.
       query(`
         SELECT COALESCE(SUM(job_value), 0) as total
         FROM jobs
         WHERE is_deleted = false
-          AND pipeline_status NOT IN ('confirmed', 'lost')
-          AND pipeline_status IS NOT NULL
-      `),
+          AND dismissed_at IS NULL
+          AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+          AND NOT (id = ANY($1::uuid[]))
+      `, [nonLeadOptionIds]),
 
       // 15. Stat card counts.
       // going_out_count uses the same status filter as the Today section
@@ -446,8 +451,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           -- chase-model definition in CLAUDE.md. The previous blacklist swept in
           -- every operational + historical job (prepping / prepped / dispatched /
           -- returned / completed / cancelled) and reported ~1100+ on a fleet
-          -- with ~40 actual open enquiries.
+          -- with ~40 actual open enquiries. Dismissed enquiries are hidden from
+          -- the Pipeline page, so they are left out here too (Oct 2026) — the
+          -- card then agrees with the Pipeline section's "open enquiries".
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+             AND dismissed_at IS NULL
              AND NOT (id = ANY($1::uuid[]))) as open_enquiries_count
       `, [nonLeadOptionIds]),
 

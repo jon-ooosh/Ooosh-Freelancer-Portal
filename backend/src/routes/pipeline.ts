@@ -327,13 +327,17 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
         AND NOT (id = ANY($1::uuid[]))
     `, [nonLeads]);
 
-    // Total active pipeline value (excl. confirmed and lost)
+    // Total active pipeline value — enquiry stages only, the same jobs as the
+    // board and the chase counts. The previous blacklist (everything but
+    // confirmed / lost / cancelled) also summed every prepped, dispatched,
+    // returned and completed job: £1.38M on 22 Oct 2026, of which £1.11M was
+    // 1,581 completed jobs.
     const activeValue = await query(`
       SELECT COALESCE(SUM(job_value), 0) as total
       FROM jobs
       WHERE is_deleted = false
         AND dismissed_at IS NULL
-        AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
+        AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
         AND NOT (id = ANY($1::uuid[]))
     `, [nonLeads]);
 
