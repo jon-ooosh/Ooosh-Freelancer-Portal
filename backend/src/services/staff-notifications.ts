@@ -195,6 +195,16 @@ export async function notifyOvertimeLogged(entryId: string) {
   } catch (e) { console.error('[staff-notifications] overtime logged:', e); }
 }
 
+/**
+ * The entry is no longer waiting (approved, declined or withdrawn) — every
+ * approver's "X logged overtime" bell is done with. `follow_up` only; the
+ * person's "Overtime approved" bell is `system` on the same entry. Called by
+ * staff-overtime.ts; never throws. Same rule as retireLeaveRequestBells.
+ */
+export async function retireOvertimeBells(entryId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_overtime_entry', entityId: entryId, type: 'follow_up' });
+}
+
 /** Somebody asked to work from home — same route to the approver as leave. */
 export async function notifyWfhRequested(requestId: string) {
   try {
@@ -223,6 +233,17 @@ export async function notifyWfhRequested(requestId: string) {
       ],
       link);
   } catch (e) { console.error('[staff-notifications] wfh requested:', e); }
+}
+
+/**
+ * The request is no longer waiting (approved, declined or withdrawn) — every
+ * approver's "X has asked to work from home" bell is done with. `follow_up`
+ * only; the person's "Working from home approved" bell is `system` on the
+ * same request. Called by staff-wfh.ts; never throws. Same rule as
+ * retireLeaveRequestBells.
+ */
+export async function retireWfhBells(requestId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_wfh_request', entityId: requestId, type: 'follow_up' });
 }
 
 /**

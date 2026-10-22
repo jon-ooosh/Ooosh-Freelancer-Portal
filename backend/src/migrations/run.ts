@@ -345,6 +345,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '303_portal_login_security.sql',
         '304_clear_chase_outside_enquiry.sql',
         '305_retire_decided_leave_bells.sql',
+        '306_retire_decided_overtime_wfh_bells.sql',
+        '307_retire_answered_mention_bells.sql',
       ];
 
       for (const migration of migrations) {

@@ -16,6 +16,7 @@ import { useAttachments, type InteractionAttachment } from '../components/messag
 import { MentionComposer } from '../components/messaging/MentionComposer';
 import ImageLightbox from '../components/ImageLightbox';
 import { useOpenClaimsFor, ExistingClaimChoice } from '../components/claims/format';
+import { markMentionsSeen } from '../lib/mentionsSeen';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -212,6 +213,12 @@ function IssueDetailContent() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  // The problem's thread is on screen — my mention bells on it are read, not
+  // done (lib/mentionsSeen.ts). Replying or reacting marks them done.
+  useEffect(() => {
+    if (id) markMentionsSeen('job_issues', id);
+  }, [id]);
 
   // Load user list for assignee picker once.
   useEffect(() => {

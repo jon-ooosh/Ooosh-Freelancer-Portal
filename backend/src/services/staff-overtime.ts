@@ -19,6 +19,7 @@
 import { query, getClient } from '../config/database';
 import { DATE_RE } from './staff-day-status';
 import { getBalance, postEntry } from './staff-balance';
+import { retireOvertimeBells } from './staff-notifications';
 
 export type OvertimeStatus = 'pending' | 'approved' | 'declined' | 'cancelled';
 
@@ -92,12 +93,17 @@ export async function approveEntry(entryId: string, note: string | null, userId:
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const upd = await client.query(
       `UPDATE staff_overtime_entries
           SET status='approved', decided_by=$2, decided_at=NOW(), decision_note=$3, updated_at=NOW()
-        WHERE id=$1 AND status='pending'`,
+        WHERE id=$1 AND status='pending'
+        RETURNING id`,
       [entryId, userId, note]
     );
+    // The status check above ran before the transaction. Two presses at once
+    // both pass it; only the one that flips the row may credit the bank, or
+    // the hours are banked twice (Oct 2026). Throwing rolls it back.
+    if (upd.rows.length === 0) throw new Error('That entry has already been decided');
     await client.query(
       `INSERT INTO staff_ledger_entries
          (person_id, account, leave_year, entry_type, minutes, effective_date,
@@ -112,6 +118,8 @@ export async function approveEntry(entryId: string, note: string | null, userId:
   } finally {
     client.release();
   }
+  // No longer waiting — every approver's bell for it is done with.
+  await retireOvertimeBells(entryId);
 }
 
 export async function declineEntry(entryId: string, note: string, userId: string) {
@@ -122,6 +130,7 @@ export async function declineEntry(entryId: string, note: string, userId: string
     [entryId, userId, note]
   );
   if (r.rows.length === 0) throw new Error('That entry is no longer pending');
+  await retireOvertimeBells(entryId);
 }
 
 /** Withdraw your own entry before it has been looked at. */
@@ -133,6 +142,7 @@ export async function cancelEntry(entryId: string, personId: string) {
     [entryId, personId]
   );
   if (r.rows.length === 0) throw new Error('That entry is no longer pending');
+  await retireOvertimeBells(entryId);
 }
 
 // ── Cash-out ────────────────────────────────────────────────────────────────
