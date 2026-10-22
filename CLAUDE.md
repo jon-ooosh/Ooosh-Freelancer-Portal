@@ -313,7 +313,7 @@ the band / tour managers — not promoters or agents.
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
 that answers it — new bells should link that way, not at the bare page. **Exception:
-anything waiting for an approval** (leave, overtime, WFH requests) links to the bare page,
+anything waiting for an approval** (leave, overtime, WFH requests, day swaps) links to the bare page,
 because the "Waiting for you" panel there is the approvals surface; the person's Time
 off tab is not reliable for it (jon, Oct 2026 — see `staff-notifications.ts`). The page is
 manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
@@ -362,7 +362,7 @@ existing definition:
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |
 | Sending any email | `services/email-service.ts` |
-| The thing a bell asked for is done — clear the bell | `services/notification-resolve.ts` `resolveActionBells()` — for everyone who got it, read AND done, by row AND bell type (the requester's outcome bell on the same row survives); open bells refresh live (`notifications_resolved`). Wired: leave requests (`retireLeaveRequestBells()`). Services push to browsers through `config/socket.ts` `emitToUser()` |
+| The thing a bell asked for is done — clear the bell | `services/notification-resolve.ts` `resolveActionBells()` — for everyone who got it, read AND done, by row AND bell type (the requester's outcome bell on the same row survives); open bells refresh live (`notifications_resolved`). Wired: leave requests (`retireLeaveRequestBells()`), day swaps (`retireSwapRequestBells()`). Services push to browsers through `config/socket.ts` `emitToUser()` |
 | Did this email actually arrive? Is this address bouncing / blocked by Resend? | `services/email-delivery.ts` (Resend webhook → `email_delivery_events`, `email_address_problems`); frontend `hooks/useEmailProblems.ts` + `components/EmailProblemFlag.tsx`. `email_log` 'sent' only means Resend accepted it |
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
@@ -421,6 +421,7 @@ existing definition:
 | When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` — the record's own `action_on` fires; the per-type intervals only pre-fill it (never `driver-validity.ts` — different people) |
 | What staff data has expired? | `services/staff-retention.ts` |
 | Is this person in the building / working from home? | `services/staff-day-status.ts` (`StaffDay.location`; requests in `services/staff-wfh.ts`) |
+| A staff member swapping a day ("work Friday instead of Saturday") — may they, ask, approve, what the calendar shows | `services/staff-swaps.ts` — two `staff_pattern_exceptions` legs sharing a `swap_group_id`, which is the swap's id; asked for on My Time, approved like holiday, nothing on the calendar until approved; no ledger (`docs/STAFF-CALENDAR-SPEC.md` §8.2) |
 | What goes in a person's calendar feed? | `services/staff-ical.ts` — own time only, never a colleague's |
 | Building or restyling a tab on the Staff page | `frontend/src/components/StaffCard.tsx` — Card, StatCard, InfoRow, Pill, button classes (the Time off look) |
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |

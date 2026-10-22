@@ -1,8 +1,8 @@
 ---
 paths:
-  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-ical,freelancer-days,freelancer-tasks}.ts"
+  - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-swaps,staff-ical,freelancer-days,freelancer-tasks}.ts"
   - "backend/src/routes/{staff-calendar,staff-calendar-feed,freelancer-tasks}.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276}_*.sql"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,307}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
   - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel,FreelancerTasksPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
@@ -40,6 +40,7 @@ neither can be shown to be wrong.
 | What is the threshold / policy / bank holiday? | `services/staff-settings.ts` |
 | Is the company shut on this date? | `services/staff-company-days.ts` |
 | Is this person working from home? | `services/staff-wfh.ts` (merged into `StaffDay.location` by `staff-day-status.ts`) |
+| May these two days be swapped? What is this swap? | `services/staff-swaps.ts` (`swapProblems()`, `checkSwap()`) |
 | What goes in somebody's calendar feed? | `services/staff-ical.ts` |
 
 ## The ledger is append-only and the database enforces it
@@ -474,6 +475,36 @@ pattern's `at_home` tick (a regular day, admin-set) or an APPROVED
   'home'`. The calendar footer shows the on-site number, plus `+n⌂` only when
   somebody is home; the dashboard strip does the same.
 - Not special-category — every viewer sees it.
+
+## Swapping a day is a pair of pattern exceptions, asked for like holiday
+
+Spec §8.2 (jon, Oct 2026, migration 307). `services/staff-swaps.ts` is THE
+definition. "Work Friday instead of Saturday" = two `staff_pattern_exceptions`
+rows sharing a `swap_group_id`: the day OFF and the day IN.
+
+- **The group is the unit.** The group id is the swap's id in every URL, bell
+  and email. Approve, decline, withdraw and call off update BOTH legs in one
+  statement — never a leg.
+- **Nothing on the calendar until approved** (jon). `getStaffCalendar` reads
+  `status = 'approved'` exceptions only. Do not add a "Requested" state for a
+  waiting swap without asking — two opposite "maybe" cells was the reason.
+- **Approval re-checks both days** (`checkSwap(…, excludeSwapId)`). Holiday
+  booked on the day being given up while the swap waited would otherwise sit on
+  a date that is no longer a working day — the calendar and the ledger would
+  disagree.
+- **Refusals, not warnings**, for the same reason as leave's "not a day you are
+  contracted to work": giving up a day that isn't worked or already has time
+  off / absence / a company day; working instead on a day already worked or a
+  company day; a date already in another live change.
+- **The hours on the day worked are the person's** (pre-filled, changeable);
+  **the break is the day given up's** (`breakOf()`), never asked — My Time does
+  not show breaks. `usual_minutes` snapshots the day given up's paid minutes at
+  request time, like a leave day's minutes.
+- **Nothing here touches the ledger.** If a swap change needs
+  `staff-balance.ts`, something has gone wrong.
+- **Two people swapping is two swaps** (jon) — nothing links them.
+- On the team calendar both days carry `StaffDay.swapWith` (the other date);
+  the day given up is drawn as an outlined **Swap**, not a blank.
 
 ## The calendar feed is the person's OWN time — nothing else, ever
 
