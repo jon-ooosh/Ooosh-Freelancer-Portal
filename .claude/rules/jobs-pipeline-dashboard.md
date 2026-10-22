@@ -26,7 +26,7 @@ Full detail: `docs/reference/PIPELINE-AND-ORGS.md`, `docs/reference/OPERATIONS-M
   Wiring a new auto-bump source? Use this expression, not a plain UPDATE.
 - Chase dates are **date-granular, not timestamps** — anything with intra-day precision ("chase me in 2 hours") isn't supported by the model.
 - `next_chase_date` is auto-nulled on any transition out of an enquiry stage — by a trigger on `jobs` (`trg_clear_chase_outside_enquiry`, migration 304), so EVERY path obeys it, including the ones that used to leave a stale date behind (a deposit auto-confirming the job, the 09:00 auto-lose, auto-dispatch). The explicit clears in `routes/pipeline.ts` and `routes/webhooks.ts` stay as belt-and-braces.
-- **Every chase COUNT uses the pipeline list's rule:** `pipeline_status IN ('new_enquiry','quoting','paused','provisional')` AND `dismissed_at IS NULL` AND lead option only (`nonLeadMemberIds()`). Never a `NOT IN (...)` blacklist — the dashboard's "Chases due" once read 34 over a pipeline with 2 — 29 of them dispatched/completed jobs with old chase dates (Oct 2026). The card links to `/pipeline?chase=due` (overdue OR due today), matching what it counts.
+- **Every chase count, enquiry count and pipeline £ total uses the pipeline list's rule:** `pipeline_status IN ('new_enquiry','quoting','paused','provisional')` AND `dismissed_at IS NULL` AND lead option only (`nonLeadMemberIds()`). Never a `NOT IN (...)` blacklist — it sweeps in every won job. Oct 2026: "Chases due" read 34 over a pipeline with 2 (29 were dispatched/completed jobs with old chase dates), and "Active pipeline" read £1.38M, £1.11M of it 1,581 completed jobs. The Chases due card links to `/pipeline?chase=due` (overdue OR due today), matching what it counts.
 
 ## Enquiry dismissal
 

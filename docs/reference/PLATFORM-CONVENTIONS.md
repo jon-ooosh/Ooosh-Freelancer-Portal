@@ -181,6 +181,15 @@ This is the quoting/costing system for delivery, collection, and crewed jobs. It
 4. **Quotes** are saved to the `quotes` table, linked to a job and optionally a venue
 5. **Crew assignments** via `quote_assignments` junction table — links people to quotes with role, agreed rate, and status
 6. **Quote status lifecycle:** draft → confirmed → completed/cancelled (with `cancelled_reason`)
+7. **The setup / pack-down premium** (the fixed £ beside "Includes setup work on site") is paid to the
+   freelancer AND charged to the client. Hourly mode charges it plus `expense_markup_percent`
+   (a £50 premium = £55 on the client's labour); day-rate mode charges it inside the day-rate markup
+   (×`day_rate_client_markup`), or at cost when a client day rate is typed. **Until Oct 2026 hourly
+   mode never charged it**: the freelancer's fee went up and the client's charge didn't.
+8. **Crew quotes (`applyCrewMultiplier`)** multiply labour, the fee and the totals by crew size,
+   **except fuel**: one van, one tank (jon, Oct 2026; until then a crew of three paid the van's fuel
+   three times). Train fares, hotels and other expenses stay per person in the totals. Saved quotes
+   only change when edited (the HireHop line keeps its old price and is flagged, as for any edit).
 
 ### Venue linkage on a quote (Sep 2026)
 
