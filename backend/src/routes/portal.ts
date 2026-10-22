@@ -3255,7 +3255,13 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // Skip for van-only book-outs — there's no equipment to acknowledge,
       // and the OP book-out flow emits its own vehicle condition report
       // which IS the relevant artefact.
-      if (((isDelivery && !vanOnly) || isCrewHireNote) && recipients.size > 0 && ctx.hirehop_id) {
+      // A delivery's note is made even when "Don't send" was ticked (Oct 2026):
+      // like the warehouse sign-off, it is filed on the job's Files tab either
+      // way, so the office has a copy to check or send on. The crew hire note
+      // stays opt-in — made only when ticked and there is someone to send it to.
+      const makeDeliveryNote = isDelivery && !vanOnly;
+      if ((makeDeliveryNote || (isCrewHireNote && recipients.size > 0)) && ctx.hirehop_id) {
+        let noteMade = false;
         try {
           // Pull equipment from HireHop via broker.
           // Line items live on /frames/items_to_supply_list.php (not job_data.php).
@@ -3305,21 +3311,56 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
             driverName: completionName,
             variant: isCrewHireNote ? 'hire' : 'delivery',
           });
+          noteMade = true;
 
           // Store the PDF in R2 for future re-access
+          let storedPdfKey: string | null = null;
           if (isR2Configured()) {
             const pdfKey = `delivery-notes/${quoteId}/${isCrewHireNote ? 'hire-note' : 'delivery-note'}-${Date.now()}.pdf`;
             try {
               await uploadToR2(pdfKey, pdfBuffer, 'application/pdf');
+              storedPdfKey = pdfKey;
             } catch (err) {
               console.error('[portal completion] R2 upload failed for PDF:', err);
             }
           }
 
-          // Email each recipient
+          // File it on the job's Files tab, the same as the warehouse sign-off
+          // does (routes/warehouse.ts), so staff can see it, open it and send
+          // it on with the Files tab's Email button. Until Oct 2026 it was
+          // uploaded and its key thrown away, so nobody could find it.
+          const noteLabel = isCrewHireNote ? 'Equipment on hire note' : 'Delivery note';
+          let filedOnJob = false;
+          if (storedPdfKey && ctx.job_id) {
+            const fileAttachment = {
+              name: `${noteLabel} — ${ctx.hirehop_id}.pdf`,
+              url: storedPdfKey,
+              type: 'document',
+              label: noteLabel,
+              uploaded_at: completedAt,
+              uploaded_by: completedBy,
+              comment: isCrewHireNote
+                ? `From ${completionName}, working on the job.`
+                : `Delivered by ${completionName}${signatureBuffer ? ', signed for by the client' : ', not signed for'}.`,
+            };
+            try {
+              await query(
+                `UPDATE jobs SET files = COALESCE(files, '[]'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
+                [JSON.stringify([fileAttachment]), ctx.job_id]
+              );
+              filedOnJob = true;
+            } catch (err) {
+              console.error('[portal completion] Filing the delivery note on the job failed:', err);
+            }
+          }
+
+          // Email each recipient. send() RESOLVES { success: false } on a
+          // delivery failure rather than throwing, so both are counted.
+          const emailedTo: string[] = [];
+          const emailFailures: string[] = [];
           for (const to of recipients) {
             try {
-              await emailService.send(noteTemplate, {
+              const sent = await emailService.send(noteTemplate, {
                 to,
                 variables: {
                   clientName: clientName || 'there',
@@ -3337,15 +3378,59 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
                   contentType: 'application/pdf',
                 }],
               });
+              if (sent.success) {
+                emailedTo.push(to);
+              } else {
+                console.error(`[portal completion] Failed to email delivery note to ${to}:`, sent.error);
+                emailFailures.push(to);
+              }
             } catch (emailErr) {
               console.error(`[portal completion] Failed to email delivery note to ${to}:`, emailErr);
+              emailFailures.push(to);
             }
           }
+
+          // Say on the job's Activity Timeline who it went to, as the warehouse
+          // sign-off does — the answer to "did the freelancer send it?".
+          if (ctx.job_id) {
+            const parts: string[] = [
+              isCrewHireNote
+                ? `📋 Equipment on hire note from ${completionName}.`
+                : `📦 Equipment delivered by ${completionName}.`,
+            ];
+            if (emailedTo.length > 0) parts.push(`${noteLabel} emailed to ${emailedTo.join(', ')}.`);
+            if (emailFailures.length > 0) parts.push(`${noteLabel} email failed for ${emailFailures.join(', ')}.`);
+            if (emailedTo.length === 0 && emailFailures.length === 0) {
+              parts.push(sendClientEmail
+                ? `${noteLabel} not emailed.`
+                : `${noteLabel} not emailed ("Don't send" was ticked).`);
+            }
+            if (filedOnJob) parts.push('A copy is on the Files tab.');
+            await query(
+              `INSERT INTO interactions (type, content, job_id, created_by, source)
+               VALUES ('note', $1, $2, $3, 'system')`,
+              [parts.join(' '), ctx.job_id, SYSTEM_USER_ID]
+            ).catch((err) => console.error('[portal completion] delivery note timeline note failed:', err));
+          }
+
           if (completionFallback) {
             await logFallbackToTimeline({ jobId: completionFallback.jobId, templateId: noteTemplate });
           }
         } catch (err) {
           console.error('[portal completion] Delivery note PDF/email failed:', err);
+          // Nothing was made, so nothing was sent. Say so rather than leave the
+          // timeline silent, which would read as "the freelancer didn't send it".
+          if (ctx.job_id && !noteMade) {
+            await query(
+              `INSERT INTO interactions (type, content, job_id, created_by, source)
+               VALUES ('note', $1, $2, $3, 'system')`,
+              [
+                `⚠️ ${isCrewHireNote ? 'The equipment on hire note' : 'The delivery note'} from ${completionName} could not be made, so it was not emailed. Print one from HireHop if the client needs it.`,
+                ctx.job_id,
+                SYSTEM_USER_ID,
+              ]
+            ).catch((e) => console.error('[portal completion] delivery note failure timeline note failed:', e));
+          }
         }
       }
 
