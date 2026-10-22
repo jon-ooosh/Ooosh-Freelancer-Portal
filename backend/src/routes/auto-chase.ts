@@ -20,6 +20,7 @@ import { backfillOpenPipelineThreads, type BackfillScope, type BackfillSummary }
 import { getJobQuoteVersions, sweepQuoteVersions, type QuoteSweepSummary } from '../services/quote-versions';
 import { runDueAutoChases } from '../services/auto-chase-runner';
 import { isAnthropicConfigured } from '../config/anthropic';
+import { greetingName } from '../services/display-name';
 import { isGmailConfigured, getPrimaryMailbox } from '../config/gmail';
 
 const router = Router();
@@ -37,14 +38,15 @@ async function senderFirstName(userId?: string): Promise<string | null> {
   if (!userId) return null;
   try {
     const r = await query(
-      `SELECT p.first_name, p.last_name
+      `SELECT p.first_name, p.last_name, p.preferred_name
          FROM users u JOIN people p ON p.id = u.person_id
         WHERE u.id = $1`,
       [userId],
     );
     const row = r.rows[0];
     if (!row) return null;
-    const name = String(row.first_name || row.last_name || '').trim();
+    // Preferred name first ("Jon", not "Jonathan").
+    const name = greetingName(row, '') || String(row.last_name || '').trim();
     return name || null;
   } catch {
     return null;

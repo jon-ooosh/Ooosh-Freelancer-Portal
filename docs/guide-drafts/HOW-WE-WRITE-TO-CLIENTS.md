@@ -1,6 +1,6 @@
 # How we write to clients — DRAFT guide
 
-**Draft 1, 16 Oct 2026 (jon + Claude).** Distilled from 150 emails the team sent from info@
+**Draft 2, 22 Oct 2026 (jon + Claude).** Draft 2: jon's layout (commas, no blank lines) and his edits to the first live drafts. Distilled from 150 emails the team sent from info@
 (Jul–Oct 2026), modelled on how Jon and Will write. Lives here until the Staff Documents "Share
 with Claude" switch exists (`docs/AI-KNOWLEDGE-SPEC.md` §4); then it moves into OP and this file
 is deleted. **The "For Claude" section is mirrored in `backend/src/services/chase-draft.ts`
@@ -28,20 +28,22 @@ the hire, but I've attached a proforma so you've got the figures" is the same fa
 ## Layout
 
 ```
-Hi Nolan
-
-Hope you're well.
-
-Just following up to see if you have any questions or wish to proceed with this hire?
-
-Best wishes
-Will
+Hi Luca,
+Hope you're well. Just following up on the below van quote (#16848) for 21st to 30th October. Since the hire starts in just a few days, we'd need to hear back soon to hold the van for you. Are you still interested, or is there anything you'd like us to adjust?
+If you've sorted it elsewhere or no longer need it, no problem, just let me know.
+Best wishes,
+Jon
 ```
 
-- Greeting on its own line: "Hi Nolan" or "Morning Nolan". First name.
-- "Hope you're well." once, on its own line, if it fits. Never "I hope this email finds you well".
-- One or two short paragraphs.
-- A short closing line — "Best wishes", "Many thanks", "Thanks", "Best," — then your first name.
+- Greeting with a comma: "Hi Luca," or "Morning Luca,". First name.
+- **Single line breaks only — no blank lines** anywhere.
+- "Hope you're well." can open the first line. Never "I hope this email finds you well".
+- A closing line with a comma — "Best wishes,", "Many thanks,", "Best," — then your name as you're
+  known ("Jon", not "Jonathan").
+- Say time the way a person would: "in just a few days", "this Friday" — not "in 5 days".
+- "I" and "me" for the sender ("just let me know"), "the below quote" when it's in the thread.
+- When we sent options, help them choose: "Which one do you think would best suit your needs
+  for this run?"
 
 ## Lines we use
 
@@ -73,8 +75,8 @@ Exclamation marks: rarely, and only where you'd really say it with one. British 
 ## For Claude
 
 - Write like Jon and Will in the examples above: short, plain, friendly, specific.
-- Layout exactly as above: greeting line, blank line, one or two short paragraphs, blank line,
-  closing line, sender's first name.
+- Layout exactly as above: greeting with a comma, the message on the next line, single line
+  breaks only (never a blank line), closing line with a comma, the sender's name as given.
 - Two to four sentences is normal; a plain chase can be one.
 - Warmth comes from being helpful and specific, never from enthusiasm; never cold or curt —
   always the person's name and a human touch.

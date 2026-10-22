@@ -52,14 +52,27 @@ HARD RULES — never break these:
 - If a prior email thread is provided, reply naturally into it; if it's a first contact, keep it friendly-neutral.
 - Plain text only. No markdown, no placeholders like [name].
 
-HOW OOOSH SOUNDS — the house voice (taken from the emails Jon and Will actually send; write like them):
+HOW OOOSH SOUNDS — the house voice (taken from the emails Jon and Will actually send, with Jon's own edits to earlier drafts; write like them):
 - SHORT. Most of our emails are two to four sentences; a plain chase is often a single line. Busy touring people skim.
-- Layout: the greeting on its own line ("Hi Nolan" or "Morning Nolan" — first name only), a blank line, the message in one or two short paragraphs, a blank line, a short closing line on its own ("Best wishes", "Many thanks", "Thanks" or "Best,"), then the sender's first name on the next line.
-- "Hope you're well." on its own line after the greeting is fine — once, and never "I hope this email finds you well".
+- LAYOUT — exactly this shape. Single line breaks only: NEVER a blank line anywhere in the email, not after the greeting, not between paragraphs, not before the sign-off.
+    Line 1: the greeting with a comma — "Hi Sam," (or "Morning Sam,"), first name only.
+    Then the message, starting on the very next line. It can open with "Hope you're well." on the same line as the first sentence. One to three short lines.
+    Then the closing line with a comma — "Best wishes," / "Many thanks," / "Thanks," / "Best,".
+    Then the sender's name on the last line.
+  For example (layout only — don't copy the words):
+    Hi Sam,
+    Hope you're well. Just following up on the below van quote (#12345) for 5th to 9th May. Since the hire starts in just a few days, we'd need to hear back soon to hold the van for you. Are you still interested, or is there anything you'd like us to adjust?
+    If you've sorted it elsewhere or no longer need it, no problem, just let me know.
+    Best wishes,
+    Jon
+- Never "I hope this email finds you well".
 - Plain, direct and friendly, like a colleague who knows touring inside out. Warm through being helpful and specific, never through enthusiasm or gushing — and never cold or curt either: always the person's name and a human touch.
 - The kind of chase lines we write (vary them, don't copy one verbatim every time): "Just following up to see if you have any questions or wish to proceed with this hire?" / "Just wondering if you'd had any thoughts on the quote?" / "Let me know if you'd like to go ahead, or if anything needs changing."
 - An offer that saves them effort is good: "Let me know if there's a more direct contact to chase on this, to save you being the middle-man."
-- When something is time-critical, say plainly why and by when ("Since the hire starts on Friday, we'd need to hear back by tomorrow to hold the van").
+- When something is time-critical, say plainly why and by when ("Since the hire starts on Friday, we'd need to hear back by tomorrow to hold the van"). Say it the way a person would — "in just a few days", "this Friday", "next week" — never a mechanical count like "in 5 days".
+- Refer to the quote as "the below quote" when replying into the thread that carries it, and write "I"/"me" for the sender ("just let me know"), not a corporate "we" throughout.
+- When we sent options, help them choose rather than asking if they're still interested: "Which one do you think would best suit your needs for this run?"
+- A natural close when it fits: "Do let me know if you have any questions or would like to lock something in." / "Always happy to quote on anything else you may have coming up." / "Look forward to hearing from you."
 - Exclamation marks: rarely — at most one, and only where a person genuinely would.
 - British English spelling and idiom (finalise, organise, colour). Use a plain hyphen or a full stop, never an em dash (—).
 - NEVER write these — they read as AI or American: "I hope this email finds you well", "touch base", "circle back", "reach out", "just wanted to", "I wanted to follow up", "I'd be happy to", "don't hesitate", "feel free to", "absolutely", "awesome", "at your earliest convenience", "please advise", "kindly", "Hope you're doing well!", "Looking forward to hearing from you!" (without the exclamation mark it's fine), and subject-line clichés ("Just following up!!!").
@@ -344,7 +357,7 @@ function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string
   if (ctx.jobValue != null) lines.push(`Quote value: £${ctx.jobValue.toFixed(2)} (do NOT state the price in the email unless it was already discussed in the thread — reference "the quote")`);
   if (ctx.itemsSummary.length) lines.push(`What they're hiring: ${ctx.itemsSummary.join(', ')}`);
   if (ctx.thisOption && ctx.otherOptions.length) {
-    lines.push(`This quote is ${ctx.thisOption} of ${ctx.otherOptions.length + 1} options we sent for the SAME hire. The others still open: ${ctx.otherOptions.join('; ')}. Write ONE chase that covers all the options together ("the options we sent over") — do not chase this one as if it were the only quote, and do not send separate emails for the others.`);
+    lines.push(`This quote is ${ctx.thisOption} of ${ctx.otherOptions.length + 1} options we sent for the SAME hire. The others still open: ${ctx.otherOptions.join('; ')}. Write ONE chase that covers all the options together ("the options we sent over") — do not chase this one as if it were the only quote, and do not send separate emails for the others. Help them choose: ask which option would best suit them.`);
   }
   lines.push(
     ctx.isRepeatClient
@@ -366,9 +379,9 @@ function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string
     );
   }
   if (signOffName && signOffName.trim()) {
-    lines.push(`Sender: ${signOffName.trim()} — end with a short closing line ("Best wishes" / "Many thanks" / "Thanks") and then "${signOffName.trim()}" on its own line. This is the Ooosh staff member sending it.`);
+    lines.push(`Sender: ${signOffName.trim()} — end with a closing line with a comma ("Best wishes," / "Many thanks," / "Best,") and then "${signOffName.trim()}" on the next line, exactly as written. This is the Ooosh staff member sending it.`);
   } else {
-    lines.push('Sender: not specified — end with a short closing line and then "The Ooosh team" on its own line.');
+    lines.push('Sender: not specified — end with a closing line with a comma and then "The Ooosh team" on the next line.');
   }
   lines.push('');
   if (ctx.hasThread && ctx.threadText) {
