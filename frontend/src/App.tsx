@@ -29,6 +29,7 @@ import IssueDetailPage from './pages/IssueDetailPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import MoneyOverviewPage from './pages/MoneyOverviewPage';
 import CostsPage from './pages/CostsPage';
+import LinkFreelancerInvoicesPage from './pages/LinkFreelancerInvoicesPage';  // ONE-OFF (FREELANCER-PORTAL-SPEC §5): delete once used
 import ShopTillPage from './pages/ShopTillPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
@@ -280,6 +281,7 @@ export default function App() {
                 <Route path="/money/overview" element={<MoneyOverviewPage />} />
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/money/costs" element={<CostsPage />} />
+                <Route path="/money/costs/link-freelancers" element={<LinkFreelancerInvoicesPage />} />
                 <Route path="/money/shop" element={<ShopTillPage />} />
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
                 <Route path="/vehicles/pcns" element={<PcnsPage />} />

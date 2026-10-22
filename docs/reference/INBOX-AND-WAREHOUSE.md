@@ -224,12 +224,12 @@ retires it — straight away from the code that finishes the thing, and on a 5-m
 each escalation) for every other path. Read + `acknowledged_at`; dealt-with bells stay in the dropdown,
 greyed, "✓ Done", and open bells / the Inbox update over the socket (`notifications_resolved`
 `{ ids, done }`, through `config/socket.ts`). Rules: `.claude/rules/email-and-notifications.md`.
-- [x] **Leave, overtime and WFH requests** — decided or withdrawn → every approver's bell (migrations 305/306
+- [x] **Leave, overtime and WFH requests** — decided or withdrawn → every approver's bell (migrations 305/308
   cleared the old ones). Approve also can't double-post any more (the losing press rolls back).
 - [x] **Mentions** — a reply or a reaction in the thread marks YOUR mention bells there done; opening the
-  timeline or the Problem marks them read (`POST /notifications/seen`). Migration 307 cleared the ones
+  timeline or the Problem marks them read (`POST /notifications/seen`). Migration 309 cleared the ones
   already answered. (This also restores "Reply marks Done" in the Inbox, which the ThreadView had lost.)
-- [x] **By rule (bell-rules.ts), migration 309 labelled the open ones:** Problems (new / re-flagged /
+- [x] **By rule (bell-rules.ts), migration 311 labelled the open ones:** Problems (new / re-flagged /
   assigned), claim form submitted, sale photos, lock-up not submitted, quote option confirmed, driver referral
   and NI licence check (now filed under the driver), storage invoice and rate review, held-item hold date,
   lost-property digest, kiosk PIN, overtime cash-out, return-to-work, freelancer not confirmed, To Do (needs

@@ -29,6 +29,7 @@ import { greetingName, fullDisplayName } from '../services/display-name';
 import { ukToday } from '../services/uk-date';
 import { isEndKeyed, lastWorkDay } from '../services/quote-schedule';
 import { isVanLegDone } from '../services/quote-completion';
+import { personalFee } from '../services/freelancer-fees';
 import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures, deviceLabelFrom } from '../services/staff-login-security';
 import {
   isPortalEnforcedNow, portalEmailHint, signPortalPending, readPortalPending, sendPortalLoginCode,
@@ -3575,21 +3576,8 @@ router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => 
 
 // ── Helper: format a quote row into portal-friendly shape ────────────
 
-/**
- * This freelancer's fee on a quote: their own agreed rate when staff set one,
- * else the quote's fee. A crewed quote for more than one person stores the
- * WHOLE crew's fee (applyCrewMultiplier), so without a personal rate it is split
- * evenly — each of a crew of three used to be shown the full three-person figure
- * (Oct 2026). Per-person rates by role are a later piece of work (Earnings).
- */
-function personalFee(row: Record<string, unknown>): number {
-  // Any rate staff typed wins, even £0 (NUMERIC arrives as a string, so the old
-  // `agreed_rate || fee` honoured an explicit '0.00' too).
-  if (row.agreed_rate != null && String(row.agreed_rate).trim() !== '') return Number(row.agreed_rate) || 0;
-  const quoteFee = Number(row.freelancer_fee_rounded || row.freelancer_fee || 0);
-  const crew = row.job_type === 'crewed' ? Math.max(1, Math.floor(Number(row.crew_count) || 1)) : 1;
-  return Math.round((quoteFee / crew) * 100) / 100;
-}
+// This freelancer's fee on a quote: services/freelancer-fees.ts personalFee(),
+// shared with Costs ("Which jobs?") and Earnings so the figures can't drift.
 
 function formatJobForPortal(row: Record<string, unknown>) {
   const jobType = row.job_type as string;

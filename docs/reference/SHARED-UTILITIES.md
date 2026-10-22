@@ -388,6 +388,17 @@ methods). Engine: `services/cost-xero-push.ts`; routes: `routes/costs.ts`; UI:
   - **Decoupled from the money action** — `POST /costs/:id/send-remittance` (admin-only, matches `/pay`) is fired by the frontend *after* a successful pay; a failed email surfaces "paid, but email failed, resend later" and never unwinds the payment. `GET /costs/:id/remittance-contact` drives the pre-fill. Sending stamps `remittance_sent_at`/`remittance_email` (migration 169) → ✉︎ pip on paid rows + the "remembered" reuse.
   - **`remittance_advice` template** is client-branded but subject/body are composed in the service (supplier-vs-reimbursement wording, paid-vs-scheduled tense) via `subjectOverride`/`bodyHtmlOverride`. Email copy uses plain hyphens, not em-dashes, and includes a "you'll receive a separate remittance for each other invoice" line (heads off the "what about my others?" reply). Rollout: ships OFF `EMAIL_LIVE_TEMPLATES` so it test-redirects until released.
 
+**Freelancer invoices: whose and which work (Oct 2026, migration 306, `FREELANCER-PORTAL-SPEC.md` §5.1).**
+A "Freelance crew invoices" (320) cost carries `person_id` (the freelancer) and `cost_work_items` (the
+bookings / sitter evenings / yard days it pays for, each with its share). The upload form asks "Whose
+invoice?" (`services/freelancer-invoice-person.ts`) and "Which work does it cover?"
+(`services/freelancer-work.ts`, `GET /costs/freelancer-work`); `work_items` ride in the same create /
+update request as the header and are checked before anything is written. Booked vs invoiced is a hint
+(`freelancer_invoice_tolerance_gbp` / `_pct`), never a gate. **Query** (`POST/DELETE /costs/:id/query`,
+`queried_at` / `query_note`) is the alternative to approving; approving clears it. Work links are NOT
+`cost_allocations`: the by-job read is unchanged and the job split stays by hand. The portal's Earnings tab
+reads these links.
+
 **Due dates — `resolveDueDate()` in `services/supplier-terms.ts` is THE definition (Sep 2026, migration 198).** The bill due date is DERIVED, not stored, and was being re-derived independently at five sites (the costs list, get-one, the bill push, the bill re-sync, and by extension the mark-paid modal via the list payload) — each carrying its own copy of the freelancer-vs-supplier branch. Every one of those now calls `resolveDueDate(cost, supplierTerms)` (or the terms-resolving `resolveDueDateForCost(cost)` for a single row), so OP and Xero cannot disagree about when a bill is due.
 
 - **Precedence: staff override → the Ooosh freelancer Friday rule → the supplier's payment terms.** Do NOT branch on `cost_type` at a call site — the resolver picks the rule; that branching living in the callers is exactly how the sites drifted.

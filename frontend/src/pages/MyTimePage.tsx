@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { splitBankHolidays } from '../lib/companyCalendar';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import { QuarterHourSelect } from '../components/QuarterHourSelect';
 
 /**
  * My Time — book time off, see your balances, track your requests.
@@ -89,6 +90,28 @@ interface WfhRequest {
   requestNote: string | null;
   decidedByName: string | null;
   decisionNote: string | null;
+}
+/**
+ * A day swap (spec §8.2) — GET /staff-calendar/swaps. Work a day you normally
+ * don't instead of one you normally do. The id is the swap's group id.
+ */
+interface DaySwap {
+  id: string;
+  offDate: string;
+  workDate: string;
+  startTime: string;
+  endTime: string;
+  minutes: number;
+  usualMinutes: number | null;
+  status: 'pending' | 'approved' | 'declined' | 'withdrawn' | 'cancelled';
+  requestNote: string | null;
+  decidedByName: string | null;
+  decisionNote: string | null;
+}
+/** GET /staff-calendar/swaps/preview — what is wrong so far, and the day given up's hours. */
+interface SwapCheck {
+  problems: string[];
+  usual: { startTime: string; endTime: string; minutes: number; breakMinutes: number } | null;
 }
 interface OvertimeEntry {
   id: string;
@@ -230,8 +253,10 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [wfh, setWfh] = useState<WfhRequest[]>([]);
+  const [swaps, setSwaps] = useState<DaySwap[]>([]);
   const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
   const [wfhOpen, setWfhOpen] = useState(false);
+  const [swapOpen, setSwapOpen] = useState(false);
   const [balances, setBalances] = useState<MyBalances | null>(null);
   const [hasStaffRecord, setHasStaffRecord] = useState(true);
   // The leave year being looked at. Everything on this page is per leave year
@@ -256,7 +281,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
     try {
       const from = `${year}-01-01`;
       const to = `${year}-12-31`;
-      const [leave, ot, bal, bh, cd, wf] = await Promise.all([
+      const [leave, ot, bal, bh, cd, wf, sw] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}&${who}`),
         api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}&${who}`),
         api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>(
@@ -269,8 +294,12 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         // days rather than taking the balances down with it.
         api.get<{ data: WfhRequest[] }>(`/staff-calendar/wfh?from=${from}&to=${to}&${who}`)
           .catch(() => ({ data: [] as WfhRequest[] })),
+        // Same: a failure leaves the list without swaps, nothing more.
+        api.get<{ data: DaySwap[] }>(`/staff-calendar/swaps?from=${from}&to=${to}&${who}`)
+          .catch(() => ({ data: [] as DaySwap[] })),
       ]);
       setWfh(wf.data ?? []);
+      setSwaps(sw.data ?? []);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
@@ -309,12 +338,14 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   // state, so a double click sent the approval twice (Oct 2026). The server
   // refuses the second now as well; this stops it being sent.
   const deciding = useRef(false);
-  async function decide(kind: 'leave' | 'overtime' | 'wfh', id: string, action: 'approve' | 'decline' | 'cancel') {
+  async function decide(kind: DecideKind, id: string, action: 'approve' | 'decline' | 'cancel') {
     if (deciding.current) return;
     let note: string | null = null;
     if (action !== 'approve') {
       note = window.prompt(action === 'cancel'
-        ? 'Why is this home day called off? They will see this.'
+        ? (kind === 'swaps'
+          ? 'Why is this swap called off? Both days go back to normal, and they will see this.'
+          : 'Why is this home day called off? They will see this.')
         : 'Why is this declined? They will see this.');
       if (!note?.trim()) return;
     }
@@ -351,6 +382,17 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
     try {
       await api.post(`/staff-calendar/wfh/${id}/withdraw`, {});
       setNotice('Request withdrawn.');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to withdraw');
+    }
+  }
+
+  async function withdrawSwap(id: string) {
+    if (!confirm('Withdraw this swap?')) return;
+    try {
+      await api.post(`/staff-calendar/swaps/${id}/withdraw`, {});
+      setNotice('Swap withdrawn.');
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to withdraw');
@@ -480,6 +522,12 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
                 className="w-full py-2.5 rounded-lg border border-teal-300 text-teal-800 hover:bg-teal-50 text-sm font-medium">
                 ⌂ Work from home
               </button>
+              {/* Not time off either — a different day worked instead of a
+                  usual one (spec §8.2). Asked for and approved like holiday. */}
+              <button onClick={() => setSwapOpen(true)}
+                className="w-full py-2.5 rounded-lg border border-indigo-300 text-indigo-800 hover:bg-indigo-50 text-sm font-medium">
+                ⇄ Swap a day
+              </button>
               {!isCurrentYear && (
                 <p className="text-xs text-gray-500">
                   Books against {year} — next year&apos;s allowance is already set.
@@ -530,6 +578,17 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
           onError={setError} />
       )}
 
+      {swapOpen && !adminView && (
+        <SwapForm
+          onClose={() => setSwapOpen(false)}
+          onDone={async () => {
+            setSwapOpen(false); setError(null);
+            setNotice('Asked — you’ll hear when it’s been looked at. Nothing changes on the calendar until it’s approved.');
+            await load();
+          }}
+          onError={setError} />
+      )}
+
       {booking && (
         <BookTimeOff key={`${booking.type}:${booking.seed}`}
           balances={balances} seedDate={booking.seed} initialType={booking.type}
@@ -542,7 +601,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         <div className="px-4 sm:px-5 py-3.5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-baseline gap-x-2.5">
             <h2 className="text-[17px] font-semibold text-gray-900">{adminView ? 'Time off and overtime' : 'Your time'}</h2>
-            <span className="hidden sm:inline text-[13px] text-gray-500">Holiday, overtime, home days and company days together</span>
+            <span className="hidden sm:inline text-[13px] text-gray-500">Holiday, overtime, home days, swaps and company days together</span>
           </div>
           <div className="flex bg-gray-100 rounded-lg p-[3px]">
             {(['list', 'calendar'] as const).map(v => (
@@ -559,6 +618,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
           <div className="px-5 py-6 text-sm text-gray-500">Loading…</div>
         ) : view === 'list' ? (
           <TimeList year={year} requests={requests} overtime={overtime} wfh={wfh} onWithdrawWfh={withdrawWfh}
+            swaps={swaps} onWithdrawSwap={withdrawSwap}
             adjustments={adjustments}
             companyDays={companyDays}
             bankHolidaysToBook={bh.toBook} freshIds={freshIds}
@@ -574,7 +634,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
               if (next.y !== year) setYear(next.y);
             }}
             onThisMonth={() => changeYear(CURRENT_YEAR)}
-            requests={requests} overtime={overtime} wfh={wfh} companyDays={companyDays}
+            requests={requests} overtime={overtime} wfh={wfh} swaps={swaps} companyDays={companyDays}
             bankHolidays={bankHolidays} bankHolidaysToBook={bh.toBook}
             onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         )}
@@ -825,6 +885,147 @@ function WfhForm({ seedDate, onClose, onDone, onError }: {
       <button onClick={() => void submit()} disabled={saving}
         className="px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold disabled:opacity-50">
         {saving ? 'Sending…' : 'Ask to work from home'}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Ask to swap a day (spec §8.2): have a day you normally work off, and work a
+ * day you normally don't instead. Approved like holiday and touches no
+ * balance — nothing changes on the calendar until it is approved.
+ *
+ * The hours for the day worked instead are filled in from the day given up
+ * and can be changed (jon, Oct 2026 — a Friday and a Saturday don't always run
+ * the same hours). The unpaid break is the day given up's, so it is not asked
+ * for: breaks aren't shown on My Time. The server checks the days as they are
+ * picked, and the same rules again when the request is sent.
+ */
+function SwapForm({ onClose, onDone, onError }: {
+  onClose: () => void; onDone: () => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [offDate, setOffDate] = useState('');
+  const [workDate, setWorkDate] = useState('');
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
+  const [note, setNote] = useState('');
+  const [check, setCheck] = useState<SwapCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // Opens below the logger, which on a phone is off-screen — bring it into view.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, []);
+
+  // Ask about the days as they are picked. A reply for days since changed is
+  // dropped, so a slow answer cannot overwrite a newer one.
+  useEffect(() => {
+    if (!offDate && !workDate) { setCheck(null); return; }
+    let live = true;
+    setChecking(true);
+    const qs = new URLSearchParams();
+    if (offDate) qs.set('offDate', offDate);
+    if (workDate) qs.set('workDate', workDate);
+    api.get<{ data: SwapCheck }>(`/staff-calendar/swaps/preview?${qs.toString()}`)
+      .then(r => { if (live) setCheck(r.data); })
+      .catch(err => {
+        if (live) setCheck({ problems: [err instanceof Error ? err.message : 'Could not check those days'], usual: null });
+      })
+      .finally(() => { if (live) setChecking(false); });
+    return () => { live = false; };
+  }, [offDate, workDate]);
+
+  // Fill the hours in from the day being given up, whenever that day changes.
+  const usualStart = check?.usual?.startTime ?? null;
+  const usualEnd = check?.usual?.endTime ?? null;
+  useEffect(() => {
+    if (usualStart && usualEnd) { setStartTime(usualStart); setEndTime(usualEnd); }
+  }, [offDate, usualStart, usualEnd]);
+
+  const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+  const usual = check?.usual ?? null;
+  const paid = usual && startTime && endTime ? toMin(endTime) - toMin(startTime) - usual.breakMinutes : null;
+  const timesBad = !!(startTime && endTime && toMin(endTime) <= toMin(startTime));
+  const problems = check?.problems ?? [];
+  const diff = paid !== null && usual ? paid - usual.minutes : 0;
+  const ready = !!(offDate && workDate && usual && paid !== null && paid > 0 && !timesBad
+    && problems.length === 0 && !checking);
+
+  async function submit() {
+    setSaving(true);
+    try {
+      await api.post('/staff-calendar/swaps', { offDate, workDate, startTime, endTime, note: note.trim() || null });
+      await onDone();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not send that');
+    } finally { setSaving(false); }
+  }
+
+  const input = 'w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm bg-white';
+  return (
+    <div ref={panelRef} className="p-5 rounded-2xl sm:rounded-xl border border-indigo-200 bg-white">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-[17px] font-semibold text-gray-900">Swap a day</h2>
+        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+      <p className="text-[13px] text-gray-500 mb-3">
+        Have one of your usual days off and work a different day instead. It costs no holiday —
+        it just changes which day you&apos;re in. The calendar updates once it&apos;s approved.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Day you&apos;ll have off <span className="text-gray-400">— one you normally work</span></span>
+          <input type="date" value={offDate} onChange={e => setOffDate(e.target.value)} className={input} />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Day you&apos;ll work instead <span className="text-gray-400">— one you normally don&apos;t</span></span>
+          <input type="date" value={workDate} onChange={e => setWorkDate(e.target.value)} className={input} />
+        </label>
+      </div>
+
+      {/* Hours only once there is a day to take them from — an empty select
+          would show its first option and look like a real time. */}
+      {usual ? (
+        <div className="mb-3">
+          <span className="block text-xs text-gray-600 mb-1">
+            Your hours on {workDate ? fmtDate(workDate) : 'the day you work instead'}
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <QuarterHourSelect value={startTime} onChange={setStartTime} aria-label="Start time"
+              className="px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm bg-white" />
+            <span className="text-gray-500">to</span>
+            <QuarterHourSelect value={endTime} onChange={setEndTime} aria-label="Finish time"
+              className="px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm bg-white" />
+            <span className={`text-sm ${timesBad || (paid !== null && paid <= 0) ? 'text-red-600' : 'text-gray-700'}`}>
+              {timesBad ? 'The finish needs to be after the start'
+                : paid === null ? ''
+                : paid <= 0 ? 'That leaves no working time after your usual break'
+                : `${fmtH(paid)}${offDate ? (diff === 0
+                    ? ` — the same as ${fmtDate(offDate)}`
+                    : ` — ${fmtH(Math.abs(diff))} ${diff > 0 ? 'longer' : 'shorter'} than ${fmtDate(offDate)}`) : ''}`}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-gray-500">
+            Filled in from the day you&apos;re giving up — change them if that day runs differently.
+          </p>
+        </div>
+      ) : !problems.length && (
+        <p className="mb-3 text-xs text-gray-500">Pick the day you&apos;re giving up and its hours will be filled in.</p>
+      )}
+
+      {problems.length > 0 && (
+        <ul className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700 list-disc list-inside">
+          {problems.map(p => <li key={p}>{p}</li>)}
+        </ul>
+      )}
+
+      <label className="block text-sm mb-3">
+        <span className="block text-xs text-gray-600 mb-1">Note (optional)</span>
+        <input value={note} onChange={e => setNote(e.target.value)} maxLength={500}
+          placeholder="e.g. gig on the Saturday" className={input} />
+      </label>
+      <button onClick={() => void submit()} disabled={saving || !ready}
+        className="px-4 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-sm font-semibold disabled:opacity-50">
+        {saving ? 'Sending…' : checking ? 'Checking…' : 'Ask to swap'}
       </button>
     </div>
   );
@@ -1781,10 +1982,11 @@ const DEAD = new Set(['declined', 'cancelled', 'withdrawn']);
  * IS time off — they just did not have to ask for it and it cost nothing — so
  * it sits in the same list as their own bookings.
  */
-type Decide = (kind: 'leave' | 'overtime' | 'wfh', id: string, action: 'approve' | 'decline' | 'cancel') => void;
+type DecideKind = 'leave' | 'overtime' | 'wfh' | 'swaps';
+type Decide = (kind: DecideKind, id: string, action: 'approve' | 'decline' | 'cancel') => void;
 
 /** What a pending row offers: the person withdraws it; an admin decides it. */
-function pendingActions(kind: 'leave' | 'overtime' | 'wfh', id: string, onWithdraw: () => void, onDecide?: Decide) {
+function pendingActions(kind: DecideKind, id: string, onWithdraw: () => void, onDecide?: Decide) {
   return onDecide
     ? [
         { label: 'Approve', onClick: () => onDecide(kind, id, 'approve'), className: 'text-emerald-700 font-semibold' },
@@ -1793,9 +1995,10 @@ function pendingActions(kind: 'leave' | 'overtime' | 'wfh', id: string, onWithdr
     : [{ label: 'Withdraw', onClick: onWithdraw, className: 'text-red-600' }];
 }
 
-function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, adjustments = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
+function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], onWithdrawSwap, adjustments = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
+  swaps?: DaySwap[]; onWithdrawSwap?: (id: string) => void;
   adjustments?: Adjustment[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
@@ -1913,12 +2116,44 @@ function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, adjustments = 
           : undefined,
     });
   }
+
+  // Day swaps (spec §8.2): costs nothing, but "which days was I in?" is the
+  // same kind of question. One row, dated by whichever day comes first.
+  for (const sw of swaps) {
+    const dead = DEAD.has(sw.status);
+    const first = sw.offDate < sw.workDate ? sw.offDate : sw.workDate;
+    const last = sw.offDate < sw.workDate ? sw.workDate : sw.offDate;
+    const extras = [
+      sw.usualMinutes !== null && sw.minutes !== sw.usualMinutes
+        ? `${fmtH(sw.minutes)} — ${fmtH(Math.abs(sw.minutes - sw.usualMinutes))} ${sw.minutes > sw.usualMinutes ? 'longer' : 'shorter'} than the day given up`
+        : null,
+      sw.decisionNote ? `${sw.decidedByName ? `${sw.decidedByName}: ` : ''}${sw.decisionNote}` : null,
+    ].filter(Boolean).join(' · ');
+    rows.push({
+      key: `swap:${sw.id}`, date: first, until: last,
+      title: 'Day swap',
+      meta: `Off ${fmtDate(sw.offDate)} · working ${fmtDate(sw.workDate)} ${sw.startTime}–${sw.endTime}${sw.requestNote ? ` · “${sw.requestNote}”` : ''}`,
+      extra: extras || null,
+      amount: '', amountClass: '',
+      pill: sw.status === 'pending' ? 'Waiting for approval' : statusWord(sw.status),
+      pillClass: sw.status === 'approved' ? 'bg-indigo-100 text-indigo-800' : STATUS_STYLE[sw.status as LeaveStatus] ?? 'bg-gray-100 text-gray-600',
+      statusClass: sw.status === 'pending' ? 'text-amber-800' : sw.status === 'approved' ? 'text-indigo-700' : 'text-gray-500',
+      dot: dead ? 'bg-gray-300' : sw.status === 'pending' ? 'bg-amber-500' : 'bg-indigo-500',
+      actions: sw.status === 'pending'
+        ? pendingActions('swaps', sw.id, () => onWithdrawSwap?.(sw.id), onDecide)
+        // An admin can call off an approved swap until both days have passed.
+        : sw.status === 'approved' && onDecide && last >= localIso(new Date())
+          ? [{ label: 'Call off', onClick: () => onDecide('swaps', sw.id, 'cancel'), className: 'text-red-600' }]
+          : undefined,
+    });
+  }
   return rows;
 }
 
 function TimeList(props: {
   year: number; requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
+  swaps?: DaySwap[]; onWithdrawSwap?: (id: string) => void;
   adjustments?: Adjustment[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
@@ -1982,12 +2217,13 @@ interface CalEvent { label: string; cls: string; dot: string; onClick?: () => vo
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 /** A month grid, Monday first, of the same facts the list shows. */
-function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [], companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
+function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [], swaps = [], companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
   month: { y: number; m: number };
   onMonth: (next: { y: number; m: number }) => void;
   onThisMonth: () => void;
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[];
+  swaps?: DaySwap[];
   companyDays: { date: string; label: string }[];
   bankHolidays: string[]; bankHolidaysToBook: string[];
   onBook?: (date: string) => void;
@@ -2031,8 +2267,16 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [
           : { label: '⌂ Home — waiting', cls: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' });
       }
     }
+    for (const sw of swaps) {
+      if (sw.status !== 'pending' && sw.status !== 'approved') continue;
+      const waiting = sw.status === 'pending' ? ' — waiting' : '';
+      const cls = waiting ? 'bg-amber-100 text-amber-800' : 'bg-indigo-50 text-indigo-800';
+      const dot = waiting ? 'bg-amber-500' : 'bg-indigo-500';
+      add(sw.offDate, { label: `⇄ Off (swap)${waiting}`, cls, dot });
+      add(sw.workDate, { label: `⇄ In ${sw.startTime}–${sw.endTime}${waiting}`, cls, dot });
+    }
     return map;
-  }, [requests, overtime, wfh, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
+  }, [requests, overtime, wfh, swaps, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
 
   const { y, m } = month;
   const first = new Date(Date.UTC(y, m, 1));
@@ -2117,6 +2361,7 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [
           ['bg-ooosh-600', 'Holiday'],
           ['bg-emerald-100', 'Company day'],
           ['bg-teal-50 border border-teal-300', 'Home'],
+          ['bg-indigo-50 border border-indigo-300', 'Swapped day'],
         ].map(([cls, text]) => (
           <span key={text} className="flex items-center gap-1.5">
             <i className={`w-2.5 h-2.5 rounded-[3px] ${cls}`} />{text}

@@ -241,6 +241,51 @@ export async function notifyWfhRequested(requestId: string) {
   } catch (e) { console.error('[staff-notifications] wfh requested:', e); }
 }
 
+/** "Paid hours on the new day, against the day given up" — for the approver. */
+function swapHoursLine(minutes: number, usualMinutes: number | null): string {
+  if (usualMinutes === null) return fmtH(minutes);
+  const diff = minutes - usualMinutes;
+  if (diff === 0) return `${fmtH(minutes)} — the same as the day given up`;
+  return `${fmtH(minutes)} — ${fmtH(Math.abs(diff))} ${diff > 0 ? 'longer' : 'shorter'} than the day given up`;
+}
+
+/** Somebody asked to swap a day (services/staff-swaps.ts) — same route to the approver as leave. */
+export async function notifySwapRequested(swapId: string) {
+  try {
+    // Dynamic: staff-swaps.ts imports this module for retireSwapRequestBells.
+    const { getSwap } = await import('./staff-swaps');
+    const q = await getSwap(swapId);
+    if (!q) return;
+    const link = APPROVALS_URL;
+    const what = `Off ${fmtDate(q.offDate)}, working ${fmtDate(q.workDate)} ${q.startTime}–${q.endTime} instead`;
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        `${q.personName} has asked to swap a day`, what,
+        'staff_pattern_swap', q.id, link, 'normal', true);
+    }
+    await emailApprovers(
+      `${q.personName} has asked to swap a day`,
+      `${esc(q.personName)} has asked to swap a day`,
+      [
+        `Off <strong>${esc(fmtDate(q.offDate))}</strong>, working <strong>${esc(fmtDate(q.workDate))}</strong> ` +
+          `${esc(q.startTime)}–${esc(q.endTime)} instead`,
+        esc(swapHoursLine(q.minutes, q.usualMinutes)),
+        ...(q.requestNote ? [`<span style="color:#64748b;">“${esc(q.requestNote)}”</span>`] : []),
+      ],
+      link);
+  } catch (e) { console.error('[staff-notifications] swap requested:', e); }
+}
+
+/**
+ * The swap is no longer waiting (approved, declined or withdrawn), so every
+ * approver's "X has asked to swap a day" bell is done with. Only `follow_up`:
+ * the person's own "Day swap approved" bell is `system` on the same id and
+ * must survive. Called by staff-swaps.ts; never throws (notification-resolve.ts).
+ */
+export async function retireSwapRequestBells(swapId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_pattern_swap', entityId: swapId, type: 'follow_up' });
+}
+
 /**
  * The request is no longer waiting (approved, declined or withdrawn) — every
  * approver's "X has asked to work from home" bell is done with. `follow_up`
@@ -299,7 +344,7 @@ async function emailApprovers(
  */
 export async function notifyDecision(opts: {
   personId: string;
-  kind: 'leave' | 'overtime' | 'wfh';
+  kind: 'leave' | 'overtime' | 'wfh' | 'swap';
   outcome: 'approved' | 'declined' | 'cancelled';
   summary: string;
   note?: string | null;
@@ -310,7 +355,8 @@ export async function notifyDecision(opts: {
       `SELECT id, email FROM users WHERE person_id = $1 AND is_active = true LIMIT 1`, [opts.personId]);
     const userId = u.rows[0]?.id;
     if (!userId) return;   // no login — nothing to notify to
-    const what = opts.kind === 'leave' ? 'Time off' : opts.kind === 'wfh' ? 'Working from home' : 'Overtime';
+    const what = opts.kind === 'leave' ? 'Time off' : opts.kind === 'wfh' ? 'Working from home'
+      : opts.kind === 'swap' ? 'Day swap' : 'Overtime';
     // The routes pass ISO dates and raw minutes; say them the way people do.
     const summary = opts.summary
       .replace(/\d{4}-\d{2}-\d{2}/g, d => fmtDate(d))
@@ -319,7 +365,8 @@ export async function notifyDecision(opts: {
     await notify(userId, 'system',
       `${what} ${opts.outcome}: ${summary}`,
       opts.note ?? '',
-      opts.kind === 'leave' ? 'staff_leave_request' : opts.kind === 'wfh' ? 'staff_wfh_request' : 'staff_overtime_entry',
+      opts.kind === 'leave' ? 'staff_leave_request' : opts.kind === 'wfh' ? 'staff_wfh_request'
+        : opts.kind === 'swap' ? 'staff_pattern_swap' : 'staff_overtime_entry',
       opts.entityId, MY_TIME,
       opts.outcome === 'declined' ? 'high' : 'normal', true);
 
@@ -331,7 +378,8 @@ export async function notifyDecision(opts: {
     if (to) {
       const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
       const word = opts.outcome === 'approved' ? 'approved' : opts.outcome === 'declined' ? 'declined' : 'cancelled';
-      const heading = `Your ${opts.kind === 'leave' ? 'time off' : opts.kind === 'wfh' ? 'working-from-home request' : 'overtime'} has been ${word}`;
+      const heading = `Your ${opts.kind === 'leave' ? 'time off' : opts.kind === 'wfh' ? 'working-from-home request'
+        : opts.kind === 'swap' ? 'day swap' : 'overtime'} has been ${word}`;
       const body =
         `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">${esc(heading)}</h2>` +
         `<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;"><strong>${esc(summary)}</strong></p>` +
@@ -528,6 +576,7 @@ export interface DigestResult {
   pendingLeave: number;
   pendingOvertime: number;
   pendingWfh?: number;
+  pendingSwaps?: number;
   emailed: boolean;
   skippedReason?: string;
 }
@@ -539,7 +588,8 @@ export interface DigestResult {
  * quiet — "nothing pending" is a result, not a failure.
  */
 export async function runStaffTimeDigest(): Promise<DigestResult> {
-  const [leave, overtime, wfh] = await Promise.all([
+  const { listSwaps } = await import('./staff-swaps');
+  const [leave, overtime, wfh, swaps] = await Promise.all([
     query(
       `SELECT r.id, r.leave_type, r.total_minutes, r.request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
@@ -560,15 +610,21 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
          FROM staff_wfh_requests w JOIN people p ON p.id = w.person_id
         WHERE w.status = 'pending'
         ORDER BY w.start_date`),
+    // A failure here must not cost the morning its leave and overtime list.
+    listSwaps({ status: 'pending' }).catch(e => {
+      console.error('[staff-notifications] digest: swaps unreadable:', e);
+      return [];
+    }),
   ]);
 
   const result: DigestResult = {
     pendingLeave: leave.rows.length,
     pendingOvertime: overtime.rows.length,
     pendingWfh: wfh.rows.length,
+    pendingSwaps: swaps.length,
     emailed: false,
   };
-  if (result.pendingLeave === 0 && result.pendingOvertime === 0 && wfh.rows.length === 0) {
+  if (result.pendingLeave === 0 && result.pendingOvertime === 0 && wfh.rows.length === 0 && swaps.length === 0) {
     result.skippedReason = 'nothing pending';
     return result;
   }
@@ -617,7 +673,20 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
     }
   }
 
-  const total = result.pendingLeave + result.pendingOvertime + wfh.rows.length;
+  if (swaps.length > 0) {
+    rows.push(`<h3 style="margin:20px 0 8px;font-size:15px;color:#1e293b;">Day swaps (${swaps.length})</h3>`);
+    for (const q of swaps) {
+      rows.push(
+        `<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">` +
+        `<strong>${esc(q.personName)}</strong> — off ${esc(fmtDate(q.offDate))}, ` +
+        `working ${esc(fmtDate(q.workDate))} ${esc(q.startTime)}–${esc(q.endTime)} instead` +
+        (q.requestNote ? `<br><span style="color:#64748b;">“${esc(q.requestNote)}”</span>` : '') +
+        `</p>`
+      );
+    }
+  }
+
+  const total = result.pendingLeave + result.pendingOvertime + wfh.rows.length + swaps.length;
   const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
   const body =
     `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">` +

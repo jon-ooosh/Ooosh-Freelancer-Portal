@@ -3,7 +3,7 @@
  *
  * A bell is a copy of a fact at the moment it happened. One that ASKS for
  * something ("New issue", "Storage invoice due", "A to-do needs you") is
- * stamped with a key (`notifications.resolve_key`, migration 308), and the
+ * stamped with a key (`notifications.resolve_key`, migration 310), and the
  * key's rule here says, in SQL, when the bell is STILL NEEDED. Once that stops
  * being true the bell is retired — read and done, greyed in the dropdown,
  * hidden in the Inbox — by `retireDoneBells()` in notification-resolve.ts:

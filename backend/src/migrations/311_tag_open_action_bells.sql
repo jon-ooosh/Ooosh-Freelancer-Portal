@@ -1,6 +1,6 @@
 -- Label the bells already waiting with what they ask for (jon, Oct 2026).
 --
--- Migration 308 added notifications.resolve_key; from this release the code
+-- Migration 310 added notifications.resolve_key; from this release the code
 -- sets it on every new bell that asks for something, and the rule for each
 -- key in services/bell-rules.ts retires the bell once that is done. Bells
 -- created BEFORE this release carry no key, so nothing would ever retire

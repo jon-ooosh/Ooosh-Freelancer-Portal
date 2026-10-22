@@ -1375,7 +1375,7 @@ async function fireReferralNotification(
     for (const userId of targets.bellUserIds) {
       // Filed under the driver, with its key, so it retires once the referral
       // has an outcome (bell-rules.ts referral_needed). It had no entity
-      // before Oct 2026; migration 309 back-fills the old ones from the link.
+      // before Oct 2026; migration 311 back-fills the old ones from the link.
       await query(
         `INSERT INTO notifications (user_id, type, title, content, action_url, priority, email_sent_at,
                                     entity_type, entity_id, resolve_key)

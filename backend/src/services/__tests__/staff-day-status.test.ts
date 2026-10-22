@@ -198,6 +198,20 @@ describe('resolveScheduledDay', () => {
     expect(d.scheduledMinutes).toBe(0);
     expect(d.isException).toBe(true);
   });
+  it('carries the other day of an approved swap, so the calendar can say "Swap"', () => {
+    const off = resolveScheduledDay('2026-09-09', [WILL_PATTERN], WILL_MAP, {
+      person_id: 'will', exception_date: '2026-09-09', is_working: false,
+      start_time: null, end_time: null, minutes: 0, swap_with: '2026-09-10',
+    });
+    expect(off.status).toBe('not_scheduled');
+    expect(off.swapWith).toBe('2026-09-10');
+    // A one-off change that is not a swap carries nothing.
+    const oneOff = resolveScheduledDay('2026-09-09', [WILL_PATTERN], WILL_MAP, {
+      person_id: 'will', exception_date: '2026-09-09', is_working: false,
+      start_time: null, end_time: null, minutes: 0, swap_with: null,
+    });
+    expect(oneOff).not.toHaveProperty('swapWith');
+  });
   it('applies an exception even where no pattern covers the date', () => {
     const d = resolveScheduledDay('2025-11-05', [WILL_PATTERN], WILL_MAP, {
       person_id: 'will', exception_date: '2025-11-05', is_working: true,

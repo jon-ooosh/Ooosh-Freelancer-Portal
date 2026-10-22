@@ -345,10 +345,12 @@ async function runMigrations(direction: 'up' | 'down') {
         '303_portal_login_security.sql',
         '304_clear_chase_outside_enquiry.sql',
         '305_retire_decided_leave_bells.sql',
-        '306_retire_decided_overtime_wfh_bells.sql',
-        '307_retire_answered_mention_bells.sql',
-        '308_notifications_resolve_key.sql',
-        '309_tag_open_action_bells.sql',
+        '306_freelancer_invoice_links.sql',
+        '307_day_swap_requests.sql',
+        '308_retire_decided_overtime_wfh_bells.sql',
+        '309_retire_answered_mention_bells.sql',
+        '310_notifications_resolve_key.sql',
+        '311_tag_open_action_bells.sql',
       ];
 
       for (const migration of migrations) {

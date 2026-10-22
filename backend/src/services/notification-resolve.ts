@@ -27,10 +27,10 @@
  * bell's count drops without a reload. `done` is false when the bells were
  * only marked READ (`markMentionsSeen`).
  *
- * Wired up so far: leave, overtime and WFH requests (`retire…Bells()` in
- * staff-notifications.ts, called by their services); mentions (replies and
- * reactions in routes/interactions.ts, the timeline via
- * POST /notifications/seen). The rest: INBOX-AND-WAREHOUSE.md.
+ * Wired up so far: leave, overtime and WFH requests and day swaps
+ * (`retire…Bells()` in staff-notifications.ts, called by their services);
+ * mentions (replies and reactions in routes/interactions.ts, the timeline via
+ * POST /notifications/seen); everything with a key in bell-rules.ts.
  */
 import { query } from '../config/database';
 import { emitToUser } from '../config/socket';

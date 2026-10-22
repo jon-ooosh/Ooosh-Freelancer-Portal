@@ -108,7 +108,7 @@ Adding a scanner: copy the shape, add a marker column, wire the clear into every
 Until Oct 2026 a bell was a copy of a fact frozen at the moment it happened — approving a holiday left every
 admin's "X has requested holiday" lit until each of them clicked it. Now (jon, Oct 2026):
 
-- **A bell that ASKS for something carries `notifications.resolve_key`** (migration 308), and
+- **A bell that ASKS for something carries `notifications.resolve_key`** (migration 310), and
   `services/bell-rules.ts` holds ONE rule per key: "still needed while …", SQL over the bell row `n`.
   **Set the key at insert. Never on an FYI bell** ("Issue resolved", "Approved", "Renewal coming up") — an FYI
   bell is done when it is read, and FYI and action bells often share a type and a record, which is exactly why
@@ -125,8 +125,9 @@ admin's "X has requested holiday" lit until each of them clicked it. Now (jon, O
 - **A rule is a parameter-free EXISTS** (`bell-rules.test.ts` checks): no `$n`; `[0-9]` not `\d`; guard any cast
   with CASE. A deleted record reads as done. A rule that needs a module that loads auth or email keeps a copy
   of the number and the test checks it matches (`HOLD_UNTIL_LEAD_DAYS`, `PIN_ROTATE_DAYS`).
-- **Older wiring, same idea:** leave / overtime / WFH requests retire their approvers' `follow_up` bells by type
-  (`retire…Bells()` beside each `notify…Requested()` in `staff-notifications.ts`). **Mentions are one
+- **Older wiring, same idea:** leave / overtime / WFH requests and day swaps retire their approvers' `follow_up`
+  bells by type (`retire…Bells()` beside each `notify…Requested()` in `staff-notifications.ts`; day swaps from
+  `staff-swaps.ts` via `retireSwapRequestBells()`, entity `staff_pattern_swap`, the swap's group id). **Mentions are one
   person's:** a reply or a reaction in the thread marks the replier's own mention bells done
   (`resolveMyThreadMentions`); opening the timeline or the Problem marks them READ only
   (`POST /notifications/seen`, `markMentionsSeen`).
