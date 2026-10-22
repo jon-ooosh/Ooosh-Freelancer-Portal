@@ -359,7 +359,7 @@ existing definition:
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |
 | Sending any email | `services/email-service.ts` |
-| The thing a bell asked for is done — clear the bell | `services/notification-resolve.ts` `resolveActionBells()` — for everyone who got it, read AND done, by row AND bell type (the requester's outcome bell on the same row survives); open bells refresh live (`notifications_resolved`). Wired: leave requests (`retireLeaveRequestBells()`). Services push to browsers through `config/socket.ts` `emitToUser()` |
+| A bell that ASKS for something — when is it done? | `services/bell-rules.ts` — ONE rule per `notifications.resolve_key` ("still needed while …", SQL over the bell row); `notification-resolve.ts` `retireDoneBells(key, id?)` applies it (call it from the code that finishes the thing — instant) and `sweepDoneBells()` every 5 min catches every other path. Set the key at insert; never on an FYI bell. Older wiring, same file: leave/overtime/WFH `retire…Bells()` in `staff-notifications.ts`, mentions `resolveMyThreadMentions()` / `markMentionsSeen()`. Open bells refresh live (`notifications_resolved`); services push through `config/socket.ts` `emitToUser()` |
 | Did this email actually arrive? Is this address bouncing / blocked by Resend? | `services/email-delivery.ts` (Resend webhook → `email_delivery_events`, `email_address_problems`); frontend `hooks/useEmailProblems.ts` + `components/EmailProblemFlag.tsx`. `email_log` 'sent' only means Resend accepted it |
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
@@ -548,7 +548,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh daily 07:30 ·
-Gmail ingestion every 10 min · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email).
+Gmail ingestion every 10 min · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email) · bell sweep every 5 min (retires bells whose thing is done, `bell-rules.ts`; also runs before each escalation).
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `is_internal` rule (see `jobs-pipeline-dashboard.md`).

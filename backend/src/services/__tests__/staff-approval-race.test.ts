@@ -20,6 +20,7 @@ jest.mock('../staff-notifications', () => ({
   retireLeaveRequestBells: jest.fn(async () => 0),
   retireOvertimeBells: jest.fn(async () => 0),
 }));
+jest.mock('../notification-resolve', () => ({ retireDoneBells: jest.fn(async () => 0) }));
 
 import { query, getClient } from '../../config/database';
 import { approveRequest, cancelRequest } from '../staff-leave';

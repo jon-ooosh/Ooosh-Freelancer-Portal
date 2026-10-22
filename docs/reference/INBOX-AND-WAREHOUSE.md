@@ -216,24 +216,29 @@ Closes the "one-way" gap in the current inbox: rolling conversations with replie
 
 Phased plan in `docs/MESSAGING-SPEC.md`. Phase G (email reply ingestion via `reply+<id>@oooshtours.co.uk`) is captured in spec but deferred.
 
-**Bells joined to the thing they ask for (Oct 2026, in progress).** A bell used to clear only when its
-recipient clicked it, pressed Mark all read or Done — never when the thing itself was done, and never for
-the other people who got a copy. `services/notification-resolve.ts` `resolveActionBells()` now retires a
-bell for everyone (read + `acknowledged_at`) when the code that finishes the thing calls it, matching on
-row AND bell type; open bells refresh over the socket (`notifications_resolved`, sent through
-`config/socket.ts`). Dealt-with bells stay in the dropdown, greyed, "✓ Done". Rules:
-`.claude/rules/email-and-notifications.md`.
-- [x] **Leave requests** — approve / decline / withdraw (`staff-leave.ts` → `retireLeaveRequestBells()`).
-  Migration 305 cleared the bells of requests decided before it shipped.
-- [ ] **Mentions** (jon's decisions, Oct 2026): a reply or a reaction in that thread marks YOUR mention bell
-  done; opening the timeline where it sits marks it read only. NB the "Reply marks notification as Done"
-  item under Phase C above is not true of the current Inbox — `ThreadView`'s `onReplied` is not wired
-  there — so this round restores it.
-- [ ] **Overtime and WFH requests** — the same shape as leave.
-- [ ] **Sort the rest** — the ~35 places that create bells into "for information" (done when read) and
-  "needs action" (needs wiring).
-- The Inbox page does not listen for `notifications_resolved` yet; an open Inbox shows a retired bell
-  until it next loads.
+**Bells joined to the thing they ask for (Oct 2026).** A bell used to clear only when its recipient
+clicked it, pressed Mark all read or Done — never when the thing itself was done, and never for the other
+people who got a copy. Now a bell that ASKS for something carries `notifications.resolve_key` (migration
+308) and `services/bell-rules.ts` holds one rule per key ("still needed while …"); `notification-resolve.ts`
+retires it — straight away from the code that finishes the thing, and on a 5-minute sweep (also run before
+each escalation) for every other path. Read + `acknowledged_at`; dealt-with bells stay in the dropdown,
+greyed, "✓ Done", and open bells / the Inbox update over the socket (`notifications_resolved`
+`{ ids, done }`, through `config/socket.ts`). Rules: `.claude/rules/email-and-notifications.md`.
+- [x] **Leave, overtime and WFH requests** — decided or withdrawn → every approver's bell (migrations 305/306
+  cleared the old ones). Approve also can't double-post any more (the losing press rolls back).
+- [x] **Mentions** — a reply or a reaction in the thread marks YOUR mention bells there done; opening the
+  timeline or the Problem marks them read (`POST /notifications/seen`). Migration 307 cleared the ones
+  already answered. (This also restores "Reply marks Done" in the Inbox, which the ThreadView had lost.)
+- [x] **By rule (bell-rules.ts), migration 309 labelled the open ones:** Problems (new / re-flagged /
+  assigned), claim form submitted, sale photos, lock-up not submitted, quote option confirmed, driver referral
+  and NI licence check (now filed under the driver), storage invoice and rate review, held-item hold date,
+  lost-property digest, kiosk PIN, overtime cash-out, return-to-work, freelancer not confirmed, To Do (needs
+  you / given / handed back / list item / follow-up), repeating to-do proposed, review due, staff record
+  action / deletion, staff documents (to sign, content review, awaiting approval, changes requested).
+- [ ] **Waiting on jon's decisions** (not keyed — they clear as before): chase alerts, requirement chases,
+  compliance, mid-tour drivers, claim check-ins and client chases, the staff-document escalation, storage
+  access requests, and the bells with no state to test (failed hooks, payroll, company days, receipts
+  digest, refund tidy-ups, lock-up flagged items, delivery problems).
 
 **Round 4 backlog (captured, not shipped):**
 - Real-time updates in Inbox for the Sent tab (currently Sent doesn't refresh on socket events — minor).
