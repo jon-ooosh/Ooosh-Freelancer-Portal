@@ -42,7 +42,7 @@ These are things that **will** need doing on a known schedule. Non-negotiable.
 | **Mitigation** | Use `nvm` for easy version switching. Calendar reminder when current LTS enters maintenance mode. |
 | **Current version** | Node 22 LTS (NodeSource apt repo, `/usr/bin/node`) — upgraded from 20.20.2 on 23 Oct 2026 after the Node 20 line went EOL unpatched (Brotli RCE, CVE-2026-111497; Stripe telemetry flagged it) |
 | **Next action date** | **Before April 2027** — Node 22 leaves maintenance; move to Node 24 (`setup_24.x` in `deploy/setup-server.sh`, build both dirs on it first) |
-| **Status** | [x] Node 22 since Oct 2026. Security point releases arrive via `apt upgrade` in `weekly-maintenance.sh` |
+| **Status** | [x] Node 22 since Oct 2026. Security point releases arrive via `apt upgrade` in `weekly-maintenance.sh`. The weekly *Runtime* section counts down to the support end (warns 90 days out), shouts if the running major has no date on file, and says if ooosh-portal is still on a replaced binary |
 
 ### 1.4 npm Dependency Updates
 
@@ -65,8 +65,8 @@ These are things that **will** need doing on a known schedule. Non-negotiable.
 | **Frequency** | Major release annually. Minor/security patches quarterly. |
 | **Failure mode** | EOL version = no security patches |
 | **Mitigation** | Minor updates: `apt upgrade`. Major updates: dump/restore with testing. |
-| **Current version** | TBD (will use PostgreSQL 16 at launch) |
-| **Status** | [ ] Not yet configured |
+| **Current version** | PostgreSQL 16 (`postgresql@16-main`), supported until Nov 2028 |
+| **Status** | [x] Minor updates via the Monday `apt upgrade`. **The support end date is counted down every week** in the maintenance report's *Runtime* section (`SUPPORT_END` in `deploy/weekly-maintenance.sh`; warns 180 days out). A major upgrade is a planned dump/restore |
 
 ### 1.6 Hetzner Server OS Updates
 
@@ -76,7 +76,8 @@ These are things that **will** need doing on a known schedule. Non-negotiable.
 | **Frequency** | Monthly `apt update && apt upgrade` for security patches |
 | **Failure mode** | Unpatched OS vulnerabilities |
 | **Mitigation** | Unattended-upgrades for security patches. Monthly manual review for non-security. |
-| **Status** | [ ] Not yet configured |
+| **Current version** | Ubuntu 24.04 LTS, standard support until Apr 2029 |
+| **Status** | [x] `unattended-upgrades` is on (Ubuntu security pocket, daily); `deploy/weekly-maintenance.sh` runs the full `apt upgrade` Mondays 02:30, which is also what carries NodeSource (Node) point releases — unattended-upgrades does not take third-party repos. The OS support end date is in the weekly *Runtime* section (warns 180 days out) |
 
 ---
 

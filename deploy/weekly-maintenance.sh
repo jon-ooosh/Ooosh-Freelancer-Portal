@@ -410,6 +410,98 @@ if [ -n "$STOPPED_CONTAINERS" ]; then
 fi
 echo "" >> "$REPORT_FILE"
 
+# --- Runtime: is what we run still supported, and is it what's running? ---
+# Added Oct 2026 after Node 20 sat on this box for six months past its end
+# of life with nothing to say so (the Oct 2026 Brotli RCE, CVE-2026-111497,
+# had no fix for it; Stripe's telemetry noticed before we did). `apt upgrade`
+# cannot catch that: an end-of-life line simply stops publishing packages.
+# So this section counts down to each runtime's support end, every week, and
+# shouts when a version isn't in the table at all - which is what a line we
+# forgot to plan for looks like.
+#
+# Dates are from endoflife.date (ubuntu / postgresql / nodejs). Add a row when
+# upgrading; the "no support end date on file" warning is the nudge.
+echo "--- Runtime ---" >> "$REPORT_FILE"
+
+declare -A SUPPORT_END=(
+    [ubuntu:22.04]=2027-04-30
+    [ubuntu:24.04]=2029-04-30       # end of standard support (5 years)
+    [ubuntu:26.04]=2031-04-30
+    [postgresql:15]=2027-11-11
+    [postgresql:16]=2028-11-09      # final release of the 16 line
+    [postgresql:17]=2029-11-08
+    [postgresql:18]=2030-11-14
+    [nodejs:20]=2026-04-30          # the line we sat on past its end
+    [nodejs:22]=2027-04-30          # maintenance LTS ends
+    [nodejs:24]=2028-04-30
+    [nodejs:26]=2029-04-30
+)
+
+# support_line NAME VERSION WARN_DAYS - one report line per runtime.
+support_line() {
+    local name="$1" ver="$2" warn="$3" end days
+    end="${SUPPORT_END[$name:$ver]:-}"
+    if [ -z "$ver" ]; then
+        echo "WARNING - $name: could not read the installed version" >> "$REPORT_FILE"
+        return
+    fi
+    if [ -z "$end" ]; then
+        echo "WARNING - $name $ver: no support end date on file - add [$name:$ver] to SUPPORT_END in weekly-maintenance.sh (see endoflife.date/$name)" >> "$REPORT_FILE"
+        return
+    fi
+    days=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+    if [ "$days" -lt 0 ]; then
+        echo "WARNING - $name $ver: OUT OF SUPPORT since $end - no more security fixes; upgrade now" >> "$REPORT_FILE"
+    elif [ "$days" -le "$warn" ]; then
+        echo "WARNING - $name $ver: support ends $end ($days days) - plan the upgrade" >> "$REPORT_FILE"
+    else
+        echo "OK - $name $ver: supported until $end ($days days)" >> "$REPORT_FILE"
+    fi
+}
+
+# OS and Postgres want months of notice (a major upgrade is a planned job);
+# Node needs a quarter (a point of apt, as Oct 2026 showed).
+OS_VERSION=$(. /etc/os-release 2>/dev/null && echo "$VERSION_ID")
+PG_VERSION=$(pg_lsclusters -h 2>/dev/null | awk 'NR==1 {print $1}')
+[ -z "$PG_VERSION" ] && PG_VERSION=$(psql --version 2>/dev/null | grep -oE '[0-9]+' | head -1)
+NODE_INSTALLED=$(/usr/bin/node -v 2>/dev/null)
+NODE_MAJOR=$(echo "$NODE_INSTALLED" | sed 's/^v//' | cut -d. -f1)
+support_line ubuntu     "$OS_VERSION" 180
+support_line postgresql "$PG_VERSION" 180
+support_line nodejs     "$NODE_MAJOR" 90
+
+# Is the API actually running the Node that is installed? apt replaces the
+# file; the process keeps the old binary until something restarts it. apt's
+# needrestart hook normally bounces ooosh-portal in the same run, so this is
+# the check that it did. Linux marks a replaced binary "(deleted)" on the
+# process's exe link.
+PORTAL_PID=$(systemctl show -p MainPID --value ooosh-portal 2>/dev/null)
+if [ -n "$PORTAL_PID" ] && [ "$PORTAL_PID" != "0" ]; then
+    PORTAL_EXE=$(readlink "/proc/$PORTAL_PID/exe" 2>/dev/null)
+    case "$PORTAL_EXE" in
+        *"(deleted)"*)
+            echo "RESTART NEEDED - ooosh-portal is running a Node binary that has since been replaced on disk (installed: $NODE_INSTALLED) - systemctl restart ooosh-portal" >> "$REPORT_FILE" ;;
+        *)
+            echo "OK - ooosh-portal is running the installed Node ($NODE_INSTALLED)" >> "$REPORT_FILE" ;;
+    esac
+fi
+
+# Pending restarts the upgrades left behind. Reported, never acted on here -
+# a reboot is jon's call.
+if [ -f /var/run/reboot-required ]; then
+    REBOOT_PKGS=$(sort -u /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')
+    echo "REBOOT NEEDED - ${REBOOT_PKGS:-see /var/run/reboot-required}" >> "$REPORT_FILE"
+else
+    echo "OK - no reboot pending" >> "$REPORT_FILE"
+fi
+if command -v needrestart &>/dev/null; then
+    DEFERRED_SVCS=$(needrestart -b -r l 2>/dev/null | awk '/^NEEDRESTART-SVC:/ {print $2}' | tr '\n' ' ')
+    if [ -n "$DEFERRED_SVCS" ]; then
+        echo "Services still on replaced libraries (restart when convenient): $DEFERRED_SVCS" >> "$REPORT_FILE"
+    fi
+fi
+echo "" >> "$REPORT_FILE"
+
 # --- Old kernel cleanup check ---
 # grep -c exits 1 on no matches, so the old `|| echo 0` appended a second zero
 # to grep's own "0" and produced "0 0".
