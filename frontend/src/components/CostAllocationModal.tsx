@@ -11,6 +11,11 @@
  * unattributed ("our cost", e.g. £20 of a £70 fuel receipt where £50 goes to a
  * client). An amber nudge shows the unallocated balance but never blocks. Only
  * OVER-allocation (more than the cost total) is rejected.
+ *
+ * A share can carry its own recharge to its job (migration 318). Each existing
+ * line is sent back with its id, so the server keeps that share (and its
+ * recharge) rather than re-making it. A share already recharged to the client
+ * can't be removed here; the server refuses it too.
  */
 import { useState, useEffect } from 'react';
 import { api } from '../services/api';
@@ -29,6 +34,10 @@ interface AllocCostLite {
 
 interface Line {
   key: string;
+  /** The saved share, when this line is one. */
+  id?: string;
+  /** Its recharge to this job: waiting to be done, or done. */
+  rechargeState?: 'pending' | 'done';
   job_id: string;
   label: string;
   amount: string;
@@ -63,11 +72,17 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
   useEffect(() => {
     (async () => {
       try {
-        const r = await api.get<{ data: { allocations?: Array<{ job_id: string | null; hh_job_number?: number | null; job_name?: string | null; amount: number; recharge: boolean; notes: string | null }> } }>(`/costs/${cost.id}`);
+        const r = await api.get<{ data: { allocations?: Array<{
+          id: string; job_id: string | null; hh_job_number?: number | null; job_name?: string | null; amount: number;
+          recharge: boolean; notes: string | null; recharge_mode?: string | null; recharge_status?: string | null;
+        }> } }>(`/costs/${cost.id}`);
         const existing = (r.data.allocations || []).filter((a) => a.job_id);
         if (existing.length) {
           setLines(existing.map((a) => ({
             key: nextKey(),
+            id: a.id,
+            rechargeState: !a.recharge_mode || a.recharge_mode === 'none' ? undefined
+              : (a.recharge_status ?? 'pending') === 'pending' ? 'pending' : 'done',
             job_id: a.job_id as string,
             label: a.hh_job_number
               ? `#${a.hh_job_number}${a.job_name ? ' – ' + a.job_name : ''}`
@@ -129,7 +144,13 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
   }
 
   const setLine = (key: string, patch: Partial<Line>) => setLines((prev) => prev.map((l) => l.key === key ? { ...l, ...patch } : l));
-  const removeLine = (key: string) => setLines((prev) => prev.filter((l) => l.key !== key));
+  const removeLine = (key: string) => {
+    const line = lines.find((l) => l.key === key);
+    // Taking out a share that is waiting to be recharged drops that recharge too.
+    if (line?.rechargeState === 'pending'
+      && !confirm(`${line.label} is waiting to be recharged to the client. Remove it from the split anyway? Its recharge goes with it.`)) return;
+    setLines((prev) => prev.filter((l) => l.key !== key));
+  };
 
   const allocated = round2(lines.reduce((s, l) => s + (Number(l.amount) || 0), 0));
   const remaining = round2(gross - allocated);
@@ -146,7 +167,10 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
     setSaving(true);
     try {
       await api.put(`/costs/${cost.id}/allocations`, {
-        allocations: lines.map((l) => ({ job_id: l.job_id, amount: Number(l.amount), recharge: l.recharge, notes: l.notes || null })),
+        allocations: lines.map((l) => ({
+          ...(l.id ? { id: l.id } : {}),
+          job_id: l.job_id, amount: Number(l.amount), recharge: l.recharge, notes: l.notes || null,
+        })),
       });
       onSaved();
     } catch (err) {
@@ -178,7 +202,11 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
                   {lines.map((l) => (
                     <div key={l.key} className="flex items-center gap-2 flex-wrap border border-gray-100 rounded-md p-2">
                       <div className="flex-1 min-w-[140px]">
-                        <div className="text-sm text-gray-800">{l.label}</div>
+                        <div className="text-sm text-gray-800">
+                          {l.label}
+                          {l.rechargeState === 'pending' && <span className="ml-1.5 px-1.5 py-0.5 text-[11px] rounded-full bg-amber-50 text-amber-700">recharge pending</span>}
+                          {l.rechargeState === 'done' && <span className="ml-1.5 px-1.5 py-0.5 text-[11px] rounded-full bg-green-50 text-green-700">recharged ✓</span>}
+                        </div>
                         {l.expected != null && <div className="text-xs text-gray-400">quoted cost {gbp(l.expected)}</div>}
                       </div>
                       <div className="flex items-center gap-1">
@@ -186,7 +214,12 @@ export default function CostAllocationModal({ cost, onClose, onSaved }: {
                         <input type="number" step="0.01" min="0" className={`${inputCls} w-24`} value={l.amount}
                           onChange={(e) => setLine(l.key, { amount: e.target.value })} />
                       </div>
-                      <button onClick={() => removeLine(l.key)} className="text-red-500 hover:text-red-700 text-sm px-1" title="Remove">🗑</button>
+                      {l.rechargeState === 'done' ? (
+                        <span className="text-gray-300 text-sm px-1 cursor-not-allowed"
+                          title="Already recharged to the client, so it stays in the split">🗑</span>
+                      ) : (
+                        <button onClick={() => removeLine(l.key)} className="text-red-500 hover:text-red-700 text-sm px-1" title="Remove">🗑</button>
+                      )}
                     </div>
                   ))}
                 </div>

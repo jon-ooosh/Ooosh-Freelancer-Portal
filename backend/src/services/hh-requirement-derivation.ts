@@ -778,10 +778,11 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       }
 
       // Conditional: cost recharge resolution — only if the job has any cost
-      // flagged for client recharge. Skipped on internal jobs (no client to bill).
+      // flagged for client recharge (a whole cost, or a split share recharged to
+      // this job: v_cost_recharges). Skipped on internal jobs (no client to bill).
       if (!isInternal) {
         const rechargeCount = await client.query(
-          `SELECT COUNT(*) AS cnt FROM costs WHERE job_id = $1 AND recharge_mode <> 'none'`,
+          `SELECT COUNT(*) AS cnt FROM v_cost_recharges WHERE job_id = $1`,
           [jobId]
         );
         if (parseInt(rechargeCount.rows[0]?.cnt || '0') > 0) {

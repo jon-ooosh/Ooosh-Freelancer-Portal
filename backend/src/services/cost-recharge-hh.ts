@@ -14,8 +14,8 @@
  * Stock IDs supplied by jon (Jun 2026), all HIRE items at 20% VAT. Hardcoded
  * here (stable); move to system_settings + a Settings UI if they ever churn.
  */
-import { query } from '../config/database';
 import { default as hhBroker } from './hirehop-broker';
+import { loadRecharge, updateRecharge, hasPerJobRecharges, PER_JOB_ALREADY } from './cost-recharges';
 
 interface RechargeStock {
   stockId: number;   // HH stock LIST_ID (b<id> hire item)
@@ -59,33 +59,36 @@ export interface RechargePushResult {
 // silently blocked the module's main use case.
 const CLOSED_HH_STATUSES = [9, 10, 11];
 
-export async function pushRechargeToHH(costId: string): Promise<RechargePushResult> {
-  const r = await query(
-    `SELECT c.*, j.hh_job_number
-       FROM costs c LEFT JOIN jobs j ON j.id = c.job_id
-      WHERE c.id = $1`,
-    [costId],
-  );
-  const cost = r.rows[0];
-  if (!cost) return { pushed: false, error: 'Cost not found' };
+/**
+ * Push one recharge to HireHop. `allocationId` names one job's share of a split
+ * cost (migration 318), billed to THAT share's job; null is the whole cost,
+ * billed to the cost's own job, as it always was.
+ */
+export async function pushRechargeToHH(costId: string, allocationId: string | null = null): Promise<RechargePushResult> {
+  const t = await loadRecharge(costId, allocationId);
+  if (!t) return { pushed: false, error: allocationId ? 'That job\'s share of the cost was not found' : 'Cost not found' };
+  const cost = t.cost;
 
   // Guards
-  if (cost.recharge_mode === 'none' || !cost.recharge_mode) return { pushed: false, skipped: 'Cost is not flagged for recharge' };
-  if (cost.recharged_to_hh_at) return { pushed: false, skipped: 'Already recharged to HireHop' };
-  if (cost.cost_intent === 'quote_actual') return { pushed: false, skipped: 'Cost is part of a quote — not rechargeable' };
-  if (!cost.job_id || !cost.hh_job_number) return { pushed: false, error: 'Cost must be linked to a HireHop job to recharge' };
+  if (!allocationId && await hasPerJobRecharges(costId)) return { pushed: false, error: PER_JOB_ALREADY };
+  if (t.rechargeMode === 'none' || !t.rechargeMode) return { pushed: false, skipped: 'Cost is not flagged for recharge' };
+  if (t.rechargedToHhAt) return { pushed: false, skipped: 'Already recharged to HireHop' };
+  if (t.costIntent === 'quote_actual') return { pushed: false, skipped: 'Cost is part of a quote — not rechargeable' };
+  if (!t.jobId || !t.hhJobNumber) return { pushed: false, error: 'Cost must be linked to a HireHop job to recharge' };
 
   // NET amount to bill (HH adds 20% VAT). recharge_amount is the FINAL net figure
   // the resolve modal computed (base + markup), so it's authoritative for both
   // full and partial. Legacy full-mode rows that pre-date markup (no
-  // recharge_amount) fall back to the cost's own net.
-  const net = Number(cost.recharge_amount
-    ?? (cost.recharge_mode === 'full' ? (cost.amount_net ?? cost.amount_gross) : 0)
+  // recharge_amount) fall back to the net of what is being recharged: the
+  // cost's own net, or the share's.
+  const net = Number(t.rechargeAmount
+    ?? (t.rechargeMode === 'full' ? (t.shareNet ?? t.shareGross) : 0)
     ?? 0);
   if (!(net > 0)) return { pushed: false, error: 'Recharge amount must be greater than zero' };
 
   const stock = stockForCost(cost.xero_account_code);
-  const hhJobId = String(cost.hh_job_number);
+  const hhJobNumber = t.hhJobNumber;
+  const hhJobId = String(hhJobNumber);
 
   // Don't add lines to a locked/closed job — surface for manual handling.
   const jobResp = await hhBroker.get<Record<string, unknown>>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 30 });
@@ -94,8 +97,8 @@ export async function pushRechargeToHH(costId: string): Promise<RechargePushResu
   const hhStatus = parseFloat(String(jd.STATUS || 0));
   if (locked || CLOSED_HH_STATUSES.includes(hhStatus)) {
     return {
-      pushed: false, manualActionRequired: true, hhJobNumber: cost.hh_job_number,
-      error: `HireHop job #${cost.hh_job_number} is ${locked ? 'locked' : 'closed'} — add the £${net.toFixed(2)} ${stock.label} line manually.`,
+      pushed: false, manualActionRequired: true, hhJobNumber,
+      error: `HireHop job #${hhJobNumber} is ${locked ? 'locked' : 'closed'} — add the £${net.toFixed(2)} ${stock.label} line manually.`,
     };
   }
 
@@ -146,12 +149,11 @@ export async function pushRechargeToHH(costId: string): Promise<RechargePushResu
     return { pushed: false, error: `Recharge line added but pricing it failed: ${editRes?.error || 'unknown error'}. Set the price manually in HireHop.` };
   }
 
-  // Stamp the cost as recharged (terminal lifecycle state + the HH stamps)
-  await query(
-    `UPDATE costs SET recharged_to_hh_at = NOW(), recharge_hh_item_id = $1,
-       recharge_status = 'recharged_hh' WHERE id = $2`,
-    [String(newItem.ID), costId],
-  );
+  // Stamp the recharge as done (terminal lifecycle state + the HH stamps), on the
+  // cost or on this job's share, wherever it lives.
+  await updateRecharge(t, {
+    recharged_to_hh_at: new Date(), recharge_hh_item_id: String(newItem.ID), recharge_status: 'recharged_hh',
+  });
 
   // Best-effort HH job note
   try {
@@ -163,5 +165,5 @@ export async function pushRechargeToHH(costId: string): Promise<RechargePushResu
     console.warn('[cost-recharge-hh] job note failed (non-fatal):', (noteErr as Error).message);
   }
 
-  return { pushed: true, hhJobNumber: cost.hh_job_number, amount: net, stockLabel: stock.label, lineId: String(newItem.ID) };
+  return { pushed: true, hhJobNumber, amount: net, stockLabel: stock.label, lineId: String(newItem.ID) };
 }

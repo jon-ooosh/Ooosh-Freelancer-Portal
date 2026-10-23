@@ -117,7 +117,11 @@ export async function prepareCreditFromParent(
             c.vehicle_id, c.quote_assignment_id, c.job_issue_id,
             c.vehicle_service_log_id, c.vehicle_fuel_log_id,
             j.hh_job_number,
-            (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count
+            (SELECT COUNT(*)::int FROM cost_allocations a WHERE a.cost_id = c.id) AS allocation_count,
+            -- Jobs a SHARE of it was recharged to (migration 318: per-job recharges).
+            (SELECT string_agg('#' || aj.hh_job_number, ', ' ORDER BY aj.hh_job_number)
+               FROM cost_allocations a JOIN jobs aj ON aj.id = a.job_id
+              WHERE a.cost_id = c.id AND a.recharge_mode <> 'none') AS per_job_recharge_jobs
        FROM costs c
        LEFT JOIN jobs j ON j.id = c.job_id
       WHERE c.id = $1`,
@@ -162,6 +166,12 @@ export async function prepareCreditFromParent(
     warnings.push(
       `This purchase was recharged to the client${parent.hh_job_number ? ` on job #${parent.hh_job_number}` : ''}. `
       + 'OP has NOT changed that — reduce the item in HireHop yourself.',
+    );
+  }
+  if (parent.per_job_recharge_jobs) {
+    warnings.push(
+      `Parts of this purchase were recharged to clients on job${String(parent.per_job_recharge_jobs).includes(',') ? 's' : ''} ${parent.per_job_recharge_jobs}. `
+      + 'OP has NOT changed those — reduce the items in HireHop yourself.',
     );
   }
   if (Number(parent.allocation_count) > 0) {

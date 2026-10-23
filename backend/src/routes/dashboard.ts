@@ -724,13 +724,14 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // The "buried" surface the cost lifecycle work is about — staff log a
       // refuel recharge at check-in and it sits unresolved. Scoped to active /
       // finished hires so dead enquiries don't surface; internal jobs excluded.
+      // One row per job a recharge bills (v_cost_recharges): a split cost
+      // recharged to three jobs is three to resolve.
       query(`
-        SELECT COUNT(*) AS count, COALESCE(SUM(COALESCE(c.recharge_amount, c.amount_net, c.amount_gross, 0)), 0) AS total_amount
-        FROM costs c
-        JOIN jobs j ON j.id = c.job_id
-        WHERE c.recharge_mode <> 'none'
-          AND COALESCE(c.recharge_status, 'pending') = 'pending'
-          AND c.cost_intent IS DISTINCT FROM 'quote_actual'
+        SELECT COUNT(*) AS count, COALESCE(SUM(COALESCE(r.recharge_amount, r.share_net, r.share_gross, 0)), 0) AS total_amount
+        FROM v_cost_recharges r
+        JOIN jobs j ON j.id = r.job_id
+        WHERE r.is_pending
+          AND r.cost_intent IS DISTINCT FROM 'quote_actual'
           AND COALESCE(j.is_internal, false) = false
           AND j.pipeline_status NOT IN ('lost', 'cancelled', 'new_enquiry', 'quoting', 'paused', 'provisional')
       `),

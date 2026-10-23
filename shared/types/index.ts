@@ -1280,9 +1280,18 @@ export interface CostAllocation {
   job_id: string | null;
   quote_assignment_id: string | null;
   amount: number;
+  /** Not used for anything; superseded by recharge_mode (migration 318). */
   recharge: boolean;
   notes: string | null;
   created_at: string;
+  // This job's share, recharged to THIS job (migration 318). Same meanings as
+  // the cost's own columns. A cost is recharged as a whole OR per share, never both.
+  /** NULL = the cost's own quote/extra answer. */
+  cost_intent?: CostIntent | null;
+  recharge_mode?: CostRechargeMode;
+  recharge_amount?: number | null;
+  recharge_status?: CostRechargeStatus | null;
+  recharged_to_hh_at?: string | null;
 }
 
 // Holding module — "Held for Clients" / "Lost Property" / temp storage

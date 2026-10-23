@@ -8,6 +8,8 @@ import { query } from '../config/database';
  *
  * "Resolved" = recharge_status IN (recharged_hh, recharged_external, absorbed).
  * "Pending" = flagged for recharge (recharge_mode <> 'none') but not yet resolved.
+ * Read from v_cost_recharges (migration 318), so a share of a split cost
+ * recharged to THIS job counts here, and a whole cost counts on its own job.
  * Mirrors syncExcessRequirementStatus — resolution-authoritative (promotes AND
  * demotes), so a card staff marked Resolved while a recharge is still pending
  * gets pulled back to amber.
@@ -32,13 +34,10 @@ export async function syncCostResolveRequirementStatus(
      FROM (
        SELECT
          NOT EXISTS (
-           SELECT 1 FROM costs c
-           WHERE c.job_id = $1
-             AND c.recharge_mode <> 'none'
-             AND COALESCE(c.recharge_status, 'pending') = 'pending'
+           SELECT 1 FROM v_cost_recharges r WHERE r.job_id = $1 AND r.is_pending
          ) AS resolved,
          EXISTS (
-           SELECT 1 FROM costs c2 WHERE c2.job_id = $1 AND c2.recharge_mode <> 'none'
+           SELECT 1 FROM v_cost_recharges r2 WHERE r2.job_id = $1
          ) AS has_records
      ) rs
      WHERE jr.job_id = $1

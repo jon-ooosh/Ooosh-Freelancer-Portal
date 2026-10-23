@@ -1319,3 +1319,59 @@ price, and 20% VAT land, plus that a closed-HH-job push correctly bounces the mo
 to the "Billed externally" path. Markup default is greater-of-£10-or-20% (editable
 in Settings via the `cost_recharge` system_settings rows — no dedicated Settings UI
 section yet; edit the rows directly or add a section if it churns).
+
+---
+
+## Per-job recharges (Oct 2026, migration 318)
+
+**Why.** A freelancer's invoice often covers several jobs, and each job can have its own
+fuel or tolls its client should pay back. A recharge lived on the COST, so it could only
+bill one job: the cost's own. The split (`cost_allocations`) said what each job carries,
+but nothing could recharge a share, and the Money tab showed split rows read-only. First
+step of the capture-form redesign (`docs/design/cost-capture-redesign/DECISIONS.md`).
+
+**The rule.** A cost is recharged EITHER as a whole (`costs.recharge_*`, as before) OR job by
+job (`cost_allocations.recharge_*`), never both. Every write path refuses the second kind
+while the first exists (`PATCH /costs/:id`, `POST /:id/recharge`, `/push-recharge`,
+`/resolve-recharge`, `PUT /:id/allocations`), so nothing is billed twice. Every existing
+recharge is a whole-cost one and is untouched, including the few on costs split later.
+
+**Data.** `cost_allocations` gained `cost_intent` (NULL = the cost's) and the whole recharge
+lifecycle, same names and meanings as on `costs`: `recharge_mode`, `recharge_amount`,
+`recharge_status`, base, markup, resolution note/by/at, `recharged_to_hh_at`,
+`recharge_hh_item_id`. The old `recharge` boolean was never read and is left alone.
+`cost_share_net(share, cost_gross, cost_net)` nets a gross share at the cost's own VAT ratio.
+
+**One read.** `v_cost_recharges`: one row per job a recharge bills (arm A whole costs on
+`costs.job_id`, arm B shares on `cost_allocations.job_id`), with `is_pending`, `share_gross`,
+`share_net`. Read by: the Recharges tab and its count (`GET /costs?view=recharge`, one row per
+recharge, the recharge in a nested `recharge` object so the row handed to the edit form is
+still the cost as it is), the dashboard's "Recharges to resolve", the `cost_resolve` close-out
+card (`cost-requirement-sync.ts`, `hh-requirement-derivation.ts`) and the vehicle / Problem
+"outstanding" count. `services/cost-recharges.ts` loads and writes a recharge wherever it lives.
+
+**Writes.**
+- `POST /costs/:id/push-recharge` and `/resolve-recharge` take an optional `allocation_id`;
+  `pushRechargeToHH(costId, allocationId)` bills the share's job. The HireHop line type still
+  comes from the cost's category (a freelancer invoice, 320, goes in as "Cost / fee /
+  recharge"), as it did for a whole-cost part recharge.
+- `PUT /costs/:id/allocations` is now an upsert: a share sent with its `id` is kept and
+  updated, so its recharge survives an edit to the split; new shares are inserted; missing
+  ones deleted. A share whose recharge is DONE can't be removed, moved to another job or
+  re-flagged (409). Per share it accepts `cost_intent`, `recharge_mode`, `recharge_amount`
+  (net, for partial); part of the quote forces no recharge; a credit never recharges. It runs
+  on one client, a real transaction (one of the `SECURITY-AUDIT-BRIEF.md` B.5 sites).
+- Changing the whole cost to "part of the quote" is refused while shares that inherit it are
+  flagged for recharge.
+
+**UI in this PR.** The job's Money tab: a split row under "Extra costs" now has the recharge
+slot ("Recharge…" / pending · Resolve / the status pill), billed to that job. The Recharges
+tab: one row per recharge, a share showing its job and "£x of £y". Elsewhere a split cost
+recharged per job shows "n job recharges · m pending" (opens the Recharges tab) and offers no
+whole-cost "Recharge…". The resolve modal starts a share from its own net and compares with
+the share. The split modal sends ids, tags shares "recharge pending" / "recharged ✓", won't
+remove a done one and asks before removing a pending one. Setting who pays per job at capture
+is PR 2 (the form).
+
+**Also fixed.** Weekend managers' "Approve & save" (`isManagerTier()`); the resolve modal's
+"that's a loss" warning on part recharges (it compared with the whole invoice).

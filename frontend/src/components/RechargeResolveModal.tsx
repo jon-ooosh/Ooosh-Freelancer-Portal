@@ -2,7 +2,9 @@
  * RechargeResolveModal — the single "resolve this recharge" surface, used from
  * both the Costs hub (Recharges tab) and the Job View Money tab (Extra costs).
  *
- * One cost, three terminal outcomes:
+ * One recharge, three terminal outcomes. A recharge is a whole cost, or one
+ * job's share of a split cost (`allocation_id`, migration 318), billed to THAT
+ * share's job:
  *   - Push to HireHop      → adds a billable hire line on the job (HH adds VAT)
  *   - Recharged externally → billed another way (closed HH job → direct invoice)
  *   - Absorb / write off   → not billed (reason required, auditable)
@@ -27,6 +29,13 @@ export interface RechargeCost {
   recharge_mode: 'none' | 'full' | 'partial';
   recharge_amount?: number | null;
   hh_job_number?: number | null;
+  /** One job's share of a split cost. Absent = the whole cost. */
+  allocation_id?: string | null;
+  /** That share, inc VAT and net, when it is one. */
+  share_gross?: number | null;
+  share_net?: number | null;
+  /** The whole cost, inc VAT, for "£50 of £443.60". */
+  full_amount_gross?: number | null;
 }
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -48,8 +57,12 @@ export default function RechargeResolveModal({ cost, onClose, onResolved }: {
   onResolved: () => void;
 }) {
   // Net base (ex VAT) — prefer the cost's net, fall back to gross. If a partial
-  // recharge amount was already set, treat that as the base to start from.
-  const baseStart = round2(Number(cost.recharge_amount ?? cost.amount_net ?? cost.amount_gross ?? 0));
+  // recharge amount was already set, treat that as the base to start from. A
+  // job's share starts from the share's own net, never the whole invoice's.
+  const isShare = !!cost.allocation_id;
+  const baseStart = round2(Number(cost.recharge_amount
+    ?? (isShare ? (cost.share_net ?? cost.share_gross) : (cost.amount_net ?? cost.amount_gross))
+    ?? 0));
 
   const [mode, setMode] = useState<Mode>('push');
   const [base, setBase] = useState<string>(String(baseStart || ''));
@@ -92,8 +105,13 @@ export default function RechargeResolveModal({ cost, onClose, onResolved }: {
   // never a loss). If the client-billed inc-VAT figure is at or below the cost's
   // gross, the base is almost certainly wrong (e.g. net accidentally stripped of
   // VAT). Warn loudly — but don't hard-block; the rare legit break-even exists.
-  const costGross = round2(Number(cost.amount_gross ?? 0));
-  const belowCost = mode !== 'absorb' && finalNum > 0 && costGross > 0 && incVat <= costGross + 0.005;
+  // On a job's share, "what you paid" is the share, not the whole invoice. A
+  // PART recharge (the fuel inside a freelancer's share, say) is meant to be less
+  // than what was paid, so the check only applies when the whole amount is billed.
+  const costGross = round2(Number((isShare ? cost.share_gross : cost.amount_gross) ?? 0));
+  const costNet = isShare ? cost.share_net : cost.amount_net;
+  const belowCost = mode !== 'absorb' && cost.recharge_mode !== 'partial'
+    && finalNum > 0 && costGross > 0 && incVat <= costGross + 0.005;
 
   const figuresPayload = useCallback(() => ({
     recharge_mode: 'full' as const,
@@ -101,7 +119,8 @@ export default function RechargeResolveModal({ cost, onClose, onResolved }: {
     recharge_base_amount: baseNum,
     recharge_markup_type: markupType,
     recharge_markup_value: markupType === 'none' ? null : markupValue,
-  }), [finalNum, baseNum, markupType, markupValue]);
+    ...(cost.allocation_id ? { allocation_id: cost.allocation_id } : {}),
+  }), [finalNum, baseNum, markupType, markupValue, cost.allocation_id]);
 
   async function submit() {
     setError(null); setInfo(null);
@@ -127,6 +146,7 @@ export default function RechargeResolveModal({ cost, onClose, onResolved }: {
       await api.post(`/costs/${cost.id}/resolve-recharge`, {
         resolution: mode === 'external' ? 'recharged_external' : 'absorbed',
         note: note.trim() || null,
+        ...(cost.allocation_id ? { allocation_id: cost.allocation_id } : {}),
         ...(mode === 'external' ? figuresPayload() : {}),
       });
       onResolved(); onClose();
@@ -159,7 +179,10 @@ export default function RechargeResolveModal({ cost, onClose, onResolved }: {
           <div className="text-sm">
             <div className="font-medium text-gray-900 truncate">{title}</div>
             <div className="text-gray-500">
-              Cost {`£${Number(cost.amount_gross ?? 0).toFixed(2)}`} inc VAT
+              {isShare
+                ? <>This job&apos;s share {`£${Number(cost.share_gross ?? 0).toFixed(2)}`}
+                    {cost.full_amount_gross != null ? ` of £${Number(cost.full_amount_gross).toFixed(2)}` : ''} inc VAT</>
+                : <>Cost {`£${Number(cost.amount_gross ?? 0).toFixed(2)}`} inc VAT</>}
               {cost.hh_job_number ? ` · HireHop job #${cost.hh_job_number}` : ''}
             </div>
           </div>
@@ -238,8 +261,8 @@ export default function RechargeResolveModal({ cost, onClose, onResolved }: {
                 <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-2">
                   ⚠ This recharge (£{incVat.toFixed(2)} inc VAT) is at or below what you paid
                   (£{costGross.toFixed(2)} inc VAT) — that's a loss, not a markup. Check the
-                  <strong> Base (net)</strong> above: it should be the cost's ex-VAT net
-                  (£{round2(Number(cost.amount_net ?? costGross / 1.2)).toFixed(2)}), not net minus VAT.
+                  <strong> Base (net)</strong> above: it should be the {isShare ? 'share' : 'cost'}&apos;s ex-VAT net
+                  (£{round2(Number(costNet ?? costGross / 1.2)).toFixed(2)}), not net minus VAT.
                 </div>
               )}
             </div>
