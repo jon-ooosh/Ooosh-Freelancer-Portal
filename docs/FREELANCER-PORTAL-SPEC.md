@@ -26,7 +26,11 @@ built, with the portal's favicon. Nothing is half-built.
 3. **Simplify the cost capture form, last** (jon, 22 Oct 2026: "very heavy, very wordy"; even he couldn't
    tell what the "This job so far / Is this part of a quote? / recharge" block was asking). jon's call:
    once everything else is done, start with a clickable mock-up and go from there. Not part of this
-   programme, but raised here.
+   programme, but raised here. **Under way (23 Oct 2026):** the Claude Design mock-up was reviewed and
+   agreed with changes, in three PRs. PR 1, per-job recharges (migration 318, `v_cost_recharges`,
+   `COST-CAPTURE-RECHARGE-SPEC.md` "Per-job recharges"), is built; PR 2 the laptop form, PR 3 the phone
+   flow (folding in My Receipts). That PR also moved the cost split save onto one client, so item 2
+   above has three places left, not four.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.

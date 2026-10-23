@@ -15,7 +15,7 @@ import { hasOutstanding, isNonZero, cancellationBalance } from '../lib/money';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
 import CostAllocationModal from './CostAllocationModal';
-import RechargeResolveModal, { RechargeSlot } from './RechargeResolveModal';
+import RechargeResolveModal, { RechargeSlot, type RechargeCost } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
 import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
 import RecipientPicker, { type PickedRecipient } from './RecipientPicker';
@@ -197,9 +197,15 @@ interface JobCostLite {
   recharge_status: string | null;
   // Allocation-aware read: a row split IN from a cost captured on another job.
   // amount_gross is this job's share; full_amount_gross is the cost's total.
+  // On such a row, cost_intent and the recharge_* fields are THIS job's share's
+  // own (migration 318); share_net is the share before VAT.
   is_allocation?: boolean;
   full_amount_gross?: number | null;
   allocation_id?: string | null;
+  share_net?: number | null;
+  // A split cost recharged as a whole (the old way, on its own job): its shares
+  // can't be recharged separately as well.
+  recharged_as_whole?: boolean;
   // Capture job — where the cost was actually entered (differs from this job on
   // split-in rows; the full invoice + recharge live there).
   job_id?: string | null;
@@ -3016,7 +3022,11 @@ function CostReceiptCell({ cost, onPreview }: { cost: JobCostLite; onPreview: (c
 function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn, onJobChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void; jobId: string; rechargeOn: boolean; onJobChanged?: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
-  const [resolving, setResolving] = useState<JobCostLite | null>(null);
+  const [resolving, setResolving] = useState<RechargeCost | null>(null);
+  // A split-in row is this job's SHARE of the cost: its recharge is the share's.
+  const rechargeTargetOf = (c: JobCostLite): RechargeCost => (c.is_allocation && c.allocation_id
+    ? { ...c, allocation_id: c.allocation_id, share_gross: c.amount_gross, share_net: c.share_net ?? null, full_amount_gross: c.full_amount_gross ?? null }
+    : c);
   const [rechargeBusy, setRechargeBusy] = useState(false);
   const [receiptPreview, setReceiptPreview] = useState<JobCostLite | null>(null);
 
@@ -3256,9 +3266,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
           </div>
           <ul className="space-y-1">
             {extraCosts.map((c) => {
-              // Allocation-in rows are a share of a cost captured on ANOTHER
-              // job — recharge (and its resolution) belongs to that capture job,
-              // so we show them read-only here, tagged as a split.
+              // Allocation-in rows are this job's share of a cost split across
+              // jobs. The share carries its own recharge, billed to THIS job
+              // (migration 318) — unless the cost is recharged as a whole the
+              // old way, on its own job, in which case the share has none.
               const isSplit = !!c.is_allocation;
               return (
                 <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
@@ -3272,7 +3283,9 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
                     <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
-                    {!isSplit && <RechargeSlot cost={{ ...c, job_id: c.job_id ?? jobId }} onResolve={() => setResolving(c)} />}
+                    {!(isSplit && c.recharged_as_whole) && (
+                      <RechargeSlot cost={{ ...c, job_id: isSplit ? jobId : (c.job_id ?? jobId) }} onResolve={() => setResolving(rechargeTargetOf(c))} />
+                    )}
                   </span>
                 </li>
               );

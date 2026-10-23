@@ -18,7 +18,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
 import { UNMATCHED_REASONS } from '../components/costs/FreelancerInvoiceLinks';
 import CostAllocationModal from '../components/CostAllocationModal';
-import RechargeResolveModal, { RechargeSlot } from '../components/RechargeResolveModal';
+import RechargeResolveModal, { RechargeSlot, type RechargeCost } from '../components/RechargeResolveModal';
 import RecordRefundModal from '../components/RecordRefundModal';
 import { PAID_NOW_METHODS } from '../lib/costOptions';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
@@ -26,13 +26,36 @@ import { ukToday } from '../lib/ukDate';
 
 type ViewMode = 'all' | 'payable' | 'recharge' | 'reconcile';
 
+/**
+ * On the Recharges tab, the recharge a row is about: the whole cost, or one
+ * job's share of a split cost (migration 318). The row's own columns are the
+ * cost as it is, because the edit button hands the row to the capture form.
+ */
+interface RechargeRef {
+  allocation_id: string | null;
+  job_id: string | null;
+  hh_job_number: number | null;
+  job_name: string | null;
+  cost_intent: 'quote_actual' | 'extra' | null;
+  recharge_mode: 'none' | 'full' | 'partial';
+  recharge_amount: number | null;
+  recharge_status: string | null;
+  share_gross: number | null;
+  share_net: number | null;
+}
+
 interface CostRow extends Cost {
   uploaded_by_name?: string | null;
   hh_job_number?: number | null;
   job_name?: string | null;
   vehicle_reg?: string | null;
   allocation_count?: number;
-  allocation_jobs?: Array<{ job_id: string | null; hh_job_number: number | null; job_name: string | null; amount: number }>;
+  allocation_jobs?: Array<{
+    job_id: string | null; hh_job_number: number | null; job_name: string | null; amount: number;
+    recharge_mode?: 'none' | 'full' | 'partial'; recharge_status?: string | null;
+  }>;
+  /** Recharges tab only. */
+  recharge?: RechargeRef;
   due_date?: string | null;
   /** Money that has come back against THIS purchase (positive £). */
   refunded_total?: number | null;
@@ -50,6 +73,25 @@ interface Stats {
 }
 
 const gbp = (n: number | null | undefined) => `£${Number(n || 0).toFixed(2)}`;
+
+/** A Recharges-tab row about one job's share (not the whole cost). */
+const isShareRow = (c: CostRow) => !!c.recharge?.allocation_id;
+
+/** What the resolve modal needs for this row's recharge. */
+function rechargeTarget(c: CostRow): RechargeCost {
+  const rc = c.recharge;
+  if (!rc?.allocation_id) return c;
+  return {
+    ...c,
+    recharge_mode: rc.recharge_mode,
+    recharge_amount: rc.recharge_amount,
+    hh_job_number: rc.hh_job_number,
+    allocation_id: rc.allocation_id,
+    share_gross: rc.share_gross,
+    share_net: rc.share_net,
+    full_amount_gross: c.amount_gross,
+  };
+}
 
 // cost_date is a DATE; pg/JSON returns it as an ISO timestamp. Take the date
 // part only (avoids timezone day-shift) and show UK format.
@@ -132,13 +174,14 @@ const PERIOD_LABELS: [PeriodFilter, string][] = [
   ['ytd', 'Year to date'],
   ['last_year', 'Last year'],
 ];
-const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
+const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string; recharge?: { allocation_id: string | null; share_gross: number | null } }) => string | number> = {
   date: (c) => c.cost_date || '',
   // Undated bills sort last under ascending (the common "what's due soonest" view).
   due: (c) => c.due_date || '9999-12-31',
   supplier: (c) => (c.supplier_name || '').toLowerCase(),
   description: (c) => (c.description || '').toLowerCase(),
-  gross: (c) => Number(c.amount_gross || 0),
+  // A share row on the Recharges tab sorts by the share it shows.
+  gross: (c) => Number((c.recharge?.allocation_id ? c.recharge.share_gross : c.amount_gross) || 0),
   type: (c) => (c.category || c.cost_type || '').toLowerCase(),
   status: (c) => c.approval_state || c.payment_status || '',
 };
@@ -180,7 +223,7 @@ export default function CostsPage() {
   const [refundFile, setRefundFile] = useState<File | null>(null);
   const [termsTarget, setTermsTarget] = useState<CostRow | null>(null);
   const [preview, setPreview] = useState<CostRow | null>(null);
-  const [resolving, setResolving] = useState<CostRow | null>(null);
+  const [resolving, setResolving] = useState<RechargeCost | null>(null);
   // Recharge view slice: '' = pending (default), or a terminal state / 'all' for the audit view.
   const [rechargeStatusFilter, setRechargeStatusFilter] = useState<string>('');
   const [actionBusy, setActionBusy] = useState<string | null>(null);
@@ -369,7 +412,8 @@ export default function CostsPage() {
   // from the stat card's figure, which is the global "what do we owe" number:
   // a card that quietly changes meaning when a filter is on is how someone
   // quotes a filtered total as the total.
-  const shownTotal = sortedRows.reduce((t, c) => t + (Number(c.amount_gross) || 0), 0);
+  // A share row on the Recharges tab counts its share, not the whole cost again.
+  const shownTotal = sortedRows.reduce((t, c) => t + (Number(isShareRow(c) ? c.recharge?.share_gross : c.amount_gross) || 0), 0);
   // The server caps the list. Where it did, the filtered total covers what was
   // sent, not everything that matches — say so rather than under-reporting money.
   const truncated = totalMatching !== null && rows.length < totalMatching;
@@ -633,11 +677,13 @@ export default function CostsPage() {
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2 text-sm text-gray-600">
           <span>
             Showing <strong className="text-gray-900">{sortedRows.length}</strong>
-            {sortedRows.length === 1 ? ' cost' : ' costs'} ·{' '}
+            {view === 'recharge'
+              ? (sortedRows.length === 1 ? ' recharge' : ' recharges')
+              : (sortedRows.length === 1 ? ' cost' : ' costs')} ·{' '}
             <strong className="text-gray-900">{gbp(shownTotal)}</strong>
             {truncated && (
               <span className="text-amber-700">
-                {' '}— only the first {rows.length} of {totalMatching} matching costs are loaded,
+                {' '}— only the first {rows.length} of {totalMatching} matching {view === 'recharge' ? 'recharges' : 'costs'} are loaded,
                 so this total covers what's on screen, not the whole filter.
               </span>
             )}
@@ -683,7 +729,8 @@ export default function CostsPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {sortedRows.map((c) => (
-                <tr key={c.id} id={`cost-row-${c.id}`}
+                <tr key={isShareRow(c) ? `${c.id}:${c.recharge?.allocation_id}` : c.id}
+                  id={isShareRow(c) ? undefined : `cost-row-${c.id}`}
                   className={focusCostId === c.id ? 'bg-purple-50 ring-2 ring-inset ring-purple-300' : 'hover:bg-gray-50'}>
                   {selectableRows.length > 0 && (
                     <td className="px-2 py-2">
@@ -757,7 +804,12 @@ export default function CostsPage() {
                     )}
                   </td>
                   <td className="px-2 py-2 text-right font-medium text-gray-900">
-                    {c.is_credit ? (
+                    {isShareRow(c) ? (
+                      <span title={`This job's share of a ${gbp(c.amount_gross)} cost`}>
+                        {gbp(c.recharge?.share_gross)}
+                        <span className="block text-[11px] text-gray-500 font-normal">of {gbp(c.amount_gross)}</span>
+                      </span>
+                    ) : c.is_credit ? (
                       <span className="text-emerald-700" title="Money back from the supplier">
                         −{gbp(Math.abs(Number(c.amount_gross) || 0))}
                       </span>
@@ -776,13 +828,18 @@ export default function CostsPage() {
                     {c.category || c.cost_type.replace('_', ' ')}
                   </td>
                   <td className="px-2 py-2 text-gray-600 whitespace-nowrap">
-                    {c.hh_job_number && c.job_id ? (
+                    {isShareRow(c) ? (
+                      /* The job this share is recharged to, not the cost's own. */
+                      c.recharge?.job_id && c.recharge.hh_job_number ? (
+                        <Link to={`/jobs/${c.recharge.job_id}`} title={c.recharge.job_name || undefined} className="text-purple-700 hover:underline">#{c.recharge.hh_job_number}</Link>
+                      ) : <span className="text-purple-700">{c.recharge?.job_name || '(job)'}</span>
+                    ) : c.hh_job_number && c.job_id ? (
                       <Link to={`/jobs/${c.job_id}`} title={c.job_name || undefined} className="text-purple-700 hover:underline">#{c.hh_job_number}</Link>
                     ) : c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
                       : c.vehicle_reg && c.vehicle_id ? (
                         <Link to={`/vehicles/fleet/${c.vehicle_id}`} className="text-purple-700 hover:underline">{c.vehicle_reg}</Link>
                       ) : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
-                    {c.allocation_jobs && c.allocation_jobs.length > 0 && (
+                    {!isShareRow(c) && c.allocation_jobs && c.allocation_jobs.length > 0 && (
                       /* One job per line, not a single inline run. Inline, a three-way
                          split was ~250px wide and set the whole column's width, which is
                          what pushed the row actions off the right edge. Stacked, the
@@ -820,7 +877,8 @@ export default function CostsPage() {
                         replaced the separate Resolve button in Actions, which kept
                         that column wide on every recharge row. */}
                     {!c.is_credit && (
-                      <span className="ml-1"><RechargeSlot cost={c} onResolve={() => setResolving(c)} /></span>
+                      <span className="ml-1"><RechargeCell c={c} onResolve={() => setResolving(rechargeTarget(c))}
+                        onShowRecharges={() => setView('recharge')} /></span>
                     )}
                     {c.queried_at && c.approval_state !== 'approved' && c.approval_state !== 'paid' && (
                       <span className="ml-1 px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800" title={c.query_note || 'Queried'}>Queried</span>
@@ -1455,6 +1513,41 @@ function SortableTh({ label, k, sortKey, sortDir, onSort, align }: {
       {sortKey === k && <span className="ml-1">{sortDir === 'asc' ? '▲' : '▼'}</span>}
     </th>
   );
+}
+
+/**
+ * The recharge slot on a Costs-page row. A Recharges-tab row is ONE recharge
+ * (the whole cost, or one job's share) and gets the usual slot. Elsewhere, a
+ * split cost recharged job by job shows a summary instead, because each share is
+ * resolved on its own (the Recharges tab, or that job's Money tab). A split cost
+ * with no recharge offers nothing here: a share is recharged from its own job,
+ * so the whole invoice can't be billed to one job by mistake (migration 318).
+ */
+function RechargeCell({ c, onResolve, onShowRecharges }: { c: CostRow; onResolve: () => void; onShowRecharges: () => void }) {
+  const rc = c.recharge;
+  if (rc) {
+    return (
+      <RechargeSlot
+        cost={{ recharge_mode: rc.recharge_mode, recharge_status: rc.recharge_status, cost_intent: rc.cost_intent, amount_gross: rc.share_gross, job_id: rc.job_id }}
+        onResolve={onResolve} />
+    );
+  }
+  const split = Number(c.allocation_count || 0) > 0;
+  if (split && (!c.recharge_mode || c.recharge_mode === 'none')) {
+    const perJob = (c.allocation_jobs || []).filter((a) => a.recharge_mode && a.recharge_mode !== 'none');
+    if (!perJob.length) return null;
+    const pending = perJob.filter((a) => (a.recharge_status ?? 'pending') === 'pending').length;
+    return (
+      <button type="button" onClick={onShowRecharges}
+        title="Recharged job by job. Resolve each job's share on the Recharges tab or that job's Money tab."
+        className={`px-2 py-0.5 text-xs rounded-full whitespace-nowrap border ${pending
+          ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+          : 'bg-green-50 text-green-700 border-green-200'}`}>
+        {perJob.length} job recharge{perJob.length === 1 ? '' : 's'}{pending ? ` · ${pending} pending` : ' ✓'}
+      </button>
+    );
+  }
+  return <RechargeSlot cost={c} onResolve={onResolve} />;
 }
 
 function ActionBtn({ busy, onClick, label }: { busy: boolean; onClick: () => void; label: string }) {

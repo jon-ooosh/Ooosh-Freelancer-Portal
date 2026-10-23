@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,sans-serif;color:#1f2937;background:#e5e7eb}*{box-sizing:border-box}input,select,textarea,button{font:inherit;color:inherit}button{white-space:nowrap}a{color:#7e22ce}a:hover{color:#581c87}</style>
+</helmet>
+<div style="min-height:100vh;display:flex;flex-direction:column">
+  <div style="background:#0b3a5b;height:44px;display:flex;align-items:center;gap:26px;padding:0 20px;color:#cbd5e1;font-size:14px;flex:none">
+    <span>Address Book</span><span>Jobs</span><span>Operations</span><span>Vehicles</span><span style="background:#1e5a85;color:#fff;padding:12px">Money</span>
+  </div>
+  <div style="display:flex;justify-content:center;padding:14px 16px 0;flex:none">
+    <div style="display:flex;gap:4px;background:#111827;padding:4px;border-radius:999px;flex-wrap:wrap;align-items:center;justify-content:center">
+      <span style="color:#9ca3af;font-size:12px;padding:0 8px 0 12px">Mock-up · try</span>
+      <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4">
+        <button onClick="{{ t.onClick }}" style="border:0;border-radius:999px;padding:7px 14px;font-size:13px;cursor:pointer;background:{{ t.bg }};color:{{ t.fg }}">{{ t.label }}</button>
+      </sc-for>
+    </div>
+  </div>
+
+  <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+    <div style="flex:1;display:flex;justify-content:center;padding:16px">
+      <div style="width:100%;max-width:1180px;height:calc(100vh - 110px);min-height:640px;background:#fff;border-radius:10px;box-shadow:0 20px 50px rgba(0,0,0,.25);display:flex;flex-direction:column;overflow:hidden">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid #e5e7eb;flex:none">
+          <span style="font-size:20px;font-weight:600;color:#111827">Capture cost</span>
+          <span style="color:#9ca3af;font-size:20px;cursor:pointer">×</span>
+        </div>
+        <div style="flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr)">
+          <div style="background:#f3f4f6;border-right:1px solid #e5e7eb;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:13px;color:#6b7280"><span>{{ doc.file }}</span><span style="color:#7e22ce;cursor:pointer;flex:none">Replace</span></div>
+            <div style="background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.14);padding:{{ doc.pad }};font-family:{{ doc.font }};font-size:{{ doc.size }};width:100%;max-width:{{ doc.maxw }};margin:0 auto;display:flex;flex-direction:column;gap:6px;color:#1f2937">
+              <sc-for list="{{ doc.head }}" as="h"><div style="text-align:{{ doc.align }};font-weight:{{ h.w }};font-size:{{ h.size }}">{{ h.t }}</div></sc-for>
+              <div style="height:10px"></div>
+              <sc-for list="{{ doc.lines }}" as="r"><div style="display:flex;justify-content:space-between;gap:12px;font-weight:{{ r.w }};border-top:{{ r.bt }};padding-top:{{ r.pt }}"><span style="flex:1;min-width:0">{{ r.l }}</span><span style="flex:none">{{ r.r }}</span></div></sc-for>
+              <div style="margin-top:14px;text-align:{{ doc.align }};color:#6b7280">{{ doc.foot }}</div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid #e5e7eb;margin-top:4px">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px"><span style="font-size:13px;font-weight:600;color:#374151;white-space:nowrap">Supporting documents</span><span style="font-size:12px;color:#6b7280;text-align:right">Evidence only, not read by the AI</span></div>
+              <sc-for list="{{ supDocs }}" as="sd">
+                <div style="display:flex;align-items:center;gap:10px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:8px 10px;font-size:13px">
+                  <span style="width:28px;height:28px;border-radius:5px;background:#f3e8ff;color:#7e22ce;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">{{ sd.ext }}</span>
+                  <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ sd.name }}</span>
+                  <span style="color:#7e22ce;cursor:pointer">View</span>
+                  <button onClick="{{ sd.onRemove }}" style="border:0;background:none;color:#9ca3af;font-size:16px;cursor:pointer;padding:0 2px">×</button>
+                </div>
+              </sc-for>
+              <button onClick="{{ addDocs }}" style="border:1.5px dashed #d1d5db;background:#fafafa;border-radius:8px;padding:14px;font-size:13px;color:#4b5563;cursor:pointer;display:flex;flex-direction:column;gap:2px;align-items:center"><span style="font-weight:600;color:#6b21a8">+ Add supporting documents</span></button>
+            </div>
+          </div>
+
+          <div style="overflow:auto;padding:22px 28px 28px;display:flex;flex-direction:column;gap:24px">
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px"><span style="font-size:11px;letter-spacing:.06em;color:#6b7280;font-weight:600;text-transform:uppercase">What is it?</span><span style="font-size:12px;color:#6b7280">{{ aiNote }}</span></div>
+              <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
+                <sc-for list="{{ kinds }}" as="k" hint-placeholder-count="3"><button onClick="{{ k.onClick }}" style="text-align:left;padding:10px 12px;border-radius:8px;border:1.5px solid {{ k.bd }};background:{{ k.bg }};cursor:pointer;display:flex;flex-direction:column;gap:2px"><span style="font-weight:600;font-size:14px;color:#111827">{{ k.label }}</span><span style="font-size:12px;color:#6b7280">{{ k.sub }}</span></button></sc-for>
+              </div>
+            </div>
+
+            <div style="border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:12px">
+              <div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:11px;letter-spacing:.06em;color:#6b7280;font-weight:600;text-transform:uppercase">From the document</span><button onClick="{{ toggleEdit }}" style="border:0;background:none;color:#7e22ce;font-size:13px;cursor:pointer;padding:0">{{ editLabel }}</button></div>
+              <sc-if value="{{ notEditing }}" hint-placeholder-val="{{ true }}">
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px 20px">
+                  <sc-for list="{{ details }}" as="d" hint-placeholder-count="4"><div style="display:flex;flex-direction:column;gap:2px;min-width:0"><span style="font-size:12px;color:#6b7280">{{ d.label }}</span><span style="font-size:15px;font-weight:600;color:#111827">{{ d.value }}</span><span style="font-size:12px;color:{{ d.subColor }}">{{ d.sub }}</span></div></sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ editing }}">
+                <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">
+                  <sc-for list="{{ details }}" as="d"><label style="display:flex;flex-direction:column;gap:4px"><span style="font-size:12px;color:#6b7280">{{ d.label }}</span><input defaultValue="{{ d.value }}" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:100%"></label></sc-for>
+                </div>
+                <span style="font-size:12px;color:#6b7280">VAT mode, gross / VAT / net and payment terms all live here, as today.</span>
+              </sc-if>
+              <div style="border-top:1px solid #f0f0f3;padding-top:12px;display:flex;flex-direction:column;gap:10px">
+                <div style="display:flex;align-items:flex-end;gap:20px;flex-wrap:wrap">
+                  <sc-for list="{{ amtCells }}" as="ac"><div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:12px;color:#6b7280">{{ ac.label }}</span><span style="font-size:15px;font-weight:{{ ac.w }};color:#111827">{{ ac.value }}</span></div></sc-for>
+                  <div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:12px;color:#6b7280">Rate</span><span style="font-size:15px;font-weight:600;color:#6b21a8">{{ vatModeLabel }}</span></div>
+                  <button onClick="{{ toggleVat }}" style="margin-left:auto;border:0;background:none;color:#7e22ce;font-size:13px;cursor:pointer;padding:0 0 2px">{{ vatToggleLabel }}</button>
+                </div>
+                <sc-if value="{{ vatOpen }}">
+                  <div style="display:flex;gap:2px;background:#f3f4f6;padding:2px;border-radius:8px;align-self:flex-start">
+                    <sc-for list="{{ vatOpts }}" as="o"><button onClick="{{ o.onClick }}" style="border:0;border-radius:6px;padding:5px 12px;font-size:13px;cursor:pointer;background:{{ o.bg }};color:{{ o.fg }};font-weight:{{ o.fw }}">{{ o.label }}</button></sc-for>
+                  </div>
+                  <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
+                    <label style="display:flex;flex-direction:column;gap:4px"><span style="font-size:12px;color:#6b7280">Gross (£)</span><input value="{{ grossIn }}" onChange="{{ onGross }}" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:100%"></label>
+                    <label style="display:flex;flex-direction:column;gap:4px"><span style="font-size:12px;color:#6b7280">VAT (£)</span><input value="{{ vatIn }}" onChange="{{ onVat }}" readOnly="{{ vatReadOnly }}" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:100%;background:{{ vatBg }}"></label>
+                    <label style="display:flex;flex-direction:column;gap:4px"><span style="font-size:12px;color:#6b7280">Net (£)</span><input value="{{ netIn }}" onChange="{{ onNet }}" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:100%"></label>
+                  </div>
+                  <span style="font-size:12px;color:#6b7280">{{ vatHint }}</span>
+                </sc-if>
+                <sc-if value="{{ vatUnsure }}"><span style="font-size:12px;color:#93370d;background:#fffaeb;border-radius:6px;padding:6px 10px">{{ vatUnsure }}</span></sc-if>
+              </div>
+              <sc-if value="{{ flag }}">
+                <div style="background:#fffaeb;border:1px solid #fedf89;border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px">
+                  <span style="font-size:13px;font-weight:600;color:#93370d">{{ flag.label }}: please check</span>
+                  <input defaultValue="{{ flag.value }}" style="padding:8px 10px;border:1px solid #fdb022;border-radius:6px;font-size:14px;width:100%;max-width:260px;background:#fff">
+                  <span style="font-size:12px;color:#93370d">{{ flag.note }}</span>
+                </div>
+              </sc-if>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <span style="font-size:11px;letter-spacing:.06em;color:#6b7280;font-weight:600;text-transform:uppercase">What it's for</span>
+              <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px">
+                <label style="display:flex;flex-direction:column;gap:4px"><span style="font-size:13px;font-weight:600;color:#374151">Category</span>
+                  {{ catSelect }}
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px"><span style="font-size:13px;font-weight:600;color:#374151">Description</span>
+                  <input value="{{ desc }}" onChange="{{ onDesc }}" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:100%">
+                </label>
+              </div>
+              <sc-if value="{{ showVan }}">
+                <div style="display:flex;align-items:center;gap:12px;font-size:14px;padding:8px 12px;background:#f9fafb;border-radius:8px">
+                  <span style="color:#6b7280">Van</span><span style="font-weight:600;flex:1">{{ vanText }}</span>
+                  <button onClick="{{ removeVan }}" style="border:0;background:none;color:#b42318;font-size:13px;cursor:pointer;padding:0">Remove</button>
+                </div>
+              </sc-if>
+              <sc-if value="{{ noVan }}"><button onClick="{{ addVan }}" style="align-self:flex-start;border:0;background:none;color:#7e22ce;font-size:13px;cursor:pointer;padding:0">+ Link a van</button></sc-if>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px"><span style="font-size:11px;letter-spacing:.06em;color:#6b7280;font-weight:600;text-transform:uppercase">Jobs and who pays</span><span style="font-size:12px;color:#6b7280">{{ jobsHint }}</span></div>
+              <sc-if value="{{ noJobs }}">
+                <div style="border:1px dashed #d1d5db;border-radius:10px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:14px;color:#4b5563;flex-wrap:wrap">
+                  <span>Not linked to a job, so it goes to overheads.</span>
+                  <button onClick="{{ openPicker }}" style="border:1px solid #d6bbfb;background:#faf5ff;color:#6b21a8;border-radius:6px;padding:7px 12px;font-size:13px;cursor:pointer">+ Link to a job</button>
+                </div>
+              </sc-if>
+              <sc-if value="{{ hasJobs }}" hint-placeholder-val="{{ true }}">
+                <div style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden">
+                  <sc-for list="{{ jobs }}" as="j" hint-placeholder-count="2">
+                    <div style="border-top:{{ j.bt }};background:{{ j.bg }}">
+                      <div style="display:flex;align-items:center;gap:12px;padding:12px 14px">
+                        <button onClick="{{ j.onTick }}" style="width:20px;height:20px;border-radius:5px;border:1.5px solid {{ j.tickBd }};background:{{ j.tickBg }};color:#fff;font-size:12px;line-height:1;cursor:pointer;flex:none;padding:0">{{ j.tick }}</button>
+                        <div onClick="{{ j.onExpand }}" style="flex:1;min-width:0;display:flex;align-items:center;gap:12px;cursor:{{ j.cursor }}">
+                          <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+                            <div style="font-size:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline"><span style="color:#6b7280">{{ j.when }}</span><span style="font-weight:600;color:{{ j.nameColor }}">{{ j.role }}</span><span style="color:#7e22ce">#{{ j.id }}</span><span style="color:{{ j.nameColor }}">{{ j.name }}</span></div>
+                            <div style="font-size:12px;color:#6b7280">{{ j.sub }}</div>
+                          </div>
+                          <div style="flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+                            <span style="font-weight:600;font-size:14px;color:{{ j.nameColor }}">{{ j.amount }}</span>
+                            <sc-if value="{{ j.chip }}"><span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:{{ j.chip.bg }};color:{{ j.chip.fg }}">{{ j.chip.t }}</span></sc-if>
+                          </div>
+                          <span style="color:#9ca3af;width:12px;flex:none">{{ j.chev }}</span>
+                        </div>
+                      </div>
+                      <sc-if value="{{ j.open }}">
+                        <div style="padding:0 14px 12px 46px;display:flex;flex-direction:column">
+                          <sc-if value="{{ j.hasExp }}"><div style="display:grid;grid-template-columns:minmax(0,1fr) 80px 96px 120px;gap:8px;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:.05em;padding-bottom:4px"><span>Line</span><span style="text-align:right">Expected</span><span style="text-align:right">Invoiced</span><span></span></div></sc-if>
+                          <sc-for list="{{ j.lines }}" as="ln">
+                            <div style="display:flex;flex-direction:column;gap:8px;padding:9px 0;border-top:1px solid #f0f0f3">
+                              <div style="display:grid;grid-template-columns:{{ ln.cols }};gap:8px;align-items:center;font-size:14px">
+                                <span style="font-weight:500">{{ ln.label }}</span>
+                                <sc-if value="{{ ln.hasExp }}"><span style="text-align:right;color:#6b7280">{{ ln.expStr }}</span></sc-if>
+                                <input value="{{ ln.amt }}" onChange="{{ ln.onAmt }}" style="text-align:right;padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;width:100%;font-size:14px">
+                                <sc-if value="{{ ln.hasExp }}"><span style="justify-self:end;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:{{ ln.st.bg }};color:{{ ln.st.fg }}">{{ ln.st.t }}</span></sc-if>
+                              </div>
+                              <sc-if value="{{ ln.isFlag }}">
+                                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fef3f2;border-radius:8px;padding:8px 10px">
+                                  <span style="font-size:13px;color:#912018;flex:1;min-width:180px">{{ ln.flagText }}</span>
+                                  <button onClick="{{ ln.onQuery }}" style="border:1px solid #fda29b;background:#fff;color:#b42318;border-radius:6px;padding:5px 10px;font-size:13px;cursor:pointer">Ask them about it</button>
+                                  <button onClick="{{ ln.onAccept }}" style="border:1px solid #d1d5db;background:#fff;color:#374151;border-radius:6px;padding:5px 10px;font-size:13px;cursor:pointer">Accept it</button>
+                                </div>
+                              </sc-if>
+                              <sc-if value="{{ ln.isResolved }}"><button onClick="{{ ln.onUndo }}" style="align-self:flex-start;border:0;background:none;color:#7e22ce;font-size:12px;cursor:pointer;padding:0">Undo {{ ln.resLabel }}</button></sc-if>
+                              <sc-if value="{{ ln.showPays }}">
+                                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                  <div style="display:flex;gap:2px;background:#f3f4f6;padding:2px;border-radius:8px">
+                                    <sc-for list="{{ ln.opts }}" as="o"><button onClick="{{ o.onClick }}" style="border:0;border-radius:6px;padding:5px 10px;font-size:12.5px;white-space:nowrap;cursor:pointer;background:{{ o.bg }};color:{{ o.fg }};font-weight:{{ o.fw }}">{{ o.label }}</button></sc-for>
+                                  </div>
+                                  <span style="font-size:12px;color:#6b7280"><strong style="color:#374151">{{ ln.noteStrong }}</strong>{{ ln.note }}</span>
+                                  <sc-if value="{{ ln.partMode }}"><input value="{{ ln.part }}" onChange="{{ ln.onPart }}" placeholder="£ net" style="width:90px;padding:4px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;text-align:right"></sc-if>
+                                  <sc-if value="{{ ln.isCharge }}"><button onClick="{{ ln.onPartToggle }}" style="border:0;background:none;color:#7e22ce;font-size:12px;cursor:pointer;padding:0">{{ ln.partLabel }}</button></sc-if>
+                                </div>
+                              </sc-if>
+                              <sc-if value="{{ ln.isCredit }}"><span style="font-size:12px;color:#6b7280">Credits are never charged to the client.</span></sc-if>
+                            </div>
+                          </sc-for>
+                          <sc-if value="{{ j.showSummary }}"><div style="font-size:12px;color:#6b7280;padding-top:6px;border-top:1px solid #f0f0f3">{{ j.summary }}</div></sc-if>
+                        </div>
+                      </sc-if>
+                    </div>
+                  </sc-for>
+                </div>
+                <sc-if value="{{ showAlloc }}"><div style="font-size:13px;padding:8px 12px;border-radius:8px;background:{{ alloc.bg }};color:{{ alloc.fg }}">{{ alloc.t }}</div></sc-if>
+                <sc-if value="{{ notPicker }}"><button onClick="{{ openPicker }}" style="align-self:flex-start;border:0;background:none;color:#7e22ce;font-size:13px;cursor:pointer;padding:0">{{ addLabel }}</button></sc-if>
+              </sc-if>
+              <sc-if value="{{ picker }}">
+                <div style="border:1px solid #e9d5ff;background:#faf5ff;border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:6px">
+                  <input placeholder="Search job number, client or venue" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:100%">
+                  <sc-for list="{{ pickerJobs }}" as="p"><button onClick="{{ p.onClick }}" style="text-align:left;border:0;background:#fff;border-radius:6px;padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px"><span style="color:#7e22ce">#{{ p.id }}</span> {{ p.name }}</span><span style="font-size:12px;color:#6b7280">{{ p.summary }}</span></button></sc-for>
+                  <button onClick="{{ closePicker }}" style="align-self:flex-start;border:0;background:none;color:#6b7280;font-size:13px;cursor:pointer;padding:2px 4px">Cancel</button>
+                </div>
+              </sc-if>
+              <sc-if value="{{ hasQuestion }}">
+                <div style="border:1px solid #fedf89;background:#fffcf5;border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+                  <div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:13px;font-weight:600;color:#374151">Question for {{ freelancer }}</span><button onClick="{{ clearQuestion }}" style="border:0;background:none;color:#b42318;font-size:13px;cursor:pointer;padding:0">Remove</button></div>
+                  <textarea value="{{ question }}" onChange="{{ onQuestion }}" rows="3" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:100%;resize:vertical"></textarea>
+                  <span style="font-size:12px;color:#6b7280">Goes to them when you save.</span>
+                </div>
+              </sc-if>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <span style="font-size:11px;letter-spacing:.06em;color:#6b7280;font-weight:600;text-transform:uppercase">Payment</span>
+              <sc-if value="{{ isReceipt }}">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                  <span style="font-size:14px;color:#374151">Paid by</span>
+                  <div style="display:flex;gap:2px;background:#f3f4f6;padding:2px;border-radius:8px">
+                    <sc-for list="{{ paidOpts }}" as="o"><button onClick="{{ o.onClick }}" style="border:0;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer;background:{{ o.bg }};color:{{ o.fg }};font-weight:{{ o.fw }}">{{ o.label }}</button></sc-for>
+                  </div>
+                </div>
+                <sc-if value="{{ showPerson }}">
+                  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                    <input value="{{ person }}" onChange="{{ onPerson }}" placeholder="Who paid? e.g. a freelancer or staff member" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;flex:1;min-width:220px">
+                    <span style="font-size:12px;color:#6b7280">Shell stays the supplier for VAT. We record {{ grossStr }} as owed to this person.</span>
+                  </div>
+                </sc-if>
+              </sc-if>
+              <sc-if value="{{ isBill }}">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:14px;padding:10px 14px;background:#f9fafb;border-radius:8px"><span>{{ billLine }}</span><button onClick="{{ togglePayEdit }}" style="border:0;background:none;color:#7e22ce;font-size:13px;cursor:pointer;padding:0">{{ payEditLabel }}</button></div>
+                <sc-if value="{{ payEdit }}">
+                  <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">
+                    <label style="display:flex;flex-direction:column;gap:4px"><span style="font-size:12px;color:#6b7280">Payment method</span><select style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff"><option>Supplier bill (pay later)</option><option>Direct debit</option><option>Ooosh card</option></select></label>
+                    <label style="display:flex;flex-direction:column;gap:4px"><span style="font-size:12px;color:#6b7280">Payment status</span><select style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;background:#fff"><option>Awaiting payment</option><option>Paid</option></select></label>
+                  </div>
+                </sc-if>
+              </sc-if>
+              <sc-if value="{{ isCredit }}"><div style="font-size:14px;padding:10px 14px;background:#f9fafb;border-radius:8px">{{ creditLine }}</div></sc-if>
+            </div>
+
+            <sc-if value="{{ notesOpen }}">
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:13px;font-weight:600;color:#374151">Notes</span><button onClick="{{ closeNotes }}" style="border:0;background:none;color:#b42318;font-size:13px;cursor:pointer;padding:0">Remove</button></div>
+                <textarea rows="2" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;width:100%;resize:vertical"></textarea>
+                <span style="font-size:12px;color:#6b7280">Staff only. Shows on this cost in OP; not sent to Xero or the freelancer.</span>
+              </div>
+            </sc-if>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <sc-for list="{{ extras }}" as="x"><button onClick="{{ x.onClick }}" style="border:1px solid #e5e7eb;background:#fff;color:#4b5563;border-radius:999px;padding:5px 12px;font-size:13px;cursor:pointer">{{ x.label }}</button></sc-for>
+            </div>
+          </div>
+        </div>
+        <div style="border-top:1px solid #e5e7eb;padding:14px 24px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;flex:none;background:#fcfcfd">
+          <div style="flex:1;min-width:280px;display:flex;flex-direction:column;gap:3px">
+            <span style="font-size:14px;color:#111827;font-weight:500">{{ summary }}</span>
+            <sc-if value="{{ warn }}"><span style="font-size:13px;color:#b54708">{{ warn }}</span></sc-if>
+          </div>
+          <button style="border:0;background:none;color:#374151;padding:10px 14px;font-size:14px;cursor:pointer">Cancel</button>
+          <sc-if value="{{ showApprove }}"><button onClick="{{ onSaveSecondary }}" style="border:1px solid #d6bbfb;background:#fff;color:#6b21a8;border-radius:8px;padding:10px 16px;font-size:14px;cursor:pointer">Save for approval</button></sc-if>
+          <button onClick="{{ onSavePrimary }}" style="border:0;background:#8b31e6;color:#fff;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer">{{ primaryLabel }}</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isMobile }}">
+    <div style="flex:1;display:flex;justify-content:center;padding:20px">
+      <div style="width:390px;height:800px;border-radius:46px;background:#111;padding:12px;box-shadow:0 20px 50px rgba(0,0,0,.3);flex:none">
+        <div style="width:100%;height:100%;border-radius:36px;background:#fff;overflow:hidden;display:flex;flex-direction:column">
+          <div style="height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;font-size:14px;font-weight:600;flex:none;background:#0b3a5b;color:#fff"><span>9:41</span><span>●●● ▮</span></div>
+          <div style="display:flex;align-items:center;gap:4px;padding:4px 8px;background:#0b3a5b;color:#fff;flex:none">
+            <button onClick="{{ mBack }}" style="width:44px;height:44px;border:0;background:none;color:#fff;font-size:26px;cursor:pointer;opacity:{{ mBackOpacity }}">‹</button>
+            <span style="flex:1;font-size:17px;font-weight:600">{{ mTitle }}</span>
+            <span style="font-size:13px;color:#cbd5e1;padding-right:12px">{{ mStepLabel }}</span>
+          </div>
+          <div style="height:3px;background:#e5e7eb;flex:none"><div style="height:3px;background:#8b31e6;width:{{ mProgress }}"></div></div>
+
+          <sc-if value="{{ m0 }}">
+            <div style="flex:1;background:#1f2937;display:flex;align-items:center;justify-content:center;padding:24px;position:relative">
+              <div style="background:#fbfbf8;transform:rotate(-2deg);width:240px;padding:18px 14px;font-family:ui-monospace,Consolas,monospace;font-size:11px;display:flex;flex-direction:column;gap:4px;box-shadow:0 8px 20px rgba(0,0,0,.45)">
+                <sc-for list="{{ fuelDoc.head }}" as="h"><div style="text-align:center;font-weight:{{ h.w }}">{{ h.t }}</div></sc-for>
+                <div style="height:6px"></div>
+                <sc-for list="{{ fuelDoc.lines }}" as="r"><div style="display:flex;justify-content:space-between;font-weight:{{ r.w }};border-top:{{ r.bt }};padding-top:{{ r.pt }}"><span>{{ r.l }}</span><span>{{ r.r }}</span></div></sc-for>
+              </div>
+              <div style="position:absolute;inset:18px;border:2px solid rgba(255,255,255,.5);border-radius:14px;pointer-events:none"></div>
+            </div>
+            <div style="padding:16px;display:flex;gap:10px;background:#111827;flex:none">
+              <button style="height:52px;padding:0 18px;border-radius:12px;border:1px solid #4b5563;background:none;color:#fff;font-size:16px">Retake</button>
+              <button onClick="{{ mNext }}" style="flex:1;height:52px;border-radius:12px;border:0;background:#8b31e6;color:#fff;font-size:16px;font-weight:600;cursor:pointer">Use this photo</button>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ m1 }}">
+            <div style="flex:1;overflow:auto;padding:18px 18px 8px;display:flex;flex-direction:column;gap:16px">
+              <span style="font-size:14px;color:#6b7280">We read this from the photo. Tap anything that's wrong.</span>
+              <div style="display:flex;gap:4px;background:#f3f4f6;padding:3px;border-radius:10px">
+                <sc-for list="{{ mKinds }}" as="o"><button onClick="{{ o.onClick }}" style="flex:1;height:44px;border:0;border-radius:8px;font-size:14px;cursor:pointer;background:{{ o.bg }};color:{{ o.fg }};font-weight:{{ o.fw }}">{{ o.label }}</button></sc-for>
+              </div>
+              <div style="display:flex;flex-direction:column;border:1px solid #e5e7eb;border-radius:12px">
+                <sc-for list="{{ mRows }}" as="r"><div style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-top:{{ r.bt }};min-height:56px"><div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:12px;color:#6b7280">{{ r.label }}</span><span style="font-size:16px;font-weight:600">{{ r.value }}</span></div><span style="color:#7e22ce;font-size:14px">Edit</span></div></sc-for>
+              </div>
+            </div>
+            <div style="padding:16px;flex:none"><button onClick="{{ mNext }}" style="width:100%;height:52px;border-radius:12px;border:0;background:#8b31e6;color:#fff;font-size:16px;font-weight:600;cursor:pointer">Looks right</button></div>
+          </sc-if>
+
+          <sc-if value="{{ m2 }}">
+            <div style="flex:1;overflow:auto;padding:16px 18px;display:flex;flex-direction:column;gap:12px">
+              <input placeholder="Search job, client or van reg" style="height:48px;padding:0 14px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;width:100%">
+              <button onClick="{{ mNoJob }}" style="border:1px dashed #d1d5db;background:#fff;border-radius:12px;height:52px;font-size:15px;color:#4b5563;cursor:pointer">No job, goes to overheads</button>
+              <span style="font-size:12px;letter-spacing:.06em;color:#6b7280;font-weight:600;text-transform:uppercase;padding-top:4px">Recent transport jobs</span>
+              <sc-for list="{{ mJobsToday }}" as="mj"><button onClick="{{ mj.onClick }}" style="text-align:left;border:1px solid #e5e7eb;background:#fff;border-radius:12px;padding:12px 14px;cursor:pointer;display:flex;flex-direction:column;gap:3px;min-height:64px"><span style="font-size:15px;font-weight:600"><span style="color:#7e22ce">#{{ mj.id }}</span> {{ mj.name }}</span><span style="font-size:13px;color:#6b7280">{{ mj.meta }}</span></button></sc-for>
+
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ m3 }}">
+            <div style="flex:1;overflow:auto;padding:16px 18px;display:flex;flex-direction:column;gap:18px">
+              <div style="display:flex;flex-direction:column;gap:2px;padding:12px 14px;background:#f9fafb;border-radius:12px"><span style="font-size:13px;color:#6b7280">£72.40 diesel for</span><span style="font-size:16px;font-weight:600">{{ mJobLine }}</span></div>
+              <sc-if value="{{ mHasJob }}">
+                <div style="display:flex;flex-direction:column;gap:8px">
+                  <span style="font-size:14px;font-weight:600">Who pays?</span>
+                  <sc-for list="{{ mPays }}" as="o"><button onClick="{{ o.onClick }}" style="text-align:left;border:1.5px solid {{ o.bd }};background:{{ o.bg }};border-radius:12px;padding:12px 14px;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-height:56px"><span style="font-size:15px;font-weight:600">{{ o.label }}</span><span style="font-size:13px;color:#6b7280"><strong style="color:#374151">{{ o.subStrong }}</strong>{{ o.sub }}</span></button></sc-for>
+                </div>
+                <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #e5e7eb;border-radius:12px;min-height:56px"><div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:12px;color:#6b7280">Van</span><span style="font-size:16px;font-weight:600">{{ mVan }}</span></div><span style="color:#7e22ce;font-size:14px">Change</span></div>
+              </sc-if>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <span style="font-size:14px;font-weight:600">Paid by</span>
+                <div style="display:flex;gap:4px;background:#f3f4f6;padding:3px;border-radius:10px">
+                  <sc-for list="{{ mPaid }}" as="o"><button onClick="{{ o.onClick }}" style="flex:1;height:44px;border:0;border-radius:8px;font-size:14px;cursor:pointer;background:{{ o.bg }};color:{{ o.fg }};font-weight:{{ o.fw }}">{{ o.label }}</button></sc-for>
+                </div>
+                <sc-if value="{{ mShowPerson }}"><input placeholder="Who paid it?" style="height:48px;padding:0 14px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;width:100%"></sc-if>
+              </div>
+            </div>
+            <div style="padding:16px;flex:none"><button onClick="{{ mNext }}" style="width:100%;height:52px;border-radius:12px;border:0;background:#8b31e6;color:#fff;font-size:16px;font-weight:600;cursor:pointer">Save receipt</button></div>
+          </sc-if>
+
+          <sc-if value="{{ m4 }}">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center">
+              <div style="width:72px;height:72px;border-radius:50%;background:#ecfdf3;color:#067647;font-size:36px;display:flex;align-items:center;justify-content:center">✓</div>
+              <span style="font-size:20px;font-weight:600">Receipt saved</span>
+              <span style="font-size:15px;color:#4b5563;text-wrap:pretty">{{ mSummary }}</span>
+            </div>
+            <div style="padding:16px;flex:none"><button onClick="{{ mAgain }}" style="width:100%;height:52px;border-radius:12px;border:0;background:#8b31e6;color:#fff;font-size:16px;font-weight:600;cursor:pointer">Snap another receipt</button></div>
+          </sc-if>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ toast }}">
+    <div style="position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 18px;border-radius:999px;font-size:14px;box-shadow:0 8px 20px rgba(0,0,0,.25)">{{ toast }}</div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const fmt = n => '£' + (Math.round(n * 100) / 100).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const num = v => { const n = parseFloat(String(v ?? '').replace(/[£,]/g, '')); return isNaN(n) ? 0 : n; };
+const L = (label, exp, amt, pays) => ({ label, exp, amt, pays, part: null, res: null });
+const PAYS = [['quote', 'Already in quote'], ['charge', 'Charge to client'], ['ours', 'We cover it']];
+const CATS = ['Motor fuel', 'Freelance crew invoices', 'Office equipment hire', 'Tolls & parking', 'Vehicle repairs & servicing', 'Subcontractor costs'];
+const JOBS = {
+  16710: { id: 16710, name: 'APS / Vodafone Hotspot Hunters', summary: 'Quote £1,840 · costs so far £55.74 · recharges running costs at actual +20%', recharge: true, van: 'RX71 KHL' },
+  16744: { id: 16744, name: 'Kilimanjaro Live / Bristol O2 Academy', summary: 'Quote £960 · costs so far £0.00 · recharges running costs at actual +20%', recharge: true, van: 'RV22 ODX' },
+  16752: { id: 16752, name: 'Brighton Dome – Crew', summary: 'Quote £2,300 · costs so far £410.00', recharge: false },
+  16761: { id: 16761, name: 'Live Nation / Wembley – Splitter van', summary: 'Quote £640 · costs so far £0.00', recharge: false, van: 'RK70 YTB' }
+};
+const r = (l, rr, bold, line) => ({ l, r: rr, w: bold ? 700 : 400, bt: line ? '1px dashed #9ca3af' : '0', pt: line ? '6px' : '0' });
+const hd = (t, w, size) => ({ t, w: w || 400, size: size || 'inherit' });
+const FUEL_DOC = { file: 'IMG_4471.jpg · photo from phone', font: 'ui-monospace,Consolas,monospace', size: '13px', maxw: '300px', pad: '24px 20px', align: 'center',
+  head: [hd('SHELL', 700, '18px'), hd('HASTINGS RIDGE', 600), hd('The Ridge, Hastings TN34 2SA'), hd('VAT No. GB 235 7632 55')],
+  lines: [r('21/10/2026', '07:42'), r('Pump 6', 'DIESEL'), r('41.23 L @ 175.6p', '£72.40'), r('TOTAL', '£72.40', 1, 1), r('incl. VAT @ 20%', '£12.07'), r('VISA ****4412', 'CONTACTLESS')], foot: 'THANK YOU' };
+const S = {
+  fuel: { supplier: 'Shell Hastings Ridge', supSub: 'Matched to Xero contact “Shell UK”', date: '21 Oct 2026', ref: 'Till 0412-8831', gross: 72.40, vatLabel: 'incl. £12.07 VAT (20%)', due: null, aiKind: 'receipt', ai: 'AI read this as a receipt, paid at the till', cat: 'Motor fuel', desc: 'Diesel – RX71 KHL', freelancer: null, doc: FUEL_DOC },
+  freelancer: { supplier: 'Pet Sounds Ltd', supSub: 'Freelancer: Pabs Sounds ✓', date: '5 Oct 2026', ref: '2026034', gross: 443.60, vatLabel: 'No VAT (not VAT registered)', due: '23 Oct 2026', dueSub: 'From the invoice (terms say 16 Oct)', aiKind: 'bill', ai: 'AI read this as a freelancer bill', cat: 'Freelance crew invoices', desc: 'Crew & driving, 28 Sep – 1 Oct', freelancer: 'Pabs Sounds',
+    doc: { file: 'INVOICE PET SOUNDS - Ooosh 2026034.pdf', font: 'inherit', size: '12.5px', maxw: '460px', pad: '32px 30px', align: 'left',
+      head: [hd('Pet Sounds Ltd', 700, '18px'), hd('Pabs Sounds · 14 Marine Parade, Brighton'), hd('Invoice 2026034 · 5 October 2026'), hd('To: Ooosh Tours Ltd')],
+      lines: [r('28/09 Crew – Hastings Premier Inn', '£220.00'), r('28/09 Fuel', '£20.60'), r('28/09 Parking', '£10.00'), r('01/10 Van driver – Bristol O2', '£100.00'), r('01/10 Fuel', '£80.00'), r('01/10 Tolls (M6 Toll)', '£13.00'), r('Total due', '£443.60', 1, 1), r('Not VAT registered', ''), r('Payment due', '23/10/2026')], foot: 'Bank 20-45-77 · 30418822' } },
+  supplier: { supplier: 'Ricoh UK Ltd', supSub: 'Matched to Xero contact', date: '14 Oct 2026', ref: null, gross: 186.00, vatLabel: 'incl. £31.00 VAT (20%)', due: '13 Nov 2026', dueSub: '30-day terms', aiKind: 'bill', ai: 'AI read this as a supplier bill', cat: 'Office equipment hire', desc: 'Copier lease – October', freelancer: null, vatUnsure: "The AI couldn't read the VAT line clearly, so the amounts are open. Check them against the invoice.",
+    flag: { label: 'Invoice number', value: 'INV-88I203', note: "The AI wasn't sure: the print is smudged. Check it against the invoice." },
+    doc: { file: 'Ricoh_INV-881203.pdf', font: 'inherit', size: '12.5px', maxw: '460px', pad: '32px 30px', align: 'left',
+      head: [hd('RICOH', 700, '20px'), hd('Ricoh UK Ltd · VAT GB 523 1170 88'), hd('Invoice no. INV-88▒203'), hd('Date 14/10/2026 · Terms 30 days')],
+      lines: [r('Copier lease – MP C3004 – Oct 2026', '£155.00'), r('Subtotal', '£155.00', 0, 1), r('VAT 20%', '£31.00'), r('Total', '£186.00', 1, 1)], foot: 'Account OOSH-0042' } }
+};
+const seg = a => ({ bg: a ? '#8b31e6' : 'transparent', fg: a ? '#fff' : '#374151', fw: a ? 600 : 400 });
+const chip = (t, bg, fg) => ({ t, bg, fg });
+
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    let scen = 'freelancer';
+    try { scen = localStorage.getItem('costsMock.scen') || scen; } catch (e) {}
+    this.state = { scen, ...this.seed(scen === 'mobile' ? 'fuel' : scen), m: { step: 0, job: null, pays: 'charge', paidBy: 'card', kind: 'receipt' } };
+  }
+  seed(s) {
+    const m = S[s];
+    const base = { editing: false, picker: false, question: '', person: '', notesOpen: false, splitOpen: false, payEdit: false, toast: null, cat: m.cat, desc: m.desc, kind: m.aiKind, paidBy: 'card', showVan: false, jobs: [], vatMode: m.vatLabel.startsWith('No') ? 'none' : '20', gross: m.gross.toFixed(2), vatManual: '', vatOpen: !!m.vatUnsure, docs: [] };
+    const row = (id, x) => ({ ...JOBS[id], when: '', role: '', ticked: true, expanded: false, freelance: false, ...x });
+    if (s === 'fuel') return { ...base, showVan: true, jobs: [row(16710, { when: 'Tue 21 Oct', role: 'Van + driver', expanded: true, lines: [L('Diesel', null, '72.40', 'charge')] })] };
+    if (s === 'freelancer') return { ...base, jobs: [
+      row(16710, { when: 'Mon 28 Sep', role: 'Crew · Hastings', freelance: true, lines: [L('Fee', 220, '220.00', 'quote'), L('Fuel', 20.60, '20.60', 'charge'), L('Parking', 10, '10.00', 'charge')] }),
+      row(16744, { when: 'Thu 1 Oct', role: 'Van + driver · Bristol', freelance: true, expanded: true, lines: [L('Fee', 100, '100.00', 'quote'), L('Fuel', 20, '80.00', 'charge'), L('Tolls', 12, '13.00', 'charge')] }),
+      row(16752, { when: 'Sat 3 Oct', role: 'Crew · Brighton', freelance: true, ticked: false, lines: [L('Fee', 150, '', 'quote')] })
+    ] };
+    return base;
+  }
+  setScen(s) {
+    try { localStorage.setItem('costsMock.scen', s); } catch (e) {}
+    if (s === 'mobile') this.setState({ scen: s, m: { step: 0, job: null, pays: 'charge', paidBy: 'card', kind: 'receipt' } });
+    else this.setState({ scen: s, ...this.seed(s) });
+  }
+  updJob(i, fn) { this.setState(st => ({ jobs: st.jobs.map((j, k) => k === i ? { ...j, ...fn(j) } : j) })); }
+  updLine(i, k, patch) { this.updJob(i, j => ({ lines: j.lines.map((ln, q) => q === k ? { ...ln, ...patch } : ln) })); }
+  lstat(ln) {
+    if (ln.exp == null) return null;
+    if (ln.res === 'queried') return { k: 'q', ...chip('Asked', '#fffaeb', '#b54708') };
+    if (ln.res === 'accepted') return { k: 'a', ...chip('Accepted', '#f3f4f6', '#374151') };
+    const d = num(ln.amt) - ln.exp, tol = Math.max(10, ln.exp * 0.2);
+    if (Math.abs(d) < 0.005) return { k: 'ok', ...chip('✓ Matches', '#ecfdf3', '#067647') };
+    if (Math.abs(d) <= tol) return { k: 'ok', ...chip('≈ Close enough', '#f0f9ff', '#026aa2') };
+    return { k: 'flag', d, ...chip(`⚠ ${fmt(Math.abs(d))} ${d > 0 ? 'over' : 'under'}`, '#fef3f2', '#b42318') };
+  }
+  toast(t) { this.setState({ toast: t }); clearTimeout(this._t); this._t = setTimeout(() => this.setState({ toast: null }), 2600); }
+  addJob(id) {
+    const st = this.state, m = S[st.scen], J = JOBS[id];
+    const alloc = st.jobs.filter(j => j.ticked).reduce((a, j) => a + j.lines.reduce((b, l) => b + num(l.amt), 0), 0);
+    const rem = Math.max(0, num(st.gross) - alloc);
+    const pays = J.recharge && /fuel|toll/i.test(st.cat) ? 'charge' : 'quote';
+    this.setState({ picker: false, jobs: [...st.jobs, { ...J, when: '', role: '', ticked: true, expanded: true, freelance: false, added: true, lines: [L('Amount', null, rem.toFixed(2), pays)] }] });
+  }
+
+  desktopVals() {
+    const st = this.state, m = S[st.scen], credit = st.kind === 'credit';
+    const kinds = [['receipt', 'Receipt', 'Already paid'], ['bill', 'Bill', 'To be paid'], ['credit', 'Refund / credit', 'Money back to us']]
+      .map(([v, label, sub]) => ({ label, sub, onClick: () => this.setState({ kind: v }), bd: st.kind === v ? '#8b31e6' : '#e5e7eb', bg: st.kind === v ? '#faf5ff' : '#fff' }));
+    const details = [
+      { label: 'Supplier', value: m.supplier, sub: m.supSub, subColor: '#067647' },
+      { label: 'Date', value: m.date, sub: '', subColor: '#6b7280' },
+      ...(m.ref ? [{ label: 'Invoice / ref', value: m.ref, sub: '', subColor: '#6b7280' }] : []),
+      ...(st.kind === 'bill' && m.due ? [{ label: 'Pay by', value: m.due, sub: m.dueSub, subColor: m.dueSub && m.dueSub.includes('terms say') ? '#b54708' : '#6b7280' }] : [])
+    ];
+    let flags = 0, queried = 0, alloc = 0, charged = 0, ours = 0;
+    const jobs = st.jobs.map((j, i) => {
+      const simple = !j.freelance && j.lines.length === 1;
+      const open = j.ticked && (simple || j.expanded);
+      const hasExp = j.lines.some(l => l.exp != null);
+      let rowFlags = 0, rowQ = 0, sumAmt = 0, sumExp = 0;
+      const groups = {};
+      const lines = j.lines.map((ln, k) => {
+        const s = this.lstat(ln);
+        sumAmt += num(ln.amt); sumExp += ln.exp || 0;
+        if (j.ticked) {
+          if (s && s.k === 'flag') rowFlags++;
+          if (s && s.k === 'q') rowQ++;
+          const val = ln.pays === 'charge' && ln.part != null ? num(ln.part) : num(ln.amt);
+          if (!credit && ln.pays === 'charge') charged += val;
+          if (!credit && ln.pays === 'ours') ours += num(ln.amt);
+          const pl = PAYS.find(p => p[0] === ln.pays)[1].toLowerCase();
+          (groups[pl] = groups[pl] || []).push(ln.label);
+        }
+        const isCharge = ln.pays === 'charge', partMode = isCharge && ln.part != null;
+        return {
+          label: ln.label, amt: ln.amt, hasExp, expStr: ln.exp != null ? fmt(ln.exp) : '',
+          cols: hasExp ? 'minmax(0,1fr) 80px 96px 120px' : 'minmax(0,1fr) 110px',
+          onAmt: e => this.updLine(i, k, { amt: e.target.value }),
+          st: s || chip('', 'transparent', 'transparent'),
+          isFlag: !!(s && s.k === 'flag'),
+          flagText: s && s.k === 'flag' ? `${ln.label} expected ${fmt(ln.exp)}, invoiced ${fmt(num(ln.amt))}.` : '',
+          onQuery: () => {
+            const q = `#${j.id} ${ln.label.toLowerCase()} (${j.when}): you've invoiced ${fmt(num(ln.amt))} but we estimated ${fmt(ln.exp)}. Can you explain the difference?`;
+            this.updLine(i, k, { res: 'queried' });
+            this.setState(x => ({ question: x.question ? x.question + '\n' + q : q }));
+          },
+          onAccept: () => this.updLine(i, k, { res: 'accepted' }),
+          isResolved: !!ln.res, resLabel: ln.res === 'queried' ? 'question' : 'accept',
+          onUndo: () => this.updLine(i, k, { res: null }),
+          showPays: j.ticked && !credit, isCredit: j.ticked && credit,
+          opts: PAYS.map(([v, l]) => ({ label: l, onClick: () => this.updLine(i, k, { pays: v, part: v === 'charge' ? ln.part : null }), ...seg(ln.pays === v) })),
+          noteStrong: isCharge ? (partMode ? '' : 'Not in quote: ') : ln.pays === 'ours' ? 'Not in quote, ' : '',
+          note: isCharge ? (partMode ? 'Part, net of VAT' : (j.recharge ? 'recharge at actual +20%' : 'recharge plus markup')) : ln.pays === 'quote' ? 'Client has already been charged for this' : "but we're not recharging the client",
+          isCharge, partMode, part: ln.part ?? '', partLabel: partMode ? 'Charge all of it' : 'Only part?',
+          onPartToggle: () => this.updLine(i, k, { part: partMode ? null : '' }),
+          onPart: e => this.updLine(i, k, { part: e.target.value })
+        };
+      });
+      if (j.ticked) { alloc += sumAmt; flags += rowFlags; queried += rowQ; }
+      const paysSummary = credit ? 'Credit, not charged to client' : Object.entries(groups).map(([p, ls]) => (j.lines.length > 1 ? ls.join(', ') + ': ' : '') + p).join(' · ');
+      let c = null;
+      if (j.freelance) {
+        if (!j.ticked) c = chip('Not on this invoice', '#f3f4f6', '#6b7280');
+        else if (rowFlags) c = chip(`⚠ Check ${rowFlags} line${rowFlags > 1 ? 's' : ''}`, '#fef3f2', '#b42318');
+        else if (rowQ) c = chip('Question asked', '#fffaeb', '#b54708');
+        else c = chip('✓ As expected', '#ecfdf3', '#067647');
+      }
+      return {
+        id: j.id, name: j.name, when: j.when, role: j.role, open, hasExp, lines,
+        bt: i ? '1px solid #e5e7eb' : '0', bg: j.ticked ? '#fff' : '#fafafa', nameColor: j.ticked ? '#111827' : '#9ca3af',
+        tick: j.ticked ? '✓' : '', tickBg: j.ticked ? '#8b31e6' : '#fff', tickBd: j.ticked ? '#8b31e6' : '#d1d5db',
+        onTick: () => {
+          if (j.ticked && j.added) return this.setState(x => ({ jobs: x.jobs.filter((_, q) => q !== i) }));
+          this.updJob(i, jj => ({ ticked: !jj.ticked, expanded: !jj.ticked, lines: jj.lines.map(l => ({ ...l, amt: l.amt || (l.exp != null ? l.exp.toFixed(2) : '') })) }));
+        },
+        onExpand: () => { if (!simple && j.ticked) this.updJob(i, jj => ({ expanded: !jj.expanded })); },
+        cursor: simple || !j.ticked ? 'default' : 'pointer',
+        chev: simple || !j.ticked ? '' : (j.expanded ? '▾' : '▸'),
+        sub: !j.ticked ? `Booked, expected ${fmt(sumExp)}` : (simple ? j.summary : paysSummary),
+        amount: j.ticked ? fmt(sumAmt) : '—', chip: c,
+        summary: j.summary, showSummary: !simple
+      };
+    });
+    const ticked = st.jobs.filter(j => j.ticked);
+    const G = num(st.gross), diff = G - alloc;
+    const alloc_ = Math.abs(diff) < 0.005 ? chip(`✓ Invoice ${fmt(G)} · allocated to jobs ${fmt(alloc)}`, '#ecfdf3', '#067647')
+      : diff > 0 ? chip(`${fmt(diff)} of ${fmt(G)} isn't on a job. Fine if it's overheads; otherwise tick or add a job.`, '#fffaeb', '#93370d')
+      : chip(`Allocated ${fmt(-diff)} more than the invoice total (${fmt(G)}).`, '#fef3f2', '#b42318');
+    const vanJob = ticked.find(j => j.van);
+    const parts = [];
+    if (!ticked.length) parts.push(`${fmt(G)} to overheads`);
+    else if (ticked.length === 1) parts.push(`${fmt(alloc)} → #${ticked[0].id}`);
+    else parts.push(`${fmt(alloc)} across ${ticked.length} jobs`);
+    if (credit) parts.push('credit note');
+    if (charged > 0) parts.push(`${fmt(charged)} charged to client`);
+    if (ours > 0) parts.push(`${fmt(ours)} we cover`);
+    if (queried) parts.push(`${queried} question to ${m.freelancer}`);
+    if (st.kind === 'receipt') parts.push(st.paidBy === 'card' ? 'paid on Ooosh card' : st.paidBy === 'cash' ? 'paid in cash' : `owed to ${st.person || '?'}`);
+    if (st.kind === 'bill') parts.push(`bill due ${m.due || 'on receipt'}`);
+    if (st.showVan && vanJob) parts.push(`van ${vanJob.van}`);
+    let warn = '';
+    if (flags) warn = `${flags} line${flags > 1 ? 's don’t' : ' doesn’t'} match the booking. Ask about it or accept it.`;
+    else if (ticked.length && Math.abs(diff) >= 0.005) warn = alloc_.t;
+    else if (st.kind === 'receipt' && st.paidBy === 'other' && !st.person) warn = 'Say who paid, so we know who to pay back.';
+    const extras = [
+      ...(m.freelancer && !st.question ? [{ label: `+ Question for ${m.freelancer}`, onClick: () => this.setState({ question: ' ' }) }] : []),
+      ...(!st.notesOpen ? [{ label: '+ Notes', onClick: () => this.setState({ notesOpen: true }) }] : [])
+    ];
+    const vm = st.vatMode, gN = num(st.gross), vatN = vm === '20' ? gN / 6 : vm === 'none' ? 0 : num(st.vatManual), netN = gN - vatN, ro = vm === '20' || vm === 'none';
+    const BATCH = { fuel: ['Fuel card slip.jpg'], freelancer: ['Fuel receipt – 1 Oct.jpg', 'M6 Toll receipt.pdf', 'Parking – Hastings.jpg'], supplier: ['Ricoh lease agreement.pdf'] }[st.scen] || [];
+    return {
+      doc: m.doc, aiNote: st.kind === m.aiKind ? m.ai : 'Changed from what the AI read', kinds,
+      details, editing: st.editing, notEditing: !st.editing, editLabel: st.editing ? 'Done' : 'Edit details', toggleEdit: () => this.setState(x => ({ editing: !x.editing })),
+      flag: m.flag || null,
+      catSelect: React.createElement('select', { key: st.scen, value: st.cat, onChange: e => this.setState({ cat: e.target.value }), style: { padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, width: '100%', background: '#fff' } }, CATS.map(v => React.createElement('option', { key: v, value: v }, v))), onCat: e => this.setState({ cat: e.target.value }), desc: st.desc, onDesc: e => this.setState({ desc: e.target.value }),
+      noVan: !st.showVan, addVan: () => this.setState({ showVan: true }), closeNotes: () => this.setState({ notesOpen: false }),
+      supDocs: st.docs.map((d, i) => ({ name: d, ext: d.split('.').pop().toUpperCase().slice(0, 4), onRemove: () => this.setState(x => ({ docs: x.docs.filter((_, q) => q !== i) })) })),
+      addDocs: () => { const add = BATCH.filter(b => !st.docs.includes(b)); this.setState({ docs: [...st.docs, ...add] }); this.toast(add.length ? `${add.length} file${add.length > 1 ? 's' : ''} added in one go (mock-up)` : 'Would open the file picker'); },
+      amtCells: [{ label: 'Gross', value: fmt(gN), w: 600 }, { label: 'VAT', value: fmt(vatN), w: 400 }, { label: 'Net', value: fmt(netN), w: 400 }],
+      vatModeLabel: { '20': '20% VAT', none: 'No VAT', manual: 'Manual VAT', reclaim: 'VAT reclaim' }[vm],
+      vatOpen: st.vatOpen, vatUnsure: m.vatUnsure || '', vatToggleLabel: st.vatOpen ? 'Done' : 'Change amounts / VAT', toggleVat: () => this.setState(x => ({ vatOpen: !x.vatOpen })),
+      vatOpts: [['20', '20% VAT'], ['none', 'No VAT'], ['manual', 'Manual'], ['reclaim', 'VAT reclaim']].map(([v, l]) => ({ label: l, onClick: () => this.setState({ vatMode: v, vatManual: v === 'manual' || v === 'reclaim' ? (st.vatManual || vatN.toFixed(2)) : '' }), ...seg(vm === v) })),
+      grossIn: st.gross, onGross: e => this.setState({ gross: e.target.value }),
+      vatIn: ro ? vatN.toFixed(2) : st.vatManual, onVat: e => { if (!ro) this.setState({ vatManual: e.target.value }); }, vatReadOnly: ro, vatBg: ro ? '#f3f4f6' : '#fff',
+      netIn: netN.toFixed(2), onNet: e => { const n = num(e.target.value); this.setState({ gross: (vm === '20' ? n * 1.2 : n + (ro ? 0 : num(st.vatManual))).toFixed(2) }); },
+      vatHint: { '20': '20% VAT: enter gross or net and the other two fill in.', none: "No VAT (e.g. a freelancer who isn't VAT registered): gross = net, nothing reclaimed.", manual: 'Type the VAT exactly as it appears on the invoice.', reclaim: 'VAT reclaim works as it does today.' }[vm],
+      showVan: st.showVan, vanText: vanJob ? `${vanJob.van} · on job #${vanJob.id}` : 'Search by reg…', removeVan: () => this.setState({ showVan: false }),
+      jobsHint: m.freelancer ? 'Tick the work this invoice covers' : ticked.length ? 'Add another job to split the cost' : '',
+      hasJobs: st.jobs.length > 0, noJobs: !st.jobs.length && !st.picker, jobs,
+      showAlloc: ticked.length > 0 && (st.jobs.length > 1 || Math.abs(diff) >= 0.005), alloc: alloc_,
+      picker: st.picker, notPicker: !st.picker, openPicker: () => this.setState({ picker: true }), closePicker: () => this.setState({ picker: false }),
+      addLabel: m.freelancer ? '+ Add a job not in their booked work' : '+ Add another job',
+      pickerJobs: Object.values(JOBS).filter(J => !st.jobs.some(j => j.id === J.id)).map(J => ({ id: J.id, name: J.name, summary: J.summary, onClick: () => this.addJob(J.id) })),
+      hasQuestion: !!st.question, question: st.question.trimStart(), freelancer: m.freelancer, onQuestion: e => this.setState({ question: e.target.value || ' ' }), clearQuestion: () => this.setState({ question: '' }),
+      isReceipt: st.kind === 'receipt', isBill: st.kind === 'bill', isCredit: credit,
+      paidOpts: [['card', 'Ooosh card ••4412'], ['cash', 'Cash'], ['other', 'Someone else']].map(([v, l]) => ({ label: l, onClick: () => this.setState({ paidBy: v }), ...seg(st.paidBy === v) })),
+      showPerson: st.paidBy === 'other', person: st.person, onPerson: e => this.setState({ person: e.target.value }), grossStr: fmt(G),
+      billLine: `Pay later · due ${m.due || 'on receipt'} · awaiting payment`, payEdit: st.payEdit, payEditLabel: st.payEdit ? 'Done' : 'Change', togglePayEdit: () => this.setState(x => ({ payEdit: !x.payEdit })),
+      creditLine: `Credit note from ${m.supplier}. It comes off their next bill in Xero.`,
+      notesOpen: st.notesOpen, splitOpen: st.splitOpen, extras,
+      summary: parts.join(' · '), warn,
+      showApprove: st.kind !== 'receipt', primaryLabel: st.kind === 'receipt' ? 'Save' : 'Approve & send to Xero',
+      onSavePrimary: () => this.toast(st.kind === 'receipt' ? 'Saved (mock-up, nothing sent)' : 'Approved and pushed to Xero (mock-up)'),
+      onSaveSecondary: () => this.toast('Saved, waiting for approval (mock-up)')
+    };
+  }
+
+  mobileVals() {
+    const m = this.state.m, setM = p => this.setState(x => ({ m: { ...x.m, ...p } }));
+    const J = m.job ? JOBS[m.job] : null;
+    const titles = ['Snap the receipt', 'Is this right?', 'Which job?', 'Who pays?', 'Done'];
+    const jb = (id, meta) => ({ id, name: JOBS[id].name, meta, onClick: () => setM({ job: id, pays: JOBS[id].recharge ? 'charge' : 'quote', step: 3 }) });
+    const paysOpts = [['quote', 'Already in quote', '', 'Client has already been charged for this'], ['charge', 'Charge to client', 'Not in quote: ', J && J.recharge ? 'recharge at actual +20%' : 'recharge plus markup'], ['ours', 'We cover it', 'Not in quote, ', "but we're not recharging the client"]];
+    const payWord = { quote: 'already in quote', charge: 'charge to client', ours: 'we cover it' }[m.pays];
+    return {
+      m0: m.step === 0, m1: m.step === 1, m2: m.step === 2, m3: m.step === 3, m4: m.step === 4,
+      mTitle: titles[m.step], mStepLabel: m.step < 4 ? `${m.step + 1} of 4` : '', mProgress: `${(m.step / 4) * 100}%`,
+      mBack: () => m.step > 0 && m.step < 4 && setM({ step: m.step - 1 }), mBackOpacity: m.step > 0 && m.step < 4 ? 1 : 0,
+      mNext: () => setM({ step: m.step + 1 }), mAgain: () => setM({ step: 0, job: null, paidBy: 'card' }),
+      fuelDoc: FUEL_DOC,
+      mKinds: [['receipt', 'Receipt'], ['bill', 'Bill'], ['credit', 'Refund']].map(([v, l]) => ({ label: l, onClick: () => setM({ kind: v }), ...seg(m.kind === v) })),
+      mRows: [['Supplier', 'Shell Hastings Ridge'], ['Date', '21 Oct 2026 · 07:42'], ['Amount', '£72.40 incl. £12.07 VAT'], ['Category', 'Motor fuel']].map(([label, value], i) => ({ label, value, bt: i ? '1px solid #e5e7eb' : '0' })),
+      mJobsToday: [jb(16761, 'Splitter van · RK70 YTB · Fri 24 Oct'), jb(16710, 'Van + driver · RX71 KHL · Tue 21 Oct · recharges fuel'), jb(16744, 'Van + driver · RV22 ODX · Thu 1 Oct · recharges fuel')],
+      mNoJob: () => setM({ job: null, step: 3 }),
+      mHasJob: !!J, mJobLine: J ? `#${J.id} ${J.name}` : 'Overheads (no job)', mVan: J ? `${J.van} · on this job` : '',
+      mPays: paysOpts.map(([v, label, subStrong, sub]) => ({ label, subStrong, sub, onClick: () => setM({ pays: v }), bd: m.pays === v ? '#8b31e6' : '#e5e7eb', bg: m.pays === v ? '#faf5ff' : '#fff' })),
+      mPaid: [['card', 'Ooosh card'], ['cash', 'Cash'], ['other', 'Someone else']].map(([v, l]) => ({ label: l, onClick: () => setM({ paidBy: v }), ...seg(m.paidBy === v) })),
+      mShowPerson: m.paidBy === 'other',
+      mSummary: J ? `£72.40 diesel → #${J.id}, ${payWord}. Van ${J.van}.` : '£72.40 diesel → overheads.'
+    };
+  }
+
+  renderVals() {
+    const st = this.state;
+    const tabs = [['fuel', 'Fuel receipt on a job'], ['freelancer', 'Freelancer bill, 3 jobs'], ['supplier', 'Supplier bill, no job'], ['mobile', 'Mobile: fuel receipt']]
+      .map(([v, label]) => ({ label, onClick: () => this.setScen(v), bg: st.scen === v ? '#fff' : 'transparent', fg: st.scen === v ? '#111827' : '#d1d5db' }));
+    const isMobile = st.scen === 'mobile';
+    return { tabs, isMobile, isDesktop: !isMobile, toast: st.toast, ...(isMobile ? this.mobileVals() : this.desktopVals()), ...(isMobile ? {} : {}) };
+  }
+}
+</script>
+</body>
+</html>

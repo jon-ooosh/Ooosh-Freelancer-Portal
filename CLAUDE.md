@@ -369,6 +369,7 @@ existing definition:
 | What happens to requirements when a job dies? | `services/requirement-close-sweep.ts` |
 | When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` — a freelancer invoice: the first Friday a week after APPROVAL, 8 to 14 days (jon, Oct 2026, final — it had moved to the invoice date and back); bills approved before the switch (`system_settings.freelancer_terms_approval_from`) keep the invoice-date rule |
 | What are this job's costs? | `GET /costs/by-job/:jobId` |
+| Which recharges are there, on which job, still to do? | `v_cost_recharges` (view, one row per job a recharge bills) — a recharge is on the whole cost OR on each job's share of a split cost, never both; load / write one through `services/cost-recharges.ts` |
 | Money coming BACK from a supplier? | `services/cost-credit.ts` |
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |

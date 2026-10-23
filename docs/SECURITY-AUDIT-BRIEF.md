@@ -106,8 +106,9 @@ the general `authenticate` middleware checked the signature and nothing else.
     - A password reset signs out every other session
       (`people.portal_sessions_valid_after`, migration 302; a minute's grace for
       the Netlify clock). The reset's "transaction" was BEGIN/COMMIT through the
-      shared pool, i.e. none; it is on one client now. Four other places still do
-      that (`cost-lines.ts`, `routes/costs.ts`, `routes/pipeline.ts` ×2) — open.
+      shared pool, i.e. none; it is on one client now. Three other places still do
+      that (`cost-lines.ts`, `routes/pipeline.ts` ×2) — open. (`routes/costs.ts`'s
+      split save moved to one client with per-job recharges, Oct 2026.)
     - The registration code came from `Math.random()`; now `crypto.randomInt`.
     - `src/app/api/hirehop/items/[jobId]` (the portal's kit list, read with its
       own HireHop token) served any job to any login, and a Monday-era secret
@@ -200,8 +201,9 @@ page without a redirect loop.
    `await query('BEGIN')` / `query('COMMIT')` sends each statement to whichever
    pooled connection is free, so it is no transaction at all, and a BEGIN can be
    left open on a connection that later requests then write through. The portal's
-   password reset was one (fixed in A.12, now on `getClient()`). Four remain:
-   `services/cost-lines.ts`, `routes/costs.ts`, and `routes/pipeline.ts` (two).
+   password reset was one (fixed in A.12, now on `getClient()`), and so was the
+   cost split save in `routes/costs.ts` (fixed with per-job recharges, migration
+   318, Oct 2026). Three remain: `services/cost-lines.ts` and `routes/pipeline.ts` (two).
    Fix: `const client = await getClient()`, BEGIN/COMMIT/ROLLBACK on that client,
    `client.release()` in a `finally`. Its own PR, with a test per path.
 
