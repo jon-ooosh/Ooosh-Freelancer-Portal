@@ -14,7 +14,6 @@ import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '..
 import { hasOutstanding, isNonZero, cancellationBalance } from '../lib/money';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
-import CostAllocationModal from './CostAllocationModal';
 import RechargeResolveModal, { RechargeSlot, type RechargeCost } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
 import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
@@ -23,7 +22,7 @@ import { newPaymentMethodAllowed } from '../lib/paymentMethods';
 import CloseOutMoneyPanel from './CloseOutMoneyPanel';
 import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
-import type { JobExcess, Cost } from '../../../shared/types';
+import type { JobExcess } from '../../../shared/types';
 
 /** The Stripe line on a refund, in the words the money came in by: the reader, a PayPal
  *  payment through the portal (the portal tags the HireHop deposit "(PayPal)"), or a card
@@ -602,7 +601,6 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
   const [jobQuotes, setJobQuotes] = useState<JobQuoteLite[]>([]);
   const [showAddCost, setShowAddCost] = useState(false);
-  const [splittingCost, setSplittingCost] = useState<Cost | null>(null);
 
   const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
     setRefundingDep(dep);
@@ -2195,14 +2193,6 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
           presetJobId={jobId}
           onClose={() => setShowAddCost(false)}
           onSaved={() => { setShowAddCost(false); loadJobCosts(); }}
-          onSavedAndSplit={(c) => { setShowAddCost(false); loadJobCosts(); setSplittingCost(c); }}
-        />
-      )}
-      {splittingCost && (
-        <CostAllocationModal
-          cost={splittingCost}
-          onClose={() => setSplittingCost(null)}
-          onSaved={() => { setSplittingCost(null); loadJobCosts(); }}
         />
       )}
 
@@ -3234,8 +3224,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                       {c.supplier_name || c.description || c.category || 'Cost'}
                       {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
                     </a>
+                    {/* The cost's own job is the one with the biggest share, so it
+                        can be THIS job: then it's a part, not "split from" here. */}
                     {isSplit && (
-                      captureJobId ? (
+                      captureJobId && captureJobId !== jobId ? (
                         <a href={`/jobs/${captureJobId}`} className="ml-1 text-xs text-purple-600 hover:underline"
                           title={`This job's share of a ${m(num(c.full_amount_gross))} cost captured on ${c.capture_hh_job_number ? `job #${c.capture_hh_job_number}` : 'another job'}`}>
                           · split from {c.capture_hh_job_number ? `#${c.capture_hh_job_number}` : 'another job'}

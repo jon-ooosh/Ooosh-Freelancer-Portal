@@ -39,6 +39,9 @@ export interface WorkPart {
   /** This part's booked figure, used to share a run's amount across its stops. */
   weight: number;
   jobId: string | null;
+  /** That job's HireHop number and name, so a run's stops on other jobs can be named. */
+  hhJobNumber?: number | null;
+  jobName?: string | null;
 }
 
 export interface FreelancerWorkItem {
@@ -189,7 +192,10 @@ export async function listFreelancerWork(personId: string, opts: {
       fee: personalFee(r),
       estimate: est.total,
       estimateParts: est.parts,
-      parts: [{ kind: 'booking', id: r.id, weight: personalFee(r) + est.total, jobId: r.job_id || null }],
+      parts: [{
+        kind: 'booking', id: r.id, weight: personalFee(r) + est.total, jobId: r.job_id || null,
+        hhJobNumber: r.hh_job_number != null ? Number(r.hh_job_number) : null, jobName: r.job_name || null,
+      }],
       invoicedOn: [],
       linkedAmount: null,
     });
@@ -216,6 +222,8 @@ export async function listFreelancerWork(personId: string, opts: {
       parts: stops.map((s, i) => ({
         kind: 'booking' as const, id: s.id as string,
         weight: stopFees[i] + ests[i].total || 1, jobId: (s.job_id as string) || null,
+        hhJobNumber: s.hh_job_number != null ? Number(s.hh_job_number) : null,
+        jobName: (s.job_name as string) || null,
       })),
       invoicedOn: [],
       linkedAmount: null,

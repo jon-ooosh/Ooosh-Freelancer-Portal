@@ -1244,6 +1244,8 @@ export interface Cost {
   person_name?: string | null;
   /** How many pieces of their work it covers (list only). */
   work_item_count?: number;
+  /** What that work is: HireHop jobs, studio evenings, yard days (list only; "1 job · 3 nights"). */
+  work_summary?: { jobs: number; nights: number; days: number } | null;
   /** Why it was saved with no work ticked: 'person_not_in_op' | 'work_not_in_op' | 'later' (migration 315). */
   work_unmatched_reason?: string | null;
   /** "Queried": the office has a question about this freelancer invoice. Approving clears it. */

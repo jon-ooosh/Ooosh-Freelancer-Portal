@@ -1375,3 +1375,47 @@ is PR 2 (the form).
 
 **Also fixed.** Weekend managers' "Approve & save" (`isManagerTier()`); the resolve modal's
 "that's a loss" warning on part recharges (it compared with the whole invoice).
+
+---
+
+## The capture form, rebuilt (Oct 2026, PR 2 of the redesign)
+
+`CostCaptureModal.tsx` rebuilt to the agreed design (`docs/design/cost-capture-redesign/DECISIONS.md`,
+which lists where the build differs from the mock). No migration.
+
+**The form.** Five questions: *What is it?* (Receipt / Bill / Refund, asked first, by a person; Refund
+hands over to `RecordRefundModal`, which picks the purchase first), *From the document* (the AI's read as
+a summary, "Edit details" for inputs, amounts and VAT behind "Change amounts / VAT", lines behind "Split
+by VAT rate or category"; opens by itself when the AI wasn't sure), *What it's for* (category, description,
+the van: from the job for a vehicle cost, the van it had on the cost date after any swap, several offered),
+*Jobs and who pays* (`components/costs/CostJobsTable.tsx`), *Payment* (Paid by: company card ••last4 /
+cash / Wise / Me (= `reimburse_me`); a bill is "Pay later · due … · awaiting payment"). A live summary in
+the footer. The document is read as soon as it is picked; supporting documents take several at once and
+drag-and-drop. Notes and the question for a freelancer sit behind "+ Notes" / "+ Question for …".
+
+**Jobs and who pays.** One row per job, each with ONE answer: Already in quote / Charge to client (all,
+or "Only part? £" net) / We cover it. Defaults (`costJobs.ts` `defaultWhoPays()`): a freelancer invoice
+never defaults to a recharge (the PR #1535 rule); fuel, parking and travel on a job that recharges its
+running costs default to Charge; else Already in quote when the job has a quote, We cover it when not.
+For a freelancer, Charge is always part: what they invoiced over their fee on that job, editable.
+Saving (`planSplit()`): one job holding the whole cost saves on the cost (`job_id` + who pays, exactly as
+before); several jobs, or one job holding part, is a split whose shares each carry who pays, the cost's
+own recharge set to none; no job is overheads. With no ticked work, one job left blank takes the rest.
+Allocating more than the invoice is blocked (the server refuses it too).
+
+**A freelancer's work** is the Jobs table: ticking a row links its job, several split the cost (one share
+per job; a run's stops spread by what was booked); studio evenings and yard days are on no job, so they
+stay with overheads. Each row's invoiced figure is shared in proportion until someone types the real one;
+then it gets its own chip against the booking (the same tolerance), and "Ask them about it" writes a line
+into the question for them. The overall booked-vs-invoiced check stays under the rows.
+
+**Backend.** `POST`/`PATCH /costs` take `allocations` (`services/cost-allocations.ts`, which PUT
+`/:id/allocations` now wraps): checked against the cost as it will be BEFORE anything is written, written
+in one transaction. Lines and a split may now stand together (the old refusal is gone; COST-LINES-SPEC).
+An edit can't take a done whole-cost recharge off (409). A kept share keeps its notes when the sender
+doesn't mention them. `GET /costs/check-duplicate` (same amount to the penny, same day, same supplier by
+Xero contact or normalised name; warn only). The list's `work_summary` gives "1 job · 3 nights".
+`freelancer-work.ts` names every stop's job.
+
+**Retired.** `CostAllocationModal.tsx` (⑂ opens the edit form at the Jobs table), the "covers several
+jobs" tick, the "This job so far" box, the fuel banners, the quote/extra cards and recharge selects.
