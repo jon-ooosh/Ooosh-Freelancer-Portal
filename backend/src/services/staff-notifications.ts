@@ -927,7 +927,7 @@ export async function runPayrollReportEmail(today = new Date()): Promise<Payroll
   }
 
   // THE definition of every figure here — staff-overtime.ts, not a second SUM.
-  const { getPayrollReport, payrollCsv } = await import('./staff-overtime');
+  const { getPayrollReport, payrollCsv, otherAbsenceText } = await import('./staff-overtime');
   const rows = await getPayrollReport(from, to);
   const csv = payrollCsv(rows, from, to);
 
@@ -950,7 +950,7 @@ export async function runPayrollReportEmail(today = new Date()): Promise<Payroll
 
   const table =
     `<table style="border-collapse:collapse;width:100%;margin:8px 0 16px;">` +
-    `<tr>${th('Name', 'left')}${th('Overtime to pay')}${th('Unpaid leave (days)')}${th('Unpaid leave (hours)')}${th('Sickness (days)')}${th('Sickness (hours)')}</tr>` +
+    `<tr>${th('Name', 'left')}${th('Overtime to pay')}${th('Unpaid leave (days)')}${th('Unpaid leave (hours)')}${th('Sickness (days)')}${th('Sickness (hours)')}${th('Other absence', 'left')}</tr>` +
     rows.map(r =>
       `<tr>` +
       td(`<strong>${esc(r.name)}</strong>${r.nominalDayMinutes == null ? ' *' : ''}`, 'left') +
@@ -959,6 +959,7 @@ export async function runPayrollReportEmail(today = new Date()): Promise<Payroll
       td(fmtH(r.unpaidLeaveMinutes), 'right', r.unpaidLeaveMinutes === 0) +
       td(days(r.sicknessDays), 'right', r.sicknessMinutes === 0) +
       td(fmtH(r.sicknessMinutes), 'right', r.sicknessMinutes === 0) +
+      td(r.otherAbsenceMinutes === 0 ? '—' : esc(otherAbsenceText(r)), 'left', r.otherAbsenceMinutes === 0) +
       `</tr>`).join('') +
     `</table>`;
 
@@ -972,6 +973,9 @@ export async function runPayrollReportEmail(today = new Date()): Promise<Payroll
       ? p(`<span style="color:#b45309;">* No working pattern on file, so days read 0 — check the hours instead.</span>`)
       : '') +
     p(`<span style="color:#64748b;">Overtime to pay is what was cashed out of the overtime bank in the month. Statutory sick pay is not worked out here — the payroll company does that from the days.</span>`) +
+    (rows.some(r => r.otherAbsenceMinutes > 0)
+      ? p(`<span style="color:#64748b;">Other absence is everything that isn’t sickness — paternity, maternity, jury service and so on. Statutory parental pay is the payroll company’s to work out from the days, too.</span>`)
+      : '') +
     `<p style="margin:24px 0 0;"><a href="${base}${STAFF_URL}" ` +
     `style="display:inline-block;padding:10px 18px;background:#7B5EA7;color:#fff;` +
     `border-radius:6px;text-decoration:none;font-size:15px;">Open the Payroll report</a></p>`;

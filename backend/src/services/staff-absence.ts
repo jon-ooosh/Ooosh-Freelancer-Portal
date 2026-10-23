@@ -783,6 +783,38 @@ export async function listAbsences(opts: {
   return r.rows.map(row => mapAbsence(row, byAbsence.get(row.id) ?? []));
 }
 
+/**
+ * A person's own absence, as they may see it: dates only (spec §7.2).
+ *
+ * No type, reason, notes, fit note or return-to-work — My Time shows each one
+ * as "Absent", nothing more (jon, Oct 2026). `deductsAllowance` stays because
+ * it explains a figure on their holiday card.
+ */
+export interface OwnAbsence {
+  id: string;
+  startDate: string;
+  endDate: string | null;
+  isOpen: boolean;
+  deductsAllowance: boolean;
+  days: { date: string; minutes: number; portion: AbsencePortion }[];
+}
+
+/**
+ * THE mask for GET /me/absences. Built field by field from an allow-list, so a
+ * column added to Absence later cannot leak through here by accident.
+ */
+export async function listOwnAbsences(personId: string, from: string, to: string): Promise<OwnAbsence[]> {
+  const rows = await listAbsences({ personId, from, to });
+  return rows.map(a => ({
+    id: a.id,
+    startDate: a.startDate,
+    endDate: a.endDate,
+    isOpen: a.isOpen,
+    deductsAllowance: a.deductsAllowance,
+    days: a.days.map(d => ({ date: d.date, minutes: d.minutes, portion: d.portion })),
+  }));
+}
+
 // ── Reporting (spec §7.6) ───────────────────────────────────────────────────
 
 export interface AbsenceReportRow {
@@ -876,4 +908,52 @@ export async function getSicknessMinutes(from: string, to: string): Promise<Map<
     [from, to]
   );
   return new Map(r.rows.map(row => [row.person_id as string, Number(row.minutes)]));
+}
+
+/** How the payroll report names each absence type. Sickness has its own column. */
+export const ABSENCE_TYPE_LABELS: Record<AbsenceType, string> = {
+  sickness: 'Sickness',
+  maternity: 'Maternity',
+  paternity: 'Paternity',
+  shared_parental: 'Shared parental',
+  adoption: 'Adoption',
+  bereavement: 'Bereavement',
+  compassionate: 'Compassionate',
+  goodwill: 'Goodwill',
+  jury_service: 'Jury service',
+  medical_appointment: 'Appointment',
+  other: 'Other',
+};
+
+/**
+ * Every OTHER absence over a period, per person and type — the payroll
+ * report's "Other absence" column (spec §12.1).
+ *
+ * Paternity, maternity, adoption and shared parental leave are paid through
+ * payroll at the statutory rate, so the accountants need the days even though
+ * the holiday balance never sees them. Planned in §12.1 and missed when the
+ * report was built; added Oct 2026 for the first paternity leave.
+ */
+export async function getOtherAbsenceMinutes(
+  from: string, to: string
+): Promise<Map<string, { type: AbsenceType; minutes: number }[]>> {
+  await materialiseOpenAbsences();
+  const r = await query(
+    `SELECT d.person_id, a.absence_type, COALESCE(SUM(d.minutes), 0) AS minutes
+       FROM staff_absence_days d
+       JOIN staff_absences a ON a.id = d.absence_id
+      WHERE d.is_active AND a.status = 'active'
+        AND a.absence_type <> 'sickness'
+        AND d.absence_date BETWEEN $1::date AND $2::date
+      GROUP BY d.person_id, a.absence_type
+      ORDER BY d.person_id, a.absence_type`,
+    [from, to]
+  );
+  const out = new Map<string, { type: AbsenceType; minutes: number }[]>();
+  for (const row of r.rows) {
+    const list = out.get(row.person_id) ?? [];
+    list.push({ type: row.absence_type as AbsenceType, minutes: Number(row.minutes) });
+    out.set(row.person_id, list);
+  }
+  return out;
 }

@@ -316,6 +316,14 @@ Policy is `use_allowance`: a bank holiday is an ordinary working day here and
 someone who wants it off books holiday like any other day. They are **marked**
 on the calendar, nothing more.
 
+**My Time only asks somebody to book a bank holiday they would otherwise be
+WORKING** (Oct 2026). `/me/balances` carries `bankHolidaysWorking` from
+`contractedDatesAmong()` in `staff-day-status.ts` — the raw contract on each
+date, swaps included, so a part-timer who swaps onto a Monday is asked again.
+Before this, someone who never works Mondays was told to book Monday 28 Dec
+and the form then refused the date. Missing or null (older backend, failed
+read) means "offer them all", never "offer none".
+
 **Never seed them as `staff_pattern_exceptions`.** That is the obvious
 implementation and it would make them non-working — silently handing everyone
 eight free days a year that no ledger entry ever paid for.
@@ -527,6 +535,14 @@ admin from the 1st, once — jon submits to payroll before the 4th. It stamps
 retries tomorrow); clear that setting to resend. Figures come from
 `getPayrollReport()` — never a second SUM.
 
+**Every absence that isn't sickness is on it too** (Oct 2026 — spec §12.1
+planned it, the build missed it, the first paternity leave found it): per type
+from `getOtherAbsenceMinutes()` in `staff-absence.ts`, as three columns
+APPENDED to the CSV (`Other absence (days)`, `(hours)`, `(type)` —
+"Paternity 8 days") and a column in the email and the Staff page panel.
+Statutory parental pay is the payroll company's to work out, like SSP. CSV
+columns are only ever appended: the accountants read them by position.
+
 ## Special-category data is masked in the service, not the browser
 
 Sickness and parental data is masked inside `staff-day-status.ts`
@@ -537,7 +553,24 @@ returning full records and hiding them in React.
 **Every `/absences` route is `adminOnly`** (`STAFF_ADMIN_ROLES = ['admin']`),
 with no exceptions. Staff have exactly two things to do in this module: log
 overtime, and request time off as holiday or TOIL. Absence is recorded for
-them, not by them.
+them, not by them — the Book time off form says so, and points paternity,
+maternity, jury service and the rest at an admin (Oct 2026: the first
+paternity leave was booked as holiday because nothing said otherwise).
+
+**The one read that is not admin is `GET /me/absences`** (Oct 2026, jon):
+the person's OWN absences, dates only, shown on My Time as **"Absent"** —
+never the type or reason. `listOwnAbsences()` in `staff-absence.ts` is the
+mask, built from an allow-list; never return `Absence` rows from it. An admin
+may pass `personId=` (the Staff page's Time off tab), like `/me/balances`.
+The calendar feed still carries no absence.
+
+**Removing a feature must not remove its neighbours' routes.** The timed-marker
+removal (781f2782, 15 Sep 2026) also deleted `POST /absences`,
+`GET /absences/:id` and `GET /me/absences`, so "Record it" answered 404 for
+five weeks. `routes/__tests__/staff-calendar-routes.test.ts` now fails if any
+route the Absence page or My Time calls goes missing — add to it when you add
+a call. Absences are also on the Staff page as the person's **Absence** tab
+(`StaffAbsencePage personId={…}`, admin only, after Access).
 
 ## Email is LIVE
 

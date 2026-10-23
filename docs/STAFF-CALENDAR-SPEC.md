@@ -702,6 +702,10 @@ sickness — raises the return-to-work task.
 
 `Absent`. Nothing else. Ever. (§0.5)
 
+Including on their own My Time (Oct 2026, jon): `GET /me/absences` returns the
+dates only, and each spell is a row reading "Absent" — with the hours only when
+it came out of their holiday, which explains the figure on their card.
+
 ### 7.3 Return to work — the standard process
 
 On closing a sickness absence, a notification goes to admin with a short structured form:
@@ -1177,6 +1181,12 @@ to make it send again. Figures come from `getPayrollReport()` in
 `staff-overtime.ts` — never a second SUM. The Payroll report panel on the Staff
 page has "This month", "Last month" and "Year so far" presets.
 
+**Other absence, Oct 2026:** the "Other absence (days)" row of the table above
+was not built until the first paternity leave needed it. Every non-sickness
+absence is now reported by type (`getOtherAbsenceMinutes()`), as three columns
+appended to the CSV — days, hours, and the type ("Paternity 8 days") — and a
+column in the email and the panel.
+
 ### 12.2 Other reports
 
 - Balances and remaining liability across the team (holiday and banked overtime).
@@ -1436,6 +1446,7 @@ Where things are, for troubleshooting:
 | **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
 | — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
 | **§8.2** | Swap a day — asked for on My Time, approved like holiday; nothing on the calendar until approved, then "Swap" on the day given up; changeable hours on the day worked, break copied, the day given up's minutes snapshotted; approval re-checks both days | 307 |
+| — | First paternity leave (Oct 2026): `POST /absences` and `GET /absences/:id` restored (lost with the markers in 215's commit — "Record it" was a 404), with a route guard test; an Absence tab on the Staff page; the person sees their own absence on My Time as "Absent" (`GET /me/absences`, dates only); other absence on the payroll report (§12.1); bank holidays offered only on days the person works; the Book time off form points non-holiday leave at an admin | — |
 
 ### Decisions taken during the build that CHANGE this spec
 
