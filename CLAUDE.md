@@ -611,6 +611,9 @@ journalctl -u ooosh-portal -n 50 --no-pager
   `deploy/safe-restart.sh` is an OPTIONAL extra — it waits for a card-reader payment in progress
   first (up to 5 minutes, then stops without restarting; `FORCE=1` overrides). Don't make it the
   default or put it in `deploy.sh`.
+- **The server runs Node 22 LTS from the NodeSource apt repo** (`/usr/bin/node`, upgraded from an
+  EOL Node 20 on 23 Oct 2026 after CVE-2026-111497). `weekly-maintenance.sh`'s `apt upgrade` keeps it
+  on the latest 22.x; Node 22 leaves maintenance April 2027 — `docs/MAINTENANCE.md` §1.3 is the plan.
 - **`npm install` before building is not optional** on the manual path — a PR that added
   a dependency fails the build with "Cannot find module …". `deploy.sh` always installs.
 - Run `npm run db:migrate` from `backend/` if there are new migrations. Re-running is
