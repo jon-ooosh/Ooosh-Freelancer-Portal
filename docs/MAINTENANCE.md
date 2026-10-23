@@ -40,9 +40,9 @@ These are things that **will** need doing on a known schedule. Non-negotiable.
 | **Frequency** | LTS releases every 12 months (even-numbered: 18, 20, 22, etc.). Security patches more frequently. |
 | **Failure mode** | Running an EOL version means no security patches |
 | **Mitigation** | Use `nvm` for easy version switching. Calendar reminder when current LTS enters maintenance mode. |
-| **Current version** | TBD (will use Node 20 LTS at launch) |
-| **Next action date** | October 2026 — Node 22 LTS becomes active; evaluate upgrade |
-| **Status** | [ ] Not yet configured |
+| **Current version** | Node 22 LTS (NodeSource apt repo, `/usr/bin/node`) — upgraded from 20.20.2 on 23 Oct 2026 after the Node 20 line went EOL unpatched (Brotli RCE, CVE-2026-111497; Stripe telemetry flagged it) |
+| **Next action date** | **Before April 2027** — Node 22 leaves maintenance; move to Node 24 (`setup_24.x` in `deploy/setup-server.sh`, build both dirs on it first) |
+| **Status** | [x] Node 22 since Oct 2026. Security point releases arrive via `apt upgrade` in `weekly-maintenance.sh` |
 
 ### 1.4 npm Dependency Updates
 
