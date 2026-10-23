@@ -8,7 +8,8 @@ review against it.
 Three PRs, in this order:
 1. **Per-job recharges** (backend, built): migration 318, `v_cost_recharges`,
    `services/cost-recharges.ts`. See `docs/COST-CAPTURE-RECHARGE-SPEC.md` "Per-job recharges".
-2. **The laptop form**: rebuild `CostCaptureModal.tsx` to the agreed design below.
+2. **The laptop form** (built): rebuild `CostCaptureModal.tsx` to the agreed design below. Where the
+   build differs, see "What PR 2 built" at the end.
 3. **The phone flow**: the one-question-per-screen stepper, with My Receipts folded in.
 
 ## The form (PR 2)
@@ -96,3 +97,21 @@ Receipts list) above the camera; tap one to attach, or snap and let the duplicat
   manager only). Now `isManagerTier()`.
 - The resolve modal warned "that's a loss" on every PART recharge (it compared with the
   whole invoice). It now checks only a recharge of the whole amount.
+
+## What PR 2 built, and where it differs (Oct 2026)
+
+Built as above, with these differences, each the simpler of two ways to the same end:
+- **"Charge to client" on a freelancer's job is one figure, not Invoiced boxes per expense line.** It
+  starts as what they invoiced over their fee on that job (their fee is in the quote) and can be typed
+  over. Per-line boxes would be lost on the next edit, since nothing stores them.
+- **Each work row has one Invoiced figure** (its share of the invoice), with its chip once typed; the
+  expanded row shows the booking (fee, fuel, tolls) read-only. No "Accept it" button: a chip is a warning,
+  and saving as it is accepts it.
+- **"AI-unsure" is the reader's overall confidence**: below high, the amounts open with a note. The date,
+  near-miss supplier and duplicate warnings show in place, as before.
+- **Refund opens the refund flow** (pick the purchase first) with the document handed over, rather than
+  turning this form's right-hand side into the refund form.
+- **Who pays sits on the job rows, under the work rows**, not inside each work row: Will Fox's five days
+  on three jobs are three answers, not five.
+- **A one-job freelancer invoice with a studio evening is a one-share split**, so the evening stays with
+  overheads, as agreed.

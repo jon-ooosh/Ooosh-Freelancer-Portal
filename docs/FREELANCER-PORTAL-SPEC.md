@@ -204,8 +204,12 @@ which match one freelancer by name.
 
 **What it does** (migration 306):
 - `costs.person_id` (whose invoice) and `cost_work_items` (which work: one row per booking / sitter
-  evening / yard day, with this invoice's share). Kept apart from `cost_allocations`, so job costs on the
-  Money tab (`GET /costs/by-job`) are unchanged; the job split stays by hand ("covers several jobs").
+  evening / yard day, with this invoice's share). Kept apart from `cost_allocations` at first (22 Oct);
+  **since the capture form's redesign (Oct 2026, `docs/design/cost-capture-redesign/DECISIONS.md`) ticking
+  the work ALSO splits the job costs**, one share per job, each with its own who pays (a run's stops are
+  spread over their jobs by what was booked). Studio evenings and yard days are on no job, so they stay
+  with overheads. `cost_work_items` is still what Earnings and the price check read; `cost_allocations`
+  is what the Money tab reads.
 - The upload form, for "Freelance crew invoices" (320): **Whose invoice?** filled in from the letterhead
   (`services/freelancer-invoice-person.ts`: remembered from an earlier linked invoice, then an earlier
   remittance address, then one freelancer by name, compared as supplier matching does) and **Which work
