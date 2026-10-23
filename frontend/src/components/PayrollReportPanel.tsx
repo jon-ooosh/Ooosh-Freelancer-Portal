@@ -25,6 +25,19 @@ interface PayrollRow {
   sicknessMinutes: number;
   sicknessDays: number;
   nominalDayMinutes: number | null;
+  /** Paternity, maternity, jury service… by type (Oct 2026). Optional: an
+   *  older backend does not send it. */
+  otherAbsenceMinutes?: number;
+  otherAbsence?: { type: string; label: string; minutes: number; days: number }[];
+}
+
+/** "Paternity 8 days" — the same wording as the email and the CSV. */
+function otherAbsenceText(r: PayrollRow): string {
+  return (r.otherAbsence ?? [])
+    .map(o => (o.days === 0 && o.minutes > 0
+      ? `${o.label} ${fmtH(o.minutes)}`
+      : `${o.label} ${o.days} day${o.days === 1 ? '' : 's'}`))
+    .join('; ');
 }
 
 function fmtH(mins: number): string {
@@ -161,6 +174,7 @@ export default function PayrollReportPanel() {
                 <th className="py-1.5 pr-3 text-right">Overtime to pay</th>
                 <th className="py-1.5 pr-3 text-right">Unpaid leave</th>
                 <th className="py-1.5 pr-3 text-right">Sickness</th>
+                <th className="py-1.5 pr-3">Other absence</th>
               </tr>
             </thead>
             <tbody>
@@ -181,6 +195,9 @@ export default function PayrollReportPanel() {
                   <td className="py-1.5 pr-3 text-right tabular-nums">
                     {r.sicknessDays === 0 ? '—' : `${r.sicknessDays} days`}
                   </td>
+                  <td className="py-1.5 pr-3 text-gray-700">
+                    {(r.otherAbsenceMinutes ?? 0) === 0 ? '—' : otherAbsenceText(r)}
+                  </td>
                 </tr>
               ))}
               {/* The single figure to send payroll — the whole point of a
@@ -189,7 +206,7 @@ export default function PayrollReportPanel() {
               <tr className="border-t-2 border-gray-300 font-medium">
                 <td className="py-1.5 pr-3">Total overtime to pay</td>
                 <td className="py-1.5 pr-3 text-right tabular-nums">{fmtH(totalOvertime)}</td>
-                <td colSpan={2} />
+                <td colSpan={3} />
               </tr>
             </tbody>
           </table>

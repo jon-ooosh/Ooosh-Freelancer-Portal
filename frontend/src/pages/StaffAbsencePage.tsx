@@ -119,9 +119,16 @@ function addMonths(iso: string, months: number): string {
   return Number.isNaN(dt.getTime()) ? iso : dt.toISOString().slice(0, 10);
 }
 
-export default function StaffAbsencePage() {
+/**
+ * `personId` set = the Staff page's Absence tab for one person (Oct 2026): the
+ * same page, narrowed to them, with "Record an absence" already pointed at
+ * them. Same idea as the Time off tab mounting My Time — one page, so the two
+ * views cannot drift.
+ */
+export default function StaffAbsencePage({ personId }: { personId?: string } = {}) {
   const role = useAuthStore(s => s.user?.role);
   const isAdmin = role === 'admin';
+  const scoped = !!personId;
 
   const [absences, setAbsences] = useState<Absence[]>([]);
   const [rtwOutstanding, setRtwOutstanding] = useState<RtwOutstanding[]>([]);
@@ -131,7 +138,7 @@ export default function StaffAbsencePage() {
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [personFilter, setPersonFilter] = useState('');
+  const [personFilter, setPersonFilter] = useState(personId ?? '');
 
   const reportFrom = useMemo(() => addMonths(TODAY, -12), []);
 
@@ -147,15 +154,16 @@ export default function StaffAbsencePage() {
         api.get<{ data: RosterRow[] }>('/staff-calendar/roster'),
       ]);
       setAbsences(abs.data);
-      setRtwOutstanding(abs.rtwOutstanding ?? []);
-      setReport(rep.data);
+      // Both are team-wide from the API; on one person's tab show only theirs.
+      setRtwOutstanding((abs.rtwOutstanding ?? []).filter(r => !personId || r.personId === personId));
+      setReport(rep.data.filter(r => !personId || r.personId === personId));
       setRoster(ros.data.filter(r => r.personId && r.employment));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load absences');
     } finally {
       setLoading(false);
     }
-  }, [personFilter, reportFrom]);
+  }, [personFilter, reportFrom, personId]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -173,32 +181,44 @@ export default function StaffAbsencePage() {
   }
 
   return (
-    <div className="p-4 sm:p-6 max-w-6xl">
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Absence</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Sickness, parental leave and return-to-work. Admin only.
+    <div className={scoped ? '' : 'p-4 sm:p-6 max-w-6xl'}>
+      {scoped ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <p className="text-sm text-gray-500">
+            Sickness, parental leave and return-to-work. Admin only — they see it as “Absent”.
           </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Link to="/staff/admin"
-            className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Staff</Link>
-          <Link to="/staff/calendar"
-            className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Calendar</Link>
           <button onClick={() => setAdding(true)}
             className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">
             Record an absence
           </button>
         </div>
-      </div>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">Absence</h1>
+            <p className="text-sm text-gray-500 mt-0.5">
+              Sickness, parental leave and return-to-work. Admin only.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Link to="/staff/admin"
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Staff</Link>
+            <Link to="/staff/calendar"
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Calendar</Link>
+            <button onClick={() => setAdding(true)}
+              className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">
+              Record an absence
+            </button>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 p-3 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>
       )}
 
       {adding && (
-        <AddAbsence roster={roster} onClose={() => setAdding(false)}
+        <AddAbsence roster={roster} fixedPersonId={personId} onClose={() => setAdding(false)}
           onSaved={() => { setAdding(false); void load(); }} onError={setError} />
       )}
 
@@ -308,14 +328,16 @@ export default function StaffAbsencePage() {
       {/* ── The record ─────────────────────────────────────────────────────── */}
       <section className="rounded-lg border border-gray-200 bg-white">
         <div className="px-4 py-3 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-gray-900">All absences</h2>
-          <select value={personFilter} onChange={e => setPersonFilter(e.target.value)}
-            className="px-2 py-1 text-sm rounded border border-gray-300">
-            <option value="">Everyone</option>
-            {roster.map(r => (
-              <option key={r.personId} value={r.personId}>{r.preferredName || r.name}</option>
-            ))}
-          </select>
+          <h2 className="text-sm font-semibold text-gray-900">{scoped ? 'Absences' : 'All absences'}</h2>
+          {!scoped && (
+            <select value={personFilter} onChange={e => setPersonFilter(e.target.value)}
+              className="px-2 py-1 text-sm rounded border border-gray-300">
+              <option value="">Everyone</option>
+              {roster.map(r => (
+                <option key={r.personId} value={r.personId}>{r.preferredName || r.name}</option>
+              ))}
+            </select>
+          )}
         </div>
 
         {loading ? (
@@ -445,7 +467,8 @@ function AbsenceActions({ a, onChanged, onError }: {
   onError: (msg: string) => void;
 }) {
   const [closing, setClosing] = useState(false);
-  const [endDate, setEndDate] = useState(TODAY);
+  // Never before the first day off — the server refuses it anyway.
+  const [endDate, setEndDate] = useState(a.startDate > TODAY ? a.startDate : TODAY);
   const [rtwOpen, setRtwOpen] = useState(false);
   const [reclaim, setReclaim] = useState<ReclaimCandidate[] | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
@@ -530,7 +553,7 @@ function AbsenceActions({ a, onChanged, onError }: {
         <div className="flex flex-wrap items-end gap-2 rounded border border-gray-200 bg-white p-3">
           <label className="text-sm">
             <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Last day off</span>
-            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+            <input type="date" value={endDate} min={a.startDate} onChange={e => setEndDate(e.target.value)}
               className="px-2 py-1 rounded border border-gray-300" />
           </label>
           <button disabled={busy}
@@ -647,13 +670,15 @@ function RtwForm({ absenceId, onDone, onClose, onError }: {
 
 // ── Recording one ───────────────────────────────────────────────────────────
 
-function AddAbsence({ roster, onClose, onSaved, onError }: {
+function AddAbsence({ roster, fixedPersonId, onClose, onSaved, onError }: {
   roster: RosterRow[];
+  /** Set on a person's Absence tab: the form is for them and nobody else. */
+  fixedPersonId?: string;
   onClose: () => void;
   onSaved: () => void;
   onError: (msg: string) => void;
 }) {
-  const [personId, setPersonId] = useState('');
+  const [personId, setPersonId] = useState(fixedPersonId ?? '');
   const [absenceType, setType] = useState<AbsenceType>('sickness');
   const [startDate, setStart] = useState(TODAY);
   const [ongoing, setOngoing] = useState(true);
@@ -668,6 +693,8 @@ function AddAbsence({ roster, onClose, onSaved, onError }: {
 
   async function save() {
     if (!personId) { onError('Pick who this is for'); return; }
+    const hasEnd = !(ongoing && portion === 'full');
+    if (hasEnd && endDate < startDate) { onError('The last day off can’t be before the first'); return; }
     setBusy(true);
     try {
       await api.post('/staff-calendar/absences', {
@@ -694,7 +721,8 @@ function AddAbsence({ roster, onClose, onSaved, onError }: {
         <label className="text-sm">
           <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Who</span>
           <select value={personId} onChange={e => setPersonId(e.target.value)}
-            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white">
+            disabled={!!fixedPersonId}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white disabled:bg-gray-100">
             <option value="">Pick someone…</option>
             {roster.map(r => (
               <option key={r.personId} value={r.personId}>{r.preferredName || r.name}</option>
@@ -724,12 +752,19 @@ function AddAbsence({ roster, onClose, onSaved, onError }: {
       <div className="grid sm:grid-cols-3 gap-3">
         <label className="text-sm">
           <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">First day off</span>
-          <input type="date" value={startDate} onChange={e => setStart(e.target.value)}
+          {/* Moving the first day past the last drags the last day with it,
+              so the pair can never read backwards (jon, Oct 2026). */}
+          <input type="date" value={startDate}
+            onChange={e => {
+              const v = e.target.value;
+              setStart(v);
+              if (v && endDate < v) setEnd(v);
+            }}
             className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
         </label>
         <label className="text-sm">
           <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Last day off</span>
-          <input type="date" value={endDate} disabled={ongoing && portion === 'full'}
+          <input type="date" value={endDate} min={startDate} disabled={ongoing && portion === 'full'}
             onChange={e => setEnd(e.target.value)}
             className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white disabled:bg-gray-100" />
         </label>
