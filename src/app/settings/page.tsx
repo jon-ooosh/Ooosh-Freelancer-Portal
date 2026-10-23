@@ -311,7 +311,9 @@ export default function SettingsPage() {
               <span className="text-[14px] text-hf-muted">
                 {notifications?.globalMuteActive
                   ? `Paused until ${formatMuteDate(notifications.globalMuteUntil)}`
-                  : 'New jobs, changes and cancellations'}
+                  // Pausing stops these two only: cancellations, reminders to finish a
+                  // job, yard-day offers and sign-in emails still arrive (Oct 2026).
+                  : 'New jobs and changes'}
               </span>
             </div>
             {notifications?.globalMuteActive ? (
@@ -416,7 +418,7 @@ export default function SettingsPage() {
               <span className="w-12 h-12 rounded-full bg-hf-amber-bg text-hf-amber-text flex items-center justify-center"><AlertTriangle size={24} strokeWidth={2} /></span>
               <h3 className="text-[18px] font-semibold text-hf-ink">Turn off all job emails?</h3>
               <p className="text-[15px] text-hf-body leading-[1.45]">
-                You won&apos;t receive any emails about new jobs, changes or cancellations until you turn them back on yourself.
+                You won&apos;t receive any emails about new jobs or changes until you turn them back on yourself. We&apos;ll still email you if a job is cancelled.
               </p>
             </div>
             <Banner tone="warning" className="text-center"><strong>Important:</strong> you may miss time-sensitive job updates.</Banner>

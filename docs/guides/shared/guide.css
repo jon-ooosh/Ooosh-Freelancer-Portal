@@ -105,7 +105,7 @@ li { margin-bottom: 5px; }
 
 /* Cover */
 .cover { display: flex; flex-direction: column; }
-.cover .logo { width: 74px; margin: 2px 0 18px; }
+.cover .logo { width: 74px; margin: 0 0 10px; }
 .cover h1 { margin: 0 0 4px; font-size: 30px; line-height: 1.12; color: var(--ink); font-weight: 800; letter-spacing: -0.02em; }
 .cover .sub { margin: 0 0 16px; font-size: 16px; color: var(--link); font-weight: 600; }
 .rules { border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px 4px; margin-top: 4px; }

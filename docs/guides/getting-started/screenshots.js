@@ -51,7 +51,10 @@ const DAYS = {
   upcoming: [{ id: 'd1', date: day(3), startTime: '09:00', endTime: '17:00', durationType: 'full_day', rateType: 'day',
     agreedRate: 140, notes: 'Warehouse: prepping backline for a tour', status: 'offered', invoiceReceived: false, tasks: [] }],
 }
-const SHIFTS = { success: true, shifts: [] }
+const SHIFTS = { success: true, shifts: [
+  { date: day(4), planned_start: '18:00:00', planned_end: '23:00:00', status: 'scheduled', assignment_status: 'confirmed',
+    fee: 90, report_submitted_at: null, jobs: [] },
+] }
 
 const VENUE = {
   id: 'v1', name: 'Roundhouse', address: 'Chalk Farm Road, London NW1 8EH', loadInAddress: null,
@@ -144,6 +147,15 @@ async function main() {
     const page = await context.newPage()
     await page.goto(`${BASE}/login`, { waitUntil: 'networkidle' })
     await snap(page, OUT, '01-sign-in', [page.locator('img').first(), page.getByRole('button', { name: 'Sign in' })], { padTop: 20, padBottom: 28 })
+
+    // 01b: the emailed sign-in code (on a phone it doesn't know yet)
+    await page.route('**/api/auth/login', (r) => r.fulfill({ json: {
+      success: true, needsCode: true, pending: 'sample', emailHint: 'a***@example.com', codeSent: true } }))
+    await page.fill('input[type="email"]', 'alex@example.com')
+    await page.fill('input[type="password"]', 'sample-password')
+    await page.getByRole('button', { name: 'Sign in' }).click()
+    await page.getByText('Check your email').waitFor()
+    await snap(page, OUT, '01b-sign-in-code', [page.getByText('Check your email'), page.getByText(/Remember this phone/).last()], { padTop: 24, padBottom: 40 })
     await browser.close()
   }
 
