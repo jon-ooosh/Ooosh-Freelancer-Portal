@@ -24,6 +24,8 @@
 import { query } from '../config/database';
 import { emailService } from './email-service';
 import { ukToday } from './uk-date';
+import { resolveActionBells } from './notification-resolve';
+import type { BellKey } from './bell-rules';
 
 const STAFF_URL = '/staff/admin';
 const ABSENCE_URL = '/staff/absence';
@@ -107,17 +109,24 @@ async function notify(
    * 15-minute escalator does not email it a second time four hours later —
    * which is exactly what happened with every TOIL request (jon, Oct 2026):
    * requested → emailed → approved → the still-unread bell escalated as
-   * "X has requested TOIL" again. Approving never marks the bell read, so
-   * the stamp is the only thing that stops it (email-and-notifications
-   * rules). Bells WITHOUT a direct email (the task and review chases) leave
-   * this false so the escalator still does its job for them.
+   * "X has requested TOIL" again. Deciding a leave request now retires its
+   * bell (`retireLeaveRequestBells`, Oct 2026), but a request can sit unread
+   * for hours before anyone decides, so the stamp is still what stops it
+   * (email-and-notifications rules). Bells WITHOUT a direct email (the task
+   * and review chases) leave this false so the escalator still does its job
+   * for them.
    */
   emailedDirectly = false,
+  /**
+   * What this bell ASKS for — its rule in bell-rules.ts retires it once that
+   * is done. Leave null for an FYI bell (done when read).
+   */
+  resolveKey: BellKey | null = null,
 ) {
   await query(
-    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CASE WHEN $9::boolean THEN NOW() END)`,
-    [userId, type, title, content, entityType, entityId, actionUrl, priority, emailedDirectly]
+    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CASE WHEN $9::boolean THEN NOW() END, $10)`,
+    [userId, type, title, content, entityType, entityId, actionUrl, priority, emailedDirectly, resolveKey]
   ).catch(e => console.error(`[staff-notifications] notify failed (${type}, ${entityType}):`, e));
 }
 
@@ -154,6 +163,17 @@ export async function notifyLeaveRequested(requestId: string) {
   } catch (e) { console.error('[staff-notifications] leave requested:', e); }
 }
 
+/**
+ * The request is no longer waiting (approved, declined or withdrawn), so the
+ * approvers' "X has requested holiday" bells above are done with — for every
+ * approver, not just the one who acted. Only the `follow_up` bells: the
+ * requester's "Time off approved" bell is `system` on the same request and
+ * must survive. Called by staff-leave.ts; never throws (notification-resolve.ts).
+ */
+export async function retireLeaveRequestBells(requestId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_leave_request', entityId: requestId, type: 'follow_up' });
+}
+
 export async function notifyOvertimeLogged(entryId: string) {
   try {
     const r = await query(
@@ -179,6 +199,16 @@ export async function notifyOvertimeLogged(entryId: string) {
       ],
       link);
   } catch (e) { console.error('[staff-notifications] overtime logged:', e); }
+}
+
+/**
+ * The entry is no longer waiting (approved, declined or withdrawn) — every
+ * approver's "X logged overtime" bell is done with. `follow_up` only; the
+ * person's "Overtime approved" bell is `system` on the same entry. Called by
+ * staff-overtime.ts; never throws. Same rule as retireLeaveRequestBells.
+ */
+export async function retireOvertimeBells(entryId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_overtime_entry', entityId: entryId, type: 'follow_up' });
 }
 
 /** Somebody asked to work from home — same route to the approver as leave. */
@@ -209,6 +239,62 @@ export async function notifyWfhRequested(requestId: string) {
       ],
       link);
   } catch (e) { console.error('[staff-notifications] wfh requested:', e); }
+}
+
+/** "Paid hours on the new day, against the day given up" — for the approver. */
+function swapHoursLine(minutes: number, usualMinutes: number | null): string {
+  if (usualMinutes === null) return fmtH(minutes);
+  const diff = minutes - usualMinutes;
+  if (diff === 0) return `${fmtH(minutes)} — the same as the day given up`;
+  return `${fmtH(minutes)} — ${fmtH(Math.abs(diff))} ${diff > 0 ? 'longer' : 'shorter'} than the day given up`;
+}
+
+/** Somebody asked to swap a day (services/staff-swaps.ts) — same route to the approver as leave. */
+export async function notifySwapRequested(swapId: string) {
+  try {
+    // Dynamic: staff-swaps.ts imports this module for retireSwapRequestBells.
+    const { getSwap } = await import('./staff-swaps');
+    const q = await getSwap(swapId);
+    if (!q) return;
+    const link = APPROVALS_URL;
+    const what = `Off ${fmtDate(q.offDate)}, working ${fmtDate(q.workDate)} ${q.startTime}–${q.endTime} instead`;
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        `${q.personName} has asked to swap a day`, what,
+        'staff_pattern_swap', q.id, link, 'normal', true);
+    }
+    await emailApprovers(
+      `${q.personName} has asked to swap a day`,
+      `${esc(q.personName)} has asked to swap a day`,
+      [
+        `Off <strong>${esc(fmtDate(q.offDate))}</strong>, working <strong>${esc(fmtDate(q.workDate))}</strong> ` +
+          `${esc(q.startTime)}–${esc(q.endTime)} instead`,
+        esc(swapHoursLine(q.minutes, q.usualMinutes)),
+        ...(q.requestNote ? [`<span style="color:#64748b;">“${esc(q.requestNote)}”</span>`] : []),
+      ],
+      link);
+  } catch (e) { console.error('[staff-notifications] swap requested:', e); }
+}
+
+/**
+ * The swap is no longer waiting (approved, declined or withdrawn), so every
+ * approver's "X has asked to swap a day" bell is done with. Only `follow_up`:
+ * the person's own "Day swap approved" bell is `system` on the same id and
+ * must survive. Called by staff-swaps.ts; never throws (notification-resolve.ts).
+ */
+export async function retireSwapRequestBells(swapId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_pattern_swap', entityId: swapId, type: 'follow_up' });
+}
+
+/**
+ * The request is no longer waiting (approved, declined or withdrawn) — every
+ * approver's "X has asked to work from home" bell is done with. `follow_up`
+ * only; the person's "Working from home approved" bell is `system` on the
+ * same request. Called by staff-wfh.ts; never throws. Same rule as
+ * retireLeaveRequestBells.
+ */
+export async function retireWfhBells(requestId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_wfh_request', entityId: requestId, type: 'follow_up' });
 }
 
 /**
@@ -258,7 +344,7 @@ async function emailApprovers(
  */
 export async function notifyDecision(opts: {
   personId: string;
-  kind: 'leave' | 'overtime' | 'wfh';
+  kind: 'leave' | 'overtime' | 'wfh' | 'swap';
   outcome: 'approved' | 'declined' | 'cancelled';
   summary: string;
   note?: string | null;
@@ -269,7 +355,8 @@ export async function notifyDecision(opts: {
       `SELECT id, email FROM users WHERE person_id = $1 AND is_active = true LIMIT 1`, [opts.personId]);
     const userId = u.rows[0]?.id;
     if (!userId) return;   // no login — nothing to notify to
-    const what = opts.kind === 'leave' ? 'Time off' : opts.kind === 'wfh' ? 'Working from home' : 'Overtime';
+    const what = opts.kind === 'leave' ? 'Time off' : opts.kind === 'wfh' ? 'Working from home'
+      : opts.kind === 'swap' ? 'Day swap' : 'Overtime';
     // The routes pass ISO dates and raw minutes; say them the way people do.
     const summary = opts.summary
       .replace(/\d{4}-\d{2}-\d{2}/g, d => fmtDate(d))
@@ -278,7 +365,8 @@ export async function notifyDecision(opts: {
     await notify(userId, 'system',
       `${what} ${opts.outcome}: ${summary}`,
       opts.note ?? '',
-      opts.kind === 'leave' ? 'staff_leave_request' : opts.kind === 'wfh' ? 'staff_wfh_request' : 'staff_overtime_entry',
+      opts.kind === 'leave' ? 'staff_leave_request' : opts.kind === 'wfh' ? 'staff_wfh_request'
+        : opts.kind === 'swap' ? 'staff_pattern_swap' : 'staff_overtime_entry',
       opts.entityId, MY_TIME,
       opts.outcome === 'declined' ? 'high' : 'normal', true);
 
@@ -290,7 +378,8 @@ export async function notifyDecision(opts: {
     if (to) {
       const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
       const word = opts.outcome === 'approved' ? 'approved' : opts.outcome === 'declined' ? 'declined' : 'cancelled';
-      const heading = `Your ${opts.kind === 'leave' ? 'time off' : opts.kind === 'wfh' ? 'working-from-home request' : 'overtime'} has been ${word}`;
+      const heading = `Your ${opts.kind === 'leave' ? 'time off' : opts.kind === 'wfh' ? 'working-from-home request'
+        : opts.kind === 'swap' ? 'day swap' : 'overtime'} has been ${word}`;
       const body =
         `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">${esc(heading)}</h2>` +
         `<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;"><strong>${esc(summary)}</strong></p>` +
@@ -327,7 +416,7 @@ export async function notifyRtwDue(absenceId: string) {
       await notify(u.id, 'follow_up',
         `Return-to-work due for ${q.name}`,
         `Back on ${fmtDate(q.end_date)} — record the conversation`,
-        'staff_absence', q.id, ABSENCE_URL, 'normal', true);
+        'staff_absence', q.id, ABSENCE_URL, 'normal', true, 'rtw_due');
     }
     await emailApprovers(
       `Return-to-work due for ${q.name}`,
@@ -363,7 +452,7 @@ export async function runRtwChase(chaseDays?: number): Promise<RtwChaseResult> {
       await notify(u.id, 'follow_up',
         `Return-to-work still outstanding for ${a.personName}`,
         `Back on ${fmtDate(a.endDate)} — ${a.daysWaiting} days ago`,
-        'staff_absence', a.id, ABSENCE_URL, 'high', true);
+        'staff_absence', a.id, ABSENCE_URL, 'high', true, 'rtw_due');
     }
     await emailApprovers(
       `Return-to-work still outstanding for ${a.personName}`,
@@ -455,7 +544,7 @@ export async function runFreelancerOfferChase(chaseDays?: number): Promise<Offer
       await notify(u.id, 'follow_up',
         `${who} has not confirmed for tomorrow`,
         `Offered a yard day on ${fmtDate(row.booking_date)} and has not replied`,
-        'freelancer_day_booking', row.id as string, CALENDAR_URL, 'high', true);
+        'freelancer_day_booking', row.id as string, CALENDAR_URL, 'high', true, 'freelancer_unconfirmed');
     }
     await emailApprovers(
       `${who} has not confirmed for tomorrow`,
@@ -487,6 +576,7 @@ export interface DigestResult {
   pendingLeave: number;
   pendingOvertime: number;
   pendingWfh?: number;
+  pendingSwaps?: number;
   emailed: boolean;
   skippedReason?: string;
 }
@@ -498,7 +588,8 @@ export interface DigestResult {
  * quiet — "nothing pending" is a result, not a failure.
  */
 export async function runStaffTimeDigest(): Promise<DigestResult> {
-  const [leave, overtime, wfh] = await Promise.all([
+  const { listSwaps } = await import('./staff-swaps');
+  const [leave, overtime, wfh, swaps] = await Promise.all([
     query(
       `SELECT r.id, r.leave_type, r.total_minutes, r.request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
@@ -519,15 +610,21 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
          FROM staff_wfh_requests w JOIN people p ON p.id = w.person_id
         WHERE w.status = 'pending'
         ORDER BY w.start_date`),
+    // A failure here must not cost the morning its leave and overtime list.
+    listSwaps({ status: 'pending' }).catch(e => {
+      console.error('[staff-notifications] digest: swaps unreadable:', e);
+      return [];
+    }),
   ]);
 
   const result: DigestResult = {
     pendingLeave: leave.rows.length,
     pendingOvertime: overtime.rows.length,
     pendingWfh: wfh.rows.length,
+    pendingSwaps: swaps.length,
     emailed: false,
   };
-  if (result.pendingLeave === 0 && result.pendingOvertime === 0 && wfh.rows.length === 0) {
+  if (result.pendingLeave === 0 && result.pendingOvertime === 0 && wfh.rows.length === 0 && swaps.length === 0) {
     result.skippedReason = 'nothing pending';
     return result;
   }
@@ -576,7 +673,20 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
     }
   }
 
-  const total = result.pendingLeave + result.pendingOvertime + wfh.rows.length;
+  if (swaps.length > 0) {
+    rows.push(`<h3 style="margin:20px 0 8px;font-size:15px;color:#1e293b;">Day swaps (${swaps.length})</h3>`);
+    for (const q of swaps) {
+      rows.push(
+        `<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">` +
+        `<strong>${esc(q.personName)}</strong> — off ${esc(fmtDate(q.offDate))}, ` +
+        `working ${esc(fmtDate(q.workDate))} ${esc(q.startTime)}–${esc(q.endTime)} instead` +
+        (q.requestNote ? `<br><span style="color:#64748b;">“${esc(q.requestNote)}”</span>` : '') +
+        `</p>`
+      );
+    }
+  }
+
+  const total = result.pendingLeave + result.pendingOvertime + wfh.rows.length + swaps.length;
   const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
   const body =
     `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">` +
@@ -728,7 +838,7 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
   for (const u of await approverUserIds()) {
     await notify(u.id, 'follow_up', title,
       `${people.length} ${people.length === 1 ? 'person has' : 'people have'} ${fmtH(totalMinutes)} between them`,
-      'staff_overtime_entry', null, STAFF_URL, 'high', true);
+      'staff_overtime_entry', null, STAFF_URL, 'high', true, 'overtime_cashout');
   }
 
   await emailApprovers(title, title,
@@ -1079,7 +1189,9 @@ export async function runTaskChase(): Promise<{ chased: number }> {
       'staff_tasks',
       row.id,
       '/me?tab=todo',
-      'normal'
+      'normal',
+      false,
+      'task_owner',
     );
     chased++;
   }
@@ -1128,7 +1240,7 @@ export async function runListItemChase(): Promise<{ chased: number }> {
       await notify(
         w.id, 'staff_list_item_due', `On ${esc(row.list_name)}: something needs doing`,
         `“${esc(row.title)}” ${when} — nobody has taken it yet.`,
-        'staff_tasks', row.id, `/me?tab=todo&view=lists&list=${row.list_id}`, 'normal'
+        'staff_tasks', row.id, `/me?tab=todo&view=lists&list=${row.list_id}`, 'normal', false, 'task_list_item'
       );
     }
     chased++;
@@ -1162,7 +1274,7 @@ export async function notifyTaskAssigned(
   await notify(
     userId, 'staff_task_assigned', 'You’ve been given a to-do',
     `${esc(byName || 'Somebody')} gave you “${esc(title)}”${dueDate ? `, due ${fmtDate(dueDate)}` : ''}.`,
-    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal'
+    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal', false, 'task_owner'
   );
 }
 
@@ -1173,7 +1285,7 @@ export async function notifyTaskHandedBack(
   await notify(
     setterUserId, 'staff_task_handed_back', 'A to-do was handed back to you',
     `${esc(byName || 'Somebody')} handed back “${esc(title)}”: ${esc(reason)}. It’s on your list now.`,
-    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal'
+    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal', false, 'task_owner'
   );
 }
 
@@ -1202,7 +1314,7 @@ export async function notifySeriesProposed(
     `${esc(byName || 'Somebody')} wants to give you “${esc(title)}” — ` +
     `${esc(ruleText.charAt(0).toLowerCase() + ruleText.slice(1))}. ` +
     'Accept or decline it on your To Do.',
-    'staff_task_series', seriesId, `${TODO_URL}&view=mine`, 'normal'
+    'staff_task_series', seriesId, `${TODO_URL}&view=mine`, 'normal', false, 'series_proposed'
   );
 }
 
@@ -1264,7 +1376,7 @@ export async function runTaskFollowUpChase(): Promise<{ chased: number }> {
       row.created_by, 'staff_task_follow_up', 'A to-do you set is still open',
       `${esc(row.owner_name || 'Somebody')}’s “${esc(row.title)}” is still open` +
       `${row.due_date ? ` (due ${fmtDate(row.due_date)})` : ''}.`,
-      'staff_tasks', row.id, `${TODO_URL}&view=assigned`, 'normal'
+      'staff_tasks', row.id, `${TODO_URL}&view=assigned`, 'normal', false, 'task_follow_up'
     );
     chased++;
   }
@@ -1317,7 +1429,9 @@ export async function runReviewDueScan(): Promise<{ flagged: number }> {
         'people',
         row.person_id,
         `${STAFF_URL}?person=${row.person_id}&tab=reviews`,
-        'normal'
+        'normal',
+        false,
+        'review_due',
       );
     }
     flagged++;
@@ -1423,10 +1537,11 @@ export async function runRecordActionChase(): Promise<{ chased: number }> {
     for (const admin of recipients) {
       await query(
         `INSERT INTO notifications
-           (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-         VALUES ($1, $2, $3, $4, 'staff_record_files', $5, $6, $7, $8)`,
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+         VALUES ($1, $2, $3, $4, 'staff_record_files', $5, $6, $7, $8, $9)`,
         [admin.id, isDelete ? 'staff_record_delete_due' : 'staff_record_action_due',
-         title, fullContent, rec.id, url, priority, emailNow ? new Date() : null]
+         title, fullContent, rec.id, url, priority, emailNow ? new Date() : null,
+         isDelete ? 'record_delete' : 'record_action']
       ).catch(e => console.error('[staff-notifications] record action bell failed:', e));
 
       if (emailNow && admin.email) {

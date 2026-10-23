@@ -9,12 +9,14 @@ import {
 } from '../../../shared/types';
 import { stripOptionSuffix } from '../lib/quoteOptions';
 import OptionTag from './OptionTag';
+import { PROJECT_COPY } from '../lib/projectCopy';
 
 interface SearchResult {
   id: string;
   name: string;
   subtitle: string | null;
-  type: 'person' | 'organisation' | 'venue' | 'job';
+  // 'project' (docs/JOB-PROJECTS-SPEC.md): `id` is one of its jobs, where the panel lives.
+  type: 'person' | 'organisation' | 'venue' | 'job' | 'project';
   // pipeline_status holds both pre-confirmation (PipelineStatus) and
   // post-confirmation (OperationalStatus) values — typed as string here.
   pipeline_status?: string | null;
@@ -33,6 +35,7 @@ const typeLabels: Record<string, string> = {
   organisation: 'Org',
   venue: 'Venue',
   job: 'Job',
+  project: PROJECT_COPY.searchLabel,
 };
 
 const typeColors: Record<string, string> = {
@@ -40,6 +43,7 @@ const typeColors: Record<string, string> = {
   organisation: 'bg-purple-100 text-purple-700',
   venue: 'bg-teal-100 text-teal-700',
   job: 'bg-amber-100 text-amber-700',
+  project: 'bg-ooosh-100 text-ooosh-700',
 };
 
 // Map HireHop integer status → operational status key
@@ -150,6 +154,7 @@ export default function GlobalSearch() {
       organisation: `/organisations/${result.id}`,
       venue: `/venues/${result.id}`,
       job: `/jobs/${result.id}`,
+      project: `/jobs/${result.id}`,
     };
     navigate(paths[result.type]);
     setQuery('');

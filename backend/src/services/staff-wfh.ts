@@ -19,6 +19,7 @@
 
 import { query } from '../config/database';
 import { DATE_RE } from './staff-day-status';
+import { retireWfhBells } from './staff-notifications';
 
 export type WfhStatus = 'pending' | 'approved' | 'declined' | 'withdrawn' | 'cancelled';
 
@@ -93,6 +94,8 @@ export async function decideWfhRequest(
       WHERE id = $1 AND status = 'pending' RETURNING id`,
     [id, outcome, userId, note]);
   if (!r.rows.length) throw new Error('That request is no longer waiting for a decision');
+  // No longer waiting — every approver's bell for it is done with.
+  await retireWfhBells(id);
   return (await getWfhRequest(id))!;
 }
 
@@ -103,6 +106,7 @@ export async function withdrawWfhRequest(id: string, personId: string): Promise<
       WHERE id = $1 AND person_id = $2 AND status = 'pending' RETURNING id`,
     [id, personId]);
   if (!r.rows.length) throw new Error('That request is no longer pending');
+  await retireWfhBells(id);
 }
 
 /** An admin calls off an approved home day — they are expected in after all. */

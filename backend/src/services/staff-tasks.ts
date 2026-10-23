@@ -25,6 +25,20 @@
 import { query } from '../config/database';
 import { STAFF_ADMIN_ROLES } from './staff-employment';
 import { ukToday } from './uk-date';
+import { retireDoneBells } from './notification-resolve';
+
+/**
+ * A write that can settle a to-do's bells — closed, reassigned, handed back,
+ * taken off a list, put back, follow-up moved. bell-rules.ts decides for each
+ * bell (per person: whoever is no longer its owner is done with it). Exported
+ * for staff-task-series.ts, which closes occurrences with its own SQL.
+ * Never throws.
+ */
+export async function retireTaskBells(taskId: string): Promise<void> {
+  await retireDoneBells('task_owner', taskId);
+  await retireDoneBells('task_list_item', taskId);
+  await retireDoneBells('task_follow_up', taskId);
+}
 
 export const TASK_STATUSES = ['open', 'done', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -102,7 +116,11 @@ const SELECT_TASKS = `
          CASE WHEN t.source_type = 'vehicle_sale' THEN (
            SELECT '/vehicles/fleet/' || vs.vehicle_id || '/sale'
              FROM vehicle_sales vs WHERE vs.id = t.source_id
-         ) END AS source_link,
+         )
+         -- An option confirmed with nobody on the page → the job, with the
+         -- Confirm panel open (services/option-confirm.ts).
+         WHEN t.source_type = 'quote_option' THEN '/jobs/' || t.source_id || '?group_prompt=1'
+         END AS source_link,
          t.created_at, t.completed_at,
          t.created_by, t.is_private,
          t.follow_up_on::text AS follow_up_on,
@@ -446,6 +464,7 @@ export async function updateTask(
     const { onOccurrenceClosed } = await import('./staff-task-series');
     await onOccurrenceClosed(taskId).catch(e => console.error('[staff-tasks] next occurrence failed:', e));
   }
+  await retireTaskBells(taskId);
   return row;
 }
 
@@ -493,6 +512,7 @@ export async function handBackTask(taskId: string, reason: string, userId: strin
   } catch (e) {
     console.error('[staff-tasks] handed-back bell failed:', e);
   }
+  await retireTaskBells(taskId);
   return row;
 }
 
@@ -528,6 +548,7 @@ export async function takeTask(taskId: string, userId: string) {
     [taskId, mine]
   );
   if (!r.rows.length) throw new Error('Somebody’s already on it — or it’s gone');
+  await retireTaskBells(taskId);
   return taskFacts(taskId);
 }
 
@@ -541,6 +562,7 @@ export async function releaseTask(taskId: string, userId: string, role: string |
       WHERE id = $1 AND status = 'open'`,
     [taskId]
   );
+  await retireTaskBells(taskId);
   return taskFacts(taskId);
 }
 
@@ -612,6 +634,7 @@ export async function cancelTask(taskId: string, userId: string, role: string | 
     const { onOccurrenceClosed } = await import('./staff-task-series');
     await onOccurrenceClosed(taskId).catch(e => console.error('[staff-tasks] next occurrence failed:', e));
   }
+  await retireTaskBells(taskId);
   return { id: taskId };
 }
 

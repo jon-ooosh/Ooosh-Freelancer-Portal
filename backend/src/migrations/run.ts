@@ -343,6 +343,20 @@ async function runMigrations(direction: 'up' | 'down') {
         '301_freelancer_terms_from_approval.sql',
         '302_portal_sessions_valid_after.sql',
         '303_portal_login_security.sql',
+        '304_clear_chase_outside_enquiry.sql',
+        '305_retire_decided_leave_bells.sql',
+        '306_freelancer_invoice_links.sql',
+        '307_day_swap_requests.sql',
+        '308_retire_decided_overtime_wfh_bells.sql',
+        '309_retire_answered_mention_bells.sql',
+        '310_notifications_resolve_key.sql',
+        '311_tag_open_action_bells.sql',
+        '312_tag_open_action_bells_round2.sql',
+        '313_freelancer_portal_url_fix.sql',
+        '314_save_new_enquiry_chase_alert.sql',
+        '315_freelancer_invoice_unmatched_reason.sql',
+        '316_job_projects.sql',
+        '317_freelancer_earnings_labels_from.sql',
       ];
 
       for (const migration of migrations) {

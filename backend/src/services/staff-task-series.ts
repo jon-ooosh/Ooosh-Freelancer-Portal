@@ -23,7 +23,8 @@
 
 import { query } from '../config/database';
 import { STAFF_ADMIN_ROLES } from './staff-employment';
-import { personIdForUser, todayLondon } from './staff-tasks';
+import { personIdForUser, todayLondon, retireTaskBells } from './staff-tasks';
+import { retireDoneBells } from './notification-resolve';
 import {
   validateRule, firstOnOrAfter, nextAfterClose, describe, preview,
   RecurrenceRule, Mode,
@@ -240,6 +241,8 @@ export async function respondToSeries(id: string, accept: boolean, reason: strin
       await notifySeriesResponse(s.created_by, id, s.title, owner, accept, reason?.trim() || null);
     } catch (e) { console.error('[task-series] response bell failed:', e); }
   }
+  // Answered — "A repeating to-do needs your OK" is done (bell-rules.ts).
+  await retireDoneBells('series_proposed', id);
   return getSeries(id);
 }
 
@@ -266,6 +269,8 @@ export async function endSeries(id: string, reason: string | null, userId: strin
       if (mine !== s.person_id) await n.notifySeriesEnded(null, s.person_id, id, s.title, byName, reason?.trim() || null);
     }
   } catch (e) { console.error('[task-series] ended bell failed:', e); }
+  // Stopped — nobody is still being asked to OK it (bell-rules.ts).
+  await retireDoneBells('series_proposed', id);
   return getSeries(id);
 }
 
@@ -349,11 +354,14 @@ export async function updateSeries(id: string, patch: SeriesPatch, userId: strin
   if (newOwner) {
     // A new owner starts clean: the old owner's open one is dropped, and the
     // new owner's first is made when they accept (or now, if it's the setter).
-    await query(
+    const dropped = await query(
       `UPDATE staff_tasks SET status = 'cancelled', next_chase_date = NULL, updated_at = NOW()
-        WHERE source_type = $1 AND source_id = $2 AND status = 'open'`,
+        WHERE source_type = $1 AND source_id = $2 AND status = 'open'
+        RETURNING id`,
       [SERIES_SOURCE, id]
     );
+    // The old owner's open one is gone — so are its bells (bell-rules.ts).
+    for (const t of dropped.rows) await retireTaskBells(t.id as string);
     const fresh = await loadSeries(id);
     if (fresh.status === 'active') {
       const due = firstDue(fresh, todayLondon());
@@ -364,6 +372,9 @@ export async function updateSeries(id: string, patch: SeriesPatch, userId: strin
         await notifySeriesProposed(newOwner, id, fresh.title, await nameForUser(userId), seriesText(fresh));
       } catch (e) { console.error('[task-series] proposed bell failed:', e); }
     }
+    // Given to somebody else: the previous person's "needs your OK" is done;
+    // the new person's (just sent) still waits — the rule is per person.
+    await retireDoneBells('series_proposed', id);
   }
   return getSeries(id);
 }

@@ -34,6 +34,8 @@ import CancellationModal from '../components/CancellationModal';
 import CombineBookingsModal from '../components/CombineBookingsModal';
 import QuoteOptionsBar from '../components/QuoteOptionsBar';
 import AddQuoteOptionModal from '../components/AddQuoteOptionModal';
+import { ProjectPanel, AddToProjectModal } from '../components/JobProjects';
+import { PROJECT_COPY } from '../lib/projectCopy';
 import { OPTION_COPY } from '../lib/optionCopy';
 import { isOptionOpen, stripOptionSuffix, ALTERNATIVE_QUOTE_LOST_REASON } from '../lib/quoteOptions';
 import { validateDateTimeOrdering, addDays } from '../lib/jobDates';
@@ -164,6 +166,8 @@ interface JobDetail {
   group_id?: string | null;
   option_no?: number | null;
   option_label?: string | null;
+  // Job project (migration 316) — "these jobs belong to the same festival"
+  job_project_id?: string | null;
   // Lost-job fields (mirror of cancellation, populated by pipeline transition)
   lost_at?: string | null;
   lost_reason?: string | null;
@@ -1628,6 +1632,7 @@ function JobDetailContent() {
   const [showCombineModal, setShowCombineModal] = useState(false);
   // Quote options — "+ Add an option" modal, and a signal the bar reloads on.
   const [showAddOptionModal, setShowAddOptionModal] = useState(false);
+  const [showAddToProjectModal, setShowAddToProjectModal] = useState(false);
   const [optionsRefresh, setOptionsRefresh] = useState(0);
   const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
   const [stagingRefreshKey, setStagingRefreshKey] = useState(0);
@@ -3298,10 +3303,12 @@ function JobDetailContent() {
     : null;
 
   const showClientHistory = clientHistoryData && (parseInt(clientHistoryData.stats.total_jobs) > 0 || clientHistoryData.client_info);
+  // The right-hand column: the job's project panel and/or the client history.
+  const showSidebar = !!showClientHistory || !!job.job_project_id;
 
   return (
-    <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
-      <div className={showClientHistory ? 'flex-1 min-w-0' : ''}>
+    <div className={showSidebar ? 'lg:flex lg:gap-6' : ''}>
+      <div className={showSidebar ? 'flex-1 min-w-0' : ''}>
       {/* Quote options bar — only renders once the enquiry has two or more options.
           At the TOP of the page (jon, 13 Oct 2026): which option you are looking at
           has to be the first thing you see. */}
@@ -4249,20 +4256,39 @@ function JobDetailContent() {
               <span>🔧</span>
               <span>{internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}</span>
             </button>
-            {/* Quote options — a subtle link on a lone pre-confirmation enquiry.
-                Once the job is in a group the bar below the header carries "+ Add". */}
-            {!job.group_id && isOptionOpen(job.pipeline_status) && !job.dismissed_at && !job.combined_into_job_id && (
-              <div className="col-span-2 text-right">
-                <button
-                  type="button"
-                  onClick={() => setShowAddOptionModal(true)}
-                  className="text-xs text-ooosh-600 hover:text-ooosh-800 font-medium"
-                  title={OPTION_COPY.addLinkTitle}
-                >
-                  {OPTION_COPY.addLink}
-                </button>
-              </div>
-            )}
+            {/* Subtle links under the buttons: "+ Add to a project" on any job not
+                in one yet (a project panel takes over once it is), and quote
+                options on a lone pre-confirmation enquiry — once the job is in a
+                group the bar below the header carries "+ Add". */}
+            {(() => {
+              const canAddOption = !job.group_id && isOptionOpen(job.pipeline_status) && !job.dismissed_at && !job.combined_into_job_id;
+              const canAddProject = !job.job_project_id;
+              if (!canAddOption && !canAddProject) return null;
+              return (
+                <div className="col-span-2 flex justify-end gap-4">
+                  {canAddProject && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAddToProjectModal(true)}
+                      className="text-xs text-ooosh-600 hover:text-ooosh-800 font-medium"
+                      title={PROJECT_COPY.addLinkTitle}
+                    >
+                      {PROJECT_COPY.addLink}
+                    </button>
+                  )}
+                  {canAddOption && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAddOptionModal(true)}
+                      className="text-xs text-ooosh-600 hover:text-ooosh-800 font-medium"
+                      title={OPTION_COPY.addLinkTitle}
+                    >
+                      {OPTION_COPY.addLink}
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
 
@@ -6661,6 +6687,15 @@ function JobDetailContent() {
         />
       )}
 
+      {/* Add this job to a project, or start one from it */}
+      {showAddToProjectModal && job && (
+        <AddToProjectModal
+          job={job}
+          onClose={() => setShowAddToProjectModal(false)}
+          onDone={() => { setShowAddToProjectModal(false); loadJob(); }}
+        />
+      )}
+
       {/* Quote another option / link an existing quote */}
       {showAddOptionModal && job && (
         <AddQuoteOptionModal
@@ -6753,8 +6788,18 @@ function JobDetailContent() {
       </div>
 
       {/* Client trading history sidebar (desktop only) */}
-      {showClientHistory && (
+      {showSidebar && (
         <div className="hidden lg:block w-72 shrink-0">
+          {/* Job project — "these jobs all belong to the same festival"
+              (docs/JOB-PROJECTS-SPEC.md). Above the client history: it is
+              about THIS piece of work, the history is about the client. */}
+          {job.job_project_id && (
+            <div className="mb-4">
+              <ProjectPanel projectId={job.job_project_id} jobId={job.id} onChanged={() => loadJob()} />
+            </div>
+          )}
+          {showClientHistory && (
+          <>
           {/* Holding FYI — anything we're still holding for this client that
               arrived for a DIFFERENT job (incoming/merch held for a future
               hire, temp storage, lost property). excludeJobId drops items tied
@@ -7029,6 +7074,8 @@ function JobDetailContent() {
               </>
             )}
           </div>
+          </>
+          )}
         </div>
       )}
     </div>

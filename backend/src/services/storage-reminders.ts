@@ -14,6 +14,7 @@
 import { query } from '../config/database';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import type { BellKey } from './bell-rules';
 
 interface ReminderResult {
   billingDue: number;
@@ -42,13 +43,15 @@ async function notify(
   title: string,
   content: string,
   entityId: string,
+  /** What it asks for — bell-rules.ts retires it once that is done. */
+  resolveKey: BellKey,
   priority: 'normal' | 'high' = 'normal'
 ): Promise<void> {
   for (const userId of userIds) {
     await query(
-      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-       VALUES ($1, 'follow_up', $2, $3, 'storage_tenancies', $4, '/storage?tab=tenancies', $5)`,
-      [userId, title, content, entityId, priority]
+      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+       VALUES ($1, 'follow_up', $2, $3, 'storage_tenancies', $4, '/storage?tab=tenancies', $5, $6)`,
+      [userId, title, content, entityId, priority, resolveKey]
     );
   }
 }
@@ -146,7 +149,7 @@ export async function runStorageReminders(): Promise<ReminderResult> {
         await notify(targets,
           `Storage invoice overdue — ${client}`,
           `Invoice for ${t.room_name} (${client}) was due ${dueIso} and hasn't been marked sent.`,
-          t.id, 'high');
+          t.id, 'storage_invoice', 'high');
         await query(`UPDATE storage_tenancies SET billing_overdue_sent_for = $1 WHERE id = $2`, [dueIso, t.id]);
         result.billingOverdue++;
       }
@@ -156,7 +159,7 @@ export async function runStorageReminders(): Promise<ReminderResult> {
         await notify(targets,
           `Storage invoice due — ${client}`,
           `Invoice for ${t.room_name} (${client}) is due ${dueIso}. Mark it sent on the Storage tab once done.`,
-          t.id);
+          t.id, 'storage_invoice');
         await query(`UPDATE storage_tenancies SET billing_reminder_sent_for = $1 WHERE id = $2`, [dueIso, t.id]);
         result.billingDue++;
       }
@@ -186,7 +189,7 @@ export async function runStorageReminders(): Promise<ReminderResult> {
     await notify(targets,
       `Storage rate review due — ${client}`,
       `Time to review the rate for ${t.room_name} (${client}). Currently £${Number(t.weekly_rate).toFixed(2)}/week${lastChange}.`,
-      t.id);
+      t.id, 'storage_rate_review');
     await query(`UPDATE storage_tenancies SET rate_review_sent_for = $1 WHERE id = $2`, [reviewIso, t.id]);
     result.reviews++;
   }

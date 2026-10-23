@@ -19,6 +19,7 @@ import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { uploadToPublicR2, deleteFromPublicR2 } from '../config/r2';
 import { DISPLAY_NAME_SQL } from './display-name';
+import { retireDoneBells } from './notification-resolve';
 
 export const OPEN_SALE_STATUSES = ['preparing', 'listed', 'under_offer'] as const;
 export type OpenSaleStatus = typeof OPEN_SALE_STATUSES[number];
@@ -447,6 +448,8 @@ export async function updateSale(saleId: string, role: string, patch: SalePatch,
     await logSaleEvent(saleId, 'status_change', `${STAGE_LABEL[current.status]} → ${STAGE_LABEL[next]}${reason}`, userId);
     if (next === 'withdrawn') await cancelSaleFollowUps(saleId, userId);
   }
+  // A withdrawn sale has no photos to check (bell-rules.ts sale_photos).
+  await retireDoneBells('sale_photos', saleId);
 }
 
 /** Any change to the photo set counts as "someone has looked at the photos". */
@@ -455,6 +458,8 @@ async function stampPhotosConfirmed(saleId: string): Promise<void> {
     `UPDATE vehicle_sales SET photos_confirmed_at = NOW(), updated_at = NOW() WHERE id = $1`,
     [saleId],
   );
+  // The photos have been looked at — "check its sale photos" is done.
+  await retireDoneBells('sale_photos', saleId);
 }
 
 export async function confirmPhotos(saleId: string): Promise<void> {
@@ -590,8 +595,8 @@ export async function notifyVehicleSaleOfIssue(issueId: string, actorUserId: str
     for (const userId of recipients) {
       await query(
         `INSERT INTO notifications
-           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-         VALUES ($1, 'system', $2, $3, 'vehicle_sales', $4, $5, 'normal', $6)`,
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id, resolve_key)
+         VALUES ($1, 'system', $2, $3, 'vehicle_sales', $4, $5, 'normal', $6, 'sale_photos')`,
         [userId, title, content, row.sale_id, actionUrl, actorUserId],
       );
     }
@@ -621,6 +626,7 @@ export async function closeOpenSaleOnRemoval(vehicleId: string, userId: string |
     for (const r of closed.rows) {
       await logSaleEvent(r.id as string, 'status_change', 'Sold — van removed from the fleet', userId);
       await cancelSaleFollowUps(r.id as string, userId);
+      await retireDoneBells('sale_photos', r.id as string);
     }
   } catch (err) {
     console.error('[vehicle-sales] could not close the sale on removal:', err);

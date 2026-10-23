@@ -39,6 +39,7 @@ import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
 import { applyAccountAutoCover, AUTO_COVER_MARKER } from '../services/hh-requirement-derivation';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
+import { retireDoneBells } from '../services/notification-resolve';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -2248,6 +2249,9 @@ async function executeAddToHire(opts: {
 
     await dbClient.query('COMMIT');
 
+    // This row is now booked out: its "Mid-tour driver" bell is done.
+    await retireDoneBells('mid_tour_driver', sourceId);
+
     // Fire the post-book-out hook chain per affected assignment (fleet status,
     // agreement PDF + email, multi-van fan-out, OOH, auto-dispatch). Per-van
     // hooks need per-row calls; per-job hooks are idempotent.
@@ -3414,9 +3418,11 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
               // email_sent_at = NOW() so the escalation scheduler doesn't fire a
               // duplicate email — the direct mid_tour_driver send below covers it.
               for (const userId of targets.bellUserIds) {
+                // Asks for the driver to be added to the van: retires once
+                // this row is booked out (bell-rules.ts mid_tour_driver).
                 await query(
-                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
-                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at, resolve_key)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW(), 'mid_tour_driver')`,
                   [
                     userId,
                     `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,

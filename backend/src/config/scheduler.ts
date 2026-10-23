@@ -355,9 +355,11 @@ export function startScheduler() {
           const actions = JSON.stringify([
             { kind: 'mark_chased', label: 'Mark chased', success_message: 'Chase logged + bumped.' },
           ]);
+          // Retires once the chase date moves on or the job leaves the
+          // enquiry stages (bell-rules.ts chase_due).
           await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, actions)
-             VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, $6, $7::jsonb)`,
+            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, actions, resolve_key)
+             VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, $6, $7::jsonb, 'chase_due')`,
             [
               job.chase_alert_user_id,
               `Chase due: ${jobName}`,
@@ -634,9 +636,11 @@ export function startScheduler() {
 
           // Close-out requirements are always post_hire — phase included in
           // URL so the inbox link lands on the right toggle.
+          // Retires once the requirement is done or cancelled
+          // (bell-rules.ts requirement_due).
           await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-             VALUES ($1, 'chase_alert', $2, $3, 'job_requirements', $4, $5, $6)`,
+            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+             VALUES ($1, 'chase_alert', $2, $3, 'job_requirements', $4, $5, $6, 'requirement_due')`,
             [
               userId, title, content, req.id,
               `/jobs/${req.job_id}?tab=overview&phase=post_hire`,
@@ -696,10 +700,38 @@ export function startScheduler() {
   });
   console.log('Scheduler: Held-return reconciliation scheduled hourly at :15');
 
+  // ── Bells that are done with ─────────────────────────────────────────
+  // Every 5 minutes — retire every bell whose thing has been done, by the one
+  // rule per kind in services/bell-rules.ts. The code that finishes a thing
+  // retires its bells straight away; this catches every other path.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { sweepDoneBells } = await import('../services/notification-resolve');
+      const retired = await sweepDoneBells();
+      if (retired > 0) console.log(`Scheduler: Bell sweep — ${retired} retired`);
+      // The "mark the other options lost?" To Dos follow their bell's rule.
+      const { closeDoneOptionTodos } = await import('../services/option-confirm');
+      const todos = await closeDoneOptionTodos();
+      if (todos > 0) console.log(`Scheduler: Bell sweep — ${todos} option To Do(s) done`);
+    } catch (err) {
+      console.error('Scheduler: Bell sweep failed:', err instanceof Error ? err.message : err);
+    }
+  });
+  console.log('Scheduler: Bell sweep scheduled every 5 minutes');
+
   // ── Notification Escalation ──────────────────────────────────────────
   // Every 15 minutes — check unread notifications and escalate to email
   cron.schedule('*/15 * * * *', async () => {
     try {
+      // Retire finished bells first, so the escalator never emails somebody
+      // about a thing that has already been done. A failure here must not
+      // stop the escalator.
+      try {
+        const { sweepDoneBells } = await import('../services/notification-resolve');
+        await sweepDoneBells();
+      } catch (sweepErr) {
+        console.error('Scheduler: Bell sweep before escalation failed:', sweepErr instanceof Error ? sweepErr.message : sweepErr);
+      }
       const { runNotificationEscalation } = await import('../services/notification-escalation');
       const result = await runNotificationEscalation();
       if (result.emailed > 0) {
@@ -800,12 +832,20 @@ export function startScheduler() {
         // primary case is already filtered out by the SQL above — this is
         // a defence-in-depth for edge cases (e.g. status reset, snooze
         // chains, manual DB edits).
+        // Only the person's NEWEST bell on it counts for (b): an older copy is
+        // retired automatically once a newer one is sent (bell-rules.ts
+        // requirement_due), and that is not the person handling it.
         const existing = await query(
-          `SELECT id FROM notifications
-           WHERE user_id = $1 AND entity_type = 'job_requirements' AND entity_id = $2
+          `SELECT id FROM notifications n
+           WHERE n.user_id = $1 AND n.entity_type = 'job_requirements' AND n.entity_id = $2
              AND (
-               created_at > NOW() - INTERVAL '24 hours'
-               OR (acknowledged_at IS NOT NULL AND acknowledged_at >= $3)
+               n.created_at > NOW() - INTERVAL '24 hours'
+               OR (n.acknowledged_at IS NOT NULL AND n.acknowledged_at >= $3
+                   AND NOT EXISTS (SELECT 1 FROM notifications newer
+                                    WHERE newer.user_id = n.user_id
+                                      AND newer.entity_type = 'job_requirements'
+                                      AND newer.entity_id = n.entity_id
+                                      AND newer.created_at > n.created_at))
              )`,
           [targetUserId, rem.id, rem.updated_at || new Date(0)]
         );
@@ -827,10 +867,12 @@ export function startScheduler() {
         const actions = JSON.stringify([
           { kind: 'complete_requirement', label: 'Mark done', success_message: 'Requirement marked done.' },
         ]);
+        // Retires once the requirement is done or cancelled
+        // (bell-rules.ts requirement_due).
         const inserted = await query(
           `INSERT INTO notifications
-            (user_id, type, title, content, entity_type, entity_id, action_url, priority, actions)
-           VALUES ($1, 'follow_up', $2, $3, 'job_requirements', $4, $5, $6, $7::jsonb)
+            (user_id, type, title, content, entity_type, entity_id, action_url, priority, actions, resolve_key)
+           VALUES ($1, 'follow_up', $2, $3, 'job_requirements', $4, $5, $6, $7::jsonb, 'requirement_due')
            RETURNING id`,
           [
             targetUserId, title, content, rem.id,

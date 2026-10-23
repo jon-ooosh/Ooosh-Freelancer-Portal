@@ -506,6 +506,66 @@ export interface PortalResourceDetail {
   url?: string | null
 }
 
+// =============================================================================
+// EARNINGS (FREELANCER-PORTAL-SPEC §5.2)
+// =============================================================================
+
+/** Shapes from OP services/freelancer-earnings.ts. */
+export type EarningsPeriodKey = 'last_month' | 'this_month' | 'tax_year' | 'last_tax_year'
+
+export interface EarningsPeriod {
+  key: EarningsPeriodKey
+  label: string
+  tab: string
+  from: string
+  to: string
+}
+
+export interface EarningsInvoice {
+  id: string
+  invoiceNumber: string | null
+  date: string | null
+  amount: number
+  status: 'received' | 'queried' | 'approved' | 'scheduled' | 'paid'
+  statusDate: string | null
+  queryNote: string | null
+  work: { date: string; title: string; jobNumber: number | null }[]
+}
+
+export interface EarningsWork {
+  key: string
+  kind: 'booking' | 'run' | 'sitter' | 'yard'
+  date: string
+  title: string
+  detail: string | null
+  jobNumber: number | null
+  fee: number
+  label: 'to_invoice' | 'invoiced' | 'paid' | null
+  paidDate: string | null
+}
+
+export interface EarningsResponse {
+  success: boolean
+  /** The shared staff login: no invoices of its own, nothing else is sent. */
+  shared: boolean
+  period?: EarningsPeriod
+  periods?: EarningsPeriod[]
+  labelsFrom?: string
+  totals?: { paid: number; invoiced: number; toInvoice: number; total: number }
+  counts?: { paid: number; waiting: number }
+  toInvoiceCount?: number
+  nextPayment?: { date: string; amount: number } | null
+  invoices?: EarningsInvoice[]
+  earlierWaiting?: EarningsInvoice[]
+  work?: EarningsWork[]
+}
+
+/** Their invoices and finished work for a period (default this month). */
+export async function getEarningsFromOP(sessionToken: string, period?: string): Promise<EarningsResponse> {
+  const q = period ? `?period=${encodeURIComponent(period)}` : ''
+  return opFetch<EarningsResponse>(`/earnings${q}`, sessionToken)
+}
+
 /** List approved, freelancer-shareable staff documents. */
 export async function getResourcesFromOP(sessionToken: string): Promise<PortalResourcesResponse> {
   return opFetch<PortalResourcesResponse>('/resources', sessionToken)

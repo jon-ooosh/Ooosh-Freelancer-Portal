@@ -19,6 +19,8 @@ import { logIssueEvent } from './job-issues';
 import { defaultFormData } from './claim-form-fields';
 import { estimateVehicleValue } from './vehicle-value';
 import { ukDatePlus } from './uk-date';
+import type { BellKey } from './bell-rules';
+import { retireDoneBells } from './notification-resolve';
 
 type DbClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
@@ -87,6 +89,18 @@ export function nextWorkingDay(): string {
 }
 
 /**
+ * A claim's bells that ask for something — "Claim form submitted", "Check in
+ * on claim", "Client form not coming back" — retired once their thing is done
+ * (bell-rules.ts). Call it after anything that moves the stage, the check
+ * date or the client chase; the 5-minute sweep catches any path that doesn't.
+ */
+export async function retireClaimBells(claimId: string): Promise<void> {
+  await retireDoneBells('claim_review', claimId);
+  await retireDoneBells('claim_check_in', claimId);
+  await retireDoneBells('claim_form_chase', claimId);
+}
+
+/**
  * Bell the people following a case. Recipients: watchers + owner + default
  * watchers, minus the actor. Bodies NEVER carry injury / declaration / driver
  * personal details (spec §15) — the bell links to the case instead.
@@ -97,7 +111,12 @@ export async function notifyClaimFollowers(
   actorUserId: string | null,
   title: string,
   content: string,
-  opts: { priority?: 'low' | 'normal' | 'high' | 'urgent'; onlyUserIds?: string[] } = {},
+  opts: {
+    priority?: 'low' | 'normal' | 'high' | 'urgent';
+    onlyUserIds?: string[];
+    /** Set on a bell that ASKS for something — bell-rules.ts retires it once done. */
+    resolveKey?: BellKey;
+  } = {},
 ): Promise<void> {
   try {
     let recipients: Set<string>;
@@ -114,9 +133,10 @@ export async function notifyClaimFollowers(
     for (const userId of recipients) {
       await query(
         `INSERT INTO notifications
-           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-         VALUES ($1, 'system', $2, $3, 'incident_claims', $4, $5, $6, $7)`,
-        [userId, title, content, claimId, `/vehicles/claims/${claimId}`, opts.priority || 'normal', actorUserId],
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id, resolve_key)
+         VALUES ($1, 'system', $2, $3, 'incident_claims', $4, $5, $6, $7, $8)`,
+        [userId, title, content, claimId, `/vehicles/claims/${claimId}`, opts.priority || 'normal', actorUserId,
+         opts.resolveKey ?? null],
       );
     }
   } catch (err) {
@@ -303,7 +323,8 @@ export async function runClaimCheckReminders(): Promise<{ belled: number }> {
       c.id, null,
       `Check in on claim — ${claimLabel(c)}`,
       `${STAGE_LABEL[c.stage as ClaimStage] || c.stage}; last update ${days === 0 ? 'today' : `${days} day${days === 1 ? '' : 's'} ago`}.`,
-      { onlyUserIds: recipients },
+      // Retires once the check date moves or the claim closes (bell-rules.ts).
+      { onlyUserIds: recipients, resolveKey: 'claim_check_in' },
     );
     belled++;
   }
@@ -408,7 +429,7 @@ export async function notifyClaimSubmitted(claimId: string, byName: string): Pro
     const label = claimLabel(c.rows[0]);
     const title = `Claim form submitted — ${label}`;
     const content = `${byName} has submitted the incident form. It needs a manager to review it.`;
-    await notifyClaimFollowers(claimId, null, title, content, { priority: 'high' });
+    await notifyClaimFollowers(claimId, null, title, content, { priority: 'high', resolveKey: 'claim_review' });
     const to = c.rows[0].owner_user_id ? [c.rows[0].owner_user_id as string] : await getDefaultClaimWatchers();
     if (!to.length) return;
     const users = await query(

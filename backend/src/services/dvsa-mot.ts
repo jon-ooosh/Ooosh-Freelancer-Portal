@@ -26,6 +26,7 @@
  */
 import { query } from '../config/database';
 import { fullDisplayName } from './display-name';
+import { retireDoneBells } from './notification-resolve';
 
 const DVSA_API_BASE = 'https://history.mot.api.gov.uk';
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -609,6 +610,8 @@ export async function refreshVehicleMot(vehicleId: string, actor: string): Promi
         JSON.stringify({ mot_due: decision.motDue, mot_due_source: decision.source })],
     ).catch((err) => console.warn('[dvsa-mot] audit insert failed:', err));
     console.log(`[dvsa-mot] ${reg}: mot_due ${ourMotDue ?? '(none)'} → ${decision.motDue} from DVSA`);
+    // A new MOT may finish the van's "MOT due" bell.
+    await retireDoneBells('compliance_mot', vehicleId);
   }
 
   return getVehicleMot(vehicleId);
@@ -637,6 +640,7 @@ export async function useDvsaMotDue(vehicleId: string, actor: string): Promise<b
     [actor, vehicleId, JSON.stringify({ mot_due: r.mot_due, mot_due_source: r.mot_due_source }),
       JSON.stringify({ mot_due: r.dvsa_mot_due, mot_due_source: 'dvsa' })],
   ).catch((err) => console.warn('[dvsa-mot] audit insert failed:', err));
+  await retireDoneBells('compliance_mot', vehicleId);
   return true;
 }
 

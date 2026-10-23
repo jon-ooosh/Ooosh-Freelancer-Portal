@@ -29,6 +29,8 @@ import { greetingName, fullDisplayName } from '../services/display-name';
 import { ukToday } from '../services/uk-date';
 import { isEndKeyed, lastWorkDay } from '../services/quote-schedule';
 import { isVanLegDone } from '../services/quote-completion';
+import { personalFee } from '../services/freelancer-fees';
+import { getFreelancerEarnings } from '../services/freelancer-earnings';
 import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures, deviceLabelFrom } from '../services/staff-login-security';
 import {
   isPortalEnforcedNow, portalEmailHint, signPortalPending, readPortalPending, sendPortalLoginCode,
@@ -1956,6 +1958,28 @@ router.post('/studio-sitter/shifts/:date/lost-property', lockupUploadMw, async (
   }
 });
 
+// ── Earnings (FREELANCER-PORTAL-SPEC §5.2) ────────────────────────────
+//
+// GET /api/portal/earnings?period=this_month|last_month|tax_year|last_tax_year
+//
+// Their invoices (as the office linked them in Costs) and their finished work
+// for the period: services/freelancer-earnings.ts. The shared staff login has
+// no invoices of its own, so it gets `shared: true` and nothing else.
+router.get('/earnings', async (req: PortalRequest, res: Response) => {
+  try {
+    if (req.portalUser!.isStaffShared) {
+      res.json({ success: true, shared: true });
+      return;
+    }
+    const period = typeof req.query.period === 'string' ? req.query.period : undefined;
+    const earnings = await getFreelancerEarnings(req.portalUser!.id, period);
+    res.json({ success: true, shared: false, ...earnings });
+  } catch (err) {
+    console.error('[portal] earnings failed:', err);
+    res.status(500).json({ error: 'Could not load your earnings. Please try again.' });
+  }
+});
+
 // ── Resources (Staff Documents shared with freelancers) ──────────────
 //
 // GET /api/portal/resources      → approved, shareable staff documents
@@ -3255,7 +3279,13 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // Skip for van-only book-outs — there's no equipment to acknowledge,
       // and the OP book-out flow emits its own vehicle condition report
       // which IS the relevant artefact.
-      if (((isDelivery && !vanOnly) || isCrewHireNote) && recipients.size > 0 && ctx.hirehop_id) {
+      // A delivery's note is made even when "Don't send" was ticked (Oct 2026):
+      // like the warehouse sign-off, it is filed on the job's Files tab either
+      // way, so the office has a copy to check or send on. The crew hire note
+      // stays opt-in — made only when ticked and there is someone to send it to.
+      const makeDeliveryNote = isDelivery && !vanOnly;
+      if ((makeDeliveryNote || (isCrewHireNote && recipients.size > 0)) && ctx.hirehop_id) {
+        let noteMade = false;
         try {
           // Pull equipment from HireHop via broker.
           // Line items live on /frames/items_to_supply_list.php (not job_data.php).
@@ -3305,21 +3335,56 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
             driverName: completionName,
             variant: isCrewHireNote ? 'hire' : 'delivery',
           });
+          noteMade = true;
 
           // Store the PDF in R2 for future re-access
+          let storedPdfKey: string | null = null;
           if (isR2Configured()) {
             const pdfKey = `delivery-notes/${quoteId}/${isCrewHireNote ? 'hire-note' : 'delivery-note'}-${Date.now()}.pdf`;
             try {
               await uploadToR2(pdfKey, pdfBuffer, 'application/pdf');
+              storedPdfKey = pdfKey;
             } catch (err) {
               console.error('[portal completion] R2 upload failed for PDF:', err);
             }
           }
 
-          // Email each recipient
+          // File it on the job's Files tab, the same as the warehouse sign-off
+          // does (routes/warehouse.ts), so staff can see it, open it and send
+          // it on with the Files tab's Email button. Until Oct 2026 it was
+          // uploaded and its key thrown away, so nobody could find it.
+          const noteLabel = isCrewHireNote ? 'Equipment on hire note' : 'Delivery note';
+          let filedOnJob = false;
+          if (storedPdfKey && ctx.job_id) {
+            const fileAttachment = {
+              name: `${noteLabel} — ${ctx.hirehop_id}.pdf`,
+              url: storedPdfKey,
+              type: 'document',
+              label: noteLabel,
+              uploaded_at: completedAt,
+              uploaded_by: completedBy,
+              comment: isCrewHireNote
+                ? `From ${completionName}, working on the job.`
+                : `Delivered by ${completionName}${signatureBuffer ? ', signed for by the client' : ', not signed for'}.`,
+            };
+            try {
+              await query(
+                `UPDATE jobs SET files = COALESCE(files, '[]'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
+                [JSON.stringify([fileAttachment]), ctx.job_id]
+              );
+              filedOnJob = true;
+            } catch (err) {
+              console.error('[portal completion] Filing the delivery note on the job failed:', err);
+            }
+          }
+
+          // Email each recipient. send() RESOLVES { success: false } on a
+          // delivery failure rather than throwing, so both are counted.
+          const emailedTo: string[] = [];
+          const emailFailures: string[] = [];
           for (const to of recipients) {
             try {
-              await emailService.send(noteTemplate, {
+              const sent = await emailService.send(noteTemplate, {
                 to,
                 variables: {
                   clientName: clientName || 'there',
@@ -3337,15 +3402,59 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
                   contentType: 'application/pdf',
                 }],
               });
+              if (sent.success) {
+                emailedTo.push(to);
+              } else {
+                console.error(`[portal completion] Failed to email delivery note to ${to}:`, sent.error);
+                emailFailures.push(to);
+              }
             } catch (emailErr) {
               console.error(`[portal completion] Failed to email delivery note to ${to}:`, emailErr);
+              emailFailures.push(to);
             }
           }
+
+          // Say on the job's Activity Timeline who it went to, as the warehouse
+          // sign-off does — the answer to "did the freelancer send it?".
+          if (ctx.job_id) {
+            const parts: string[] = [
+              isCrewHireNote
+                ? `📋 Equipment on hire note from ${completionName}.`
+                : `📦 Equipment delivered by ${completionName}.`,
+            ];
+            if (emailedTo.length > 0) parts.push(`${noteLabel} emailed to ${emailedTo.join(', ')}.`);
+            if (emailFailures.length > 0) parts.push(`${noteLabel} email failed for ${emailFailures.join(', ')}.`);
+            if (emailedTo.length === 0 && emailFailures.length === 0) {
+              parts.push(sendClientEmail
+                ? `${noteLabel} not emailed.`
+                : `${noteLabel} not emailed ("Don't send" was ticked).`);
+            }
+            if (filedOnJob) parts.push('A copy is on the Files tab.');
+            await query(
+              `INSERT INTO interactions (type, content, job_id, created_by, source)
+               VALUES ('note', $1, $2, $3, 'system')`,
+              [parts.join(' '), ctx.job_id, SYSTEM_USER_ID]
+            ).catch((err) => console.error('[portal completion] delivery note timeline note failed:', err));
+          }
+
           if (completionFallback) {
             await logFallbackToTimeline({ jobId: completionFallback.jobId, templateId: noteTemplate });
           }
         } catch (err) {
           console.error('[portal completion] Delivery note PDF/email failed:', err);
+          // Nothing was made, so nothing was sent. Say so rather than leave the
+          // timeline silent, which would read as "the freelancer didn't send it".
+          if (ctx.job_id && !noteMade) {
+            await query(
+              `INSERT INTO interactions (type, content, job_id, created_by, source)
+               VALUES ('note', $1, $2, $3, 'system')`,
+              [
+                `⚠️ ${isCrewHireNote ? 'The equipment on hire note' : 'The delivery note'} from ${completionName} could not be made, so it was not emailed. Print one from HireHop if the client needs it.`,
+                ctx.job_id,
+                SYSTEM_USER_ID,
+              ]
+            ).catch((e) => console.error('[portal completion] delivery note failure timeline note failed:', e));
+          }
         }
       }
 
@@ -3490,21 +3599,8 @@ router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => 
 
 // ── Helper: format a quote row into portal-friendly shape ────────────
 
-/**
- * This freelancer's fee on a quote: their own agreed rate when staff set one,
- * else the quote's fee. A crewed quote for more than one person stores the
- * WHOLE crew's fee (applyCrewMultiplier), so without a personal rate it is split
- * evenly — each of a crew of three used to be shown the full three-person figure
- * (Oct 2026). Per-person rates by role are a later piece of work (Earnings).
- */
-function personalFee(row: Record<string, unknown>): number {
-  // Any rate staff typed wins, even £0 (NUMERIC arrives as a string, so the old
-  // `agreed_rate || fee` honoured an explicit '0.00' too).
-  if (row.agreed_rate != null && String(row.agreed_rate).trim() !== '') return Number(row.agreed_rate) || 0;
-  const quoteFee = Number(row.freelancer_fee_rounded || row.freelancer_fee || 0);
-  const crew = row.job_type === 'crewed' ? Math.max(1, Math.floor(Number(row.crew_count) || 1)) : 1;
-  return Math.round((quoteFee / crew) * 100) / 100;
-}
+// This freelancer's fee on a quote: services/freelancer-fees.ts personalFee(),
+// shared with Costs ("Which jobs?") and Earnings so the figures can't drift.
 
 function formatJobForPortal(row: Record<string, unknown>) {
   const jobType = row.job_type as string;

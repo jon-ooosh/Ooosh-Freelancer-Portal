@@ -38,6 +38,8 @@ interface StaffDay {
   location?: 'home';
   /** A working-from-home request for the day is waiting for a decision. */
   homePending?: boolean;
+  /** Both days of an APPROVED day swap carry the other date (spec §8.2). */
+  swapWith?: string;
   detail?: { leaveType?: string; absenceType?: string };
 }
 /**
@@ -220,6 +222,15 @@ const REQUESTED = { bg: 'bg-transparent text-amber-800 border border-dashed bord
 /** Working from home — working, but not in the building (spec §19). */
 const HOME = { bg: 'bg-transparent text-teal-800 border border-teal-300', label: '⌂ Home' };
 const HOME_ASKED = { bg: 'bg-emerald-100 text-teal-700 border border-dashed border-teal-400', label: 'Home?' };
+/** The day given up in an approved swap. Not working, but not a blank either —
+ *  a blank on somebody's usual Saturday reads as a no-show. The one-off outline
+ *  (isException) draws round it, as it does round the day worked instead. */
+const SWAPPED = { bg: 'bg-white text-gray-500', label: 'Swap' };
+
+/** "Sat 31 Oct" — for a swap's hover text. */
+function shortDate(date: string): string {
+  return `${shortDay(date)} ${dayNum(date)} ${monthShort(date)}`;
+}
 
 /** Somebody's usual start across the days on screen — only a DIFFERENT one is
  *  worth printing in the cell. */
@@ -573,9 +584,11 @@ export default function StaffCalendarPage() {
                     return p.days.map(day => {
                       const worked = day.status === 'working' || day.status === 'partial';
                       const home = worked && day.location === 'home';
+                      const swappedOut = day.status === 'not_scheduled' && !!day.swapWith && !day.companyDay;
                       const cell = day.pending ? REQUESTED
                         : home && day.status === 'working' ? (onSiteOnly ? { bg: 'text-gray-300', label: '⌂' } : HOME)
                         : day.homePending && day.status === 'working' ? HOME_ASKED
+                        : swappedOut ? SWAPPED
                         : CELL[day.status];
                       // A day can carry several windows now; fall back to the
                       // single `window` so a cached bundle keeps working.
@@ -583,14 +596,18 @@ export default function StaffCalendarPage() {
                       // Why somebody is off is admin-only: detail never reaches
                       // anybody else (maskForViewer), so peers just see "Off".
                       const why = day.detail?.absenceType ?? day.detail?.leaveType;
-                      const title = home
-                        ? `Working from home${day.startTime ? ` ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}` : ''}`
+                      // A swap names its other day, so "why is Will in on a Friday?" answers itself.
+                      const swapNote = day.swapWith ? ` — swapped for ${shortDate(day.swapWith)}` : '';
+                      const title = swappedOut
+                        ? `Not working — swapped, working ${shortDate(day.swapWith!)} instead`
+                        : home
+                        ? `Working from home${day.startTime ? ` ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}` : ''}${swapNote}`
                         : day.homePending && day.status === 'working'
                           ? 'Asked to work from home — not approved yet, so expected in'
                           : day.pending
                         ? `Requested${wins.length ? ` ${wins.map(w => `${w.start}–${w.end}`).join(', ')}` : ''}, not yet approved${why ? ` — ${why}` : ''}`
                         : day.status === 'working' && day.startTime
-                          ? `In ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}`
+                          ? `In ${day.startTime.slice(0, 5)}–${day.endTime?.slice(0, 5)}${swapNote}`
                           : wins.length > 0
                             ? `Off ${wins.map(w => `${w.start}–${w.end}`).join(', ')}${why ? ` — ${why}` : ''}`
                             : day.status === 'leave' || day.status === 'absent'
@@ -602,7 +619,7 @@ export default function StaffCalendarPage() {
                         : day.status === 'working'
                           ? (day.startTime && day.startTime.slice(0, 5) !== usual ? day.startTime.slice(0, 5) : '')
                           : day.companyDay ? 'Closed' : cell.label;
-                      const empty = day.status === 'not_scheduled' && !day.companyDay;
+                      const empty = day.status === 'not_scheduled' && !day.companyDay && !swappedOut;
                       return (
                         <td key={day.date}
                           className={`px-1 border-b border-gray-100 text-center align-middle ${

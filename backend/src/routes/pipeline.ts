@@ -42,6 +42,7 @@ import {
 } from '../services/job-groups';
 import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 import { forClientContext } from '../services/endorsements';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -114,7 +115,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     // Chase status filter
-    if (chase_status === 'overdue') {
+    if (chase_status === 'due') {
+      // Overdue OR due today — what the dashboard's "Chases due" card counts.
+      conditions.push(`j.next_chase_date <= CURRENT_DATE`);
+    } else if (chase_status === 'overdue') {
       conditions.push(`j.next_chase_date < CURRENT_DATE`);
     } else if (chase_status === 'due_today') {
       conditions.push(`j.next_chase_date = CURRENT_DATE`);
@@ -248,7 +252,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
                                         AND m.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional'))
                        ) ORDER BY m.option_no)
                        FROM jobs m WHERE m.group_id = g.id AND m.is_deleted = false)
-         ) FROM job_groups g WHERE g.id = j.group_id) AS group_summary
+         ) FROM job_groups g WHERE g.id = j.group_id) AS group_summary,
+        -- The card's project chip (docs/JOB-PROJECTS-SPEC.md). Not project_name:
+        -- that column is HireHop's own, unused.
+        (SELECT jp.name FROM job_projects jp WHERE jp.id = j.job_project_id) AS job_project_name
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id
@@ -308,7 +315,9 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       ORDER BY pipeline_status
     `, [nonLeads]);
 
-    // Chase stats
+    // Chase stats — enquiry stages only, the same as the list below them. The
+    // previous blacklist counted dispatched / completed jobs still carrying an
+    // old chase date, so the header said "29 overdue" over an empty list.
     const chaseStats = await query(`
       SELECT
         COUNT(*) FILTER (WHERE next_chase_date < CURRENT_DATE) as overdue,
@@ -317,18 +326,22 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       FROM jobs
       WHERE is_deleted = false
         AND dismissed_at IS NULL
-        AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
+        AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
         AND next_chase_date IS NOT NULL
         AND NOT (id = ANY($1::uuid[]))
     `, [nonLeads]);
 
-    // Total active pipeline value (excl. confirmed and lost)
+    // Total active pipeline value — enquiry stages only, the same jobs as the
+    // board and the chase counts. The previous blacklist (everything but
+    // confirmed / lost / cancelled) also summed every prepped, dispatched,
+    // returned and completed job: £1.38M on 22 Oct 2026, of which £1.11M was
+    // 1,581 completed jobs.
     const activeValue = await query(`
       SELECT COALESCE(SUM(job_value), 0) as total
       FROM jobs
       WHERE is_deleted = false
         AND dismissed_at IS NULL
-        AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
+        AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
         AND NOT (id = ANY($1::uuid[]))
     `, [nonLeads]);
 
@@ -700,6 +713,8 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       `UPDATE jobs SET ${updates.join(', ')} WHERE id = $${pIdx} RETURNING *`,
       updateParams
     );
+    // Out of the enquiry stages, or a new chase date: "Chase due" is done (bell-rules.ts).
+    await retireDoneBells('chase_due', jobId);
 
     // Resurrection: reverse the Lost / Cancelled requirement sweep when moving
     // OUT of lost/cancelled. Marker-gated so staff-cancelled rows stay cancelled.
@@ -961,6 +976,8 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
       `UPDATE jobs SET ${updates.join(', ')} WHERE id = $${pIdx} RETURNING *`,
       params
     );
+    // A rescheduled chase (ChaseModal) finishes "Chase due" (bell-rules.ts).
+    if ('next_chase_date' in fields) await retireDoneBells('chase_due', jobId);
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', current.rows[0], result.rows[0]);
 
@@ -3702,6 +3719,9 @@ router.post('/:id/dismiss', validate(dismissSchema), async (req: AuthRequest, re
     );
 
     await client.query('COMMIT');
+
+    // Dismissed: its "Chase due" bells are done (bell-rules.ts).
+    await retireDoneBells('chase_due', jobId);
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', job, updated.rows[0]);
 

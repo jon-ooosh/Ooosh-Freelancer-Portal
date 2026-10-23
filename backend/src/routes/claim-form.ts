@@ -25,7 +25,7 @@ import {
   CLAIM_SECTIONS, CLIENT_SECTION_KEYS, sanitiseSection, resolveOutlineType, sectionMissing, sectionFormatErrors,
 } from '../services/claim-form-fields';
 import {
-  logClaimEvent, notifyClaimSubmitted, nextWorkingDay, SHARED_BY_DEFAULT,
+  logClaimEvent, notifyClaimSubmitted, nextWorkingDay, SHARED_BY_DEFAULT, retireClaimBells,
 } from '../services/incident-claims';
 import {
   LinkRow, OPEN_STAGES, resolveLink, driversOnVan, createAndSendLink, maskEmail,
@@ -462,6 +462,8 @@ router.post('/:token/submit', writeLimiter, withLink(true, async (_req, res, lin
     [link.claim_id, link.id, nextWorkingDay()],
   );
   await query(`UPDATE incident_claim_links SET status = 'submitted' WHERE claim_id = $1 AND status <> 'revoked'`, [link.claim_id]);
+  // The form is in: "Client form not coming back" and the old check-in are done.
+  await retireClaimBells(link.claim_id);
   await logClaimEvent(link.claim_id, null, 'stage_change', `Form submitted by ${link.filled_by_name || link.recipient_name || 'the client'}`,
     { from: c.rows[0].stage, to: 'submitted', via_link: link.id });
   await notifyClaimSubmitted(link.claim_id, link.filled_by_name || link.recipient_name || 'The client');

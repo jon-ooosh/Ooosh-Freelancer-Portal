@@ -16,6 +16,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
+import { UNMATCHED_REASONS } from '../components/costs/FreelancerInvoiceLinks';
 import CostAllocationModal from '../components/CostAllocationModal';
 import RechargeResolveModal, { RechargeSlot } from '../components/RechargeResolveModal';
 import RecordRefundModal from '../components/RecordRefundModal';
@@ -170,6 +171,8 @@ export default function CostsPage() {
   const [editing, setEditing] = useState<CostRow | null>(null);
   const [allocating, setAllocating] = useState<CostRow | null>(null);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
+  // "Query" on a freelancer invoice: a question for them instead of approving (FREELANCER-PORTAL-SPEC §5).
+  const [queryTarget, setQueryTarget] = useState<CostRow | null>(null);
   // Recording money coming BACK. `null` target with the flag on = opened from
   // capture, where the purchase hasn't been picked yet.
   const [refundTarget, setRefundTarget] = useState<CostRow | null>(null);
@@ -716,6 +719,22 @@ export default function CostsPage() {
                       <div className="min-w-0">
                         <div className="truncate max-w-[150px]">{c.supplier_name || '—'}</div>
                         {c.invoice_number && <div className="text-xs text-gray-400 truncate max-w-[150px]">#{c.invoice_number}</div>}
+                        {/* A freelancer invoice's freelancer + how much of their work it
+                            covers (FREELANCER-PORTAL-SPEC §5): what their Earnings reads. */}
+                        {c.person_name && (
+                          <div className="text-xs text-purple-700 truncate max-w-[150px]"
+                            title={`${c.person_name}'s invoice${c.work_item_count ? `, covering ${c.work_item_count} job(s)` : ', no work ticked yet'}`}>
+                            {/* Their own name is usually the letterhead already: don't say it twice. */}
+                            {(c.person_name || '').trim().toLowerCase() === (c.supplier_name || '').trim().toLowerCase() ? 'Linked' : c.person_name}
+                            {c.work_item_count ? ` · ${c.work_item_count} job${c.work_item_count === 1 ? '' : 's'}` : ''}
+                          </div>
+                        )}
+                        {/* Saved with no work ticked, and why (the save asks). */}
+                        {c.cost_type === 'freelancer_invoice' && !c.work_item_count && c.work_unmatched_reason && (
+                          <div className="text-xs text-amber-700 truncate max-w-[150px]" title="Saved without ticking the work it covers">
+                            {UNMATCHED_REASONS.find((r) => r.code === c.work_unmatched_reason)?.short || 'Not matched'}
+                          </div>
+                        )}
                         {/* "Uploaded by" used to be its own column on the All costs tab,
                             which pushed the row actions off-screen. It rides here instead;
                             the other tabs keep it as the Type tooltip, as before. */}
@@ -803,6 +822,9 @@ export default function CostsPage() {
                     {!c.is_credit && (
                       <span className="ml-1"><RechargeSlot cost={c} onResolve={() => setResolving(c)} /></span>
                     )}
+                    {c.queried_at && c.approval_state !== 'approved' && c.approval_state !== 'paid' && (
+                      <span className="ml-1 px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800" title={c.query_note || 'Queried'}>Queried</span>
+                    )}
                     {c.remittance_sent_at && (
                       <span className="ml-1 text-xs text-gray-400" title={`Remittance advice sent${c.remittance_email ? ` to ${c.remittance_email}` : ''}`}>✉︎</span>
                     )}
@@ -817,7 +839,7 @@ export default function CostsPage() {
                   <td className="px-2 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
-                        <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
+                        <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} onQuery={() => setQueryTarget(c)} />
                       )}
                       {/* Money back. Not offered on a credit (you can't refund a
                           refund) or on a £0 row, which is what the server says too. */}
@@ -925,6 +947,11 @@ export default function CostsPage() {
           onClose={() => setShowBatchPay(false)}
           onSubmit={payBatch}
         />
+      )}
+
+      {queryTarget && (
+        <QueryInvoiceModal cost={queryTarget} onClose={() => setQueryTarget(null)}
+          onSaved={() => { setQueryTarget(null); void load(true); }} />
       )}
 
       {payTarget && (
@@ -1314,7 +1341,7 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
                 {remittanceEmail && emailValid && contactSource === 'reimbursement_staff' && (
                   <p className="text-xs text-gray-400 mt-1">From their staff profile.</p>
                 )}
-                {remittanceEmail && emailValid && (contactSource === 'freelancer_assignment' || contactSource === 'person_match') && (
+                {remittanceEmail && emailValid && (contactSource === 'freelancer_linked' || contactSource === 'freelancer_assignment' || contactSource === 'person_match') && (
                   <p className="text-xs text-gray-400 mt-1">From their OP contact record.</p>
                 )}
                 {remittanceEmail && emailValid && contactSource === 'remembered' && (
@@ -1376,16 +1403,35 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
   );
 }
 
-function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay }: {
+function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay, onQuery }: {
   cost: Cost;
   isManager: boolean;
   isAdmin: boolean;
   busy: string | null;
   onAction: (id: string, a: 'verify' | 'approve') => void;
   onPay: () => void;
+  onQuery?: () => void;
 }) {
   const s = cost.approval_state;
   if (s === 'paid') return <span className="text-xs text-green-600">Paid</span>;
+  // A freelancer invoice not yet approved: "why is that so expensive?" sits
+  // beside Verify / Approve, as the other answer (jon, Oct 2026).
+  const queryBtn = isManager && onQuery && cost.cost_type === 'freelancer_invoice' && s !== 'approved' ? (
+    <button onClick={onQuery} title={cost.queried_at ? `Queried: ${cost.query_note || ''}` : 'Ask the freelancer about this invoice'}
+      className="px-2 py-1 text-xs rounded border border-amber-300 text-amber-800 hover:bg-amber-50">
+      {cost.queried_at ? 'Edit query' : 'Query'}
+    </button>
+  ) : null;
+  if (queryBtn && isManager && (!s || s === 'submitted' || s === 'verified')) {
+    const verify = !s || s === 'submitted';
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        {queryBtn}
+        <ActionBtn busy={busy === cost.id + (verify ? 'verify' : 'approve')}
+          onClick={() => onAction(cost.id, verify ? 'verify' : 'approve')} label={verify ? 'Verify' : 'Approve'} />
+      </span>
+    );
+  }
   if ((!s || s === 'submitted') && isManager) {
     return <ActionBtn busy={busy === cost.id + 'verify'} onClick={() => onAction(cost.id, 'verify')} label="Verify" />;
   }
@@ -1654,6 +1700,56 @@ function XeroCotProbe() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Query a freelancer invoice: a question for them instead of approving it
+ * (FREELANCER-PORTAL-SPEC §5). Shown as Queried here and, soon, in their
+ * portal. No email: the office contacts them itself (jon). Approving clears it.
+ */
+function QueryInvoiceModal({ cost, onClose, onSaved }: { cost: Cost; onClose: () => void; onSaved: () => void }) {
+  const [note, setNote] = useState(cost.queried_at ? cost.query_note || '' : '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function save(clear: boolean) {
+    setBusy(true); setError('');
+    try {
+      if (clear) await api.delete(`/costs/${cost.id}/query`);
+      else await api.post(`/costs/${cost.id}/query`, { note: note.trim() });
+      onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the query');
+    } finally { setBusy(false); }
+  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-semibold text-gray-900">Query this invoice</h2>
+        <p className="mt-1 text-sm text-gray-600">
+          {cost.person_name || cost.supplier_name || 'Freelancer'}{cost.invoice_number ? ` · #${cost.invoice_number}` : ''}
+          {cost.amount_gross != null ? ` · £${Number(cost.amount_gross).toFixed(2)}` : ''}
+        </p>
+        <label className="mt-4 block text-sm font-medium text-gray-700 mb-1">What do you need to ask them?</label>
+        <textarea className="w-full min-h-[90px] rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+          value={note} onChange={(e) => setNote(e.target.value)} maxLength={2000} autoFocus
+          placeholder="e.g. The £80 train looks high. Can you send the ticket?" />
+        <p className="mt-1 text-xs text-gray-400">They&apos;ll see this in their portal (Earnings). It stays Queried until it&apos;s approved or you remove the query. No email is sent: contact them yourself.</p>
+        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+        <div className="mt-4 flex items-center justify-between gap-2">
+          {cost.queried_at ? (
+            <button onClick={() => void save(true)} disabled={busy} className="text-sm text-red-600 hover:underline disabled:opacity-50">Remove the query</button>
+          ) : <span />}
+          <span className="flex gap-2">
+            <button onClick={onClose} className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Cancel</button>
+            <button onClick={() => void save(false)} disabled={busy || !note.trim()}
+              className="px-3 py-1.5 text-sm rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+              {busy ? 'Saving…' : cost.queried_at ? 'Update the query' : 'Mark as queried'}
+            </button>
+          </span>
+        </div>
+      </div>
     </div>
   );
 }

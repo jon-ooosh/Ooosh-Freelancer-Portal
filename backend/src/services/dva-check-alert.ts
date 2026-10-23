@@ -56,9 +56,12 @@ export async function sendDvaCheckAlert(driverId: string): Promise<DvaCheckAlert
     // escalation scheduler doesn't fire its own second email on top of the one
     // below — same reason as the referral bell in routes/driver-verification.ts.
     for (const userId of targets.bellUserIds) {
+      // Filed under the driver, with its key, so it retires once a check is
+      // recorded (bell-rules.ts dva_check_needed).
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, action_url, priority, email_sent_at)
-         VALUES ($1, 'dva_check', $2, $3, $4, 'high', NOW())`,
+        `INSERT INTO notifications (user_id, type, title, content, action_url, priority, email_sent_at,
+                                    entity_type, entity_id, resolve_key)
+         VALUES ($1, 'dva_check', $2, $3, $4, 'high', NOW(), 'drivers', $5, 'dva_check_needed')`,
         [
           userId,
           `NI licence check needed: ${d.full_name || 'driver'}`,
@@ -67,6 +70,7 @@ export async function sendDvaCheckAlert(driverId: string): Promise<DvaCheckAlert
             + `waiting on the nidirect lookup`
             + `${d.current_job_number ? ` for job #${d.current_job_number}` : ''}.`,
           `/drivers/${driverId}`,
+          driverId,
         ],
       );
     }

@@ -190,7 +190,7 @@ export default function DashboardPage() {
           value={stats.chases_due_count}
           label="Chases due"
           accent="amber"
-          to="/pipeline?chase=overdue"
+          to="/pipeline?chase=due"
         />
         <StatCard
           value={stats.open_enquiries_count}

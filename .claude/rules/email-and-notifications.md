@@ -103,6 +103,45 @@ Warning emails that used to fire inline follow one shape (`services/sanity-check
 
 Adding a scanner: copy the shape, add a marker column, wire the clear into every status-write path. **Don't put the send back inline "just for the urgent case"** — the spam always comes back.
 
+## A bell that asks someone to act retires itself when the thing is done
+
+Until Oct 2026 a bell was a copy of a fact frozen at the moment it happened — approving a holiday left every
+admin's "X has requested holiday" lit until each of them clicked it. Now (jon, Oct 2026):
+
+- **A bell that ASKS for something carries `notifications.resolve_key`** (migration 310), and
+  `services/bell-rules.ts` holds ONE rule per key: "still needed while …", SQL over the bell row `n`.
+  **Set the key at insert. Never on an FYI bell** ("Issue resolved", "Approved", "Renewal coming up") — an FYI
+  bell is done when it is read, and FYI and action bells often share a type and a record, which is exactly why
+  `type` can't be the test (it also drives the Inbox tabs and delivery preferences, so don't split it).
+- **The rule decides; callers only nudge.** Call `retireDoneBells(key, recordId)` from the code that FINISHES
+  the thing (after COMMIT) so the bell goes at once; `sweepDoneBells()` runs every 5 minutes and before each
+  escalation, so a path nobody wired only delays a bell — it never strands one, and a finished thing is never
+  emailed. Don't add a second "is it done?" test anywhere else.
+- **Read AND done, for whoever the rule says is finished** — everyone by default; per person where the rule
+  reads `n.user_id` (a to-do's owner, a document's signer). Done bells stay in the dropdown greyed "✓ Done";
+  the Inbox hides them like any Done item. Never throws.
+- **`latestOnly`** for a reminder that is sent again while still waiting (a digest, a re-armed chase, "due" then
+  "overdue"): only the newest copy to each person stays lit.
+- **A rule is a parameter-free EXISTS** (`bell-rules.test.ts` checks): no `$n`; `[0-9]` not `\d`; guard any cast
+  with CASE. A deleted record reads as done. A rule that needs a module that loads auth or email keeps a copy
+  of the number and the test checks it matches (`HOLD_UNTIL_LEAD_DAYS`, `PIN_ROTATE_DAYS`,
+  `CLAIM_CHASE_ESCALATED`); a light module's number is imported (`COMPLIANCE_DEFAULTS`, `RECEIPT_GRACE_DAYS`)
+  — and that module must then never load `bell-rules` / `notification-resolve` at runtime (`import type` only).
+- **A rule mirroring a scanner must never be NARROWER than the scanner** (the van compliance rules copy
+  `runComplianceCheck` item by item): a bell retired while the scanner still calls it due just comes back.
+- **A scanner's dedup that reads `acknowledged_at` must not mistake a `latestOnly` retirement for a person
+  handling it** — count only the person's newest bell (the requirement Reminder scanner, `scheduler.ts`).
+- **Older wiring, same idea:** leave / overtime / WFH requests and day swaps retire their approvers' `follow_up`
+  bells by type (`retire…Bells()` beside each `notify…Requested()` in `staff-notifications.ts`; day swaps from
+  `staff-swaps.ts` via `retireSwapRequestBells()`, entity `staff_pattern_swap`, the swap's group id). **Mentions are one
+  person's:** a reply or a reaction in the thread marks the replier's own mention bells done
+  (`resolveMyThreadMentions`); opening the timeline or the Problem marks them READ only
+  (`POST /notifications/seen`, `markMentionsSeen`).
+- **Deliberately NOT keyed:** New Enquiry's "Chase reminder" (sent at once with a future date — it would read
+  as done straight away), storage access requests (jon: unused), the prep-flag and low-tread van bells, a send
+  failure / soft-bounce "Email not delivered", and bells with no state to test (failed hooks, payroll, company
+  days). The full keyed list is `BELL_RULES`; what each round covered is in `INBOX-AND-WAREHOUSE.md`.
+
 ## Timelines & threads
 
 - **Scoping guards are load-bearing:** entity timeline reads filter `issue_id IS NULL` / `shift_id IS NULL`. Issue chatter and shift handovers must NOT bubble onto the linked vehicle / driver / organisation timelines.

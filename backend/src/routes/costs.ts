@@ -13,9 +13,13 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import multer from 'multer';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, isManagerTier } from '../middleware/auth';
 import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
 import { fetchCostLines, validateCostLines, replaceCostLines, headerVatFromLines, type CostLineInput } from '../services/cost-lines';
+import { listFreelancerWork, getInvoiceTolerance, planWorkLinks, writeWorkLinks, WorkLinkError, type WorkLinkRow } from '../services/freelancer-work';
+import { suggestInvoicePerson, personIdByEmail } from '../services/freelancer-invoice-person';
+import { fullDisplayName } from '../services/display-name';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -154,6 +158,18 @@ const createSchema = z.object({
   // Xero push (fired immediately below) sees them — a separate PUT would race
   // it and push a one-line bill. See services/cost-lines.ts.
   lines: z.array(costLineInputSchema).max(50).optional(),
+
+  // A freelancer invoice: WHOSE it is, and WHICH of their work it covers
+  // (FREELANCER-PORTAL-SPEC §5). `work_items` is not a column: when sent it
+  // replaces the cost's cost_work_items (keys from GET /costs/freelancer-work).
+  person_id: z.string().uuid().optional().nullable(),
+  work_items: z.array(z.object({
+    key: z.string().trim().min(3).max(80),
+    amount: money,
+  })).max(200).optional(),
+  // Why it was saved with no work ticked (migration 315). Cleared server-side
+  // whenever work is ticked.
+  work_unmatched_reason: z.enum(['person_not_in_op', 'work_not_in_op', 'later']).optional().nullable(),
 });
 
 // Update accepts the same fields, all optional.
@@ -183,6 +199,9 @@ const WRITABLE = [
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'job_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
+  // The freelancer a freelancer invoice is from (FREELANCER-PORTAL-SPEC §5),
+  // and why no work is ticked on it, when none is.
+  'person_id', 'work_unmatched_reason',
   'recharge_mode', 'recharge_amount', 'recharge_status', 'cost_intent', 'receipt_r2_key', 'receipt_filename',
   'supporting_documents', 'status', 'notes',
   // Credits — money coming back. The SIGN is applied by applyCreditSign()
@@ -232,21 +251,32 @@ function deriveRechargeStatusForWrite(data: Record<string, unknown>, current?: s
 // then had nothing to print and fell back to "(linked job)" / "(captured job)".
 // Enrich the row with the display fields the list query already exposes so the
 // real job number is shown wherever a saved cost is rendered.
-async function withJobLabels<T extends { id?: string; job_id?: string | null; vehicle_id?: string | null }>(row: T): Promise<T> {
-  if (!row || (!row.job_id && !row.vehicle_id)) return row;
+async function withJobLabels<T extends { id?: string; job_id?: string | null; vehicle_id?: string | null; person_id?: string | null }>(row: T): Promise<T> {
+  if (!row || (!row.job_id && !row.vehicle_id && !row.person_id)) return row;
   try {
     const r = await query(
-      `SELECT j.hh_job_number, j.job_name, fv.reg AS vehicle_reg
+      `SELECT j.hh_job_number, j.job_name, fv.reg AS vehicle_reg,
+              fp.first_name AS fp_first, fp.last_name AS fp_last, fp.preferred_name AS fp_pref
          FROM costs c
          LEFT JOIN jobs j ON j.id = c.job_id
          LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+         LEFT JOIN people fp ON fp.id = c.person_id
         WHERE c.id = $1`,
       [row.id],
     );
-    return r.rows.length ? { ...row, ...r.rows[0] } : row;
+    return r.rows.length ? { ...row, ...withPersonName(r.rows[0]) } : row;
   } catch {
     return row; // display sugar only — never fail a save over it
   }
+}
+
+/** A freelancer invoice's freelancer, by name (from fp_* columns a query selected). */
+function withPersonName<R extends Record<string, unknown>>(r: R): R & { person_name: string | null } {
+  const { fp_first, fp_last, fp_pref, ...rest } = r as Record<string, unknown>;
+  const name = fp_first || fp_last
+    ? fullDisplayName({ first_name: fp_first as string, last_name: fp_last as string, preferred_name: fp_pref as string | null }) || null
+    : null;
+  return { ...(rest as R), person_name: name };
 }
 
 async function audit(userId: string, costId: string, action: string, prev: unknown, next: unknown) {
@@ -351,13 +381,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
                 ) ORDER BY a.created_at), '[]'::json)
            FROM cost_allocations a
            LEFT JOIN jobs aj ON aj.id = a.job_id
-          WHERE a.cost_id = c.id) AS allocation_jobs
+          WHERE a.cost_id = c.id) AS allocation_jobs,
+        -- A freelancer invoice's freelancer and how much of their work it is
+        -- linked to (FREELANCER-PORTAL-SPEC §5).
+        fp.first_name AS fp_first, fp.last_name AS fp_last, fp.preferred_name AS fp_pref,
+        (SELECT COUNT(*)::int FROM cost_work_items w WHERE w.cost_id = c.id) AS work_item_count
       FROM costs c
       LEFT JOIN users u   ON u.id = c.uploaded_by
       LEFT JOIN people up ON up.id = u.person_id
       LEFT JOIN jobs j    ON j.id = c.job_id
       LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
       LEFT JOIN costs pc ON pc.id = c.refund_of_cost_id
+      LEFT JOIN people fp ON fp.id = c.person_id
       ${whereClause}
       ORDER BY c.created_at DESC
       LIMIT $${params.length}
@@ -382,7 +417,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         resolve({ xeroContactId: r.xero_contact_id, supplierName: r.supplier_name }),
         approvalRuleFrom,
       );
-      return { ...r, terms, due_date: dueDate, due_date_derived: derivedDueDate, due_date_is_override: isOverride };
+      return { ...withPersonName(r), terms, due_date: dueDate, due_date_derived: derivedDueDate, due_date_is_override: isOverride };
     });
 
     // Headline counts for the hub tabs.
@@ -565,6 +600,42 @@ router.get('/check-invoice', async (req: AuthRequest, res: Response) => {
 // cost that doesn't exist yet, so staff see the derived date at upload time and
 // can correct it. Same engine as the list / get-one / Xero push, so the number
 // shown here is the number that lands. Multi-segment so it doesn't hit /:id.
+// ── Freelancer invoices: whose, and which work (FREELANCER-PORTAL-SPEC §5) ──
+// Both before GET /:id, which would otherwise take the path as an id.
+
+// "Whose invoice?": a suggestion from the letterhead (remembered → previous
+// remittance address → one freelancer by name). Staff confirm it.
+router.get('/freelancer-person-suggest', async (req: AuthRequest, res: Response) => {
+  try {
+    const name = typeof req.query.supplier_name === 'string' ? req.query.supplier_name.slice(0, 200) : '';
+    const costId = typeof req.query.cost_id === 'string' && /^[0-9a-f-]{36}$/i.test(req.query.cost_id) ? req.query.cost_id : null;
+    res.json({ data: await suggestInvoicePerson(name, costId) });
+  } catch (err) {
+    console.error('[costs] freelancer-person-suggest error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// "Which jobs?": the person's finished work (12 months), each with the fee they
+// were booked at and the quote's expense estimate, plus whatever is already
+// linked to `cost_id`. Work already on another invoice only with include_invoiced=1.
+router.get('/freelancer-work', async (req: AuthRequest, res: Response) => {
+  try {
+    const personId = typeof req.query.person_id === 'string' ? req.query.person_id : '';
+    if (!/^[0-9a-f-]{36}$/i.test(personId)) { res.status(400).json({ error: 'person_id is required' }); return; }
+    const costId = typeof req.query.cost_id === 'string' && /^[0-9a-f-]{36}$/i.test(req.query.cost_id) ? req.query.cost_id : null;
+    const includeInvoiced = req.query.include_invoiced === '1' || req.query.include_invoiced === 'true';
+    const [items, tolerance] = await Promise.all([
+      listFreelancerWork(personId, { costId, includeInvoiced }),
+      getInvoiceTolerance(),
+    ]);
+    res.json({ data: { items, tolerance } });
+  } catch (err) {
+    console.error('[costs] freelancer-work error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/due-date-preview', async (req: AuthRequest, res: Response) => {
   try {
     const { resolveDueDateForCost } = await import('../services/supplier-terms');
@@ -849,12 +920,14 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT c.*,
          CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name,
-         j.hh_job_number, j.job_name, fv.reg AS vehicle_reg
+         j.hh_job_number, j.job_name, fv.reg AS vehicle_reg,
+         fp.first_name AS fp_first, fp.last_name AS fp_last, fp.preferred_name AS fp_pref
        FROM costs c
        LEFT JOIN users u   ON u.id = c.uploaded_by
        LEFT JOIN people up ON up.id = u.person_id
        LEFT JOIN jobs j    ON j.id = c.job_id
        LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+       LEFT JOIN people fp ON fp.id = c.person_id
        WHERE c.id = $1`,
       [req.params.id],
     );
@@ -867,7 +940,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
        WHERE a.cost_id = $1 ORDER BY a.created_at ASC`,
       [req.params.id],
     );
-    const cost = result.rows[0];
+    const cost = withPersonName(result.rows[0]);
     const { resolveDueDateForCost } = await import('../services/supplier-terms');
     const { dueDate, derivedDueDate, terms, isOverride } = await resolveDueDateForCost(cost);
     res.json({
@@ -994,6 +1067,26 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
       }
     }
 
+    // "Which jobs?" (FREELANCER-PORTAL-SPEC §5): checked BEFORE the insert, so
+    // ticks that aren't this freelancer's can't leave a half-saved cost behind.
+    const workItems = data.work_items as { key: string; amount: number }[] | undefined;
+    delete data.work_items;
+    let workRows: WorkLinkRow[] | null = null;
+    if (workItems !== undefined) {
+      if (workItems.length && data.cost_type !== 'freelancer_invoice') {
+        res.status(400).json({ error: 'Only a freelancer invoice can be linked to their work.' });
+        return;
+      }
+      try {
+        workRows = await planWorkLinks(null, (data.person_id as string | null | undefined) || null, workItems);
+      } catch (e) {
+        if (e instanceof WorkLinkError) { res.status(400).json({ error: e.message }); return; }
+        throw e;
+      }
+    }
+    // Work ticked: no "why not?" to keep (migration 315).
+    if (workRows?.length) data.work_unmatched_reason = null;
+
     const cols = ['uploaded_by', 'approval_state'];
     const vals: unknown[] = [req.user!.id, approvalState];
     if (approveNow) {
@@ -1014,6 +1107,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     // Lines BEFORE the push, not after: the push reads them to build the Xero
     // line items, and a separate round-trip would race it onto a one-line bill.
     if (newLines?.length) await replaceCostLines(result.rows[0].id, newLines);
+    if (workRows?.length) await writeWorkLinks(result.rows[0].id, workRows, req.user!.id);
 
     // Background push to Xero for paid costs — non-blocking; the cost row's
     // xero_sync_state + xero_error carry success/failure for the UI.
@@ -1055,6 +1149,35 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     const data = parse.data as Record<string, unknown>;
     coerceRechargeForIntent(data);
     serialiseJsonbForWrite(data);
+
+    // "Which jobs?" (FREELANCER-PORTAL-SPEC §5), checked before anything is
+    // written. Changing WHOSE invoice it is without re-ticking clears the old
+    // ticks: they were the previous person's work.
+    const workItems = data.work_items as { key: string; amount: number }[] | undefined;
+    delete data.work_items;
+    let workRows: WorkLinkRow[] | null = null;
+    if (workItems !== undefined || data.person_id !== undefined) {
+      const cur = await query('SELECT person_id, cost_type FROM costs WHERE id = $1', [req.params.id]);
+      if (!cur.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+      const personId = (data.person_id !== undefined ? data.person_id : cur.rows[0].person_id) as string | null;
+      const costType = (data.cost_type ?? cur.rows[0].cost_type) as string;
+      if (workItems !== undefined) {
+        if (workItems.length && costType !== 'freelancer_invoice') {
+          res.status(400).json({ error: 'Only a freelancer invoice can be linked to their work.' });
+          return;
+        }
+        try {
+          workRows = await planWorkLinks(String(req.params.id), personId || null, workItems);
+        } catch (e) {
+          if (e instanceof WorkLinkError) { res.status(400).json({ error: e.message }); return; }
+          throw e;
+        }
+      } else if ((personId || null) !== (cur.rows[0].person_id || null)) {
+        workRows = [];
+      }
+    }
+    // Work ticked: no "why not?" to keep (migration 315).
+    if (workRows?.length) data.work_unmatched_reason = null;
 
     // Amounts arrive as positive magnitudes from every client, so an edited
     // credit has to be re-signed or it flips to a purchase on save. Which kind
@@ -1118,7 +1241,18 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     for (const c of WRITABLE) {
       if (data[c] !== undefined) { vals.push(data[c]); sets.push(`${c} = $${vals.length}`); }
     }
-    if (!sets.length) { res.status(400).json({ error: 'No updatable fields supplied' }); return; }
+    if (!sets.length) {
+      // Only the ticks changed: nothing on the row itself, nothing for Xero.
+      if (workRows) {
+        await writeWorkLinks(String(req.params.id), workRows, req.user!.id);
+        const row = await query('SELECT * FROM costs WHERE id = $1', [req.params.id]);
+        if (!row.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+        res.json({ data: await withJobLabels(row.rows[0]) });
+        return;
+      }
+      res.status(400).json({ error: 'No updatable fields supplied' });
+      return;
+    }
 
     vals.push(req.params.id);
     const result = await query(
@@ -1126,6 +1260,12 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
       vals,
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+    if (workRows) await writeWorkLinks(String(req.params.id), workRows, req.user!.id);
+    // A receipt attached (or the purchase changed) may finish someone's
+    // "company-card purchases need a receipt" bell.
+    if (['receipt_r2_key', 'payment_method', 'cost_date'].some((f) => data[f] !== undefined)) {
+      await retireDoneBells('cot_receipts');
+    }
 
     const updated = result.rows[0];
     // Same ordering rule as create: lines land before any push reads them.
@@ -1242,6 +1382,7 @@ router.delete('/:id', authorize(...VERIFY_ROLES), async (req: AuthRequest, res: 
   try {
     const result = await query('DELETE FROM costs WHERE id = $1 RETURNING id', [req.params.id]);
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+    await retireDoneBells('cot_receipts');
     res.json({ data: { id: req.params.id, deleted: true } });
   } catch (err) {
     console.error('[costs] delete error:', err);
@@ -1421,7 +1562,10 @@ router.post('/:id/verify', authorize(...VERIFY_ROLES), async (req: AuthRequest, 
 router.post('/:id/approve', authorize(...VERIFY_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
-      `UPDATE costs SET approval_state = 'approved', approved_by = $1, approved_at = NOW()
+      // Approving answers any open query (FREELANCER-PORTAL-SPEC §5); its note
+      // stays in the audit log.
+      `UPDATE costs SET approval_state = 'approved', approved_by = $1, approved_at = NOW(),
+              queried_at = NULL, queried_by = NULL, query_note = NULL
        WHERE id = $2 RETURNING *`,
       [req.user!.id, req.params.id],
     );
@@ -1436,6 +1580,63 @@ router.post('/:id/approve', authorize(...VERIFY_ROLES), async (req: AuthRequest,
     res.json({ data: result.rows[0] });
   } catch (err) {
     console.error('[costs] approve error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Query a freelancer invoice (FREELANCER-PORTAL-SPEC §5) ───────────────────
+// "Why is that so expensive?": the alternative to approving it. Shown as
+// Queried in Costs (and, next, in the freelancer's portal). No email: the
+// office contacts the freelancer itself (jon). Managers and admins, or whoever
+// uploaded it. Approving clears it.
+
+const querySchema = z.object({ note: z.string().trim().min(1, 'Say what the question is').max(2000) });
+
+async function mayQuery(req: AuthRequest, costId: string): Promise<{ ok: true; cost: Record<string, unknown> } | { ok: false; status: number; error: string }> {
+  const r = await query('SELECT id, uploaded_by, approval_state, cost_type, queried_at, query_note FROM costs WHERE id = $1', [costId]);
+  const cost = r.rows[0];
+  if (!cost) return { ok: false, status: 404, error: 'Cost not found' };
+  if (cost.cost_type !== 'freelancer_invoice') return { ok: false, status: 400, error: 'Only a freelancer invoice can be queried.' };
+  // Manager tier = who approves (VERIFY_ROLES, which authorize() widens to weekend managers).
+  if (!isManagerTier(req.user!.role) && cost.uploaded_by !== req.user!.id) {
+    return { ok: false, status: 403, error: 'Only a manager, or whoever uploaded it, can query this invoice.' };
+  }
+  if (cost.approval_state === 'approved' || cost.approval_state === 'paid') {
+    return { ok: false, status: 409, error: 'This invoice is already approved, so there is nothing to query.' };
+  }
+  return { ok: true, cost };
+}
+
+router.post('/:id/query', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = querySchema.safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: parse.error.issues[0]?.message || 'Say what the question is' }); return; }
+    const check = await mayQuery(req, String(req.params.id));
+    if (!check.ok) { res.status(check.status).json({ error: check.error }); return; }
+    const result = await query(
+      `UPDATE costs SET queried_at = NOW(), queried_by = $1, query_note = $2 WHERE id = $3 RETURNING *`,
+      [req.user!.id, parse.data.note, req.params.id],
+    );
+    await audit(req.user!.id, String(req.params.id), 'cost_queried', null, { query_note: parse.data.note });
+    res.json({ data: await withJobLabels(result.rows[0]) });
+  } catch (err) {
+    console.error('[costs] query error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/:id/query', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const check = await mayQuery(req, String(req.params.id));
+    if (!check.ok) { res.status(check.status).json({ error: check.error }); return; }
+    const result = await query(
+      `UPDATE costs SET queried_at = NULL, queried_by = NULL, query_note = NULL WHERE id = $1 RETURNING *`,
+      [req.params.id],
+    );
+    await audit(req.user!.id, String(req.params.id), 'cost_query_cleared', { query_note: check.cost.query_note }, null);
+    res.json({ data: await withJobLabels(result.rows[0]) });
+  } catch (err) {
+    console.error('[costs] clear query error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1606,6 +1807,21 @@ router.post('/:id/send-remittance', authorize(...ADMIN_ONLY), async (req: AuthRe
     const result = await sendRemittance(req.params.id as string, parse.data.email);
     if (!result.ok) { res.status(502).json({ error: result.error || 'Send failed' }); return; }
     await audit(req.user!.id, req.params.id as string, 'remittance_sent', null, { email: parse.data.email });
+    // A freelancer invoice nobody linked yet: the address staff just chose names
+    // the freelancer, so link it (FREELANCER-PORTAL-SPEC §5). Only on a clear,
+    // single match, and never over an existing link.
+    try {
+      const c = await query(`SELECT cost_type, person_id FROM costs WHERE id = $1`, [req.params.id]);
+      if (c.rows[0]?.cost_type === 'freelancer_invoice' && !c.rows[0].person_id) {
+        const personId = await personIdByEmail(parse.data.email);
+        if (personId) {
+          await query(`UPDATE costs SET person_id = $1 WHERE id = $2 AND person_id IS NULL`, [personId, req.params.id]);
+          await audit(req.user!.id, req.params.id as string, 'cost_person_linked', null, { person_id: personId, from: 'remittance' });
+        }
+      }
+    } catch (linkErr) {
+      console.error('[costs] remittance person link failed (non-fatal):', linkErr);
+    }
     res.json({ data: { sent: true, email: parse.data.email } });
   } catch (err) {
     console.error('[costs] send-remittance error:', err);

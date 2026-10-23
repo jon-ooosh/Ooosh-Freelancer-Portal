@@ -1,5 +1,6 @@
 import { query } from '../config/database';
 import { getSystemSetting } from '../routes/system-settings';
+import type { BellKey } from './bell-rules';
 import { frontendLink } from '../config/app-urls';
 
 type DbClient = {
@@ -76,7 +77,15 @@ export async function notifyIssueRecipients(
   severity: string | null | undefined,
   title: string,
   content: string,
-  opts: { includeReporter?: boolean } = {},
+  opts: {
+    includeReporter?: boolean;
+    /**
+     * Set on a bell that ASKS for something (a new or re-flagged Problem) —
+     * bell-rules.ts retires it once the Problem is closed. Never on an FYI
+     * bell ("Issue resolved", "severity changed").
+     */
+    resolveKey?: BellKey;
+  } = {},
 ): Promise<void> {
   try {
     const issueRow = await query(
@@ -105,9 +114,9 @@ export async function notifyIssueRecipients(
     for (const userId of recipients) {
       await query(
         `INSERT INTO notifications
-           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-         VALUES ($1, 'system', $2, $3, 'job_issues', $4, $5, $6, $7)`,
-        [userId, title, content, issueId, actionUrl, priority, actorUserId],
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id, resolve_key)
+         VALUES ($1, 'system', $2, $3, 'job_issues', $4, $5, $6, $7, $8)`,
+        [userId, title, content, issueId, actionUrl, priority, actorUserId, opts.resolveKey ?? null],
       );
     }
   } catch (err) {
@@ -325,6 +334,7 @@ export async function createJobIssue(opts: {
     issueId, opts.reportedByUserId, severity,
     `New issue: ${opts.summary.slice(0, 80)}`,
     `${opts.category} — ${severity}`,
+    { resolveKey: 'problem_open' },
   );
   // Van for sale with chosen photos → "check its sale photos" (VEHICLE-SALES-SPEC D6).
   if (opts.vehicleId) {

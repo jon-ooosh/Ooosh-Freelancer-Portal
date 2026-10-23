@@ -259,8 +259,17 @@ once (`job-groups.ts` `nonLeadMemberIds()`), the Confirm panel in the bar (`serv
 `afterOptionConfirmed()` on all four confirmation paths; bells on the unattended ones), the §8 guards
 (`notAltQuoteLossSql`, `bumpSiblingChaseDates`, `jobNameKeepingOptionSuffixSql`), and the portal hand-off
 (`portalOptionsFor()` on `GET /money/job-lookup/:hh` — `payable` is false for a live option whose sibling
-confirmed; the portal repo refuses before any Stripe session). Festival-style grouping is NOT a `part_of` group — it gets its own design (§14 says why: every group read path assumes alternatives). **Spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
+confirmed; the portal repo refuses before any Stripe session). Festival-style grouping is NOT a `part_of` group — it is job projects, below (§14 says why: every group read path assumes alternatives). An option confirmed with nobody on the page gets a bell AND a To Do (`source_type = 'quote_option'`). **Spec §14 is the handover: what's left and where it's specified.** **`job_duplicate.php` returns the new job under `ID`** (`readDuplicatedJobNumber()`; Re-open uses
 it too). Copy strings: `frontend/src/lib/optionCopy.ts`.
+
+**BUILT, 21 Oct 2026:** `docs/JOB-PROJECTS-SPEC.md` — job projects: "these jobs all belong to the same
+festival" (core backline, outlier stages, band spot-hires). A panel top right on Job Detail (name, client,
+lead Ooosh-er, roll-ups, every job), "+ Add to a project" in the header, a chip on Kanban cards, project
+names in global search, "+ New job in this project" = a blank New Enquiry with the project's client and
+dates. **Its own table (`job_projects`) and column (`jobs.job_project_id`) — never `job_groups`**, and not
+`jobs.hh_project_id`/`project_name` (HireHop's, unused). **The project's dates are defaults for NEW jobs
+only — never pushed into existing jobs** (Start/End are what HireHop charges). All logic in
+`services/job-projects.ts`; copy in `frontend/src/lib/projectCopy.ts`.
 
 **BUILT (all three phases), Oct 2026:** `docs/STAFF-LOGIN-SECURITY-SPEC.md` — two-factor for every OP
 staff login. Phase 1: a 6-digit email code as the second factor, **trusted devices** (the
@@ -285,8 +294,10 @@ completion fixes, payment terms, security fixes, the Claude Design reskin of the
 `tailwind.config.js` `hf`/`kind`, shared pieces in `src/components/ui.tsx`), past work on the Completed page
 (every kind, one window: `src/lib/history.ts`), the van screens in the portal look for freelancers only
 (`frontend/src/modules/vehicles/components/freelancer/`, colours from `shared/design/freelancer-tokens.cjs`),
-portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1).
-Next: Earnings (plan + backfill in §5), the four guides.
+portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1),
+freelancer invoices linked to the freelancer and their work in Costs (§5.1; the past ones linked by hand, Oct 2026),
+the Earnings tab in the portal (§5.2: money by invoice, "To invoice" from 22 Oct 2026).
+Next: the four guides; the Costs form simplification comes last.
 **§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
@@ -312,7 +323,7 @@ the band / tour managers — not promoters or agents.
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
 that answers it — new bells should link that way, not at the bare page. **Exception:
-anything waiting for an approval** (leave, overtime, WFH requests) links to the bare page,
+anything waiting for an approval** (leave, overtime, WFH requests, day swaps) links to the bare page,
 because the "Waiting for you" panel there is the approvals surface; the person's Time
 off tab is not reliable for it (jon, Oct 2026 — see `staff-notifications.ts`). The page is
 manager-tier but Records, Reviews and the Overview's data are admin-only, so anything
@@ -349,6 +360,9 @@ existing definition:
 | Who could we contact on this job? | `services/job-contact-candidates.ts` |
 | What's this van's hire status? | `services/fleet-hire-status-sync.ts` |
 | Is this job genuinely returning? | `services/hire-lifecycle.ts` |
+| What is a freelancer paid for a delivery / collection / crew booking? | `services/freelancer-fees.ts` `personalFee()` — their agreed rate, else the quote's fee (a crew's fee split evenly). The portal's "Your fee", Costs and Earnings all use it |
+| Which of a freelancer's work is finished, what was it booked at, which invoice covers it? | `services/freelancer-work.ts` (`listFreelancerWork()`, `cost_work_items`; a run is one item at its combined fee). Whose invoice: `services/freelancer-invoice-person.ts`. Not `cost_allocations` — job costs stay as they are (`FREELANCER-PORTAL-SPEC.md` §5.1) |
+| What does a freelancer's Earnings page show (paid, invoiced, to invoice, next payment)? | `services/freelancer-earnings.ts` `getFreelancerEarnings()` — money by INVOICE (paid in the period / dated in it and unpaid), "To invoice" only from `freelancer_earnings_labels_from`; never the expense estimate (`FREELANCER-PORTAL-SPEC.md` §5.2) |
 | When does a quote's work end? When does the completion chaser start? | `services/quote-schedule.ts` — crew and People jobs by their LAST day (complete from it, chased 09:00 UK the day after), deliveries/collections from arrival time in UK time; shared by the chaser and the portal (`docs/FREELANCER-PORTAL-SPEC.md` §2) |
 | Has a quote's van leg actually happened (booked out / collected)? | `services/quote-completion.ts` `isVanLegDone()` — by direction; "out on hire" is NOT a collection. The portal's van-only "All Done" and `maybeCloseQuote` both ask it |
 | What happens to transport when a job dies? | `services/job-close-cascade.ts` |
@@ -359,6 +373,7 @@ existing definition:
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |
 | Sending any email | `services/email-service.ts` |
+| A bell that ASKS for something — when is it done? | `services/bell-rules.ts` — ONE rule per `notifications.resolve_key` ("still needed while …", SQL over the bell row); `notification-resolve.ts` `retireDoneBells(key, id?)` applies it (call it from the code that finishes the thing — instant) and `sweepDoneBells()` every 5 min catches every other path. Set the key at insert; never on an FYI bell. Older wiring, same file: leave/overtime/WFH/day-swap `retire…Bells()` in `staff-notifications.ts`, mentions `resolveMyThreadMentions()` / `markMentionsSeen()`. Open bells refresh live (`notifications_resolved`); services push through `config/socket.ts` `emitToUser()` |
 | Did this email actually arrive? Is this address bouncing / blocked by Resend? | `services/email-delivery.ts` (Resend webhook → `email_delivery_events`, `email_address_problems`); frontend `hooks/useEmailProblems.ts` + `components/EmailProblemFlag.tsx`. `email_log` 'sent' only means Resend accepted it |
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
@@ -417,6 +432,7 @@ existing definition:
 | When is a STAFF document due a re-check? | `services/staff-doc-cycles.ts` — the record's own `action_on` fires; the per-type intervals only pre-fill it (never `driver-validity.ts` — different people) |
 | What staff data has expired? | `services/staff-retention.ts` |
 | Is this person in the building / working from home? | `services/staff-day-status.ts` (`StaffDay.location`; requests in `services/staff-wfh.ts`) |
+| A staff member swapping a day ("work Friday instead of Saturday") — may they, ask, approve, what the calendar shows | `services/staff-swaps.ts` — two `staff_pattern_exceptions` legs sharing a `swap_group_id`, which is the swap's id; asked for on My Time, approved like holiday, nothing on the calendar until approved; no ledger (`docs/STAFF-CALENDAR-SPEC.md` §8.2) |
 | What goes in a person's calendar feed? | `services/staff-ical.ts` — own time only, never a colleague's |
 | Building or restyling a tab on the Staff page | `frontend/src/components/StaffCard.tsx` — Card, StatCard, InfoRow, Pill, button classes (the Time off look) |
 | What does a shop item cost / what VAT? | `services/shop-stock.ts` `resolveVatRate()` (the HireHop rate is an INDEX, not a percentage) |
@@ -439,6 +455,7 @@ existing definition:
 | Refunding a shop sale / money back off a deposit | `services/shop-sales.ts` `reverseShopSale()` → `hh-deposit.ts` `refundDepositOnHH()` |
 | The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
 | A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
+| Which jobs belong to the same festival? Its value, lead, default dates | `services/job-projects.ts` (`getProject()` roll-ups; quote options inside count once) |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
 | A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee |
 
@@ -547,7 +564,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh daily 07:30 ·
-Gmail ingestion every 10 min · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email).
+Gmail ingestion every 10 min · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email) · bell sweep every 5 min (retires bells whose thing is done, `bell-rules.ts`; also runs before each escalation).
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `is_internal` rule (see `jobs-pipeline-dashboard.md`).

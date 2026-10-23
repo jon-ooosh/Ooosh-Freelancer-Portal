@@ -438,6 +438,11 @@ export interface Job {
   // GET /api/pipeline only: the group this job belongs to, with its lead
   // resolved, so the board can collapse the options onto one card.
   group_summary?: JobGroupSummary | null;
+  // Job projects (migration 316, docs/JOB-PROJECTS-SPEC.md): "these jobs all
+  // belong to the same festival". NOT hh_project_id / project_name (HireHop's
+  // own, unused). job_project_name is on GET /api/pipeline only (the card chip).
+  job_project_id?: string | null;
+  job_project_name?: string | null;
   // Source
   enquiry_source: EnquirySource | null;
   // HireHop status (separate from pipeline_status)
@@ -1234,6 +1239,17 @@ export interface Cost {
   /** Remittance advice sent to the payee for this cost (audit + "sent" pip). */
   remittance_sent_at?: string | null;
   remittance_email?: string | null;
+  /** The freelancer a freelancer invoice is from (FREELANCER-PORTAL-SPEC §5). */
+  person_id?: string | null;
+  person_name?: string | null;
+  /** How many pieces of their work it covers (list only). */
+  work_item_count?: number;
+  /** Why it was saved with no work ticked: 'person_not_in_op' | 'work_not_in_op' | 'later' (migration 315). */
+  work_unmatched_reason?: string | null;
+  /** "Queried": the office has a question about this freelancer invoice. Approving clears it. */
+  queried_at?: string | null;
+  queried_by?: string | null;
+  query_note?: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
   /**

@@ -88,8 +88,10 @@ async function escalate(job: { id: string; hh_job_number: number | null; job_nam
   for (const r of recipients) {
     try {
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, 'normal')`,
+        // Asks for a human chase: retires once the chase date moves on or the
+        // job leaves the enquiry stages (bell-rules.ts chase_due).
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, 'normal', 'chase_due')`,
         [
           r.id,
           `Auto-chase stopped: ${label}`,
@@ -123,8 +125,10 @@ export async function runDueAutoChases(): Promise<AutoChaseRunSummary> {
 
   const due = await query(
     `SELECT j.id, j.hh_job_number, j.job_name, j.auto_chase_mode, j.chase_alert_user_id,
-            sp.first_name AS setter_first_name,
-            mp.first_name AS manager_first_name
+            -- Preferred name first ("Jon", not "Jonathan") — same rule as
+            -- services/display-name.ts greetingName().
+            COALESCE(NULLIF(TRIM(sp.preferred_name), ''), sp.first_name) AS setter_first_name,
+            COALESCE(NULLIF(TRIM(mp.preferred_name), ''), mp.first_name) AS manager_first_name
        FROM jobs j
        LEFT JOIN users su ON su.id = j.auto_chase_set_by
        LEFT JOIN people sp ON sp.id = su.person_id

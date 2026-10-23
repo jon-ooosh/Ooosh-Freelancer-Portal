@@ -119,7 +119,8 @@ export async function runClaimClientChase(): Promise<{ chased: number; skipped: 
           `No form after ${CHASE_MAX} reminders — reminders stopped. Worth a phone call.`);
         await notifyClaimFollowers(c.id, null, `Client form not coming back — ${claimLabel(c)}`,
           `${CHASE_MAX} reminders sent and the form still isn't in. Chasing has stopped; restart it or phone them.`,
-          { priority: 'high' });
+          // Retires once the form is in, or chasing is paused or restarted (bell-rules.ts).
+          { priority: 'high', resolveKey: 'claim_form_chase' });
         out.escalated++;
         continue;
       }
