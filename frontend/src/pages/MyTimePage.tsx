@@ -66,6 +66,10 @@ interface MyBalances {
    *  an older backend does not send it, and the page then falls back to the
    *  company-wide policy from /bank-holidays. */
   bankHolidayPolicy?: BhPolicy;
+  /** This year's bank holidays the person would otherwise be WORKING (Oct
+   *  2026) — the only ones worth booking off. Absent from an older backend,
+   *  null if the server could not work it out: then every one is offered. */
+  bankHolidaysWorking?: string[] | null;
 }
 /**
  * A manual adjustment an admin posted to a balance (Oct 2026) — e.g. overtime
@@ -81,6 +85,19 @@ interface Adjustment {
   effectiveDate: string;
   note: string | null;
   createdByName: string | null;
+}
+/**
+ * An absence an admin recorded for this person — GET /staff-calendar/me/absences
+ * (Oct 2026). Dates only: the API never sends the type or the reason (spec
+ * §7.2), so it is shown as "Absent" whatever it was.
+ */
+interface MyAbsence {
+  id: string;
+  startDate: string;
+  endDate: string | null;
+  isOpen: boolean;
+  deductsAllowance: boolean;
+  days: { date: string; minutes: number; portion: 'full' | 'am' | 'pm' }[];
 }
 /** A one-off working-from-home request (spec §19) — GET /staff-calendar/wfh. */
 interface WfhRequest {
@@ -256,6 +273,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const [wfh, setWfh] = useState<WfhRequest[]>([]);
   const [swaps, setSwaps] = useState<DaySwap[]>([]);
   const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
+  const [absences, setAbsences] = useState<MyAbsence[]>([]);
   const [wfhOpen, setWfhOpen] = useState(false);
   const [swapOpen, setSwapOpen] = useState(false);
   const [balances, setBalances] = useState<MyBalances | null>(null);
@@ -282,7 +300,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
     try {
       const from = `${year}-01-01`;
       const to = `${year}-12-31`;
-      const [leave, ot, bal, bh, cd, wf, sw] = await Promise.all([
+      const [leave, ot, bal, bh, cd, wf, sw, ab] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}&${who}`),
         api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}&${who}`),
         api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>(
@@ -298,9 +316,14 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         // Same: a failure leaves the list without swaps, nothing more.
         api.get<{ data: DaySwap[] }>(`/staff-calendar/swaps?from=${from}&to=${to}&${who}`)
           .catch(() => ({ data: [] as DaySwap[] })),
+        // Same: a failure leaves the list without absences, nothing more.
+        api.get<{ data: MyAbsence[] }>(
+          `/staff-calendar/me/absences?year=${year}${personId ? `&${who}` : ''}`)
+          .catch(() => ({ data: [] as MyAbsence[] })),
       ]);
       setWfh(wf.data ?? []);
       setSwaps(sw.data ?? []);
+      setAbsences(ab.data ?? []);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
@@ -438,16 +461,26 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   // already covered by a live request is not "left" — telling someone to book
   // Easter Monday when they already have is a nag people learn to ignore.
   const bh = useMemo(() => {
-    const booked = new Set(requests
-      .filter(r => r.status === 'pending' || r.status === 'approved')
-      .flatMap(r => r.days.map(d => d.date)));
+    const booked = new Set([
+      ...requests
+        .filter(r => r.status === 'pending' || r.status === 'approved')
+        .flatMap(r => r.days.map(d => d.date)),
+      // Off anyway — an absence covers it.
+      ...absences.flatMap(a => a.days.map(d => d.date)),
+    ]);
+    // Only the ones they would otherwise be working (Oct 2026): someone who
+    // never works Mondays was told to book Monday 28 Dec, and the form then
+    // refused it. Unknown (older backend, failed read) = offer them all.
+    const worked = balances?.bankHolidaysWorking ? new Set(balances.bankHolidaysWorking) : null;
     const { working, granted } = splitBankHolidays(bankHolidays, companyDays, TODAY);
     return {
       // Only under use_allowance is a bank holiday something to book at all.
-      toBook: policy === 'use_allowance' ? working.filter(d => !booked.has(d)) : [],
+      toBook: policy === 'use_allowance'
+        ? working.filter(d => !booked.has(d) && (!worked || worked.has(d)))
+        : [],
       granted,
     };
-  }, [requests, bankHolidays, companyDays, policy]);
+  }, [requests, absences, bankHolidays, companyDays, policy, balances]);
 
   const pendingOvertime = overtime
     .filter(e => e.status === 'pending')
@@ -620,7 +653,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         ) : view === 'list' ? (
           <TimeList year={year} requests={requests} overtime={overtime} wfh={wfh} onWithdrawWfh={withdrawWfh}
             swaps={swaps} onWithdrawSwap={withdrawSwap}
-            adjustments={adjustments}
+            adjustments={adjustments} absences={absences}
             companyDays={companyDays}
             bankHolidaysToBook={bh.toBook} freshIds={freshIds}
             onWithdraw={withdraw} onCancelOvertime={cancelOvertime}
@@ -635,7 +668,8 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
               if (next.y !== year) setYear(next.y);
             }}
             onThisMonth={() => changeYear(CURRENT_YEAR)}
-            requests={requests} overtime={overtime} wfh={wfh} swaps={swaps} companyDays={companyDays}
+            requests={requests} overtime={overtime} wfh={wfh} swaps={swaps} absences={absences}
+            companyDays={companyDays}
             bankHolidays={bankHolidays} bankHolidaysToBook={bh.toBook}
             onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         )}
@@ -1209,6 +1243,13 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
           </label>
         )}
       </div>
+      {/* Absence is recorded FOR staff, never booked by them (spec §7) — so
+          the form has to say where the rest goes, or it gets booked here as
+          holiday. The first paternity leave did exactly that (Oct 2026). */}
+      <p className="-mt-1 mb-3 text-xs text-gray-500">
+        Paternity, maternity, jury service or anything else that isn’t holiday? Don’t book it
+        here — ask an admin, who will record it for you without touching your allowance.
+      </p>
 
       {spanMode === 'part' && (
         <div className="mb-3 flex flex-wrap items-end gap-2">
@@ -2004,11 +2045,12 @@ function pendingActions(kind: DecideKind, id: string, onWithdraw: () => void, on
     : [{ label: 'Withdraw', onClick: onWithdraw, className: 'text-red-600' }];
 }
 
-function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], onWithdrawSwap, adjustments = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
+function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], onWithdrawSwap, adjustments = [], absences = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
   swaps?: DaySwap[]; onWithdrawSwap?: (id: string) => void;
   adjustments?: Adjustment[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
@@ -2033,6 +2075,32 @@ function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], on
       pillClass: lieu ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-700',
       statusClass: lieu ? 'text-emerald-700' : 'text-gray-600',
       dot: lieu ? 'bg-emerald-500' : 'bg-gray-400',
+    });
+  }
+
+  // Absence an admin recorded — sickness, parental leave and the rest. "Absent"
+  // and nothing more (jon, Oct 2026): the API does not send the type. The
+  // hours show only when it came out of their holiday, which explains a
+  // figure on the card the list would otherwise leave unaccounted for.
+  for (const a of absences) {
+    const n = a.days.length;
+    const mins = a.days.reduce((t, d) => t + d.minutes, 0);
+    const half = n === 1 && a.days[0]!.portion !== 'full'
+      ? ` · ${a.days[0]!.portion === 'am' ? 'morning' : 'afternoon'}` : '';
+    const span = a.isOpen
+      ? `Since ${fmtDate(a.startDate)} · still off`
+      : fmtRange(a.startDate, a.endDate ?? a.startDate);
+    rows.push({
+      key: `abs:${a.id}`, date: a.startDate,
+      until: a.isOpen ? TODAY : (a.endDate ?? a.startDate),
+      title: 'Absent',
+      meta: `${span}${n > 0 ? ` · ${n} day${n === 1 ? '' : 's'}` : ''}${half}`,
+      amount: a.deductsAllowance ? `−${fmtH(mins)}` : '',
+      amountClass: 'text-gray-600',
+      pill: a.deductsAllowance ? 'From your holiday' : 'Doesn’t use your holiday',
+      pillClass: 'bg-violet-100 text-violet-800',
+      statusClass: 'text-violet-700',
+      dot: 'bg-violet-500',
     });
   }
 
@@ -2164,6 +2232,7 @@ function TimeList(props: {
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
   swaps?: DaySwap[]; onWithdrawSwap?: (id: string) => void;
   adjustments?: Adjustment[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
@@ -2226,13 +2295,14 @@ interface CalEvent { label: string; cls: string; dot: string; onClick?: () => vo
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 /** A month grid, Monday first, of the same facts the list shows. */
-function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [], swaps = [], companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
+function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [], swaps = [], absences = [], companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
   month: { y: number; m: number };
   onMonth: (next: { y: number; m: number }) => void;
   onThisMonth: () => void;
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[];
   swaps?: DaySwap[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[];
   bankHolidays: string[]; bankHolidaysToBook: string[];
   onBook?: (date: string) => void;
@@ -2284,8 +2354,15 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [
       add(sw.offDate, { label: `⇄ Off (swap)${waiting}`, cls, dot });
       add(sw.workDate, { label: `⇄ In ${sw.startTime}–${sw.endTime}${waiting}`, cls, dot });
     }
+    // "Absent" only — never the type (spec §7.2).
+    for (const a of absences) {
+      for (const d of a.days) {
+        add(d.date, { label: d.portion === 'full' ? 'Absent' : `Absent (${d.portion.toUpperCase()})`,
+          cls: 'bg-violet-100 text-violet-800', dot: 'bg-violet-500' });
+      }
+    }
     return map;
-  }, [requests, overtime, wfh, swaps, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
+  }, [requests, overtime, wfh, swaps, absences, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
 
   const { y, m } = month;
   const first = new Date(Date.UTC(y, m, 1));
@@ -2371,6 +2448,7 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [
           ['bg-emerald-100', 'Company day'],
           ['bg-teal-50 border border-teal-300', 'Home'],
           ['bg-indigo-50 border border-indigo-300', 'Swapped day'],
+          ['bg-violet-100', 'Absent'],
         ].map(([cls, text]) => (
           <span key={text} className="flex items-center gap-1.5">
             <i className={`w-2.5 h-2.5 rounded-[3px] ${cls}`} />{text}

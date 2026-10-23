@@ -320,7 +320,7 @@ left.** Searches are run by hand on purpose (no scheduler). Contact research wan
 the band / tour managers — not promoters or agents.
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
-in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
+in place as `?person=<id>&tab=overview|employment|time|records|reviews|access|absence`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
 that answers it — new bells should link that way, not at the bare page. **Exception:
 anything waiting for an approval** (leave, overtime, WFH requests, day swaps) links to the bare page,

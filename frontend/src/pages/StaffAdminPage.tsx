@@ -14,6 +14,7 @@ import StaffBalancePanel from '../components/StaffBalancePanel';
 import LeaveApprovals from '../components/LeaveApprovals';
 import PayrollReportPanel from '../components/PayrollReportPanel';
 import MyTimePage from './MyTimePage';
+import StaffAbsencePage from './StaffAbsencePage';
 import { Card, InfoRow, Pill, btnPrimary, btnSecondary, btnQuiet } from '../components/StaffCard';
 import { ukToday } from '../lib/ukDate';
 
@@ -465,6 +466,7 @@ const PERSON_TABS = [
   { id: 'records', label: 'Records' },
   { id: 'reviews', label: 'Reviews' },
   { id: 'access', label: 'Access' },
+  { id: 'absence', label: 'Absence' },
 ] as const;
 
 /**
@@ -473,7 +475,8 @@ const PERSON_TABS = [
  * The same six panels as before, but one at a time: Records and Reviews are
  * the admin-only halves of the staff-records module, Access is the login and
  * company card, Employment is the contract and hours. Overview is read-only
- * on purpose — see StaffPersonOverview.
+ * on purpose — see StaffPersonOverview. Absence (admin only, Oct 2026) is the
+ * Absence page narrowed to this person.
  */
 function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSaved, onError }: {
   row: RosterRow; isAdmin: boolean; people: ReviewPerson[];
@@ -484,10 +487,12 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
   // Records and Reviews hold passports, NI numbers and private review notes.
   // A manager reaching this page sees the person, not those tabs.
   // Time off reads that person's leave and overtime, which only an admin may
-  // list for somebody else — and only an employee has any.
+  // list for somebody else — and only an employee has any. Absence is
+  // special-category data (every /absences route is admin-only) and hangs off
+  // the employment record too, so it follows the same two rules.
   const tabs = PERSON_TABS.filter(x =>
-    (isAdmin || (x.id !== 'records' && x.id !== 'reviews' && x.id !== 'time'))
-    && (x.id !== 'time' || !!row.employment));
+    (isAdmin || (x.id !== 'records' && x.id !== 'reviews' && x.id !== 'time' && x.id !== 'absence'))
+    && ((x.id !== 'time' && x.id !== 'absence') || !!row.employment));
   const active = tabs.some(x => x.id === tab) ? tab : 'overview';
   const urgent = attention.filter(a => a.severity === 'urgent').length;
 
@@ -629,6 +634,13 @@ function PersonView({ row, isAdmin, people, tab, attention, onTab, onBack, onSav
           )}
           {isAdmin && <CotCardSection row={row} onSaved={onSaved} onError={onError} />}
         </div>
+      )}
+
+      {/* The Absence page, narrowed to this person (Oct 2026 — it was only
+          reachable from a small link on the roster). Keyed so moving between
+          people starts clean, like Time off. */}
+      {active === 'absence' && isAdmin && row.employment && (
+        <StaffAbsencePage key={row.personId} personId={row.personId} />
       )}
     </div>
   );

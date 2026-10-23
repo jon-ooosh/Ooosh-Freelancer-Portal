@@ -9,8 +9,9 @@
  *   * Calendar reads — STAFF_ROLES. The whole team needs to see who is in.
  *   * Employment / pattern / salary / review writes — admin only, via the
  *     STAFF_ADMIN_ROLES chokepoint in services/staff-employment.ts.
- *   * Absence — admin only, with no exceptions, because it is special-category
- *     data (§0.5).
+ *   * Absence — admin only, because it is special-category data (§0.5). The
+ *     one exception is GET /me/absences: your own days, dates only, shown on
+ *     My Time as "Absent" — never the type or reason.
  *
  * MASKING (spec §0.5): every calendar response passes through
  * getStaffCalendar(), which strips special-category detail for non-admin
@@ -20,7 +21,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import {
-  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE, cycleWeekFor,
+  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE, cycleWeekFor, contractedDatesAmong,
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
@@ -51,7 +52,7 @@ import {
 import {
   createAbsence, closeAbsence, cancelAbsence, recordRtw, reclaimLeaveDays,
   getReclaimCandidates, getAbsence, listAbsences, listRtwOutstanding,
-  getAbsenceReport, ABSENCE_TYPES,
+  getAbsenceReport, ABSENCE_TYPES, listOwnAbsences,
   type AbsenceType, type CreateAbsenceInput,
 } from '../services/staff-absence';
 import {
@@ -572,9 +573,10 @@ router.post('/year-end-cashout', adminOnly, async (req: AuthRequest, res: Respon
 
 // ── Absence (Phase D) ───────────────────────────────────────────────────────
 //
-// ADMIN ONLY, every route. Absence is special-category data under UK GDPR
+// ADMIN ONLY, every route here. Absence is special-category data under UK GDPR
 // (spec §0.5) and the tier is deliberate — the module has one admin today, and
-// widening it is an RBAC change, not a code change.
+// widening it is an RBAC change, not a code change. (GET /me/absences, beside
+// /me/balances, is the person's own dates only — see listOwnAbsences().)
 //
 // Migration 215 removed the one exception there used to be, the self-recorded
 // timed marker. It answered neither question this module exists to answer —
@@ -601,6 +603,65 @@ router.get('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[staff-calendar] list absences error:', err);
     res.status(500).json({ error: 'Failed to load absences' });
+  }
+});
+
+// GET /api/staff-calendar/absences/:id — one absence, plus any booked leave it
+// overlaps (the reclaim prompt on the Absence page reads this).
+//
+// This route and POST /absences below were deleted by accident with the timed
+// markers (commit 781f2782, 15 Sep 2026) and restored Oct 2026 — the Absence
+// page could not record anything in between, and nothing noticed because the
+// verify script calls the service directly. routes/__tests__/staff-calendar-routes.test.ts
+// now checks every absence route the page calls is still here.
+router.get('/absences/:id', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const a = await getAbsence(req.params.id as string);
+    if (!a) { res.status(404).json({ error: 'Absence not found' }); return; }
+    res.json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
+  } catch (err) {
+    console.error('[staff-calendar] get absence error:', err);
+    res.status(500).json({ error: 'Failed to load the absence' });
+  }
+});
+
+// POST /api/staff-calendar/absences — open one. No end date = still running.
+//
+// Whole days, mornings or afternoons only: migration 215 removed timed absence
+// and the database refuses it, so the schema does not offer 'hours' or times.
+router.post('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    personId: z.string().uuid(),
+    absenceType: z.enum(ABSENCE_TYPES as [string, ...string[]]),
+    startDate: dateStr,
+    endDate: dateStr.nullish(),
+    portion: z.enum(['full', 'am', 'pm']).optional(),
+    deductsAllowance: z.boolean().optional(),
+    reasonCategory: z.string().max(50).nullish(),
+    notes: z.string().max(2000).nullish(),
+    selfCertified: z.boolean().optional(),
+    fitNoteReceived: z.boolean().optional(),
+    fitNoteExpiry: dateStr.nullish(),
+    sspQualifying: z.boolean().nullish(),
+    rtwRequired: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  if (parsed.data.endDate && parsed.data.endDate < parsed.data.startDate) {
+    res.status(400).json({ error: 'The last day off can’t be before the first' }); return;
+  }
+
+  try {
+    const a = await createAbsence(
+      { ...parsed.data, absenceType: parsed.data.absenceType as AbsenceType } as CreateAbsenceInput,
+      req.user!.id
+    );
+    // The reclaim prompt (§7.4) is offered, never applied automatically —
+    // giving holiday back is a decision, and the platform rule is that money
+    // and allowance never move without a human saying so.
+    res.status(201).json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record the absence' });
   }
 });
 
@@ -1140,12 +1201,40 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
         holiday: { ...holiday, balanceMinutes: holiday.availableMinutes },
         overtime: { ...overtime, balanceMinutes: overtime.availableMinutes },
         bankHolidayPolicy,
+        // The year's bank holidays this person would otherwise be WORKING —
+        // the only ones My Time offers to book off. Additive (an older bundle
+        // ignores it); null if the read failed, and My Time then lists them
+        // all as before rather than hiding one somebody does need to book.
+        bankHolidaysWorking: await contractedDatesAmong(personId, await getBankHolidays(year))
+          .catch(e => { console.error('[staff-calendar] bank holidays worked error:', e); return null; }),
       },
       hasStaffRecord: true,
     });
   } catch (err) {
     console.error('[staff-calendar] my balances error:', err);
     res.status(500).json({ error: 'Failed to load your balances' });
+  }
+});
+
+// GET /api/staff-calendar/me/absences?year= — your own absences, as "Absent".
+//
+// The one absence read that is not adminOnly, and it carries no type, reason,
+// notes, fit note or return-to-work — listOwnAbsences() is the mask (spec §7.2:
+// what staff see is "Absent"). An admin may pass personId= for the Staff
+// page's Time off tab, which mounts My Time for that person, like /me/balances.
+router.get('/me/absences', async (req: AuthRequest, res: Response) => {
+  try {
+    const asked = typeof req.query.personId === 'string' && req.query.personId ? req.query.personId : null;
+    if (asked && !z.string().uuid().safeParse(asked).success) {
+      res.status(400).json({ error: 'personId must be a UUID' }); return;
+    }
+    const personId = asked && isAdmin(req) ? asked : await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: [] }); return; }
+    const year = resolveYear(req);
+    res.json({ data: await listOwnAbsences(personId, `${year}-01-01`, `${year}-12-31`) });
+  } catch (err) {
+    console.error('[staff-calendar] my absences error:', err);
+    res.status(500).json({ error: 'Failed to load your absences' });
   }
 });
 

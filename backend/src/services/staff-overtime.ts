@@ -285,6 +285,14 @@ export interface PayrollRow {
   sicknessMinutes: number;
   sicknessDays: number;
   nominalDayMinutes: number | null;
+  /**
+   * Every absence that is not sickness (paternity, maternity, jury service…),
+   * by type, plus the total. Appended Oct 2026 (spec §12.1's "Other absence",
+   * missed first time round) — statutory parental pay goes through payroll.
+   */
+  otherAbsenceMinutes: number;
+  otherAbsenceDays: number;
+  otherAbsence: { type: string; label: string; minutes: number; days: number }[];
 }
 
 /**
@@ -328,8 +336,9 @@ export async function getPayrollReport(from: string, to: string): Promise<Payrol
 
   const { getContractedWeek } = await import('./staff-balance');
   // THE definition of sickness minutes — staff-absence.ts, not a second SUM here.
-  const { getSicknessMinutes } = await import('./staff-absence');
+  const { getSicknessMinutes, getOtherAbsenceMinutes, ABSENCE_TYPE_LABELS } = await import('./staff-absence');
   const sickness = await getSicknessMinutes(from, to);
+  const otherAbsence = await getOtherAbsenceMinutes(from, to);
 
   return Promise.all(r.rows.map(async (row: Record<string, unknown>) => {
     const week = await getContractedWeek(row.person_id as string, to);
@@ -337,6 +346,13 @@ export async function getPayrollReport(from: string, to: string): Promise<Payrol
     const sick = sickness.get(row.person_id as string) ?? 0;
     const asDays = (min: number) => week?.nominalDayMinutes
       ? Math.round((min / week.nominalDayMinutes) * 100) / 100 : 0;
+    const other = (otherAbsence.get(row.person_id as string) ?? []).map(o => ({
+      type: o.type,
+      label: ABSENCE_TYPE_LABELS[o.type] ?? o.type,
+      minutes: o.minutes,
+      days: asDays(o.minutes),
+    }));
+    const otherMinutes = other.reduce((s, o) => s + o.minutes, 0);
     return {
       personId: row.person_id as string,
       name: row.name as string,
@@ -346,8 +362,24 @@ export async function getPayrollReport(from: string, to: string): Promise<Payrol
       sicknessMinutes: sick,
       sicknessDays: asDays(sick),
       nominalDayMinutes: week?.nominalDayMinutes ?? null,
+      otherAbsenceMinutes: otherMinutes,
+      otherAbsenceDays: asDays(otherMinutes),
+      otherAbsence: other,
     };
   }));
+}
+
+/**
+ * "Paternity 8 days" — or, for more than one type, each joined by "; ".
+ * Hours instead when there is no working pattern to turn minutes into days,
+ * so a real absence never reads "0 days".
+ */
+export function otherAbsenceText(r: PayrollRow): string {
+  return r.otherAbsence
+    .map(o => (o.days === 0 && o.minutes > 0
+      ? `${o.label} ${(o.minutes / 60).toFixed(2)}h`
+      : `${o.label} ${o.days} day${o.days === 1 ? '' : 's'}`))
+    .join('; ');
 }
 
 export function payrollCsv(rows: PayrollRow[], from: string, to: string): string {
@@ -358,7 +390,8 @@ export function payrollCsv(rows: PayrollRow[], from: string, to: string): string
   const lines = [
     `Ooosh Tours payroll changes,${from} to ${to}`,
     '',
-    'Name,Paid overtime (hours),Paid overtime (h:mm),Unpaid leave (days),Unpaid leave (hours),Sickness (days),Sickness (hours)',
+    // Columns are only ever APPENDED: the accountants read them by position.
+    'Name,Paid overtime (hours),Paid overtime (h:mm),Unpaid leave (days),Unpaid leave (hours),Sickness (days),Sickness (hours),Other absence (days),Other absence (hours),Other absence (type)',
     ...rows.map(r => [
       esc(r.name),
       (r.paidOvertimeMinutes / 60).toFixed(2),
@@ -367,6 +400,9 @@ export function payrollCsv(rows: PayrollRow[], from: string, to: string): string
       (r.unpaidLeaveMinutes / 60).toFixed(2),
       r.sicknessDays.toFixed(2),
       (r.sicknessMinutes / 60).toFixed(2),
+      r.otherAbsenceDays.toFixed(2),
+      (r.otherAbsenceMinutes / 60).toFixed(2),
+      esc(otherAbsenceText(r)),
     ].join(',')),
   ];
   return lines.join('\n');
