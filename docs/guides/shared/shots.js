@@ -79,3 +79,42 @@ async function screen(page, outDir, name) {
 }
 
 module.exports = { loadPlaywright, ukToday, phone, ring, clearRings, snap, screen }
+
+/** The placeholder van photos fed to the camera, in the order the app asks for them (18). */
+function samplePhotos() {
+  const dir = path.join(__dirname, 'sample-photos')
+  return require('fs').readdirSync(dir).filter((f) => f.endsWith('.jpg')).sort().map((f) => path.join(dir, f))
+}
+
+/** Sign a signature pad with a handwriting-like loop, as a finger would. */
+async function drawSignature(page, canvas) {
+  // Centre it: at the bottom of the screen a fixed button bar can sit on top of it.
+  await canvas.evaluate((el) => el.scrollIntoView({ block: 'center' }))
+  await page.waitForTimeout(250)
+  const b = await canvas.boundingBox()
+  if (!b) throw new Error('No signature pad on screen')
+  const x0 = b.x + b.width * 0.12, y0 = b.y + b.height * 0.58
+  const w = b.width * 0.72, h = b.height * 0.22
+  await page.mouse.move(x0, y0)
+  await page.mouse.down()
+  // A prolate cycloid: a run of joined loops, like joined-up writing.
+  for (let t = 0; t <= 6 * Math.PI; t += 0.18) {
+    const x = x0 + (t - 1.7 * Math.sin(t)) / (6 * Math.PI) * w
+    const y = y0 - (1 - 1.7 * Math.cos(t)) / 2.7 * h + Math.sin(t / 3) * h * 0.25
+    await page.mouse.move(x, y)
+  }
+  await page.mouse.up()
+}
+
+/** Fixed bars (a bottom menu, a sticky button) would land on top of a clipped shot: hide them for it. */
+async function hideFixed(page, hide) {
+  await page.evaluate((h) => {
+    document.querySelectorAll('body *').forEach((el) => {
+      const pos = getComputedStyle(el).position
+      if (h && (pos === 'fixed' || pos === 'sticky')) { el.dataset.guideHidden = '1'; el.style.visibility = 'hidden' }
+      if (!h && el.dataset.guideHidden) { el.style.visibility = ''; delete el.dataset.guideHidden }
+    })
+  }, hide)
+}
+
+Object.assign(module.exports, { samplePhotos, drawSignature, hideFixed })

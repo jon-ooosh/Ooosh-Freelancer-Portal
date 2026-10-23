@@ -14,7 +14,7 @@
 
 const path = require('path')
 const fs = require('fs')
-const { phone, ukToday, ring, clearRings, snap } = require('../shared/shots')
+const { phone, ukToday, ring, clearRings, snap, hideFixed } = require('../shared/shots')
 
 const BASE = process.env.PORTAL_URL || 'http://localhost:3100'
 const OUT = path.join(__dirname, 'img')
@@ -125,17 +125,6 @@ async function answer(route) {
   if (p === '/api/earnings') return json(EARNINGS)
   if (p.startsWith('/api/hirehop/items')) return json({ success: true, items: [] })
   return json({ error: `not mocked: ${p}` }, 404)
-}
-
-/** Fixed bars (the bottom menu, a sticky button) would land on top of a clipped shot: hide them for it. */
-async function hideFixed(page, hide) {
-  await page.evaluate((h) => {
-    document.querySelectorAll('body *').forEach((el) => {
-      const pos = getComputedStyle(el).position
-      if (h && (pos === 'fixed' || pos === 'sticky')) { el.dataset.guideHidden = '1'; el.style.visibility = 'hidden' }
-      if (!h && el.dataset.guideHidden) { el.style.visibility = ''; delete el.dataset.guideHidden }
-    })
-  }, hide)
 }
 
 async function main() {
