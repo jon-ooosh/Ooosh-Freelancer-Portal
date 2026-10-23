@@ -32,7 +32,8 @@
  *
  * Confident = one candidate job AND the amount equals (within AMOUNT_TOLERANCE) one of
  * the figures the portal offers: deposit, half, remaining balance, or the excess
- * outstanding. A confident match is recorded through services/record-payment.ts — the
+ * outstanding. Half counts to the pound (the portal's figure) or to the penny (exact
+ * 50%). A confident match is recorded through services/record-payment.ts — the
  * same code a staff "Record Payment" click runs (OP row, HireHop deposit on the Wise
  * bank, excess update, Booked push, client email). No email to info@ for those.
  *
@@ -90,7 +91,7 @@ export interface IncomingCandidate {
   /** How this job came up: job_number · hh_invoice · payer_name */
   via: string;
   /** Figures the amount was compared against (for the resolve UI / email). */
-  expected?: { deposit: number; half: number; remaining: number; excess: number };
+  expected?: { deposit: number; half: number; remaining: number; excess: number; halfExact?: number };
 }
 
 // ── Detection ──────────────────────────────────────────────────────────────
@@ -228,6 +229,7 @@ interface MoneyPosition {
   remaining: number;
   requiredDeposit: number;
   half: number;
+  halfExact: number;
   depositPaid: boolean;
   excessOutstanding: number;
   invoiceNumbers: string[];
@@ -240,6 +242,10 @@ interface MoneyPosition {
  * Hire value inc VAT comes from job_financials (VAT-adjusted, refreshed nightly and
  * on every Money-tab open) with jobs.job_value × 1.2 as the fallback; deposits are
  * read live from HireHop so this morning's card payment is already counted.
+ *
+ * `halfExact` is 50% to the penny, matched alongside the portal's whole-pound `half`:
+ * a client paying by bank works half out for themselves. Job 16383 (23 Oct 2026) sent
+ * £3,447.30 against the portal's £3,447 and was queued for 30p.
  */
 async function getMoneyPosition(job: JobRow): Promise<MoneyPosition> {
   const fin = await query(
@@ -299,6 +305,7 @@ async function getMoneyPosition(job: JobRow): Promise<MoneyPosition> {
     remaining,
     requiredDeposit: Math.min(requiredDeposit, remaining),
     half: Math.round(hireValueIncVat * 0.5),
+    halfExact: hireValueIncVat * 0.5,
     depositPaid,
     excessOutstanding: Math.max(0, excessRequired - excessTaken),
     invoiceNumbers,
@@ -559,7 +566,7 @@ export async function matchIncomingPayment(p: {
     if (!job) continue;
     try {
       const pos = await getMoneyPosition(job);
-      c.expected = { deposit: round2(pos.requiredDeposit), half: round2(pos.half), remaining: round2(pos.remaining), excess: round2(pos.excessOutstanding) };
+      c.expected = { deposit: round2(pos.requiredDeposit), half: round2(pos.half), remaining: round2(pos.remaining), excess: round2(pos.excessOutstanding), halfExact: round2(pos.halfExact) };
       c.via += pos.depositPaid ? '' : '';
       (c as any)._depositPaid = pos.depositPaid;
     } catch (err) {
@@ -571,7 +578,7 @@ export async function matchIncomingPayment(p: {
   if (strongCandidates.length === 1 && strongCandidates[0].expected) {
     const c = strongCandidates[0];
     const e = c.expected!;
-    const hireHit = near(p.amount, e.deposit) || near(p.amount, e.half) || near(p.amount, e.remaining);
+    const hireHit = near(p.amount, e.deposit) || near(p.amount, e.half) || near(p.amount, e.halfExact ?? 0) || near(p.amount, e.remaining);
     const excessHit = near(p.amount, e.excess);
     const hint = referenceHintsExcess(p.reference);
     let paymentType: RecordPaymentType | null = null;
