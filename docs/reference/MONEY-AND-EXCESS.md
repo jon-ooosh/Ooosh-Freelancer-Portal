@@ -808,7 +808,9 @@ bare digits, on the last 80 recent jobs' billing) → **Xero invoice number (`OT
 Xero-only invoice such as monthly storage, recorded as a Payment on it in Xero against
 `xero_bank_wise`** → payer name against client names as evidence only. Confident = one strong
 candidate and the amount equals deposit / half / remaining / excess-outstanding within 2p
-(`AMOUNT_TOLERANCE`), "excess" in the reference breaks ties; recorded through
+(`AMOUNT_TOLERANCE`), "excess" in the reference breaks ties; half is accepted both as the
+portal's whole-pound figure and as exact 50% to the penny (job 16383, 23 Oct 2026: £3,447.30
+sent was queued against the portal's £3,447); recorded through
 `services/record-payment.ts` with no email. Everything else → `incoming_bank_payments`
 (unique on the Gmail Message-ID) + ONE email to info@ with candidates and a link to
 `/money?incoming=<id>`, where the Money-overview panel records it (job number + hire/excess,
