@@ -408,7 +408,10 @@ export function CollectionPage() {
     }
 
     // ── Step 1b: Update Fleet Master status to "Collected" ──
-    if (form.vehicleReg) {
+    // Staff only. A freelancer's session may only set "On Hire", so this was
+    // refused on every freelancer collection and the done screen went amber
+    // ("something to check"). Their saved event already sets the van Not Ready.
+    if (form.vehicleReg && !isFreelancer) {
       const fleetResult = await updateFleetHireStatus(form.vehicleReg, 'Collected')
       if (fleetResult.success) {
         results.push({ label: 'Fleet status', success: true, detail: 'Set to Collected' })
