@@ -88,6 +88,15 @@ not the dashboard strip — add a slot if wanted). NOT touched by the HH derivat
 temp_storage + lost_property are NOT on the ticker — they're **right-sidebar FYI** on the Job View
 ("📦 Also holding (FYI)", client-wide via org).
 
+**Moving an item to another job (Oct 2026, job 16648 → 16649):** the owner/job form
+(`POST /:id/link` with `edit: true`) 500'd on every save from 14 to 26 Oct 2026 — an untyped
+`$1 IS NOT NULL` in its SET list; the params it tests are now cast. It is open on FINISHED items too
+(a box handed over while on a mistyped job number must still be movable). On a move: `needed_by`
+follows the job when it equalled the OLD job's out date (a typed date stays); the old job's timeline
+gets "moved to job #N"; and when no incoming item (not even a cancelled one) points at the old job
+any more, its merch card is DELETED if this module made it (`is_auto` + `source = 'holding'`) — a
+card a person added stays, at `not_started`.
+
 **Smart linking + notify + ship-back (PRs #690/#692/#695):** HH job number is the primary capture
 field — `POST /holding` + `/link` derive `job_id` + client org from it (`resolveJobContext`), live
 `GET /holding/job-lookup/:n` confirms the client in the form, `GET /holding/org-jobs/:orgId`
