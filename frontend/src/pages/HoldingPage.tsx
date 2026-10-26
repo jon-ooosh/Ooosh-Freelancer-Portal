@@ -530,7 +530,11 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   // owner comes first, as it does in the server's next_action precedence.
   const primary: 'link' | 'book_in' | 'collect' =
     h.owner_unknown ? 'link' : (!isLost && h.status === 'expected') ? 'book_in' : 'collect';
-  const canNotify = ['expected', 'arrived', 'stored', 'client_notified'].includes(h.status);
+  // "Notify client" sits in the main row only until the client's been told;
+  // after that it's a rarer "Notify again" under More — otherwise a lost item
+  // showed two email-the-client buttons side by side (Notify + Send chase).
+  const canNotify = ['expected', 'arrived', 'stored'].includes(h.status);
+  const canNotifyAgain = h.status === 'client_notified';
   // Two different outcomes for a delivery that isn't complete:
   //  - nothing turned up at all  → cancel the record outright ("Won't arrive")
   //  - some turned up, rest isn't coming → CORRECT the expected count so the
@@ -540,12 +544,6 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   //    `expected` — so a part-arrived delivery had no way to be closed off at all.
   const canWontArrive = h.kind === 'incoming' && !h.received_count && h.status === 'expected';
   const canShortfall = !isLost && isPartiallyArrived(h);
-
-  async function viewPhoto(key: string) {
-    try {
-      await openR2Key(key);
-    } catch { setMsg({ text: 'Could not open photo.', ok: false }); }
-  }
 
   // This EMAILS the client (the tier's template) — it was labelled "Log chase"
   // with no confirmation, which undersold what one click did.
@@ -591,13 +589,6 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
           </div>
         )}
 
-        {/* Photos — inline thumbnails */}
-        {(h.photos || []).length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {h.photos.map((p, idx) => <PhotoThumb key={idx} photoKey={p.url} onOpen={() => viewPhoto(p.url)} />)}
-          </div>
-        )}
-
         {msg && <p className={msg.ok ? 'text-green-700' : 'text-red-600'}>{msg.text}</p>}
 
         {/* Actions — when one inline action is open, the rest hide so the
@@ -633,6 +624,9 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
                 </div>
                 {moreOpen && (
                   <div className="flex flex-wrap gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
+                    {canNotifyAgain && (
+                      <button disabled={!!busy} onClick={() => setNotifyOpen(true)} className={btnSecondary}>✉ Notify again</button>
+                    )}
                     {canShortfall && (
                       <button disabled={!!busy} onClick={() => setOpenAction('shortfall')} className={btnSecondary}>📦 Nothing more coming</button>
                     )}
@@ -672,6 +666,28 @@ function Card({ title, action, children }: { title: string; action?: ReactNode; 
       </div>
       {children}
     </section>
+  );
+}
+
+/**
+ * The item's photos, as the last row of its card — they used to float on their
+ * own between the cards and the buttons.
+ */
+function PhotoRow({ item }: { item: HeldItem }) {
+  const [err, setErr] = useState('');
+  if (!(item.photos || []).length) return null;
+  async function view(key: string) {
+    setErr('');
+    try { await openR2Key(key); } catch { setErr('Could not open photo.'); }
+  }
+  return (
+    <div className="mt-3">
+      <p className="text-xs font-medium text-slate-500 mb-1">{item.photos.length === 1 ? 'Photo' : 'Photos'}</p>
+      <div className="flex flex-wrap gap-2">
+        {item.photos.map((p, idx) => <PhotoThumb key={idx} photoKey={p.url} onOpen={() => view(p.url)} />)}
+      </div>
+      {err && <p className="text-sm text-red-600 mt-1">{err}</p>}
+    </div>
   );
 }
 
@@ -764,7 +780,13 @@ function HeldItemDiscussion({ heldItemId }: { heldItemId: string }) {
   const [comment, setComment] = useState('');
   const [mentionedIds, setMentionedIds] = useState<string[]>([]);
   const [posting, setPosting] = useState(false);
+  // The box sits as one quiet "Add a note…" line until somebody clicks into it
+  // (or pastes / drops a file); then it grows and shows Attach + Post. It
+  // doesn't shrink back on blur — clicking "Attach file" blurs the box first,
+  // and the click would land on nothing. It shrinks again after a post.
+  const [active, setActive] = useState(false);
   const attach = useAttachments();
+  const expanded = active || comment.trim() !== '' || attach.pending.length > 0;
 
   const load = useCallback(async () => {
     try {
@@ -786,7 +808,7 @@ function HeldItemDiscussion({ heldItemId }: { heldItemId: string }) {
         attachments: attach.payload(),
         mentioned_user_ids: mentionedIds,
       });
-      setComment(''); setMentionedIds([]); attach.clear();
+      setComment(''); setMentionedIds([]); attach.clear(); setActive(false);
       load();
     } catch (e) { console.error('Held-item note failed:', e); }
     finally { setPosting(false); }
@@ -800,15 +822,17 @@ function HeldItemDiscussion({ heldItemId }: { heldItemId: string }) {
   return (
     <div className="pt-3 border-t">
       <h4 className="text-sm font-semibold text-slate-700 mb-2">Discussion</h4>
-      <div className="space-y-2">
-        {topComments.length === 0 && <p className="text-xs text-slate-400 italic">No notes yet. Add one below — @mention a colleague to ping them.</p>}
-        {topComments.map((c) => (
-          <div key={c.id} className="border border-slate-200 rounded-lg p-2 bg-slate-50/40">
-            <ThreadView interactionId={c.id} onReplied={load} />
-          </div>
-        ))}
-      </div>
-      <div className="mt-3">
+      {/* No "No notes yet" line: the box's own placeholder says how to use it. */}
+      {topComments.length > 0 && (
+        <div className="space-y-2 mb-3">
+          {topComments.map((c) => (
+            <div key={c.id} className="border border-slate-200 rounded-lg p-2 bg-slate-50/40">
+              <ThreadView interactionId={c.id} onReplied={load} />
+            </div>
+          ))}
+        </div>
+      )}
+      <div onFocus={() => setActive(true)}>
         <MentionComposer
           value={comment}
           onChange={setComment}
@@ -816,9 +840,10 @@ function HeldItemDiscussion({ heldItemId }: { heldItemId: string }) {
           onMentionedIdsChange={setMentionedIds}
           attach={attach}
           placeholder="Add a note… (type @ to mention, paste images to attach)"
-          rows={2}
+          rows={expanded ? 2 : 1}
+          compact={!expanded}
           disabled={posting}
-          footer={
+          footer={expanded && (
             <div className="flex justify-between items-center mt-2 gap-2">
               <label className="text-[11px] text-slate-500 cursor-pointer hover:text-slate-700">
                 📎 Attach file
@@ -831,7 +856,7 @@ function HeldItemDiscussion({ heldItemId }: { heldItemId: string }) {
                 {posting ? 'Posting…' : attach.hasInFlight ? 'Uploading…' : 'Post note'}
               </button>
             </div>
-          }
+          )}
         />
       </div>
     </div>
@@ -1006,6 +1031,7 @@ function DeliveryCard({ item, locations, isOpen, onSaved }: {
             <OutcomeInfo item={item} />
           </div>
         )}
+      {!editing && <PhotoRow item={item} />}
     </Card>
   );
 }
@@ -1093,13 +1119,19 @@ function DeliveryForm({ item, locations, onCancel, onSaved }: {
  * Lost property: where it was found, where it is now, and the chase clock. The
  * chase figures are the backend's (next_chase_due / chase_state) so this card,
  * the list and the daily scanner all agree.
+ *
+ * One row: Found · Location · Chased. The NEXT chase date isn't repeated here —
+ * the window's "Next: Chase owner · date" line already shows it (with ⏸ when
+ * the client's collection date has paused chasing).
  */
 function FoundCard({ item, locations, isOpen, onSaved }: {
   item: HeldItem; locations: HeldItemLocation[]; isOpen: boolean; onSaved: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const paused = item.chase_state === 'paused';
   const where = item.found_vehicle_reg || item.found_location_text;
+  const foundIn = item.found_in ? `${FOUND_IN_LABEL[item.found_in]}${where ? ` (${where})` : ''}` : '';
+  const foundOn = item.found_date ? fmtDate(item.found_date) : '';
+  const chases = item.escalation_level || 0;
   return (
     <Card title="Found & chasing"
       action={isOpen && !editing && <button onClick={() => setEditing(true)} className={btnLink}>Edit</button>}>
@@ -1107,24 +1139,20 @@ function FoundCard({ item, locations, isOpen, onSaved }: {
         ? <FoundForm item={item} locations={locations} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />
         : (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-            <Info label="Found in">{item.found_in ? `${FOUND_IN_LABEL[item.found_in]}${where ? ` (${where})` : ''}` : '—'}</Info>
-            <Info label="Found on">{fmtDate(item.found_date)}</Info>
+            <Info label="Found">{[foundIn, foundOn].filter(Boolean).join(' · ') || '—'}</Info>
             <Info label="Location">{locationLabelOrDash(item)}</Info>
             {isOpen && (
-              <>
-                <Info label="Last contacted">{item.last_chased_at ? fmtDate(item.last_chased_at) : 'Not yet'}</Info>
-                <Info label="Next chase">
-                  {item.next_chase_due
-                    ? <span className={paused ? 'text-blue-600' : ''}>{paused ? `Paused until ${fmtDate(item.next_chase_due)}` : fmtDate(item.next_chase_due)}</span>
-                    : '—'}
-                </Info>
-                <Info label="Chases sent">{item.escalation_level || 0}</Info>
-              </>
+              <Info label="Chased">
+                {chases === 0
+                  ? 'Not yet'
+                  : `${chases} sent${item.last_chased_at ? ` · last ${fmtDate(item.last_chased_at)}` : ''}`}
+              </Info>
             )}
             {item.expected_collection_date && <Info label="Client collecting on">{fmtDate(item.expected_collection_date)}</Info>}
             <OutcomeInfo item={item} />
           </div>
         )}
+      {!editing && <PhotoRow item={item} />}
     </Card>
   );
 }
