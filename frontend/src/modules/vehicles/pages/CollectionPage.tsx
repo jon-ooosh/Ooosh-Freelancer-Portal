@@ -32,6 +32,7 @@ import { LoaderCircle } from 'lucide-react'
 import { fl, StepHeader, StepTitle, StepFooter, Banner, SummaryRows, FuelMileageStep, plateText, CentredSpinner } from '../components/freelancer/ui'
 import { VanConfirm, vanSubLine } from '../components/freelancer/VanConfirm'
 import { DoneScreen, isBothJob } from '../components/freelancer/DoneScreen'
+import { clearFreelancerSession } from '../adapters/freelancer-session'
 
 interface OpResult {
   label: string
@@ -724,7 +725,13 @@ export function CollectionPage() {
         results={opResults}
         bothNote={both}
         continueLabel={both ? 'Go to the equipment checklist' : 'Back to the portal'}
-        onContinue={returnUrl ? () => { window.location.href = returnUrl } : null}
+        // Clear the session on the way out, as book-out does: a session left
+        // on the phone turns /vehicles/check-in back into this collection for
+        // up to 4h, so a staff member couldn't check the van in at base on it.
+        onContinue={returnUrl ? () => {
+          clearFreelancerSession()
+          window.location.href = returnUrl
+        } : null}
       />
     )
   }
