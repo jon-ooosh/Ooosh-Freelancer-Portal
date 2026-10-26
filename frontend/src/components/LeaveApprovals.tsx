@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../services/api';
 import { ImpactPanel } from '../pages/MyTimePage';
 
@@ -29,6 +29,12 @@ interface LeaveRequest {
   requestNote: string | null;
   requestedAt: string;
   days: { date: string; minutes: number; portion: string }[];
+  // Spec §5.4 — optional, so an older backend simply shows none of it.
+  /** A CHANGE: the approved booking it replaces once approved. */
+  replacesRequestId?: string | null;
+  replaces?: { startDate: string; endDate: string; totalMinutes: number; leaveType: LeaveType } | null;
+  /** An approved booking with an ask to cancel waiting. */
+  cancelAsk?: { requestedAt: string; note: string | null; declinedAt: string | null } | null;
 }
 interface Impact {
   days: { date: string; minutes: number; portion: string }[];
@@ -85,20 +91,25 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
   const [wfh, setWfh] = useState<WfhRequest[]>([]);
   const [swaps, setSwaps] = useState<DaySwap[]>([]);
+  // Approved bookings somebody has asked, in writing, to cancel (§5.4).
+  const [cancelAsks, setCancelAsks] = useState<LeaveRequest[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [leave, ot, wf, sw] = await Promise.all([
+      const [leave, ot, wf, sw, ca] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave?status=pending'),
         api.get<{ data: OvertimeEntry[] }>('/staff-calendar/overtime?status=pending'),
         api.get<{ data: WfhRequest[] }>('/staff-calendar/wfh?status=pending')
           .catch(() => ({ data: [] as WfhRequest[] })),
         api.get<{ data: DaySwap[] }>('/staff-calendar/swaps?status=pending')
           .catch(() => ({ data: [] as DaySwap[] })),
+        api.get<{ data: LeaveRequest[] }>('/staff-calendar/leave?cancelAsked=1')
+          .catch(() => ({ data: [] as LeaveRequest[] })),
       ]);
+      setCancelAsks(ca.data ?? []);
       setPending(leave.data);
       setOvertime(ot.data);
       setWfh(wf.data ?? []);
@@ -128,7 +139,7 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
       {pending.length === 0 ? (
         // Only when NOTHING is waiting — overtime, home days and swaps are
         // listed below, and "nothing waiting" above them read as a contradiction.
-        pending.length + overtime.length + wfh.length + swaps.length === 0 && (
+        pending.length + overtime.length + wfh.length + swaps.length + cancelAsks.length === 0 && (
           <div className="p-3 rounded border border-dashed border-gray-300 text-sm text-gray-500">
             Nothing waiting for a decision.
           </div>
@@ -142,6 +153,28 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
               onDecided={async () => { setError(null); await load(); onChanged?.(); }}
               onError={setError} />
           ))}
+        </div>
+      )}
+
+      {cancelAsks.length > 0 && (
+        <div className="mt-4">
+          <div className="flex items-baseline gap-2 mb-2">
+            <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Asks to cancel</h3>
+            <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
+              {cancelAsks.length} waiting
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 mb-2">
+            Approved time off they no longer want. Approving gives the time back to their balance;
+            declining leaves it booked, and they&apos;re told why.
+          </p>
+          <div className="space-y-2">
+            {cancelAsks.map(r => (
+              <CancelAskRow key={r.id} request={r}
+                onDecided={async () => { setError(null); await load(); onChanged?.(); }}
+                onError={setError} />
+            ))}
+          </div>
         </div>
       )}
 
@@ -211,6 +244,60 @@ export default function LeaveApprovals({ onChanged }: { onChanged?: () => void }
         </div>
       )}
     </section>
+  );
+}
+
+/** An ask to cancel approved time off (spec §5.4). */
+function CancelAskRow({ request, onDecided, onError }: {
+  request: LeaveRequest; onDecided: () => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function decide(action: 'approve' | 'decline') {
+    let body: Record<string, string> = {};
+    if (action === 'approve') {
+      if (!confirm(`Cancel ${request.personName}'s booking? The time goes back to their balance, and they're told.`)) return;
+    } else {
+      const note = prompt(`Why are you declining? ${request.personName}'s booking stays, and they'll see this.`);
+      if (!note?.trim()) return;
+      body = { note };
+    }
+    setBusy(true);
+    try {
+      await api.post(`/staff-calendar/leave/${request.id}/cancel-request/${action}`, body);
+      await onDecided();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally { setBusy(false); }
+  }
+
+  const range = request.startDate === request.endDate
+    ? fmtDate(request.startDate)
+    : `${fmtDate(request.startDate)} – ${fmtDate(request.endDate)}`;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-white">
+      <div className="min-w-0">
+        <div className="font-medium text-gray-900">
+          {request.personName}
+          <span className="ml-2 text-sm font-normal text-gray-600">asks to cancel {range}</span>
+        </div>
+        <div className="text-xs text-gray-500">
+          {TYPE_LABELS[request.leaveType]} · {request.days.length} day{request.days.length === 1 ? '' : 's'}
+          {' · '}{fmtH(request.totalMinutes)}{request.leaveType === 'unpaid' ? '' : ' back to their balance'}
+          {request.cancelAsk?.note && ` · “${request.cancelAsk.note}”`}
+        </div>
+      </div>
+      <div className="flex gap-2 shrink-0">
+        <button onClick={() => void decide('approve')} disabled={busy}
+          className="px-2.5 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+          Approve
+        </button>
+        <button onClick={() => void decide('decline')} disabled={busy}
+          className="px-2.5 py-1.5 text-sm rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50">
+          Decline
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -368,6 +455,8 @@ function ApprovalCard({ request, open, onToggle, onDecided, onError }: {
   onDecided: (msg?: string) => Promise<void>; onError: (msg: string) => void;
 }) {
   const [impact, setImpact] = useState<Impact | null>(null);
+  // For a change: the booking it replaces, days and all.
+  const [original, setOriginal] = useState<LeaveRequest | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -375,8 +464,8 @@ function ApprovalCard({ request, open, onToggle, onDecided, onError }: {
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.get<{ data: { impact: Impact } }>(`/staff-calendar/leave/${request.id}`);
-        if (!cancelled) setImpact(res.data.impact);
+        const res = await api.get<{ data: { impact: Impact; original?: LeaveRequest | null } }>(`/staff-calendar/leave/${request.id}`);
+        if (!cancelled) { setImpact(res.data.impact); setOriginal(res.data.original ?? null); }
       } catch { /* the card still works without context */ }
     })();
     return () => { cancelled = true; };
@@ -401,6 +490,38 @@ function ApprovalCard({ request, open, onToggle, onDecided, onError }: {
   const range = request.startDate === request.endDate
     ? fmtDate(request.startDate)
     : `${fmtDate(request.startDate)} – ${fmtDate(request.endDate)}`;
+  // A CHANGE to approved time off (§5.4) — approving swaps the old booking
+  // for this one; declining leaves the old one as it was.
+  const was = request.replaces
+    ? (request.replaces.startDate === request.replaces.endDate
+        ? fmtDate(request.replaces.startDate)
+        : `${fmtDate(request.replaces.startDate)} – ${fmtDate(request.replaces.endDate)}`)
+    : null;
+  // Taking a day out of the middle leaves both end dates where they were, so
+  // the ranges alone can read "was Mon – Fri → now Mon – Fri". Say the hours,
+  // and once it is open, the days.
+  const headline = was === null ? range
+    : was !== range ? `asks to change: was ${was} → now ${range}`
+    : request.replaces && request.replaces.totalMinutes !== request.totalMinutes
+      ? `asks to change ${range}: ${fmtH(request.totalMinutes)} instead of ${fmtH(request.replaces.totalMinutes)}`
+      : `asks to change ${range}`;
+  const daysDiff = useMemo(() => {
+    if (!original) return null;
+    const word = (p: string) => p === 'full' ? 'whole day' : p === 'am' ? 'morning' : p === 'pm' ? 'afternoon' : 'set times';
+    const lines: string[] = [];
+    const gone = original.days.filter(o => !request.days.some(n => n.date === o.date)).map(o => fmtDate(o.date));
+    const added = request.days.filter(n => !original.days.some(o => o.date === n.date)).map(n => fmtDate(n.date));
+    const altered = request.days
+      .filter(n => original.days.some(o => o.date === n.date && o.portion !== n.portion))
+      .map(n => `${fmtDate(n.date)} (${word(n.portion)})`);
+    if (gone.length) lines.push(`No longer off: ${gone.join(', ')}`);
+    if (added.length) lines.push(`Now off: ${added.join(', ')}`);
+    if (altered.length) lines.push(`Now part of the day: ${altered.join(', ')}`);
+    if (original.leaveType !== request.leaveType) {
+      lines.push(`${TYPE_LABELS[original.leaveType]} → ${TYPE_LABELS[request.leaveType]}`);
+    }
+    return lines;
+  }, [original, request.days, request.leaveType]);
 
   // Thinnest cover across the requested days — the single number that decides
   // whether this approval is routine or needs thinking about.
@@ -415,10 +536,10 @@ function ApprovalCard({ request, open, onToggle, onDecided, onError }: {
         <div className="min-w-0">
           <div className="font-medium text-gray-900">
             {request.personName}
-            <span className="ml-2 text-sm font-normal text-gray-600">{range}</span>
+            <span className="ml-2 text-sm font-normal text-gray-600">{headline}</span>
           </div>
           <div className="text-xs text-gray-500">
-            {TYPE_LABELS[request.leaveType]} · {request.days.length} day{request.days.length === 1 ? '' : 's'}
+            {was && 'Change · '}{TYPE_LABELS[request.leaveType]} · {request.days.length} day{request.days.length === 1 ? '' : 's'}
             {' · '}{fmtH(request.totalMinutes)}
             {impact && worst !== null && (
               <span className={worst <= 1 ? 'text-amber-700 font-medium' : ''}>
@@ -453,6 +574,20 @@ function ApprovalCard({ request, open, onToggle, onDecided, onError }: {
                 ))}
               </div>
             </div>
+          )}
+
+          {daysDiff && daysDiff.length > 0 && (
+            <div className="text-sm text-gray-800">
+              <h4 className="text-xs font-medium text-gray-600 mb-0.5">What changes</h4>
+              {daysDiff.map(l => <div key={l}>{l}</div>)}
+            </div>
+          )}
+
+          {was && (
+            <p className="text-xs text-gray-600">
+              Approving cancels the {was} booking and books this instead, in one go. Declining leaves {was} as it was.
+              Cover and notice are checked only for the days that change.
+            </p>
           )}
 
           <div className="flex flex-wrap gap-2 pt-1">
