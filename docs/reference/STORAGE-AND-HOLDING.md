@@ -103,8 +103,11 @@ client" when the number points elsewhere) and *Delivery* / *Found & chasing* —
 **Edit → Save / Cancel**, sending only the fields that changed and showing a failed save on the card.
 The five old ways of editing (save-on-blur, save-on-pick, a form at the bottom, a "Move" button) are
 gone. One main button for the next step (🔗 Link owner → 📦 Book it in (receipt page) → ✅ Given /
-Collected), Notify / Ship back / Send chase beside it, Nothing more coming / Won't arrive / Dispose
-under **More**. Typing boxes in on an `expected` delivery books it in (`status: 'stored'`). The lost-
+Collected), Ship back / Send chase beside it — Notify too until the client has been told, then it's
+"Notify again" under **More** with Nothing more coming / Won't arrive / Dispose. Photos are the last
+row of the second card; lost property's card is one row (Found · Location · Chased — the next chase
+date is the window's "Next:" line). The note box is one line until clicked into (`MentionComposer`
+`compact`); no "No notes yet" line. Typing boxes in on an `expected` delivery books it in (`status: 'stored'`). The lost-
 property chase button EMAILS the client, so it is "📨 Send 2nd chase" and asks first (it was
 "Log chase", unconfirmed). The location select keeps a retired location as its own option.
 
