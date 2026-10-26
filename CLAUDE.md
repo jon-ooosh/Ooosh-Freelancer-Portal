@@ -233,6 +233,9 @@ ONE custom line on Misc income (190) at 20%, raised on the close-out panel's but
 (its amount re-set at allocation), refunded by a person with Process; excess is the Excess card's; the
 job stays HireHop 9 and is never completed. A hire invoiced before cancelling is refused (credit note,
 by hand). The portal takes payment at status 9 only while an approved invoice is owing.
+**After cancelling (26 Oct 2026):** the internal email is a to-do list (`services/cancellation-alert.ts`), and
+the money cards (`invoice`, `payment_reconcile`, `excess_resolve`) are due 3 days out with `keep_after_close`, so the
+09:30 close-out scanner chases them for any manager until each ticks itself — spec final section.
 
 **CLOSED, 19 Oct 2026 — live for everyone:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same

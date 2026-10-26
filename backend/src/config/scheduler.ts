@@ -15,6 +15,7 @@ import { runOohApproachScan } from '../services/ooh-sms-approach';
 import { cascadeJobClose } from '../services/job-close-cascade';
 import { closeJobRequirements } from '../services/requirement-close-sweep';
 import { ukToday } from '../services/uk-date';
+import { MANAGER_ROLES } from '../middleware/auth';
 
 /**
  * Starts the backup and sync schedulers.
@@ -583,12 +584,16 @@ export function startScheduler() {
           AND jr.due_date::date <= CURRENT_DATE
           -- Don't chase close-out on a mid-hire partial return (HH 6 but the
           -- hire isn't due back yet). See CLAUDE.md → "status-6 no man's land".
+          -- A cancelled job's own money follow-ups (fee invoice, refund, excess)
+          -- are chased whatever HireHop's status: the cancellation created them
+          -- due in 3 days and keep_after_close, Oct 2026 (routes/cancellations.ts).
           AND (
             j.status IN (7, 8)
             OR (j.status = 6 AND (
               COALESCE(j.return_date, j.job_end) IS NULL
               OR COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE + INTERVAL '1 day'
             ))
+            OR (j.pipeline_status = 'cancelled' AND jr.source = 'cancellation')
           )
           AND (
             j.pipeline_status NOT IN ('lost', 'cancelled')
@@ -601,9 +606,13 @@ export function startScheduler() {
         return;
       }
 
-      // Get admin/manager users to notify (if no assigned_to on the requirement)
+      // Get manager-tier users to notify (if no assigned_to on the requirement).
+      // MANAGER_ROLES, so the weekend manager is included (Oct 2026 — it was a
+      // hardcoded admin/manager list, which left them out).
       const admins = await query(
-        `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
+        `SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true
+           AND COALESCE(login_disabled, false) = false`,
+        [[...MANAGER_ROLES]]
       );
       const adminIds = admins.rows.map((r: Record<string, unknown>) => r.id as string);
 
