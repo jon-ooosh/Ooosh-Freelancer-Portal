@@ -358,6 +358,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '316_job_projects.sql',
         '317_freelancer_earnings_labels_from.sql',
         '318_cost_allocation_recharges.sql',
+        '319_soft_checked_in_by.sql',
         '320_staff_leave_change_requests.sql',
       ];
 

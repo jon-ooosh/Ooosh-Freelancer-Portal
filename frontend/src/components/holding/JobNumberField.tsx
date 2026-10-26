@@ -9,19 +9,23 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 
-interface JobMatch {
+export interface JobMatch {
   job_id: string;
   hh_job_number: number;
   job_name: string | null;
   client_name: string | null;
 }
 
-export function JobNumberField({ value, onChange, onResolved, compact }: {
+export function JobNumberField({ value, onChange, onResolved, compact, foundSuffix, idleHint }: {
   value: string;
   onChange: (v: string) => void;
   /** Fired with the matched job (or null) so the parent can prefill/store if it wants. */
   onResolved?: (job: JobMatch | null) => void;
   compact?: boolean;
+  /** Overrides the capture forms' wording, which promises to fill in the
+   *  client too — not true when editing an item that already has one. */
+  foundSuffix?: string;
+  idleHint?: string;
 }) {
   const [state, setState] = useState<'idle' | 'loading' | 'found' | 'none'>('idle');
   const [match, setMatch] = useState<JobMatch | null>(null);
@@ -57,14 +61,14 @@ export function JobNumberField({ value, onChange, onResolved, compact }: {
       {state === 'found' && match && (
         <p className="text-[11px] text-green-700 mt-1">
           ✓ {match.client_name ? <span className="font-medium">{match.client_name}</span> : 'Linked'}
-          {match.job_name ? ` · ${match.job_name}` : ''} — we'll link the job &amp; client for you.
+          {match.job_name ? ` · ${match.job_name}` : ''}{foundSuffix ?? " — we'll link the job & client for you."}
         </p>
       )}
       {state === 'none' && (
         <p className="text-[11px] text-amber-600 mt-1">No synced job found for #{value.trim()} — it'll still be saved with this number, link the client manually below.</p>
       )}
       {state === 'idle' && (
-        <p className="text-[11px] text-slate-400 mt-1">Enter the job # and we link the job &amp; client for you. Only fill the boxes below if there's no job.</p>
+        <p className="text-[11px] text-slate-400 mt-1">{idleHint ?? "Enter the job # and we link the job & client for you. Only fill the boxes below if there's no job."}</p>
       )}
     </div>
   );
