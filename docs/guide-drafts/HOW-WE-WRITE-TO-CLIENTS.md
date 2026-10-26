@@ -1,9 +1,8 @@
 # How we write to clients — DRAFT guide
 
 **Draft 2, 22 Oct 2026 (jon + Claude).** Draft 2: jon's layout (commas, no blank lines) and his edits to the first live drafts. Distilled from 150 emails the team sent from info@
-(Jul–Oct 2026), modelled on how Jon and Will write. Lives here until the Staff Documents "Share
-with Claude" switch exists (`docs/AI-KNOWLEDGE-SPEC.md` §4); then it moves into OP and this file
-is deleted. **The "For Claude" section is mirrored in `backend/src/services/chase-draft.ts`
+(Jul–Oct 2026), modelled on how Jon and Will write. **The "Share with Claude" switch now exists (26 Oct 2026): paste this into a Staff Document, share
+it, then delete this file.** **The "For Claude" section is mirrored in `backend/src/services/chase-draft.ts`
 (SYSTEM_PROMPT) — change both together until then.**
 
 ## What this covers
