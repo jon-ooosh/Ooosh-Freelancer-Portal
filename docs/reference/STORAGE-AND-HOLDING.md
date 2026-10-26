@@ -88,6 +88,26 @@ not the dashboard strip — add a slot if wanted). NOT touched by the HH derivat
 temp_storage + lost_property are NOT on the ticker — they're **right-sidebar FYI** on the Job View
 ("📦 Also holding (FYI)", client-wide via org).
 
+**Moving an item to another job (Oct 2026, job 16648 → 16649):** the owner/job form
+(`POST /:id/link` with `edit: true`) 500'd on every save from 14 to 26 Oct 2026 — an untyped
+`$1 IS NOT NULL` in its SET list; the params it tests are now cast. It is open on FINISHED items too
+(a box handed over while on a mistyped job number must still be movable). On a move: `needed_by`
+follows the job when it equalled the OLD job's out date (a typed date stays); the old job's timeline
+gets "moved to job #N"; and when no incoming item (not even a cancelled one) points at the old job
+any more, its merch card is DELETED if this module made it (`is_auto` + `source = 'holding'`) — a
+card a person added stays, at `not_started`.
+
+**The item window (Oct 2026 tidy-up, `HoldingPage.tsx` `DetailModal`):** two cards — *Who & which job*
+(job # first, live lookup; only the owner boxes in use are shown, the rest are links; "Use the job's
+client" when the number points elsewhere) and *Delivery* / *Found & chasing* — each read-only until
+**Edit → Save / Cancel**, sending only the fields that changed and showing a failed save on the card.
+The five old ways of editing (save-on-blur, save-on-pick, a form at the bottom, a "Move" button) are
+gone. One main button for the next step (🔗 Link owner → 📦 Book it in (receipt page) → ✅ Given /
+Collected), Notify / Ship back / Send chase beside it, Nothing more coming / Won't arrive / Dispose
+under **More**. Typing boxes in on an `expected` delivery books it in (`status: 'stored'`). The lost-
+property chase button EMAILS the client, so it is "📨 Send 2nd chase" and asks first (it was
+"Log chase", unconfirmed). The location select keeps a retired location as its own option.
+
 **Smart linking + notify + ship-back (PRs #690/#692/#695):** HH job number is the primary capture
 field — `POST /holding` + `/link` derive `job_id` + client org from it (`resolveJobContext`), live
 `GET /holding/job-lookup/:n` confirms the client in the form, `GET /holding/org-jobs/:orgId`
