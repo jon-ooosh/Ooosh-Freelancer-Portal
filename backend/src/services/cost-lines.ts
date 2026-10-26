@@ -24,7 +24,7 @@
  *
  * See docs/COST-LINES-SPEC.md.
  */
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 
 export interface CostLine {
   id: string;
@@ -176,13 +176,19 @@ export function grossesWithResidue(lines: Pick<CostLine, 'amount_gross'>[], head
  * shows. An empty array clears the split.
  *
  * NB the caller validates first — this writes what it's given.
+ *
+ * Every statement runs on ONE borrowed connection. `query('BEGIN')` through
+ * the shared pool is no transaction at all — each statement goes to whichever
+ * connection is free, and a BEGIN left open there swallows other requests'
+ * writes (SECURITY-AUDIT-BRIEF B.5).
  */
 export async function replaceCostLines(costId: string, lines: CostLineInput[]): Promise<CostLine[]> {
-  await query('BEGIN');
+  const client = await getClient();
   try {
-    await query('DELETE FROM cost_lines WHERE cost_id = $1', [costId]);
+    await client.query('BEGIN');
+    await client.query('DELETE FROM cost_lines WHERE cost_id = $1', [costId]);
     for (const [i, l] of lines.entries()) {
-      await query(
+      await client.query(
         `INSERT INTO cost_lines
            (cost_id, line_no, description, amount_gross, amount_vat,
             xero_account_code, job_id, crew_fronted, source)
@@ -200,10 +206,12 @@ export async function replaceCostLines(costId: string, lines: CostLineInput[]): 
         ],
       );
     }
-    await query('COMMIT');
+    await client.query('COMMIT');
   } catch (err) {
-    await query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => { /* the connection is going back anyway */ });
     throw err;
+  } finally {
+    client.release();
   }
   return fetchCostLines(costId);
 }

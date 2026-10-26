@@ -1379,21 +1379,26 @@ router.put('/:jobId/contacts', validate(putJobContactsSchema), async (req: AuthR
 
     // Transactional replace: delete all existing, insert the new set.
     // Simpler than a diff for a small list and keeps the audit clean.
-    await query('BEGIN');
+    // On ONE borrowed connection — a BEGIN through the shared pool is no
+    // transaction at all (SECURITY-AUDIT-BRIEF B.5).
+    const client = await getClient();
     try {
-      await query('DELETE FROM job_contacts WHERE job_id = $1', [jobId]);
+      await client.query('BEGIN');
+      await client.query('DELETE FROM job_contacts WHERE job_id = $1', [jobId]);
       for (const personId of person_ids) {
         const isPrimary = personId === primary_person_id;
-        await query(
+        await client.query(
           `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
            VALUES ($1, $2, $3, $4)`,
           [jobId, personId, isPrimary, req.user!.id]
         );
       }
-      await query('COMMIT');
+      await client.query('COMMIT');
     } catch (txErr) {
-      await query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => { /* the connection is going back anyway */ });
       throw txErr;
+    } finally {
+      client.release();
     }
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', {}, {
@@ -1447,13 +1452,16 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
     }
     const clientId = jobResult.rows[0].client_id;
 
-    await query('BEGIN');
+    // On ONE borrowed connection — a BEGIN through the shared pool is no
+    // transaction at all (SECURITY-AUDIT-BRIEF B.5).
+    const dbClient = await getClient();
     try {
+      await dbClient.query('BEGIN');
       let resolvedPersonId = person_id;
 
       // Create person if needed
       if (!resolvedPersonId) {
-        const createResult = await query(
+        const createResult = await dbClient.query(
           `INSERT INTO people (first_name, last_name, email, phone, created_by)
            VALUES ($1, $2, $3, $4, $5)
            RETURNING id`,
@@ -1465,14 +1473,14 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
       // Link to client org via person_organisation_roles if a client org
       // exists and the link doesn't already (active row).
       if (clientId) {
-        const existingLink = await query(
+        const existingLink = await dbClient.query(
           `SELECT id FROM person_organisation_roles
            WHERE person_id = $1 AND organisation_id = $2 AND status = 'active'
            LIMIT 1`,
           [resolvedPersonId, clientId]
         );
         if (existingLink.rows.length === 0) {
-          await query(
+          await dbClient.query(
             `INSERT INTO person_organisation_roles
              (person_id, organisation_id, role, status)
              VALUES ($1, $2, $3, 'active')`,
@@ -1484,7 +1492,7 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
       // If set_as_primary, clear any current primary on the job first
       // (the partial unique index would otherwise reject the insert).
       if (set_as_primary) {
-        await query(
+        await dbClient.query(
           `UPDATE job_contacts SET is_primary = false
            WHERE job_id = $1 AND is_primary = true`,
           [jobId]
@@ -1492,7 +1500,7 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
       }
 
       // Tick on the job
-      await query(
+      await dbClient.query(
         `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (job_id, person_id) DO UPDATE
@@ -1500,11 +1508,13 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
         [jobId, resolvedPersonId, !!set_as_primary, req.user!.id]
       );
 
-      await query('COMMIT');
+      await dbClient.query('COMMIT');
       res.status(201).json({ person_id: resolvedPersonId });
     } catch (txErr) {
-      await query('ROLLBACK');
+      await dbClient.query('ROLLBACK').catch(() => { /* the connection is going back anyway */ });
       throw txErr;
+    } finally {
+      dbClient.release();
     }
   } catch (error) {
     console.error('Add job contact error:', error);
