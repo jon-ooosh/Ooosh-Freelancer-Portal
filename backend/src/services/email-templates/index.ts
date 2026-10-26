@@ -2184,28 +2184,49 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // The hand-off of a cancellation's money end (Oct 2026): what is LEFT to do,
+  // not "processed" — the old version read as if everything was finished.
+  // Variables come from services/cancellation-alert.ts. Every {{#if}} is flat
+  // (the engine can't nest), so the box is always drawn and each step is its
+  // own row; `nothingToDo` fills the box when there is no money to move.
   job_cancelled_internal: {
     variant: 'internal',
-    subject: 'Cancellation Processed — {{jobName}} ({{jobNumber}})',
+    subject: 'Cancelled — {{subjectAction}}: {{jobName}} ({{jobRef}})',
     body: `
-      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job Cancelled</h2>
-      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
-        <strong>{{cancelledBy}}</strong> has cancelled job <strong>{{jobName}}</strong> ({{jobNumber}}).
+      {{#if hasMoneySteps}}<h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job cancelled — money still to finish</h2>{{/if}}
+      {{#if nothingToDo}}<h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job cancelled</h2>{{/if}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>{{cancelledBy}}</strong> marked <strong>{{jobName}}</strong> ({{jobRef}}) as cancelled.
+        Reason: <strong>{{reason}}</strong>.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
-          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Reason</p>
-            <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{reason}}</p>
-            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Cancellation fee</p>
-            <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{fee}}</p>
-            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Refund due</p>
-            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{refund}}</p>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fcd34d;">
+            <p style="margin:0 0 8px;font-size:12px;color:#92400e;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">Still to do — on the job's Money tab (any manager)</p>
+            <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;font-size:14px;color:#1e293b;line-height:1.5;">
+              {{#if hasFee}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Raise the cancellation fee invoice — {{feeNet}} + VAT = <strong>{{feeGross}}</strong>. The same button puts the client's payment against it.</td></tr>{{/if}}
+              {{#if hasRefund}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Refund the client <strong>{{refund}}</strong> — Pending refunds &rsaquo; Process (target: 10 working days). The Money tab confirms the exact figure once the fee invoice is raised.</td></tr>{{/if}}
+              {{#if hasOwing}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Collect the <strong>{{owing}}</strong> the client still owes — once the fee invoice is raised they can pay it through the payment portal.</td></tr>{{/if}}
+              {{#if hasFee}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Send the fee invoice to the client, then press <em>Mark as sent</em>.</td></tr>{{/if}}
+              {{#if hasExcess}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Excess: <strong>{{excessHeld}}</strong> held — release or reimburse it from the Excess card.</td></tr>{{/if}}
+              {{#if nothingToDo}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9745;</td><td style="padding:2px 0;">Nothing to invoice, collect or refund, and no excess held.</td></tr>{{/if}}
+            </table>
           </td>
         </tr>
       </table>
-      <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
+      <p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">
+        Finished when the Money tab says <strong>Settled</strong>. The job stays Cancelled — it is never completed.
+      </p>
+      {{#if hasExcess}}<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">The excess is separate: it is finished when the Excess card holds nothing.</p>{{/if}}
+      {{#if hasMoneySteps}}<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">Anything still open on {{chaseFrom}} is chased in the managers' bells each morning until it's done.</p>{{/if}}
+      <p style="margin:16px 0 16px;font-size:14px;color:#334155;">
+        <a href="{{moneyUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Finish on the Money tab &rarr;</a>
+        &nbsp;&nbsp;&middot;&nbsp;&nbsp;
+        <a href="{{listUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">All cancellations still to finish &rarr;</a>
+      </p>
+      <p style="margin:0;font-size:12px;color:#64748b;line-height:1.5;">
+        Already done by OP: the job's other cards closed, any crew and transport stood down, HireHop being set to Cancelled (a refusal is noted on the job's timeline),
+        {{#if clientEmailed}}and a cancellation confirmation emailed to the client.{{/if}}{{#if clientNotEmailed}}and no client email (skipped at cancellation).{{/if}}
       </p>
     `,
   },

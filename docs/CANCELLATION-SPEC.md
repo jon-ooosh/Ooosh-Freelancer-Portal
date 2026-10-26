@@ -379,3 +379,36 @@ cancellation; zero-rating a fee (decision 5).
   against that invoice, and HireHop credit notes are not yet captured in `HIREHOP-BILLING-API.md`.
 - Work style with jon: discuss and agree the design first, small PRs, give him the deploy commands
   (he deploys; Claude cannot SSH), test on a scratch job before any real one.
+
+### After cancelling: the hand-off email and the chase (26 Oct 2026)
+
+Job 16725: the internal email said "Cancellation Processed" with the fee and refund as facts, so it
+read as if everything was finished — the fee invoice, the refund and sending the invoice were all
+still to do, and nothing chased them afterwards. Agreed with jon:
+
+- **The email is a to-do list** (`job_cancelled_internal`, variables from
+  `services/cancellation-alert.ts`): subject `Cancelled — money to finish: <job> (J-n)` (or
+  `nothing to settle`), one tick-box per step that applies — raise the fee invoice (£net + VAT =
+  £gross), refund £x / collect £x owed, send the invoice and press Mark as sent, excess held (from
+  `v_excess_held`). Links to the job's Money tab and to Lost & Cancelled › Cancelled. Still to info@.
+  The finish line is the Money tab's **Settled**; the job is never completed.
+- **Any manager does it**, weekend manager included.
+- **The money cards are chased from 3 days after cancelling** (`CANCELLATION_CHASE_DAYS`). Step 11
+  creates `invoice`, `payment_reconcile` and `excess_resolve` with `due_date` and
+  `keep_after_close = true`; the 09:30 close-out scanner (`config/scheduler.ts`) chases a cancelled
+  job's `source = 'cancellation'` cards whatever HireHop's status, one bell per card per manager
+  (`MANAGER_ROLES`, not login-disabled), `requirement_due` — the same as a hire's close-out.
+  `client_followup` has no due date and is not chased (it ticks when the invoice is marked sent).
+- **Each card ticks itself:** `invoice` on Mark as sent; `payment_reconcile` when the close-out plan
+  is settled (`markCancellationReconciled`) — now made on EVERY cancellation that moves money (refund,
+  fee owed, or all-square), not only a refund; `excess_resolve` from the excess records
+  (`syncExcessRequirementStatus`, also run at creation, so a job holding no excess is green at once).
+  A manager can tick one by hand to stop the chase (e.g. a fee waived on a rebooking).
+- **The Lost & Cancelled page no longer ticks Payment on a cancelled job** — its HireHop check
+  (`/requirements/closeout-progress`) read "every invoice paid" as reconciled the moment the fee was
+  allocated, with the refund still due. The close-out plan owns a cancellation's card.
+- **Forward only:** cancellations from before this have no `keep_after_close`, so they are never
+  chased. Clear any old ones from the Outstanding close-out list by eye.
+- **The cancel window** now treats a client who paid nothing as owing the fee; it used to offer the
+  T&Cs' theoretical refund and file a pending refund for money never received. The calculator's figure
+  is only the fallback when the payments can't be read.
