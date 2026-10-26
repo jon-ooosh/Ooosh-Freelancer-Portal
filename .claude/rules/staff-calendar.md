@@ -2,7 +2,7 @@
 paths:
   - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-swaps,staff-ical,freelancer-days,freelancer-tasks}.ts"
   - "backend/src/routes/{staff-calendar,staff-calendar-feed,freelancer-tasks}.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,307}_*.sql"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,307,320}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
   - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel,FreelancerTasksPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
@@ -517,6 +517,34 @@ rows sharing a `swap_group_id`: the day OFF and the day IN.
 - **Two people swapping is two swaps** (jon) — nothing links them.
 - On the team calendar both days carry `StaffDay.swapWith` (the other date);
   the day given up is drawn as an outlined **Swap**, not a blank.
+
+## Changing or cancelling APPROVED time off is asked for, then approved
+
+Spec §5.4.1 (jon, Oct 2026, migration 320). "Change or cancel" on an approved
+booking on My Time; the answer comes from Waiting for you on the Staff page.
+
+- **A change is a NEW request with `replaces_request_id`**, never an edit of
+  the approved one. Its day rows are `is_live = false` while it waits; the
+  status trigger makes them live on approval. `approveRequest` cancels the
+  original (credits) and approves the change (debits) in ONE transaction —
+  original first, or the no-double-booking index sees both. Never split that.
+- **A cancel ask lives on the booking** (`cancel_requested_*` /
+  `cancel_declined_*`). "Waiting" = status `approved`, asked, not declined
+  (`isCancelAskWaiting()`). One ask OR one change at a time, never both.
+- **Days before today never change.** `planChangeDays()` carries them over
+  verbatim (minutes included), refuses dropping, altering or adding one, and a
+  holiday under way keeps its type and cannot be cancelled outright — it is
+  shortened instead. `cancelRequest` refuses a booking with a day already gone.
+- **A day already handed back is never credited twice.** Cancelling skips days
+  with `reclaimed_absence_id` / `reclaimed_company_day_id` set; a change copies
+  those stamps onto the same date and does not debit it. Anything new that
+  credits a booking's days must do the same.
+- **`'none'` ("not off") is a request-side portion only** — never stored, never
+  in the `portion` CHECK. A day not taken has no row, like a weekend.
+- **A declined CANCEL is not a declined holiday.** Its bell carries its own
+  heading (`notifyDecision({ heading })`); do not let it fall back to "Time off
+  declined".
+- `backend/src/scripts/__verify-leave-changes.ts` is the real-Postgres check.
 
 ## The calendar feed is the person's OWN time — nothing else, ever
 

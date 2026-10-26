@@ -48,3 +48,26 @@ describe('staff-calendar absence routes', () => {
     expect(has('get', '/me/absences')).toBe(true);
   });
 });
+
+describe('staff-calendar leave routes', () => {
+  // MyTimePage.tsx (book, change, ask to cancel, withdraw) and
+  // LeaveApprovals.tsx (approve / decline a request, a change, an ask to
+  // cancel) — spec §5.4. Same reason as above: a missing route is a 404 that
+  // nobody sees until somebody needs it.
+  it.each([
+    ['get', '/leave'],
+    ['post', '/leave'],
+    ['get', '/leave/impact'],
+    ['get', '/leave/:id'],
+    ['post', '/leave/:id/approve'],
+    ['post', '/leave/:id/decline'],
+    ['post', '/leave/:id/withdraw'],
+    ['post', '/leave/:id/cancel'],
+    ['post', '/leave/:id/cancel-request'],
+    ['post', '/leave/:id/cancel-request/withdraw'],
+    ['post', '/leave/:id/cancel-request/approve'],
+    ['post', '/leave/:id/cancel-request/decline'],
+  ])('%s %s is still there', (method, path) => {
+    expect(has(method, path)).toBe(true);
+  });
+});
