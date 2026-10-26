@@ -2,7 +2,7 @@
 paths:
   - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-swaps,staff-ical,freelancer-days,freelancer-tasks}.ts"
   - "backend/src/routes/{staff-calendar,staff-calendar-feed,freelancer-tasks}.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,307,319}_*.sql"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,307,320}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
   - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel,FreelancerTasksPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
@@ -520,7 +520,7 @@ rows sharing a `swap_group_id`: the day OFF and the day IN.
 
 ## Changing or cancelling APPROVED time off is asked for, then approved
 
-Spec §5.4.1 (jon, Oct 2026, migration 319). "Change or cancel" on an approved
+Spec §5.4.1 (jon, Oct 2026, migration 320). "Change or cancel" on an approved
 booking on My Time; the answer comes from Waiting for you on the Staff page.
 
 - **A change is a NEW request with `replaces_request_id`**, never an edit of

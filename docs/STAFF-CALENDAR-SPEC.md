@@ -639,7 +639,7 @@ Decline posts nothing. See §11 for the approval surface — the context is the 
   versa) is a cancel + rebook, which is exactly what the ledger records.
 - **Past:** staff cannot touch it. Admin posts a correction (§0.4).
 
-#### 5.4.1 As built (Oct 2026, migration 319)
+#### 5.4.1 As built (Oct 2026, migration 320)
 
 Until this was built an approved holiday could not be touched from any screen: the
 admin-only `POST /leave/:id/cancel` existed with no button. jon's call: staff ask **in
@@ -1485,7 +1485,7 @@ Where things are, for troubleshooting:
 | **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
 | — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
 | **§8.2** | Swap a day — asked for on My Time, approved like holiday; nothing on the calendar until approved, then "Swap" on the day given up; changeable hours on the day worked, break copied, the day given up's minutes snapshotted; approval re-checks both days | 307 |
-| **§5.4** | Changing and cancelling APPROVED time off — asked in writing on My Time, approved in Waiting for you; a change replaces the booking in one transaction on approval; "not off" for a day out of the middle; days already gone never change; admins act directly from the Time off tab; the double credit on a cancelled booking with a day already handed back fixed (§5.4.1) | 319 |
+| **§5.4** | Changing and cancelling APPROVED time off — asked in writing on My Time, approved in Waiting for you; a change replaces the booking in one transaction on approval; "not off" for a day out of the middle; days already gone never change; admins act directly from the Time off tab; the double credit on a cancelled booking with a day already handed back fixed (§5.4.1) | 320 |
 | — | First paternity leave (Oct 2026): `POST /absences` and `GET /absences/:id` restored (lost with the markers in 215's commit — "Record it" was a 404), with a route guard test; an Absence tab on the Staff page; the person sees their own absence on My Time as "Absent" (`GET /me/absences`, dates only); other absence on the payroll report (§12.1); bank holidays offered only on days the person works; the Book time off form points non-holiday leave at an admin | — |
 
 ### Decisions taken during the build that CHANGE this spec
