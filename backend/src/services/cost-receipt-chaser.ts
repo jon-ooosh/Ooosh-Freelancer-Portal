@@ -45,11 +45,14 @@ export async function runCostReceiptChase(): Promise<ChaseResult> {
 
   // Relative path only. The notification-escalation email builder wraps
   // action_url with frontendLink(), and NotificationBell / InboxPage navigate()
-  // it directly — both expect a relative path (e.g. '/my-receipts'). Storing an
+  // it directly — both expect a relative path (e.g. '/receipt'). Storing an
   // absolute URL here double-prepends the host in the email
-  // (staff.oooshtours.co.uk/https://staff.oooshtours.co.uk/my-receipts) and
+  // (staff.oooshtours.co.uk/https://staff.oooshtours.co.uk/receipt) and
   // breaks the in-app click-through too.
-  const actionUrl = '/my-receipts';
+  // /receipt is the phone receipt page, which lists these first ("Waiting for a
+  // receipt"); it replaced /my-receipts (Oct 2026), which now redirects there,
+  // so bells and emails sent before still land.
+  const actionUrl = '/receipt';
 
   for (const row of due.rows as Array<{ user_id: string; n: number; cost_ids: string[] }>) {
     const n = row.n;

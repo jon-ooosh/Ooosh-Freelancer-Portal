@@ -714,13 +714,29 @@ router.get('/check-duplicate', async (req: AuthRequest, res: Response) => {
     const supplier = String(req.query.supplier_name || '').trim();
     const contactId = String(req.query.xero_contact_id || '').trim();
     const excludeId = typeof req.query.exclude_id === 'string' && /^[0-9a-f-]{36}$/i.test(req.query.exclude_id) ? req.query.exclude_id : null;
+    // "Did my save land?" — the phone, after a save that got no reply, asks by the
+    // photo it uploaded (unique per upload), whatever the supplier was.
+    const receiptKey = typeof req.query.receipt_r2_key === 'string' ? req.query.receipt_r2_key.slice(0, 500) : '';
+    if (receiptKey) {
+      const k = await query(
+        `SELECT c.id, c.supplier_name, c.amount_gross, c.cost_date::text AS cost_date, c.description,
+                c.payment_method, true AS has_receipt, c.receipt_r2_key
+           FROM costs c WHERE c.receipt_r2_key = $1 LIMIT 3`,
+        [receiptKey],
+      );
+      res.json({ data: { duplicates: k.rows } });
+      return;
+    }
     if (!(amount > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(date) || (!supplier && !contactId)) {
       res.json({ data: { duplicates: [] } });
       return;
     }
     const r = await query(
       `SELECT c.id, c.supplier_name, c.xero_contact_id, c.amount_gross, c.cost_date::text AS cost_date,
-              c.payment_method, c.receipt_r2_key IS NOT NULL AS has_receipt,
+              c.description, c.payment_method, c.receipt_r2_key IS NOT NULL AS has_receipt,
+              -- The phone, after a save that got no reply, looks for its own photo
+              -- here to learn whether the save landed (never a blind re-send).
+              c.receipt_r2_key,
               CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name
          FROM costs c
          LEFT JOIN users u ON u.id = c.uploaded_by
@@ -743,6 +759,64 @@ router.get('/check-duplicate', async (req: AuthRequest, res: Response) => {
     res.json({ data: { duplicates } });
   } catch (err) {
     console.error('[costs] check-duplicate error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// "Which job?" on the phone (docs/design/cost-capture-redesign/DECISIONS.md, PR 3):
+// the jobs that had a van out around a receipt's date, so a fuel or parking
+// receipt is one tap from its job. A van counts from two days before its hire to
+// two days after (filled before it went, topped up when it came back); a van
+// swapped out stops at the swap. `reg` puts that van's job first (the AI read it
+// off the receipt); `search` keeps only jobs whose van reg contains it (typing a
+// reg into the job search). Each job comes with its van rows, so the phone picks
+// the van on the day with the same rule as the laptop (costJobs.ts vansOnDate()).
+// Assignments meet jobs by the dual match: staff allocations carry only the
+// HireHop number until a hire form lands.
+router.get('/van-jobs', async (req: AuthRequest, res: Response) => {
+  try {
+    const { ukToday } = await import('../services/uk-date');
+    const raw = String(req.query.date || '').slice(0, 10);
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : ukToday();
+    const norm = (v: unknown) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const reg = norm(req.query.reg);
+    const search = norm(req.query.search);
+    const r = await query(
+      `WITH rows AS (
+         SELECT j.id AS job_id, vha.vehicle_id, fv.reg, vha.status, vha.swapped_at,
+                COALESCE(vha.hire_start, (j.out_date AT TIME ZONE 'Europe/London')::date,
+                         (j.job_date AT TIME ZONE 'Europe/London')::date) AS starts,
+                COALESCE(CASE WHEN vha.status = 'swapped' THEN (vha.swapped_at AT TIME ZONE 'Europe/London')::date END,
+                         vha.hire_end, (j.job_end AT TIME ZONE 'Europe/London')::date) AS ends,
+                regexp_replace(upper(fv.reg), '[^A-Z0-9]', '', 'g') AS reg_norm
+           FROM vehicle_hire_assignments vha
+           JOIN jobs j ON (vha.job_id = j.id OR vha.hirehop_job_id = j.hh_job_number)
+           JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+          WHERE vha.status <> 'cancelled'
+            AND j.is_deleted = false
+            AND j.pipeline_status NOT IN ('lost', 'cancelled')
+       )
+       SELECT j.id, j.hh_job_number, j.job_name, COALESCE(j.company_name, j.client_name) AS client,
+              COALESCE(j.recharge_running_costs, false) AS recharge_running_costs,
+              json_agg(DISTINCT jsonb_build_object(
+                'vehicle_id', r.vehicle_id, 'vehicle_reg', r.reg, 'status', r.status,
+                'hire_start', r.starts, 'hire_end', r.ends, 'swapped_at', r.swapped_at)) AS vans,
+              bool_or($2 <> '' AND r.reg_norm = $2) AS reg_match,
+              bool_or(r.starts <= $1::date AND (r.ends IS NULL OR r.ends >= $1::date)) AS on_day,
+              MIN(ABS(COALESCE(r.starts, $1::date) - $1::date)) AS distance
+         FROM rows r
+         JOIN jobs j ON j.id = r.job_id
+        WHERE (r.starts IS NULL OR r.starts <= $1::date + 2)
+          AND (r.ends IS NULL OR r.ends >= $1::date - 2)
+          AND ($3 = '' OR r.reg_norm LIKE '%' || $3 || '%')
+        GROUP BY j.id
+        ORDER BY reg_match DESC, on_day DESC, distance ASC, j.hh_job_number DESC
+        LIMIT 15`,
+      [date, reg, search],
+    );
+    res.json({ data: r.rows.map((x) => ({ ...x, distance: Number(x.distance) })) });
+  } catch (err) {
+    console.error('[costs] van-jobs error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

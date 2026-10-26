@@ -300,7 +300,7 @@ completion fixes, payment terms, security fixes, the Claude Design reskin of the
 portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1),
 freelancer invoices linked to the freelancer and their work in Costs (§5.1; the past ones linked by hand, Oct 2026),
 the Earnings tab in the portal (§5.2: money by invoice, "To invoice" from 22 Oct 2026).
-Next: the four guides; the Costs form simplification comes last.
+Next: the four guides. The Costs form simplification is done (three PRs, Oct 2026: `docs/design/cost-capture-redesign/DECISIONS.md`).
 **§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
@@ -366,7 +366,9 @@ existing definition:
 | What is a freelancer paid for a delivery / collection / crew booking? | `services/freelancer-fees.ts` `personalFee()` — their agreed rate, else the quote's fee (a crew's fee split evenly). The portal's "Your fee", Costs and Earnings all use it |
 | Which of a freelancer's work is finished, what was it booked at, which invoice covers it? | `services/freelancer-work.ts` (`listFreelancerWork()`, `cost_work_items`; a run is one item at its combined fee). Whose invoice: `services/freelancer-invoice-person.ts`. Ticking the work also splits the job costs (`cost_allocations`, one share per job; studio evenings and yard days stay with overheads) since the capture form's redesign (`FREELANCER-PORTAL-SPEC.md` §5.1) |
 | Which jobs does a cost land on, and who pays on each (capture form)? | `frontend/src/components/costs/costJobs.ts` `planSplit()` — one job holding the whole cost saves on the cost, anything else is a split whose shares carry who pays; sent as `allocations` in the SAME `POST`/`PATCH /costs` request and checked by `services/cost-allocations.ts` before anything is written. The split modal is retired (`docs/design/cost-capture-redesign/DECISIONS.md`) |
-| Has this receipt already been added (no invoice number)? | `GET /costs/check-duplicate` — same amount to the penny, same day, same supplier (Xero contact, else the normalised name); warn only |
+| Has this receipt already been added (no invoice number)? | `GET /costs/check-duplicate` — same amount to the penny, same day, same supplier (Xero contact, else the normalised name); warn only. `?receipt_r2_key=` answers "did my save land?" by the uploaded photo |
+| Snapping a receipt on a phone | `/receipt` (`pages/ReceiptCapturePage.tsx`) — every staff role; "Waiting for a receipt" (it replaced `/my-receipts`, which redirects), the AI read, which job, who pays, save. The photo, the AI read and the retry rules are `components/costs/receiptRead.ts`, shared with the laptop form; a save is never re-sent blind |
+| Which jobs had a van out around a date (a fuel receipt's job)? | `GET /costs/van-jobs?date=&reg=&search=` — two days either side of the hire, a swapped-out van ends at the swap, the dual assignment↔job match, the receipt's reg first |
 | What does a freelancer's Earnings page show (paid, invoiced, to invoice, next payment)? | `services/freelancer-earnings.ts` `getFreelancerEarnings()` — money by INVOICE (paid in the period / dated in it and unpaid), "To invoice" only from `freelancer_earnings_labels_from`; never the expense estimate (`FREELANCER-PORTAL-SPEC.md` §5.2) |
 | When does a quote's work end? When does the completion chaser start? | `services/quote-schedule.ts` — crew and People jobs by their LAST day (complete from it, chased 09:00 UK the day after), deliveries/collections from arrival time in UK time; shared by the chaser and the portal (`docs/FREELANCER-PORTAL-SPEC.md` §2) |
 | Has a quote's van leg actually happened (booked out / collected)? | `services/quote-completion.ts` `isVanLegDone()` — by direction; "out on hire" is NOT a collection. The portal's van-only "All Done" and `maybeCloseQuote` both ask it |
