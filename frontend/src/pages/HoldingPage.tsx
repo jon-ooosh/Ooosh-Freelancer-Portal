@@ -529,7 +529,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
             <p className="text-xs text-slate-400">Client</p>
             <p className="text-slate-800 flex items-center gap-1.5 flex-wrap">
               <span className={h.owner_unknown ? 'text-amber-700' : ''}>{client || (h.owner_unknown ? 'Unknown' : '—')}</span>
-              {isOpen && <LinkEditButton unknown={!client} onClick={() => setLinkOpen(true)} />}
+              <LinkEditButton unknown={!client} onClick={() => setLinkOpen(true)} />
             </p>
           </div>
           <div>
@@ -540,7 +540,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
                     ? <Link to={`/jobs/${h.job_id}`} title="Opens the job in the operations portal" className="text-ooosh-600 hover:underline">#{h.hh_job_number} · open job in OP →</Link>
                     : <span>#{h.hh_job_number} <span className="text-xs text-slate-400">(not linked in OP)</span></span>)
                 : <span>—</span>}
-              {isOpen && <LinkEditButton unknown={!h.hh_job_number} onClick={() => setLinkOpen(true)} />}
+              <LinkEditButton unknown={!h.hh_job_number} onClick={() => setLinkOpen(true)} />
             </p>
           </div>
           {h.kind !== 'lost_property' && (() => {
@@ -586,8 +586,10 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
         {/* Link / backfill owner — opened from the Client or Job field above,
             so there's one obvious place to fix an owner rather than a button
-            floating below unrelated sections. */}
-        {isOpen && linkOpen && (
+            floating below unrelated sections. Open on a finished item too: a
+            box handed over while still on a mistyped job number has to be
+            movable to the right job afterwards. */}
+        {linkOpen && (
           <div>
             <div className="flex items-center justify-between">
               <p className="text-xs font-semibold text-slate-500">Owner / job</p>
@@ -998,6 +1000,9 @@ function LinkForm({ item, onDone }: { item: HeldItem; onDone: () => void }) {
   const [clientText, setClientText] = useState(item.client_name_text || '');
   const [hh, setHh] = useState(item.hh_job_number ? String(item.hh_job_number) : '');
   const [saving, setSaving] = useState(false);
+  // A failed save used to vanish silently (no catch), which is how a broken
+  // job-number edit read as "the page won't let me change it".
+  const [err, setErr] = useState('');
   return (
     <div className="border border-slate-200 rounded-lg p-3 mt-2 space-y-2">
       <div className="flex items-end gap-1">
@@ -1010,9 +1015,10 @@ function LinkForm({ item, onDone }: { item: HeldItem; onDone: () => void }) {
       </div>
       <div><label className="block text-xs text-slate-500 mb-1">Or a name</label><input className={inputCls} value={clientText} onChange={(e) => setClientText(e.target.value)} /></div>
       <div><label className="block text-xs text-slate-500 mb-1">HireHop job # <span className="text-slate-400">(clear to unlink)</span></label><input className={inputCls} type="number" value={hh} onChange={(e) => setHh(e.target.value)} /></div>
+      {err && <p className="text-xs text-red-600">{err}</p>}
       <div className="flex justify-end">
         <button disabled={saving} onClick={async () => {
-          setSaving(true);
+          setSaving(true); setErr('');
           try {
             await api.post(`/holding/${item.id}/link`, {
               edit: true,
@@ -1020,6 +1026,8 @@ function LinkForm({ item, onDone }: { item: HeldItem; onDone: () => void }) {
               client_name_text: clientText.trim() || null, hh_job_number: hh ? Number(hh) : null,
             });
             onDone();
+          } catch (e) {
+            setErr(`Couldn't save — ${e instanceof Error ? e.message : 'please try again'}.`);
           } finally { setSaving(false); }
         }} className="text-xs bg-[#7B5EA7] text-white px-3 py-1.5 rounded-lg disabled:opacity-50">Save</button>
       </div>

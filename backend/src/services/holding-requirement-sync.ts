@@ -46,6 +46,31 @@ export async function syncMerchRequirementStatus(jobId: string): Promise<void> {
   );
 
   if (rows.length === 0) {
+    // No incoming item points at this job at all — not even a cancelled one —
+    // so the only way the card got here is an item that has since been MOVED
+    // to another job (a mistyped job number). If this module made the card,
+    // take it away again rather than leave "Merch Receiving: Not started" on a
+    // job that never had merch. A card a person added stays (below).
+    const anyItem = await query(
+      `SELECT 1 FROM held_items WHERE job_id = $1 AND kind = 'incoming' LIMIT 1`,
+      [jobId],
+    );
+    if (anyItem.rows.length === 0 && reqRes.rows.length > 0) {
+      const removed = await query(
+        `DELETE FROM job_requirements
+         WHERE id = $1 AND is_auto = true AND source = 'holding'
+         RETURNING id`,
+        [reqRes.rows[0].id],
+      );
+      if (removed.rows.length > 0) {
+        // Same cascade as DELETE /requirements/:id — no ghost bells.
+        await query(
+          `DELETE FROM notifications WHERE entity_type = 'job_requirements' AND entity_id = $1`,
+          [reqRes.rows[0].id],
+        ).catch((err) => console.warn('[holding] merch card notification cleanup failed:', err));
+        return;
+      }
+    }
     // Nothing (or everything cancelled) — leave an existing card at not_started,
     // don't create one from thin air.
     if (reqRes.rows.length > 0 && reqRes.rows[0].status !== 'not_started') {
