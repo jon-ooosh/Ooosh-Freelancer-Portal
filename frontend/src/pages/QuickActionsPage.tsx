@@ -40,7 +40,7 @@ export default function QuickActionsPage() {
     { id: 'lost', emoji: '🔍', label: 'Lost property', onClick: () => setActive('lost'), tone: 'bg-amber-600' },
     { id: 'handover', emoji: '✅', label: 'Handover / collected', onClick: () => setActive('handover'), tone: 'bg-green-600' },
     { id: 'pcn', emoji: '🅿️', label: 'Log PCN', onClick: () => navigate('/vehicles/pcns?new=1'), tone: 'bg-rose-700' },
-    { id: 'receipt', emoji: '🧾', label: 'Upload receipt', onClick: () => navigate('/money/costs?capture=1'), tone: 'bg-slate-700' },
+    { id: 'receipt', emoji: '🧾', label: 'Upload receipt', onClick: () => navigate('/receipt'), tone: 'bg-slate-700' },
     { id: 'checkin', emoji: '↩️', label: 'Check vehicle in', onClick: () => navigate('/vehicles/check-in'), tone: 'bg-blue-700' },
   ];
 

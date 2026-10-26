@@ -36,7 +36,7 @@ import StaffCalendarPage from './pages/StaffCalendarPage';
 import StaffAdminPage from './pages/StaffAdminPage';
 import StaffAbsencePage from './pages/StaffAbsencePage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
-import StaffReceiptsPage from './pages/StaffReceiptsPage';
+import ReceiptCapturePage from './pages/ReceiptCapturePage';
 import LostCancelledPage from './pages/LostCancelledPage';
 import LeadsPage from './pages/LeadsPage';
 import FillGapPage from './pages/FillGapPage';
@@ -251,6 +251,8 @@ export default function App() {
       <Route path="/van/:token" element={<VehicleForSalePage />} />
       {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
       <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
+      {/* Phone receipt capture, one question per screen — staff JWT, full-screen, no Layout chrome */}
+      <Route path="/receipt" element={<ProtectedRoute><ReceiptCapturePage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
       <Route path="/warehouse" element={<WarehousePinPage />} />
       <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />
@@ -332,7 +334,8 @@ export default function App() {
                 <Route path="/staff/absence" element={<StaffAbsencePage />} />
                 <Route path="/staff/documents" element={<Navigate to="/me?tab=documents" replace />} />
                 <Route path="/staff/documents/admin" element={<StaffDocumentsAdminPage />} />
-                <Route path="/my-receipts" element={<StaffReceiptsPage />} />
+                {/* Retired into the phone receipt page; old chaser emails and bells still land. */}
+                <Route path="/my-receipts" element={<Navigate to="/receipt" replace />} />
                 <Route path="/profile" element={<Navigate to="/me?tab=profile" replace />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />
