@@ -99,6 +99,11 @@ const BASE_SELECT = `
     d.identity_check_status AS driver_identity_check_status,
     d.calculated_excess_amount AS driver_calculated_excess,
     p.first_name || ' ' || p.last_name AS freelancer_name,
+    -- Who collected the van on the portal (migration 319) — Job Detail's
+    -- "collected by …, awaiting check-in" line names them with displayFullName.
+    sc.first_name AS soft_checked_in_by_first_name,
+    sc.last_name AS soft_checked_in_by_last_name,
+    sc.preferred_name AS soft_checked_in_by_preferred_name,
     je.id AS excess_id,
     je.excess_status,
     je.excess_amount_required,
@@ -111,6 +116,7 @@ const BASE_SELECT = `
   LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
   LEFT JOIN drivers d ON d.id = vha.driver_id
   LEFT JOIN people p ON p.id = vha.freelancer_person_id
+  LEFT JOIN people sc ON sc.id = vha.soft_checked_in_by_person_id
   LEFT JOIN job_excess je ON je.assignment_id = vha.id
 `;
 
