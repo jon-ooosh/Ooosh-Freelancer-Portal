@@ -27,6 +27,7 @@ import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { retireDoneBells } from '../services/notification-resolve';
 import type { BellKey } from '../services/bell-rules';
+import { AI_TOPICS } from '../services/house-knowledge';
 
 const router = Router();
 router.use(authenticate);
@@ -844,6 +845,55 @@ router.post('/:id/reject', authorize(...MANAGER_ROLES), async (req: AuthRequest,
     res.json({ data: { approval_status: 'draft' } });
   } catch (error) {
     console.error('[staff-documents] reject error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/staff-documents/:id/ai — share (or stop sharing) a document with the
+// Claude that drafts client emails, and say which drafting tasks it applies to
+// (docs/AI-KNOWLEDGE-SPEC.md §4). ADMIN ONLY: whatever is shared here shapes every
+// AI-drafted client email. Only an approved, active document with text can be
+// shared — an uploaded PDF has nothing Claude can read. Read back by
+// services/house-knowledge.ts, which also re-checks approval at read time.
+const aiSchema = z.object({
+  ai_shared: z.boolean(),
+  ai_topics: z.array(z.enum(AI_TOPICS)).max(AI_TOPICS.length),
+});
+router.put('/:id/ai', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = aiSchema.safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { ai_shared, ai_topics } = parse.data;
+    const cur = await query(
+      `SELECT d.approval_status, d.is_active, v.body
+         FROM staff_documents d
+         LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = TRUE
+        WHERE d.id = $1`,
+      [req.params.id],
+    );
+    if (!cur.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
+    if (ai_shared) {
+      const row = cur.rows[0];
+      if (row.approval_status !== 'approved' || !row.is_active) {
+        res.status(400).json({ error: 'Only an approved, active document can be shared with Claude' }); return;
+      }
+      if (!String(row.body || '').trim()) {
+        res.status(400).json({ error: 'This document has no written text for Claude to read (an uploaded file can\'t be shared)' }); return;
+      }
+      if (!ai_topics.length) {
+        res.status(400).json({ error: 'Pick at least one topic, so Claude knows when to read it' }); return;
+      }
+    }
+    const topics = Array.from(new Set(ai_topics));
+    const r = await query(
+      `UPDATE staff_documents SET ai_shared = $1, ai_topics = $2::text[], updated_at = NOW()
+        WHERE id = $3 RETURNING id, ai_shared, ai_topics`,
+      [ai_shared, topics, req.params.id],
+    );
+    await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'update', null, { ai_shared, ai_topics: topics }).catch(() => {});
+    res.json({ data: r.rows[0] });
+  } catch (error) {
+    console.error('[staff-documents] ai share error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

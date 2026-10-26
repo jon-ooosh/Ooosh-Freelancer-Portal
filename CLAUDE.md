@@ -311,10 +311,10 @@ Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisi
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
 (support, 15 Oct 2026) — never work around it; §3 is the evidence. §5 the decisions, §6 what must exist first.
 
-**DRAFT SPEC, Oct 2026:** `docs/AI-KNOWLEDGE-SPEC.md` — the house knowledge every AI client draft
-reads: the voice (absorbs the chase-tone round), house guides as Staff Documents shared with Claude,
-the client brief, and "remember this?" client facts. **Code rails beat written guidance**; nothing is
-learned without a human tick. §9 is the open decisions.
+**IN PROGRESS, Oct 2026:** `docs/AI-KNOWLEDGE-SPEC.md` — the house knowledge every AI client draft
+reads: the voice (Phase A built), house guides as Staff Documents shared with Claude (Phase B built —
+admin-only Claude switch, `house-knowledge.ts`), the client brief, and "remember this?" client facts.
+**Code rails beat written guidance**; nothing is learned without a human tick. §9 is the decisions.
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
@@ -386,6 +386,7 @@ existing definition:
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
+| Which of Ooosh's own guides does an AI client draft read? | `services/house-knowledge.ts` `getGuidesFor(topics)` — Staff Documents an admin shared with Claude (`ai_shared`, `ai_topics`), current approved version only; a shared `voice` guide replaces the built-in voice. Never a second reader (`AI-KNOWLEDGE-SPEC.md` §4) |
 | Which Claude model? | `config/anthropic.ts` `CLAUDE_SONNET_MODEL` / `CLAUDE_HAIKU_MODEL` — never a model string in a service. Read a Claude structured-output reply with `readStructuredJson()`; Sonnet 5.5+ rejects forced `tool_choice` |
 | Opening a possible insurance claim | `services/incident-claims.ts` `createClaimFromIssue()` — always from a Problem |
 | The claim form's fields (staff form, PDF, client form) | `services/claim-form-fields.ts` (frontend: `@claimform`) |

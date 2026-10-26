@@ -58,6 +58,21 @@ clients — the test bench for everything here.
 
 ## 4. Phase B — house guides, shared with Claude
 
+**BUILT 26 Oct 2026** (migration 321). What shipped:
+- `staff_documents.ai_shared` + `ai_topics` (topics: voice, chasing, quoting_vans, quoting_general,
+  client_questions — `house-knowledge.ts` `AI_TOPICS` ↔ `frontend/src/lib/aiTopics.ts`).
+- `PUT /api/staff-documents/:id/ai`, **admin only**; refuses a draft, retired or file-only document,
+  or sharing with no topic. Staff Documents page: a **Claude** button (admins) and a "Shared with
+  Claude" pill (everyone who sees the list).
+- `services/house-knowledge.ts` `getGuidesFor(topics)` — THE reader: current version of an approved,
+  active, shared document, re-checked at read time; never throws; over 30,000 characters logs a warning,
+  nothing is cut.
+- **Chase drafts read `voice` + `chasing`.** A shared `voice` guide REPLACES the built-in voice
+  (`BUILT_IN_VOICE` in `chase-draft.ts`, kept as the fallback); the rails always stay; the Settings
+  voice box still goes last. The preview returns `guidesUsed` (document + version).
+- **Not built:** collapsing the `## For Claude` section for staff readers (it shows as a normal
+  heading, which is at least transparent); recording `guidesUsed` on the Gmail draft itself.
+
 Built on Staff Documents (`STAFF-DOCUMENTS-SPEC.md`), which already gives versions,
 approval, owners and a content-review cadence — the "how do we keep it current" answer.
 
@@ -167,12 +182,30 @@ is shared (B), and the brief exists (C). Phase D can follow; it isn't a blocker.
 | Step | Code (Claude) | Content (jon / team) |
 |---|---|---|
 | A | Rails rework (built 16 Oct); voice guide draft; learn-voice removed | Review drafts until they'd go unedited |
-| B | `ai_shared` + `ai_topics` + template + `house-knowledge.ts`; chase drafts use it | Write "Chasing a quote" + "Quoting a van hire"; triage Monday guides |
+| B | BUILT 26 Oct: `ai_shared` + `ai_topics` + `house-knowledge.ts`; chase drafts use it | Write "Chasing a quote" + "Quoting a van hire"; triage Monday guides |
 | C | `client-brief.ts`; brief shown beside the draft; chase drafts use it | Fill terms for the top regular clients |
 | D | Client facts table + page section; draft-vs-sent capture; proposal UI | Tick or reject suggestions as they come |
 | E | Un-park the van slice | Test on old enquiries before live ones |
 
 A and the content half of B can run in parallel this week.
+
+## 8a. Where this is heading — the business brain (jon, 26 Oct 2026)
+
+jon's reference: a "three engines" model (Charlie Hutton, *The £1M AI Cheat Code*) —
+**Briefing** (the machine knows who we are), **Intelligence** (it sees everything happening),
+**Execution** (it does the routine work and asks a person only for judgement). How OP maps:
+
+| Engine | OP today | Missing |
+|---|---|---|
+| Briefing | Voice + van guide drafts; Phase B home for them | "Who we are", "How we deal with clients", "How we price", **"Lessons learned the hard way"** (§4 guides, written by interview + mined from Problems / retros / claims / losses) |
+| Intelligence | Most of it: jobs, money, drivers, vans, Problems, retros, every client email (ingested), HireHop sync | **Phone calls** (transcription — the other half of client contact); the client brief (§5) that pulls it together per job |
+| Execution | Chase drafts; close-out, shop close, Wise matcher, auto-chase runner, claim chase | Quote drafting (`AI-QUOTING-SPEC`), "remember this?" (§6), proactive nudges ("this client normally replies in a day, nothing for a week") |
+
+Settled direction: **a person approves anything that leaves the building or moves money** — the
+"Execution" engine drafts and prepares; it does not send unattended until a task has a track record
+(auto-send for chases is the first candidate, `AUTO-CHASE-SPEC.md` Phase 3). Phone transcription is
+its own spec when it comes: consent/announcement, which calls, storage and retention, matching a call
+to a job the same deterministic way emails are matched.
 
 ## 9. Decisions (jon, 15 Oct 2026)
 
