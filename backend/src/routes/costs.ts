@@ -12,7 +12,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import multer from 'multer';
-import { query, getClient } from '../config/database';
+import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, isManagerTier } from '../middleware/auth';
 import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
 import { fetchCostLines, validateCostLines, replaceCostLines, headerVatFromLines, type CostLineInput } from '../services/cost-lines';
@@ -20,6 +20,7 @@ import { listFreelancerWork, getInvoiceTolerance, planWorkLinks, writeWorkLinks,
 import { suggestInvoicePerson, personIdByEmail } from '../services/freelancer-invoice-person';
 import { fullDisplayName } from '../services/display-name';
 import { retireDoneBells } from '../services/notification-resolve';
+import { planAllocations, writeAllocations, AllocationError, type AllocationInput } from '../services/cost-allocations';
 import {
   TERMINAL_RECHARGE, loadRecharge, updateRecharge, hasPerJobRecharges, PER_JOB_ALREADY,
   wholeCostAlready, type RechargeTarget,
@@ -98,6 +99,24 @@ const costLineInputSchema = z.object({
   source: z.enum(['manual', 'ai']).optional(),
 });
 
+// One job's share of a cost (cost_allocations). Shared by PUT /:id/allocations
+// and the create / update payload, so the two can't drift.
+const allocationItemSchema = z.object({
+  // An existing share, kept (and updated) rather than replaced, so a recharge
+  // it carries survives an edit to the split. Omitted = a new share.
+  id: z.string().uuid().optional(),
+  job_id: z.string().uuid().optional().nullable(),
+  quote_assignment_id: z.string().uuid().optional().nullable(),
+  amount: money,
+  recharge: z.boolean().optional(),
+  notes: z.string().trim().max(2000).optional().nullable(),
+  // Who pays for THIS job's share (migration 318). Omitted = leave the share
+  // as it is (a new share: no recharge, and the cost's own quote/extra answer).
+  cost_intent: z.enum(['quote_actual', 'extra']).optional().nullable(),
+  recharge_mode: z.enum(RECHARGE_MODES).optional(),
+  recharge_amount: money.optional().nullable(),
+});
+
 const createSchema = z.object({
   supplier_name: z.string().trim().max(200).optional().nullable(),
   cost_date: z.string().trim().max(20).optional().nullable(),
@@ -174,6 +193,9 @@ const createSchema = z.object({
   // Why it was saved with no work ticked (migration 315). Cleared server-side
   // whenever work is ticked.
   work_unmatched_reason: z.enum(['person_not_in_op', 'work_not_in_op', 'later']).optional().nullable(),
+  // The job split, saved with the cost (not a column). When sent it replaces the
+  // cost's split; an empty array clears it. See services/cost-allocations.ts.
+  allocations: z.array(allocationItemSchema).max(100).optional(),
 });
 
 // Update accepts the same fields, all optional.
@@ -186,21 +208,7 @@ const rechargeSchema = z.object({
 
 const allocationSchema = z.object({
   // Empty array clears the split (deletes all allocations for the cost).
-  allocations: z.array(z.object({
-    // An existing share, kept (and updated) rather than replaced, so a recharge
-    // it carries survives an edit to the split. Omitted = a new share.
-    id: z.string().uuid().optional(),
-    job_id: z.string().uuid().optional().nullable(),
-    quote_assignment_id: z.string().uuid().optional().nullable(),
-    amount: money,
-    recharge: z.boolean().optional(),
-    notes: z.string().trim().max(2000).optional().nullable(),
-    // Who pays for THIS job's share (migration 318). Omitted = leave the share
-    // as it is (a new share: no recharge, and the cost's own quote/extra answer).
-    cost_intent: z.enum(['quote_actual', 'extra']).optional().nullable(),
-    recharge_mode: z.enum(RECHARGE_MODES).optional(),
-    recharge_amount: money.optional().nullable(),
-  })),
+  allocations: z.array(allocationItemSchema),
 });
 
 // Columns a staff member may set directly via create/update (whitelist —
@@ -258,7 +266,7 @@ function deriveRechargeStatusForWrite(data: Record<string, unknown>, current?: s
 
 // `RETURNING *` gives the raw costs row — no hh_job_number / job_name / vehicle_reg,
 // because those live on the joined tables. Callers hand that row straight to the
-// UI (the capture modal's job chip, and the split modal it can open next), which
+// UI (the capture form's job rows), which
 // then had nothing to print and fell back to "(linked job)" / "(captured job)".
 // Enrich the row with the display fields the list query already exposes so the
 // real job number is shown wherever a saved cost is rendered.
@@ -425,7 +433,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         -- A freelancer invoice's freelancer and how much of their work it is
         -- linked to (FREELANCER-PORTAL-SPEC §5).
         fp.first_name AS fp_first, fp.last_name AS fp_last, fp.preferred_name AS fp_pref,
-        (SELECT COUNT(*)::int FROM cost_work_items w WHERE w.cost_id = c.id) AS work_item_count
+        (SELECT COUNT(*)::int FROM cost_work_items w WHERE w.cost_id = c.id) AS work_item_count,
+        -- What that work is, for the list's "1 job · 3 nights": HireHop jobs
+        -- reached through ticked bookings (a run's stops on one job count once),
+        -- studio evenings, yard days.
+        (SELECT json_build_object(
+                  'jobs', COUNT(DISTINCT q.job_id),
+                  'nights', COUNT(w.sitter_assignment_id),
+                  'days', COUNT(w.day_booking_id))
+           FROM cost_work_items w
+           LEFT JOIN quote_assignments qa ON qa.id = w.quote_assignment_id
+           LEFT JOIN quotes q ON q.id = qa.quote_id
+          WHERE w.cost_id = c.id) AS work_summary
         ${rechargeView ? `,
         r.allocation_id AS rc_allocation_id, r.job_id AS rc_job_id,
         rj.hh_job_number AS rc_hh_job_number, rj.job_name AS rc_job_name,
@@ -677,6 +696,53 @@ router.get('/check-invoice', async (req: AuthRequest, res: Response) => {
     res.json({ data: { duplicate: r.rows.length > 0, match: r.rows[0] || null } });
   } catch (err) {
     console.error('[costs] check-invoice error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// De-dup check, the other kind: has this RECEIPT already been added? Fuel and
+// till receipts rarely carry an invoice number (the reader is told to leave it
+// blank), so the invoice-number check above never sees the commonest duplicate:
+// the same fuel receipt uploaded twice, or a card cost typed in and then
+// snapped. Same amount to the penny + same date + same supplier (the Xero
+// contact when both have one, else the name as supplier-match normalises it).
+// Warn only (jon, Oct 2026): two vans can pay the same £10 at the same car park.
+router.get('/check-duplicate', async (req: AuthRequest, res: Response) => {
+  try {
+    const amount = Number(req.query.amount_gross);
+    const date = String(req.query.cost_date || '').slice(0, 10);
+    const supplier = String(req.query.supplier_name || '').trim();
+    const contactId = String(req.query.xero_contact_id || '').trim();
+    const excludeId = typeof req.query.exclude_id === 'string' && /^[0-9a-f-]{36}$/i.test(req.query.exclude_id) ? req.query.exclude_id : null;
+    if (!(amount > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(date) || (!supplier && !contactId)) {
+      res.json({ data: { duplicates: [] } });
+      return;
+    }
+    const r = await query(
+      `SELECT c.id, c.supplier_name, c.xero_contact_id, c.amount_gross, c.cost_date::text AS cost_date,
+              c.payment_method, c.receipt_r2_key IS NOT NULL AS has_receipt,
+              CONCAT(up.first_name, ' ', up.last_name) AS uploaded_by_name
+         FROM costs c
+         LEFT JOIN users u ON u.id = c.uploaded_by
+         LEFT JOIN people up ON up.id = u.person_id
+        WHERE c.cost_date = $1::date
+          AND ROUND(c.amount_gross * 100) = $2
+          AND NOT COALESCE(c.is_credit, false)
+          AND ($3::uuid IS NULL OR c.id <> $3::uuid)
+        ORDER BY c.created_at DESC
+        LIMIT 20`,
+      [date, Math.round(amount * 100), excludeId],
+    );
+    const { normaliseSupplierName } = await import('../services/supplier-match');
+    const wanted = supplier ? normaliseSupplierName(supplier) : '';
+    const duplicates = r.rows.filter((c) => (contactId && c.xero_contact_id
+      ? c.xero_contact_id === contactId
+      : Boolean(wanted) && normaliseSupplierName(c.supplier_name || '') === wanted))
+      .slice(0, 3)
+      .map(({ xero_contact_id: _drop, ...rest }) => rest);
+    res.json({ data: { duplicates } });
+  } catch (err) {
+    console.error('[costs] check-duplicate error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1171,6 +1237,26 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
         throw e;
       }
     }
+
+    // The job split, sent with the cost: checked against the cost as it will be,
+    // BEFORE the insert, and written after it.
+    const splitInput = data.allocations as AllocationInput[] | undefined;
+    delete data.allocations;
+    let splitPlan: Awaited<ReturnType<typeof planAllocations>> | null = null;
+    if (splitInput?.length) {
+      const hh = data.job_id
+        ? (await query('SELECT hh_job_number FROM jobs WHERE id = $1', [data.job_id])).rows[0]?.hh_job_number ?? null
+        : null;
+      try {
+        splitPlan = await planAllocations(null, {
+          amount_gross: data.amount_gross as number | null, cost_intent: (data.cost_intent as string) ?? null,
+          recharge_mode: (data.recharge_mode as string) ?? 'none', is_credit: isCredit, hh_job_number: hh,
+        }, splitInput);
+      } catch (e) {
+        if (e instanceof AllocationError) { res.status(e.status).json({ error: e.message }); return; }
+        throw e;
+      }
+    }
     // Work ticked: no "why not?" to keep (migration 315).
     if (workRows?.length) data.work_unmatched_reason = null;
 
@@ -1195,6 +1281,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     // line items, and a separate round-trip would race it onto a one-line bill.
     if (newLines?.length) await replaceCostLines(result.rows[0].id, newLines);
     if (workRows?.length) await writeWorkLinks(result.rows[0].id, workRows, req.user!.id);
+    if (splitPlan) await writeAllocations(result.rows[0].id, splitPlan, req.user!.id);
 
     // Background push to Xero for paid costs — non-blocking; the cost row's
     // xero_sync_state + xero_error carry success/failure for the UI.
@@ -1281,9 +1368,45 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
 
     // Keep recharge_status in step if recharge_mode is being changed — but never
     // clobber a terminal resolution (already pushed/absorbed) back to pending.
+    // Nor take one off: a recharge that is done records a line on the client's
+    // HireHop job (or a decision), and clearing it here would leave that line
+    // billed with nothing in OP saying so.
     if (data.recharge_mode !== undefined) {
-      const cur = await query('SELECT recharge_status FROM costs WHERE id = $1', [req.params.id]);
-      deriveRechargeStatusForWrite(data, cur.rows[0]?.recharge_status ?? null);
+      const cur = await query('SELECT recharge_mode, recharge_status FROM costs WHERE id = $1', [req.params.id]);
+      const was = cur.rows[0];
+      if (data.recharge_mode === 'none' && was && (was.recharge_mode ?? 'none') !== 'none' && TERMINAL_RECHARGE.has(was.recharge_status)) {
+        res.status(409).json({ error: 'This cost has already been recharged to the client, so its recharge can\'t be taken off here.' });
+        return;
+      }
+      deriveRechargeStatusForWrite(data, was?.recharge_status ?? null);
+    }
+
+    // The job split, sent with the cost: checked against the cost as it WILL be
+    // after this save (so "whole cost or per job" is judged on the final state),
+    // before anything is written.
+    const splitInput = data.allocations as AllocationInput[] | undefined;
+    delete data.allocations;
+    let splitPlan: Awaited<ReturnType<typeof planAllocations>> | null = null;
+    if (splitInput !== undefined) {
+      const cur = await query(
+        `SELECT c.amount_gross, c.cost_intent, c.recharge_mode, c.is_credit, c.job_id
+           FROM costs c WHERE c.id = $1`,
+        [req.params.id],
+      );
+      if (!cur.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
+      const will = { ...cur.rows[0], ...data } as Record<string, unknown>;
+      const hh = will.job_id
+        ? (await query('SELECT hh_job_number FROM jobs WHERE id = $1', [will.job_id])).rows[0]?.hh_job_number ?? null
+        : null;
+      try {
+        splitPlan = await planAllocations(String(req.params.id), {
+          amount_gross: will.amount_gross as number | null, cost_intent: (will.cost_intent as string) ?? null,
+          recharge_mode: (will.recharge_mode as string) ?? 'none', is_credit: will.is_credit === true, hh_job_number: hh,
+        }, splitInput);
+      } catch (e) {
+        if (e instanceof AllocationError) { res.status(e.status).json({ error: e.message }); return; }
+        throw e;
+      }
     }
 
     // A cost is recharged as a whole OR job by job, never both (migration 318).
@@ -1291,8 +1414,10 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     // recharge is refused here: 'none' on a cost recharged per job is the form
     // agreeing, not a change. A cost-level "part of a quote" would contradict
     // shares that inherit it and are flagged for recharge, so that is refused too.
+    // When the split comes in this same request, the plan above has already
+    // judged the final state, so the existing shares don't decide it.
     const wantsWholeRecharge = data.recharge_mode !== undefined && data.recharge_mode !== 'none';
-    if (wantsWholeRecharge || data.cost_intent === 'quote_actual') {
+    if (!splitPlan && splitInput === undefined && (wantsWholeRecharge || data.cost_intent === 'quote_actual')) {
       const clash = await query(
         `SELECT COUNT(*) FILTER (WHERE recharge_mode <> 'none')::int AS recharged,
                 COUNT(*) FILTER (WHERE recharge_mode <> 'none' AND cost_intent IS NULL)::int AS inheriting
@@ -1327,20 +1452,14 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         res.status(409).json({ error: 'This cost is reconciled in Xero and can no longer be changed.' });
         return;
       }
-      // Lines and a hand-made job split are two answers to the same question,
-      // and lines are the better one (they carry the category too). Rather than
-      // guess which wins, refuse and let staff clear the split.
-      // NB when derived allocations land (COST-LINES-SPEC §7) this narrows to
-      // allocations that were NOT derived from lines.
-      if (editedLines.length) {
-        const split = await query('SELECT COUNT(*)::int AS n FROM cost_allocations WHERE cost_id = $1', [req.params.id]);
-        if (split.rows[0]?.n > 0) {
-          res.status(400).json({
-            error: 'This cost already has a manual job split. Clear the split first — lines carry the job themselves.',
-          });
-          return;
-        }
-      }
+      // Lines and a job split used to be refused together ("two answers to the
+      // same question"). Since the capture form's redesign (Oct 2026) they answer
+      // DIFFERENT questions: lines say how the invoice breaks down by category
+      // and VAT (they are the Xero line items), the split says which jobs carry
+      // it. No line sets a job, and the job read ignores lines on a split-in row
+      // (a share's lines would describe a total that job doesn't carry), so
+      // both can stand. A freelancer invoice across two jobs whose fee and fuel
+      // are at different VAT rates needs both.
 
       const merged = { ...before.rows[0], ...data };
       const problem = validateCostLines(merged as never, editedLines);
@@ -1356,9 +1475,11 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
       if (data[c] !== undefined) { vals.push(data[c]); sets.push(`${c} = $${vals.length}`); }
     }
     if (!sets.length) {
-      // Only the ticks changed: nothing on the row itself, nothing for Xero.
-      if (workRows) {
-        await writeWorkLinks(String(req.params.id), workRows, req.user!.id);
+      // Only the ticks and/or the split changed: nothing on the row itself,
+      // nothing for Xero.
+      if (workRows || splitPlan) {
+        if (workRows) await writeWorkLinks(String(req.params.id), workRows, req.user!.id);
+        if (splitPlan) await writeAllocations(String(req.params.id), splitPlan, req.user!.id);
         const row = await query('SELECT * FROM costs WHERE id = $1', [req.params.id]);
         if (!row.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
         res.json({ data: await withJobLabels(row.rows[0]) });
@@ -1375,6 +1496,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
     if (workRows) await writeWorkLinks(String(req.params.id), workRows, req.user!.id);
+    if (splitPlan) await writeAllocations(String(req.params.id), splitPlan, req.user!.id);
     // A receipt attached (or the purchase changed) may finish someone's
     // "company-card purchases need a receipt" bell.
     if (['receipt_r2_key', 'payment_method', 'cost_date'].some((f) => data[f] !== undefined)) {
@@ -1971,20 +2093,15 @@ router.post('/:id/send-remittance', authorize(...ADMIN_ONLY), async (req: AuthRe
 });
 
 // ── Allocations (bundled invoice split) ─────────────────────────────────────
-// Saves the whole split for a cost in one transaction. A share sent with its
-// `id` is KEPT and updated rather than deleted and re-made, so what it carries
-// (its own recharge to that job, migration 318) survives an edit to the split.
-// A share whose recharge is DONE (billed on HireHop, billed another way, or
-// absorbed) records something that happened: it can't be taken out of the
-// split or moved to another job, and its recharge can't be changed here.
-
-const samePence = (a: unknown, b: unknown) => Math.round((Number(a) || 0) * 100) === Math.round((Number(b) || 0) * 100);
+// Saves the whole split for a cost in one transaction. The rules (shares kept by
+// id, a share whose recharge is done stays put, the whole-cost-or-per-job rule)
+// live in services/cost-allocations.ts, shared with create / update, which take
+// `allocations` in the same request as the cost.
 
 router.put('/:id/allocations', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const parse = allocationSchema.safeParse(req.body);
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
-    const { allocations } = parse.data;
     const costId = String(req.params.id);
 
     const exists = await query(
@@ -1993,168 +2110,15 @@ router.put('/:id/allocations', authorize(...STAFF_ROLES), async (req: AuthReques
       [costId],
     );
     if (!exists.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
-    const cost = exists.rows[0];
 
-    // Attribution is OP-only and OPTIONAL — it may leave a remainder unallocated
-    // ("our cost"), so allocations summing to LESS than the cost total is fine.
-    // Only OVER-allocation is rejected: you can't attribute more than the cost.
-    const gross = Number(cost.amount_gross ?? 0);
-    const allocated = allocations.reduce((s, a) => s + Number(a.amount || 0), 0);
-    if (allocated > gross + 0.01) {
-      res.status(400).json({
-        error: `Allocated £${allocated.toFixed(2)} exceeds the cost total £${gross.toFixed(2)}. Reduce the split — you can't attribute more than the cost.`,
-      });
-      return;
-    }
-    if (allocations.some((a) => !(Number(a.amount) > 0))) {
-      res.status(400).json({ error: 'Every line needs an amount greater than zero.' });
-      return;
-    }
-
-    const cur = await query(
-      `SELECT a.id, a.job_id, a.cost_intent, a.recharge_mode, a.recharge_amount, a.recharge_status, j.hh_job_number
-         FROM cost_allocations a LEFT JOIN jobs j ON j.id = a.job_id
-        WHERE a.cost_id = $1`,
-      [costId],
-    );
-    const byId = new Map(cur.rows.map((r) => [r.id as string, r]));
-    const onJob = (r: { hh_job_number?: number | null }) => (r.hh_job_number ? `job #${r.hh_job_number}` : 'its job');
-    const isDone = (r: { recharge_status?: string | null }) => TERMINAL_RECHARGE.has(String(r.recharge_status));
-
-    // Every id sent must be one of this cost's shares, and only once.
-    const kept = new Set<string>();
-    for (const a of allocations) {
-      if (!a.id) continue;
-      if (!byId.has(a.id) || kept.has(a.id)) {
-        res.status(400).json({ error: 'The split changed while you were editing it. Close it, open it again and re-check.' });
-        return;
-      }
-      kept.add(a.id);
-    }
-    // A share whose recharge is done stays in the split.
-    for (const r of cur.rows) {
-      if (!kept.has(r.id) && isDone(r)) {
-        res.status(409).json({
-          error: `The share on ${onJob(r)} has already been recharged to the client, so it can't be taken out of the split.`,
-        });
-        return;
-      }
-    }
-
-    type Planned = {
-      id: string | null; jobId: string | null; quoteAssignmentId: string | null; amount: number;
-      recharge: boolean; notes: string | null;
-      costIntent: string | null; rechargeMode: string; rechargeAmount: number | null; rechargeStatus: string | null;
-    };
-    const planned: Planned[] = [];
-    for (const a of allocations) {
-      const prev = a.id ? byId.get(a.id) : undefined;
-      const jobId = a.job_id ?? null;
-      const base = {
-        id: prev ? (prev.id as string) : null, jobId, quoteAssignmentId: a.quote_assignment_id ?? null,
-        amount: a.amount, recharge: a.recharge ?? false, notes: a.notes ?? null,
-      };
-
-      if (prev && isDone(prev)) {
-        if (jobId !== (prev.job_id ?? null)) {
-          res.status(409).json({ error: `The share on ${onJob(prev)} has already been recharged to the client, so it can't move to another job.` });
-          return;
-        }
-        const changed = (a.recharge_mode !== undefined && a.recharge_mode !== prev.recharge_mode)
-          || (a.recharge_amount !== undefined && !samePence(a.recharge_amount, prev.recharge_amount))
-          || (a.cost_intent !== undefined && (a.cost_intent ?? null) !== (prev.cost_intent ?? null));
-        if (changed) {
-          res.status(409).json({ error: `The share on ${onJob(prev)} has already been recharged to the client, so its recharge can't be changed here.` });
-          return;
-        }
-        planned.push({
-          ...base, costIntent: prev.cost_intent ?? null, rechargeMode: prev.recharge_mode,
-          rechargeAmount: prev.recharge_amount == null ? null : Number(prev.recharge_amount), rechargeStatus: prev.recharge_status,
-        });
-        continue;
-      }
-
-      const costIntent = a.cost_intent !== undefined ? (a.cost_intent ?? null) : (prev?.cost_intent ?? null);
-      let rechargeMode: string = a.recharge_mode ?? prev?.recharge_mode ?? 'none';
-      // Part of the quote (this share's answer, or the cost's when it has none):
-      // already billed through the quote, so never recharged too.
-      if ((costIntent ?? cost.cost_intent) === 'quote_actual') rechargeMode = 'none';
-      const modeChanged = !prev || rechargeMode !== prev.recharge_mode;
-      let rechargeAmount: number | null = a.recharge_amount !== undefined
-        ? (a.recharge_amount ?? null)
-        : (modeChanged ? null : (prev?.recharge_amount == null ? null : Number(prev.recharge_amount)));
-
-      if (rechargeMode !== 'none') {
-        if (cost.is_credit) { res.status(400).json({ error: 'A refund is never recharged to a client.' }); return; }
-        if (!jobId) { res.status(400).json({ error: 'A share can only be recharged when it is on a job.' }); return; }
-        if ((cost.recharge_mode ?? 'none') !== 'none') { res.status(400).json({ error: wholeCostAlready(cost.hh_job_number) }); return; }
-        if (rechargeMode === 'partial' && !(Number(rechargeAmount) > 0)) {
-          res.status(400).json({ error: 'Say how much of this job\'s share to recharge (£, before VAT).' });
-          return;
-        }
-      } else {
-        rechargeAmount = null;
-      }
-      planned.push({
-        ...base, costIntent, rechargeMode, rechargeAmount,
-        rechargeStatus: rechargeMode === 'none' ? null : 'pending',
-      });
-    }
-
-    // One client for the lot, so it IS a transaction (SECURITY-AUDIT-BRIEF B.5):
-    // BEGIN/COMMIT through the shared pool lands on whichever connection is free.
-    const client = await getClient();
+    let plan;
     try {
-      await client.query('BEGIN');
-      const keepIds = planned.filter((p) => p.id).map((p) => p.id as string);
-      await client.query(
-        'DELETE FROM cost_allocations WHERE cost_id = $1 AND NOT (id = ANY($2::uuid[]))',
-        [costId, keepIds],
-      );
-      for (const p of planned) {
-        const vals = [p.jobId, p.quoteAssignmentId, p.amount, p.recharge, p.notes,
-          p.costIntent, p.rechargeMode, p.rechargeAmount, p.rechargeStatus];
-        if (p.id) {
-          await client.query(
-            `UPDATE cost_allocations
-                SET job_id = $1, quote_assignment_id = $2, amount = $3, recharge = $4, notes = $5,
-                    cost_intent = $6, recharge_mode = $7, recharge_amount = $8, recharge_status = $9
-              WHERE id = $10 AND cost_id = $11`,
-            [...vals, p.id, costId],
-          );
-        } else {
-          await client.query(
-            `INSERT INTO cost_allocations
-               (job_id, quote_assignment_id, amount, recharge, notes,
-                cost_intent, recharge_mode, recharge_amount, recharge_status, cost_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-            [...vals, costId],
-          );
-        }
-      }
-      await client.query('COMMIT');
-    } catch (txErr) {
-      await client.query('ROLLBACK').catch(() => { /* the connection is going back anyway */ });
-      throw txErr;
-    } finally {
-      client.release();
+      plan = await planAllocations(costId, exists.rows[0], parse.data.allocations);
+    } catch (e) {
+      if (e instanceof AllocationError) { res.status(e.status).json({ error: e.message }); return; }
+      throw e;
     }
-
-    // A recharge flagged or cleared on a share is a recharge decision: on the record.
-    const summary = (rows: Array<{ job_id?: string | null; jobId?: string | null; recharge_mode?: string; rechargeMode?: string; recharge_amount?: unknown; rechargeAmount?: unknown }>) =>
-      rows.filter((r) => (r.recharge_mode ?? r.rechargeMode) !== 'none')
-        .map((r) => ({ job_id: r.job_id ?? r.jobId, mode: r.recharge_mode ?? r.rechargeMode, amount: r.recharge_amount ?? r.rechargeAmount }));
-    const before = summary(cur.rows);
-    const after = summary(planned);
-    if (JSON.stringify(before) !== JSON.stringify(after)) {
-      await audit(req.user!.id, costId, 'allocation_recharges', { shares: before }, { shares: after });
-    }
-    // Each job's close-out card, for every job a share's recharge billed or now bills.
-    const jobs = new Set<string>([
-      ...cur.rows.filter((r) => r.recharge_mode !== 'none' && r.job_id).map((r) => r.job_id as string),
-      ...planned.filter((p) => p.rechargeMode !== 'none' && p.jobId).map((p) => p.jobId as string),
-    ]);
-    for (const j of jobs) await syncRechargeJob(j);
+    await writeAllocations(costId, plan, req.user!.id);
 
     const result = await query(
       `SELECT a.*, j.hh_job_number, j.job_name FROM cost_allocations a

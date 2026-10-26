@@ -17,7 +17,6 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
 import { UNMATCHED_REASONS } from '../components/costs/FreelancerInvoiceLinks';
-import CostAllocationModal from '../components/CostAllocationModal';
 import RechargeResolveModal, { RechargeSlot, type RechargeCost } from '../components/RechargeResolveModal';
 import RecordRefundModal from '../components/RecordRefundModal';
 import { PAID_NOW_METHODS } from '../lib/costOptions';
@@ -76,6 +75,22 @@ const gbp = (n: number | null | undefined) => `£${Number(n || 0).toFixed(2)}`;
 
 /** A Recharges-tab row about one job's share (not the whole cost). */
 const isShareRow = (c: CostRow) => !!c.recharge?.allocation_id;
+
+/**
+ * What a freelancer invoice's ticked work is, for its row: "1 job · 3 nights".
+ * Counts HireHop jobs (a run's stops on one job once), studio evenings and yard
+ * days, not work items, which read as "5 jobs" for five days on one job.
+ */
+function workLabel(c: { work_item_count?: number; work_summary?: { jobs: number; nights: number; days: number } | null }): string {
+  const w = c.work_summary;
+  if (!w) return `${c.work_item_count} item${c.work_item_count === 1 ? '' : 's'}`;
+  const bits = [
+    w.jobs ? `${w.jobs} job${w.jobs === 1 ? '' : 's'}` : '',
+    w.nights ? `${w.nights} night${w.nights === 1 ? '' : 's'}` : '',
+    w.days ? `${w.days} yard day${w.days === 1 ? '' : 's'}` : '',
+  ].filter(Boolean);
+  return bits.join(' · ') || `${c.work_item_count} item${c.work_item_count === 1 ? '' : 's'}`;
+}
 
 /** What the resolve modal needs for this row's recharge. */
 function rechargeTarget(c: CostRow): RechargeCost {
@@ -212,7 +227,8 @@ export default function CostsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [showCapture, setShowCapture] = useState(false);
   const [editing, setEditing] = useState<CostRow | null>(null);
-  const [allocating, setAllocating] = useState<CostRow | null>(null);
+  // ⑂ opens the edit form at its Jobs section (the split modal it used to open is retired).
+  const [editingJobs, setEditingJobs] = useState(false);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
   // "Query" on a freelancer invoice: a question for them instead of approving (FREELANCER-PORTAL-SPEC §5).
   const [queryTarget, setQueryTarget] = useState<CostRow | null>(null);
@@ -770,10 +786,10 @@ export default function CostsPage() {
                             covers (FREELANCER-PORTAL-SPEC §5): what their Earnings reads. */}
                         {c.person_name && (
                           <div className="text-xs text-purple-700 truncate max-w-[150px]"
-                            title={`${c.person_name}'s invoice${c.work_item_count ? `, covering ${c.work_item_count} job(s)` : ', no work ticked yet'}`}>
+                            title={`${c.person_name}'s invoice${c.work_item_count ? `, covering ${workLabel(c)}` : ', no work ticked yet'}`}>
                             {/* Their own name is usually the letterhead already: don't say it twice. */}
                             {(c.person_name || '').trim().toLowerCase() === (c.supplier_name || '').trim().toLowerCase() ? 'Linked' : c.person_name}
-                            {c.work_item_count ? ` · ${c.work_item_count} job${c.work_item_count === 1 ? '' : 's'}` : ''}
+                            {c.work_item_count ? ` · ${workLabel(c)}` : ''}
                           </div>
                         )}
                         {/* Saved with no work ticked, and why (the save asks). */}
@@ -908,11 +924,11 @@ export default function CostsPage() {
                           ↩
                         </button>
                       )}
-                      <button onClick={() => setAllocating(c)} title="Split across jobs"
+                      <button onClick={() => { setEditingJobs(true); setEditing(c); }} title="Split across jobs"
                         className={`px-1.5 py-1 text-sm rounded hover:bg-gray-100 ${c.allocation_count ? 'text-purple-700' : 'text-gray-500 hover:text-gray-800'}`}>
                         ⑂{c.allocation_count ? <span className="text-[10px] align-top">{c.allocation_count}</span> : ''}
                       </button>
-                      <button onClick={() => setEditing(c)} title="Edit"
+                      <button onClick={() => { setEditingJobs(false); setEditing(c); }} title="Edit"
                         className="px-1.5 py-1 text-sm text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
                         ✎
                       </button>
@@ -935,7 +951,6 @@ export default function CostsPage() {
         <CostCaptureModal
           onClose={() => setShowCapture(false)}
           onSaved={() => { setShowCapture(false); load(); }}
-          onSavedAndSplit={(c) => { setShowCapture(false); load(); setAllocating(c as CostRow); }}
           // Someone photographed a refund slip and came here out of habit. Hand
           // the file over rather than letting it be captured as spend — a refund
           // booked as a cost inflates the figure by twice the amount.
@@ -960,15 +975,9 @@ export default function CostsPage() {
       {editing && (
         <CostCaptureModal
           existing={editing}
+          focusJobs={editingJobs}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }}
-        />
-      )}
-      {allocating && (
-        <CostAllocationModal
-          cost={allocating}
-          onClose={() => setAllocating(null)}
-          onSaved={() => { setAllocating(null); load(true); }}
         />
       )}
       {/* Batch-pay bar. Sticks to the bottom so the total stays visible while
