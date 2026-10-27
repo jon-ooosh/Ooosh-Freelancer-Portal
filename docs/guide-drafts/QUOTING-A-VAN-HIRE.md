@@ -22,7 +22,8 @@ Three styles today, each in **auto and manual** (each its own HireHop stock item
 availability is per style AND gearbox):
 
 - **Mini** — Mercedes Vito, 6 seats inc. driver. Small bands, budget, easier to drive and park.
-- **Basic** — Mercedes Sprinter MWB, 9 seats. The everyday splitter.
+- **Basic** — Mercedes Sprinter MWB, 9 seats. The everyday splitter. **No air conditioning and no
+  opening rear windows**: say so when quoting one (clients have reported "broken AC", 16581, 15987).
 - **Premium** — Mercedes LWB, 9 leather seats. Comfort on longer tours: bunk, Apple TV, EU wifi,
   air con, 240V, bigger equipment bay. Rear seating **forward-facing or round a table**.
 

@@ -316,6 +316,10 @@ reads: the voice (Phase A built), house guides as Staff Documents shared with Cl
 admin-only Claude switch, `house-knowledge.ts`), the client brief, and "remember this?" client facts.
 **Code rails beat written guidance**; nothing is learned without a human tick. §9 is the decisions.
 
+**PLANNED (written Mar 2026, not built):** `docs/CALL-INTELLIGENCE-SPEC.md` — Voipfone calls transcribed, summarised and
+matched to people and jobs like emails. **§0 says what has changed since it was written; follow §0 over the
+March details** (reuse Gmail ingestion, `interactions`, one unmatched review surface, a gated R2 prefix).
+
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
 outreach → chased Cold enquiry, jobs-for-this-tour linking. **§20 is the current state and what's
