@@ -20,6 +20,7 @@
  *      thread id — a standalone draft to the client is the honest fallback).
  *   3. No resolvable client email → throw (staff addresses it manually).
  */
+import crypto from 'crypto';
 import { query } from '../config/database';
 import { getPrimaryMailbox, createGmailDraft, sendGmailDraft, gmailSearchMessageIds, gmailApiGet, isGmailConfigured } from '../config/gmail';
 import { draftChaseEmail } from './chase-draft';
@@ -77,10 +78,41 @@ function buildRawMessage(opts: {
     headers.push(`References: ${opts.inReplyTo}`);
   }
   headers.push('MIME-Version: 1.0');
-  headers.push('Content-Type: text/plain; charset="UTF-8"');
-  headers.push('Content-Transfer-Encoding: 8bit');
-  const mime = `${headers.join('\r\n')}\r\n\r\n${opts.body}`;
+  // multipart/alternative with an HTML part laid out the way Gmail writes its own
+  // emails (one <div> per line). A text/plain-only draft opens in Gmail's
+  // plain-text mode, and Gmail then hard-wraps every line at ~70 characters when
+  // it is sent — the "lots of line breaks" jon saw (Oct 2026). The plain part
+  // stays for clients whose mail reader wants it.
+  const boundary = `ooosh-${crypto.randomBytes(12).toString('hex')}`;
+  headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+  const mime = [
+    headers.join('\r\n'),
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    opts.body,
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    bodyAsGmailHtml(opts.body),
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
   return toBase64Url(mime);
+}
+
+/** Plain text → Gmail-style HTML: one <div> per line, a blank line as <div><br></div>. */
+export function bodyAsGmailHtml(body: string): string {
+  const escape = (t: string) => t
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  const lines = body.replace(/\r\n?/g, '\n').split('\n');
+  return `<div dir="ltr">${lines.map((l) => (l.trim() ? `<div>${escape(l)}</div>` : '<div><br></div>')).join('')}</div>`;
 }
 
 interface GmailThreadMeta {

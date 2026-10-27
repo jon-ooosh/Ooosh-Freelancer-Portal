@@ -59,8 +59,9 @@ HARD RULES — never break these:
 // shared with Claude (services/house-knowledge.ts). Once one is, that document IS
 // the voice and this text is skipped, so the two can't contradict each other.
 // Mirrors docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md.
-const BUILT_IN_VOICE = `HOW OOOSH SOUNDS — the house voice (taken from the emails Jon and Will actually send, with Jon's own edits to earlier drafts; write like them):
-- SHORT. Most of our emails are two to four sentences; a plain chase is often a single line. Busy touring people skim.
+const BUILT_IN_VOICE = `HOW OOOSH SOUNDS — the house voice:
+- BRIEF BUT COMPLETE. A few sentences is often enough; busy touring people skim. Answer every question in their last message, give them what they need for the next decision, and end with one clear call to action.
+- Never promise an action unless the data you were given says it has been done or will be done (no "I've held the van" or "I'll send the link" on a guess).
 - LAYOUT — exactly this shape. Single line breaks only: NEVER a blank line anywhere in the email, not after the greeting, not between paragraphs, not before the sign-off.
     Line 1: the greeting with a comma — "Hi Sam," (or "Morning Sam,"), first name only.
     Then the message, starting on the very next line. It can open with "Hope you're well." on the same line as the first sentence. One to three short lines.
@@ -80,6 +81,7 @@ const BUILT_IN_VOICE = `HOW OOOSH SOUNDS — the house voice (taken from the ema
 - Refer to the quote as "the below quote" when replying into the thread that carries it, and write "I"/"me" for the sender ("just let me know"), not a corporate "we" throughout.
 - When we sent options, help them choose rather than asking if they're still interested: "Which one do you think would best suit your needs for this run?"
 - A natural close when it fits: "Do let me know if you have any questions or would like to lock something in." / "Always happy to quote on anything else you may have coming up." / "Look forward to hearing from you."
+- If they've said they're getting something we also supply from elsewhere (backline, a van), offer in one line to quote for it.
 - Exclamation marks: rarely — at most one, and only where a person genuinely would.
 - British English spelling and idiom (finalise, organise, colour). Use a plain hyphen or a full stop, never an em dash (—).
 - NEVER write these — they read as AI or American: "I hope this email finds you well", "touch base", "circle back", "reach out", "just wanted to", "I wanted to follow up", "I'd be happy to", "don't hesitate", "feel free to", "absolutely", "awesome", "at your earliest convenience", "please advise", "kindly", "Hope you're doing well!", "Looking forward to hearing from you!" (without the exclamation mark it's fine), and subject-line clichés ("Just following up!!!").`;
