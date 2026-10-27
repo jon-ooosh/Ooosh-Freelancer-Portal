@@ -1,8 +1,9 @@
 /**
  * Event History section for a vehicle — lists all book-outs, check-ins,
  * prep events etc. newest-first. Includes inline "Regenerate PDF" action
- * on Book Out and Check In events so staff can re-issue a condition
- * report for damage disputes or correct a mis-fired original.
+ * on Book Out, Check In and Interim Check In (freelancer collection) events
+ * so staff can re-issue a condition report for damage disputes or correct a
+ * mis-fired original.
  */
 
 import { useState } from 'react'
@@ -91,7 +92,10 @@ function EventRow({ event, vehicleReg, vehicleId, onOpenPrep }: { event: EventIn
   const [regenOpen, setRegenOpen] = useState(false)
   const badgeClass = EVENT_TYPE_BADGE[event.eventType] || 'bg-gray-100 text-gray-700'
   const isHireEvent = event.eventType === 'Book Out' || event.eventType === 'Check In'
-  const canRegen = isHireEvent
+  // A freelancer collection ('Interim Check In') has its own report too: the
+  // van's state when it left the client, often the only photos of the damage
+  // (HH 16044, Oct 2026). The server already rebuilds it; the button was missing.
+  const canRegen = isHireEvent || event.eventType === 'Interim Check In'
   // Entry point to the full "life of a hire" comparison page (out vs back-in).
   const canViewHire = isHireEvent && !!vehicleId && !!event.hireHopJob
   // Only "Prep Completed" has a stored prep session — "Prep Started" is a
