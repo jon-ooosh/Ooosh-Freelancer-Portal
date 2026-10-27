@@ -187,7 +187,8 @@ page without a redirect loop.
    portal's row is set — do that once the code is live:
    `UPDATE api_keys SET permissions = '["money:job-lookup","money:excess-info","money:stripe-event","money:payment-event"]' WHERE service = 'payment_portal';`
    (check `SELECT name, service, key_prefix, permissions FROM api_keys WHERE is_active` first
-   — the portal's row is the one whose prefix matches Netlify's `OP_API_KEY`). The
+   — the portal's row is the one whose prefix matches Netlify's `OP_API_KEY`). **Set — checked on the server 26 Oct 2026:** the `payment_portal` row holds exactly
+   those four permissions (and the `enquiry_form` row `["enquiry_intake"]`). The
    `webhooks.ts` `external/status-transition` key check is untouched.
 
 3. **Tokens in URLs.** Reviewed and left as is. The book-out / check-in pages
@@ -197,15 +198,35 @@ page without a redirect loop.
    The one remaining sink is the nginx access log, which records query strings.
    The HMAC tokens are single-purpose and expire, so this is accepted.
 
-5. **Transactions run through the shared pool — open (found 21 Oct 2026, A.12).**
+5. **Transactions through the shared pool — DONE 26 Oct 2026 (found 21 Oct 2026, A.12).**
    `await query('BEGIN')` / `query('COMMIT')` sends each statement to whichever
    pooled connection is free, so it is no transaction at all, and a BEGIN can be
    left open on a connection that later requests then write through. The portal's
    password reset was one (fixed in A.12, now on `getClient()`), and so was the
    cost split save in `routes/costs.ts` (fixed with per-job recharges, migration
-   318, Oct 2026; now `services/cost-allocations.ts` `writeAllocations()`). Three remain: `services/cost-lines.ts` and `routes/pipeline.ts` (two).
-   Fix: `const client = await getClient()`, BEGIN/COMMIT/ROLLBACK on that client,
-   `client.release()` in a `finally`. Its own PR, with a test per path.
+   318, Oct 2026; now `services/cost-allocations.ts` `writeAllocations()`). The last
+   three moved onto `getClient()` (BEGIN/COMMIT/ROLLBACK on that client, `release()`
+   in a `finally`): `services/cost-lines.ts` `replaceCostLines()` and
+   `routes/pipeline.ts` `PUT /:jobId/contacts` and `POST /:jobId/contacts/add-person`.
+   **Why it had seemed fine:** the pool hands the connection just returned straight
+   back to the same request, so with a free connection the steps stay together by
+   luck. It bites when the pool is FULL and requests queue (production has been —
+   `config/database.ts`, 10 Jun 2026): a returned connection then goes to whoever is
+   first in the queue. Reproduced on a real database with the pool saturated (three runs), before
+   the fix: one connection left "idle in transaction" for a minute, 13 others queued
+   behind its lock, contact saves answered cleanly yet left wrong, and of 643,321
+   background writes answered "done" only 337,607 reached disk (the rest were inside
+   the left-open transaction when its connection closed). After: nothing left open,
+   nothing lost, no BEGIN/COMMIT warnings in the Postgres log. Guard:
+   `routes/__tests__/pool-transactions.test.ts` (8 tests, all failing on the old code).
+   **Same PR:** the hire-form save (`routes/hire-forms.ts` `POST /`) released its
+   connection early on the duplicate and van-clash paths AND in its `finally` —
+   `pg` threw "Release called on client which has already been released" after every
+   such reply (10 of 10 in the test), and a failed read after the early release would
+   have sent the catch's ROLLBACK down a connection another request might own. The
+   early releases are gone. The two one-off scripts that did the same through the pool
+   (`freeze-imported-pcn-chases.ts`, `migrate-monday-upcoming.ts`) were deleted — their
+   work is done (jon). The rule is now in CLAUDE.md "Data handling".
 
 ## C. Public-route inventory (9 Oct 2026)
 

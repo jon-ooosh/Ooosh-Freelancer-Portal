@@ -22,7 +22,9 @@ built, with the portal's favicon. Nothing is half-built.
 1. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
    shop-till guide (`docs/guides/shop-till/`) in the new look at the same time. The invoicing guide can now
    point at the Earnings tab.
-2. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+2. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** **Done (26 Oct 2026):**
+   the last three moved onto `getClient()`, plus the hire-form save's double release; reproduced on a real
+   database first. The brief's B.5 has the detail.
 3. **Simplify the cost capture form, last** (jon, 22 Oct 2026: "very heavy, very wordy"; even he couldn't
    tell what the "This job so far / Is this part of a quote? / recharge" block was asking). jon's call:
    once everything else is done, start with a clickable mock-up and go from there. Not part of this
@@ -31,7 +33,7 @@ built, with the portal's favicon. Nothing is half-built.
    `v_cost_recharges`), PR 2 the laptop form, PR 3 the phone receipt page `/receipt` (My Receipts folded
    in). `docs/design/cost-capture-redesign/DECISIONS.md` says where each differs from the mock;
    `COST-CAPTURE-RECHARGE-SPEC.md` has the build notes. PR 1 also moved the cost split save onto one
-   client, so item 2 above has three places left, not four.
+   client, so item 2 above had three places left, not four.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -54,7 +56,7 @@ them from the recipe there.
 | – | Calculator: setup premium charged to the client, crew fuel once (`PLATFORM-CONVENTIONS.md`) | merged 22 Oct 2026 |
 | 6b | Earnings part 2: the portal tab (§5.2), plus the portal favicon | built 22 Oct 2026 |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
-| – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | any time |
+| – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | built 26 Oct 2026 |
 
 ## 2. Completion: what PR 1 changed and why
 

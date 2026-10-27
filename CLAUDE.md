@@ -521,6 +521,12 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
   character class: it either throws ("invalid character range" — the auto-cover
   revert) or strips every matching letter (the inbox un-ack: "Check the van tyres" →
   "Chhys"). Both shipped and sat unnoticed until Oct 2026.
+- **A transaction is `const client = await getClient()`, BEGIN/COMMIT/ROLLBACK on that
+  client, `client.release()` once, in a `finally`.** Never `query('BEGIN')` through the
+  pool — each statement goes to whichever connection is free, so under load the BEGIN is
+  left open on a connection that swallows other requests' writes, and its locks stall
+  everything behind it (reproduced, Oct 2026: `SECURITY-AUDIT-BRIEF.md` B.5). Never release
+  early as well as in the `finally` — `pg` throws on the second release.
 - API responses are `{ data, pagination }` or `{ error }`.
 
 ## Dependencies
