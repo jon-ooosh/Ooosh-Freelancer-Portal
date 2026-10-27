@@ -1805,7 +1805,7 @@ const templates: Record<string, EmailTemplate> = {
         <strong>{{jobTypeSummary}}</strong> for <strong>{{jobName}}</strong>
         ({{jobLabel}}) on <strong>{{jobDateFormatted}}</strong> is still in
         the "To Be Arranged" column — that's
-        <strong>{{daysUntilLabel}}</strong> away and needs picking up.
+        <strong>{{daysUntilLabel}}</strong> and needs picking up.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
