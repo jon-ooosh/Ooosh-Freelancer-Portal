@@ -8009,6 +8009,9 @@ function StatusTransitionModal({
   const [note, setNote] = useState('');
   const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
+  // Optional second retro question. Saved as a "Next time:" line inside the same
+  // retro note, so every existing "Job retro:" reader keeps working unchanged.
+  const [retroNextTime, setRetroNextTime] = useState('');
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
 
   // Multi-reminder system
@@ -8131,7 +8134,11 @@ function StatusTransitionModal({
       if (keepRequirementIds.size > 0) data.keep_requirement_ids = Array.from(keepRequirementIds);
     } else if (targetStatus === 'completed') {
       data.retro_rating = retroRating;
-      if (retroNotes) data.retro_notes = retroNotes;
+      const retroText = [
+        retroNotes.trim(),
+        retroNextTime.trim() ? `Next time: ${retroNextTime.trim()}` : '',
+      ].filter(Boolean).join('\n');
+      if (retroText) data.retro_notes = retroText;
       // Collect valid reminders (have text + date)
       const validReminders = reminders.filter(r => r.text.trim() && r.date);
       if (validReminders.length > 0) {
@@ -8331,6 +8338,13 @@ function StatusTransitionModal({
               placeholder="Anything to note? Lessons learned, client feedback, things to improve..."
               value={retroNotes}
               onChange={(e) => setRetroNotes(e.target.value)}
+              rows={2}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+            <textarea
+              placeholder="Anything we'd do differently next time? (optional)"
+              value={retroNextTime}
+              onChange={(e) => setRetroNextTime(e.target.value)}
               rows={2}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
