@@ -75,6 +75,7 @@ writing any new billing call).
 
 ## Refunds
 
+- **Ask HireHop what the deposit has free BEFORE any card is refunded.** The hire Refund does it (Phase 1, job 15628) and so does excess Reimburse (Step 1b, job 16491 — `findDepositAvailability()` + `excessRefundShortfall()`). A new refund path does the same; HireHop's 370 after Stripe has paid out leaves real money recorded nowhere.
 - **One refund id = one leg.** `refund_legs` dedup is by `ref` ALONE (`isDuplicateLeg()` in `excess-refund.ts`) — the same refund arrives as `manual` (our reimburse endpoint), `stripe_webhook` and `hh_reconcile`. Keying on `(source, ref)` meant they never matched each other and the same £900 was applied twice (job 15187).
 - **Claim the leg the moment the money moves, not after the response.** Stripe's `charge.refunded` lands ~300ms after `refunds.create`; the HH push + Xero sync take seconds. Any new refund path must write its leg BEFORE that work, or the webhook re-applies the amount.
 - **Never unwind `charge.amount_refunded`** — it's the CUMULATIVE refunded total on the charge. Use the individual refund's amount, or a second partial refund re-applies the first.

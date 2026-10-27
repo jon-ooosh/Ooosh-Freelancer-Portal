@@ -309,9 +309,26 @@ describe('planHireCloseOut', () => {
     const plan = await planHireCloseOut(JOB.id);
     expect(plan.ready).toBe(false);
     expect(plan.blockers.join(' ')).toContain('Excess payment 9093 has £1200.00 applied to invoices in HireHop, but OP has recorded only £0.00');
+    // Nothing left on the excess → Claim is the only way OP can record it.
+    expect(plan.blockers.join(' ')).toContain('remove the allocation in HireHop and use Excess → Claim');
+    expect(plan.blockers.join(' ')).not.toContain('Retained by Ooosh');
     const run = await runHireAllocation(JOB.id, 'u1');
     expect(run.done).toBe(false);
     expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('16491: part of the excess applied by hand, the rest still free → Reimburse what HireHop holds + "Retained by Ooosh"', async () => {
+    excessClaimed = 0;
+    hh.deposits[2].allocated = 841.32;              // £358.68 of the £1,200 still on payment 9093
+    hh.apps[1].amount = 841.32;
+    hh.invoices[0].paid = 4629.82 + 841.32;
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.ready).toBe(false);
+    const said = plan.blockers.join(' ');
+    expect(said).toContain('Excess payment 9093 has £841.32 applied to invoices in HireHop, but OP has recorded only £0.00');
+    expect(said).toContain('Reimburse for £358.68');
+    expect(said).toContain('"Retained by Ooosh"');
+    expect(said).toContain('Nothing is applied in Xero until the two agree.');
   });
 
   it('16015 as HireHop had it: a blank, un-recorded refund row is a blocker that names the fix', async () => {
