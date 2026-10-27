@@ -140,8 +140,13 @@ page without a redirect loop.
    compiling WebAssembly when an iPhone HEIC photo is chosen (now
    `'wasm-unsafe-eval'` in `script-src` — wasm only, never JS eval) and three
    migrated Jotform reference photos on the studio-sitter lock-up template
-   (`www.jotform.com` allowed in `img-src` until they are re-uploaded to R2, then
-   drop it). Maps, blob PDFs, Socket.io and the framed staging calculator reported
+   (`www.jotform.com` allowed in `img-src` until they were re-uploaded to R2 through
+   Settings › Studio sitter; dropped 27 Oct 2026 — Jotform had begun redirecting them
+   to `files.jotform.com`, which the policy never allowed, and each was 3.7 MB on a
+   sitter's phone). The code fallback `DEFAULT_TEMPLATE` in
+   `services/studio-sitter-lockup.ts` still names the Jotform links; it is used only
+   when the setting row is missing, and the sitter's page is in the portal, which has
+   no image policy. Maps, blob PDFs, Socket.io and the framed staging calculator reported
    nothing. `stage-view.html`'s viewer script moved to `stage-view.js` so no
    inline exception is needed. Enforcement itself still reports to
    `/api/csp-report`, so a regression shows in the log. History follows.
