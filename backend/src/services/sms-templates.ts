@@ -32,6 +32,15 @@ const templates: Record<string, SmsTemplate> = {
       `Ooosh! Tours: reminder to finish our incident form for van {{vehicleReg}}{{jobRef}} ` +
       `({{done}}/{{total}} done): {{formUrl}}`,
   },
+
+  // A freelancer who hasn't completed their job on the portal, with the 2nd
+  // reminder email (services/completion-chaser.ts). Plain characters only; the
+  // link is long, so this is usually two segments.
+  completion_chase: {
+    body:
+      `Ooosh! Tours: your {{kind}}{{venuePart}} isn't marked as done yet. ` +
+      `Please finish it here: {{link}}`,
+  },
 };
 
 export default templates;

@@ -99,6 +99,26 @@ chaser and the portal.
   maths ran an hour late all summer).
 - Every person on a job gets each reminder (the per-quote level bump used to block all but the first).
 
+**The 2nd reminder is also a text** (jon, 27 Oct 2026, after HH 16535: Lewis read the job at 6am,
+never used the portal at Heathrow and didn't see the emails; the office closed it by hand).
+`services/completion-chaser.ts`:
+- Once per quote, the first time it reaches level 2 or beyond (a run outside 07:00–22:00 can jump
+  from 1 to 3), to everyone being chased except the shared Ooosh crew account. Same hours as the
+  emails. Like them it ignores the portal mute (accountability, not news).
+- The number is `textableNumber()`: mobile, else international, else phone, the first that is a real
+  mobile (`sms-service.ts` `isMobileNumber()`, never a landline). No mobile, the email only.
+- Template `completion_chase`: "Ooosh! Tours: your collection at Heathrow isn't marked as done yet.
+  Please finish it here: <link>". Plain characters only (`plainSmsText()`, venue cut at 30 at a word),
+  so two segments at most with the link. Every send is in `sms_log`.
+- Off switch `system_settings.completion_chase_sms_enabled` (migration 322, on; category `sms`, no
+  screen, like the other on/off switches): set it to `'false'` and only the texts stop.
+- **The link, in the text AND the email's button, is `completionLink()`**: a delivery/collection
+  whose van step isn't done goes to the Start screen (van / backline / both); crew, People, and a
+  D&C job whose van step is done go to the completion page. The email's button used to go straight
+  to the completion page, which closes a job that never went through Start with no van recorded.
+- The portal login returns to the page that sent you there (`from`, plain portal paths only), so a
+  signed-out phone lands on the job, not the dashboard.
+
 **Van collection sign-off** (`CollectionPage.tsx`): the CUSTOMER signs; "Customer not here" needs a
 short note instead (where the keys were, anything else). Checked before anything is written. The
 signature is stored on the event (a regenerated report used to say "Signed in person at book-out"),
