@@ -178,6 +178,8 @@ export interface JobRow {
   job_name: string | null;
   is_internal: boolean | null;
   pipeline_status: string | null;
+  /** Set when Combine folded this booking into another (its money moved there). */
+  combined_into_job_id?: string | null;
 }
 
 // ── Log ──────────────────────────────────────────────────────────────────
@@ -221,8 +223,8 @@ export async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
   const isUuid = /^[0-9a-f]{8}-/i.test(jobIdOrNumber);
   const r = await query(
     isUuid
-      ? `SELECT id, hh_job_number, job_name, is_internal, pipeline_status FROM jobs WHERE id = $1`
-      : `SELECT id, hh_job_number, job_name, is_internal, pipeline_status FROM jobs WHERE hh_job_number = $1`,
+      ? `SELECT id, hh_job_number, job_name, is_internal, pipeline_status, combined_into_job_id FROM jobs WHERE id = $1`
+      : `SELECT id, hh_job_number, job_name, is_internal, pipeline_status, combined_into_job_id FROM jobs WHERE hh_job_number = $1`,
     [isUuid ? jobIdOrNumber : parseInt(jobIdOrNumber, 10)],
   );
   const job = r.rows[0];
@@ -721,8 +723,25 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   );
   const opDeposits = op.rows.filter((r: any) => ['deposit', 'balance'].includes(r.payment_type) && r.source !== 'cross_job_apply');
   const opRefunds = op.rows.filter((r: any) => r.payment_type === 'refund');
+  // A combined booking's payments moved to the booking it was combined into: Combine
+  // re-creates each one there and refunds it back off this job in HireHop, but records
+  // the move on the kept job only. So a payment here that HireHop shows refunded back
+  // off itself IN FULL is accounted for, not money OP never took. One only part-refunded
+  // still asks — that residual is real (HH 15323 → 15322, Oct 2026).
+  const movedAway = new Set<number>();
+  if (job.combined_into_job_id) {
+    for (const row of hireRows) {
+      const id = idOf(row);
+      const credit = round2(parseFloat(row.credit ?? row.data?.credit ?? '0'));
+      const backOff = new Map<number, number>();   // by row id — a twin row must not count twice
+      for (const r of refundRows(rows, new Set([id]))) backOff.set(idOf(r), Math.abs(parseFloat(r.credit ?? r.data?.credit ?? '0')));
+      const refunded = round2([...backOff.values()].reduce((s, n) => s + n, 0));
+      if (credit - refunded < PENNY) movedAway.add(id);
+    }
+  }
   for (const row of hireRows) {
     const id = idOf(row);
+    if (movedAway.has(id)) continue;
     const credit = round2(parseFloat(row.credit ?? row.data?.credit ?? '0'));
     const mine = opDeposits.filter((r: any) => Number(r.hirehop_deposit_id) === id);
     if (mine.length === 0) {
@@ -743,6 +762,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   for (const row of refundRows(rows, hireIds)) {
     const d = row.data || {};
     const depositId = Number(d.OWNER_DEPOSIT);
+    if (movedAway.has(depositId)) continue;   // Combine's move to the kept booking, above
     const amount = round2(Math.abs(parseFloat(row.credit ?? d.credit ?? '0')));
     const desc = String(d.DESCRIPTION || row.desc || '').trim();
     const matched = opRefunds.some((r: any) => Number(r.hirehop_deposit_id) === depositId && Math.abs(Math.abs(Number(r.amount)) - amount) < PENNY);

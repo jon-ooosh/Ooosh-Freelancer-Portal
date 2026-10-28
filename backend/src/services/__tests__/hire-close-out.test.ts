@@ -1026,3 +1026,55 @@ describe('a cancelled job (job 16739)', () => {
     expect(plan.blockers).toEqual(['This job is lost — there is nothing to invoice.']);
   });
 });
+
+// ── A booking combined into another: its money moved there (routes/pipeline.ts combine) ──
+
+describe('a booking combined into another (HH 15323 → 15322)', () => {
+  /** 15323 after Combine: its £775.20 portal payment re-created on 15322 and refunded back off 15323. */
+  let job: any;
+
+  beforeEach(() => {
+    job = {
+      ...JOB, hh_job_number: 15323, job_name: 'The Wedding Present - Van hire', pipeline_status: 'cancelled',
+      combined_into_job_id: '6b25edbc-0000-4000-8000-000000015322', cancellation_fee: '0',
+      cancelled_at: '2026-10-28T10:00:00Z', job_date: '2026-10-29T09:00:00Z', job_end: '2026-11-02T09:00:00Z',
+    };
+    hh = {
+      jobStatus: 9, nextApp: 900, ignoreAllocations: false,
+      accruedNet: 646, uninvoicedNet: 646, euTrigger: false, nextInvoice: 13200,
+      invoices: [],
+      deposits: [{ id: 7847, credit: 775.2, bank: 267, allocated: 775.2, desc: '15323 - deposit', date: '2026-02-09' }],
+      apps: [{ id: 905, invoiceId: 0, depositId: 7847, amount: 775.2, desc: '15323 - deposit reallocated to job 15322' }],
+    };
+    opPayments = [];   // taken by the portal in February; OP never recorded it on 15323
+    installXero();
+    const base = mockQuery.getMockImplementation()!;
+    mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
+      if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...job }] };
+      if (sql.includes("payment_status = 'pending'") && sql.includes('SELECT')) return { rows: [] };
+      return base(sql, params);
+    });
+  });
+
+  it('a payment moved to the kept booking in full is not "money OP has no record of" — nothing to sort', async () => {
+    const plan = await planHireCloseOut('15323');
+    expect(plan.blockers).toEqual([]);
+    expect(plan.warnings).toEqual([]);
+    expect(plan.surplus).toEqual([]);
+    expect(plan.allocations).toEqual([]);
+  });
+
+  it('a move that only partly went through still asks — the residual is real money', async () => {
+    hh.deposits[0].allocated = 500;
+    hh.apps[0].amount = 500;                       // £275.20 still sitting on 15323
+    const plan = await planHireCloseOut('15323');
+    expect(plan.blockers.join(' ')).toContain('Payment 7847');
+    expect(plan.blockers.join(' ')).toContain('OP has no record');
+  });
+
+  it('the same payment on a job that was NOT combined still asks', async () => {
+    job.combined_into_job_id = null;
+    const plan = await planHireCloseOut('15323');
+    expect(plan.blockers.join(' ')).toContain('Payment 7847');
+  });
+});
