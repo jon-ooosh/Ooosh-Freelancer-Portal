@@ -4250,11 +4250,11 @@ function JobDetailContent() {
               })()}
             {['admin', 'manager', 'weekend_manager'].includes(user?.role || '')
               && !job.combined_into_job_id
-              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'].includes(job.pipeline_status || '') && (
+              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping', 'dispatched'].includes(job.pipeline_status || '') && (
               <button
                 onClick={() => setShowCombineModal(true)}
                 className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
-                title="Combine this booking with another pre-hire booking for the same client"
+                title="Combine this booking with another booking for the same client (two that haven't started, or extend one that's out on hire)"
               >
                 <span>🔀</span>
                 <span>Combine</span>
