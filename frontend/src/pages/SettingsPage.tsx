@@ -2067,7 +2067,7 @@ function LoginAndKioskSettingsSection() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const KEYS = ['staff_2fa_enforced_from', 'portal_2fa_enforced_from', 'kiosk_allowed_ips', 'stripe_terminal_kiosk', 'kiosk_pin_rotated_at'];
+  const KEYS = ['staff_2fa_enforced_from', 'portal_2fa_enforced_from', 'kiosk_device_required', 'kiosk_allowed_ips', 'stripe_terminal_kiosk', 'kiosk_pin_rotated_at'];
 
   useEffect(() => { void load(); }, []);
 
@@ -2104,13 +2104,15 @@ function LoginAndKioskSettingsSection() {
   const today = new Date().toLocaleDateString('en-CA');
   const row = 'grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center';
   const input = 'px-2 py-1.5 rounded border border-gray-300 text-sm';
+  // Same rule as the server (kiosk-devices.ts): only an explicit 'false' is off.
+  const deviceLockOn = vals.kiosk_device_required !== 'false';
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
       <h2 className="text-lg font-semibold text-gray-900 mb-1">Login security &amp; kiosk</h2>
       <p className="text-sm text-gray-600 mb-4">
         Every staff login has a second step (passkey or email code, remembered per device). The warehouse iPad keeps its PIN
-        and now has a till; the PIN only works from the addresses below.
+        and now has a till; the PIN only works on the tablets set up below.
       </p>
 
       {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
@@ -2151,17 +2153,33 @@ function LoginAndKioskSettingsSection() {
           {' '}Help for one freelancer is on their Freelancer tab (Portal sign-in).
         </p>
 
+        {/* The tablet lock (STAFF-LOGIN-SECURITY-SPEC §9, services/kiosk-devices.ts). */}
+        <div className={row}>
+          <label htmlFor="kiosk_device_required" className="text-sm text-gray-700">
+            Kiosk PIN works on
+            <span className="block text-xs text-gray-400 font-mono">kiosk_device_required</span>
+          </label>
+          <select id="kiosk_device_required" value={deviceLockOn ? 'true' : 'false'}
+            onChange={e => setVals(v => ({ ...v, kiosk_device_required: e.target.value }))} className={`${input} max-w-xs`}>
+            <option value="true">Only the tablets set up below</option>
+            <option value="false">Any device (not recommended)</option>
+          </select>
+        </div>
+        <KioskTablets lockOn={deviceLockOn} />
+
         <div className={row}>
           <label htmlFor="kiosk_allowed_ips" className="text-sm text-gray-700">
             Kiosk PIN accepted from (public IPs)
             <span className="block text-xs text-gray-400 font-mono">kiosk_allowed_ips</span>
           </label>
           <input id="kiosk_allowed_ips" value={vals.kiosk_allowed_ips}
-            onChange={e => setVals(v => ({ ...v, kiosk_allowed_ips: e.target.value }))} placeholder="95.144.185.166" className={input} />
+            onChange={e => setVals(v => ({ ...v, kiosk_allowed_ips: e.target.value }))} placeholder="Optional — leave empty" className={input} />
         </div>
-        {!vals.kiosk_allowed_ips.trim() && (
-          <p className="text-xs text-amber-700">Empty — the kiosk PIN is accepted from anywhere on the internet. Put the yard's address in.</p>
-        )}
+        {!vals.kiosk_allowed_ips.trim() && (deviceLockOn ? (
+          <p className="text-xs text-gray-500">Optional. The tablet lock above holds the PIN to the warehouse; add addresses only if the yard has a fixed one (the broadband&apos;s address can change).</p>
+        ) : (
+          <p className="text-xs text-amber-700">Empty, and the tablet lock is off — the kiosk PIN is accepted from anywhere on the internet.</p>
+        ))}
 
         <div className={row}>
           <label htmlFor="stripe_terminal_kiosk" className="text-sm text-gray-700">
@@ -2198,6 +2216,134 @@ function LoginAndKioskSettingsSection() {
           className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
           {saving ? 'Saving…' : 'Save'}
         </button>
+      </div>
+    </div>
+  );
+}
+
+interface KioskTablet {
+  id: string;
+  label: string;
+  status: 'active' | 'waiting';
+  created_at: string;
+  created_by_name: string | null;
+  setup_expires_at: string | null;
+  activated_at: string | null;
+  last_used_at: string | null;
+  last_used_ip: string | null;
+}
+
+/**
+ * The warehouse kiosk tablets (docs/STAFF-LOGIN-SECURITY-SPEC.md §9,
+ * services/kiosk-devices.ts): the tablets set up, codes still waiting to be
+ * typed, "Set up a tablet" (a one-time code, 10 minutes) and "Forget". These
+ * act at once — they are not part of the section's Save.
+ */
+function KioskTablets({ lockOn }: { lockOn: boolean }) {
+  const [rows, setRows] = useState<KioskTablet[] | null>(null);
+  const [label, setLabel] = useState('Warehouse iPad');
+  const [shown, setShown] = useState<{ id: string; code: string; label: string; expires_at: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ data: KioskTablet[] }>('/warehouse/devices');
+      setRows(res.data);
+    } catch {
+      setError('Could not load the kiosk tablets (has migration 323 run?).');
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function setUp() {
+    setBusy(true); setError('');
+    try {
+      const res = await api.post<{ data: { id: string; code: string; label: string; expires_at: string } }>(
+        '/warehouse/devices', { label });
+      setShown(res.data);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not make a set-up code');
+    } finally { setBusy(false); }
+  }
+
+  async function forget(t: KioskTablet) {
+    const question = t.status === 'active'
+      ? `Forget "${t.label}"? The PIN stops working on it straight away (a session already open on it ends within 12 hours).`
+      : `Cancel the set-up code for "${t.label}"?`;
+    if (!window.confirm(question)) return;
+    setBusy(true); setError('');
+    try {
+      await api.delete(`/warehouse/devices/${t.id}`);
+      if (shown?.id === t.id) setShown(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not forget the tablet');
+    } finally { setBusy(false); }
+  }
+
+  const when = (iso: string | null) => iso
+    ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '—';
+  const clock = (iso: string | null) => iso
+    ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+    : '—';
+  const active = (rows ?? []).filter(r => r.status === 'active');
+  const button = 'px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50';
+
+  return (
+    <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-start">
+      <span className="text-sm text-gray-700">
+        Kiosk tablets
+        <span className="block text-xs text-gray-400 font-mono">kiosk_devices</span>
+      </span>
+      <div className="space-y-2">
+        {error && <p className="text-xs text-red-700">{error}</p>}
+        {rows === null && !error && <p className="text-xs text-gray-500">Loading…</p>}
+
+        {(rows ?? []).map(t => (
+          <div key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-200 px-3 py-2 text-sm">
+            <span>
+              <span className="font-medium text-gray-900">{t.label}</span>
+              {t.status === 'active' ? (
+                <span className="block text-xs text-gray-500">
+                  Set up {when(t.activated_at)}{t.created_by_name ? ` (code from ${t.created_by_name})` : ''}
+                  {' · '}last used {when(t.last_used_at)}{t.last_used_ip ? ` from ${t.last_used_ip}` : ''}
+                </span>
+              ) : (
+                <span className="block text-xs text-amber-700">Waiting for its code to be typed on the tablet (until {clock(t.setup_expires_at)})</span>
+              )}
+            </span>
+            <button type="button" onClick={() => void forget(t)} disabled={busy} className={button}>
+              {t.status === 'active' ? 'Forget' : 'Cancel code'}
+            </button>
+          </div>
+        ))}
+
+        {rows !== null && active.length === 0 && lockOn && (
+          <p className="text-xs text-amber-700">No tablet is set up, so the kiosk PIN works nowhere until one is.</p>
+        )}
+
+        {shown && (
+          <div className="rounded border border-purple-200 bg-purple-50 p-3 text-sm space-y-1">
+            <p className="text-gray-700">Set-up code for <strong>{shown.label}</strong>, valid until {clock(shown.expires_at)}:</p>
+            <p className="text-2xl font-mono tracking-widest text-gray-900">{shown.code}</p>
+            <p className="text-xs text-gray-600">
+              On the tablet, tap &quot;Set up this tablet&quot; under the PIN box and type this code. It works once.
+            </p>
+            <button type="button" onClick={() => { setShown(null); void load(); }} className={button}>Done</button>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={label} onChange={e => setLabel(e.target.value)} maxLength={60} aria-label="Tablet name"
+            className="px-2 py-1.5 rounded border border-gray-300 text-sm w-48" />
+          <button type="button" onClick={() => void setUp()} disabled={busy || !label.trim()} className={button}>
+            Set up a tablet
+          </button>
+        </div>
       </div>
     </div>
   );

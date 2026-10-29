@@ -362,6 +362,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '320_staff_leave_change_requests.sql',
         '321_staff_documents_ai_shared.sql',
         '322_completion_chase_sms_setting.sql',
+        '323_kiosk_devices.sql',
       ];
 
       for (const migration of migrations) {

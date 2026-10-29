@@ -287,7 +287,9 @@ when a second step is owed. **Phase 2: passkeys** (`services/staff-passkeys.ts`,
 with no passkey gets a modal that will not close, and once they have one the email code is refused for them;
 recovery codes are admins only, shown once. The banner's "Set up now" opens the setup modal in place.
 **Phase 3: the kiosk till** (`services/kiosk-till.ts`, `/warehouse/till`): the warehouse PIN session gains
-`scopes: ['collections','till']`, the PIN is accepted only from `system_settings.kiosk_allowed_ips`, the
+`scopes: ['collections','till']`, the PIN works only on a tablet an admin has set up (`services/kiosk-devices.ts`,
+spec §9, 29 Oct 2026 — a one-time code from Settings, then the `op_kiosk_device` cookie; checked BEFORE the PIN;
+`system_settings.kiosk_allowed_ips` is optional since the yard's broadband address changed and locked the warehouse out), the
 till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or reader, each naming a person
 from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
 `stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
@@ -430,7 +432,8 @@ existing definition:
 | Is this login allowed in, does this device skip the code, is this account slowed down? | `services/staff-login-security.ts` — the second factor, trusted devices, the per-account slowdown; `routes/auth.ts` decides, this answers |
 | A FREELANCER's portal sign-in: is the code on, does this phone skip it, a code (emailed or read out by staff), sign out everywhere | `services/portal-login-security.ts` — `routes/portal.ts` decides, this answers; the office's card is `PortalSignInCard.tsx` on the Freelancer tab (`docs/FREELANCER-PORTAL-SPEC.md` §7.1) |
 | A passkey (register, log in with, remove), an admin's recovery codes | `services/staff-passkeys.ts` — challenges in Redis, rows in `user_passkeys`; frontend `lib/passkeys.ts`; the one setup flow is `components/LoginSecuritySetup.tsx` |
-| May the warehouse kiosk's PIN session call this? Who may it name on a sale? Where does the PIN work? | `services/kiosk-till.ts` — `staffOrKioskTill(KIOSK_TILL_ALLOW)`, `assertKioskSeller()`, `kioskIpAllowed()`; a kiosk request carries `req.kiosk`, never `req.user` |
+| May the warehouse kiosk's PIN session call this? Who may it name on a sale? | `services/kiosk-till.ts` — `staffOrKioskTill(KIOSK_TILL_ALLOW)`, `assertKioskSeller()`; a kiosk request carries `req.kiosk`, never `req.user` |
+| Where does the kiosk PIN work? Is this a set-up kiosk tablet? | `services/kiosk-devices.ts` — `kioskDeviceLockOn()` (fails closed), `kioskDeviceFrom()`, set-up codes, Forget; the optional address list is `kiosk-till.ts` `kioskIpAllowed()`. Both are checked BEFORE the PIN (`STAFF-LOGIN-SECURITY-SPEC.md` §9) |
 | Minting or verifying ANY JWT | `services/tokens.ts` `signFor(audience, …)` / `verifyFor(audience, …)` — every family has its own `aud`; never call `jsonwebtoken` directly (the portal session, on its own secret, is the one exception) |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |
