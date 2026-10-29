@@ -33,7 +33,7 @@ const JOB = {
   venueName: 'Roundhouse', venueId: 'v1', status: 'confirmed', hhRef: '16840', driverPay: 60,
 }
 const ASSIGNMENT = {
-  id: 'a1', vehicleId: 'veh1', registration: 'RX24KHV', makeModel: 'Ford Transit Custom', vehicleType: 'PREMIUM LWB (A)',
+  id: 'a1', vehicleId: 'veh1', registration: 'TE45REG', makeModel: 'Mercedes Sprinter', vehicleType: 'PREMIUM LWB (A)',
   status: 'confirmed', customerDriver: { name: 'Jamie Cole', email: 'jamie@example.com' },
 }
 const RESOLVE = {
@@ -41,8 +41,8 @@ const RESOLVE = {
   job: { id: 'job1', hhJobNumber: 16840, venueName: 'Roundhouse' },
   driver: { name: 'Alex Morgan', email: 'alex@example.com' },
 }
-const FLEET = { data: [{ id: 'veh1', reg: 'RX24KHV', vehicleType: 'PREMIUM LWB (A)', simpleType: 'Premium', gearbox: 'auto', seats: 9,
-  make: 'Ford', model: 'Transit Custom', colour: 'Grey', isOldSold: false, currentMileage: 23410, needsExternalWash: false }] }
+const FLEET = { data: [{ id: 'veh1', reg: 'TE45REG', vehicleType: 'PREMIUM LWB (A)', simpleType: 'Premium', gearbox: 'auto', seats: 9,
+  make: 'Mercedes', model: 'Sprinter', colour: 'Grey', isOldSold: false, currentMileage: 23410, needsExternalWash: false }] }
 
 function vanApi({ resolve = RESOLVE } = {}) {
   return async (route) => {
@@ -185,10 +185,11 @@ async function main() {
     const { browser, context } = await phone({ base: STAFF })
     const page = await context.newPage()
     await page.route('**/api/**', vanApi({ resolve: { status: 409, body: {
-      error: 'Customer hire form not received yet. The customer must complete and sign their hire form before this van can be booked out. Please contact the Ooosh office.',
+      error: 'Customer hire form not received yet',
+      hint: 'The customer must complete and sign their hire form before this van can be booked out. Please contact the Ooosh office.',
       code: 'no_hire_form' } } }))
     await page.goto(bookOutUrl(), { waitUntil: 'networkidle' })
-    await page.getByText(/hire form not received/).waitFor()
+    await page.getByText(/hire form isn.t in yet/).waitFor()
     await snap(page, OUT, '11-no-hire-form', [page.getByRole('heading').first(), page.getByText('Call the office', { exact: true })], { padTop: 120, padBottom: 70 })
     await browser.close()
   }

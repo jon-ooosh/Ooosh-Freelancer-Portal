@@ -33,13 +33,13 @@ const JOB = {
 }
 const RESOLVE = {
   success: true, sessionToken: 'sample',
-  assignment: { id: 'a1', vehicleId: 'veh1', registration: 'RX24KHV', makeModel: 'Ford Transit Custom', vehicleType: 'PREMIUM LWB (A)',
+  assignment: { id: 'a1', vehicleId: 'veh1', registration: 'TE45REG', makeModel: 'Mercedes Sprinter', vehicleType: 'PREMIUM LWB (A)',
     status: 'booked_out', customerDriver: { name: 'Jamie Cole', email: 'jamie@example.com' } },
   job: { id: 'job1', hhJobNumber: 16840, venueName: 'Roundhouse' },
   driver: { name: 'Alex Morgan', email: 'alex@example.com' },
 }
-const FLEET = { data: [{ id: 'veh1', reg: 'RX24KHV', vehicleType: 'PREMIUM LWB (A)', simpleType: 'Premium', gearbox: 'auto', seats: 9,
-  make: 'Ford', model: 'Transit Custom', colour: 'Grey', isOldSold: false, currentMileage: 23486, needsExternalWash: false }] }
+const FLEET = { data: [{ id: 'veh1', reg: 'TE45REG', vehicleType: 'PREMIUM LWB (A)', simpleType: 'Premium', gearbox: 'auto', seats: 9,
+  make: 'Mercedes', model: 'Sprinter', colour: 'Grey', isOldSold: false, currentMileage: 23486, needsExternalWash: false }] }
 const BOOK_OUT = { id: 'e1', eventType: 'Book Out', eventDate: ukToday(-4), mileage: 23486, fuelLevel: '6/8', hireHopJob: '16840' }
 
 async function vanApi(route) {
