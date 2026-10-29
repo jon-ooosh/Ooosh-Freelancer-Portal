@@ -12,6 +12,14 @@
  *   3. name: exactly one freelancer whose name matches the letterhead.
  * Freelancers trading as a company only match by 1 or 2, which is why the
  * choice is remembered once made.
+ *
+ * Only a person marked as a freelancer is ever suggested or linked. The link is
+ * there for their bookings (the work to tick) and their portal's Earnings page,
+ * and only freelancers have either; the form's own search lists only them too.
+ * A freelancer is often in the address book more than once (a record per company
+ * email), so a non-freelancer twin with the right email or an earlier link is
+ * skipped, never taken (invoice 26/27052, Oct 2026: linked to the freelancer's
+ * other record, it listed none of their work and never reached their Earnings).
  */
 import { query } from '../config/database';
 import { normaliseSupplierName } from './supplier-match';
@@ -20,27 +28,30 @@ import { fullDisplayName } from './display-name';
 export interface SuggestedPerson { id: string; name: string; email: string | null }
 export type SuggestSource = 'remembered' | 'remittance' | 'name' | 'none';
 
-async function personRow(id: string): Promise<SuggestedPerson | null> {
+/** The person, if they are a live freelancer (anyone else is never suggested). */
+async function freelancerRow(id: string): Promise<SuggestedPerson | null> {
   const r = await query(
-    `SELECT id, first_name, last_name, preferred_name, email FROM people WHERE id = $1 AND COALESCE(is_deleted, false) = false`,
+    `SELECT id, first_name, last_name, preferred_name, email FROM people
+      WHERE id = $1 AND COALESCE(is_deleted, false) = false AND is_freelancer = true`,
     [id],
   );
   const p = r.rows[0];
   return p ? { id: p.id, name: fullDisplayName(p), email: p.email || null } : null;
 }
 
-/** The one person (freelancers first) with this email address, else null. */
+/**
+ * The one freelancer with this email address, else null. Someone with the
+ * address who isn't marked as a freelancer doesn't count, even when they are
+ * the only one: that is usually the freelancer's other record.
+ */
 export async function personIdByEmail(email: string): Promise<string | null> {
   const r = await query(
-    `SELECT id, is_freelancer FROM people
-      WHERE COALESCE(is_deleted, false) = false AND LOWER(TRIM(email)) = LOWER(TRIM($1))
-      ORDER BY is_freelancer DESC NULLS LAST`,
+    `SELECT id FROM people
+      WHERE COALESCE(is_deleted, false) = false AND is_freelancer = true
+        AND LOWER(TRIM(email)) = LOWER(TRIM($1))`,
     [email],
   );
-  const freelancers = r.rows.filter((x) => x.is_freelancer);
-  if (freelancers.length === 1) return freelancers[0].id;
-  if (!freelancers.length && r.rows.length === 1) return r.rows[0].id;
-  return null;
+  return r.rows.length === 1 ? r.rows[0].id : null;
 }
 
 export async function suggestInvoicePerson(
@@ -62,16 +73,20 @@ export async function suggestInvoicePerson(
     [excludeCostId || null],
   );
   const same = prior.rows.filter((r) => normaliseSupplierName(r.supplier_name) === key);
-  const linked = same.find((r) => r.person_id);
-  if (linked) {
-    const p = await personRow(linked.person_id);
+  // The newest earlier invoice linked to a freelancer; one linked to anybody
+  // else is passed over for the one before it.
+  const tried = new Set<string>();
+  for (const r of same) {
+    if (!r.person_id || tried.has(r.person_id)) continue;
+    tried.add(r.person_id);
+    const p = await freelancerRow(r.person_id);
     if (p) return { person: p, source: 'remembered' };
   }
   for (const r of same) {
     if (!r.remittance_email) continue;
     const id = await personIdByEmail(r.remittance_email);
     if (id) {
-      const p = await personRow(id);
+      const p = await freelancerRow(id);
       if (p) return { person: p, source: 'remittance' };
     }
   }
