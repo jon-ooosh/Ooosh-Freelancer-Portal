@@ -265,6 +265,14 @@ which match one freelancer by name.
   It defaults like any other cost (Part of the quote when the job has a quote), and the hint says to choose
   Extra and recharge the fronted part (Partial) if the invoice includes fuel or tolls. The "defaulted to
   Extra + recharge" banner and "(set to Extra)" now show only while they are true.
+- **Only a person marked as a freelancer is suggested or linked** (29 Oct 2026). A freelancer is often in
+  the address book more than once, a record per company email. Invoice 26/27052 was suggested the other
+  record (not a freelancer) because the invoice before it, 26/27043, was linked to it. It listed none of
+  their work and never reached their Earnings. Two paths could put a non-freelancer there: "remembered"
+  took the newest earlier link whoever it named, and `personIdByEmail()` (the remittance link and the
+  remittance suggestion) took the only person with an address even when they weren't a freelancer. Now
+  `personIdByEmail()` returns only a freelancer, and "remembered" passes over an earlier link to anyone
+  else for the one before it (`services/freelancer-invoice-person.ts`).
 
 **The one-off backfill (used and removed, Oct 2026):** a Costs page grouped the unlinked freelancer
 invoices since 6 April 2026 by letterhead for jon to link once. Done; the page, its route and its
