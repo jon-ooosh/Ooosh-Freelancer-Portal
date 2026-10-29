@@ -36,7 +36,7 @@ import StaffCalendarPage from './pages/StaffCalendarPage';
 import StaffAdminPage from './pages/StaffAdminPage';
 import StaffAbsencePage from './pages/StaffAbsencePage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
-import StaffReceiptsPage from './pages/StaffReceiptsPage';
+import ReceiptCapturePage from './pages/ReceiptCapturePage';
 import LostCancelledPage from './pages/LostCancelledPage';
 import LeadsPage from './pages/LeadsPage';
 import FillGapPage from './pages/FillGapPage';
@@ -80,10 +80,28 @@ const staffBookOutQueryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 2, retry: 1 } },
 });
 
+/**
+ * Is this tab on the FREELANCER book-out / collection page? The same test
+ * BookOutEntry and CheckInEntry use to show the freelancer shell: one of the
+ * two hand-over paths, with the portal link in the address bar (it stays
+ * there) or a live freelancer session on this phone.
+ */
+function isOnFreelancerHandoverPage(): boolean {
+  try {
+    const { pathname, search } = window.location;
+    if (!/^\/vehicles\/(book-out|check-in)\/?$/.test(pathname)) return false;
+    return new URLSearchParams(search).has('freelancerToken') || isFreelancerSessionActive();
+  } catch {
+    return false;
+  }
+}
+
 // Initialize Vehicle Module with OP auth and API config.
 //
 // getAuthHeaders picks the right token for the current mode:
-//   - Staff logged in → staff JWT (even if a stale freelancer session is
+//   - Freelancer book-out / collection page → that page's freelancer JWT,
+//     never a staff login on the same phone (below)
+//   - Else staff logged in → staff JWT (even if a stale freelancer session is
 //     also present in localStorage; staff session wins)
 //   - Else freelancer session present → scoped freelancer JWT
 //   - Else → no auth header
@@ -93,6 +111,16 @@ const staffBookOutQueryClient = new QueryClient({
 initVehicleModule({
   apiBaseUrl: '/api/vehicles',
   getAuthHeaders: (): Record<string, string> => {
+    // On the freelancer hand-over page the PAGE decides, like the prep page:
+    // the screens run as the freelancer, so the server must hear the same.
+    // A staff login sent here turned a staff member's portal collection into
+    // a staff interim check-in: the van was recorded but the collection never
+    // marked done, so the portal job stayed open and was chased (HH 16044,
+    // Oct 2026). No session → no header: the shell sends them back to the link.
+    if (isOnFreelancerHandoverPage()) {
+      const handover = getFreelancerSession();
+      return handover ? { Authorization: `Bearer ${handover.token}` } : {};
+    }
     const staffToken = useAuthStore.getState().accessToken;
     if (staffToken) return { Authorization: `Bearer ${staffToken}` };
     // On the freelancer prep page the PAGE decides which session is sent, so a
@@ -109,8 +137,13 @@ initVehicleModule({
   sharedRefreshToken: async () => {
     // Freelancer sessions don't refresh — they're one-shot, 4h TTL.
     // If a freelancer's JWT 401s, they have to go back to the portal
-    // and get a new HMAC token. Skip the staff refresh path entirely.
-    if (!useAuthStore.getState().accessToken && (isFreelancerSessionActive() || isOnFreelancerPrepPage())) {
+    // and get a new HMAC token. Skip the staff refresh path entirely —
+    // on the hand-over page even when staff are logged in, or the retry
+    // would go out on the staff login (see getAuthHeaders).
+    if (
+      isOnFreelancerHandoverPage()
+      || (!useAuthStore.getState().accessToken && (isFreelancerSessionActive() || isOnFreelancerPrepPage()))
+    ) {
       throw new Error('Freelancer session expired');
     }
     return sharedRefreshToken();
@@ -218,6 +251,8 @@ export default function App() {
       <Route path="/van/:token" element={<VehicleForSalePage />} />
       {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
       <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
+      {/* Phone receipt capture, one question per screen — staff JWT, full-screen, no Layout chrome */}
+      <Route path="/receipt" element={<ProtectedRoute><ReceiptCapturePage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
       <Route path="/warehouse" element={<WarehousePinPage />} />
       <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />
@@ -299,7 +334,8 @@ export default function App() {
                 <Route path="/staff/absence" element={<StaffAbsencePage />} />
                 <Route path="/staff/documents" element={<Navigate to="/me?tab=documents" replace />} />
                 <Route path="/staff/documents/admin" element={<StaffDocumentsAdminPage />} />
-                <Route path="/my-receipts" element={<StaffReceiptsPage />} />
+                {/* Retired into the phone receipt page; old chaser emails and bells still land. */}
+                <Route path="/my-receipts" element={<Navigate to="/receipt" replace />} />
                 <Route path="/profile" element={<Navigate to="/me?tab=profile" replace />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />

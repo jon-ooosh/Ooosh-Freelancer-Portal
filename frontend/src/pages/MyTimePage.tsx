@@ -28,7 +28,8 @@ import { ukToday } from '../lib/ukDate';
  */
 
 type LeaveType = 'holiday' | 'toil' | 'unpaid';
-interface DaySpec { portion: 'full' | 'am' | 'pm' | 'hours'; startTime?: string; endTime?: string }
+/** 'none' = "not off that day" — only offered when changing a booking (spec §5.4). */
+interface DaySpec { portion: 'full' | 'am' | 'pm' | 'hours' | 'none'; startTime?: string; endTime?: string }
 type LeaveStatus = 'pending' | 'approved' | 'declined' | 'cancelled' | 'withdrawn';
 
 interface LeaveRequest {
@@ -46,7 +47,18 @@ interface LeaveRequest {
   decidedByName: string | null;
   decisionNote: string | null;
   cancellationReason: string | null;
-  days: { date: string; minutes: number; portion: 'full' | 'am' | 'pm' }[];
+  days: { date: string; minutes: number; portion: 'full' | 'am' | 'pm' | 'hours'; startTime?: string | null; endTime?: string | null }[];
+  // Changing / cancelling approved time off (spec §5.4). Optional: an older
+  // backend does not send them, and the page then simply offers nothing.
+  /** On a CHANGE: the approved booking it replaces once approved. */
+  replacesRequestId?: string | null;
+  replaces?: { startDate: string; endDate: string; totalMinutes: number; leaveType: LeaveType; status: LeaveStatus } | null;
+  /** On an approved booking: a change waiting to replace it. */
+  pendingChangeId?: string | null;
+  /** On a booking cancelled by a change: the booking that replaced it. */
+  replacedById?: string | null;
+  /** On an approved booking: an ask to cancel it, and the answer if declined. */
+  cancelAsk?: { requestedAt: string; note: string | null; declinedAt: string | null; declineNote: string | null } | null;
 }
 interface AccountBreakdown {
   inMinutes: number;
@@ -66,6 +78,10 @@ interface MyBalances {
    *  an older backend does not send it, and the page then falls back to the
    *  company-wide policy from /bank-holidays. */
   bankHolidayPolicy?: BhPolicy;
+  /** This year's bank holidays the person would otherwise be WORKING (Oct
+   *  2026) — the only ones worth booking off. Absent from an older backend,
+   *  null if the server could not work it out: then every one is offered. */
+  bankHolidaysWorking?: string[] | null;
 }
 /**
  * A manual adjustment an admin posted to a balance (Oct 2026) — e.g. overtime
@@ -81,6 +97,19 @@ interface Adjustment {
   effectiveDate: string;
   note: string | null;
   createdByName: string | null;
+}
+/**
+ * An absence an admin recorded for this person — GET /staff-calendar/me/absences
+ * (Oct 2026). Dates only: the API never sends the type or the reason (spec
+ * §7.2), so it is shown as "Absent" whatever it was.
+ */
+interface MyAbsence {
+  id: string;
+  startDate: string;
+  endDate: string | null;
+  isOpen: boolean;
+  deductsAllowance: boolean;
+  days: { date: string; minutes: number; portion: 'full' | 'am' | 'pm' }[];
 }
 /** A one-off working-from-home request (spec §19) — GET /staff-calendar/wfh. */
 interface WfhRequest {
@@ -138,6 +167,10 @@ interface Impact {
   clashes: { date: string; people: string[] }[];
   coverage: { date: string; scheduled: number; ifApproved: number }[];
   warnings: string[];
+  /** Contracted days in the range marked "not off" (a change only). */
+  notOff?: string[];
+  /** A CHANGE's net effect: minutes > 0 uses more, < 0 gives time back. */
+  change?: { replacesRequestId: string; minutes: number; changedDates: string[]; unchanged?: boolean } | null;
 }
 
 const TYPE_LABELS: Record<LeaveType, string> = {
@@ -256,6 +289,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const [wfh, setWfh] = useState<WfhRequest[]>([]);
   const [swaps, setSwaps] = useState<DaySwap[]>([]);
   const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
+  const [absences, setAbsences] = useState<MyAbsence[]>([]);
   const [wfhOpen, setWfhOpen] = useState(false);
   const [swapOpen, setSwapOpen] = useState(false);
   const [balances, setBalances] = useState<MyBalances | null>(null);
@@ -270,6 +304,8 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const [companyDays, setCompanyDays] = useState<{ date: string; label: string }[]>([]);
   // The booking form, when open: which type it starts on and which date.
   const [booking, setBooking] = useState<{ type: LeaveType; seed: string } | null>(null);
+  // Changing or cancelling an approved booking (spec §5.4), when open.
+  const [changing, setChanging] = useState<LeaveRequest | null>(null);
   const [view, setView] = useState<'list' | 'calendar'>(readView);
   const [calMonth, setCalMonth] = useState({ y: CURRENT_YEAR, m: Number(TODAY.slice(5, 7)) - 1 });
   // Overtime logged on this visit, so its row can be picked out in the list.
@@ -282,7 +318,7 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
     try {
       const from = `${year}-01-01`;
       const to = `${year}-12-31`;
-      const [leave, ot, bal, bh, cd, wf, sw] = await Promise.all([
+      const [leave, ot, bal, bh, cd, wf, sw, ab] = await Promise.all([
         api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}&${who}`),
         api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}&${who}`),
         api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>(
@@ -298,9 +334,14 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         // Same: a failure leaves the list without swaps, nothing more.
         api.get<{ data: DaySwap[] }>(`/staff-calendar/swaps?from=${from}&to=${to}&${who}`)
           .catch(() => ({ data: [] as DaySwap[] })),
+        // Same: a failure leaves the list without absences, nothing more.
+        api.get<{ data: MyAbsence[] }>(
+          `/staff-calendar/me/absences?year=${year}${personId ? `&${who}` : ''}`)
+          .catch(() => ({ data: [] as MyAbsence[] })),
       ]);
       setWfh(wf.data ?? []);
       setSwaps(sw.data ?? []);
+      setAbsences(ab.data ?? []);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
@@ -411,6 +452,43 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
     }
   }
 
+  // Take back an ask to cancel that nobody has answered yet.
+  async function withdrawCancelAsk(id: string) {
+    if (!confirm('Withdraw your ask to cancel? The booking stays as it is.')) return;
+    try {
+      await api.post(`/staff-calendar/leave/${id}/cancel-request/withdraw`, {});
+      setNotice('Ask withdrawn — the booking stays as it is.'); setError(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to withdraw');
+    }
+  }
+
+  // Admin, on the Staff page's Time off tab: answer an ask to cancel. Same
+  // one-at-a-time guard as decide() above.
+  async function decideCancelAsk(id: string, action: 'approve' | 'decline') {
+    if (deciding.current) return;
+    let body: Record<string, string> = {};
+    if (action === 'approve') {
+      if (!confirm('Cancel this booking? The time goes back to their balance, and they’re told.')) return;
+    } else {
+      const note = window.prompt('Why is cancelling it declined? The booking stays, and they will see this.');
+      if (!note?.trim()) return;
+      body = { note };
+    }
+    deciding.current = true;
+    try {
+      await api.post(`/staff-calendar/leave/${id}/cancel-request/${action}`, body);
+      setNotice(action === 'approve' ? 'Cancelled — the time is back on their balance.' : 'Declined — the booking stands.');
+      setError(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally {
+      deciding.current = false;
+    }
+  }
+
   async function cancelOvertime(id: string) {
     if (!confirm('Withdraw this overtime entry?')) return;
     try {
@@ -438,23 +516,40 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
   // already covered by a live request is not "left" — telling someone to book
   // Easter Monday when they already have is a nag people learn to ignore.
   const bh = useMemo(() => {
-    const booked = new Set(requests
-      .filter(r => r.status === 'pending' || r.status === 'approved')
-      .flatMap(r => r.days.map(d => d.date)));
+    const booked = new Set([
+      ...requests
+        .filter(r => r.status === 'pending' || r.status === 'approved')
+        .flatMap(r => r.days.map(d => d.date)),
+      // Off anyway — an absence covers it.
+      ...absences.flatMap(a => a.days.map(d => d.date)),
+    ]);
+    // Only the ones they would otherwise be working (Oct 2026): someone who
+    // never works Mondays was told to book Monday 28 Dec, and the form then
+    // refused it. Unknown (older backend, failed read) = offer them all.
+    const worked = balances?.bankHolidaysWorking ? new Set(balances.bankHolidaysWorking) : null;
     const { working, granted } = splitBankHolidays(bankHolidays, companyDays, TODAY);
     return {
       // Only under use_allowance is a bank holiday something to book at all.
-      toBook: policy === 'use_allowance' ? working.filter(d => !booked.has(d)) : [],
+      toBook: policy === 'use_allowance'
+        ? working.filter(d => !booked.has(d) && (!worked || worked.has(d)))
+        : [],
       granted,
     };
-  }, [requests, bankHolidays, companyDays, policy]);
+  }, [requests, absences, bankHolidays, companyDays, policy, balances]);
 
   const pendingOvertime = overtime
     .filter(e => e.status === 'pending')
     .reduce((s, e) => s + e.minutes, 0);
 
   function openBooking(type: LeaveType, seed = formSeedDate) {
+    setChanging(null);
     setBooking({ type, seed });
+  }
+
+  // One form open at a time — two would both be "the form" on a phone.
+  function openChange(r: LeaveRequest) {
+    setBooking(null);
+    setChanging(r);
   }
 
   return (
@@ -598,6 +693,17 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
           onError={setError} />
       )}
 
+      {/* The same form, opened on an approved booking: the person asks to
+          change or cancel it; an admin on the Staff page does it outright. */}
+      {changing && (
+        <BookTimeOff key={`change:${changing.id}`}
+          balances={balances} seedDate={changing.startDate} initialType={changing.leaveType}
+          replacing={changing} personId={personId} adminDirect={adminView}
+          onClose={() => setChanging(null)}
+          onBooked={async (msg) => { setNotice(msg); setError(null); setChanging(null); await load(); }}
+          onError={setError} />
+      )}
+
       <section className="bg-white border border-gray-200 rounded-2xl sm:rounded-xl overflow-hidden">
         <div className="px-4 sm:px-5 py-3.5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-baseline gap-x-2.5">
@@ -620,11 +726,13 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
         ) : view === 'list' ? (
           <TimeList year={year} requests={requests} overtime={overtime} wfh={wfh} onWithdrawWfh={withdrawWfh}
             swaps={swaps} onWithdrawSwap={withdrawSwap}
-            adjustments={adjustments}
+            adjustments={adjustments} absences={absences}
             companyDays={companyDays}
             bankHolidaysToBook={bh.toBook} freshIds={freshIds}
             onWithdraw={withdraw} onCancelOvertime={cancelOvertime}
             onDecide={adminView ? decide : undefined}
+            onChange={openChange} onWithdrawCancelAsk={withdrawCancelAsk}
+            onDecideCancelAsk={adminView ? decideCancelAsk : undefined}
             onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         ) : (
           <TimeCalendar month={calMonth}
@@ -635,7 +743,8 @@ export default function MyTimePage({ personId }: { personId?: string } = {}) {
               if (next.y !== year) setYear(next.y);
             }}
             onThisMonth={() => changeYear(CURRENT_YEAR)}
-            requests={requests} overtime={overtime} wfh={wfh} swaps={swaps} companyDays={companyDays}
+            requests={requests} overtime={overtime} wfh={wfh} swaps={swaps} absences={absences}
+            companyDays={companyDays}
             bankHolidays={bankHolidays} bankHolidaysToBook={bh.toBook}
             onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         )}
@@ -1040,7 +1149,25 @@ function SwapForm({ onClose, onDone, onError }: {
   );
 }
 
-function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onBooked, onError }: {
+/**
+ * An approved booking's days as the form's day settings, so a change opens on
+ * the booking exactly as it stands. A date in the range with no day is "not
+ * off" — a weekend (which the server ignores) or a day taken out before.
+ */
+function prefillDayParts(r: LeaveRequest): Record<string, DaySpec> {
+  const out: Record<string, DaySpec> = {};
+  const rows = new Map(r.days.map(d => [d.date, d]));
+  for (let date = r.startDate; date <= r.endDate; date = addDaysIso(date, 1)) {
+    const d = rows.get(date);
+    if (!d) out[date] = { portion: 'none' };
+    else if (d.portion === 'hours') {
+      out[date] = { portion: 'hours', startTime: (d.startTime ?? '15:00').slice(0, 5), endTime: (d.endTime ?? '17:00').slice(0, 5) };
+    } else if (d.portion !== 'full') out[date] = { portion: d.portion };
+  }
+  return out;
+}
+
+function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onBooked, onError, replacing, personId, adminDirect = false }: {
   balances: MyBalances | null;
   /** The date the form opens on — today, or 1 January of the year being viewed. */
   seedDate: string;
@@ -1048,16 +1175,34 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
   initialType?: LeaveType;
   onClose: () => void;
   onBooked: (msg: string) => Promise<void>; onError: (msg: string) => void;
+  /**
+   * Set when changing or cancelling this APPROVED booking (spec §5.4). The
+   * person asks and an admin approves; nothing moves until then.
+   */
+  replacing?: LeaveRequest;
+  /** Whose booking — set on the Staff page's view of somebody. */
+  personId?: string;
+  /** An admin acting on somebody's booking: done in the same press, and they are told. */
+  adminDirect?: boolean;
 }) {
   const [leaveType, setLeaveType] = useState<LeaveType>(initialType);
   // Opens below the logger, which on a phone is off-screen — bring it into view.
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => { panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, []);
   const [spanMode, setSpanMode] = useState<'days' | 'part'>('days');
-  const [startDate, setStartDate] = useState(seedDate);
-  const [endDate, setEndDate] = useState(seedDate);
+  const [startDate, setStartDate] = useState(replacing?.startDate ?? seedDate);
+  const [endDate, setEndDate] = useState(replacing?.endDate ?? seedDate);
   // A day can be whole, a half, or an actual period ("leaving at 15:00").
-  const [dayParts, setDayParts] = useState<Record<string, DaySpec>>({});
+  const [dayParts, setDayParts] = useState<Record<string, DaySpec>>(
+    () => (replacing ? prefillDayParts(replacing) : {}));
+  // Changing a booking: alter its days, or give the whole booking back.
+  const [mode, setMode] = useState<'change' | 'cancel'>('change');
+  // Days before today have gone and stay exactly as they were (jon, Oct 2026):
+  // a holiday under way can be shortened, never rewritten or cancelled.
+  const gone = useMemo(
+    () => new Set((replacing?.days ?? []).filter(d => d.date < TODAY).map(d => d.date)), [replacing]);
+  const lastGone = useMemo(() => [...gone].sort().pop() ?? null, [gone]);
+  const started = gone.size > 0;
   const [note, setNote] = useState('');
   const [impact, setImpact] = useState<Impact | null>(null);
   const [impactError, setImpactError] = useState<string | null>(null);
@@ -1099,7 +1244,8 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
   }, [spanMode, dayParts]);
 
   useEffect(() => {
-    if (localTimeError) { setChecking(false); return; }
+    // Nothing to price when the whole booking is being given back.
+    if (localTimeError || mode === 'cancel') { setChecking(false); return; }
     let cancelled = false;
     setChecking(true);
     const t = setTimeout(async () => {
@@ -1107,6 +1253,9 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
         const qs = new URLSearchParams({
           from: startDate, to: endDate, type: leaveType, halfDays: dayPartsKey,
         });
+        // A change is priced against the booking it replaces.
+        if (replacing) qs.set('replaces', replacing.id);
+        if (personId) qs.set('personId', personId);
         const res = await api.get<{ data: Impact }>(`/staff-calendar/leave/impact?${qs}`);
         if (!cancelled) { setImpact(res.data); setImpactError(null); }
       } catch (err) {
@@ -1122,35 +1271,111 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [startDate, endDate, leaveType, dayPartsKey, localTimeError]);
+  }, [startDate, endDate, leaveType, dayPartsKey, localTimeError, mode, replacing, personId]);
 
   async function submit() {
     setSaving(true);
     try {
+      if (replacing && mode === 'cancel') {
+        // The person asks; an admin on their Time off tab just does it.
+        if (adminDirect) {
+          await api.post(`/staff-calendar/leave/${replacing.id}/cancel`, { reason: note.trim() });
+          await onBooked('Cancelled — the time is back on their balance, and they’ve been told.');
+        } else {
+          await api.post(`/staff-calendar/leave/${replacing.id}/cancel-request`, { note: note.trim() });
+          await onBooked('Asked — your booking stands until it’s approved. You’ll hear either way.');
+        }
+        return;
+      }
       await api.post('/staff-calendar/leave', {
         leaveType, startDate, endDate,
         halfDays: Object.keys(dayParts).length ? dayParts : undefined,
-        note: note || null,
+        note: replacing ? note.trim() : (note || null),
+        ...(replacing ? { replacesRequestId: replacing.id } : {}),
+        ...(replacing && adminDirect ? { personId, approveNow: true } : {}),
       });
       setNote(''); setDayParts({}); setImpact(null);
-      await onBooked('Request submitted — you’ll hear when it’s been looked at.');
+      await onBooked(replacing
+        ? adminDirect
+          ? 'Changed — they’ve been told.'
+          : 'Change asked for — nothing moves until it’s approved. You’ll hear either way.'
+        : 'Request submitted — you’ll hear when it’s been looked at.');
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to submit the request');
     } finally { setSaving(false); }
   }
 
-
-  const blocked = localTimeError !== null
+  // The written reason is the point of asking through OP (jon, Oct 2026).
+  const noteMissing = !!replacing && !note.trim();
+  const unchanged = mode === 'change' && impact?.change?.unchanged === true;
+  const blocked = noteMissing || unchanged || (mode === 'change' && (localTimeError !== null
     || (impact?.ownClashes.length ?? 0) > 0
-    || (impact?.workingDays ?? 0) === 0;
+    || (impact?.workingDays ?? 0) === 0));
+
+  // Every contracted day in the range, including any marked "not off", so a
+  // day taken out can be put back.
+  const chipDays = useMemo(() => impact
+    ? [...impact.days, ...(impact.notOff ?? []).map(date => ({ date, minutes: 0, portion: 'none' }))]
+        .sort((a, b) => a.date.localeCompare(b.date))
+    : [], [impact]);
+  const bookedNow = replacing
+    ? `${fmtRange(replacing.startDate, replacing.endDate)} · ${replacing.days.length} day${replacing.days.length === 1 ? '' : 's'} · ${fmtH(replacing.totalMinutes)}`
+    : null;
 
   return (
     <div ref={panelRef} className="p-5 rounded-2xl sm:rounded-xl border border-gray-200 bg-white scroll-mt-4">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-[17px] font-semibold text-gray-900">Book time off</h2>
-        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+        <h2 className="text-[17px] font-semibold text-gray-900">
+          {replacing ? (adminDirect ? 'Change or cancel this booking' : 'Change or cancel your booking') : 'Book time off'}
+        </h2>
+        {/* "Close", not "Cancel", beside a "Cancel it altogether" button. */}
+        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">{replacing ? 'Close' : 'Cancel'}</button>
       </div>
 
+      {replacing && (
+        <div className="mb-3">
+          <p className="text-sm text-gray-700">Booked now: <strong className="font-medium text-gray-900">{bookedNow}</strong></p>
+          <div className="mt-2 flex rounded border border-gray-300 overflow-hidden text-xs w-fit">
+            {([['change', 'Change the days'], ['cancel', 'Cancel it altogether']] as const).map(([m, label]) => (
+              <button key={m} onClick={() => setMode(m)}
+                // A holiday under way can only be shortened — the days already
+                // taken were taken.
+                disabled={m === 'cancel' && started}
+                className={`px-3 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${mode === m ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-gray-500">
+            {started
+              ? 'It’s already started, so it can only be shortened — the days already gone stay as they were.'
+              : adminDirect
+                ? 'This happens straight away, and they’re told.'
+                : 'Nothing changes until it’s approved — your booking stands until then.'}
+          </p>
+        </div>
+      )}
+
+      {replacing && mode === 'cancel' ? (
+        <>
+          <p className="mb-3 text-sm text-gray-700">
+            {replacing.leaveType === 'unpaid'
+              ? 'It’s unpaid, so no balance changes — the days are simply no longer booked off.'
+              : `${adminDirect ? 'All' : 'Once approved, all'} ${fmtH(replacing.totalMinutes)} goes back to ${adminDirect ? 'their' : 'your'} ${replacing.leaveType === 'toil' ? 'overtime bank' : 'holiday balance'}.`}
+          </p>
+          <label className="block text-sm mb-3">
+            <span className="block text-xs text-gray-600 mb-1">Why? (required)</span>
+            <input value={note} onChange={e => setNote(e.target.value)}
+              placeholder={adminDirect ? 'They’ll see this' : 'e.g. the trip’s been called off'}
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+          </label>
+          <button onClick={() => void submit()} disabled={saving || noteMissing}
+            className="px-3 py-2 text-sm rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
+            {saving ? 'Sending…' : adminDirect ? 'Cancel the booking' : 'Ask to cancel'}
+          </button>
+        </>
+      ) : (<>
+      {!replacing && (
       <div className="mb-3">
         <span className="block text-xs text-gray-600 mb-1">How much time?</span>
         <div className="flex rounded border border-gray-300 overflow-hidden text-xs w-fit">
@@ -1176,12 +1401,15 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
           </p>
         )}
       </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Type</span>
+          {/* A holiday under way keeps its type — the days taken were taken as it. */}
           <select value={leaveType} onChange={e => setLeaveType(e.target.value as LeaveType)}
-            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm">
+            disabled={started}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm disabled:bg-gray-50 disabled:text-gray-500">
             {/* The balance is in the label so the choice between holiday and
                 overtime is made with both figures visible, not from memory.
                 Holiday in days, as on the stat card — "61h 13m" means nothing
@@ -1198,17 +1426,28 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
         </label>
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">From</span>
+          {/* A holiday under way keeps its start: that day has gone. */}
           <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
-            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+            disabled={started}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm disabled:bg-gray-50 disabled:text-gray-500" />
         </label>
         {spanMode === 'days' && (
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">To</span>
-            <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)}
+            <input type="date" value={endDate} min={lastGone ?? startDate} onChange={e => setEndDate(e.target.value)}
               className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
           </label>
         )}
       </div>
+      {/* Absence is recorded FOR staff, never booked by them (spec §7) — so
+          the form has to say where the rest goes, or it gets booked here as
+          holiday. The first paternity leave did exactly that (Oct 2026). */}
+      {!replacing && (
+      <p className="-mt-1 mb-3 text-xs text-gray-500">
+        Paternity, maternity, jury service or anything else that isn’t holiday? Don’t book it
+        here — ask an admin, who will record it for you without touching your allowance.
+      </p>
+      )}
 
       {spanMode === 'part' && (
         <div className="mb-3 flex flex-wrap items-end gap-2">
@@ -1236,19 +1475,27 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
         </div>
       )}
 
-      {spanMode === 'days' && impact && impact.days.length > 0 && impact.days.length <= 14 && (
+      {spanMode === 'days' && impact && chipDays.length > 0 && chipDays.length <= (replacing ? 31 : 14) && (
         <div className="mb-3">
           <span className="block text-xs text-gray-600 mb-1">
-            Days — click to switch between a whole day, a half, or set times
+            {replacing
+              ? 'Days — click to switch between a whole day, a half, set times, or not off'
+              : 'Days — click to switch between a whole day, a half, or set times'}
           </span>
           <div className="space-y-1.5">
-            {impact.days.map(d => {
+            {chipDays.map(d => {
               const spec = dayParts[d.date] ?? { portion: 'full' as const };
-              const cycle: DaySpec['portion'][] = ['full', 'am', 'pm', 'hours'];
+              // "Not off" only when changing a booking — it is how one day comes
+              // out of the middle, so it is one click away. A new booking is
+              // unchanged.
+              const cycle: DaySpec['portion'][] = replacing
+                ? ['full', 'none', 'am', 'pm', 'hours'] : ['full', 'am', 'pm', 'hours'];
               const next = cycle[(cycle.indexOf(spec.portion) + 1) % cycle.length];
+              const locked = gone.has(d.date);
               return (
                 <div key={d.date} className="flex flex-wrap items-center gap-2">
-                  <button
+                  <button disabled={locked}
+                    title={locked ? 'Already taken — days already gone can’t be changed' : undefined}
                     onClick={() => setDayParts(prev => {
                       const n = { ...prev };
                       if (next === 'full') delete n[d.date];
@@ -1256,31 +1503,35 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
                       else n[d.date] = { portion: next };
                       return n;
                     })}
-                    className={`px-2 py-1 rounded border text-xs min-w-[8.5rem] text-left ${
+                    className={`px-2 py-1 rounded border text-xs min-w-[8.5rem] text-left disabled:cursor-not-allowed disabled:opacity-60 ${
                       spec.portion === 'full'
                         ? 'border-gray-300 bg-white text-gray-700'
-                        : 'border-ooosh-300 bg-ooosh-50 text-ooosh-800'}`}>
+                        : spec.portion === 'none'
+                          ? 'border-dashed border-gray-300 bg-gray-50 text-gray-500'
+                          : 'border-ooosh-300 bg-ooosh-50 text-ooosh-800'}`}>
                     {fmtDate(d.date)}
                     <span className="ml-1 font-medium">
                       {spec.portion === 'full' ? 'whole day'
                         : spec.portion === 'am' ? 'morning'
-                        : spec.portion === 'pm' ? 'afternoon' : 'set times'}
+                        : spec.portion === 'pm' ? 'afternoon'
+                        : spec.portion === 'none' ? 'not off' : 'set times'}
                     </span>
+                    {locked && <span className="ml-1 text-gray-400">· already taken</span>}
                   </button>
 
                   {spec.portion === 'hours' && (
                     <span className="flex items-center gap-1 text-xs">
-                      <input type="time" step={300} value={spec.startTime ?? '15:00'}
+                      <input type="time" step={300} value={spec.startTime ?? '15:00'} disabled={locked}
                         onChange={e => setDayParts(p => ({ ...p, [d.date]: { ...spec, startTime: e.target.value } }))}
                         className="px-1.5 py-1 border border-gray-300 rounded text-xs" />
                       <span className="text-gray-400">to</span>
-                      <input type="time" step={300} value={spec.endTime ?? '17:00'}
+                      <input type="time" step={300} value={spec.endTime ?? '17:00'} disabled={locked}
                         onChange={e => setDayParts(p => ({ ...p, [d.date]: { ...spec, endTime: e.target.value } }))}
                         className="px-1.5 py-1 border border-gray-300 rounded text-xs" />
                     </span>
                   )}
 
-                  <span className="text-xs text-gray-500">{fmtH(d.minutes)}</span>
+                  <span className="text-xs text-gray-500">{spec.portion === 'none' ? '—' : fmtH(d.minutes)}</span>
                 </div>
               );
             })}
@@ -1289,9 +1540,9 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
       )}
 
       <label className="block text-sm mb-3">
-        <span className="block text-xs text-gray-600 mb-1">Note (optional)</span>
+        <span className="block text-xs text-gray-600 mb-1">{replacing ? 'Why the change? (required)' : 'Note (optional)'}</span>
         <input value={note} onChange={e => setNote(e.target.value)}
-          placeholder="Anything worth saying?"
+          placeholder={replacing ? (adminDirect ? 'They’ll see this' : 'e.g. moving it a day later') : 'Anything worth saying?'}
           className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
       </label>
 
@@ -1300,15 +1551,24 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
 
       <button onClick={() => void submit()} disabled={saving || checking || blocked}
         className="mt-3 px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
-        {saving ? 'Submitting…' : 'Submit request'}
+        {saving ? 'Submitting…' : replacing ? (adminDirect ? 'Save the change' : 'Ask for this change') : 'Submit request'}
       </button>
       {blocked && impact && (
-        <p className="mt-1.5 text-xs text-red-600">
+        <p className={`mt-1.5 text-xs ${(noteMissing || unchanged) && (impact.ownClashes.length === 0 && impact.workingDays > 0) ? 'text-gray-500' : 'text-red-600'}`}>
           {impact.ownClashes.length > 0
             ? 'Pick dates you haven’t already booked.'
-            : 'None of those dates are days you’re contracted to work.'}
+            : impact.workingDays === 0
+              ? replacing
+                ? 'That leaves no days off — to give the whole booking back, choose “Cancel it altogether”.'
+                : 'None of those dates are days you’re contracted to work.'
+              : unchanged
+                ? 'Change the days first — this is the booking as it already is.'
+                : noteMissing
+                  ? 'Say why first — it’s what the approver reads.'
+                  : 'None of those dates are days you’re contracted to work.'}
         </p>
       )}
+      </>)}
     </div>
   );
 }
@@ -1341,11 +1601,26 @@ export function ImpactPanel({ impact, checking, leaveType, error }: {
   return (
     <div className="p-3 rounded border border-gray-200 bg-gray-50/70">
       <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm">
-        <span>
-          <span className="text-gray-600">This costs:</span>{' '}
-          <span className="font-medium text-gray-900">{fmtH(impact.totalMinutes)}</span>
-          {days && <span className="text-gray-500"> ({days} days)</span>}
-        </span>
+        {impact.change ? (
+          // A change (spec §5.4) is the difference it makes, not the cost of
+          // the new booking — "This costs 37h" reads as 37h MORE.
+          <span>
+            <span className="text-gray-600">This change:</span>{' '}
+            <span className="font-medium text-gray-900">
+              {impact.change.unchanged ? 'nothing yet — pick the days you want instead'
+                : impact.change.minutes > 0 ? `uses ${fmtH(impact.change.minutes)} more`
+                : impact.change.minutes < 0 ? `gives back ${fmtH(-impact.change.minutes)}`
+                : 'no difference to the balance'}
+            </span>
+            <span className="text-gray-500"> · {fmtH(impact.totalMinutes)} booked in all</span>
+          </span>
+        ) : (
+          <span>
+            <span className="text-gray-600">This costs:</span>{' '}
+            <span className="font-medium text-gray-900">{fmtH(impact.totalMinutes)}</span>
+            {days && <span className="text-gray-500"> ({days} days)</span>}
+          </span>
+        )}
         {leaveType === 'unpaid' ? (
           <span className="text-gray-500">Unpaid — nothing comes off your allowance.</span>
         ) : impact.balanceBefore !== null && (
@@ -2004,14 +2279,20 @@ function pendingActions(kind: DecideKind, id: string, onWithdraw: () => void, on
     : [{ label: 'Withdraw', onClick: onWithdraw, className: 'text-red-600' }];
 }
 
-function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], onWithdrawSwap, adjustments = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide }: {
+function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], onWithdrawSwap, adjustments = [], absences = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide, onChange, onWithdrawCancelAsk, onDecideCancelAsk }: {
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
   swaps?: DaySwap[]; onWithdrawSwap?: (id: string) => void;
   adjustments?: Adjustment[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
+  /** Open the change / cancel form on an approved booking (spec §5.4). */
+  onChange?: (r: LeaveRequest) => void;
+  onWithdrawCancelAsk?: (id: string) => void;
+  /** Admin only — answer an ask to cancel. */
+  onDecideCancelAsk?: (id: string, action: 'approve' | 'decline') => void;
 }): TimeRow[] {
   const rows: TimeRow[] = [];
 
@@ -2033,6 +2314,32 @@ function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], on
       pillClass: lieu ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-700',
       statusClass: lieu ? 'text-emerald-700' : 'text-gray-600',
       dot: lieu ? 'bg-emerald-500' : 'bg-gray-400',
+    });
+  }
+
+  // Absence an admin recorded — sickness, parental leave and the rest. "Absent"
+  // and nothing more (jon, Oct 2026): the API does not send the type. The
+  // hours show only when it came out of their holiday, which explains a
+  // figure on the card the list would otherwise leave unaccounted for.
+  for (const a of absences) {
+    const n = a.days.length;
+    const mins = a.days.reduce((t, d) => t + d.minutes, 0);
+    const half = n === 1 && a.days[0]!.portion !== 'full'
+      ? ` · ${a.days[0]!.portion === 'am' ? 'morning' : 'afternoon'}` : '';
+    const span = a.isOpen
+      ? `Since ${fmtDate(a.startDate)} · still off`
+      : fmtRange(a.startDate, a.endDate ?? a.startDate);
+    rows.push({
+      key: `abs:${a.id}`, date: a.startDate,
+      until: a.isOpen ? TODAY : (a.endDate ?? a.startDate),
+      title: 'Absent',
+      meta: `${span}${n > 0 ? ` · ${n} day${n === 1 ? '' : 's'}` : ''}${half}`,
+      amount: a.deductsAllowance ? `−${fmtH(mins)}` : '',
+      amountClass: 'text-gray-600',
+      pill: a.deductsAllowance ? 'From your holiday' : 'Doesn’t use your holiday',
+      pillClass: 'bg-violet-100 text-violet-800',
+      statusClass: 'text-violet-700',
+      dot: 'bg-violet-500',
     });
   }
 
@@ -2081,10 +2388,42 @@ function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], on
     const n = r.days.length;
     const span = r.startDate === r.endDate ? '' : `${fmtRange(r.startDate, r.endDate)} · `;
     const isToil = r.leaveType === 'toil';
+    // Changing / cancelling approved time off (spec §5.4).
+    const was = r.replaces ? fmtRange(r.replaces.startDate, r.replaces.endDate) : null;
+    const askWaiting = r.status === 'approved' && !!r.cancelAsk && !r.cancelAsk.declinedAt;
+    const askDeclined = r.status === 'approved' && !!r.cancelAsk?.declinedAt;
+    const changedAway = r.status === 'cancelled' && !!r.replacedById;
+    // Still has a day today or later — the only bookings worth changing.
+    const open = r.status === 'approved' && r.days.some(d => d.date >= TODAY);
     const extras = [
       r.decisionNote ? `${r.status === 'declined' ? 'Declined' : 'Approved'}${r.decidedByName ? ` by ${r.decidedByName}` : ''}: ${r.decisionNote}` : null,
-      r.cancellationReason ? `Cancelled: ${r.cancellationReason}` : null,
+      // A change says what it replaces; the booking it replaced says so too
+      // (its reason already reads "Changed to …").
+      was ? (r.status === 'pending'
+        ? `A change to your ${was} booking — that one stands until this is approved`
+        : `Changed from ${was}`) : null,
+      r.cancellationReason ? (changedAway ? r.cancellationReason : `Cancelled: ${r.cancellationReason}`) : null,
+      r.pendingChangeId && r.status === 'approved' ? 'A change to this is waiting for approval' : null,
+      askWaiting ? `Asked to cancel${r.cancelAsk?.note ? `: “${r.cancelAsk.note}”` : ''} — waiting for approval` : null,
+      askDeclined ? `Not cancelled${r.cancelAsk?.declineNote ? `: ${r.cancelAsk.declineNote}` : ''}` : null,
     ].filter(Boolean).join(' · ');
+    // What an approved booking offers. The person asks; an admin (the Staff
+    // page's view of them) answers a waiting ask, or changes it outright.
+    let approvedActions: TimeRow['actions'];
+    if (open && !r.pendingChangeId) {
+      if (askWaiting) {
+        approvedActions = onDecideCancelAsk
+          ? [
+              { label: 'Approve cancel', onClick: () => onDecideCancelAsk(r.id, 'approve'), className: 'text-emerald-700 font-semibold' },
+              { label: 'Decline', onClick: () => onDecideCancelAsk(r.id, 'decline'), className: 'text-red-600' },
+            ]
+          : onWithdrawCancelAsk
+            ? [{ label: 'Withdraw ask', onClick: () => onWithdrawCancelAsk(r.id), className: 'text-red-600' }]
+            : undefined;
+      } else if (onChange) {
+        approvedActions = [{ label: 'Change or cancel', onClick: () => onChange(r), className: 'text-ooosh-600' }];
+      }
+    }
     rows.push({
       key: `lr:${r.id}`, date: r.startDate, until: r.endDate,
       title: isToil ? (r.requestNote || 'Time off') : TYPE_LABELS[r.leaveType],
@@ -2094,12 +2433,13 @@ function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], on
       extra: extras || null,
       amount: `−${fmtH(r.totalMinutes)}`,
       amountClass: dead ? 'text-gray-500 line-through' : 'text-gray-600',
-      pill: statusWord(r.status), pillClass: STATUS_STYLE[r.status],
+      pill: changedAway ? 'Changed' : r.status === 'pending' && was ? 'Change waiting' : statusWord(r.status),
+      pillClass: STATUS_STYLE[r.status],
       statusClass: r.status === 'pending' ? 'text-amber-800' : r.status === 'approved' ? 'text-emerald-700'
         : r.status === 'declined' ? 'text-red-700' : 'text-gray-500',
       dot: dead ? 'bg-gray-300' : isToil ? 'bg-slate-400' : 'bg-ooosh-600',
       actions: r.status === 'pending'
-        ? pendingActions('leave', r.id, () => onWithdraw(r.id), onDecide) : undefined,
+        ? pendingActions('leave', r.id, () => onWithdraw(r.id), onDecide) : approvedActions,
     });
   }
 
@@ -2164,9 +2504,13 @@ function TimeList(props: {
   wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
   swaps?: DaySwap[]; onWithdrawSwap?: (id: string) => void;
   adjustments?: Adjustment[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
   onDecide?: Decide;
+  onChange?: (r: LeaveRequest) => void;
+  onWithdrawCancelAsk?: (id: string) => void;
+  onDecideCancelAsk?: (id: string, action: 'approve' | 'decline') => void;
 }) {
   const rows = buildRows(props);
   const upcoming = rows.filter(r => r.until >= TODAY).sort((a, b) => a.date.localeCompare(b.date));
@@ -2226,13 +2570,14 @@ interface CalEvent { label: string; cls: string; dot: string; onClick?: () => vo
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 /** A month grid, Monday first, of the same facts the list shows. */
-function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [], swaps = [], companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
+function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [], swaps = [], absences = [], companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
   month: { y: number; m: number };
   onMonth: (next: { y: number; m: number }) => void;
   onThisMonth: () => void;
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
   wfh?: WfhRequest[];
   swaps?: DaySwap[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[];
   bankHolidays: string[]; bankHolidaysToBook: string[];
   onBook?: (date: string) => void;
@@ -2263,7 +2608,7 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [
         } else {
           const what = r.leaveType === 'unpaid' ? 'Unpaid leave' : 'Holiday';
           add(d.date, waiting
-            ? { label: `${what} — waiting`, cls: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' }
+            ? { label: `${what} — ${r.replacesRequestId ? 'change waiting' : 'waiting'}`, cls: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' }
             : { label: what, cls: 'bg-ooosh-600 text-white', dot: 'bg-ooosh-600' });
         }
       }
@@ -2284,8 +2629,15 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [
       add(sw.offDate, { label: `⇄ Off (swap)${waiting}`, cls, dot });
       add(sw.workDate, { label: `⇄ In ${sw.startTime}–${sw.endTime}${waiting}`, cls, dot });
     }
+    // "Absent" only — never the type (spec §7.2).
+    for (const a of absences) {
+      for (const d of a.days) {
+        add(d.date, { label: d.portion === 'full' ? 'Absent' : `Absent (${d.portion.toUpperCase()})`,
+          cls: 'bg-violet-100 text-violet-800', dot: 'bg-violet-500' });
+      }
+    }
     return map;
-  }, [requests, overtime, wfh, swaps, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
+  }, [requests, overtime, wfh, swaps, absences, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
 
   const { y, m } = month;
   const first = new Date(Date.UTC(y, m, 1));
@@ -2371,6 +2723,7 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [
           ['bg-emerald-100', 'Company day'],
           ['bg-teal-50 border border-teal-300', 'Home'],
           ['bg-indigo-50 border border-indigo-300', 'Swapped day'],
+          ['bg-violet-100', 'Absent'],
         ].map(([cls, text]) => (
           <span key={text} className="flex items-center gap-1.5">
             <i className={`w-2.5 h-2.5 rounded-[3px] ${cls}`} />{text}

@@ -23,6 +23,11 @@ import { calculatePreHireCancellation, calculateEarlyReturn } from '../services/
 import emailService from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { getFrontendUrl } from '../config/app-urls';
+import { cancellationFeeGross } from '../services/cancellation-close';
+import { cancellationAlertVariables, CANCELLATION_CHASE_DAYS } from '../services/cancellation-alert';
+import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { fullDisplayName } from '../services/display-name';
+import { ukDatePlus } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
@@ -318,20 +323,46 @@ router.post(
         }
       }
 
-      // 9. Send internal notification email
+      // 9. Send internal notification email — a to-do list of the money still to
+      // finish (services/cancellation-alert.ts), not a "processed" receipt. The
+      // first day an unfinished card is chased is also step 11's due date.
       const frontendUrl = getFrontendUrl();
-      emailService.send('job_cancelled_internal', {
-        to: 'info@oooshtours.co.uk',
-        variables: {
-          cancelledBy: req.user!.email || 'Unknown',
-          jobName,
-          jobNumber,
-          reason: cancellation_reason,
-          fee: `£${cancellation_fee.toFixed(2)}`,
-          refund: `£${cancellation_refund.toFixed(2)}`,
-          jobUrl: `${frontendUrl}/jobs/${jobId}`,
-        },
-      }).catch(err => console.error('[Cancellation] Internal email failed:', err));
+      const chaseFrom = ukDatePlus(CANCELLATION_CHASE_DAYS);
+      (async () => {
+        try {
+          const [canceller, excess] = await Promise.all([
+            query(
+              `SELECT u.email, p.first_name, p.last_name, p.preferred_name
+                 FROM users u LEFT JOIN people p ON p.id = u.person_id
+                WHERE u.id = $1`,
+              [userId]
+            ),
+            // v_excess_held — the one definition of "how much excess do we hold".
+            query(`SELECT COALESCE(SUM(held_amount), 0) AS held FROM v_excess_held WHERE job_id = $1`, [jobId]),
+          ]);
+          const result = await emailService.send('job_cancelled_internal', {
+            to: 'info@oooshtours.co.uk',
+            variables: cancellationAlertVariables({
+              cancelledBy: fullDisplayName(canceller.rows[0], req.user!.email || 'Unknown'),
+              jobName,
+              hhJobNumber: job.hh_job_number ?? null,
+              reason: cancellation_reason,
+              feeNet: cancellation_fee,
+              feeGross: cancellationFeeGross(cancellation_fee),
+              refund: cancellation_refund,
+              owing: Number(cancellation_outstanding_balance || 0),
+              excessHeld: Number(excess.rows[0]?.held ?? 0),
+              clientEmailed: send_client_email !== false,
+              chaseFrom,
+              moneyUrl: `${frontendUrl}/jobs/${jobId}?tab=money`,
+              listUrl: `${frontendUrl}/jobs/lost-cancelled?tab=cancelled`,
+            }),
+          });
+          if (!result.success) console.error('[Cancellation] Internal email not sent:', result.error);
+        } catch (err) {
+          console.error('[Cancellation] Internal email failed:', err);
+        }
+      })();
 
       // 10. Send client cancellation email — reason-aware intro paragraph.
       // The boilerplate "We're writing to confirm…" line worked for client-led
@@ -421,32 +452,53 @@ router.post(
       })();
 
       // 11. Create cancellation close-out requirements (same pattern as returns close-out)
+      //
+      // The money cards (invoice, payment_reconcile, excess_resolve) are the
+      // cancellation's own follow-ups, so they are made to outlive it: due
+      // CANCELLATION_CHASE_DAYS from now and keep_after_close = true, which is
+      // what lets the 09:30 close-out scanner chase them on a cancelled job and
+      // keeps their bells lit until done (bell-rules.ts requirement_due). Each
+      // ticks itself: invoice on "Mark as sent", payment_reconcile when the
+      // close-out plan says settled, excess_resolve from the excess records.
+      // Cancellations from before Oct 2026 have neither, so they are never chased.
       try {
-        const ensureReq = async (type: string, notes: string) => {
+        const HALF_PENNY = 0.005;
+        const outstanding = Number(cancellation_outstanding_balance || 0);
+        const ensureReq = async (type: string, notes: string, chase: boolean) => {
+          // A card the cancellation sweep just closed (the hire's own invoice
+          // card on a job cancelled after it came back) doesn't count.
           const exists = await query(
-            `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 AND phase = 'post_hire'`,
+            `SELECT id FROM job_requirements
+              WHERE job_id = $1 AND requirement_type = $2 AND phase = 'post_hire' AND status <> 'cancelled'`,
             [jobId, type]
           );
           if (exists.rows.length === 0) {
             await query(
-              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
-               VALUES ($1, $2, 'not_started', $3, true, 'cancellation', 'post_hire')`,
-              [jobId, type, notes]
+              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase, due_date, keep_after_close)
+               VALUES ($1, $2, 'not_started', $3, true, 'cancellation', 'post_hire', $4, $5)`,
+              [jobId, type, notes, chase ? chaseFrom : null, chase]
             );
           }
         };
 
         // Always: invoice for cancellation fee
-        if (cancellation_fee > 0) {
-          await ensureReq('invoice', `Create HireHop invoice for cancellation fee: £${cancellation_fee.toFixed(2)} + VAT (£${(cancellation_fee * 1.2).toFixed(2)} gross)`);
+        if (cancellation_fee >= HALF_PENNY) {
+          await ensureReq('invoice', `Create HireHop invoice for cancellation fee: £${cancellation_fee.toFixed(2)} + VAT (£${cancellationFeeGross(cancellation_fee).toFixed(2)} gross), then send it to the client`, true);
         }
 
-        // Always: client follow-up (confirm cancellation received, handle any queries)
-        await ensureReq('client_followup', 'Confirm client received cancellation notification');
+        // Always: client follow-up (confirm cancellation received, handle any queries).
+        // Not chased — it ticks itself when the fee invoice is marked sent.
+        await ensureReq('client_followup', 'Confirm client received cancellation notification', false);
 
-        // If refund due: payment reconciliation
-        if (cancellation_refund > 0) {
-          await ensureReq('payment_reconcile', `Process refund of £${cancellation_refund.toFixed(2)} to client (10 working day target)`);
+        // Payment reconciliation — on every cancellation that moves money, not only a
+        // refund: a client who still owes the fee needs tracking too. Ticked by the
+        // close-out plan once settled (cancellation-close.ts markCancellationReconciled).
+        if (cancellation_refund >= HALF_PENNY) {
+          await ensureReq('payment_reconcile', `Process refund of £${cancellation_refund.toFixed(2)} to client (10 working day target)`, true);
+        } else if (outstanding >= HALF_PENNY) {
+          await ensureReq('payment_reconcile', `Collect the £${outstanding.toFixed(2)} the client still owes on the cancellation fee`, true);
+        } else if (cancellation_fee >= HALF_PENNY) {
+          await ensureReq('payment_reconcile', 'Put the client\'s payment against the cancellation fee invoice — done when the Money tab says Settled', true);
         }
 
         // If excess records: resolve them
@@ -455,7 +507,11 @@ router.post(
           [jobId]
         );
         if (parseInt(excessCount.rows[0]?.cnt || '0') > 0) {
-          await ensureReq('excess_resolve', 'Resolve insurance excess — reimburse or waive');
+          await ensureReq('excess_resolve', 'Resolve insurance excess — reimburse or waive', true);
+          // Set it from the records now — with nothing held it goes straight to
+          // done, rather than sitting "To do" (and being chased) until the next
+          // excess change happens to re-check it.
+          await syncExcessRequirementStatus(jobId);
         }
       } catch (err) {
         console.warn('[Cancellation] Failed to create close-out requirements:', err);

@@ -1379,21 +1379,26 @@ router.put('/:jobId/contacts', validate(putJobContactsSchema), async (req: AuthR
 
     // Transactional replace: delete all existing, insert the new set.
     // Simpler than a diff for a small list and keeps the audit clean.
-    await query('BEGIN');
+    // On ONE borrowed connection — a BEGIN through the shared pool is no
+    // transaction at all (SECURITY-AUDIT-BRIEF B.5).
+    const client = await getClient();
     try {
-      await query('DELETE FROM job_contacts WHERE job_id = $1', [jobId]);
+      await client.query('BEGIN');
+      await client.query('DELETE FROM job_contacts WHERE job_id = $1', [jobId]);
       for (const personId of person_ids) {
         const isPrimary = personId === primary_person_id;
-        await query(
+        await client.query(
           `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
            VALUES ($1, $2, $3, $4)`,
           [jobId, personId, isPrimary, req.user!.id]
         );
       }
-      await query('COMMIT');
+      await client.query('COMMIT');
     } catch (txErr) {
-      await query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => { /* the connection is going back anyway */ });
       throw txErr;
+    } finally {
+      client.release();
     }
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', {}, {
@@ -1447,13 +1452,16 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
     }
     const clientId = jobResult.rows[0].client_id;
 
-    await query('BEGIN');
+    // On ONE borrowed connection — a BEGIN through the shared pool is no
+    // transaction at all (SECURITY-AUDIT-BRIEF B.5).
+    const dbClient = await getClient();
     try {
+      await dbClient.query('BEGIN');
       let resolvedPersonId = person_id;
 
       // Create person if needed
       if (!resolvedPersonId) {
-        const createResult = await query(
+        const createResult = await dbClient.query(
           `INSERT INTO people (first_name, last_name, email, phone, created_by)
            VALUES ($1, $2, $3, $4, $5)
            RETURNING id`,
@@ -1465,14 +1473,14 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
       // Link to client org via person_organisation_roles if a client org
       // exists and the link doesn't already (active row).
       if (clientId) {
-        const existingLink = await query(
+        const existingLink = await dbClient.query(
           `SELECT id FROM person_organisation_roles
            WHERE person_id = $1 AND organisation_id = $2 AND status = 'active'
            LIMIT 1`,
           [resolvedPersonId, clientId]
         );
         if (existingLink.rows.length === 0) {
-          await query(
+          await dbClient.query(
             `INSERT INTO person_organisation_roles
              (person_id, organisation_id, role, status)
              VALUES ($1, $2, $3, 'active')`,
@@ -1484,7 +1492,7 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
       // If set_as_primary, clear any current primary on the job first
       // (the partial unique index would otherwise reject the insert).
       if (set_as_primary) {
-        await query(
+        await dbClient.query(
           `UPDATE job_contacts SET is_primary = false
            WHERE job_id = $1 AND is_primary = true`,
           [jobId]
@@ -1492,7 +1500,7 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
       }
 
       // Tick on the job
-      await query(
+      await dbClient.query(
         `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (job_id, person_id) DO UPDATE
@@ -1500,11 +1508,13 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
         [jobId, resolvedPersonId, !!set_as_primary, req.user!.id]
       );
 
-      await query('COMMIT');
+      await dbClient.query('COMMIT');
       res.status(201).json({ person_id: resolvedPersonId });
     } catch (txErr) {
-      await query('ROLLBACK');
+      await dbClient.query('ROLLBACK').catch(() => { /* the connection is going back anyway */ });
       throw txErr;
+    } finally {
+      dbClient.release();
     }
   } catch (error) {
     console.error('Add job contact error:', error);
@@ -2510,6 +2520,7 @@ router.delete('/:id/group', async (req: AuthRequest, res: Response) => {
 
 // ============================================================================
 // COMBINE BOOKINGS — merge two same-client pre-hire bookings into one
+// (or extend a booking that's out on hire with one that hasn't started yet)
 //
 // The survivor keeps its identity (and gains the combined date range); the
 // other booking is retired as `cancelled` (combined_into_job_id set, £0 fee,
@@ -2519,6 +2530,12 @@ router.delete('/:id/group', async (req: AuthRequest, res: Response) => {
 // ============================================================================
 
 const COMBINABLE_STATUSES = ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'];
+
+// A booking already OUT on hire can be extended by folding in a booking for the
+// same client that hasn't started — the client keeps the van straight on to
+// their next booking instead of bringing it back (HH 15322 + 15323, Oct 2026).
+// Only one side may be out, it is always the one kept, and its start never moves.
+const ON_HIRE_COMBINE_STATUSES = ['dispatched'];
 
 // Survivor preference: the more-committed booking continues. Excess money is the
 // strongest pull (we never want to move it), then status progression (a confirmed
@@ -2535,7 +2552,7 @@ function survivorScore(c: CombineCandidateFacts): number {
     + (c.hireDepositTotal > 0 ? 1 : 0);
 }
 
-interface CombineCandidateFacts {
+export interface CombineCandidateFacts {
   job: any;
   hireDeposits: HireDeposit[];
   hireDepositTotal: number;
@@ -2581,10 +2598,11 @@ async function loadCombineCandidate(jobId: string): Promise<CombineCandidateFact
 /**
  * Decide which job should survive (default earlier start) and surface blocks.
  * The survivor MUST be the excess-holder when exactly one side holds excess —
- * combining onto it means no excess has to move. Returns the recommended
+ * combining onto it means no excess has to move. A booking that's out on hire
+ * is always the survivor (see ON_HIRE_COMBINE_STATUSES). Returns the recommended
  * survivor/absorbed split plus any hard blocks (combine refused if non-empty).
  */
-function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
+export function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
   survivor: CombineCandidateFacts;
   absorbed: CombineCandidateFacts;
   blocks: string[];
@@ -2600,11 +2618,15 @@ function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
   if (a.job.group_id && a.job.group_id === b.job.group_id) {
     blocks.push('These are two options of the same enquiry — the client picks one and the others are marked lost; combining is for two real hires.');
   }
-  // Both pre-on-hire.
+  // Both pre-on-hire — or ONE out on hire, extended by a booking that hasn't started.
+  const onHire = [a, b].filter(c => ON_HIRE_COMBINE_STATUSES.includes(c.job.pipeline_status));
   for (const c of [a, b]) {
-    if (!COMBINABLE_STATUSES.includes(c.job.pipeline_status)) {
-      blocks.push(`"${c.job.job_name || c.job.id}" is "${c.job.pipeline_status}" — only pre-hire bookings (enquiry up to prepped) can be combined.`);
+    if (!COMBINABLE_STATUSES.includes(c.job.pipeline_status) && !ON_HIRE_COMBINE_STATUSES.includes(c.job.pipeline_status)) {
+      blocks.push(`"${c.job.job_name || c.job.id}" is "${c.job.pipeline_status}" — only pre-hire bookings (enquiry up to prepped), or one booking that's out on hire, can be combined.`);
     }
+  }
+  if (onHire.length > 1) {
+    blocks.push('Both bookings are out on hire — combine can only fold a booking that hasn\'t started into one that\'s out.');
   }
 
   // Survivor = the more-committed booking (see survivorScore); earlier start
@@ -2612,7 +2634,13 @@ function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
   let survivor: CombineCandidateFacts;
   let absorbed: CombineCandidateFacts;
   const sa = survivorScore(a), sb = survivorScore(b);
-  if (sa !== sb) {
+  if (onHire.length === 1) {
+    // The booking that's out is ALWAYS kept: its van is out and its drivers have
+    // signed for it. survivorScore ranks 'dispatched' like an enquiry, so without
+    // this it would keep the other booking and cancel the hire that's out.
+    survivor = onHire[0]!;
+    absorbed = survivor === a ? b : a;
+  } else if (sa !== sb) {
     if (sa > sb) { survivor = a; absorbed = b; } else { survivor = b; absorbed = a; }
   } else {
     const aStart = new Date(a.job.job_date || a.job.out_date || 0).getTime();
@@ -2622,6 +2650,20 @@ function assessCombine(a: CombineCandidateFacts, b: CombineCandidateFacts): {
 
   if (a.excessHeld && b.excessHeld) {
     blocks.push('Both bookings hold insurance excess money — resolve one before combining so the excess doesn\'t need moving.');
+  }
+
+  if (onHire.length === 1) {
+    // The booking that's out is kept whatever the excess says, so excess money on
+    // the other one would have to move — and combine never moves excess.
+    if (absorbed.excessHeld && !survivor.excessHeld) {
+      blocks.push(`Job #${absorbed.job.hh_job_number || absorbed.job.job_name} holds insurance excess money and the booking that's out is the one kept — combine can't move excess. Refund it, or roll it over onto the booking that's out, first.`);
+    }
+    // Extending a hire that's out may only push its END later. A booking that
+    // starts before it would move the start of a hire that has already begun.
+    const t = (d: any) => (d ? new Date(d).getTime() : NaN);
+    if (['out_date', 'job_date'].some(f => t(absorbed.job[f]) < t(survivor.job[f]))) {
+      blocks.push(`Job #${absorbed.job.hh_job_number || absorbed.job.job_name} starts before job #${survivor.job.hh_job_number} went out — combine can extend a hire that's out, not move its start.`);
+    }
   }
 
   // Only the SURVIVOR must be HH-linked (dates + reattributed deposit are pushed
@@ -2661,18 +2703,25 @@ function combinedDates(survivor: any, absorbed: any) {
   };
 }
 
-// GET candidates — same-client pre-on-hire bookings to combine THIS job with.
+// GET candidates — same-client pre-on-hire bookings (or one that's out on hire)
+// to combine THIS job with.
 // Drives the modal's default picker list (search fallback handled client-side).
 router.get('/:id/combine-candidates', async (req: AuthRequest, res: Response) => {
   try {
     const jobId = req.params.id as string;
     const cur = await query(
-      `SELECT id, client_id, client_name FROM jobs WHERE id = $1 AND is_deleted = false`,
+      `SELECT id, client_id, client_name, pipeline_status FROM jobs WHERE id = $1 AND is_deleted = false`,
       [jobId]
     );
     if (cur.rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
     const clientId = cur.rows[0].client_id;
     if (!clientId) { res.json({ data: [], client_name: cur.rows[0].client_name }); return; }
+
+    // From a booking that's out, only bookings that haven't started can fold in;
+    // from one that hasn't started, a booking that's out is a candidate too.
+    const candidateStatuses = ON_HIRE_COMBINE_STATUSES.includes(cur.rows[0].pipeline_status)
+      ? COMBINABLE_STATUSES
+      : [...COMBINABLE_STATUSES, ...ON_HIRE_COMBINE_STATUSES];
 
     const rows = await query(
       `SELECT id, hh_job_number, job_name, pipeline_status,
@@ -2684,7 +2733,7 @@ router.get('/:id/combine-candidates', async (req: AuthRequest, res: Response) =>
           AND combined_into_job_id IS NULL
           AND pipeline_status = ANY($3::text[])
         ORDER BY job_date ASC NULLS LAST`,
-      [clientId, jobId, COMBINABLE_STATUSES]
+      [clientId, jobId, candidateStatuses]
     );
     res.json({ data: rows.rows, client_name: cur.rows[0].client_name });
   } catch (error: any) {

@@ -22,11 +22,18 @@ built, with the portal's favicon. Nothing is half-built.
 1. **The four freelancer guides (§8)**, now that PR 4 gives the screenshots the new look. Rebuild the
    shop-till guide (`docs/guides/shop-till/`) in the new look at the same time. The invoicing guide can now
    point at the Earnings tab.
-2. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** Four places; own PR.
+2. **Transactions through the shared pool (`docs/SECURITY-AUDIT-BRIEF.md` B.5).** **Done (26 Oct 2026):**
+   the last three moved onto `getClient()`, plus the hire-form save's double release; reproduced on a real
+   database first. The brief's B.5 has the detail.
 3. **Simplify the cost capture form, last** (jon, 22 Oct 2026: "very heavy, very wordy"; even he couldn't
    tell what the "This job so far / Is this part of a quote? / recharge" block was asking). jon's call:
    once everything else is done, start with a clickable mock-up and go from there. Not part of this
-   programme, but raised here.
+   programme, but raised here. **Done (26 Oct 2026):** the Claude Design mock-up was reviewed and
+   agreed with changes, in three PRs, all built: PR 1 per-job recharges (migration 318,
+   `v_cost_recharges`), PR 2 the laptop form, PR 3 the phone receipt page `/receipt` (My Receipts folded
+   in). `docs/design/cost-capture-redesign/DECISIONS.md` says where each differs from the mock;
+   `COST-CAPTURE-RECHARGE-SPEC.md` has the build notes. PR 1 also moved the cost split save onto one
+   client, so item 2 above had three places left, not four.
 
 **How we work:** discuss and agree before coding (jon's preference), one PR per item, deploy commands
 in the reply (CLAUDE.md "Deployment"), run `npm run db:migrate` only when a PR adds a migration.
@@ -49,7 +56,7 @@ them from the recipe there.
 | – | Calculator: setup premium charged to the client, crew fuel once (`PLATFORM-CONVENTIONS.md`) | merged 22 Oct 2026 |
 | 6b | Earnings part 2: the portal tab (§5.2), plus the portal favicon | built 22 Oct 2026 |
 | 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
-| – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | any time |
+| – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | built 26 Oct 2026 |
 
 ## 2. Completion: what PR 1 changed and why
 
@@ -91,6 +98,26 @@ chaser and the portal.
 - Ordinary deliveries/collections: chased from arrival time, as before, now in UK time (the old JS
   maths ran an hour late all summer).
 - Every person on a job gets each reminder (the per-quote level bump used to block all but the first).
+
+**The 2nd reminder is also a text** (jon, 27 Oct 2026, after HH 16535: Lewis read the job at 6am,
+never used the portal at Heathrow and didn't see the emails; the office closed it by hand).
+`services/completion-chaser.ts`:
+- Once per quote, the first time it reaches level 2 or beyond (a run outside 07:00–22:00 can jump
+  from 1 to 3), to everyone being chased except the shared Ooosh crew account. Same hours as the
+  emails. Like them it ignores the portal mute (accountability, not news).
+- The number is `textableNumber()`: mobile, else international, else phone, the first that is a real
+  mobile (`sms-service.ts` `isMobileNumber()`, never a landline). No mobile, the email only.
+- Template `completion_chase`: "Ooosh! Tours: your collection at Heathrow isn't marked as done yet.
+  Please finish it here: <link>". Plain characters only (`plainSmsText()`, venue cut at 30 at a word),
+  so two segments at most with the link. Every send is in `sms_log`.
+- Off switch `system_settings.completion_chase_sms_enabled` (migration 322, on; category `sms`, no
+  screen, like the other on/off switches): set it to `'false'` and only the texts stop.
+- **The link, in the text AND the email's button, is `completionLink()`**: a delivery/collection
+  whose van step isn't done goes to the Start screen (van / backline / both); crew, People, and a
+  D&C job whose van step is done go to the completion page. The email's button used to go straight
+  to the completion page, which closes a job that never went through Start with no van recorded.
+- The portal login returns to the page that sent you there (`from`, plain portal paths only), so a
+  signed-out phone lands on the job, not the dashboard.
 
 **Van collection sign-off** (`CollectionPage.tsx`): the CUSTOMER signs; "Customer not here" needs a
 short note instead (where the keys were, anything else). Checked before anything is written. The
@@ -200,8 +227,12 @@ which match one freelancer by name.
 
 **What it does** (migration 306):
 - `costs.person_id` (whose invoice) and `cost_work_items` (which work: one row per booking / sitter
-  evening / yard day, with this invoice's share). Kept apart from `cost_allocations`, so job costs on the
-  Money tab (`GET /costs/by-job`) are unchanged; the job split stays by hand ("covers several jobs").
+  evening / yard day, with this invoice's share). Kept apart from `cost_allocations` at first (22 Oct);
+  **since the capture form's redesign (Oct 2026, `docs/design/cost-capture-redesign/DECISIONS.md`) ticking
+  the work ALSO splits the job costs**, one share per job, each with its own who pays (a run's stops are
+  spread over their jobs by what was booked). Studio evenings and yard days are on no job, so they stay
+  with overheads. `cost_work_items` is still what Earnings and the price check read; `cost_allocations`
+  is what the Money tab reads.
 - The upload form, for "Freelance crew invoices" (320): **Whose invoice?** filled in from the letterhead
   (`services/freelancer-invoice-person.ts`: remembered from an earlier linked invoice, then an earlier
   remittance address, then one freelancer by name, compared as supplier matching does) and **Which work
@@ -234,6 +265,14 @@ which match one freelancer by name.
   It defaults like any other cost (Part of the quote when the job has a quote), and the hint says to choose
   Extra and recharge the fronted part (Partial) if the invoice includes fuel or tolls. The "defaulted to
   Extra + recharge" banner and "(set to Extra)" now show only while they are true.
+- **Only a person marked as a freelancer is suggested or linked** (29 Oct 2026). A freelancer is often in
+  the address book more than once, a record per company email. Invoice 26/27052 was suggested the other
+  record (not a freelancer) because the invoice before it, 26/27043, was linked to it. It listed none of
+  their work and never reached their Earnings. Two paths could put a non-freelancer there: "remembered"
+  took the newest earlier link whoever it named, and `personIdByEmail()` (the remittance link and the
+  remittance suggestion) took the only person with an address even when they weren't a freelancer. Now
+  `personIdByEmail()` returns only a freelancer, and "remembered" passes over an earlier link to anyone
+  else for the one before it (`services/freelancer-invoice-person.ts`).
 
 **The one-off backfill (used and removed, Oct 2026):** a Costs page grouped the unlinked freelancer
 invoices since 6 April 2026 by letterhead for jon to link once. Done; the page, its route and its

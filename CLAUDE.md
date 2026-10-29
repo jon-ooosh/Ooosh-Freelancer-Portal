@@ -233,6 +233,9 @@ ONE custom line on Misc income (190) at 20%, raised on the close-out panel's but
 (its amount re-set at allocation), refunded by a person with Process; excess is the Excess card's; the
 job stays HireHop 9 and is never completed. A hire invoiced before cancelling is refused (credit note,
 by hand). The portal takes payment at status 9 only while an approved invoice is owing.
+**After cancelling (26 Oct 2026):** the internal email is a to-do list (`services/cancellation-alert.ts`), and
+the money cards (`invoice`, `payment_reconcile`, `excess_resolve`) are due 3 days out with `keep_after_close`, so the
+09:30 close-out scanner chases them for any manager until each ticks itself — spec final section.
 
 **CLOSED, 19 Oct 2026 — live for everyone:** `docs/STRIPE-TERMINAL-SPEC.md` — in-person card payments driven from OP
 on a Stripe Reader S700, replacing Worldpay/Amex (contract ends March 2027). §1 is settled: same
@@ -284,7 +287,9 @@ when a second step is owed. **Phase 2: passkeys** (`services/staff-passkeys.ts`,
 with no passkey gets a modal that will not close, and once they have one the email code is refused for them;
 recovery codes are admins only, shown once. The banner's "Set up now" opens the setup modal in place.
 **Phase 3: the kiosk till** (`services/kiosk-till.ts`, `/warehouse/till`): the warehouse PIN session gains
-`scopes: ['collections','till']`, the PIN is accepted only from `system_settings.kiosk_allowed_ips`, the
+`scopes: ['collections','till']`, the PIN works only on a tablet an admin has set up (`services/kiosk-devices.ts`,
+spec §9, 29 Oct 2026 — a one-time code from Settings, then the `op_kiosk_device` cookie; checked BEFORE the PIN;
+`system_settings.kiosk_allowed_ips` is optional since the yard's broadband address changed and locked the warehouse out), the
 till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or reader, each naming a person
 from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
 `stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
@@ -297,7 +302,7 @@ completion fixes, payment terms, security fixes, the Claude Design reskin of the
 portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1),
 freelancer invoices linked to the freelancer and their work in Costs (§5.1; the past ones linked by hand, Oct 2026),
 the Earnings tab in the portal (§5.2: money by invoice, "To invoice" from 22 Oct 2026).
-Next: the four guides; the Costs form simplification comes last.
+Next: the four guides. The Costs form simplification is done (three PRs, Oct 2026: `docs/design/cost-capture-redesign/DECISIONS.md`).
 **§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
@@ -308,10 +313,15 @@ Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisi
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
 (support, 15 Oct 2026) — never work around it; §3 is the evidence. §5 the decisions, §6 what must exist first.
 
-**DRAFT SPEC, Oct 2026:** `docs/AI-KNOWLEDGE-SPEC.md` — the house knowledge every AI client draft
-reads: the voice (absorbs the chase-tone round), house guides as Staff Documents shared with Claude,
-the client brief, and "remember this?" client facts. **Code rails beat written guidance**; nothing is
-learned without a human tick. §9 is the open decisions.
+**IN PROGRESS, Oct 2026:** `docs/AI-KNOWLEDGE-SPEC.md` — the house knowledge every AI client draft
+reads: the voice (Phase A built), house guides as Staff Documents shared with Claude (Phase B built —
+admin-only Claude switch, `house-knowledge.ts`), the client brief, and "remember this?" client facts.
+**Code rails beat written guidance**; nothing is learned without a human tick. §9 is the decisions.
+
+**PLANNED (written Mar 2026, updated 29 Oct 2026, not built):** `docs/CALL-INTELLIGENCE-SPEC.md` — the phones move
+from Voipfone to **Twilio** with OP as the phone system (§T — build and test that FIRST), then calls are transcribed,
+summarised and matched to people and jobs like emails. **§0 and §T override the March details** (`interactions`,
+one unmatched review surface, a gated `calls/` R2 prefix, recordings from Twilio's callback — no email step).
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
@@ -320,7 +330,7 @@ left.** Searches are run by hand on purpose (no scheduler). Contact research wan
 the band / tour managers — not promoters or agents.
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
-in place as `?person=<id>&tab=overview|employment|time|records|reviews|access`. The person is
+in place as `?person=<id>&tab=overview|employment|time|records|reviews|access|absence`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
 that answers it — new bells should link that way, not at the bare page. **Exception:
 anything waiting for an approval** (leave, overtime, WFH requests, day swaps) links to the bare page,
@@ -361,14 +371,20 @@ existing definition:
 | What's this van's hire status? | `services/fleet-hire-status-sync.ts` |
 | Is this job genuinely returning? | `services/hire-lifecycle.ts` |
 | What is a freelancer paid for a delivery / collection / crew booking? | `services/freelancer-fees.ts` `personalFee()` — their agreed rate, else the quote's fee (a crew's fee split evenly). The portal's "Your fee", Costs and Earnings all use it |
-| Which of a freelancer's work is finished, what was it booked at, which invoice covers it? | `services/freelancer-work.ts` (`listFreelancerWork()`, `cost_work_items`; a run is one item at its combined fee). Whose invoice: `services/freelancer-invoice-person.ts`. Not `cost_allocations` — job costs stay as they are (`FREELANCER-PORTAL-SPEC.md` §5.1) |
+| Which of a freelancer's work is finished, what was it booked at, which invoice covers it? | `services/freelancer-work.ts` (`listFreelancerWork()`, `cost_work_items`; a run is one item at its combined fee). Whose invoice: `services/freelancer-invoice-person.ts`. Ticking the work also splits the job costs (`cost_allocations`, one share per job; studio evenings and yard days stay with overheads) since the capture form's redesign (`FREELANCER-PORTAL-SPEC.md` §5.1) |
+| Which jobs does a cost land on, and who pays on each (capture form)? | `frontend/src/components/costs/costJobs.ts` `planSplit()` — one job holding the whole cost saves on the cost, anything else is a split whose shares carry who pays; sent as `allocations` in the SAME `POST`/`PATCH /costs` request and checked by `services/cost-allocations.ts` before anything is written. The split modal is retired (`docs/design/cost-capture-redesign/DECISIONS.md`) |
+| Has this receipt already been added (no invoice number)? | `GET /costs/check-duplicate` — same amount to the penny, same day, same supplier (Xero contact, else the normalised name); warn only. `?receipt_r2_key=` answers "did my save land?" by the uploaded photo |
+| Snapping a receipt on a phone | `/receipt` (`pages/ReceiptCapturePage.tsx`) — every staff role; "Waiting for a receipt" (it replaced `/my-receipts`, which redirects), the AI read, which job, who pays, save. The photo, the AI read and the retry rules are `components/costs/receiptRead.ts`, shared with the laptop form; a save is never re-sent blind |
+| Which jobs had a van out around a date (a fuel receipt's job)? | `GET /costs/van-jobs?date=&reg=&search=` — two days either side of the hire, a swapped-out van ends at the swap, the dual assignment↔job match, the receipt's reg first |
 | What does a freelancer's Earnings page show (paid, invoiced, to invoice, next payment)? | `services/freelancer-earnings.ts` `getFreelancerEarnings()` — money by INVOICE (paid in the period / dated in it and unpaid), "To invoice" only from `freelancer_earnings_labels_from`; never the expense estimate (`FREELANCER-PORTAL-SPEC.md` §5.2) |
 | When does a quote's work end? When does the completion chaser start? | `services/quote-schedule.ts` — crew and People jobs by their LAST day (complete from it, chased 09:00 UK the day after), deliveries/collections from arrival time in UK time; shared by the chaser and the portal (`docs/FREELANCER-PORTAL-SPEC.md` §2) |
+| Where does a "please complete your job" reminder send them? Who gets the text? | `services/completion-chaser.ts` — `completionLink()` (Start screen for a delivery/collection whose van step isn't done, else the completion page; the email's button and the text share it), `textableNumber()` (a real mobile only). The 2nd reminder is also a text, once per quote; off switch `completion_chase_sms_enabled` (`FREELANCER-PORTAL-SPEC.md` §2) |
 | Has a quote's van leg actually happened (booked out / collected)? | `services/quote-completion.ts` `isVanLegDone()` — by direction; "out on hire" is NOT a collection. The portal's van-only "All Done" and `maybeCloseQuote` both ask it |
 | What happens to transport when a job dies? | `services/job-close-cascade.ts` |
 | What happens to requirements when a job dies? | `services/requirement-close-sweep.ts` |
 | When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` — a freelancer invoice: the first Friday a week after APPROVAL, 8 to 14 days (jon, Oct 2026, final — it had moved to the invoice date and back); bills approved before the switch (`system_settings.freelancer_terms_approval_from`) keep the invoice-date rule |
 | What are this job's costs? | `GET /costs/by-job/:jobId` |
+| Which recharges are there, on which job, still to do? | `v_cost_recharges` (view, one row per job a recharge bills) — a recharge is on the whole cost OR on each job's share of a split cost, never both; load / write one through `services/cost-recharges.ts` |
 | Money coming BACK from a supplier? | `services/cost-credit.ts` |
 | What does this held item need next? | `services/held-item-query.ts` |
 | Talking to HireHop | `services/hirehop-broker.ts` |
@@ -378,6 +394,7 @@ existing definition:
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
+| Which of Ooosh's own guides does an AI client draft read? | `services/house-knowledge.ts` `getGuidesFor(topics)` — Staff Documents an admin shared with Claude (`ai_shared`, `ai_topics`), current approved version only; a shared `voice` guide replaces the built-in voice. Never a second reader (`AI-KNOWLEDGE-SPEC.md` §4) |
 | Which Claude model? | `config/anthropic.ts` `CLAUDE_SONNET_MODEL` / `CLAUDE_HAIKU_MODEL` — never a model string in a service. Read a Claude structured-output reply with `readStructuredJson()`; Sonnet 5.5+ rejects forced `tool_choice` |
 | Opening a possible insurance claim | `services/incident-claims.ts` `createClaimFromIssue()` — always from a Problem |
 | The claim form's fields (staff form, PDF, client form) | `services/claim-form-fields.ts` (frontend: `@claimform`) |
@@ -416,7 +433,8 @@ existing definition:
 | Is this login allowed in, does this device skip the code, is this account slowed down? | `services/staff-login-security.ts` — the second factor, trusted devices, the per-account slowdown; `routes/auth.ts` decides, this answers |
 | A FREELANCER's portal sign-in: is the code on, does this phone skip it, a code (emailed or read out by staff), sign out everywhere | `services/portal-login-security.ts` — `routes/portal.ts` decides, this answers; the office's card is `PortalSignInCard.tsx` on the Freelancer tab (`docs/FREELANCER-PORTAL-SPEC.md` §7.1) |
 | A passkey (register, log in with, remove), an admin's recovery codes | `services/staff-passkeys.ts` — challenges in Redis, rows in `user_passkeys`; frontend `lib/passkeys.ts`; the one setup flow is `components/LoginSecuritySetup.tsx` |
-| May the warehouse kiosk's PIN session call this? Who may it name on a sale? Where does the PIN work? | `services/kiosk-till.ts` — `staffOrKioskTill(KIOSK_TILL_ALLOW)`, `assertKioskSeller()`, `kioskIpAllowed()`; a kiosk request carries `req.kiosk`, never `req.user` |
+| May the warehouse kiosk's PIN session call this? Who may it name on a sale? | `services/kiosk-till.ts` — `staffOrKioskTill(KIOSK_TILL_ALLOW)`, `assertKioskSeller()`; a kiosk request carries `req.kiosk`, never `req.user` |
+| Where does the kiosk PIN work? Is this a set-up kiosk tablet? | `services/kiosk-devices.ts` — `kioskDeviceLockOn()` (fails closed), `kioskDeviceFrom()`, set-up codes, Forget; the optional address list is `kiosk-till.ts` `kioskIpAllowed()`. Both are checked BEFORE the PIN (`STAFF-LOGIN-SECURITY-SPEC.md` §9) |
 | Minting or verifying ANY JWT | `services/tokens.ts` `signFor(audience, …)` / `verifyFor(audience, …)` — every family has its own `aud`; never call `jsonwebtoken` directly (the portal session, on its own secret, is the one exception) |
 | What must never leave a general `people` response? | `services/people-private-fields.ts` |
 | A freelancer's tasks on a day booking / sitter evening — whose, which day, auto-tick, telling them | `services/freelancer-tasks.ts` — owned by a booking OR a shift, never a person; no date column (read through the owner). NOT To Do |
@@ -512,6 +530,12 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
   character class: it either throws ("invalid character range" — the auto-cover
   revert) or strips every matching letter (the inbox un-ack: "Check the van tyres" →
   "Chhys"). Both shipped and sat unnoticed until Oct 2026.
+- **A transaction is `const client = await getClient()`, BEGIN/COMMIT/ROLLBACK on that
+  client, `client.release()` once, in a `finally`.** Never `query('BEGIN')` through the
+  pool — each statement goes to whichever connection is free, so under load the BEGIN is
+  left open on a connection that swallows other requests' writes, and its locks stall
+  everything behind it (reproduced, Oct 2026: `SECURITY-AUDIT-BRIEF.md` B.5). Never release
+  early as well as in the `finally` — `pg` throws on the second release.
 - API responses are `{ data, pagination }` or `{ error }`.
 
 ## Dependencies
@@ -611,6 +635,9 @@ journalctl -u ooosh-portal -n 50 --no-pager
   `deploy/safe-restart.sh` is an OPTIONAL extra — it waits for a card-reader payment in progress
   first (up to 5 minutes, then stops without restarting; `FORCE=1` overrides). Don't make it the
   default or put it in `deploy.sh`.
+- **The server runs Node 22 LTS from the NodeSource apt repo** (`/usr/bin/node`, upgraded from an
+  EOL Node 20 on 23 Oct 2026 after CVE-2026-111497). `weekly-maintenance.sh`'s `apt upgrade` keeps it
+  on the latest 22.x; Node 22 leaves maintenance April 2027 — `docs/MAINTENANCE.md` §1.3 is the plan.
 - **`npm install` before building is not optional** on the manual path — a PR that added
   a dependency fails the build with "Cannot find module …". `deploy.sh` always installs.
 - Run `npm run db:migrate` from `backend/` if there are new migrations. Re-running is

@@ -3,6 +3,7 @@ import { api } from '../services/api';
 import DatePicker from './DatePicker';
 import { hasManagerRole } from '../lib/roles';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { ukDatePlus } from '../lib/ukDate';
 
 interface ChaseableJob {
   id: string;
@@ -21,11 +22,15 @@ type AutoChaseMode = 'off' | 'draft' | 'send';
 type Mode = 'reschedule' | 'log';
 type Delivery = 'bell' | 'bell_email' | 'none';
 
-function addDaysToDate(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d.toISOString().split('T')[0];
-}
+// "What happened?" is optional. Left blank, the chase is saved with this line
+// instead, so the Activity Timeline still says how they were chased — the
+// timeline doesn't show chase_method itself.
+const METHOD_NOTE: Record<string, string> = {
+  phone: 'Chased by phone.',
+  email: 'Chased by email.',
+  text: 'Chased by text.',
+  whatsapp: 'Chased by WhatsApp.',
+};
 
 export default function ChaseModal({
   isOpen,
@@ -62,9 +67,13 @@ export default function ChaseModal({
   // when it is, so there's no confusing "Send that secretly only drafts".
   const [autoSendEnabled, setAutoSendEnabled] = useState(false);
 
+  // Reset the form when the modal opens or moves to another job — keyed on the
+  // job's ID, not the job object. The Job Detail page hands over a fresh copy
+  // of the job every time it redraws, so keying on the object wiped whatever
+  // was being typed a second after opening.
   useEffect(() => {
     if (isOpen && job) {
-      setNextChaseDate(addDaysToDate(5));
+      setNextChaseDate(ukDatePlus(5));
       setSelectedChasePreset('5 days');
       setMode('log');
       setContent('');
@@ -77,7 +86,8 @@ export default function ChaseModal({
       setDraftError('');
       setDrafting(false);
     }
-  }, [isOpen, job]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, job?.id]);
 
   useEffect(() => {
     if (isOpen && teamUsers.length === 0) {
@@ -105,10 +115,6 @@ export default function ChaseModal({
   if (!isOpen || !job) return null;
 
   const handleSubmit = async () => {
-    if (mode === 'log' && !content.trim()) {
-      setError('Please describe what happened');
-      return;
-    }
     setSaving(true);
     setError('');
     try {
@@ -121,7 +127,7 @@ export default function ChaseModal({
       } else {
         await api.post('/interactions', {
           type: 'chase',
-          content: content.trim(),
+          content: content.trim() || METHOD_NOTE[chaseMethod] || 'Chased.',
           job_id: job.id,
           chase_method: chaseMethod,
           next_chase_date: nextChaseDate || undefined,
@@ -298,7 +304,7 @@ export default function ChaseModal({
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">What happened? *</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">What happened? <span className="font-normal text-gray-400">(optional)</span></label>
                 <textarea
                   value={content}
                   onChange={(e) => setContent(e.target.value)}
@@ -316,10 +322,10 @@ export default function ChaseModal({
             </label>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               {[
-                { label: '2 days', fn: () => addDaysToDate(2) },
-                { label: '3 days', fn: () => addDaysToDate(3) },
-                { label: '5 days', fn: () => addDaysToDate(5) },
-                { label: '14 days', fn: () => addDaysToDate(14) },
+                { label: '2 days', fn: () => ukDatePlus(2) },
+                { label: '3 days', fn: () => ukDatePlus(3) },
+                { label: '5 days', fn: () => ukDatePlus(5) },
+                { label: '14 days', fn: () => ukDatePlus(14) },
               ].map(({ label, fn }) => (
                 <button
                   key={label}

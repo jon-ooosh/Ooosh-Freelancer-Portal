@@ -639,6 +639,45 @@ Decline posts nothing. See §11 for the approval surface — the context is the 
   versa) is a cancel + rebook, which is exactly what the ledger records.
 - **Past:** staff cannot touch it. Admin posts a correction (§0.4).
 
+#### 5.4.1 As built (Oct 2026, migration 320)
+
+Until this was built an approved holiday could not be touched from any screen: the
+admin-only `POST /leave/:id/cancel` existed with no button. jon's call: staff ask **in
+writing, through OP**, to change or cancel; an admin approves. Both start from **"Change
+or cancel"** on an approved booking on My Time.
+
+- **A CHANGE is a new request that replaces an approved one** (`replaces_request_id`).
+  It is the ordinary Book time off form, opened on the booking as it stands. Nothing moves
+  while it waits — the calendar, the balance and the original are untouched, and its day
+  rows are written `is_live = false` (they usually overlap the original, which the
+  no-double-booking index would refuse). **Approving it cancels the original and approves
+  the change in ONE transaction** (`approveRequest`): a `cancellation` credit on the
+  original, a `booking` debit on the new days — the cancel + rebook this section always
+  described, done atomically so the person is never left with neither. Declining or
+  withdrawing it leaves the original exactly as it was. Decided by the ordinary
+  approve / decline; one change at a time per booking (unique partial index).
+- **"Not off"** (`portion: 'none'`, never stored) takes one day out of the middle — one
+  click on that day's button in the change form. Only offered when changing.
+- **A CANCEL ask** has no days, so it is columns on the booking itself
+  (`cancel_requested_*`, `cancel_declined_*`). Approved = the ordinary cancel, their note
+  as the reason. Declined = the booking stands and they are told why — the bell says
+  "Your ask to cancel time off was declined", never "Time off declined".
+- **A note is required** for both — the written record is the point.
+- **Days already gone are never changed** (jon: "feels a bit sloppy"). A change carries
+  every day before today over VERBATIM, minutes included, and refuses to drop, alter or
+  add one; a holiday under way can only be shortened ("coming back early"), cannot be
+  cancelled outright, and keeps its type. The form greys those days out.
+- **Admins** see the same link on the Staff page's Time off tab and act straight away:
+  a change is created and approved in one press (`approveNow`), a cancel is the direct
+  cancel. The person is told either way.
+- **The approval card** shows the NET effect ("gives back 7h 30m"), checks cover, clashes
+  and notice only on the days that change, and lists them ("No longer off: Wed 4 Nov") —
+  a day taken out of the middle keeps both end dates, so the ranges alone say nothing.
+- **Fixed with it:** cancelling credited every day back, including a day already handed
+  back by a sickness reclaim (§7.4) or a company day (§20) — the same day twice. Credits
+  now skip those days, and a change inherits the hand-back for any day it keeps.
+- Real-Postgres check: `backend/src/scripts/__verify-leave-changes.ts`.
+
 ---
 
 ## 6. Overtime and the bank
@@ -701,6 +740,10 @@ sickness — raises the return-to-work task.
 ### 7.2 What staff see
 
 `Absent`. Nothing else. Ever. (§0.5)
+
+Including on their own My Time (Oct 2026, jon): `GET /me/absences` returns the
+dates only, and each spell is a row reading "Absent" — with the hours only when
+it came out of their holiday, which explains the figure on their card.
 
 ### 7.3 Return to work — the standard process
 
@@ -1177,6 +1220,12 @@ to make it send again. Figures come from `getPayrollReport()` in
 `staff-overtime.ts` — never a second SUM. The Payroll report panel on the Staff
 page has "This month", "Last month" and "Year so far" presets.
 
+**Other absence, Oct 2026:** the "Other absence (days)" row of the table above
+was not built until the first paternity leave needed it. Every non-sickness
+absence is now reported by type (`getOtherAbsenceMinutes()`), as three columns
+appended to the CSV — days, hours, and the type ("Paternity 8 days") — and a
+column in the email and the panel.
+
 ### 12.2 Other reports
 
 - Balances and remaining liability across the team (holiday and banked overtime).
@@ -1436,6 +1485,8 @@ Where things are, for troubleshooting:
 | **§20.5b** | Day in lieu when a company day falls on your day off — credited in advance, follows the calendar | 278 |
 | — | Manual adjustments from the Staff page (balance panel), shown to the person on My Time — for 2025 overtime still owed at the BrightHR switchover, which the 2026-only import missed | — |
 | **§8.2** | Swap a day — asked for on My Time, approved like holiday; nothing on the calendar until approved, then "Swap" on the day given up; changeable hours on the day worked, break copied, the day given up's minutes snapshotted; approval re-checks both days | 307 |
+| **§5.4** | Changing and cancelling APPROVED time off — asked in writing on My Time, approved in Waiting for you; a change replaces the booking in one transaction on approval; "not off" for a day out of the middle; days already gone never change; admins act directly from the Time off tab; the double credit on a cancelled booking with a day already handed back fixed (§5.4.1) | 320 |
+| — | First paternity leave (Oct 2026): `POST /absences` and `GET /absences/:id` restored (lost with the markers in 215's commit — "Record it" was a 404), with a route guard test; an Absence tab on the Staff page; the person sees their own absence on My Time as "Absent" (`GET /me/absences`, dates only); other absence on the payroll report (§12.1); bank holidays offered only on days the person works; the Book time off form points non-holiday leave at an admin | — |
 
 ### Decisions taken during the build that CHANGE this spec
 

@@ -2,7 +2,7 @@
 paths:
   - "backend/src/services/{staff-day-status,staff-employment,staff-balance,staff-leave,staff-overtime,staff-absence,staff-notifications,staff-settings,staff-company-days,staff-wfh,staff-swaps,staff-ical,freelancer-days,freelancer-tasks}.ts"
   - "backend/src/routes/{staff-calendar,staff-calendar-feed,freelancer-tasks}.ts"
-  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,307}_*.sql"
+  - "backend/src/migrations/{206,208,209,212,213,214,269,270,276,307,320}_*.sql"
   - "frontend/src/pages/{StaffCalendarPage,StaffAdminPage,MyTimePage,StaffAbsencePage}.tsx"
   - "frontend/src/components/{StaffBalancePanel,LeaveApprovals,PayrollReportPanel,FreelancerTasksPanel}.tsx"
   - "frontend/src/components/dashboard/v2/sections/WhosIn.tsx"
@@ -316,6 +316,14 @@ Policy is `use_allowance`: a bank holiday is an ordinary working day here and
 someone who wants it off books holiday like any other day. They are **marked**
 on the calendar, nothing more.
 
+**My Time only asks somebody to book a bank holiday they would otherwise be
+WORKING** (Oct 2026). `/me/balances` carries `bankHolidaysWorking` from
+`contractedDatesAmong()` in `staff-day-status.ts` — the raw contract on each
+date, swaps included, so a part-timer who swaps onto a Monday is asked again.
+Before this, someone who never works Mondays was told to book Monday 28 Dec
+and the form then refused the date. Missing or null (older backend, failed
+read) means "offer them all", never "offer none".
+
 **Never seed them as `staff_pattern_exceptions`.** That is the obvious
 implementation and it would make them non-working — silently handing everyone
 eight free days a year that no ledger entry ever paid for.
@@ -510,6 +518,34 @@ rows sharing a `swap_group_id`: the day OFF and the day IN.
 - On the team calendar both days carry `StaffDay.swapWith` (the other date);
   the day given up is drawn as an outlined **Swap**, not a blank.
 
+## Changing or cancelling APPROVED time off is asked for, then approved
+
+Spec §5.4.1 (jon, Oct 2026, migration 320). "Change or cancel" on an approved
+booking on My Time; the answer comes from Waiting for you on the Staff page.
+
+- **A change is a NEW request with `replaces_request_id`**, never an edit of
+  the approved one. Its day rows are `is_live = false` while it waits; the
+  status trigger makes them live on approval. `approveRequest` cancels the
+  original (credits) and approves the change (debits) in ONE transaction —
+  original first, or the no-double-booking index sees both. Never split that.
+- **A cancel ask lives on the booking** (`cancel_requested_*` /
+  `cancel_declined_*`). "Waiting" = status `approved`, asked, not declined
+  (`isCancelAskWaiting()`). One ask OR one change at a time, never both.
+- **Days before today never change.** `planChangeDays()` carries them over
+  verbatim (minutes included), refuses dropping, altering or adding one, and a
+  holiday under way keeps its type and cannot be cancelled outright — it is
+  shortened instead. `cancelRequest` refuses a booking with a day already gone.
+- **A day already handed back is never credited twice.** Cancelling skips days
+  with `reclaimed_absence_id` / `reclaimed_company_day_id` set; a change copies
+  those stamps onto the same date and does not debit it. Anything new that
+  credits a booking's days must do the same.
+- **`'none'` ("not off") is a request-side portion only** — never stored, never
+  in the `portion` CHECK. A day not taken has no row, like a weekend.
+- **A declined CANCEL is not a declined holiday.** Its bell carries its own
+  heading (`notifyDecision({ heading })`); do not let it fall back to "Time off
+  declined".
+- `backend/src/scripts/__verify-leave-changes.ts` is the real-Postgres check.
+
 ## The calendar feed is the person's OWN time — nothing else, ever
 
 `services/staff-ical.ts` is the only thing that decides what is in a feed
@@ -527,6 +563,14 @@ admin from the 1st, once — jon submits to payroll before the 4th. It stamps
 retries tomorrow); clear that setting to resend. Figures come from
 `getPayrollReport()` — never a second SUM.
 
+**Every absence that isn't sickness is on it too** (Oct 2026 — spec §12.1
+planned it, the build missed it, the first paternity leave found it): per type
+from `getOtherAbsenceMinutes()` in `staff-absence.ts`, as three columns
+APPENDED to the CSV (`Other absence (days)`, `(hours)`, `(type)` —
+"Paternity 8 days") and a column in the email and the Staff page panel.
+Statutory parental pay is the payroll company's to work out, like SSP. CSV
+columns are only ever appended: the accountants read them by position.
+
 ## Special-category data is masked in the service, not the browser
 
 Sickness and parental data is masked inside `staff-day-status.ts`
@@ -537,7 +581,24 @@ returning full records and hiding them in React.
 **Every `/absences` route is `adminOnly`** (`STAFF_ADMIN_ROLES = ['admin']`),
 with no exceptions. Staff have exactly two things to do in this module: log
 overtime, and request time off as holiday or TOIL. Absence is recorded for
-them, not by them.
+them, not by them — the Book time off form says so, and points paternity,
+maternity, jury service and the rest at an admin (Oct 2026: the first
+paternity leave was booked as holiday because nothing said otherwise).
+
+**The one read that is not admin is `GET /me/absences`** (Oct 2026, jon):
+the person's OWN absences, dates only, shown on My Time as **"Absent"** —
+never the type or reason. `listOwnAbsences()` in `staff-absence.ts` is the
+mask, built from an allow-list; never return `Absence` rows from it. An admin
+may pass `personId=` (the Staff page's Time off tab), like `/me/balances`.
+The calendar feed still carries no absence.
+
+**Removing a feature must not remove its neighbours' routes.** The timed-marker
+removal (781f2782, 15 Sep 2026) also deleted `POST /absences`,
+`GET /absences/:id` and `GET /me/absences`, so "Record it" answered 404 for
+five weeks. `routes/__tests__/staff-calendar-routes.test.ts` now fails if any
+route the Absence page or My Time calls goes missing — add to it when you add
+a call. Absences are also on the Staff page as the person's **Absence** tab
+(`StaffAbsencePage personId={…}`, admin only, after Access).
 
 ## Email is LIVE
 

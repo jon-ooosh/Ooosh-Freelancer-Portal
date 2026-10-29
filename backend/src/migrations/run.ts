@@ -357,6 +357,12 @@ async function runMigrations(direction: 'up' | 'down') {
         '315_freelancer_invoice_unmatched_reason.sql',
         '316_job_projects.sql',
         '317_freelancer_earnings_labels_from.sql',
+        '318_cost_allocation_recharges.sql',
+        '319_soft_checked_in_by.sql',
+        '320_staff_leave_change_requests.sql',
+        '321_staff_documents_ai_shared.sql',
+        '322_completion_chase_sms_setting.sql',
+        '323_kiosk_devices.sql',
       ];
 
       for (const migration of migrations) {

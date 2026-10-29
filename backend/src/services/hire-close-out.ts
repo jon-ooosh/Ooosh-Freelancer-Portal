@@ -178,6 +178,8 @@ export interface JobRow {
   job_name: string | null;
   is_internal: boolean | null;
   pipeline_status: string | null;
+  /** Set when Combine folded this booking into another (its money moved there). */
+  combined_into_job_id?: string | null;
 }
 
 // ── Log ──────────────────────────────────────────────────────────────────
@@ -221,8 +223,8 @@ export async function loadJob(jobIdOrNumber: string): Promise<JobRow> {
   const isUuid = /^[0-9a-f]{8}-/i.test(jobIdOrNumber);
   const r = await query(
     isUuid
-      ? `SELECT id, hh_job_number, job_name, is_internal, pipeline_status FROM jobs WHERE id = $1`
-      : `SELECT id, hh_job_number, job_name, is_internal, pipeline_status FROM jobs WHERE hh_job_number = $1`,
+      ? `SELECT id, hh_job_number, job_name, is_internal, pipeline_status, combined_into_job_id FROM jobs WHERE id = $1`
+      : `SELECT id, hh_job_number, job_name, is_internal, pipeline_status, combined_into_job_id FROM jobs WHERE hh_job_number = $1`,
     [isUuid ? jobIdOrNumber : parseInt(jobIdOrNumber, 10)],
   );
   const job = r.rows[0];
@@ -280,15 +282,26 @@ export async function unrecordedExcessUse(rows: Row[], invoiceId: number, extraR
   for (const id of excessIds) {
     // Everything that has left this deposit for an invoice, on any job (refunds are not invoices).
     const seen = new Set<number>();
-    const applied = round2((readDepositAvailability(all, id)?.applications ?? [])
+    const deposit = readDepositAvailability(all, id);
+    const applied = round2((deposit?.applications ?? [])
       .filter((a) => !a.applicationId || (!seen.has(a.applicationId) && !!seen.add(a.applicationId)))
       .reduce((sum, a) => sum + a.amount, 0));
     const r = await query(`SELECT COALESCE(SUM(claim_amount), 0)::float8 AS claimed FROM job_excess WHERE hh_deposit_id = $1`, [id]);
     const claimed = round2(Number(r.rows[0]?.claimed ?? 0));
     if (applied - claimed >= PENNY) {
+      // What HireHop still holds on the deposit decides the easy way out. Money
+      // left over (job 16491: £841.32 of £1,200 on the damage invoice, £358.68
+      // free) → refund that and "Retained by Ooosh" records the rest as claimed,
+      // with HireHop left as it is. Nothing left → only Claim can record it, and
+      // Claim writes its own allocation, so the hand-made one has to go first.
+      const free = round2(deposit?.available ?? 0);
+      const fix = free >= PENNY
+        ? `If that charge is right and the rest goes back to the client, use Excess → Manage → Reimburse for ${gbp(free)} `
+          + '(what HireHop still holds) and choose "Retained by Ooosh" — OP then records the rest as claimed and HireHop needs '
+          + 'no change. If the excess shouldn\'t pay it, remove the allocation in HireHop.'
+        : 'If the excess should pay this, remove the allocation in HireHop and use Excess → Claim; if not, just remove it in HireHop.';
       out.push(`Excess payment ${id} has ${gbp(applied)} applied to invoices in HireHop, but OP has recorded only ${gbp(claimed)} `
-        + 'claimed from that excess — it looks like it was applied by hand. If the excess should pay this, remove the allocation '
-        + 'in HireHop and use Excess → Claim; if not, just remove it in HireHop. Nothing is applied in Xero until the two agree.');
+        + `claimed from that excess — it looks like it was applied by hand. ${fix} Nothing is applied in Xero until the two agree.`);
     }
   }
   return out;
@@ -710,8 +723,25 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   );
   const opDeposits = op.rows.filter((r: any) => ['deposit', 'balance'].includes(r.payment_type) && r.source !== 'cross_job_apply');
   const opRefunds = op.rows.filter((r: any) => r.payment_type === 'refund');
+  // A combined booking's payments moved to the booking it was combined into: Combine
+  // re-creates each one there and refunds it back off this job in HireHop, but records
+  // the move on the kept job only. So a payment here that HireHop shows refunded back
+  // off itself IN FULL is accounted for, not money OP never took. One only part-refunded
+  // still asks — that residual is real (HH 15323 → 15322, Oct 2026).
+  const movedAway = new Set<number>();
+  if (job.combined_into_job_id) {
+    for (const row of hireRows) {
+      const id = idOf(row);
+      const credit = round2(parseFloat(row.credit ?? row.data?.credit ?? '0'));
+      const backOff = new Map<number, number>();   // by row id — a twin row must not count twice
+      for (const r of refundRows(rows, new Set([id]))) backOff.set(idOf(r), Math.abs(parseFloat(r.credit ?? r.data?.credit ?? '0')));
+      const refunded = round2([...backOff.values()].reduce((s, n) => s + n, 0));
+      if (credit - refunded < PENNY) movedAway.add(id);
+    }
+  }
   for (const row of hireRows) {
     const id = idOf(row);
+    if (movedAway.has(id)) continue;
     const credit = round2(parseFloat(row.credit ?? row.data?.credit ?? '0'));
     const mine = opDeposits.filter((r: any) => Number(r.hirehop_deposit_id) === id);
     if (mine.length === 0) {
@@ -732,6 +762,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   for (const row of refundRows(rows, hireIds)) {
     const d = row.data || {};
     const depositId = Number(d.OWNER_DEPOSIT);
+    if (movedAway.has(depositId)) continue;   // Combine's move to the kept booking, above
     const amount = round2(Math.abs(parseFloat(row.credit ?? d.credit ?? '0')));
     const desc = String(d.DESCRIPTION || row.desc || '').trim();
     const matched = opRefunds.some((r: any) => Number(r.hirehop_deposit_id) === depositId && Math.abs(Math.abs(Number(r.amount)) - amount) < PENNY);

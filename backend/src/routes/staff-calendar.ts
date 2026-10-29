@@ -9,8 +9,9 @@
  *   * Calendar reads — STAFF_ROLES. The whole team needs to see who is in.
  *   * Employment / pattern / salary / review writes — admin only, via the
  *     STAFF_ADMIN_ROLES chokepoint in services/staff-employment.ts.
- *   * Absence — admin only, with no exceptions, because it is special-category
- *     data (§0.5).
+ *   * Absence — admin only, because it is special-category data (§0.5). The
+ *     one exception is GET /me/absences: your own days, dates only, shown on
+ *     My Time as "Absent" — never the type or reason.
  *
  * MASKING (spec §0.5): every calendar response passes through
  * getStaffCalendar(), which strips special-category detail for non-admin
@@ -20,7 +21,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import {
-  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE, cycleWeekFor,
+  getStaffCalendar, getTodaySummary, addDaysYmd, DATE_RE, cycleWeekFor, contractedDatesAmong,
 } from '../services/staff-day-status';
 import {
   STAFF_ADMIN_ROLES, upsertEmployment, getEmployeeRecord, listEmployees, getStaffRoster,
@@ -39,7 +40,8 @@ import {
 import {
   createRequest, approveRequest, declineRequest, withdrawRequest, cancelRequest,
   getRequest, listRequests, getImpact, countPending,
-  type LeaveType, type LeaveStatus, type DayPortion, type DaySpec,
+  askToCancel, withdrawCancelAsk, approveCancelAsk, declineCancelAsk,
+  type LeaveType, type LeaveStatus, type DayPortion, type DaySpec, type LeaveRequest,
 } from '../services/staff-leave';
 import {
   createEntry as createOvertime, approveEntry as approveOvertime,
@@ -51,11 +53,12 @@ import {
 import {
   createAbsence, closeAbsence, cancelAbsence, recordRtw, reclaimLeaveDays,
   getReclaimCandidates, getAbsence, listAbsences, listRtwOutstanding,
-  getAbsenceReport, ABSENCE_TYPES,
+  getAbsenceReport, ABSENCE_TYPES, listOwnAbsences,
   type AbsenceType, type CreateAbsenceInput,
 } from '../services/staff-absence';
 import {
   notifyLeaveRequested, notifyOvertimeLogged, notifyDecision, notifyRtwDue, notifySwapRequested,
+  notifyLeaveCancelAsked,
 } from '../services/staff-notifications';
 import {
   checkSwap, createSwapRequest, decideSwap, withdrawSwap, cancelSwap, getSwap, listSwaps,
@@ -74,7 +77,7 @@ import {
   listNeedsClosing, closeOutBooking, withdrawBooking, amendBooking,
 } from '../services/freelancer-days';
 import { sendOfferEmail, sendCancellationEmail, sendUpdatedEmail } from '../services/freelancer-day-offer';
-import { ukToday } from '../services/uk-date';
+import { ukToday, ukDateOf } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -206,11 +209,12 @@ router.get('/roster', authorize(...MANAGER_ROLES), async (req: AuthRequest, res:
 
 // A day can be a whole day, a half, or an actual period ("leaving at 15:00").
 // The string form is kept so an older client sending {"2027-07-09":"am"} still
-// works; the object form carries the times.
+// works; the object form carries the times. 'none' — "not off that day" —
+// takes one day out of a range when changing a booking (spec §5.4).
 const daySpecSchema = z.union([
   z.enum(['full', 'am', 'pm']),
   z.object({
-    portion: z.enum(['full', 'am', 'pm', 'hours']),
+    portion: z.enum(['full', 'am', 'pm', 'hours', 'none']),
     startTime: timeStr.nullish(),
     endTime: timeStr.nullish(),
   }),
@@ -242,8 +246,12 @@ router.get('/leave/impact', async (req: AuthRequest, res: Response) => {
   if ('error' in target) { res.status(403).json({ error: target.error }); return; }
   try {
     const halfDays = req.query.halfDays ? JSON.parse(String(req.query.halfDays)) : {};
+    // ?replaces=<id> — previewing a CHANGE to that approved booking (§5.4).
+    // getImpact refuses a booking that is not the target person's.
+    const replaces = req.query.replaces ? String(req.query.replaces) : undefined;
     res.json({ data: await getImpact(target.personId, from, to, type, halfDays,
-      req.query.excludeRequestId ? String(req.query.excludeRequestId) : undefined) });
+      req.query.excludeRequestId ? String(req.query.excludeRequestId) : undefined,
+      replaces ? { replacesRequestId: replaces } : undefined) });
   } catch (err) {
     console.error('[staff-calendar] impact error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to work out the impact' });
@@ -267,6 +275,8 @@ router.get('/leave', async (req: AuthRequest, res: Response) => {
         personId, status,
         from: DATE_RE.test(String(req.query.from)) ? String(req.query.from) : undefined,
         to: DATE_RE.test(String(req.query.to)) ? String(req.query.to) : undefined,
+        // ?cancelAsked=1 — approved bookings with an ask to cancel waiting (§5.4).
+        cancelAsked: req.query.cancelAsked === '1',
       }),
       pendingCount: isAdmin(req) ? await countPending() : undefined,
     });
@@ -285,28 +295,84 @@ router.post('/leave', async (req: AuthRequest, res: Response) => {
     endDate: dateStr,
     halfDays: halfDaysSchema,
     note: z.string().max(1000).nullish(),
+    // A CHANGE to this approved booking (spec §5.4) — waits for approval, and
+    // replaces it only once approved. The note is then required.
+    replacesRequestId: z.string().uuid().optional(),
+    // An admin changing somebody's booking on their behalf decides it in the
+    // same press, rather than asking themselves for approval.
+    approveNow: z.boolean().optional(),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  if (parsed.data.approveNow && !isAdmin(req)) {
+    res.status(403).json({ error: 'Only an admin can approve a change as they make it' }); return;
+  }
+  // Only for a change — a new booking is asked for and approved as it always was.
+  if (parsed.data.approveNow && !parsed.data.replacesRequestId) {
+    res.status(400).json({ error: 'approveNow is only for changing an approved booking' }); return;
+  }
 
   const target = await resolveLeaveTarget(req, parsed.data.personId);
   if ('error' in target) { res.status(403).json({ error: target.error }); return; }
+  let id: string;
   try {
-    const id = await createRequest({
+    id = await createRequest({
       personId: target.personId,
       leaveType: parsed.data.leaveType,
       startDate: parsed.data.startDate,
       endDate: parsed.data.endDate,
       halfDays: parsed.data.halfDays as Record<string, DayPortion | DaySpec> | undefined,
       note: parsed.data.note ?? null,
+      replacesRequestId: parsed.data.replacesRequestId ?? null,
     }, req.user!.id);
-    void notifyLeaveRequested(id);
-    res.status(201).json({ data: await getRequest(id) });
   } catch (err) {
     console.error('[staff-calendar] create leave error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to submit the request' });
+    return;
   }
+
+  if (parsed.data.approveNow) {
+    try {
+      // Their own reason doubles as the decision note the person is shown.
+      await approveRequest(id, parsed.data.note ?? null, req.user!.id);
+      const r = await getRequest(id);
+      if (r) void notifyLeaveDecision(r, 'approved');
+      res.status(201).json({ data: r });
+    } catch (err) {
+      // Saved, but not approved — it now waits like any other request, so
+      // make sure it is visible where requests are decided.
+      void notifyLeaveRequested(id);
+      res.status(400).json({
+        error: `Saved, but not approved: ${err instanceof Error ? err.message : 'unknown error'} — it is waiting in Waiting for you`,
+      });
+    }
+    return;
+  }
+  void notifyLeaveRequested(id);
+  res.status(201).json({ data: await getRequest(id) });
 });
+
+/**
+ * Tell the person what was decided. A change (spec §5.4) says what it was and
+ * what it is now; a declined change says the original stands, so it cannot be
+ * read as the holiday itself being refused.
+ */
+async function notifyLeaveDecision(r: LeaveRequest, outcome: 'approved' | 'declined') {
+  const span = (a: string, b: string) => `${a}${b !== a ? ` – ${b}` : ''}`;
+  const now = span(r.startDate, r.endDate);
+  const was = r.replaces ? span(r.replaces.startDate, r.replaces.endDate) : null;
+  await notifyDecision({
+    personId: r.personId, kind: 'leave', outcome, note: r.decisionNote, entityId: r.id,
+    ...(was
+      ? outcome === 'approved'
+        // The hours as well as the dates: a day taken out of the middle keeps
+        // both end dates. notifyDecision turns "N min" into "Xh Ym".
+        ? { heading: 'Your time off has been changed',
+            summary: `now ${now}, ${r.totalMinutes} min (was ${was}, ${r.replaces!.totalMinutes} min)` }
+        : { heading: 'Your change to time off was declined', summary: `${was} stays booked as it was` }
+      : { summary: now }),
+  });
+}
 
 // GET /api/staff-calendar/leave/:id — the approval surface (spec §11).
 // Carries the impact alongside the request, so approving is never a guess.
@@ -319,15 +385,29 @@ router.get('/leave/:id', async (req: AuthRequest, res: Response) => {
       res.status(403).json({ error: 'Insufficient permissions' }); return;
     }
     // Rebuild the FULL day spec, not just the portion — a timed period needs
-    // its times back or the impact would re-price it as a half day.
-    const halfDays = Object.fromEntries(
+    // its times back or the impact would re-price it as a half day. A date in
+    // the range with no row is "not off" (a weekend, or a day a change took
+    // out); saying so keeps a changed booking's gap from being priced back in.
+    const rowDates = new Set(request.days.map(d => d.date));
+    const halfDays: Record<string, DaySpec> = Object.fromEntries(
       request.days.filter(d => d.portion !== 'full').map(d =>
         [d.date, { portion: d.portion, startTime: d.startTime, endTime: d.endTime }]));
+    for (let d = request.startDate; d <= request.endDate; d = addDaysYmd(d, 1)) {
+      if (!rowDates.has(d)) halfDays[d] = { portion: 'none' };
+    }
+    // A change still waiting is shown as it was asked: the days that had gone
+    // when it was asked for are the ones it could not touch.
+    const change = request.replacesRequestId && request.status === 'pending'
+      ? { replacesRequestId: request.replacesRequestId, lockBefore: ukDateOf(new Date(request.requestedAt)) }
+      : undefined;
     const impact = await getImpact(
       request.personId, request.startDate, request.endDate, request.leaveType,
-      halfDays, request.id
+      halfDays, request.id, change
     );
-    res.json({ data: { request, impact } });
+    // For a change, the booking it replaces — so the approver can be shown
+    // exactly which days move, not just two date ranges that may match.
+    const original = request.replacesRequestId ? await getRequest(request.replacesRequestId) : null;
+    res.json({ data: { request, impact, original } });
   } catch (err) {
     console.error('[staff-calendar] leave detail error:', err);
     res.status(500).json({ error: 'Failed to load the request' });
@@ -339,9 +419,7 @@ router.post('/leave/:id/approve', adminOnly, async (req: AuthRequest, res: Respo
   try {
     await approveRequest(req.params.id as string, req.body?.note ?? null, req.user!.id);
     const r = await getRequest(req.params.id as string);
-    if (r) void notifyDecision({ personId: r.personId, kind: 'leave', outcome: 'approved',
-      summary: `${r.startDate}${r.endDate !== r.startDate ? ` – ${r.endDate}` : ''}`,
-      note: r.decisionNote, entityId: r.id });
+    if (r) void notifyLeaveDecision(r, 'approved');
     res.json({ data: r });
   } catch (err) {
     console.error('[staff-calendar] approve error:', err);
@@ -357,9 +435,7 @@ router.post('/leave/:id/decline', adminOnly, async (req: AuthRequest, res: Respo
   try {
     await declineRequest(req.params.id as string, parsed.data.note, req.user!.id);
     const r = await getRequest(req.params.id as string);
-    if (r) void notifyDecision({ personId: r.personId, kind: 'leave', outcome: 'declined',
-      summary: `${r.startDate}${r.endDate !== r.startDate ? ` – ${r.endDate}` : ''}`,
-      note: r.decisionNote, entityId: r.id });
+    if (r) void notifyLeaveDecision(r, 'declined');
     res.json({ data: r });
   } catch (err) {
     console.error('[staff-calendar] decline error:', err);
@@ -387,10 +463,82 @@ router.post('/leave/:id/cancel', adminOnly, async (req: AuthRequest, res: Respon
   if (!parsed.success) { res.status(400).json({ error: 'A reason is required when cancelling' }); return; }
   try {
     await cancelRequest(req.params.id as string, parsed.data.reason, req.user!.id);
-    res.json({ data: await getRequest(req.params.id as string) });
+    const r = await getRequest(req.params.id as string);
+    // They are told, as for a called-off home day — time off they were
+    // counting on has gone.
+    if (r) void notifyDecision({ personId: r.personId, kind: 'leave', outcome: 'cancelled',
+      summary: `${r.startDate}${r.endDate !== r.startDate ? ` – ${r.endDate}` : ''}`,
+      note: parsed.data.reason, entityId: r.id });
+    res.json({ data: r });
   } catch (err) {
     console.error('[staff-calendar] cancel error:', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
+  }
+});
+
+// ── Asking to cancel approved time off (spec §5.4) ──────────────────────────
+// The person asks in writing; an admin approves (the ordinary cancel above)
+// or declines (the booking stands). A CHANGE is POST /leave with
+// replacesRequestId, and is decided by the ordinary approve / decline.
+
+// POST /api/staff-calendar/leave/:id/cancel-request — the person asks.
+router.post('/leave/:id/cancel-request', async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ note: z.string().trim().min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Say why — a note is required' }); return; }
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    await askToCancel(req.params.id as string, own, parsed.data.note, req.user!.id);
+    void notifyLeaveCancelAsked(req.params.id as string);
+    res.json({ data: await getRequest(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to ask' });
+  }
+});
+
+// POST /api/staff-calendar/leave/:id/cancel-request/withdraw — they change their mind.
+router.post('/leave/:id/cancel-request/withdraw', async (req: AuthRequest, res: Response) => {
+  try {
+    const own = await personIdForUser(req.user!.id);
+    if (!own) { res.status(403).json({ error: 'No staff record is linked to your login' }); return; }
+    await withdrawCancelAsk(req.params.id as string, own);
+    res.json({ data: await getRequest(req.params.id as string) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to withdraw' });
+  }
+});
+
+// POST /api/staff-calendar/leave/:id/cancel-request/approve
+router.post('/leave/:id/cancel-request/approve', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    await approveCancelAsk(req.params.id as string, req.user!.id);
+    const r = await getRequest(req.params.id as string);
+    if (r) void notifyDecision({ personId: r.personId, kind: 'leave', outcome: 'cancelled',
+      summary: `${r.startDate}${r.endDate !== r.startDate ? ` – ${r.endDate}` : ''} — as you asked`,
+      entityId: r.id });
+    res.json({ data: r });
+  } catch (err) {
+    console.error('[staff-calendar] approve cancel ask error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to cancel' });
+  }
+});
+
+// POST /api/staff-calendar/leave/:id/cancel-request/decline
+router.post('/leave/:id/cancel-request/decline', adminOnly, async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ note: z.string().trim().min(1).max(1000) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'A reason is required when declining' }); return; }
+  try {
+    await declineCancelAsk(req.params.id as string, parsed.data.note, req.user!.id);
+    const r = await getRequest(req.params.id as string);
+    // NOT "Time off declined" — the time off stands; it is the cancel that was refused.
+    if (r) void notifyDecision({ personId: r.personId, kind: 'leave', outcome: 'declined',
+      heading: 'Your ask to cancel time off was declined',
+      summary: `${r.startDate}${r.endDate !== r.startDate ? ` – ${r.endDate}` : ''} stays booked`,
+      note: parsed.data.note, entityId: r.id });
+    res.json({ data: r });
+  } catch (err) {
+    console.error('[staff-calendar] decline cancel ask error:', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to decline' });
   }
 });
 
@@ -572,9 +720,10 @@ router.post('/year-end-cashout', adminOnly, async (req: AuthRequest, res: Respon
 
 // ── Absence (Phase D) ───────────────────────────────────────────────────────
 //
-// ADMIN ONLY, every route. Absence is special-category data under UK GDPR
+// ADMIN ONLY, every route here. Absence is special-category data under UK GDPR
 // (spec §0.5) and the tier is deliberate — the module has one admin today, and
-// widening it is an RBAC change, not a code change.
+// widening it is an RBAC change, not a code change. (GET /me/absences, beside
+// /me/balances, is the person's own dates only — see listOwnAbsences().)
 //
 // Migration 215 removed the one exception there used to be, the self-recorded
 // timed marker. It answered neither question this module exists to answer —
@@ -601,6 +750,65 @@ router.get('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('[staff-calendar] list absences error:', err);
     res.status(500).json({ error: 'Failed to load absences' });
+  }
+});
+
+// GET /api/staff-calendar/absences/:id — one absence, plus any booked leave it
+// overlaps (the reclaim prompt on the Absence page reads this).
+//
+// This route and POST /absences below were deleted by accident with the timed
+// markers (commit 781f2782, 15 Sep 2026) and restored Oct 2026 — the Absence
+// page could not record anything in between, and nothing noticed because the
+// verify script calls the service directly. routes/__tests__/staff-calendar-routes.test.ts
+// now checks every absence route the page calls is still here.
+router.get('/absences/:id', adminOnly, async (req: AuthRequest, res: Response) => {
+  try {
+    const a = await getAbsence(req.params.id as string);
+    if (!a) { res.status(404).json({ error: 'Absence not found' }); return; }
+    res.json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
+  } catch (err) {
+    console.error('[staff-calendar] get absence error:', err);
+    res.status(500).json({ error: 'Failed to load the absence' });
+  }
+});
+
+// POST /api/staff-calendar/absences — open one. No end date = still running.
+//
+// Whole days, mornings or afternoons only: migration 215 removed timed absence
+// and the database refuses it, so the schema does not offer 'hours' or times.
+router.post('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
+  const schema = z.object({
+    personId: z.string().uuid(),
+    absenceType: z.enum(ABSENCE_TYPES as [string, ...string[]]),
+    startDate: dateStr,
+    endDate: dateStr.nullish(),
+    portion: z.enum(['full', 'am', 'pm']).optional(),
+    deductsAllowance: z.boolean().optional(),
+    reasonCategory: z.string().max(50).nullish(),
+    notes: z.string().max(2000).nullish(),
+    selfCertified: z.boolean().optional(),
+    fitNoteReceived: z.boolean().optional(),
+    fitNoteExpiry: dateStr.nullish(),
+    sspQualifying: z.boolean().nullish(),
+    rtwRequired: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
+  if (parsed.data.endDate && parsed.data.endDate < parsed.data.startDate) {
+    res.status(400).json({ error: 'The last day off can’t be before the first' }); return;
+  }
+
+  try {
+    const a = await createAbsence(
+      { ...parsed.data, absenceType: parsed.data.absenceType as AbsenceType } as CreateAbsenceInput,
+      req.user!.id
+    );
+    // The reclaim prompt (§7.4) is offered, never applied automatically —
+    // giving holiday back is a decision, and the platform rule is that money
+    // and allowance never move without a human saying so.
+    res.status(201).json({ data: a, reclaimCandidates: await getReclaimCandidates(a.id) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record the absence' });
   }
 });
 
@@ -1140,12 +1348,40 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
         holiday: { ...holiday, balanceMinutes: holiday.availableMinutes },
         overtime: { ...overtime, balanceMinutes: overtime.availableMinutes },
         bankHolidayPolicy,
+        // The year's bank holidays this person would otherwise be WORKING —
+        // the only ones My Time offers to book off. Additive (an older bundle
+        // ignores it); null if the read failed, and My Time then lists them
+        // all as before rather than hiding one somebody does need to book.
+        bankHolidaysWorking: await contractedDatesAmong(personId, await getBankHolidays(year))
+          .catch(e => { console.error('[staff-calendar] bank holidays worked error:', e); return null; }),
       },
       hasStaffRecord: true,
     });
   } catch (err) {
     console.error('[staff-calendar] my balances error:', err);
     res.status(500).json({ error: 'Failed to load your balances' });
+  }
+});
+
+// GET /api/staff-calendar/me/absences?year= — your own absences, as "Absent".
+//
+// The one absence read that is not adminOnly, and it carries no type, reason,
+// notes, fit note or return-to-work — listOwnAbsences() is the mask (spec §7.2:
+// what staff see is "Absent"). An admin may pass personId= for the Staff
+// page's Time off tab, which mounts My Time for that person, like /me/balances.
+router.get('/me/absences', async (req: AuthRequest, res: Response) => {
+  try {
+    const asked = typeof req.query.personId === 'string' && req.query.personId ? req.query.personId : null;
+    if (asked && !z.string().uuid().safeParse(asked).success) {
+      res.status(400).json({ error: 'personId must be a UUID' }); return;
+    }
+    const personId = asked && isAdmin(req) ? asked : await personIdForUser(req.user!.id);
+    if (!personId) { res.json({ data: [] }); return; }
+    const year = resolveYear(req);
+    res.json({ data: await listOwnAbsences(personId, `${year}-01-01`, `${year}-12-31`) });
+  } catch (err) {
+    console.error('[staff-calendar] my absences error:', err);
+    res.status(500).json({ error: 'Failed to load your absences' });
   }
 });
 

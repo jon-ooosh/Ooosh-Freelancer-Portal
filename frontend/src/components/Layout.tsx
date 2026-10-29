@@ -77,7 +77,9 @@ const navItems: NavItem[] = [
     children: [
       { path: '/money/overview', label: 'Overview', roles: ['admin', 'manager'] },
       { path: '/money/excess', label: 'Excess', roles: ['admin', 'manager'] },
-      { path: '/money/costs', label: 'Costs', roles: ['admin', 'manager', 'staff'] },
+      // Every staff role (jon, Oct 2026): general assistants hold company cards
+      // and are chased for receipts too. Approving and paying stay role-gated server-side.
+      { path: '/money/costs', label: 'Costs' },
       { path: '/money/shop', label: 'Shop Till' },
     ],
   },

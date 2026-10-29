@@ -687,6 +687,31 @@ export async function getStaffCalendar(
   });
 }
 
+/**
+ * Which of these dates is this person contracted to work?
+ *
+ * Their RAW contract: the pattern in force on each date plus approved swaps,
+ * with company days applied — leave and absence ignored, because "would they
+ * be working it?" is the question, not "are they in?".
+ *
+ * My Time asks it about bank holidays (Oct 2026). Under `use_allowance` a bank
+ * holiday is only worth booking off if you would otherwise be working it:
+ * somebody who never works Mondays was being told to book Monday 28 Dec, and
+ * the booking form then refused the date as not a contracted day.
+ */
+export async function contractedDatesAmong(personId: string, dates: string[]): Promise<string[]> {
+  const valid = dates.filter(d => DATE_RE.test(d)).sort();
+  if (valid.length === 0) return [];
+  const [person] = await getStaffCalendar(valid[0]!, valid[valid.length - 1]!, {
+    isAdmin: true, personId, includeLeave: false, includeAbsence: false,
+  });
+  if (!person) return [];
+  const wanted = new Set(valid);
+  return person.days
+    .filter(d => wanted.has(d.date) && d.status === 'working' && d.scheduledMinutes > 0)
+    .map(d => d.date);
+}
+
 /** Single person, single date. Thin wrapper so callers never hand-roll it. */
 export async function getDayStatus(personId: string, date: string, isAdmin = false): Promise<StaffDay | null> {
   const [person] = await getStaffCalendar(date, date, { isAdmin, personId });
