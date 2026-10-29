@@ -2,7 +2,7 @@
 
 > **Status (Oct 2026): LIVE under Jobs → Leads.** §1–13 are the original design; §14–19 are
 > what was built on top of it, in order. **§20 is the current state and what's left — read
-> that first.**
+> that first.** §21 is the band watch (DRAFT, not built): watching a known band for its next tour.
 
 ## 1. Motivation
 
@@ -503,9 +503,154 @@ jon asked whether the Leads date bug existed elsewhere. Findings:
   FROM a lead (`converted_job_id`), never linked tour jobs.
 
 **Open / next candidates:**
+- **Band watch** (§21) — watch a known band and get a warm lead when it next tours. Agreed, not built.
 - **Outreach email drafting** (§6 Phase 7) — folds into the auto-chase "voice" work on the
   Enquiries pipeline (AUTO-CHASE-SPEC) rather than being built separately.
 - **MusicBrainz value check** — jon expects little from it. Look at how often `external_links`
   carries MusicBrainz-only links; drop it if it adds nothing.
 - **SQL `CURRENT_DATE` in UK terms** — only if a midnight–1am BST edge ever bites (§19.1).
 
+## 21. Band watch — "tell me when they're next over" (DRAFT, Oct 2026 — not built)
+
+Agreed with jon, 26–29 Oct 2026. Nothing below is built yet.
+
+### 21.1 Why
+
+The Lead Finder starts from venues: it finds tours, then asks whose they are. A band we have
+worked with, or nearly worked with, may not be back for 6, 12 or 18+ months (often a US act
+returning for a European tour), and nobody can keep them in mind that long. The band watch
+starts from the band: we name the band, OP checks for its next tour, and a hit becomes a
+**warm** lead whose contacts we already hold. jon: this is better placed than cold searching,
+where finding contacts is most of the work and the result is still a cold lead.
+
+Today's search can't see these tours anyway: it looks at 24 UK venues, UK dates only, and needs
+3+ UK dates within 6 weeks. A US band playing one London show and 15 mainland dates is dropped.
+The reverse search itself is not new: `detector.ts` `findAllUkDates()` already asks Ticketmaster
+for every date of one act by its Ticketmaster id. The watch feeds that question with bands we
+chose.
+
+### 21.2 Settled decisions
+
+1. **Watch a band (an organisation), not a job.** One watch per org. Ticking it again on a later
+   job just records that job.
+2. **Offered on all three close-outs, ticked by default:** Lost and Completed
+   (`StatusTransitionModal` in `JobDetailPage.tsx`) and Cancelled (`CancellationModal.tsx`).
+   **Never offered for `'Confirmed Alternative Quote (from us)'`** — not a real loss. Jobs closed
+   without a modal (the 09:00 auto-loser's "No Decision", status changes made in HireHop) are not
+   watched. Accepted for now: an unanswered enquiry is a weak lead.
+3. **Which organisation.** The job's Band org (`job_organisations.role = 'band'`); else the client
+   org, whatever its type; else the person picks one. The tick shows the name ("Watch: <name> —
+   change") so it can be corrected. The data, 29 Oct 2026 (1,743 lost / cancelled / completed jobs
+   in two years): band linked 103 · client typed band 270 · **client typed "client" 1,095** (jon:
+   usually the band itself, especially when it's the only contact) · no client org 217 · promoter,
+   management and other types 58. So the client is the usual answer, and the Ticketmaster match
+   (5) is what catches a management company or promoter.
+   - Note for whoever repeats this count: `jobs.created_by` can't separate jobs made in OP from
+     ones that came from HireHop. The sync stamps a real user id, not `'hirehop_sync'`, so every
+     row read "made in OP".
+4. **Never expires; stopped by hand only.** A band that has split up just never comes up. A watch
+   does **not** end when a tour becomes an enquiry: after this tour they will come back again. The
+   lead's overlapping-dates rule (§14 item 5) already stops one tour alerting twice.
+5. **Matching the band to Ticketmaster.** Reuse the act's id if a lead already linked it
+   (`leads.tm_artist_id` + `matched_organisation_id`). Otherwise: exactly one Ticketmaster act with
+   the same normalised name (`normaliseArtist()`) → linked automatically, with **"Wrong band?"** on
+   the watch. None or several → onto a short **"Match these"** list on the Leads page, where a
+   person picks one or marks "Not on Ticketmaster". A same-name act can only cause a false alert,
+   which a person sees before acting. Never search MusicBrainz by name (§18 still applies).
+6. **Where it looks.**
+   - **Ticketmaster**, by artist id (`events.json?attractionId=`), in the UK and Ticketmaster's
+     European countries (IE, DE, NL, BE, FR, ES, IT, AT, CH, DK, SE, NO, FI, PL, CZ). Free: one
+     call per band per check against a 5,000-a-day allowance.
+   - **Skiddle** (UK, free key) — a trial (21.5 step 5). jon is wary of false matches because
+     Skiddle lists so much, so a band is matched to a Skiddle artist once, with the same rule as
+     (5), and never by searching names on each check.
+   - **A Claude web check** (21.3): the band's own site and links (`links.ts`), news, public
+     listing pages. It's the only way to watch a band Ticketmaster doesn't sell, and it reads the
+     band's own date list whoever sells the tickets. Anthropic's web fetch reads web pages and
+     PDFs, but **not images** (poster artwork) and not sites that only work in a browser
+     (Instagram, most of Facebook). Start text and PDF only. When the check sees a poster it
+     can't read, it says so with the link. Add image reading only if that turns out to be common.
+   - **Not used:** Songkick and JamBase (paid, reportedly ~$500 a month, not worth it), Eventim
+     and See Tickets (only as affiliate feeds, whose terms are for publishing listings, not lead
+     finding), DICE (no public API), setlist.fm (past shows only). **Bandsintown:** free keys are
+     per artist and wider use needs their approval. jon to ask; if granted it sits beside
+     Ticketmaster.
+7. **Runs on its own timer, unlike the cold search.** The cold search stays manual (§20) because
+   each batch creates work. A watch hit doesn't: the band is known, the contacts are on file, an
+   enquiry is one click away.
+   - Ticketmaster (and Skiddle) **weekly**.
+   - The Claude check **every 2 months** per band for its first 2 years of watching, then **every
+     6 months**.
+   - **A monthly cap on Claude checks** (`system_settings`) keeps the cost flat however long the
+     list grows, so ticking by default is affordable. When the cap bites: bands never checked
+     first, then the longest since their last check. jon: about £60 a month is fine for a trial.
+     The estimate is 10–20p a check (Sonnet with up to 6 web searches, the same shape as contact
+     research). Start the cap at 300 a month and adjust once real costs are visible.
+8. **A hit is an ordinary warm lead.** `matched_organisation_id` = the watched org,
+   `match_confidence = 'exact'`, `match_via = 'watch'`, `stream = 'warm'`, `lead_source =
+   'band_watch'`, a **"Watched"** badge, top of the dashboard card, and a bell to the person who
+   last ticked the watch. Everything after that already exists: scoring that weighs history, jobs
+   for this tour (§19), Log outreach / Start enquiry. **The hit shows when we last heard from each
+   contact**, because after 12–18 months the tour manager or manager has often changed (jon:
+   "happens all the time"); **Research again** (§18) is the fix.
+9. **Ranking.** A tour starting and/or ending in the UK first, then UK dates in the middle, then
+   mainland only (ranked lower, not dropped). Caveat: Ticketmaster only shows the dates it sells,
+   so "starts in the UK" can be wrong if the opening dates are sold elsewhere. The web check reads
+   the band's own list.
+10. **"Announced, dates to come"** (e.g. "Europe, spring 2027 — dates soon") is the earliest
+    heads-up there is. The web check reports it; it becomes a lead with no dates, labelled
+    **"Dates to come"**, and still shows on the dashboard card (`attention.ts` filters on
+    `first_date` today, so it needs a rule for these). When dates appear for that watch,
+    they fill in the same lead rather than starting a new one.
+11. **The back catalogue, once.** Orgs from lost / cancelled / completed jobs of the last two to
+    three years (never alternative-quote losses) are run through the Ticketmaster match first.
+    Only those with a match, or that a person matches, are listed for ticking in bulk. The org
+    typing mess doesn't matter here: the Ticketmaster match does the filtering.
+
+### 21.3 The web check — code rails, not trust
+
+Structured output (`readStructuredJson()`): `status` (`dates` | `announced_no_dates` | `nothing` |
+`poster_unreadable`), `dates` (`date`, `city`, `country`, `venue`), `source_urls` (at least one),
+`summary`.
+
+- **Every source URL must be one the web tools actually returned in that reply.** A hit citing
+  anything else is dropped.
+- Dates in the past, or before today + `lead_lookahead_min_weeks`, are dropped (too late to sell).
+- A web hit is labelled **"From the web — check the source"**, with the link(s), in the lead's
+  expanded row.
+- Model from `config/anthropic.ts`, never a model string in the service. Use the current web
+  search / web fetch tool versions (contact research still uses `web_search_20250305`).
+
+### 21.4 Data (a sketch — confirm at build time)
+
+- **`band_watches`**: `organisation_id` (one active watch per org), `tm_attraction_id` +
+  `tm_match` (`auto` | `confirmed` | `not_found` | `ambiguous`), `skiddle_artist_id`,
+  `started_from_job_id`, `started_by`, `started_at`, `last_ticked_by`, `last_ticked_at`,
+  `stopped_at` / `stopped_by`, `last_tm_check_at`, `last_web_check_at`, `last_web_result` (jsonb).
+- **`leads`**: + `watch_id`; each date in `all_dates` carries its country; + `uk_position`
+  (`start` | `end` | `both` | `middle` | `none`). For a watch hit `first_date` is the tour's first
+  date anywhere, which is the right "too late to sell" measure for the dashboard (`attention.ts`).
+  `uk_date_count` keeps its meaning.
+- **`system_settings`** (category `leads`): `band_watch_enabled`, `band_watch_web_checks_per_month`
+  (300), `band_watch_web_interval_days` (60), `band_watch_web_interval_days_later` (180).
+- A migration for each, added to `run.ts`, next free number at build time.
+
+### 21.5 Build order
+
+1. **Watches:** the table, the tick on the three close-outs (on by default, never for an
+   alternative-quote loss), "Watch this band" on the org page, Ticketmaster matching (automatic /
+   "Match these"), a **Watched bands** list on the Leads page (who, since when, from which job,
+   last checked, Stop).
+2. **The Ticketmaster check:** weekly, UK + Europe; hits become warm leads with the Watched badge,
+   UK-position ranking and the bell.
+3. **The back catalogue** list (21.2 item 11).
+4. **The Claude web check** with the rails, the cap and the slow-down; "Dates to come" leads.
+5. **Skiddle trial:** about 20 watched bands, compared with Ticketmaster by hand. Keep it only if
+   the matches are clean.
+6. **Later, if asked:** Bandsintown (if access is granted), reading poster images.
+
+### 21.6 Open
+
+- **Bandsintown access** — jon to ask.
+- **Who gets the bell when the person who ticked the watch has left?** Probably the managers;
+  decide at build.
