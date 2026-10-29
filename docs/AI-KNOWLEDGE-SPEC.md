@@ -218,3 +218,24 @@ to a job the same deterministic way emails are matched.
 5. **Terms:** only one bespoke deal among 50+ upcoming hires (The Wedding Present: 5% off
    vans, 20% off rehearsals of 2+ days). Simpler than expected. Discounts are the discounts
    module's job; client facts still get built. How far the brief looks: §5.
+
+## 10. Open threads (29 Oct 2026)
+
+One conversation (15–29 Oct) branched into several pieces of work. This is where each one stands, so
+none fizzles out. Update it when one moves.
+
+| Thread | State | Next step | Who |
+|---|---|---|---|
+| AI quoting | Parked. HireHop forbids generating its PDFs via the API (`AI-QUOTING-SPEC.md` §3) | Pick up after Phases C–D | — |
+| House voice (Phase A) | Done; the voice is a Staff Document shared with Claude | Tweak the document as drafts come in | jon |
+| Guides shared with Claude (Phase B) | Built (PR #1562) | — | — |
+| Van quoting guide | Drafted (`guide-drafts/QUOTING-A-VAN-HIRE.md`) | Paste into Staff Documents, share with Claude (Quoting – vans), delete the draft | jon |
+| Lessons learned guide | Draft 3, all 14 confirmed (`guide-drafts/LESSONS-LEARNED.md`) | Paste into Staff Documents, share with Claude (Client questions, Quoting), delete the draft | jon |
+| Retro "next time?" box | Live (PR #1573) | Add retro-derived lessons to the guide from time to time | jon + Claude |
+| Client brief (Phase C, §5) | Specified, not built | Build when chosen | Claude |
+| Client facts (Phase D, §6) | Specified, not built | Build after C | Claude |
+| Claude suggesting actions (§8a) | Agreed: suggest → one click → automatic for low-risk only | First step: "after sending, do this" beside a chase draft | Claude |
+| Quote-vs-spec checker (lesson 7) | Wanted, deliberately set aside | Scope it (reuse the backline matcher) | later |
+| Warehouse habits guide | Idea, from Problem threads | Draft from Problems when there's room | later |
+| Calls / phones | Voipfone has no API; moving to Twilio (`CALL-INTELLIGENCE-SPEC.md` §T, PR #1578). Test number +44 1634 980910 | Twilio Console setup (§T2), then build §T3, then a week's test on one base | jon, then Claude |
+| Lost-reason data quality | Noted: "No Decision" / "Other" with no detail / test rows | Decide whether to tighten the lost modal | jon |

@@ -1,9 +1,9 @@
 # Lessons learned the hard way
 
-*Draft 2, 27 Oct 2026: jon's interview answers (1–5) and rules drawn from OP's Problems, retros and lost
-enquiries, Apr–Oct 2026 (6–14, **marked [to confirm] until jon agrees each one**). Grows over time: interviews, then rules
-drawn from Problems and retros, each confirmed by jon before it goes in. To paste into Staff
-Documents and share with Claude (topics: Client questions, Quoting) once it has a few more entries.*
+*Draft 3, 29 Oct 2026: all fourteen confirmed by jon (1–5 from his interview, 6–14 drawn from OP's
+Problems, retros and lost enquiries, Apr–Oct 2026). Ready to paste into Staff Documents and share with
+Claude (topics: Client questions, Quoting). New lessons are added the same way: drawn from Problems and
+retros, confirmed by jon before they go in.*
 
 Each lesson is a rule, why we have it, and what it means day to day.
 
@@ -62,7 +62,7 @@ the fault is genuine and theirs if it isn't.
 
 **Why.** Saying it at the start keeps it non-confrontational. Saying it afterwards starts an argument.
 
-## 6. [to confirm] Many "faults" on the road aren't faults: talk them through first
+## 6. Many "faults" on the road aren't faults: talk them through first
 
 **From the records:** an amp "not turning on" that was a popped fuse, then no fault found after hours
 of testing (16490); a "blown fuse" that was fine on return (16332); a DI "not working" that was the gain
@@ -74,7 +74,7 @@ volume, cables swapped, batteries charged, the right input. Valve amps sometimes
 normal, not a broken amp. If the checks don't fix it, replace it anyway (lesson 5) and test it
 properly when it's back.
 
-## 7. [to confirm] Check the quote against their spec, line by line, after every change
+## 7. Check the quote against their spec, line by line, after every change
 
 **From the records:** a speaker cable never on the quote for an amp and cab, and nobody noticed when
 sending it (15971); a snare drum removed by accident when a second kick drum went on, found at the
@@ -85,7 +85,7 @@ on the spec that was never quoted (16649); items missed off a festival PO, so no
 line by line. When something goes on or comes off, check what depends on it: an amp needs a speaker
 cable, a kit needs a snare.
 
-## 8. [to confirm] Chase missing kit the day it's found missing
+## 8. Chase missing kit the day it's found missing
 
 **From the records:** a battery charger (15956), a Nord triple pedal needed for the next festival
 (16480), a keys stand (16607), a drum rug (15918), cables where two weeks went by and we had to absorb
@@ -95,7 +95,7 @@ the cost (15415).
 invoice the replacement (or take it from the excess) and refund if it turns up. Tag the job's person
 straight away so it isn't found a week later.
 
-## 9. [to confirm] Tell Basic van clients there's no air conditioning
+## 9. Tell Basic van clients there's no air conditioning
 
 **From the records:** "AC broken" complaints from Basic hires, which don't have AC or opening rear
 windows (16581, 15987). One ended in a van swap.
@@ -103,7 +103,7 @@ windows (16581, 15987). One ended in a van swap.
 **The rule.** When quoting a Basic, say plainly it has no air con or opening rear windows. The Mini
 and Premium have AC.
 
-## 10. [to confirm] Confirm the return day and time in writing at book-out
+## 10. Confirm the return day and time in writing at book-out
 
 **From the records:** a client who thought the van was due back a day later "despite Will being very
 clear at book-out" (16331).
@@ -111,14 +111,14 @@ clear at book-out" (16331).
 **The rule.** Say the return day and time at book-out AND put it in writing (the 9am rule: a hire to the
 4th is back by 9am on the 5th).
 
-## 11. [to confirm] Under-fuelling is common: remind at book-out, charge on return
+## 11. Under-fuelling is common: remind at book-out, charge on return
 
 **From the records:** "under-fuelled as always" (16523), plus 16673, 15835, 16281, 16063; one client ran
 out of fuel on the M20 (15393). AdBlue: if it runs low it has to be filled to the brim to reset (15244).
 
 **The rule.** Remind them at book-out that it goes back full, and about AdBlue. Charge the shortfall.
 
-## 12. [to confirm] Return the excess within ten days, without being asked
+## 12. Return the excess within ten days, without being asked
 
 **From the records:** clients chasing us for their excess (14885 at 13 days, 15777); a muddle over an
 excess that had part of it used (15047); pre-auths a client said were still held (16403).
@@ -126,7 +126,7 @@ excess that had part of it used (15047); pre-auths a client said were still held
 **The rule.** Return the excess within the ten days we promise, before they ask. If part of it was
 used, return the rest straight away with a line saying why.
 
-## 13. [to confirm] Holds need a deadline, and the deadline needs keeping
+## 13. Holds need a deadline, and the deadline needs keeping
 
 **From the records:** a band that took too long and found us fully booked (16680); a deadline given
 and no decision (16854); losses because the autos were all booked by the time they decided (16840, 16527).
@@ -134,13 +134,15 @@ and no decision (16854); losses because the autos were all booked by the time th
 **The rule.** A provisional hold always has a date. When it passes, ask once more, then release it.
 Tell the client honestly when demand is high.
 
-## 14. [to confirm] Check the drivers early
+## 14. Point clients to our terms on drivers early
 
 **From the records:** lost because the driver was 22 (16916), uninsurable (16112), or nobody in the
 party qualified (16450).
 
-**The rule.** If the client mentions anything that puts a driver outside our terms (age, points,
-licence), raise it before quoting, not at the hire form.
+**The rule.** Our general T&Cs set out who we can and can't accept as a driver. Point clients to them
+when quoting, so anyone outside them finds out before booking. We don't ask for driver details at
+quote stage; they come on the hire form, after the job is confirmed. If the client volunteers
+something that clearly puts a driver outside the terms (age, points, licence), flag it for a person.
 
 ## For Claude
 
@@ -154,3 +156,9 @@ licence), raise it before quoting, not at the hire form.
 - If a client reports a fault on the road: help first (quick checks, then a replacement), and say
   kindly and plainly that the cost is ours if the fault is genuine and theirs if it was user error
   or damage.
+- If a client reports a fault, suggest the quick checks first (fuse, gain versus volume, cables,
+  batteries, the right input), then offer a replacement if that doesn't fix it.
+- When quoting a Basic, say it has no air conditioning or opening rear windows.
+- Never ask for driver details at quote stage. Point to our T&Cs for driver requirements; if the
+  client mentions something that may put a driver outside them, flag it for a person.
+- If the client asks for a hold, give it a date.
