@@ -327,7 +327,9 @@ one unmatched review surface, a gated `calls/` R2 prefix, recordings from Twilio
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
 outreach → chased Cold enquiry, jobs-for-this-tour linking. **§20 is the current state and what's
 left.** Searches are run by hand on purpose (no scheduler). Contact research wants management /
-the band / tour managers — not promoters or agents.
+the band / tour managers — not promoters or agents. **§21 (DRAFT, not built) is the band watch** —
+"tell me when this band is next over", ticked on the close-out modals; the one Leads part that will
+run on a timer.
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access|absence`. The person is
