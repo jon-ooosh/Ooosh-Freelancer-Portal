@@ -12,20 +12,158 @@
 > |---|---|
 > | `contacts` table, `phone_number_index` | `people` (`phone`, `mobile`, `international_phone`) and `organisations`. An index table is still worth having, filled from those, with one normaliser shared with `services/address-book-search.ts` `phoneDigitsForSearch()` |
 > | Generic "activity timeline" | `interactions` (type `call` is already allowed) on the job / person / organisation, the way ingested emails are stored — and the same rules: hidden and detached rows never reach any AI read |
-> | Recordings by email via Mailgun/Postmark | OP already reads Gmail mailboxes (`gmail-ingestion.ts`, domain-wide delegation). A recordings mailbox can be read the same way; no new email provider |
+> | Recordings by email via Mailgun/Postmark | **Superseded again (29 Oct 2026):** recordings arrive from Twilio's recording callback (§T). There is no email step and no Gmail mailbox for recordings |
+> | Voipfone webhooks, `X-Pbx-Token` | **Superseded (29 Oct 2026):** Twilio, §T. Voipfone has no webhooks or API (their support, Oct 2026) |
 > | "Calls Inbox" page | Matching stays deterministic, as for email (number → person → their open job; a job number said on the call as evidence, never a guess). Unmatched calls go to ONE review surface shared with unmatched email, not a second inbox |
 > | `pg-boss` / `bull` worker | The existing `config/scheduler.ts` (node-cron) pattern with a table queue |
 > | `claude-sonnet-4-…` | `config/anthropic.ts` constants, structured output read with `readStructuredJson()` |
 > | MP3s in R2 under `recordings/` | A private prefix that `GET /api/files/download` role-gates (today only `staff-records/` and `claims/` are gated — every other prefix is readable by any staff login). Recordings must be gated |
 > | (not covered) | Retention: a setting like email's 24 months, then strip audio and transcript, keep the summary |
 >
-> **To check before building:** what Voipfone offers now (webhooks out of beta? a direct recording link?);
-> the "calls may be recorded" announcement switched on first (legal note below); who may listen to a
-> recording.
+> **To check before building:** the "calls may be recorded" announcement is now OP's own (§T3), so it ships
+> with the inbound route; who may listen to a recording.
 >
 > **What it feeds:** call summaries go into the client brief (`AI-KNOWLEDGE-SPEC.md` §5), so a chase or
 > a quote knows what was said on the phone; `suggested_action` becomes a suggested To Do for a person
 > to accept, never an automatic action.
+
+---
+
+## T. Telephony on Twilio — the phone system itself (decided 29 Oct 2026)
+
+**Why:** Voipfone has no webhooks and no API, so it cannot feed this module. Ooosh is moving its phones
+to **Twilio**, the account OP already uses for SMS (`services/sms-service.ts`). OP becomes the phone
+system: Twilio asks OP what to do with each call, and OP answers in TwiML. **Everything in the March
+sections below about Voipfone, recording emails and Mailgun/Postmark is superseded by this section.**
+The intelligence half (transcribe → summarise → match → `interactions`) is unchanged.
+
+This section is built and tested BEFORE the March phases. Phones first, intelligence second.
+
+### T1. Settled (jon, Oct 2026)
+
+- **Handsets stay:** four Gigaset A540H handsets on **two Gigaset N300IP bases**. Each N300IP takes
+  6 SIP accounts and up to 3 internet calls at once.
+- **One SIP login per BASE** (`base1`, `base2`), not per person or per handset. Handsets are shared
+  and get swapped around. Per-handset logins (the N300IP can assign a SIP account to each handset) are
+  a later option, not part of this build.
+- **Incoming:** a short recording notice, then ring both bases at once. Unanswered after the timeout
+  goes to voicemail.
+- **Record everything**, inbound and outbound.
+- **Voicemail** is recorded by Twilio, goes through the same pipeline as calls, and is emailed by Resend
+  (`email-service.ts`) with the summary, transcript and audio. This replaces Voipfone's emailed MP3.
+- **The phones must work when OP is down:** the number's fallback URL is a Twilio-hosted TwiML Bin that
+  rings both bases with no OP involvement (no recording, no voicemail). Outbound calls need OP; if OP is
+  down, staff use mobiles.
+- **Audio is copied to R2, then deleted from Twilio.** OP is the only long-term store, so retention
+  (§0) is OP's to enforce.
+- **01273 911382 is ported only after a test number has run for about a week** (T5, T6). Voipfone is
+  not cancelled until the port completes. Voipfone's free 056 number is not ported.
+- **Rough cost:** about £15–20/month for telephony at ~300 outbound and a few hundred inbound minutes,
+  against ~£26 on Voipfone today. Transcription and Claude are extra, as already costed.
+
+### T2. Twilio Console setup (jon, by hand — not code)
+
+1. **Test number:** buy one UK Local number (any area; about £0.87/month). Attach the existing UK
+   Regulatory Compliance bundle (the SMS one). Attach an **Emergency Address**: Compass House,
+   7 East Street, Portslade, BN41 1DL. Outbound calls need it.
+2. **SIP Domain:** create one (e.g. `ooosh.sip.twilio.com`). Create a credential list with `base1` and
+   `base2`, each with a long random password. Turn on **SIP Registration** and **Emergency Calling** on
+   the domain.
+   - Voice URL: `POST https://staff.oooshtours.co.uk/api/telephony/outbound`
+3. **Number's voice config:**
+   - A call comes in: `POST https://staff.oooshtours.co.uk/api/telephony/inbound`
+   - Primary handler fails: a **TwiML Bin** that `<Dial>`s `sip:base1@…` and `sip:base2@…` together.
+4. **Bases:** before changing anything, screenshot each N300IP's current Voipfone settings so the
+   change can be rolled back. Then point ONE base at Twilio for the test (registrar = the SIP domain,
+   username/password from step 2). Turn off "SIP ALG" on the office router if it has it.
+
+### T3. OP endpoints — new `routes/telephony.ts`, logic in `services/telephony.ts`
+
+- **Every request is checked with `X-Twilio-Signature`**, which needs the account **Auth Token**. The
+  API key SMS uses cannot validate signatures, so add `TWILIO_AUTH_TOKEN`. An unsigned or badly signed
+  request gets a 403.
+- **Always answer in TwiML, fast.** Never block on R2, AssemblyAI or Claude inside a TwiML response;
+  queue it.
+- **Twilio is called over REST, no SDK**, following `sms-service.ts`.
+
+| Route | Called by | Does |
+|---|---|---|
+| `POST /api/telephony/inbound` | the number | Insert `call_records` (direction `inbound`, `caller_number` = `From`, `unique_call_id` = `CallSid`). Reply: `<Say>` the recording notice → `<Dial timeout=… record="record-from-answer-dual" recordingStatusCallback=…/recording action=…/inbound-after>` with `<Sip>` for base1 and base2 (simultaneous ring, `referUrl` set — see transfers) |
+| `POST /api/telephony/inbound-after` | the `<Dial>` action | `DialCallStatus` answered → `<Hangup/>`. Otherwise → voicemail greeting + `<Record maxLength="180" recordingStatusCallback=…/recording?kind=voicemail>` |
+| `POST /api/telephony/outbound` | the SIP domain | Read the dialled digits from `To` (`sip:07700900123@…`), normalise to E.164 with the ONE shared normaliser (07… → +447…, 0… → +44…, 00… → +…). Reply `<Dial callerId=TELEPHONY_CALLER_ID record="record-from-answer-dual" recordingStatusCallback=…><Number>`. Insert `call_records` (direction `outbound`, the matched number = the dialled one). Refuse premium-rate (09…) and anything unparseable with a spoken message, not silence |
+| `POST /api/telephony/recording` | recording callbacks | Download the recording (authenticated), upload to R2 under a **gated** prefix `calls/YYYY/MM/<CallSid>.<ext>` (add `calls/` to the gated list in `GET /api/files/download` alongside `staff-records/` and `claims/`), then DELETE it from Twilio. Enqueue `transcribe`. **Idempotent on `RecordingSid`**: Twilio retries callbacks |
+| `POST /api/telephony/refer` | a handset transfer | Cross-base transfer (below) |
+
+**Emergency calls (999/112):** with Emergency Calling on the SIP domain, these must go straight to the
+emergency services and never depend on OP. **Confirm in Twilio's SIP emergency-calling docs exactly how a
+registered SIP device's 999 is routed, and that OP's outbound route can never swallow one.** Never test
+by dialling 999 for real; use Twilio's documented test route if one exists.
+
+**Transfers:**
+- A transfer between handsets on the same base stays inside the base.
+- A transfer to the OTHER base sends SIP REFER: the handset → Twilio → `referUrl` → OP replies `<Dial><Sip>` to the other base. Twilio charges $0.10 per refer.
+- **This must be proved in the T5 test.** If the N300IP's transfer doesn't send a REFER Twilio accepts, say so; don't build a workaround without jon.
+
+**Differences from the March tables:**
+- `unique_call_id` holds Twilio's `CallSid`.
+- Add `kind` (`call` | `voicemail` | `missed`), `answered_by` (`base1` | `base2` | null) and `recording_sid`.
+- `audio_url` becomes an R2 key.
+- `record-from-answer-dual` puts staff and caller on separate channels. Use AssemblyAI's multichannel mode for cleaner speaker labels than diarisation.
+- A **missed call with no voicemail** is still logged (`kind = 'missed'`, no audio, no AI), so the number is matched and can be called back.
+
+### T4. Settings and env
+
+**`system_settings`** (staff-editable, no deploy needed):
+- `telephony_ring_timeout_seconds` (default 25)
+- `telephony_recording_notice` (spoken text)
+- `telephony_voicemail_greeting` (spoken text, or later an R2 audio file)
+- `telephony_voicemail_email_to` (default info@)
+
+**`.env`:**
+- Add `TWILIO_AUTH_TOKEN`, `TWILIO_SIP_DOMAIN` and `TELEPHONY_CALLER_ID` (the test number until the port, then `+441273911382`).
+- Remove `VOIPFONE_WEBHOOK_SECRET` and `RECORDING_EMAIL_SECRET` from the March list; they are not needed.
+
+### T5. Test plan — test number, ONE base, about a week
+
+**Calls**
+- [ ] The base registers and stays registered through a night
+- [ ] Inbound: notice plays, both handsets on the base ring, answer, two-way audio clear
+- [ ] Outbound to a landline, a mobile, and one EU number: caller ID shows the test number
+- [ ] Hold: what the caller hears
+- [ ] Two calls at once on one base
+
+**Voicemail**
+- [ ] Unanswered → voicemail → email arrives with audio, and later the summary
+
+**Recordings and pipeline**
+- [ ] Recording lands in R2 under `calls/`, is gated, and is gone from Twilio
+- [ ] Bad signature → 403
+
+**Fallback**
+- [ ] Fallback: point the inbound URL at a dead path; the TwiML Bin still rings the phones
+
+**Second base**
+- [ ] Move the second base over; both ring; cross-base transfer (REFER) works or is reported as not working
+
+**Costs and emergency**
+- [ ] Twilio usage for the week matches the estimate
+- [ ] 999 routing confirmed from Twilio's docs (not by test call)
+
+### T6. Go-live (jon)
+
+1. Ask Voipfone to confirm 01273 911382 is a **single-line** number. Multi-line is the usual reason UK
+   ports are rejected.
+2. Submit the port to Twilio. UK geographic ports can take up to 4–6 weeks.
+3. **Before the port date**, give the ported number the same voice URL and fallback as the test number.
+4. Set `TELEPHONY_CALLER_ID=+441273911382`.
+5. After the port, ring it from a mobile: does it reach the bases?
+6. **Only then** cancel Voipfone's services.
+
+### T7. Known risks (accepted by jon, Oct 2026)
+
+- **No helpdesk:** OP and Claude Code are the support line. The fallback TwiML Bin is the safety net for inbound.
+- **Office network:** NAT and router "SIP ALG" are the usual first-week faults (one-way audio, dropped registrations).
+- **Data location:** recordings sit briefly in Twilio, a US account, until OP deletes them; covered by Twilio's DPA. UK-GDPR-compliant storage is enough (jon); UK-only storage is not required.
 
 ---
 
@@ -51,6 +189,8 @@ The module has **no dependency on Monday.com** — this is intentional, as the o
 ---
 
 ## System Architecture & Data Flow
+
+> **Steps 1–4 are now §T (Twilio recording callback → R2). Steps 5–7 stand.**
 
 ```
 1. Call ends on Voipfone
@@ -101,7 +241,7 @@ ambiguous)
 
 ## Third-Party Service Details
 
-### Voipfone
+### Voipfone — SUPERSEDED, see §T (Twilio). Kept for history only.
 - **What it provides:** Webhook events on call completion, call recording as MP3 (emailed or, once available, via direct link)
 - **Webhook beta:** Must be activated by contacting Voipfone support. Configured in PBX Settings → Integrations tab.
 - **Events to subscribe to:** `recording_inbound`, `recording_outbound`, `voicemail`
@@ -254,6 +394,8 @@ CREATE INDEX idx_phone_number_index_number ON phone_number_index(phone_number);
 All routes under `/api/calls/`. Authenticated routes use the standard ops platform JWT middleware.
 
 ### POST `/api/calls/webhook`
+> **SUPERSEDED by §T3** (`/api/telephony/*`). This route and `/api/calls/recording-email` are not built.
+
 **Auth:** Validates `X-Pbx-Token` header against `VOIPFONE_WEBHOOK_SECRET`. No JWT required (external service).
 
 Receives Voipfone webhook events. Handles:
@@ -498,9 +640,10 @@ The `phone_number_index` should be maintained by the CRM module — whenever a c
 Add to existing `.env` / Hetzner server environment:
 
 ```
-VOIPFONE_WEBHOOK_SECRET=           # Token to validate incoming Voipfone webhooks
+TWILIO_AUTH_TOKEN=                 # validates X-Twilio-Signature (§T3/T4; replaces VOIPFONE_WEBHOOK_SECRET)
+TWILIO_SIP_DOMAIN=                 # §T2
+TELEPHONY_CALLER_ID=               # test number, then +441273911382 after the port
 ASSEMBLYAI_API_KEY=                # AssemblyAI API key (sign up at assemblyai.com)
-RECORDING_EMAIL_SECRET=            # Shared secret for inbound email webhook (Mailgun/Postmark)
 CLOUDFLARE_R2_RECORDINGS_BUCKET=   # R2 bucket name for MP3 storage
 # Note: ANTHROPIC_API_KEY already exists in platform
 # Note: Cloudflare R2 credentials already exist in platform
@@ -512,7 +655,7 @@ CLOUDFLARE_R2_RECORDINGS_BUCKET=   # R2 bucket name for MP3 storage
 
 Under UK law (Telecommunications (Lawful Business Practice) (Interception of Communications) Regulations 2000), businesses may record calls for legitimate purposes without consent **only if** callers are informed. This is typically handled by a brief announcement played when the call is answered (e.g. *"This call may be recorded for quality and training purposes"*).
 
-This must be configured in Voipfone's IVR/call flow settings before call recording is enabled. This is an operational step for Jon/the team — not a code task — but the module should not be activated until this is in place.
+This is now OP's inbound TwiML (§T3, text in `telephony_recording_notice`), so it ships with the inbound route. Outbound calls: staff should mention recording where it matters; jon to decide whether outbound also plays a short notice.
 
 ---
 
@@ -527,7 +670,7 @@ Given the ops platform is being built now (July 2026 target), the recommended bu
 - CRM integration: populate `phone_number_index` on contact create/update
 
 **Phase 2 — Processing pipeline**
-- Email ingest for recordings (Mailgun/Postmark inbound)
+- ~~Email ingest for recordings~~ — replaced by the Twilio recording callback (§T3)
 - R2 upload for MP3 storage
 - AssemblyAI transcription integration
 - Claude summarisation integration
@@ -542,7 +685,6 @@ Given the ops platform is being built now (July 2026 target), the recommended bu
 **Phase 4 — Polish**
 - Nav badge for unresolved count
 - Dashboard stats widget
-- Swap email ingest for direct Voipfone recording URL once Voipfone releases it (single line change in worker: fetch from URL rather than wait for email)
 - Consider speaker labelling once contact is matched (relabel Speaker A → "Tom" in transcript view)
 
 ---
@@ -557,7 +699,7 @@ Given the ops platform is being built now (July 2026 target), the recommended bu
 
 4. **HireHop job lookup:** The worker references checking `mentioned_job_refs` against HireHop API. CC should confirm whether a HireHop job lookup utility already exists in the platform codebase to reuse.
 
-5. **Inbound email provider:** Mailgun and Postmark both support inbound email parsing. If the ops platform already uses one of these for outbound email, use the same provider for consistency.
+5. ~~Inbound email provider~~ — not needed; recordings come from Twilio (§T).
 
 ---
 
