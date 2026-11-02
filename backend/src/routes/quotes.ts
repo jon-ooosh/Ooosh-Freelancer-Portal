@@ -248,8 +248,8 @@ router.post('/calculate', validate(calculateSchema), async (req: AuthRequest, re
 // ── POST /api/quotes — save a quote (calculate + persist) ───────────
 
 const saveQuoteSchema = calculateSchema.extend({
-  jobId: z.string().uuid().optional().nullable(),
-  venueId: z.string().uuid().optional().nullable(),
+  jobId: z.string().guid().optional().nullable(),
+  venueId: z.string().guid().optional().nullable(),
   venueName: z.string().optional().nullable(),
   jobDate: z.string().optional().nullable(),
   jobFinishDate: z.string().optional().nullable(),
@@ -615,7 +615,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 const editQuoteSchema = z.object({
   job_type: z.enum(['delivery', 'collection', 'crewed']).optional(),
   venue_name: z.string().optional().nullable(),
-  venue_id: z.string().uuid().optional().nullable(),
+  venue_id: z.string().guid().optional().nullable(),
   job_date: z.string().optional().nullable(),
   job_finish_date: z.string().optional().nullable(),
   is_multi_day: z.boolean().optional().nullable(),
@@ -1143,7 +1143,7 @@ router.get('/:id/assignments', async (_req: AuthRequest, res: Response) => {
 // ── POST /api/quotes/:id/assignments — assign a person to a quote ───
 
 const assignSchema = z.object({
-  personId: z.string().uuid(),
+  personId: z.string().guid(),
   role: z.string().default('driver'),
   agreedRate: z.number().optional().nullable(),
   rateType: z.enum(['hourly', 'dayrate', 'fixed']).optional().nullable(),
@@ -1410,7 +1410,7 @@ router.post(
 // before staff decide to bypass the portal.
 
 const nudgeSchema = z.object({
-  personId: z.string().uuid(),
+  personId: z.string().guid(),
 });
 
 router.post(
@@ -1495,7 +1495,7 @@ const opsDetailsSchema = z.object({
   job_date: z.string().optional().nullable(),
   arrival_time: z.string().optional().nullable(),
   venue_name: z.string().optional().nullable(),
-  venue_id: z.string().uuid().optional().nullable(),
+  venue_id: z.string().guid().optional().nullable(),
   freelancer_notes: z.string().optional().nullable(),
   internal_notes: z.string().optional().nullable(),
 });
@@ -1541,11 +1541,11 @@ router.put('/:id/ops-details', validate(opsDetailsSchema), async (req: AuthReque
 // ── POST /api/quotes/local — create a local delivery/collection ─────
 
 const localQuoteSchema = z.object({
-  jobId: z.string().uuid(),
+  jobId: z.string().guid(),
   jobType: z.enum(['delivery', 'collection']),
   jobDate: z.string().optional().nullable(),
   arrivalTime: z.string().optional().nullable(),
-  venueId: z.string().uuid().optional().nullable(),
+  venueId: z.string().guid().optional().nullable(),
   venueName: z.string().optional().nullable(),
   fee: z.number().min(0).optional().nullable(),
   clientCharge: z.number().min(0).optional().nullable(),
@@ -1670,7 +1670,7 @@ router.get('/:id/contacts', async (req: AuthRequest, res: Response) => {
 // sent each time; anything absent is removed.
 const quoteContactsSchema = z.object({
   contacts: z.array(z.object({
-    person_id: z.string().uuid(),
+    person_id: z.string().guid(),
     label: z.string().max(100).optional().nullable(),
   })).max(20),
 });
@@ -1731,7 +1731,7 @@ router.put('/:id/contacts', validate(quoteContactsSchema), async (req: AuthReque
 // crypto.randomUUID() client-side.
 
 const runGroupSchema = z.object({
-  run_group: z.string().uuid().nullable(),
+  run_group: z.string().guid().nullable(),
   run_order: z.number().optional().nullable(),
   run_group_fee: z.number().optional().nullable(),
 });
@@ -1776,7 +1776,7 @@ const createRunSchema = z.object({
   combined_freelancer_fee: z.number().optional().nullable(),
   combined_client_fee: z.number().optional().nullable(),
   notes: z.string().optional().nullable(),
-  quote_ids: z.array(z.string().uuid()).optional(),
+  quote_ids: z.array(z.string().guid()).optional(),
 });
 
 router.post('/runs', validate(createRunSchema), async (req: AuthRequest, res: Response) => {
@@ -2212,7 +2212,7 @@ async function addItemToHireHop(
 }
 
 const pushHirehopSchema = z.object({
-  quoteId: z.string().uuid().optional(), // Can also use URL param
+  quoteId: z.string().guid().optional(), // Can also use URL param
 });
 
 router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {

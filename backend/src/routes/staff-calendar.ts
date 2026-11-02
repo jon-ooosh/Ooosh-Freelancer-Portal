@@ -174,7 +174,7 @@ router.get('/unlinked-logins', adminOnly, async (_req: AuthRequest, res: Respons
 
 // POST /api/staff-calendar/employees/:personId/link-login
 router.post('/employees/:personId/link-login', adminOnly, async (req: AuthRequest, res: Response) => {
-  const parsed = z.object({ userId: z.string().uuid() }).safeParse(req.body);
+  const parsed = z.object({ userId: z.string().guid() }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'A login is required' }); return; }
   try {
     const r = await linkLoginToPerson(req.params.personId as string, parsed.data.userId);
@@ -289,7 +289,7 @@ router.get('/leave', async (req: AuthRequest, res: Response) => {
 // POST /api/staff-calendar/leave
 router.post('/leave', async (req: AuthRequest, res: Response) => {
   const schema = z.object({
-    personId: z.string().uuid().optional(),
+    personId: z.string().guid().optional(),
     leaveType: z.enum(['holiday', 'toil', 'unpaid']),
     startDate: dateStr,
     endDate: dateStr,
@@ -297,7 +297,7 @@ router.post('/leave', async (req: AuthRequest, res: Response) => {
     note: z.string().max(1000).nullish(),
     // A CHANGE to this approved booking (spec §5.4) — waits for approval, and
     // replaces it only once approved. The note is then required.
-    replacesRequestId: z.string().uuid().optional(),
+    replacesRequestId: z.string().guid().optional(),
     // An admin changing somebody's booking on their behalf decides it in the
     // same press, rather than asking themselves for approval.
     approveNow: z.boolean().optional(),
@@ -576,7 +576,7 @@ router.get('/overtime', async (req: AuthRequest, res: Response) => {
 // POST /api/staff-calendar/overtime — log some. Either give times, or minutes.
 router.post('/overtime', async (req: AuthRequest, res: Response) => {
   const schema = z.object({
-    personId: z.string().uuid().optional(),
+    personId: z.string().guid().optional(),
     workDate: dateStr,
     startTime: timeStr.nullish(),
     endTime: timeStr.nullish(),
@@ -778,7 +778,7 @@ router.get('/absences/:id', adminOnly, async (req: AuthRequest, res: Response) =
 // and the database refuses it, so the schema does not offer 'hours' or times.
 router.post('/absences', adminOnly, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
-    personId: z.string().uuid(),
+    personId: z.string().guid(),
     absenceType: z.enum(ABSENCE_TYPES as [string, ...string[]]),
     startDate: dateStr,
     endDate: dateStr.nullish(),
@@ -846,7 +846,7 @@ router.post('/absences/:id/rtw', adminOnly, async (req: AuthRequest, res: Respon
 
 // POST /api/staff-calendar/absences/:id/reclaim — give back overtaken holiday.
 router.post('/absences/:id/reclaim', adminOnly, async (req: AuthRequest, res: Response) => {
-  const parsed = z.object({ dayIds: z.array(z.string().uuid()).min(1) }).safeParse(req.body);
+  const parsed = z.object({ dayIds: z.array(z.string().guid()).min(1) }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'Pick at least one day to reclaim' }); return; }
   try {
     const r = await reclaimLeaveDays(req.params.id as string, parsed.data.dayIds, req.user!.id);
@@ -956,7 +956,7 @@ router.get('/company-days/:id', adminOnly, async (req: AuthRequest, res: Respons
 
 // POST /api/staff-calendar/company-days/:id/reclaim
 router.post('/company-days/:id/reclaim', adminOnly, async (req: AuthRequest, res: Response) => {
-  const parsed = z.object({ leaveDayIds: z.array(z.string().uuid()).min(1) }).safeParse(req.body);
+  const parsed = z.object({ leaveDayIds: z.array(z.string().guid()).min(1) }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: 'Pick at least one day to give back' }); return; }
   try {
     const r = await reclaimForCompanyDay(req.params.id as string, parsed.data.leaveDayIds, req.user!.id);
@@ -1024,7 +1024,7 @@ router.get('/freelancer-days/bookable', freelancerDays, async (_req: AuthRequest
 // POST /api/staff-calendar/freelancer-days
 router.post('/freelancer-days', freelancerDays, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
-    personId: z.string().uuid(),
+    personId: z.string().guid(),
     bookingDate: dateStr,
     durationType: z.enum(['full_day', 'half_day', 'hours']).optional(),
     startTime: timeStr.nullish(),
@@ -1372,7 +1372,7 @@ router.get('/me/balances', async (req: AuthRequest, res: Response) => {
 router.get('/me/absences', async (req: AuthRequest, res: Response) => {
   try {
     const asked = typeof req.query.personId === 'string' && req.query.personId ? req.query.personId : null;
-    if (asked && !z.string().uuid().safeParse(asked).success) {
+    if (asked && !z.string().guid().safeParse(asked).success) {
       res.status(400).json({ error: 'personId must be a UUID' }); return;
     }
     const personId = asked && isAdmin(req) ? asked : await personIdForUser(req.user!.id);
@@ -1851,7 +1851,7 @@ router.get('/wfh', async (req: AuthRequest, res: Response) => {
 
 router.post('/wfh', async (req: AuthRequest, res: Response) => {
   const parsed = z.object({
-    personId: z.string().uuid().optional(),
+    personId: z.string().guid().optional(),
     startDate: dateStr, endDate: dateStr,
     note: z.string().max(500).nullish(),
   }).safeParse(req.body);
@@ -1984,7 +1984,7 @@ router.get('/swaps/preview', async (req: AuthRequest, res: Response) => {
 
 router.post('/swaps', async (req: AuthRequest, res: Response) => {
   const parsed = z.object({
-    personId: z.string().uuid().optional(),
+    personId: z.string().guid().optional(),
     offDate: dateStr, workDate: dateStr,
     startTime: timeStr, endTime: timeStr,
     note: z.string().max(500).nullish(),
@@ -2168,7 +2168,7 @@ router.get('/employees/:personId/exceptions', async (req: AuthRequest, res: Resp
 
 const exceptionSchema = z.object({
   legs: z.array(z.object({
-    personId: z.string().uuid(),
+    personId: z.string().guid(),
     date: dateStr,
     isWorking: z.boolean(),
     startTime: timeStr.nullish(),
@@ -2238,7 +2238,7 @@ router.get('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, r
 
 router.post('/employees/:personId/reviews', adminOnly, async (req: AuthRequest, res: Response) => {
   const schema = z.object({
-    id: z.string().uuid().nullish(),
+    id: z.string().guid().nullish(),
     reviewType: z.enum(['quarterly', 'annual', 'probation', 'ad_hoc']).optional(),
     scheduledFor: dateStr,
     status: z.enum(['proposed', 'confirmed', 'completed', 'cancelled']).optional(),

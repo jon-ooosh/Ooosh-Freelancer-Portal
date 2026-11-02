@@ -15,7 +15,7 @@ const router = Router();
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const optDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable();
 const projectFields = {
   name: z.string().min(1).max(200).optional(),

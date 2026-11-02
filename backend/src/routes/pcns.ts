@@ -465,12 +465,12 @@ const pcnDocSchema = z.object({
 const createSchema = z.object({
   reference: z.string().optional().nullable(),
   fine_type: fineType.optional(),
-  vehicle_id: z.string().uuid().optional().nullable(),
-  driver_id: z.string().uuid().optional().nullable(),
-  driver_person_id: z.string().uuid().optional().nullable(),
-  assignment_id: z.string().uuid().optional().nullable(),
-  job_id: z.string().uuid().optional().nullable(),
-  client_organisation_id: z.string().uuid().optional().nullable(),
+  vehicle_id: z.string().guid().optional().nullable(),
+  driver_id: z.string().guid().optional().nullable(),
+  driver_person_id: z.string().guid().optional().nullable(),
+  assignment_id: z.string().guid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
+  client_organisation_id: z.string().guid().optional().nullable(),
   hh_job_number: z.number().int().optional().nullable(),
   vehicle_reg: z.string().optional().nullable(),
   // Guarded: a malformed value used to reach Postgres and 500 on the

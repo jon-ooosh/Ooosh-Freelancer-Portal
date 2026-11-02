@@ -94,7 +94,7 @@ const endorsementSchema = z.object({
 
 const hireFormSchema = z.object({
   // Driver details
-  driver_id: z.string().uuid().nullable().optional(),        // If updating existing driver
+  driver_id: z.string().guid().nullable().optional(),        // If updating existing driver
   full_name: z.string().min(1).max(200),
   email: z.string().email().nullable().optional(),
   phone: z.string().max(50).nullable().optional(),
@@ -115,9 +115,9 @@ const hireFormSchema = z.object({
   dvla_check_date: z.string().nullable().optional(),
 
   // Assignment details — vehicle_id OR vehicle_reg, both optional (vehicle assigned later)
-  vehicle_id: z.string().uuid().nullable().optional(),
+  vehicle_id: z.string().guid().nullable().optional(),
   vehicle_reg: z.string().max(20).nullable().optional(),   // Alternative: look up UUID by reg
-  job_id: z.string().uuid().nullable().optional(),
+  job_id: z.string().guid().nullable().optional(),
   hirehop_job_id: z.number().int().nullable().optional(),
   hirehop_job_name: z.string().max(500).nullable().optional(),
   van_requirement_index: z.number().int().min(0).default(0),
@@ -894,9 +894,9 @@ router.get('/active', authenticate, async (_req: AuthRequest, res: Response) => 
 // ── POST /api/hire-forms/quick-assign — Quick-create assignment for testing ──
 
 const quickAssignSchema = z.object({
-  driver_id: z.string().uuid(),
-  vehicle_id: z.string().uuid().nullable().optional(),   // optional — staff can link driver-only first, pick the vehicle later
-  job_id: z.string().uuid(),
+  driver_id: z.string().guid(),
+  vehicle_id: z.string().guid().nullable().optional(),   // optional — staff can link driver-only first, pick the vehicle later
+  job_id: z.string().guid(),
   hire_start: z.string().optional(),
   hire_end: z.string().optional(),
   client_email: z.string().email().optional(),
@@ -1342,7 +1342,7 @@ const patchSchema = z.object({
   // before book-out (e.g. after picking the wrong van, or if plans change).
   // The Allocations UI sends null to clear the link for this driver and —
   // via its cascade logic — for every sibling driver on the same slot.
-  vehicle_id: z.string().uuid().nullable().optional(),
+  vehicle_id: z.string().guid().nullable().optional(),
   hire_end: z.string().optional(),
   start_time: z.string().optional(),
   end_time: z.string().optional(),
@@ -2102,7 +2102,7 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
 // into each PDF), OOH info if applicable, requirement advance.
 
 const addToHireSchema = z.object({
-  vehicle_ids: z.array(z.string().uuid()).min(1).max(10),
+  vehicle_ids: z.array(z.string().guid()).min(1).max(10),
 });
 
 interface AddToHireSibling {
@@ -3789,7 +3789,7 @@ router.get('/email-contacts/:jobId', authenticate, async (req: AuthRequest, res:
  * POST /api/hire-forms/send-email — send hire form email to selected contacts
  */
 const sendHireFormEmailSchema = z.object({
-  jobId: z.string().uuid(),
+  jobId: z.string().guid(),
   recipients: z.array(z.object({
     email: z.string().email(),
     name: z.string(),

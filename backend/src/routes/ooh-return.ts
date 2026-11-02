@@ -319,12 +319,12 @@ router.get(
 
 // Staff: record a parking violation (from check-in untick OR retro-flag).
 const violationSchema = z.object({
-  job_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
   hh_job_number: z.number().int().optional().nullable(),
-  vehicle_id: z.string().uuid().optional().nullable(),
+  vehicle_id: z.string().guid().optional().nullable(),
   reg: z.string().optional().nullable(),
-  driver_id: z.string().uuid().optional().nullable(),
-  assignment_id: z.string().uuid().optional().nullable(),
+  driver_id: z.string().guid().optional().nullable(),
+  assignment_id: z.string().guid().optional().nullable(),
   type: z.enum(['parked_blocking', 'parked_outside_yard', 'left_without_telling_us', 'other']),
   severity: z.enum(['minor', 'serious']).optional(),
   notes: z.string().max(2000).optional().nullable(),

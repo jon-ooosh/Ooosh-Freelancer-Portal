@@ -184,7 +184,7 @@ const pushSchema = z.object({
     qty: z.number().positive(),
     saleItem: z.boolean().optional(),
   })).min(1),
-  stageConfig: z.record(z.any()).optional(),
+  stageConfig: z.record(z.string(), z.any()).optional(),
   stageSummary: z.string().max(500).optional(),
 });
 
@@ -193,7 +193,7 @@ const pushSchema = z.object({
  * row is job-less + ephemeral — it never shows on a job's Staging tab). */
 router.post('/preview-link', async (req: AuthRequest, res: Response) => {
   const parsed = z.object({
-    stageConfig: z.record(z.any()),
+    stageConfig: z.record(z.string(), z.any()),
     stageSummary: z.string().max(500).optional(),
   }).safeParse(req.body);
   if (!parsed.success) {

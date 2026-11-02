@@ -174,7 +174,7 @@ const processSchema = z.object({
   // Everything else open on the job is auto-cancelled below. Kept items get
   // keep_after_close=true so background scanners still fire them. See
   // CLAUDE.md → "Lost / Cancelled cleanup pattern".
-  keep_requirement_ids: z.array(z.string().uuid()).optional().nullable(),
+  keep_requirement_ids: z.array(z.string().guid()).optional().nullable(),
 });
 
 router.post(

@@ -79,7 +79,7 @@ const createPersonSchema = z.object({
 const updatePersonSchema = createPersonSchema.partial();
 
 const personOrgRoleSchema = z.object({
-  organisation_id: z.string().uuid(),
+  organisation_id: z.string().guid(),
   role: z.string().min(1),
   is_primary: z.boolean().default(false),
   start_date: z.string().optional().nullable(),

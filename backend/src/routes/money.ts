@@ -315,7 +315,7 @@ const resolveBalanceSchema = z.object({
 const bulkResolveSchema = z.object({
   reason: z.enum(BALANCE_OVERRIDE_REASONS),
   notes: z.string().max(1000).nullable().optional(),
-  job_ids: z.array(z.string().uuid()).max(500).optional(),
+  job_ids: z.array(z.string().guid()).max(500).optional(),
   // YYYY-MM-DD — resolve every still-outstanding non-dead job that finished
   // before this date and isn't already overridden. For the old backlog sweep.
   finished_before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -608,7 +608,7 @@ const DISMISS_REASON_LABELS: Record<string, string> = {
 };
 
 const dismissRefundSchema = z.object({
-  refund_id: z.string().uuid(),
+  refund_id: z.string().guid(),
   reason: z.enum(DISMISS_REFUND_REASONS),
   notes: z.string().max(1000).nullable().optional(),
 });
@@ -668,7 +668,7 @@ router.post('/:jobId/dismiss-refund', authorize('admin', 'manager'), validate(di
 const bulkDismissRefundSchema = z.object({
   reason: z.enum(DISMISS_REFUND_REASONS),
   notes: z.string().max(1000).nullable().optional(),
-  refund_ids: z.array(z.string().uuid()).max(500).optional(),
+  refund_ids: z.array(z.string().guid()).max(500).optional(),
   // YYYY-MM-DD — clear every pending refund logged before this date. For the
   // pre-refund-tracking backlog sweep.
   logged_before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -754,7 +754,7 @@ const recordPaymentSchema = z.object({
   ]),
   payment_reference: z.string().max(255).optional(),
   notes: z.string().max(1000).optional(),
-  excess_id: z.string().uuid().optional(),
+  excess_id: z.string().guid().optional(),
   push_to_hirehop: z.boolean().default(true),
 }).refine(
   (val) => (val.amount !== undefined && val.amount >= 0.01) || val.total_collected !== undefined,
@@ -773,7 +773,7 @@ const refundPaymentSchema = z.object({
   notes: z.string().max(1000).nullable().optional(),
   // When set, an existing OP `job_payments` pending-refund IOU (e.g. created by
   // a cancellation) is marked completed instead of inserting a new refund row.
-  pending_refund_id: z.string().uuid().nullable().optional(),
+  pending_refund_id: z.string().guid().nullable().optional(),
   // Email the client confirming the refund. Only meaningful on the record-only
   // methods: a Stripe refund has genuinely moved the money, so that path always
   // emails and ignores this. On BACS/cash/Worldpay the money moves by hand, and
@@ -1178,7 +1178,7 @@ router.get('/incoming-payments', authorize('admin', 'manager'), async (_req: Aut
 });
 
 const incomingRecordSchema = z.object({
-  job_id: z.string().uuid().optional(),
+  job_id: z.string().guid().optional(),
   hh_job_number: z.number().int().positive().optional(),
   payment_type: z.enum(['deposit', 'balance', 'excess']),
   amount: z.number().min(0.01).optional(),
@@ -3080,7 +3080,7 @@ const paymentEventSchema = z.object({
   payment_reference: z.string().max(255).optional(),
   stripe_payment_intent: z.string().max(255).optional(),
   source: z.string().max(50).optional(),
-  excess_id: z.string().uuid().optional(),
+  excess_id: z.string().guid().optional(),
   hh_deposit_id: z.number().int().optional(),
   stripe_event_id: z.string().max(255).optional(),
   notes: z.string().max(1000).optional(),

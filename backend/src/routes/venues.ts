@@ -27,7 +27,7 @@ const fileSchema = z.object({
 
 const createVenueSchema = z.object({
   name: z.string().min(1).max(500),
-  organisation_id: z.string().uuid().optional().nullable(),
+  organisation_id: z.string().guid().optional().nullable(),
   address: z.string().optional().nullable(),
   city: z.string().max(255).optional().nullable(),
   postcode: z.string().max(20).optional().nullable(),

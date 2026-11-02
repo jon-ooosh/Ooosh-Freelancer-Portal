@@ -33,7 +33,7 @@ const fileSchema = z.object({
 const createOrgSchema = z.object({
   name: z.string().min(1).max(500),
   type: z.string().min(1), // band, management, label, agency, promoter, venue, festival, supplier, hire_company, booking_agent, unknown, other
-  parent_id: z.string().uuid().optional().nullable(),
+  parent_id: z.string().guid().optional().nullable(),
   website: z.string().url().optional().nullable(),
   email: z.string().email().optional().nullable(),
   phone: z.string().max(50).optional().nullable(),
@@ -47,7 +47,7 @@ const createOrgSchema = z.object({
   working_terms_credit_days: z.number().int().optional().nullable(),
   working_terms_notes: z.string().optional().nullable(),
   // Who at Ooosh looks after this client (migration 289)
-  account_owner_user_id: z.string().uuid().optional().nullable(),
+  account_owner_user_id: z.string().guid().optional().nullable(),
   // AI text fields
   ai_summary: z.string().optional().nullable(),
   ai_research: z.string().optional().nullable(),
@@ -428,8 +428,8 @@ router.put('/:id', validate(updateOrgSchema), async (req: AuthRequest, res: Resp
 // ============================================================================
 
 const createRelationshipSchema = z.object({
-  from_org_id: z.string().uuid(),
-  to_org_id: z.string().uuid(),
+  from_org_id: z.string().guid(),
+  to_org_id: z.string().guid(),
   relationship_type: z.enum(['manages', 'books_for', 'does_accounts_for', 'promotes', 'supplies', 'represents', 'other']),
   status: z.enum(['active', 'historical']).optional().default('active'),
   start_date: z.string().optional().nullable(),
@@ -448,7 +448,7 @@ const updateRelationshipSchema = z.object({
 // Person added to this org — either link an existing person by id, or
 // create a new lightweight person record in the same request.
 const orgPersonLinkSchema = z.object({
-  person_id: z.string().uuid().optional(),
+  person_id: z.string().guid().optional(),
   new_person: z.object({
     first_name: z.string().min(1).max(255),
     last_name: z.string().min(1).max(255),
@@ -913,7 +913,7 @@ router.get('/:id/merge-preview', authorize('admin', 'manager'), async (req: Auth
 // POST /api/organisations/:id/merge — merge :id (loser) INTO body.keep_id (keeper)
 router.post('/:id/merge',
   authorize('admin', 'manager'),
-  validate(z.object({ keep_id: z.string().uuid() })),
+  validate(z.object({ keep_id: z.string().guid() })),
   async (req: AuthRequest, res: Response) => {
     const loserId = req.params.id as string;
     const { keep_id: keepId } = req.body as { keep_id: string };

@@ -94,7 +94,7 @@ const costLineInputSchema = z.object({
   amount_gross: money,
   amount_vat: money.optional().nullable(),
   xero_account_code: z.string().trim().max(20).optional().nullable(),
-  job_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
   crew_fronted: z.boolean().optional(),
   source: z.enum(['manual', 'ai']).optional(),
 });
@@ -104,9 +104,9 @@ const costLineInputSchema = z.object({
 const allocationItemSchema = z.object({
   // An existing share, kept (and updated) rather than replaced, so a recharge
   // it carries survives an edit to the split. Omitted = a new share.
-  id: z.string().uuid().optional(),
-  job_id: z.string().uuid().optional().nullable(),
-  quote_assignment_id: z.string().uuid().optional().nullable(),
+  id: z.string().guid().optional(),
+  job_id: z.string().guid().optional().nullable(),
+  quote_assignment_id: z.string().guid().optional().nullable(),
   amount: money,
   recharge: z.boolean().optional(),
   notes: z.string().trim().max(2000).optional().nullable(),
@@ -140,12 +140,12 @@ const createSchema = z.object({
   cot_card_holder: z.string().trim().max(120).optional().nullable(),
   cot_card_last4: z.string().trim().max(4).optional().nullable(),
   payment_status: z.enum(PAYMENT_STATUSES).optional(),
-  job_id: z.string().uuid().optional().nullable(),
-  vehicle_id: z.string().uuid().optional().nullable(),
-  quote_assignment_id: z.string().uuid().optional().nullable(),
-  job_issue_id: z.string().uuid().optional().nullable(),
-  vehicle_service_log_id: z.string().uuid().optional().nullable(),
-  vehicle_fuel_log_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
+  vehicle_id: z.string().guid().optional().nullable(),
+  quote_assignment_id: z.string().guid().optional().nullable(),
+  job_issue_id: z.string().guid().optional().nullable(),
+  vehicle_service_log_id: z.string().guid().optional().nullable(),
+  vehicle_fuel_log_id: z.string().guid().optional().nullable(),
   recharge_mode: z.enum(RECHARGE_MODES).optional(),
   recharge_amount: money.optional().nullable(),
   cost_intent: z.enum(['quote_actual', 'extra']).optional().nullable(),
@@ -161,7 +161,7 @@ const createSchema = z.object({
     content_type: z.string().trim().max(200).optional().nullable(),
     size_bytes: z.number().int().nonnegative().optional().nullable(),
     uploaded_at: z.string().trim().max(40).optional().nullable(),
-    uploaded_by: z.string().uuid().optional().nullable(),
+    uploaded_by: z.string().guid().optional().nullable(),
   })).max(MAX_SUPPORTING_DOCUMENTS).optional(),
   status: z.enum(['draft', 'confirmed', 'resolved']).optional(),
   notes: z.string().trim().max(10000).optional().nullable(),
@@ -171,7 +171,7 @@ const createSchema = z.object({
   is_credit: z.boolean().optional(),
   // The purchase it came back from. Optional: a refund for something never
   // captured in OP is still worth recording.
-  refund_of_cost_id: z.string().uuid().optional().nullable(),
+  refund_of_cost_id: z.string().guid().optional().nullable(),
 
   // Control flag (not a column): one-click "Approve & save" on a payable.
   // Honoured only for admin/manager + a payable; ignored otherwise.
@@ -185,7 +185,7 @@ const createSchema = z.object({
   // A freelancer invoice: WHOSE it is, and WHICH of their work it covers
   // (FREELANCER-PORTAL-SPEC §5). `work_items` is not a column: when sent it
   // replaces the cost's cost_work_items (keys from GET /costs/freelancer-work).
-  person_id: z.string().uuid().optional().nullable(),
+  person_id: z.string().guid().optional().nullable(),
   work_items: z.array(z.object({
     key: z.string().trim().min(3).max(80),
     amount: money,
@@ -1766,7 +1766,7 @@ async function persistRechargeFigures(target: RechargeTarget, figures: z.infer<t
 }
 
 // Which recharge a push / resolve is about. No allocation_id = the whole cost.
-const rechargeTargetSchema = z.object({ allocation_id: z.string().uuid().optional().nullable() });
+const rechargeTargetSchema = z.object({ allocation_id: z.string().guid().optional().nullable() });
 
 /**
  * Check a push / resolve is aimed at a recharge that can take it, BEFORE any
@@ -1836,7 +1836,7 @@ const resolveRechargeSchema = rechargeFiguresSchema.extend({
   resolution: z.enum(['recharged_external', 'absorbed']),
   note: z.string().trim().max(2000).optional().nullable(),
   // One job's share of a split cost (migration 318); omitted = the whole cost.
-  allocation_id: z.string().uuid().optional().nullable(),
+  allocation_id: z.string().guid().optional().nullable(),
 });
 
 router.post('/:id/resolve-recharge', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
@@ -2092,7 +2092,7 @@ router.post('/sync-xero-payments', authorize(...ADMIN_ONLY), async (_req: AuthRe
 router.post('/pay-batch', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
   try {
     const parse = z.object({
-      cost_ids: z.array(z.string().uuid()).min(1).max(200),
+      cost_ids: z.array(z.string().guid()).min(1).max(200),
       paid_method: z.string().trim().min(1).max(40),
       paid_date: z.string().trim().max(20).optional().nullable(),
       reference: z.string().trim().max(255).optional().nullable(),

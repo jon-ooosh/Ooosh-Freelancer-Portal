@@ -422,18 +422,18 @@ const createEnquirySchema = z.object({
   end_time: z.string().optional().nullable(),      // Time charging ends (HH:MM), default 09:00
   // Optional
   job_name: z.string().optional().nullable(),
-  client_id: z.string().uuid().optional().nullable(),
-  venue_id: z.string().uuid().optional().nullable(),
+  client_id: z.string().guid().optional().nullable(),
+  venue_id: z.string().guid().optional().nullable(),
   venue_name: z.string().optional().nullable(),
   enquiry_source: z.enum(['phone', 'email', 'web_form', 'referral', 'cold_lead', 'forum', 'repeat', 'other']).optional().nullable(),
   job_value: z.number().optional().nullable(),
   likelihood: z.enum(['hot', 'warm', 'cold']).optional().default('warm'),
   notes: z.string().optional().nullable(),
-  manager1_person_id: z.string().uuid().optional().nullable(),
+  manager1_person_id: z.string().guid().optional().nullable(),
   // Chase scheduling at creation
   next_chase_date: z.string().optional().nullable(),
   chase_interval_days: z.number().optional().nullable(),
-  chase_alert_user_id: z.string().uuid().optional().nullable(),
+  chase_alert_user_id: z.string().guid().optional().nullable(),
   service_types: z.array(z.enum(['self_drive_van', 'backline', 'rehearsal'])).optional().nullable(),
   band_name: z.string().optional().nullable(),
   // Per-job contact selection — landed in migration 086. The modal sends
@@ -441,8 +441,8 @@ const createEnquirySchema = z.object({
   // client org's people), with one optional `primary_contact_person_id`
   // marking the lead. Routing graduation that ACTUALLY reads this lives
   // in the next phase; this just persists the choice.
-  contact_person_ids: z.array(z.string().uuid()).optional().nullable(),
-  primary_contact_person_id: z.string().uuid().optional().nullable(),
+  contact_person_ids: z.array(z.string().guid()).optional().nullable(),
+  primary_contact_person_id: z.string().guid().optional().nullable(),
 });
 
 router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, res: Response) => {
@@ -510,14 +510,14 @@ const updateStatusSchema = z.object({
     date: z.string(),
     delivery: z.enum(['notification', 'email', 'both']).default('both'),
     priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
-    user_id: z.string().uuid().nullable().optional(),
+    user_id: z.string().guid().nullable().optional(),
   })).optional().nullable(),
   // Requirement IDs the user explicitly chose to KEEP alive past lost/cancelled.
   // Everything else open on the job is auto-cancelled by the cleanup pass below.
   // Kept items get keep_after_close=true so background scanners (reminder
   // scanner, hire-form auto-emailer, etc.) still fire them. See CLAUDE.md →
   // "Lost / Cancelled cleanup pattern".
-  keep_requirement_ids: z.array(z.string().uuid()).optional().nullable(),
+  keep_requirement_ids: z.array(z.string().guid()).optional().nullable(),
 });
 
 router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthRequest, res: Response) => {
@@ -915,7 +915,7 @@ const updatePipelineSchema = z.object({
   likelihood: z.enum(['hot', 'warm', 'cold']).optional().nullable(),
   next_chase_date: z.string().optional().nullable(),
   chase_interval_days: z.number().min(1).max(90).optional(),
-  chase_alert_user_id: z.string().uuid().optional().nullable(),
+  chase_alert_user_id: z.string().guid().optional().nullable(),
   chase_alert_delivery: z.enum(['bell', 'bell_email', 'none']).optional().nullable(),
   job_value: z.number().optional().nullable(),
   quote_status: z.enum(['not_quoted', 'quoted', 'revised', 'accepted']).optional().nullable(),
@@ -1146,7 +1146,7 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
 // ============================================================================
 
 const createJobOrgSchema = z.object({
-  organisation_id: z.string().uuid(),
+  organisation_id: z.string().guid(),
   role: z.enum(['band', 'client', 'promoter', 'festival', 'management', 'label', 'venue_operator', 'supplier', 'other']),
   is_primary: z.boolean().optional().default(false),
   notes: z.string().optional().nullable(),
@@ -1220,7 +1220,7 @@ router.post('/:jobId/organisations', validate(createJobOrgSchema), async (req: A
 // no matter which org leads the display. Swapping the lead leaves no trail to
 // unpick — flip it back and you're exactly where you started.
 const setLeadOrgSchema = z.object({
-  organisation_id: z.string().uuid().nullable(),
+  organisation_id: z.string().guid().nullable(),
 });
 
 router.put('/:jobId/organisations/lead', validate(setLeadOrgSchema), async (req: AuthRequest, res: Response) => {
@@ -1356,8 +1356,8 @@ router.get('/:jobId/contacts', async (req: AuthRequest, res: Response) => {
 // At most one primary (enforced by partial unique index; passing a primary
 // not in person_ids is a 400). Empty person_ids clears all contacts on the job.
 const putJobContactsSchema = z.object({
-  person_ids: z.array(z.string().uuid()),
-  primary_person_id: z.string().uuid().nullable().optional(),
+  person_ids: z.array(z.string().guid()),
+  primary_person_id: z.string().guid().nullable().optional(),
 });
 
 router.put('/:jobId/contacts', validate(putJobContactsSchema), async (req: AuthRequest, res: Response) => {
@@ -1422,7 +1422,7 @@ router.put('/:jobId/contacts', validate(putJobContactsSchema), async (req: AuthR
 //         set_as_primary?: boolean }
 // Exactly one of person_id or (first_name + last_name) must be supplied.
 const addContactSchema = z.object({
-  person_id: z.string().uuid().optional(),
+  person_id: z.string().guid().optional(),
   first_name: z.string().optional(),
   last_name: z.string().optional(),
   email: z.string().email().optional().or(z.literal('')),
@@ -1558,7 +1558,7 @@ router.get('/:jobId/email-routing', async (req: AuthRequest, res: Response) => {
 // Only bucket keys in EMAIL_BUCKETS are accepted; unknown keys are
 // rejected so a typo doesn't silently get persisted into JSONB.
 const putEmailRoutingSchema = z.object({
-  routing: z.record(z.string(), z.array(z.string().uuid())),
+  routing: z.record(z.string(), z.array(z.string().guid())),
 });
 
 router.put('/:jobId/email-routing', validate(putEmailRoutingSchema), async (req: AuthRequest, res: Response) => {
@@ -1618,7 +1618,7 @@ const editJobSchema = z.object({
   start_time: z.string().optional().nullable(),
   return_time: z.string().optional().nullable(),
   end_time: z.string().optional().nullable(),
-  client_id: z.string().uuid().optional().nullable(),
+  client_id: z.string().guid().optional().nullable(),
   client_name: z.string().optional().nullable(),
   hh_job_number: z.union([z.string(), z.number()]).optional().nullable(),
   job_value: z.number().optional().nullable(),
@@ -2070,12 +2070,12 @@ const addOptionSchema = z.object({
 });
 
 const groupWithSchema = z.object({
-  other_job_id: z.string().uuid(),
+  other_job_id: z.string().guid(),
 });
 
 const patchGroupSchema = z.object({
   label: z.string().trim().max(120).optional().nullable(),
-  lead_job_id: z.string().uuid().optional().nullable(),
+  lead_job_id: z.string().guid().optional().nullable(),
 });
 
 /** The client's display name for a new group's default label. */
@@ -2783,7 +2783,7 @@ router.get('/:id/combine-preview', async (req: AuthRequest, res: Response) => {
 });
 
 const combineSchema = z.object({
-  absorb_job_id: z.string().uuid(),
+  absorb_job_id: z.string().guid(),
   out_date: z.string(),
   job_date: z.string(),
   job_end: z.string(),

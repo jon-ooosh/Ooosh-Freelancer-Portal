@@ -543,7 +543,7 @@ router.use(authorize(...STAFF_ROLES));
 // freelancer_applications row, and emails the intro + form link.
 const inviteSchema = z
   .object({
-    person_id: z.string().uuid().optional(),
+    person_id: z.string().guid().optional(),
     first_name: z.string().min(1).max(255).optional(),
     last_name: z.string().min(1).max(255).optional(),
     email: z.string().email().optional(),

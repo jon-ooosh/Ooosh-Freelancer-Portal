@@ -44,7 +44,7 @@
     "stripe": "^22.2.2",
     "uuid": "^10.0.0",
     "xlsx": "^0.18.5",
-    "zod": "^3.23.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

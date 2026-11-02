@@ -93,7 +93,7 @@ router.post('/read', async (req: AuthRequest, res: Response) => {
 // anchors routes/interactions.ts gives a mention bell.
 const seenSchema = z.object({
   entity_type: z.enum(['jobs', 'people', 'organisations', 'venues', 'job_issues']),
-  entity_id: z.string().uuid(),
+  entity_id: z.string().guid(),
 });
 
 router.post('/seen', async (req: AuthRequest, res: Response) => {
@@ -425,7 +425,7 @@ router.post('/:id/snooze', async (req: AuthRequest, res: Response) => {
     res.json({ data: result.rows[0] });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid snooze date', details: error.errors });
+      return res.status(400).json({ error: 'Invalid snooze date', details: error.issues });
     }
     console.error('Snooze error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -459,7 +459,7 @@ const followUpSchema = z.object({
   content: z.string().optional().nullable(),
   due_date: z.string().datetime({ offset: true }),
   entity_type: z.string().optional().nullable(),
-  entity_id: z.string().uuid().optional().nullable(),
+  entity_id: z.string().guid().optional().nullable(),
   action_url: z.string().optional().nullable(),
   priority: z.enum(['low', 'normal', 'high', 'urgent']).optional().default('normal'),
 });
@@ -485,7 +485,7 @@ router.post('/follow-up', async (req: AuthRequest, res: Response) => {
     res.status(201).json({ data: result.rows[0] });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid follow-up data', details: error.errors });
+      return res.status(400).json({ error: 'Invalid follow-up data', details: error.issues });
     }
     console.error('Create follow-up error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -546,7 +546,7 @@ router.put('/preferences', async (req: AuthRequest, res: Response) => {
     res.json({ success: true });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid preferences', details: error.errors });
+      return res.status(400).json({ error: 'Invalid preferences', details: error.issues });
     }
     console.error('Update preferences error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -570,7 +570,7 @@ const bulkAckSchema = z.object({
   // touch unread notifications that the user hasn't seen yet)
   // 'all'  = acknowledge everything in scope including unread
   scope: z.enum(['read', 'all']).default('read'),
-  ids: z.array(z.string().uuid()).optional(),
+  ids: z.array(z.string().guid()).optional(),
 });
 
 router.post('/bulk-acknowledge', async (req: AuthRequest, res: Response) => {
@@ -621,7 +621,7 @@ router.post('/bulk-acknowledge', async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return res.status(400).json({ error: 'Invalid request', details: error.issues });
     }
     console.error('Bulk-acknowledge error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -684,7 +684,7 @@ router.post('/:id/unacknowledge', async (req: AuthRequest, res: Response) => {
 
 // ── POST /api/notifications/bulk-unacknowledge — undo a Clear-read ────────
 const bulkUnackSchema = z.object({
-  ids: z.array(z.string().uuid()).min(1).max(500),
+  ids: z.array(z.string().guid()).min(1).max(500),
 });
 
 router.post('/bulk-unacknowledge', async (req: AuthRequest, res: Response) => {
@@ -700,7 +700,7 @@ router.post('/bulk-unacknowledge', async (req: AuthRequest, res: Response) => {
     res.json({ restored: result.rows.length });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return res.status(400).json({ error: 'Invalid request', details: error.issues });
     }
     console.error('Bulk-unacknowledge error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -862,7 +862,7 @@ router.post('/:id/action', async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return res.status(400).json({ error: 'Invalid request', details: error.issues });
     }
     console.error('Action error:', error);
     res.status(500).json({ error: 'Internal server error' });
