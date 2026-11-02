@@ -527,8 +527,8 @@ echo "" >> "$REPORT_FILE"
 # What is waiting in the repo's pull-request list and what to do about each.
 # Minor/patch bumps merge themselves once CI is green (dependabot-auto-merge.yml);
 # majors never do. Needs GITHUB_TOKEN (fine-grained, read-only: Pull requests +
-# Checks + Metadata on the repo) and GITHUB_REPO in config.env. Skipped quietly
-# when they are not set.
+# Checks + Metadata + Dependabot alerts on the repo) and GITHUB_REPO in
+# config.env. Skipped quietly when they are not set.
 echo "--- GitHub: Dependabot queue ---" >> "$REPORT_FILE"
 if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPO:-}" ]; then
     GITHUB_TOKEN="$GITHUB_TOKEN" GITHUB_REPO="$GITHUB_REPO" python3 - >> "$REPORT_FILE" 2>&1 <<'PY'
@@ -566,7 +566,7 @@ for p in bots:
     elif state == "red":
         action = f"build FAILS - open a Claude session: \"fix Dependabot PR #{n}\"."
     elif state == "green" and age >= 3:
-        action = f"green but stuck {age}d - comment \"@dependabot rebase\" on it (or ask Claude to); it then merges itself."
+        action = f"green but stuck {age}d - comment \"@dependabot rebase\" on it yourself (Claude's comments reached Dependabot garbled on 19 Oct 2026); it then merges itself."
     elif state == "green":
         action = "green - will merge itself."
     else:
@@ -575,6 +575,73 @@ for p in bots:
 if others:
     print("Other open PRs (yours, not Dependabot):")
     for p in others: print(f"  #{p['number']} {p['title']}")
+PY
+else
+    echo "Not configured: set GITHUB_TOKEN and GITHUB_REPO in /etc/ooosh-maintenance/config.env" >> "$REPORT_FILE"
+fi
+echo "" >> "$REPORT_FILE"
+
+# --- GitHub: open security alerts ------------------------------------------
+# Added Nov 2026. The PR queue above only shows what Dependabot has offered a
+# fix for; the alerts are the actual problems, and 63 of them (four critical,
+# in the freelancer portal's Next.js) sat unseen in the Security tab because
+# nothing reported them. Same token, plus "Dependabot alerts: Read" on the repo.
+# Critical and high are listed one by one; medium and low are counted by package.
+echo "--- GitHub: open security alerts ---" >> "$REPORT_FILE"
+if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPO:-}" ]; then
+    GITHUB_TOKEN="$GITHUB_TOKEN" GITHUB_REPO="$GITHUB_REPO" python3 - >> "$REPORT_FILE" 2>&1 <<'PY'
+import json, os, re, sys, urllib.request, urllib.error, datetime, collections
+repo = os.environ["GITHUB_REPO"]; tok = os.environ["GITHUB_TOKEN"]
+HEADERS = {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json", "User-Agent": "ooosh-weekly"}
+# Left on purpose (CLAUDE.md "Dependencies") - shown, but not as a warning.
+KNOWN = {("xlsx", "backend/package-lock.json"): "left on purpose: only reads trusted admin uploads",
+         ("uuid", "backend/package-lock.json"): "left on purpose: we never call the affected code"}
+alerts = []
+url = f"https://api.github.com/repos/{repo}/dependabot/alerts?state=open&per_page=100"
+try:
+    while url:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS), timeout=20) as r:
+            alerts += json.load(r)
+            nxt = re.search(r'<([^>]+)>;\s*rel="next"', r.headers.get("Link") or "")
+            url = nxt.group(1) if nxt else None
+except urllib.error.HTTPError as e:
+    if e.code in (403, 404):
+        print(f"Could not read security alerts (HTTP {e.code}). The GitHub token needs 'Dependabot alerts: Read' "
+              "on the repo: GitHub > Settings > Developer settings > Fine-grained tokens > this token > Repository permissions.")
+    else:
+        print(f"Could not read security alerts: HTTP {e.code}")
+    sys.exit(0)
+except Exception as e:
+    print(f"Could not read security alerts: {e}"); sys.exit(0)
+
+now = datetime.datetime.now(datetime.timezone.utc)
+ORDER = ["critical", "high", "medium", "low"]
+def sev(a): return (a.get("security_advisory") or {}).get("severity") or "unknown"
+def pkg(a): return (((a.get("security_vulnerability") or {}).get("package")) or {}).get("name") or "?"
+def where(a): return (a.get("dependency") or {}).get("manifest_path") or "?"
+AREA = {"": "portal", "backend": "OP server", "frontend": "OP frontend"}
+def area(a): p = where(a); return AREA.get(p.rsplit("/", 1)[0] if "/" in p else "", p)
+def scope(a): return "developer tools only" if (a.get("dependency") or {}).get("scope") == "development" else "ships"
+counts = collections.Counter(sev(a) for a in alerts)
+print(f"Open security alerts: {len(alerts)} (" + ", ".join(f"{counts.get(s, 0)} {s}" for s in ORDER) + ")")
+if not alerts:
+    print("No open security alerts.")
+for a in sorted((a for a in alerts if sev(a) in ("critical", "high")), key=lambda a: (ORDER.index(sev(a)), pkg(a))):
+    fix = ((a.get("security_vulnerability") or {}).get("first_patched_version") or {}).get("identifier")
+    age = (now - datetime.datetime.fromisoformat(a["created_at"].replace("Z", "+00:00"))).days
+    known = KNOWN.get((pkg(a), where(a)))
+    flag = "KNOWN" if known else "WARNING"
+    summary = ((a.get("security_advisory") or {}).get("summary") or "").strip()
+    print(f"{flag} - {sev(a).upper()} - {pkg(a)} in the {area(a)} ({scope(a)}, open {age}d, "
+          f"{'fixed in ' + fix if fix else 'no fix published'}): {summary[:140]}")
+    if known:
+        print(f"    -> {known}")
+rest = [a for a in alerts if sev(a) not in ("critical", "high")]
+if rest:
+    dev = sum(1 for a in rest if scope(a) != "ships")
+    by_pkg = collections.Counter(f"{pkg(a)} ({area(a)})" for a in rest)
+    print(f"Medium/low: {len(rest)} ({dev} in developer tools only). By package: "
+          + ", ".join(f"{p} x{n}" for p, n in by_pkg.most_common(12)))
 PY
 else
     echo "Not configured: set GITHUB_TOKEN and GITHUB_REPO in /etc/ooosh-maintenance/config.env" >> "$REPORT_FILE"
