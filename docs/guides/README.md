@@ -9,11 +9,12 @@ The plan for the set is `docs/FREELANCER-PORTAL-SPEC.md` §8.
 
 | Folder | Guide | State |
 |---|---|---|
-| `getting-started/` | Getting started with the freelancer portal | draft, Oct 2026 |
-| `van-delivery/` | Delivering a hire van (the book-out) | draft, Oct 2026 |
-| `van-collection/` | Collecting a hire van | draft, Oct 2026 |
-| `backline/` | Delivering and collecting backline | draft, Oct 2026 |
+| `getting-started/` | Getting started with the freelancer portal | live, Oct 2026 |
+| `van-delivery/` | Delivering a hire van (the book-out) | live, Nov 2026 |
+| `van-collection/` | Collecting a hire van | live, Nov 2026 |
+| `backline/` | Delivering and collecting backline | live, Nov 2026 |
 | `studio-sitter/` | Studio sitting (the evening, the phone, closing up, the lock-up checklist) | draft, Oct 2026 |
+| `working-with-ooosh/` | Working with Ooosh: what we expect, and what freelancers can expect from us (text only; freelancers will confirm they've read it) | draft, Nov 2026 |
 | `shop-till/` | How to use the shop till (studio sitters) | live; still in the old look, has its own scripts |
 
 ## How a guide is built

@@ -34,9 +34,10 @@ function defaultLockupTemplate() {
   const end = src.indexOf('\n};', start)
   if (start < 0 || end < 0) throw new Error('Could not find DEFAULT_TEMPLATE in studio-sitter-lockup.ts')
   const literal = src.slice(src.indexOf('{', start), end + 2)
-  // The reference photos are on Jotform; the guide only shows the link to them.
   // eslint-disable-next-line no-new-func
-  return new Function('REF_ROOM_1', 'REF_ROOM_2', 'REF_ROOM_3', `return (${literal})`)('', '', '')
+  // The real photos live in Settings, not in this code fallback. The guide
+  // only shows the "What it should look like" link, which its text keeps on screen.
+  return new Function(`return (${literal})`)()
 }
 
 // ── Sample data (made-up bands) ──────────────────────────────────────────────

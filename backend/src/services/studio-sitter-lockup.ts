@@ -64,10 +64,10 @@ export interface UploadedPhoto {
   size_bytes?: number;
 }
 
-// Jotform reference images (public form-asset URLs) — seed defaults; jon curates.
-const REF_ROOM_1 = 'https://www.jotform.com/uploads/jonwood/form_files/IMG_3638.65b7945e03a2e5.97895687.jpg';
-const REF_ROOM_2 = 'https://www.jotform.com/uploads/jonwood/form_files/IMG_2315.64f9b25b0a0af6.19275184.jpg';
-const REF_ROOM_3 = 'https://www.jotform.com/uploads/jonwood/form_files/IMG_3635.65b795cd3a8a08.69909573.jpg';
+// The reference photos are NOT in this fallback. They were Jotform-hosted at
+// first; jon re-uploaded them in Settings (Oct 2026), so the live checklist in
+// system_settings carries them (R2 keys, presigned on read). Add or change
+// photos there, never here.
 
 /**
  * Canonical lock-up template — ported from the studio Jotform. This is the code
@@ -101,7 +101,7 @@ export const DEFAULT_TEMPLATE: LockupTemplate = {
       id: 'backline_stored', section: 'Upstairs',
       label: 'Ooosh backline packed away and stored (shelves in the upstairs kitchen, or by the double doors / downstairs if from the warehouse)',
       type: 'yesno', expected: 'yes', end_of_booking_only: true,
-      reference: { text: 'When the booking has ended, the rooms should be reset and gear stored like this:', photos: [REF_ROOM_1, REF_ROOM_2, REF_ROOM_3] },
+      reference: { text: 'When the booking has ended, the rooms should be reset and gear stored like this:', photos: [] },
     },
     // ── Downstairs ───────────────────────────────────────────────────────
     { id: 'computer_stereo_off', section: 'Downstairs', label: 'Computer, stereo and printer turned off', type: 'yesno', expected: 'yes' },
