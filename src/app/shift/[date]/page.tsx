@@ -14,7 +14,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { ShoppingCart, FileText, Image as ImageIcon, Paperclip, ChevronDown, Lock, X } from 'lucide-react'
+import { ShoppingCart, FileText, Image as ImageIcon, Paperclip, ChevronDown, Lock, X, KeyRound } from 'lucide-react'
 import FreelancerTaskList from '@/components/FreelancerTaskList'
 import type { PortalFreelancerTask } from '@/lib/op-api'
 import { cls, IconTile, BackLink, Chevron, SectionLabel, Banner, Chip, ICON } from '@/components/ui'
@@ -48,6 +48,9 @@ interface ShiftDetail {
   assignment_status: string | null
   jobs: ShiftJob[]
   tasks?: PortalFreelancerTask[]
+  /** Gate, grey cupboard and lockbox codes: OP sends them on the day of the
+   *  shift only (services/site-codes.ts), otherwise null. */
+  codes?: { gate: string | null; cupboard: string | null; lockbox: string | null } | null
   error?: string
 }
 
@@ -328,6 +331,9 @@ export default function ShiftDetailPage() {
               </p>
             </section>
 
+            {/* Tonight's codes — OP only sends them on the day of the shift */}
+            {shift.codes && <CodesCard codes={shift.codes} />}
+
             {/* Shop till — price lookup any time, selling on the night */}
             <Link
               href={`/shift/${date}/till`}
@@ -600,6 +606,36 @@ export default function ShiftDetailPage() {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Tonight's codes: the yard gate, the grey cupboard outside and the key
+ * lockbox inside it. Only ever on the day of the shift (OP site-codes.ts); a
+ * code that isn't set in OP's Settings is left out.
+ */
+function CodesCard({ codes }: { codes: { gate: string | null; cupboard: string | null; lockbox: string | null } }) {
+  const rows = [
+    { label: 'Yard gate', value: codes.gate },
+    { label: 'Grey cupboard (outside)', value: codes.cupboard },
+    { label: 'Key lockbox (in the cupboard)', value: codes.lockbox },
+  ].filter((r) => r.value)
+  return (
+    <section className={`${cls.card} px-4 py-3.5 flex flex-col gap-2`}>
+      <div className="flex items-center gap-2">
+        <KeyRound size={18} strokeWidth={1.8} className="text-hf-muted" />
+        <span className="text-[16px] font-semibold text-hf-ink">Codes for tonight</span>
+      </div>
+      <div className="flex flex-col divide-y divide-hf-divider">
+        {rows.map((r) => (
+          <div key={r.label} className="min-h-[44px] flex items-center justify-between gap-3">
+            <span className="text-[15px] text-hf-body">{r.label}</span>
+            <span className="text-[20px] font-bold tracking-[0.08em] text-hf-ink tabular">{r.value}</span>
+          </div>
+        ))}
+      </div>
+      <p className="text-[13px] text-hf-muted leading-[1.4]">Shown on the day of your shift only. Please don&apos;t share them.</p>
+    </section>
   )
 }
 

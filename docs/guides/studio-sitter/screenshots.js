@@ -53,6 +53,8 @@ const JOBS_TONIGHT = [
 const SHIFT = {
   success: true, date: TODAY, planned_start: '16:45:00', planned_end: '22:30:00', status: 'scheduled',
   fee: null, assignment_status: 'confirmed', jobs: JOBS_TONIGHT, tasks: [],
+  // Made-up codes: OP sends the real ones on the day of the shift only.
+  codes: { gate: '2580', cupboard: '1470', lockbox: '3690' },
 }
 const SHIFTS = { success: true, shifts: [{ ...SHIFT, report_submitted_at: null }] }
 const THREAD = { success: true, messages: [
@@ -105,7 +107,11 @@ async function main() {
   await page.goto(`${BASE}/shift/${TODAY}`, { waitUntil: 'networkidle' })
   await page.getByText('Who’s in tonight').or(page.getByText("Who's in tonight")).first().waitFor()
   await hideFixed(page, true)
-  await snap(page, OUT, '02-shift-top', [page.getByText('Studio sitter').first(), page.locator(`a[href="/shift/${TODAY}/till"]`).first()], { padTop: 60, padBottom: 20 })
+  await snap(page, OUT, '02-shift-top', [page.locator(`a[href="/shift/${TODAY}/till"]`).first()], { padTop: 16, padBottom: 16 })
+
+  // 02b: tonight's codes
+  const codesCard = page.locator('section', { hasText: 'Codes for tonight' }).first()
+  await snap(page, OUT, '02-codes', [codesCard])
 
   // 03: who's in tonight, and the recent handover
   await page.getByText('Recent handover').click()

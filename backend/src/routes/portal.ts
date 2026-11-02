@@ -31,6 +31,7 @@ import { isEndKeyed, lastWorkDay } from '../services/quote-schedule';
 import { isVanLegDone } from '../services/quote-completion';
 import { personalFee } from '../services/freelancer-fees';
 import { getFreelancerEarnings } from '../services/freelancer-earnings';
+import { sitterCodesFor, gateCodeForJob } from '../services/site-codes';
 import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures, deviceLabelFrom } from '../services/staff-login-security';
 import {
   isPortalEnforcedNow, portalEmailHint, signPortalPending, readPortalPending, sendPortalLoginCode,
@@ -1162,7 +1163,13 @@ router.get('/studio-sitter/shifts/:date', async (req: PortalRequest, res: Respon
     } catch (err) {
       console.error('Portal sitter shift tasks error (non-fatal):', err);
     }
-    res.json({ success: true, ...detail, tasks });
+    // The gate, grey cupboard and lockbox codes, on the day only (site-codes.ts).
+    // A failure costs the codes card, not the page.
+    const codes = await sitterCodesFor({ date, status: detail.status }).catch((err) => {
+      console.error('Portal sitter shift codes error (non-fatal):', err);
+      return null;
+    });
+    res.json({ success: true, ...detail, tasks, codes });
   } catch (error) {
     console.error('Portal sitter shift detail error:', error);
     res.status(500).json({ error: 'Failed to load shift' });
@@ -2762,9 +2769,15 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
       };
     }
 
+    // The yard gate code, from the job's day to the day after (site-codes.ts).
+    const gateCode = await gateCodeForJob(row).catch((err) => {
+      console.error(`[portal] gate code lookup failed for quote ${quoteId} (non-fatal):`, err);
+      return null;
+    });
+
     res.json({
       success: true,
-      job: { ...job, clientEmail, clientContacts },
+      job: { ...job, clientEmail, clientContacts, gateCode },
       venue,
       contactsVisible: venue ? !venue.phoneHidden : true,
       boardType: row.job_type === 'crewed' ? 'crew' : 'dc',

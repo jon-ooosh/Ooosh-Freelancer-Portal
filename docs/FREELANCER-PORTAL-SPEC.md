@@ -413,9 +413,21 @@ studio manager) and **Working with Ooosh** (draft: what we expect of freelancers
 expect from us; the "no contract, these are the standards" document). On the way, the freelancer "hire
 form not in yet" screen was reworded to match the guide (carry on to the customer; keys only once the
 office says the form is done), and the lock-up checklist's built-in photos (Jotform) were dropped from
-the code fallback: the live checklist and its photos are in Settings. Still to come: the shop-till
-guide in the new look, a fire procedure for sitters, a short out-of-hours van return guide, the codes
-on the shift and job pages, and a "have they read it?" tick for freelancer documents.
+the code fallback: the live checklist and its photos are in Settings.
+
+**Codes (Nov 2026, migration 324, `services/site-codes.ts`):** the yard gate code shows on any job's
+page from its day to the day after (a late collection is back after midnight); the gate, grey cupboard
+and key lockbox codes show on a studio sitter's shift page on the day only, and still after locking
+up (the keys go back in the lockbox). One place to change them: Settings › Out-of-Hours Returns. Not a
+Resources page (jon agreed): that would put the building's key code in front of every freelancer
+login, past ones included, at any time. Early van pick-ups before staff arrive stay arranged by hand.
+The **fire procedure** ("Fire: what to do", draft) is common sense from jon's paper risk assessment:
+a call point and an extinguisher in each room, leave everything, assembly point by the front gates.
+
+Still to come: the shop-till guide in the new look, the "have they read it?" tick for freelancer
+documents (with the Staff Documents row actions folded into a ⋯ menu), and out-of-hours returns for
+freelancers by email (a small table of its own, NOT the hirer's `return_overnight` flag, which would
+email, text and log violations against the hirer).
 
 ## 9. The reskin (PR 3, Oct 2026)
 

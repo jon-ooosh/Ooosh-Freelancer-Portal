@@ -14,6 +14,7 @@ The plan for the set is `docs/FREELANCER-PORTAL-SPEC.md` §8.
 | `van-collection/` | Collecting a hire van | live, Nov 2026 |
 | `backline/` | Delivering and collecting backline | live, Nov 2026 |
 | `studio-sitter/` | Studio sitting (the evening, the phone, closing up, the lock-up checklist) | draft, Oct 2026 |
+| `fire-procedure/` | Fire: what to do (studio sitters and anyone in the building out of hours; the sitter guide points at it) | draft, Nov 2026 |
 | `working-with-ooosh/` | Working with Ooosh: what we expect, and what freelancers can expect from us (text only; freelancers will confirm they've read it) | draft, Nov 2026 |
 | `shop-till/` | How to use the shop till (studio sitters) | live; still in the old look, has its own scripts |
 
