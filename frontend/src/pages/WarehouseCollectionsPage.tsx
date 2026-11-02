@@ -108,6 +108,13 @@ export default function WarehouseCollectionsPage() {
           </div>
           <div className="flex items-center gap-2">
             <button
+              onClick={() => navigate('/warehouse/till')}
+              className="px-3 py-1.5 rounded-lg bg-purple-600 text-white text-sm font-medium hover:bg-purple-700"
+              title="Ring up a shop sale on this iPad"
+            >
+              Till
+            </button>
+            <button
               onClick={fetchJobs}
               disabled={isLoading}
               className="p-2 text-purple-600 hover:bg-purple-50 rounded-lg transition-colors disabled:opacity-50"

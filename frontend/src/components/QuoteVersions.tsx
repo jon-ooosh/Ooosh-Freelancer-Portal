@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
+import { openR2Key } from '../lib/openAuthedFile';
 
 /**
  * Quote-PDF version diff (Auto-Chase §7.3).
@@ -130,8 +131,7 @@ export default function QuoteVersions({ jobId, emailSignal }: { jobId: string; e
 
   async function openPdf(key: string) {
     try {
-      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(key)}`);
-      window.open(URL.createObjectURL(blob), '_blank');
+      await openR2Key(key);
     } catch {
       setError('Could not open the quote PDF');
     }

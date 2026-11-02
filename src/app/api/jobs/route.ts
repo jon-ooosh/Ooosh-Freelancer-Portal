@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobsFromOP, isOpClientError, OpApiError } from '@/lib/op-api'
+import { readSince } from '@/lib/history'
 
 // =============================================================================
 // TYPES
@@ -33,10 +34,10 @@ interface OrganisedJob {
   // of summing individual driverPay values — the combined fee is what
   // the freelancer is actually being paid for the whole run.
   runCombinedFreelancerFee?: number | null
-  runCombinedClientFee?: number | null
   runNotes?: string | null
   hhRef?: string
   keyNotes?: string
+  contacts?: Array<{ name: string; label?: string | null; phone?: string | null; email?: string | null }>
   completedAtDate?: string
   // Crew job specific fields
   workType?: string             // e.g. "BACKLINE TECH", or work description if "Other"
@@ -205,7 +206,8 @@ export async function GET(request: NextRequest): Promise<NextResponse<JobsApiRes
     }
 
     try {
-      const opData = await getJobsFromOP(sessionToken)
+      // `since`: how far back completed / cancelled go (lib/history.ts).
+      const opData = await getJobsFromOP(sessionToken, readSince(request.nextUrl.searchParams.get('since')))
       console.log('Jobs API: OP backend took', Date.now() - startTime, 'ms')
 
       // The OP portal API returns flat jobs (not grouped).

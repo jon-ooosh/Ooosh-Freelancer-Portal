@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { useUrlSearch } from '../hooks/useUrlSearch';
 import SlidePanel from '../components/SlidePanel';
 import PersonForm from '../components/PersonForm';
 import InviteFreelancerModal from '../components/InviteFreelancerModal';
@@ -75,7 +76,10 @@ interface PeopleResponse {
 
 export default function PeoplePage() {
   const [people, setPeople] = useState<Person[]>([]);
-  const [search, setSearch] = useState('');
+  const { search, setSearch, debouncedSearch } = useUrlSearch();
+  // Bumped per request; a reply only lands if it is still the newest (a slow
+  // reply for "1" must not overwrite the answer for "1000mods").
+  const requestSeq = useRef(0);
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
   const [showForm, setShowForm] = useState(false);
@@ -99,7 +103,7 @@ export default function PeoplePage() {
   useEffect(() => {
     loadPeople();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, filterFreelancer, filterApproved, filterMissingEmail, filterMissingPhone,
+  }, [debouncedSearch, filterFreelancer, filterApproved, filterMissingEmail, filterMissingPhone,
       filterInsured, filterTshirt, reviewFilter, selectedSkills, sortBy, groupByReview]);
 
   // Load skills list when freelancer filter turns on (once per session is enough)
@@ -137,12 +141,13 @@ export default function PeoplePage() {
   }, [filterFreelancer]);
 
   async function loadPeople(page = 1) {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
       // When grouping by review, fetch all (limit 200 — well above the freelancer count)
       const limit = groupByReview ? '200' : '50';
       const params = new URLSearchParams({ page: String(page), limit });
-      if (search) params.set('search', search);
+      if (debouncedSearch) params.set('search', debouncedSearch);
       if (filterFreelancer) params.set('is_freelancer', 'true');
       if (filterApproved) params.set('is_approved', 'true');
       if (filterInsured) params.set('is_insured', 'true');
@@ -154,12 +159,14 @@ export default function PeoplePage() {
       if (sortBy !== 'name') params.set('sort', sortBy);
 
       const data = await api.get<PeopleResponse>(`/people?${params}`);
+      if (seq !== requestSeq.current) return; // superseded by a newer search
       setPeople(data.data);
       setPagination(data.pagination);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       console.error('Failed to load people:', err);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }
 
@@ -215,7 +222,7 @@ export default function PeoplePage() {
       <div className="mt-6 flex flex-wrap items-center gap-4">
         <input
           type="text"
-          placeholder="Search people by name or email..."
+          placeholder="Search by name, email, phone or organisation..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-md rounded border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
@@ -265,6 +272,7 @@ export default function PeoplePage() {
           <option value="recently_added">Sort: Recently added</option>
           <option value="recently_updated">Sort: Recently updated</option>
           <option value="last_contacted">Sort: Last contacted</option>
+          <option value="recently_viewed">Sort: Recently viewed (me)</option>
           {filterFreelancer && <option value="review_due">Sort: Review due soonest</option>}
         </select>
       </div>
@@ -369,8 +377,10 @@ export default function PeoplePage() {
       )}
 
       {/* Table(s) */}
-      <div className="mt-6 space-y-6">
-        {loading ? (
+      {/* While a new search loads, keep the previous results up (faded) rather than
+          blanking to "Loading..." on every keystroke */}
+      <div className={`mt-6 space-y-6 transition-opacity ${loading && people.length > 0 ? 'opacity-50' : ''}`}>
+        {loading && people.length === 0 ? (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center text-sm text-gray-500">
             Loading...
           </div>

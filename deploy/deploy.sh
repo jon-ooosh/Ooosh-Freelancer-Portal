@@ -11,6 +11,12 @@
 #   3. Builds frontend and backend
 #   4. Runs database migrations
 #   5. Restarts the service
+#
+# The service keeps running the previous build until the final restart, so
+# deploys can happen ad hoc while staff are using OP. If `npm ci` fails
+# (10 Oct 2026: ENOTEMPTY on a half-deleted node_modules), the folder is
+# cleared and the install retried once. If any step fails, nothing is
+# restarted and the old build carries on — the script says so.
 # =============================================================
 
 set -euo pipefail
@@ -25,6 +31,24 @@ echo "============================================"
 
 cd "${APP_DIR}"
 
+on_fail() {
+  echo ""
+  echo "!!! Deploy FAILED — nothing was restarted; the previous build is still running."
+  echo "!!! Do NOT restart ooosh-portal until this script completes: if the install"
+  echo "!!! step failed, node_modules may be incomplete and a restart would crash."
+  echo "!!! Fix the error above and re-run this script."
+}
+
+# npm ci, and if it fails (e.g. ENOTEMPTY) clear node_modules and try once more.
+install_deps() {
+  if [ -f package-lock.json ]; then
+    npm ci "$@" || { echo "npm ci failed — clearing node_modules and retrying once..."; rm -rf node_modules; npm ci "$@"; }
+  else
+    npm install
+  fi
+}
+trap on_fail ERR
+
 # --- Pull latest code ---
 echo ""
 echo "[1/5] Pulling latest code..."
@@ -36,17 +60,9 @@ git pull origin "${BRANCH}"
 echo ""
 echo "[2/5] Installing dependencies..."
 cd "${APP_DIR}/backend"
-if [ -f package-lock.json ]; then
-  npm ci --production=false
-else
-  npm install
-fi
+install_deps --production=false
 cd "${APP_DIR}/frontend"
-if [ -f package-lock.json ]; then
-  npm ci
-else
-  npm install
-fi
+install_deps
 
 # --- Build backend ---
 echo ""
@@ -66,13 +82,14 @@ echo "[5/5] Running database migrations..."
 cd "${APP_DIR}/backend"
 npm run db:migrate
 
+# --- Restart the service (a few seconds' blip) ---
+sudo systemctl restart ooosh-portal
+trap - ERR
+
 echo ""
 echo "============================================"
-echo "  Build Complete!"
+echo "  Deploy Complete — service restarted"
 echo "============================================"
-echo ""
-echo "  Restart the service:"
-echo "    sudo systemctl restart ooosh-portal"
 echo ""
 echo "  Check status:"
 echo "    sudo systemctl status ooosh-portal"

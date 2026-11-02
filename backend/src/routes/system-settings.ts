@@ -7,11 +7,14 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // GET /api/system-settings — list all (optionally filtered by category)
 router.get('/', async (req: AuthRequest, res: Response) => {
@@ -49,6 +52,13 @@ router.put('/', authorize('admin', 'manager'), validate(updateSchema), async (re
       );
     }
     invalidateSystemSettingsCache();
+    // "PIN changed today" — the admins' "Rotate the warehouse PIN" bells are
+    // done once the date is inside the rotation period (bell-rules.ts). Lazy
+    // import: this router is loaded by services the rules module must not pull in.
+    if ('kiosk_pin_rotated_at' in settings) {
+      const { retireDoneBells } = await import('../services/notification-resolve');
+      await retireDoneBells('kiosk_pin_rotation');
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('[system-settings] update error:', error);
@@ -129,4 +139,51 @@ export async function getSystemSettings(keys: string[]): Promise<Record<string, 
 
 export function invalidateSystemSettingsCache(): void {
   cache.clear();
+}
+
+/**
+ * Create-or-update a setting that the system may legitimately invent.
+ *
+ * Distinct from setSystemSetting below, which refuses an unknown key so a typo
+ * cannot quietly create one nothing reads. A few keys are genuinely open-ended
+ * — `staff.bank_holidays.<year>` being the case that forced this: the dates are
+ * computed for any year, so an override has to be creatable for any year, and
+ * seeding rows up front just recreates the "who adds 2029?" problem one level
+ * down. The caller supplies the label and category, so a row created this way
+ * is indistinguishable from a seeded one on the Settings page.
+ */
+export async function upsertSystemSetting(
+  key: string, value: string | null,
+  meta: { label: string; category: string; valueType?: string; sortOrder?: number }
+): Promise<void> {
+  await query(
+    `INSERT INTO system_settings (key, value, label, category, value_type, sort_order)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value, label = EXCLUDED.label, updated_at = NOW()`,
+    [key, value, meta.label, meta.category, meta.valueType ?? 'text', meta.sortOrder ?? 900]
+  );
+  cache.delete(key);
+}
+
+/**
+ * Write a single setting from backend code.
+ *
+ * For values the SYSTEM owns rather than a person — a "last run" stamp, say.
+ * Staff-editable config still goes through the PUT above so it is audited to a
+ * user. Only updates an existing row, matching that route: every key is seeded
+ * by a migration, so a typo here fails loudly as a no-op rather than quietly
+ * creating a key nothing reads.
+ */
+export async function setSystemSetting(key: string, value: string | null): Promise<boolean> {
+  const r = await query(
+    `UPDATE system_settings SET value = $1, updated_at = NOW() WHERE key = $2 RETURNING key`,
+    [value, key]
+  );
+  if (r.rows.length === 0) {
+    console.warn(`[system-settings] setSystemSetting: no row for "${key}" — seed it in a migration first`);
+    return false;
+  }
+  cache.delete(key);
+  return true;
 }

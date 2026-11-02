@@ -36,6 +36,10 @@ import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
 import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
+import { applyAccountAutoCover, AUTO_COVER_MARKER } from '../services/hh-requirement-derivation';
+import { reconcileJobExcessTopN } from '../services/excess-topn';
+import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
+import { retireDoneBells } from '../services/notification-resolve';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -317,6 +321,9 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     const requiresReferral = f.requires_referral || false;
     const referralReason = f.referral_reason || '';
 
+    // A standing approval (approved/waived) survives a later form that
+    // declares the same issue — see referralCleared below.
+    let referralCleared = false;
     if (requiresReferral) {
       // Leave referral_status NULL on initial submission so the driver
       // lands in the red "Refer to Insurers" todo state — explicit signal
@@ -326,10 +333,13 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // auto-fire of the referral_alert email to admins still happens
       // via the requires_referral flag elsewhere — the alert path is
       // unchanged.
-      await client.query(
-        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2`,
+      const flagged = await client.query(
+        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2
+         RETURNING referral_status`,
         [referralReason, driverId]
       );
+      const status = flagged.rows[0]?.referral_status;
+      referralCleared = status === 'approved' || status === 'waived';
     }
 
     // 3. Excess amount — passed from hire form app, NOT recalculated here
@@ -408,7 +418,10 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // data.assignment.id regardless of whether the call was a fresh create
       // or a dedup hit.
       await client.query('COMMIT');
-      client.release();
+      // No client.release() here — the `finally` below hands the connection
+      // back. Releasing it twice threw after the reply had gone, and a failed
+      // read below would have sent the catch's ROLLBACK down a connection that
+      // might by then belong to another request (SECURITY-AUDIT-BRIEF B.5).
       console.log(`[hire-forms] Deduplicated: existing assignment ${existingAssignment.rows[0].id} for driver ${driverId}`);
       const full = await getPool().query(
         `SELECT a.*, d.full_name AS driver_name, fv.reg AS vehicle_reg
@@ -447,8 +460,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       });
       if (conflicts.length > 0) {
         await client.query('ROLLBACK');
-        client.release();
-        return res.status(409).json(buildConflictPayload(conflicts));
+        return res.status(409).json(buildConflictPayload(conflicts)); // `finally` releases
       }
     }
 
@@ -486,12 +498,24 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     // This handles the case where the payment portal collected excess before the driver submitted the hire form.
     let excessResult;
     const existingPortalExcess = jobId ? await client.query(
+      // 'waived' MUST stay excluded (added Sep 2026). A waive is a deliberate
+      // staff decision on this hire; absorbing one here silently un-waived it
+      // back to 'pending' at £1,200 the moment the driver's hire form landed,
+      // with nothing to tell staff it had happened. Every sibling query in this
+      // file already excluded it — this was the one that did not.
+      //
+      // The ONE exception (Oct 2026): a stub waived by account auto-cover
+      // (AUTO_COVER_MARKER in notes). That waive is the machine's, not a staff
+      // decision, and applyAccountAutoCover re-covers the absorbed record right
+      // after COMMIT. Skipping it stranded the stub beside a NEW driver record —
+      // two £1,200 records on a one-van hire, "£2,400 required" (job 16833).
       `SELECT id, excess_amount_taken, excess_status, payment_method, payment_reference, payment_date, hh_deposit_id
        FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
          AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND (excess_status <> 'waived' OR COALESCE(notes, '') LIKE '%' || $2 || '%')
        ORDER BY created_at DESC LIMIT 1`,
-      [jobId]
+      [jobId, AUTO_COVER_MARKER]
     ) : { rows: [] };
 
     if (existingPortalExcess.rows.length > 0) {
@@ -621,6 +645,43 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
 
     console.log(`[hire-forms] Created: driver=${driverId}, assignment=${assignment.id}, vehicle=${vehicleId || 'none'}, job=${f.hirehop_job_id || 'none'}, excess=${excessAmount || 'none'}`);
 
+    // Auto-cover from the client's standing held-on-account balance (opt-in,
+    // admin-set per client). The absorb/insert above may have created or
+    // un-waived a chargeable driver record; cover it now so an opted-in client's
+    // hire never reads "Required". Runs on the pool AFTER commit (not the hire-
+    // form transaction) so a failure here can never roll back the hire form.
+    // No-op for every non-opted client.
+    if (jobId) {
+      // Top-N by AMOUNT, not by arrival. Runs before auto-cover so an opted-in
+      // client's waive lands on the corrected figures. Money-guarded and
+      // idempotent — see services/excess-topn.ts. Best-effort: a failure here
+      // must never undo a hire form that has already committed.
+      try {
+        const topn = await reconcileJobExcessTopN(query, jobId);
+        if (topn.changed) {
+          console.log(`[hire-forms] Top-N reconciled (POST): ${topn.summary}`);
+          // Promoting a covered record to chargeable can flip the job from
+          // covered to outstanding, so the pre-hire card must re-derive.
+          const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+          await syncExcessRequirementStatus(jobId);
+        }
+        if (topn.blocked.length > 0) {
+          console.warn(
+            `[hire-forms] Top-N blocked by collected money on job ${jobId} — ` +
+            `hire should total £${topn.correctTotal}, chargeable records total £${topn.chargeableTotal}`,
+          );
+        }
+      } catch (topnErr) {
+        console.error('[hire-forms] reconcileJobExcessTopN (POST) failed (non-fatal):', topnErr);
+      }
+
+      try {
+        await applyAccountAutoCover(query, jobId);
+      } catch (coverErr) {
+        console.error('[hire-forms] applyAccountAutoCover (POST) failed (non-fatal):', coverErr);
+      }
+    }
+
     // Advance the hire_forms requirement on successful submission so the
     // Job Requirements view reflects "forms in" without waiting for book-
     // out. If this submission triggers a referral, we step the card back
@@ -628,7 +689,10 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     // happens in setImmediate so it doesn't slow the hire form response.
     const advanceJobId: string | undefined = assignment.job_id;
     if (advanceJobId) {
-      const targetStatus = requiresReferral ? 'in_progress' : 'done';
+      // An insurer approval is STANDING for the driver (jon, Oct 2026), so a
+      // returning approved driver re-declaring the same issue is not a new
+      // referral and must not step the card back to amber (Tyler Meadham).
+      const targetStatus = requiresReferral && !referralCleared ? 'in_progress' : 'done';
       setImmediate(async () => {
         try {
           await query(
@@ -708,6 +772,7 @@ router.get('/by-job/:hirehopJobId', authenticateVehicleFlexible, async (req: Fle
         d.email AS driver_email,
         d.licence_points AS driver_points,
         d.requires_referral,
+        d.referral_status,
         je.excess_amount_required,
         je.excess_amount_taken,
         je.excess_status
@@ -835,6 +900,17 @@ const quickAssignSchema = z.object({
   hire_start: z.string().optional(),
   hire_end: z.string().optional(),
   client_email: z.string().email().optional(),
+  /**
+   * Manager override for the document gate.
+   *
+   * The gate had NO route past it, which is what forced the workaround on job
+   * 16291 — a driver whose paperwork was genuinely in order but whose stored
+   * dates said otherwise simply could not be assigned, so the hire went out
+   * under someone else's name. An escape hatch nobody can open isn't one.
+   *
+   * Manager-tier, reason mandatory, written to the audit log.
+   */
+  override_reason: z.string().min(10).max(500).optional(),
 });
 
 router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (req: AuthRequest, res: Response) => {
@@ -850,6 +926,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     const driverCheck = await query(
       `SELECT licence_valid_to, dvla_valid_until,
               poa1_valid_until, poa2_valid_until,
+              identity_check_status,
               requires_referral, referral_status, full_name
          FROM drivers WHERE id = $1`,
       [f.driver_id]
@@ -866,17 +943,44 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     if (isExpired(dr.licence_valid_to)) expiredDocs.push('Licence');
     if (isExpired(dr.dvla_valid_until)) expiredDocs.push('DVLA check');
     // POA: at least one needs to be valid (matches the existing validator).
-    const poa1Expired = isExpired(dr.poa1_valid_until);
-    const poa2Expired = isExpired(dr.poa2_valid_until);
-    if (poa1Expired && poa2Expired) expiredDocs.push('Proof of address');
+    // BOTH proofs of address must be valid, independently (jon, Aug 2026).
+    //
+    // This gate previously only fired when BOTH had lapsed, which let a driver
+    // with one dead POA through — while the hire-form router, reading the same
+    // policy correctly, sent them off to re-upload. 35 drivers newly red-flag,
+    // all confirmed genuine lapses (both recorded, one expired). Named
+    // separately so staff know which one to ask for back rather than
+    // re-collecting both.
+    if (isExpired(dr.poa1_valid_until) || !dr.poa1_valid_until) expiredDocs.push('Proof of address 1');
+    if (isExpired(dr.poa2_valid_until) || !dr.poa2_valid_until) expiredDocs.push('Proof of address 2');
 
-    if (expiredDocs.length > 0) {
+    // The override deliberately covers the DOCUMENT gate only. Identity review
+    // and insurance referral below are somebody else's decision to make — a
+    // manager cannot self-serve past "the insurer hasn't answered" or "nobody
+    // has confirmed this is the person on the licence".
+    const overrideReason = (f.override_reason || '').trim();
+    const canOverride = MANAGER_ROLES.includes(req.user?.role as never);
+    if (expiredDocs.length > 0 && !(overrideReason && canOverride)) {
       return res.status(400).json({
         error: `Cannot assign ${dr.full_name} — expired documents: ${expiredDocs.join(', ')}. Send a fresh hire form to refresh.`,
         code: 'driver_documents_expired',
         expiredDocs,
+        // Tells the frontend whether to offer the override, so a member of
+        // staff without the tier isn't shown a door they can't open.
+        can_override: canOverride,
       });
     }
+    // Photo ID review sits alongside the insurance referral: same "a human must
+    // decide" shape, different decider. Checked first because it is the more
+    // fundamental question — we do not yet know this is the person on the licence.
+    if (!isIdentityAuthorised(dr.identity_check_status)) {
+      return res.status(400).json({
+        error: `Cannot assign ${dr.full_name} — ${identityHoldReason(dr.identity_check_status)}`,
+        code: 'driver_identity_unverified',
+        identity_check_status: dr.identity_check_status,
+      });
+    }
+
     if (dr.requires_referral && dr.referral_status !== 'approved') {
       return res.status(400).json({
         error: `Cannot assign ${dr.full_name} — insurance referral is ${dr.referral_status || 'pending'}. Resolve the referral on the driver detail page first.`,
@@ -954,6 +1058,29 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
       ]
     );
 
+    // Audit an overridden assignment. Written after the row exists so the log
+    // points at a real assignment, and kept loud: this is a manager knowingly
+    // putting a driver on a hire whose paperwork the system considers stale.
+    if (overrideReason && expiredDocs.length > 0) {
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, new_values)
+         VALUES ($1, 'driver', $2, 'override_document_gate', $3)`,
+        [
+          req.user!.id, f.driver_id,
+          JSON.stringify({
+            assignment_id: result.rows[0].id,
+            job_id: f.job_id,
+            expired_documents: expiredDocs,
+            reason: overrideReason,
+          }),
+        ],
+      ).catch(err => console.error('[hire-forms] override audit failed:', err));
+      console.warn(
+        `[hire-forms] Document gate OVERRIDDEN for driver ${f.driver_id} on job ${f.job_id} ` +
+        `by ${req.user?.email} — expired: ${expiredDocs.join(', ')} — reason: ${overrideReason}`,
+      );
+    }
+
     // Also create an excess record.
     //
     // Quick-assign is a STAFF action — it defaults to the £1,200 floor per
@@ -1009,12 +1136,15 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     // internal-job cascade) must never be silently flipped back to 'pending'.
     // 'released' is terminal (migration 087) — absorbing one resurrects a dead
     // pre-auth to 'pending' with stale amount_held (job 15934 incident, Jun 2026).
+    // Exception: a stub waived by account auto-cover (marker present) IS
+    // absorbed — same reason as the hire-form POST above (job 16833).
     const orphanExcess = await query(
       `SELECT id FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND (excess_status <> 'waived' OR COALESCE(notes, '') LIKE '%' || $2 || '%')
        ORDER BY created_at ASC LIMIT 1`,
-      [f.job_id]
+      [f.job_id, AUTO_COVER_MARKER]
     );
 
     if (orphanExcess.rows.length > 0) {
@@ -1066,6 +1196,41 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
       }
     }
     } // end !isInternalJob
+
+    // Auto-cover from the client's standing held-on-account balance (opt-in,
+    // admin-set per client). Covers the record just created/absorbed above so an
+    // opted-in client's quick-assign never leaves a driver reading "Required".
+    // No-op for every non-opted client. Best-effort — never fails the assign.
+    if (f.job_id) {
+      // Top-N by AMOUNT, not by arrival. Runs before auto-cover so an opted-in
+      // client's waive lands on the corrected figures. Money-guarded and
+      // idempotent — see services/excess-topn.ts. Best-effort: a failure here
+      // must never undo a hire form that has already committed.
+      try {
+        const topn = await reconcileJobExcessTopN(query, f.job_id);
+        if (topn.changed) {
+          console.log(`[hire-forms] Top-N reconciled (quick-assign): ${topn.summary}`);
+          // Promoting a covered record to chargeable can flip the job from
+          // covered to outstanding, so the pre-hire card must re-derive.
+          const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+          await syncExcessRequirementStatus(f.job_id);
+        }
+        if (topn.blocked.length > 0) {
+          console.warn(
+            `[hire-forms] Top-N blocked by collected money on job ${f.job_id} — ` +
+            `hire should total £${topn.correctTotal}, chargeable records total £${topn.chargeableTotal}`,
+          );
+        }
+      } catch (topnErr) {
+        console.error('[hire-forms] reconcileJobExcessTopN (quick-assign) failed (non-fatal):', topnErr);
+      }
+
+      try {
+        await applyAccountAutoCover(query, f.job_id);
+      } catch (coverErr) {
+        console.error('[hire-forms] applyAccountAutoCover (quick-assign) failed (non-fatal):', coverErr);
+      }
+    }
 
     console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id || 'unassigned'} on job ${f.job_id}, van_count=${vanCount})`);
 
@@ -1258,17 +1423,22 @@ const FREELANCER_PATCH_ALLOW = new Set([
  */
 async function isDriverAuthorisedForAgreement(assignmentId: string): Promise<boolean> {
   const res = await query(
-    `SELECT d.requires_referral, d.referral_status
+    `SELECT d.requires_referral, d.referral_status, d.identity_check_status
        FROM vehicle_hire_assignments vha
        JOIN drivers d ON d.id = vha.driver_id
       WHERE vha.id = $1`,
     [assignmentId],
   );
   if (res.rows.length === 0) return true; // no driver row resolvable — fail open
-  const { requires_referral, referral_status } = res.rows[0] as {
+  const { requires_referral, referral_status, identity_check_status } = res.rows[0] as {
     requires_referral: boolean | null;
     referral_status: string | null;
+    identity_check_status: string | null;
   };
+  // An unresolved photo ID check holds the agreement for the same reason a
+  // pending referral does: we are not yet cleared to treat this person as an
+  // authorised driver. Fails OPEN on an unknown status, like the referral arm.
+  if (!isIdentityAuthorised(identity_check_status)) return false;
   if (!requires_referral) return true;
   return referral_status === 'approved' || referral_status === 'waived';
 }
@@ -1935,6 +2105,231 @@ const addToHireSchema = z.object({
   vehicle_ids: z.array(z.string().uuid()).min(1).max(10),
 });
 
+interface AddToHireSibling {
+  vehicle_id: string;
+  vehicle_reg: string;
+  hire_end: Date | null;
+  return_overnight: boolean | null;
+}
+
+interface AddToHireAffected {
+  id: string;
+  vehicle_id: string;
+  vehicle_reg: string;
+  is_clone: boolean;
+}
+
+/**
+ * Core add-to-hire: link a mid-tour driver's soft/confirmed assignment to one or
+ * more already-booked-out vans on the same job, then fire the standard
+ * post-book-out hook chain per resulting assignment (agreement PDF + email,
+ * fleet status, OOH, auto-dispatch, requirement sync).
+ *
+ * Shared by the staff `POST /:id/add-to-hire` route and the automatic
+ * clean-mid-tour-driver path in post-signature. Callers own pre-validation
+ * (source state, sibling resolution); this just performs the transactional
+ * link/clone + hooks. `siblings` MUST be non-empty and each MUST be a van
+ * genuinely booked out on the job. Manages its own transaction connection.
+ */
+async function executeAddToHire(opts: {
+  source: Record<string, any>;
+  siblings: AddToHireSibling[];
+  actorUserId: string;
+  actorLabel: string;
+}): Promise<AddToHireAffected[]> {
+  const { source, siblings, actorUserId, actorLabel } = opts;
+  const sourceId: string = source.id;
+  const dbClient = await getPool().connect();
+
+  try {
+    await dbClient.query('BEGIN');
+
+    const affected: Array<AddToHireAffected & {
+      return_overnight: boolean | null;
+      hire_form_emailed_at: Date | null;
+    }> = [];
+
+    // First van: update source row. start_time = LOCALTIME (now) because the
+    // driver only became authorised at this moment.
+    const first = siblings[0];
+    const firstUpdate = await dbClient.query(
+      `UPDATE vehicle_hire_assignments
+       SET vehicle_id = $1,
+           hire_start = CURRENT_DATE,
+           start_time = LOCALTIME,
+           hire_end = COALESCE($2, hire_end),
+           return_overnight = $3,
+           status = 'booked_out',
+           status_changed_at = NOW(),
+           booked_out_at = NOW(),
+           booked_out_by = $4,
+           updated_at = NOW()
+       WHERE id = $5
+       RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
+      [first.vehicle_id, first.hire_end, first.return_overnight, actorUserId, sourceId]
+    );
+    const firstRow = firstUpdate.rows[0];
+    affected.push({
+      id: firstRow.id,
+      vehicle_id: firstRow.vehicle_id,
+      vehicle_reg: first.vehicle_reg,
+      return_overnight: firstRow.return_overnight,
+      hire_form_emailed_at: firstRow.hire_form_emailed_at,
+      is_clone: false,
+    });
+
+    // Additional vans: clone source row, one per van.
+    for (let i = 1; i < siblings.length; i++) {
+      const sib = siblings[i];
+      const cloneResult = await dbClient.query(
+        `INSERT INTO vehicle_hire_assignments (
+           vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
+           driver_id, assignment_type, van_requirement_index,
+           required_type, required_gearbox,
+           status, status_changed_at,
+           hire_start, hire_end, start_time, end_time, return_overnight,
+           booked_out_at, booked_out_by,
+           client_email,
+           notes, allocated_by_name, created_by
+         )
+         VALUES (
+           $1, $2, $3, $4,
+           $5, $6, $7,
+           $8, $9,
+           'booked_out', NOW(),
+           CURRENT_DATE, $10, LOCALTIME, $11, $12,
+           NOW(), $13,
+           $14,
+           $15, $16, $17
+         )
+         RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
+        [
+          sib.vehicle_id,
+          source.job_id,
+          source.hirehop_job_id,
+          source.hirehop_job_name,
+          source.driver_id,
+          source.assignment_type,
+          source.van_requirement_index ?? 0,
+          source.required_type,
+          source.required_gearbox,
+          sib.hire_end,
+          source.end_time,
+          sib.return_overnight,
+          actorUserId,
+          source.client_email,
+          `Cloned from assignment ${sourceId} for mid-tour add-to-hire (multi-van).`,
+          source.allocated_by_name,
+          actorUserId,
+        ]
+      );
+      const cloneRow = cloneResult.rows[0];
+      affected.push({
+        id: cloneRow.id,
+        vehicle_id: cloneRow.vehicle_id,
+        vehicle_reg: sib.vehicle_reg,
+        return_overnight: cloneRow.return_overnight,
+        hire_form_emailed_at: cloneRow.hire_form_emailed_at,
+        is_clone: true,
+      });
+    }
+
+    // Log interaction on the job timeline — one auditable trail line.
+    if (source.job_id) {
+      const regList = affected.map(a => a.vehicle_reg).join(', ');
+      const driverDisplay = source.driver_name || 'Driver';
+      await dbClient.query(
+        `INSERT INTO interactions (type, content, job_id, created_by, source)
+         VALUES ('note', $1, $2, $3, 'system')`,
+        [
+          `🚐 ${driverDisplay} added mid-hire to ${regList} (hire window inherited from existing booking; hire start set to ${new Date().toLocaleString('en-GB')}).`,
+          source.job_id,
+          actorUserId,
+        ]
+      );
+    }
+
+    await dbClient.query('COMMIT');
+
+    // This row is now booked out: its "Mid-tour driver" bell is done.
+    await retireDoneBells('mid_tour_driver', sourceId);
+
+    // Fire the post-book-out hook chain per affected assignment (fleet status,
+    // agreement PDF + email, multi-van fan-out, OOH, auto-dispatch). Per-van
+    // hooks need per-row calls; per-job hooks are idempotent.
+    for (const a of affected) {
+      firePostBookOutHooks({
+        assignmentId: a.id,
+        vehicleId: a.vehicle_id,
+        jobId: source.job_id ?? null,
+        hhJobNumber: source.hirehop_job_id ?? null,
+        returnOvernight: a.return_overnight,
+        hireFormEmailedAt: a.hire_form_emailed_at,
+        actorLabel,
+        actorUserId,
+      });
+    }
+
+    // Vehicle requirement sync — once per job.
+    if (source.job_id) {
+      const jobIdForSync: string = source.job_id;
+      const hhJobIdForSync: number | null = source.hirehop_job_id ?? null;
+      const assignmentIdForSync: string = affected[0].id;
+      setImmediate(() => {
+        runHookWithRecovery(
+          {
+            hookLabel: 'Vehicle requirement sync',
+            jobId: jobIdForSync,
+            hhJobNumber: hhJobIdForSync,
+            assignmentId: assignmentIdForSync,
+          },
+          async () => {
+            const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+            await syncVehicleRequirementStatus(jobIdForSync);
+          }
+        ).catch((err) => {
+          console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobIdForSync}:`, err);
+        });
+      });
+    }
+
+    return affected.map(({ id, vehicle_id, vehicle_reg, is_clone }) => ({ id, vehicle_id, vehicle_reg, is_clone }));
+  } catch (err) {
+    try { await dbClient.query('ROLLBACK'); } catch { /* swallow */ }
+    throw err;
+  } finally {
+    dbClient.release();
+  }
+}
+
+/**
+ * Resolve the distinct vans currently booked out / active on a job — the
+ * add-to-hire sibling set. One row per van (most-recently-booked-out wins).
+ */
+async function resolveBookedOutVans(
+  excludeAssignmentId: string,
+  jobId: string | null,
+  hirehopJobId: number | null,
+): Promise<AddToHireSibling[]> {
+  const result = await query(
+    `SELECT DISTINCT ON (a.vehicle_id)
+            a.vehicle_id, a.hire_end, a.return_overnight, fv.reg AS vehicle_reg
+       FROM vehicle_hire_assignments a
+       JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+      WHERE a.vehicle_id IS NOT NULL
+        AND a.id != $1
+        AND a.status IN ('booked_out', 'active')
+        AND (
+          ($2::uuid IS NOT NULL AND a.job_id = $2::uuid)
+          OR
+          ($3::integer IS NOT NULL AND a.hirehop_job_id = $3::integer)
+        )
+      ORDER BY a.vehicle_id, a.booked_out_at DESC NULLS LAST`,
+    [excludeAssignmentId, jobId, hirehopJobId]
+  );
+  return result.rows as AddToHireSibling[];
+}
+
 router.post(
   '/:id/add-to-hire',
   authenticate,
@@ -1965,9 +2360,22 @@ router.post(
       const source = sourceResult.rows[0];
 
       // 2. Validate source is in a state to be added mid-tour
-      if (source.vehicle_id) {
+      //
+      // Having a van linked is NOT itself a blocker. Quick-assign offers a
+      // vehicle picker, so a staff member adding a late driver to an already-out
+      // van naturally picks that van — and the old `if (source.vehicle_id)`
+      // guard then rejected the exact case this endpoint exists to serve, while
+      // the Job Detail card fell through to "Book Out" and invited a full
+      // walkaround on a van that had already left (job 16291, Aug 2026).
+      //
+      // What we must still refuse is using Add to Hire to MOVE a driver onto a
+      // different van — that is Swap Vehicle's job. So the check is scoped: the
+      // van already on this row has to be among the ones requested. Step 3
+      // below independently proves every requested van is genuinely booked out
+      // on this job, which is the real safety property.
+      if (source.vehicle_id && !requestedVehicleIds.includes(source.vehicle_id)) {
         return res.status(400).json({
-          error: 'Driver is already linked to a vehicle. Use Swap Vehicle if you need to change it.',
+          error: 'Driver is already linked to a different vehicle. Use Swap Vehicle if you need to change it.',
         });
       }
       if (!['soft', 'confirmed'].includes(source.status)) {
@@ -2024,165 +2432,14 @@ router.post(
         siblings.push(siblingResult.rows[0]);
       }
 
-      // 4. Transactional update + cloning
-      await dbClient.query('BEGIN');
-
-      const affected: Array<{
-        id: string;
-        vehicle_id: string;
-        vehicle_reg: string;
-        return_overnight: boolean | null;
-        hire_form_emailed_at: Date | null;
-        is_clone: boolean;
-      }> = [];
-
-      // First van: update source row. start_time is set to LOCALTIME (now)
-      // because the driver only became authorised at this moment — the
-      // original hire form's nominal 09:00 start no longer applies.
-      const first = siblings[0];
-      const firstUpdate = await dbClient.query(
-        `UPDATE vehicle_hire_assignments
-         SET vehicle_id = $1,
-             hire_start = CURRENT_DATE,
-             start_time = LOCALTIME,
-             hire_end = COALESCE($2, hire_end),
-             return_overnight = $3,
-             status = 'booked_out',
-             status_changed_at = NOW(),
-             booked_out_at = NOW(),
-             booked_out_by = $4,
-             updated_at = NOW()
-         WHERE id = $5
-         RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
-        [first.vehicle_id, first.hire_end, first.return_overnight, req.user!.id, sourceId]
-      );
-      const firstRow = firstUpdate.rows[0];
-      affected.push({
-        id: firstRow.id,
-        vehicle_id: firstRow.vehicle_id,
-        vehicle_reg: first.vehicle_reg,
-        return_overnight: firstRow.return_overnight,
-        hire_form_emailed_at: firstRow.hire_form_emailed_at,
-        is_clone: false,
-      });
-
-      // Additional vans: clone source row, one per van
-      for (let i = 1; i < siblings.length; i++) {
-        const sib = siblings[i];
-        const cloneResult = await dbClient.query(
-          `INSERT INTO vehicle_hire_assignments (
-             vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
-             driver_id, assignment_type, van_requirement_index,
-             required_type, required_gearbox,
-             status, status_changed_at,
-             hire_start, hire_end, start_time, end_time, return_overnight,
-             booked_out_at, booked_out_by,
-             client_email,
-             notes, allocated_by_name, created_by
-           )
-           VALUES (
-             $1, $2, $3, $4,
-             $5, $6, $7,
-             $8, $9,
-             'booked_out', NOW(),
-             CURRENT_DATE, $10, LOCALTIME, $11, $12,
-             NOW(), $13,
-             $14,
-             $15, $16, $17
-           )
-           RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
-          [
-            sib.vehicle_id,
-            source.job_id,
-            source.hirehop_job_id,
-            source.hirehop_job_name,
-            source.driver_id,
-            source.assignment_type,
-            source.van_requirement_index ?? 0,
-            source.required_type,
-            source.required_gearbox,
-            sib.hire_end,
-            source.end_time,
-            sib.return_overnight,
-            req.user!.id,
-            source.client_email,
-            `Cloned from assignment ${sourceId} for mid-tour add-to-hire (multi-van).`,
-            source.allocated_by_name,
-            req.user!.id,
-          ]
-        );
-        const cloneRow = cloneResult.rows[0];
-        affected.push({
-          id: cloneRow.id,
-          vehicle_id: cloneRow.vehicle_id,
-          vehicle_reg: sib.vehicle_reg,
-          return_overnight: cloneRow.return_overnight,
-          hire_form_emailed_at: cloneRow.hire_form_emailed_at,
-          is_clone: true,
-        });
-      }
-
-      // 5. Log interaction(s) on the job timeline — one per van for an
-      //    auditable trail. created_by must be UUID; req.user.id is fine.
-      if (source.job_id) {
-        const regList = affected.map(a => a.vehicle_reg).join(', ');
-        const driverDisplay = source.driver_name || 'Driver';
-        await dbClient.query(
-          `INSERT INTO interactions (type, content, job_id, created_by, source)
-           VALUES ('note', $1, $2, $3, 'system')`,
-          [
-            `🚐 ${driverDisplay} added mid-hire to ${regList} (hire window inherited from existing booking; hire start set to ${new Date().toLocaleString('en-GB')}).`,
-            source.job_id,
-            req.user!.id,
-          ]
-        );
-      }
-
-      await dbClient.query('COMMIT');
-
-      // 6. Fire the post-book-out hook chain for each affected assignment.
-      //    Per-vehicle hooks (fleet status, PDF + email) need to fire per
-      //    row. Per-job hooks (requirement advance, OOH, auto-dispatch) are
-      //    idempotent so the cost of multiple calls is minimal.
+      // 4. Transactional link + clone + post-book-out hooks (shared helper).
       const actorLabel = req.user?.email ? `${req.user.email} (add-to-hire)` : 'staff (add-to-hire)';
-      const actorUserId = req.user?.id || null;
-
-      for (const a of affected) {
-        firePostBookOutHooks({
-          assignmentId: a.id,
-          vehicleId: a.vehicle_id,
-          jobId: source.job_id ?? null,
-          hhJobNumber: source.hirehop_job_id ?? null,
-          returnOvernight: a.return_overnight,
-          hireFormEmailedAt: a.hire_form_emailed_at,
-          actorLabel,
-          actorUserId,
-        });
-      }
-
-      // 7. Vehicle requirement sync — same as standard PATCH does on any
-      //    vehicle state change. Once per job.
-      if (source.job_id) {
-        const jobIdForSync: string = source.job_id;
-        const hhJobIdForSync: number | null = source.hirehop_job_id ?? null;
-        const assignmentIdForSync: string = affected[0].id;
-        setImmediate(() => {
-          runHookWithRecovery(
-            {
-              hookLabel: 'Vehicle requirement sync',
-              jobId: jobIdForSync,
-              hhJobNumber: hhJobIdForSync,
-              assignmentId: assignmentIdForSync,
-            },
-            async () => {
-              const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
-              await syncVehicleRequirementStatus(jobIdForSync);
-            }
-          ).catch((err) => {
-            console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobIdForSync}:`, err);
-          });
-        });
-      }
+      const affected = await executeAddToHire({
+        source,
+        siblings,
+        actorUserId: req.user!.id,
+        actorLabel,
+      });
 
       console.log(
         `[hire-forms] Add-to-Hire: linked assignment ${sourceId} to ${affected.length} van(s): ${affected.map(a => a.vehicle_reg).join(', ')}`
@@ -3060,26 +3317,100 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
       }
     }
 
-    // 3. Mid-tour detection — is the job already dispatched?
-    if (hhJobId) {
+    // 3. Mid-tour detection — is the job already out on the road?
+    //
+    // OP's own book-out records are the primary signal: if any van on this job
+    // is booked_out/active in OP, the hire has left and this driver missed it.
+    // HireHop's status is only a secondary signal. Keying on HH alone (5/6)
+    // missed job 16491 (Sep 2026): one line (a VE103B cert) was never scanned
+    // out, so HH sat at 4 "Part Dispatched" while the van was on the road —
+    // the driver was neither auto-added nor flagged to staff.
+    if (hhJobId || assignment.job_id) {
       try {
-        const { isHireHopConfigured } = await import('../config/hirehop');
-        if (isHireHopConfigured()) {
-          const { default: hhBroker } = await import('../services/hirehop-broker');
-          const jobData = await hhBroker.get<{ STATUS: string }>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 });
-          const hhStatus = parseFloat(String(jobData.data?.STATUS || '0'));
-          const isDispatched = [5, 6].includes(hhStatus);
+        const vansOutOnJob = await resolveBookedOutVans(String(id), assignment.job_id, hhJobId);
 
-          if (isDispatched) {
-            console.log(`[post-signature] MID-TOUR DETECTED — HH job ${hhJobId} status ${hhStatus}`);
+        // HH lookup is best-effort — a failure must not hide a van OP knows is out.
+        let hhStatus: number | null = null;
+        if (hhJobId) {
+          try {
+            const { isHireHopConfigured } = await import('../config/hirehop');
+            if (isHireHopConfigured()) {
+              const { default: hhBroker } = await import('../services/hirehop-broker');
+              const jobData = await hhBroker.get<{ STATUS: string }>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 });
+              hhStatus = parseFloat(String(jobData.data?.STATUS || '0'));
+            }
+          } catch (hhErr) {
+            console.warn('[post-signature] HH status lookup failed — relying on OP book-out records:', (hhErr as Error).message);
+          }
+        }
 
-            // Set hire_start to NOW (driver shouldn't have been driving before form submission)
+        const isDispatched = vansOutOnJob.length > 0 || (hhStatus !== null && [5, 6].includes(hhStatus));
+
+        if (isDispatched) {
+          console.log(`[post-signature] MID-TOUR DETECTED — HH job ${hhJobId} status ${hhStatus}, ${vansOutOnJob.length} van(s) booked out in OP`);
+
+          // Is this a CLEAN driver we can auto-add? "Clean" = no insurer
+          // referral pending AND identity check cleared (isDriverAuthorisedFor
+          // Agreement covers both). The AI verification has already validated
+          // the driver's documents — they couldn't have reached signature
+          // otherwise — so a clean driver needs no human decision.
+          const clean = await isDriverAuthorisedForAgreement(String(id));
+          // Only a fresh self-drive hire-form row is auto-addable (a mid-tour
+          // driver's assignment lands soft/confirmed with vehicle_id NULL).
+          const addableState =
+            assignment.assignment_type === 'self_drive' &&
+            ['soft', 'confirmed'].includes(assignment.status);
+
+          // Resolve the vans currently out on the job. jon's call: add the
+          // clean driver to EVERY van out ("everyone drives everything").
+          const vansOut = clean && addableState ? vansOutOnJob : [];
+
+          if (clean && addableState && vansOut.length > 0) {
+            // AUTO-ADD: link the driver to every van out + send their hire
+            // agreement automatically. No "to do" email — nothing for staff
+            // to action. executeAddToHire stamps hire_start itself.
+            const affected = await executeAddToHire({
+              source: assignment,
+              siblings: vansOut,
+              actorUserId: req.user?.id || '00000000-0000-0000-0000-000000000000',
+              actorLabel: 'system (mid-tour auto-add)',
+            });
+
+            // Low-priority informational bell so staff still have visibility
+            // (not a to-do). email_sent_at = NOW() so it never escalates to email.
+            try {
+              const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+              const targets = await getVehicleNotificationTargets();
+              const regList = affected.map(a => a.vehicle_reg).join(', ');
+              for (const userId of targets.bellUserIds) {
+                await query(
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'low', $5, NOW())`,
+                  [
+                    userId,
+                    `Mid-tour driver auto-added — ${assignment.driver_name || 'Unknown'}`,
+                    `${assignment.driver_name || 'A driver'} submitted a clean hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}), already dispatched — auto-added to ${regList} and their hire agreement has been sent. No action needed.`,
+                    id,
+                    assignment.job_id ? `/jobs/${assignment.job_id}` : null,
+                  ]
+                );
+              }
+            } catch (notifyErr) {
+              console.warn('[post-signature] Mid-tour auto-add notification failed:', (notifyErr as Error).message);
+            }
+
+            console.log(`[post-signature] MID-TOUR AUTO-ADD — assignment ${id} linked to ${affected.length} van(s): ${affected.map(a => a.vehicle_reg).join(', ')}`);
+            results.midTour = { detected: true, hhStatus, autoAdded: true, vans: affected.map(a => a.vehicle_reg) };
+          } else {
+            // Fall back to the manual "to do" flow. Reasons: driver held for
+            // review (referral/identity — the referral alert email fires
+            // separately via sendReferralAlert), no van resolvable, or not a
+            // fresh self-drive row. Staff add + authorise the driver manually.
             await query(
               `UPDATE vehicle_hire_assignments SET hire_start = NOW() WHERE id = $1 AND hire_start IS NULL`,
               [id]
             );
 
-            // Send notification to team
             const frontendUrl = getFrontendUrl();
             try {
               const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
@@ -3089,9 +3420,11 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
               // email_sent_at = NOW() so the escalation scheduler doesn't fire a
               // duplicate email — the direct mid_tour_driver send below covers it.
               for (const userId of targets.bellUserIds) {
+                // Asks for the driver to be added to the van: retires once
+                // this row is booked out (bell-rules.ts mid_tour_driver).
                 await query(
-                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
-                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at, resolve_key)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW(), 'mid_tour_driver')`,
                   [
                     userId,
                     `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
@@ -3119,10 +3452,17 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
               console.warn('[post-signature] Mid-tour notification failed:', (notifyErr as Error).message);
             }
 
-            results.midTour = { detected: true, hhStatus, notified: true };
-          } else {
-            results.midTour = { detected: false, hhStatus };
+            results.midTour = {
+              detected: true,
+              hhStatus,
+              notified: true,
+              autoAdded: false,
+              reason: !clean ? 'held_for_review' : (!addableState ? 'not_addable' : 'no_van_out'),
+            };
           }
+        } else {
+          console.log(`[post-signature] Not mid-tour — HH job ${hhJobId} status ${hhStatus}, no van booked out in OP`);
+          results.midTour = { detected: false, hhStatus };
         }
       } catch (err) {
         console.warn('[post-signature] Mid-tour check failed (non-blocking):', (err as Error).message);

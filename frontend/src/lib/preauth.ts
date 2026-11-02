@@ -82,10 +82,18 @@ export function describePreauth(rec: PreauthLike): PreauthDescription {
     const amount = num(rec.amount_held);
     const expStr = gbpDate(rec.held_expires_at);
     const pastExpiry = rec.held_expires_at != null && new Date(rec.held_expires_at).getTime() < Date.now();
-    // Binary "held": capture if claiming, otherwise it releases on its own.
+    // Binary "held": capture if claiming, otherwise release (Stripe) or let it
+    // lapse (card machine — we can't release those).
     // No "maybe" copy even past expiry — the server-side reconcile flips the
     // record to Released once the hold is confirmed gone, and this re-renders.
-    const headline = `${gbp(amount)} pre-authorisation held${expStr ? ` — releases ${expStr}` : ''}.`;
+    //
+    // A Stripe hold says "release it when the van is back", not "it releases on its
+    // own": a card-reader hold lasts up to 30 days (extended authorisation), so
+    // waiting for it to lapse leaves the client's money blocked for a month
+    // (jon, 21 Oct 2026). Card-machine holds keep the old wording.
+    const headline = isStripe
+      ? `${gbp(amount)} pre-authorisation held${expStr ? ` — on the card until ${expStr} unless released` : ''}.`
+      : `${gbp(amount)} pre-authorisation held${expStr ? ` — releases ${expStr}` : ''}.`;
     return {
       tone: 'held',
       isHold: true,
@@ -96,8 +104,12 @@ export function describePreauth(rec: PreauthLike): PreauthDescription {
       label: 'Pre-auth Held',
       labelColour: 'text-sky-700',
       headline,
-      compact: `Held${expStr ? ` · releases ${expStr}` : ''}`,
-      detail: 'Capture now if you’re claiming for damage; otherwise it releases on its own — nothing to do.',
+      compact: isStripe
+        ? `Held${expStr ? ` until ${expStr}` : ''} · release when the van is back`
+        : `Held${expStr ? ` · releases ${expStr}` : ''}`,
+      detail: isStripe
+        ? 'Capture it if you’re claiming for damage. Otherwise release it as soon as the van is back — until then the money stays blocked on the client’s card.'
+        : 'Capture now if you’re claiming for damage; otherwise it releases on its own — nothing to do.',
       stripeUrl,
     };
   }

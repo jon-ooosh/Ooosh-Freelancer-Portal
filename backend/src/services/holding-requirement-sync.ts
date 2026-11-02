@@ -27,12 +27,16 @@ const CLOSED_STATES = ['given_to_client', 'shipped_back', 'disposed'];
 export async function syncMerchRequirementStatus(jobId: string): Promise<void> {
   if (!jobId) return;
 
-  // Incoming items that still "count" (cancelled = won't-arrive, excluded)
+  // Incoming items that still "count" (cancelled = won't-arrive, excluded).
+  // Counts come along so the note can talk in BOXES, which is what staff asked
+  // the client for — an item-row count ("1 here to give") reads as a quantity
+  // and isn't one. See the count vocabulary in frontend holding/counts.ts:
+  //   expected = box_count, here = received_count, outstanding = the difference.
   const rows = (await query(
-    `SELECT status FROM held_items
+    `SELECT status, box_count, received_count FROM held_items
      WHERE job_id = $1 AND kind = 'incoming' AND status <> 'cancelled'`,
     [jobId],
-  )).rows as { status: string }[];
+  )).rows as { status: string; box_count: number | null; received_count: number | null }[];
 
   // Ensure a merch requirement row exists once there's anything to track.
   const reqRes = await query(
@@ -42,6 +46,31 @@ export async function syncMerchRequirementStatus(jobId: string): Promise<void> {
   );
 
   if (rows.length === 0) {
+    // No incoming item points at this job at all — not even a cancelled one —
+    // so the only way the card got here is an item that has since been MOVED
+    // to another job (a mistyped job number). If this module made the card,
+    // take it away again rather than leave "Merch Receiving: Not started" on a
+    // job that never had merch. A card a person added stays (below).
+    const anyItem = await query(
+      `SELECT 1 FROM held_items WHERE job_id = $1 AND kind = 'incoming' LIMIT 1`,
+      [jobId],
+    );
+    if (anyItem.rows.length === 0 && reqRes.rows.length > 0) {
+      const removed = await query(
+        `DELETE FROM job_requirements
+         WHERE id = $1 AND is_auto = true AND source = 'holding'
+         RETURNING id`,
+        [reqRes.rows[0].id],
+      );
+      if (removed.rows.length > 0) {
+        // Same cascade as DELETE /requirements/:id — no ghost bells.
+        await query(
+          `DELETE FROM notifications WHERE entity_type = 'job_requirements' AND entity_id = $1`,
+          [reqRes.rows[0].id],
+        ).catch((err) => console.warn('[holding] merch card notification cleanup failed:', err));
+        return;
+      }
+    }
     // Nothing (or everything cancelled) — leave an existing card at not_started,
     // don't create one from thin air.
     if (reqRes.rows.length > 0 && reqRes.rows[0].status !== 'not_started') {
@@ -54,16 +83,29 @@ export async function syncMerchRequirementStatus(jobId: string): Promise<void> {
     return;
   }
 
-  const here = rows.filter((r) => HERE_STATES.includes(r.status)).length;
-  const awaited = rows.filter((r) => r.status === 'expected').length;
+  const hereRows = rows.filter((r) => HERE_STATES.includes(r.status));
+  const openRows = rows.filter((r) => !CLOSED_STATES.includes(r.status));
   const allClosed = rows.every((r) => CLOSED_STATES.includes(r.status));
   const status = allClosed ? 'done' : 'in_progress';
 
+  // Boxes physically here and still to hand over.
+  const boxesHere = hereRows.reduce((n, r) => n + (r.received_count ?? 0), 0);
+  // Boxes still to turn up across everything not yet closed out.
+  const outstanding = openRows.reduce(
+    (n, r) => n + Math.max(0, (r.box_count ?? 0) - (r.received_count ?? 0)), 0);
+
   const parts: string[] = [];
-  if (here > 0) parts.push(`${here} here to give`);
-  if (awaited > 0) parts.push(`${awaited} awaited`);
-  if (allClosed) parts.push('all given to client');
-  const notes = parts.join(' · ') || 'Incoming items tracked in Holding';
+  if (allClosed) {
+    parts.push('All handed over');
+  } else {
+    // Fall back to the row count when nobody recorded a quantity, so the note
+    // never silently reads "0" for an item that genuinely is sitting here.
+    if (boxesHere > 0) parts.push(`${boxesHere} box(es) here to give`);
+    else if (hereRows.length > 0) parts.push(`${hereRows.length} here to give`);
+    if (outstanding > 0) parts.push(`${outstanding} outstanding`);
+    if (parts.length === 0) parts.push('Nothing here yet');
+  }
+  const notes = parts.join(' · ');
 
   if (reqRes.rows.length === 0) {
     await query(

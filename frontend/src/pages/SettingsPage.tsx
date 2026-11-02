@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import { Navigate } from 'react-router-dom';
+import { Navigate, Link } from 'react-router-dom';
 import XeroBankAccountsSection from '../components/XeroBankAccountsSection';
 import { compressImage } from '../modules/vehicles/lib/image-utils';
+import { DOC_TYPES as STAFF_DOC_TYPES } from '../components/StaffRecordFiles';
 
 interface TeamUser {
   id: string;
@@ -24,53 +25,6 @@ interface BackupEntry {
   created_at: string;
 }
 
-const ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer'] as const;
-
-const ROLE_LABELS: Record<string, string> = {
-  admin: 'Admin',
-  manager: 'Manager',
-  staff: 'Staff',
-  general_assistant: 'General Assistant',
-  weekend_manager: 'Weekend Manager',
-  freelancer: 'Freelancer',
-};
-
-const roleBadgeColors: Record<string, string> = {
-  admin: 'bg-red-100 text-red-700',
-  manager: 'bg-blue-100 text-blue-700',
-  staff: 'bg-green-100 text-green-700',
-  general_assistant: 'bg-amber-100 text-amber-700',
-  weekend_manager: 'bg-purple-100 text-purple-700',
-  freelancer: 'bg-teal-100 text-teal-700',
-};
-
-function getPasswordStrength(pw: string): { score: number; label: string; color: string; checks: string[] } {
-  const checks: string[] = [];
-  let score = 0;
-
-  if (pw.length >= 8) score++;
-  else checks.push('At least 8 characters');
-
-  if (pw.length >= 12) score++;
-
-  if (/[A-Z]/.test(pw)) score++;
-  else checks.push('An uppercase letter');
-
-  if (/[a-z]/.test(pw)) score++;
-  else checks.push('A lowercase letter');
-
-  if (/\d/.test(pw)) score++;
-  else checks.push('A number');
-
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  else checks.push('A special character');
-
-  if (score <= 2) return { score, label: 'Weak', color: 'bg-red-500', checks };
-  if (score <= 3) return { score, label: 'Fair', color: 'bg-amber-500', checks };
-  if (score <= 4) return { score, label: 'Good', color: 'bg-blue-500', checks };
-  return { score, label: 'Strong', color: 'bg-green-500', checks };
-}
-
 export default function SettingsPage() {
   const user = useAuthStore((s) => s.user);
 
@@ -81,152 +35,10 @@ export default function SettingsPage() {
   return <SettingsContent />;
 }
 
+// Team-member management moved to the Staff page (Sep 2026). What remains here
+// is platform configuration only; each section below loads its own data.
 function SettingsContent() {
   const currentUser = useAuthStore((s) => s.user);
-  const [users, setUsers] = useState<TeamUser[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-
-  // New user form
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [role, setRole] = useState<string>('staff');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-
-  // Edit user
-  const [editingUser, setEditingUser] = useState<TeamUser | null>(null);
-  const [editFirstName, setEditFirstName] = useState('');
-  const [editLastName, setEditLastName] = useState('');
-  const [editEmail, setEditEmail] = useState('');
-  const [editRole, setEditRole] = useState('');
-  const [editHhUserId, setEditHhUserId] = useState('');
-  const [editSubmitting, setEditSubmitting] = useState(false);
-  const [editError, setEditError] = useState('');
-
-  useEffect(() => {
-    loadUsers();
-  }, []);
-
-  async function loadUsers() {
-    try {
-      const data = await api.get<{ data: TeamUser[] }>('/users');
-      setUsers(data.data);
-    } catch (err) {
-      console.error('Failed to load users:', err);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const strength = getPasswordStrength(password);
-  const isPasswordStrong = password.length >= 8 && strength.score >= 3;
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError('');
-    setSuccess('');
-
-    if (!isPasswordStrong) {
-      setError('Password is too weak. Please add: ' + strength.checks.join(', '));
-      return;
-    }
-
-    setSubmitting(true);
-
-    try {
-      await api.post('/auth/register', {
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
-        email: email.trim().toLowerCase(),
-        password,
-        role,
-      });
-
-      setSuccess(`${firstName} ${lastName} has been added as ${ROLE_LABELS[role] || role}.`);
-      setFirstName('');
-      setLastName('');
-      setEmail('');
-      setPassword('');
-      setRole('staff');
-      setShowForm(false);
-      loadUsers();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create user');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  function startEdit(u: TeamUser) {
-    setEditingUser(u);
-    setEditFirstName(u.first_name || '');
-    setEditLastName(u.last_name || '');
-    setEditEmail(u.email);
-    setEditRole(u.role);
-    setEditHhUserId(u.hh_user_id ? String(u.hh_user_id) : '');
-    setEditError('');
-  }
-
-  function cancelEdit() {
-    setEditingUser(null);
-    setEditError('');
-  }
-
-  async function handleEditSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!editingUser) return;
-    setEditError('');
-    setEditSubmitting(true);
-
-    try {
-      await api.put(`/users/${editingUser.id}`, {
-        first_name: editFirstName.trim(),
-        last_name: editLastName.trim(),
-        email: editEmail.trim().toLowerCase(),
-        role: editRole,
-        hh_user_id: editHhUserId ? parseInt(editHhUserId, 10) : null,
-      });
-
-      setEditingUser(null);
-      loadUsers();
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed to update user');
-    } finally {
-      setEditSubmitting(false);
-    }
-  }
-
-  async function handleDeactivate(userId: string) {
-    if (!confirm('Deactivate this user? They will no longer be able to log in.')) return;
-    try {
-      await api.put(`/users/${userId}`, { is_active: false });
-      loadUsers();
-    } catch (err) {
-      console.error('Failed to deactivate user:', err);
-    }
-  }
-
-  async function handleForcePassword(userId: string, userName: string) {
-    const newPw = prompt(`Set a new temporary password for ${userName}.\nThey will be prompted to change it on next login.\n\nNew password (min 8 characters):`);
-    if (!newPw) return;
-    if (newPw.length < 8) {
-      alert('Password must be at least 8 characters.');
-      return;
-    }
-    try {
-      await api.post(`/users/${userId}/force-password`, { new_password: newPw });
-      setSuccess(`Password reset for ${userName}. They will be prompted to change it on next login.`);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to reset password');
-    }
-  }
-
-  if (loading) return <div className="text-center py-12 text-gray-500">Loading...</div>;
 
   return (
     <div>
@@ -237,293 +49,16 @@ function SettingsContent() {
         </div>
       </div>
 
-      {/* Team Members section */}
-      <div className="mb-8">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-gray-900">Team Members</h2>
-          <button
-            onClick={() => { setShowForm(!showForm); setError(''); setSuccess(''); }}
-            className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
-          >
-            {showForm ? 'Cancel' : 'Add User'}
-          </button>
-        </div>
-
-        {success && (
-          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm mb-4">
-            {success}
-          </div>
-        )}
-
-        {/* Add user form */}
-        {showForm && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-            <h3 className="text-base font-semibold text-gray-900 mb-4">Add New User</h3>
-
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded text-sm mb-4">
-                {error}
-              </div>
-            )}
-
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">First Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={firstName}
-                    onChange={(e) => setFirstName(e.target.value)}
-                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Last Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={lastName}
-                    onChange={(e) => setLastName(e.target.value)}
-                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="name@oooshtours.co.uk"
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
-                <div className="relative">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    required
-                    minLength={8}
-                    autoComplete="new-password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Minimum 8 characters"
-                    className="w-full rounded border border-gray-300 px-3 py-2 pr-10 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                    tabIndex={-1}
-                  >
-                    {showPassword ? (
-                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3.98 8.223A10.477 10.477 0 001.934 12c1.292 4.338 5.31 7.5 10.066 7.5.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>
-                    ) : (
-                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178zM15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                    )}
-                  </button>
-                </div>
-
-                {password.length > 0 && (
-                  <div className="mt-2">
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all ${strength.color}`}
-                          style={{ width: `${Math.min((strength.score / 6) * 100, 100)}%` }}
-                        />
-                      </div>
-                      <span className={`text-xs font-medium ${
-                        strength.label === 'Weak' ? 'text-red-600' :
-                        strength.label === 'Fair' ? 'text-amber-600' :
-                        strength.label === 'Good' ? 'text-blue-600' : 'text-green-600'
-                      }`}>
-                        {strength.label}
-                      </span>
-                    </div>
-                    {strength.checks.length > 0 && (
-                      <p className="text-xs text-gray-500 mt-1">
-                        Needs: {strength.checks.join(', ')}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
-                <select
-                  value={role}
-                  onChange={(e) => setRole(e.target.value)}
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                >
-                  {ROLES.map((r) => (
-                    <option key={r} value={r}>
-                      {ROLE_LABELS[r]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  disabled={submitting || !isPasswordStrong}
-                  className="bg-ooosh-600 text-white px-6 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
-                >
-                  {submitting ? 'Creating...' : 'Create User'}
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* Users list */}
-        <div className="space-y-3">
-          {users.map((u) => (
-            <div key={u.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-              {editingUser?.id === u.id ? (
-                /* Edit mode */
-                <form onSubmit={handleEditSubmit}>
-                  {editError && (
-                    <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm mb-3">
-                      {editError}
-                    </div>
-                  )}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">First Name</label>
-                      <input
-                        type="text"
-                        required
-                        value={editFirstName}
-                        onChange={(e) => setEditFirstName(e.target.value)}
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">Last Name</label>
-                      <input
-                        type="text"
-                        required
-                        value={editLastName}
-                        onChange={(e) => setEditLastName(e.target.value)}
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
-                      <input
-                        type="email"
-                        required
-                        value={editEmail}
-                        onChange={(e) => setEditEmail(e.target.value)}
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">Role</label>
-                      <select
-                        value={editRole}
-                        onChange={(e) => setEditRole(e.target.value)}
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      >
-                        {ROLES.map((r) => (
-                          <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-500 mb-1">HireHop User ID</label>
-                      <input
-                        type="number"
-                        value={editHhUserId}
-                        onChange={(e) => setEditHhUserId(e.target.value)}
-                        placeholder="e.g. 42"
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                      />
-                      <p className="text-xs text-gray-400 mt-0.5">Sets manager on HH jobs created by this user</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 mt-3">
-                    <button
-                      type="submit"
-                      disabled={editSubmitting}
-                      className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
-                    >
-                      {editSubmitting ? 'Saving...' : 'Save'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={cancelEdit}
-                      className="px-4 py-1.5 rounded text-sm font-medium border border-gray-300 hover:bg-gray-50 transition-colors"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                /* View mode */
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    {u.avatar_url ? (
-                      <img
-                        src={`/api/auth/avatar/${u.avatar_url.split('/').pop()}`}
-                        alt=""
-                        className="w-9 h-9 rounded-full object-cover flex-shrink-0"
-                      />
-                    ) : (
-                      <div className="w-9 h-9 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-sm font-bold flex-shrink-0">
-                        {(u.first_name || u.email)[0].toUpperCase()}
-                      </div>
-                    )}
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">
-                        {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
-                      </div>
-                      <div className="text-xs text-gray-500">{u.email}</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${roleBadgeColors[u.role] || 'bg-gray-100 text-gray-700'}`}>
-                      {ROLE_LABELS[u.role] || u.role}
-                    </span>
-                    <button
-                      onClick={() => startEdit(u)}
-                      className="text-xs text-gray-400 hover:text-ooosh-600 transition-colors px-2 py-1"
-                    >
-                      Edit
-                    </button>
-                    {u.id !== currentUser?.id && (
-                      <>
-                        <button
-                          onClick={() => handleForcePassword(u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email)}
-                          className="text-xs text-gray-400 hover:text-amber-600 transition-colors px-2 py-1"
-                        >
-                          Reset Password
-                        </button>
-                        <button
-                          onClick={() => handleDeactivate(u.id)}
-                          className="text-xs text-gray-400 hover:text-red-600 transition-colors px-2 py-1"
-                        >
-                          Deactivate
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-          {users.length === 0 && (
-            <p className="text-center text-sm text-gray-400 py-8">No users found.</p>
-          )}
-        </div>
+      {/* Team members, logins and company cards moved to the Staff page (Sep 2026).
+          They are facts about a person who works here, not platform configuration
+          — see docs/STAFF-CALENDAR-SPEC.md §10. Pointer left so nobody hunts. */}
+      <div className="mb-8 p-4 rounded-lg border border-gray-200 bg-white">
+        <h2 className="text-lg font-semibold text-gray-900 mb-1">Team members</h2>
+        <p className="text-sm text-gray-600">
+          Logins, roles, company cards and working hours now live on the{' '}
+          <Link to="/staff/admin" className="text-ooosh-600 hover:underline font-medium">Staff page</Link>
+          {' '}— everyone who works here in one place, alongside the staff calendar.
+        </p>
       </div>
 
       {/* Calculator Settings — admin & manager */}
@@ -540,14 +75,32 @@ function SettingsContent() {
       {/* Auto-chase draft voice — admin & manager */}
       <ChaseVoiceSettingsSection />
 
+      {/* Auto-chase manager mailboxes — admin only (which inboxes we ingest) */}
+      {currentUser?.role === 'admin' && <ManagerMailboxesSection />}
+
       {/* Xero bank account mapping — admin & manager */}
       <XeroBankAccountsSection />
 
       {/* Vehicle Issues settings — admin & manager */}
       <VehicleIssueSettingsSection />
 
-      {/* COT card register — admin only */}
-      {currentUser?.role === 'admin' && <CotCardRegisterSection />}
+      {/* Insurance claims: broker address, insured block, vehicle-value curve — admin & manager */}
+      <ClaimsSettingsSection />
+
+      {/* Staff time thresholds & bank holidays — admin & manager */}
+      <StaffTimeSettingsSection />
+
+      {/* Links sent to a freelancer the moment they're approved — admin & manager */}
+      <FreelancerLinksSection />
+
+      {/* Shop till settings — admin only (discount ceilings are money policy) */}
+      {currentUser?.role === 'admin' && <ShopSettingsSection />}
+
+      {/* Card reader (Stripe Terminal S700) — test/live switch + who may use it, admin only */}
+      {currentUser?.role === 'admin' && <CardReaderSettingsSection />}
+
+      {/* Login security & the warehouse kiosk (STAFF-LOGIN-SECURITY-SPEC) — admin only */}
+      {currentUser?.role === 'admin' && <LoginAndKioskSettingsSection />}
 
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
@@ -1509,6 +1062,128 @@ function StudioSitterSettingsSection() {
 
 // ── Auto-Chase draft voice ───────────────────────────────────────────────────
 
+interface MailboxStatusRow {
+  mailbox: string;
+  mode: 'full' | 'matched_only';
+  profile?: { emailAddress: string };
+  syncState?: { last_synced_at: string | null; last_error: string | null } | null;
+  error?: string;
+}
+
+// Admin-only: which mailboxes auto-chase ingests. info@ (full) is fixed; manager
+// mailboxes (matched-only) are add/remove here — no deploy. Each row is probed
+// live, so a delegation gap on a manager mailbox shows as "Not connected".
+function ManagerMailboxesSection() {
+  const [rows, setRows] = useState<MailboxStatusRow[]>([]);
+  const [configured, setConfigured] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [newAddr, setNewAddr] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true); setError('');
+    try {
+      const res = await api.get<{ data: { configured: boolean; mailboxes: MailboxStatusRow[] } }>('/auto-chase/mailboxes');
+      setConfigured(res.data.configured);
+      setRows(res.data.mailboxes || []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load mailbox status');
+    } finally { setLoading(false); }
+  }
+
+  const managerList = () => rows.filter((r) => r.mode === 'matched_only').map((r) => r.mailbox);
+
+  async function saveList(list: string[]) {
+    setSaving(true); setError('');
+    try {
+      const res = await api.put<{ data: { configured: boolean; mailboxes: MailboxStatusRow[] } }>(
+        '/auto-chase/mailboxes', { mailboxes: list },
+      );
+      setConfigured(res.data.configured);
+      setRows(res.data.mailboxes || []);
+      setNewAddr('');
+    } catch (e) {
+      const err = e as { body?: { error?: string }; message?: string };
+      setError(err.body?.error || err.message || 'Save failed');
+    } finally { setSaving(false); }
+  }
+
+  function addMailbox() {
+    const addr = newAddr.trim().toLowerCase();
+    if (!addr) return;
+    saveList([...managerList(), addr]);
+  }
+
+  function removeMailbox(mb: string) {
+    if (!window.confirm(`Stop ingesting ${mb}? Emails already logged onto jobs stay; no new mail from this mailbox will be read.`)) return;
+    saveList(managerList().filter((m) => m !== mb));
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Auto-Chase — manager mailboxes</h2>
+      <p className="text-sm text-gray-500 mb-4">
+        Mailboxes ingested alongside <strong>info@</strong>. Manager mailboxes run <strong>matched-only</strong> — an
+        email is logged only when it confidently matches a job; anything else is dropped (never queued), so
+        non-job mail from a personal mailbox never surfaces to staff. info@ stays full (matched + review queue).
+      </p>
+      {!configured && (
+        <div className="mb-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+          Gmail ingestion isn’t configured on the server yet — mailboxes can’t be read.
+        </div>
+      )}
+      {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
+
+      <div className="space-y-2 mb-4">
+        {rows.map((r) => (
+          <div key={r.mailbox} className="flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-gray-900 truncate">{r.mailbox}</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${r.mode === 'full' ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-gray-100 text-gray-600'}`}>
+                  {r.mode === 'full' ? 'primary · full' : 'matched-only'}
+                </span>
+              </div>
+              <div className="text-xs mt-0.5">
+                {r.error
+                  ? <span className="text-red-600">⚠ Not connected — {r.error}</span>
+                  : <span className="text-green-700">✓ Connected{r.syncState?.last_synced_at ? ` · last synced ${new Date(r.syncState.last_synced_at).toLocaleString('en-GB')}` : ' · awaiting first sync'}</span>}
+                {r.syncState?.last_error && !r.error && <span className="text-amber-600"> · last error: {r.syncState.last_error}</span>}
+              </div>
+            </div>
+            {r.mode === 'matched_only' && (
+              <button type="button" onClick={() => removeMailbox(r.mailbox)} disabled={saving}
+                className="text-xs text-gray-400 hover:text-red-600 shrink-0">Remove</button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <input
+          type="email" value={newAddr} onChange={(e) => setNewAddr(e.target.value)}
+          placeholder="name@oooshtours.co.uk"
+          onKeyDown={(e) => { if (e.key === 'Enter') addMailbox(); }}
+          className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        />
+        <button type="button" onClick={addMailbox} disabled={saving || !newAddr.trim()}
+          className="bg-ooosh-600 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Add mailbox'}
+        </button>
+      </div>
+      <p className="text-xs text-gray-400 mt-2">
+        A newly added mailbox ingests from now on — it establishes a baseline first, then reads new mail on the
+        10-minute cycle. Only @oooshtours.co.uk addresses can be added.
+      </p>
+    </div>
+  );
+}
+
 function ChaseVoiceSettingsSection() {
   const [orig, setOrig] = useState('');
   const [val, setVal] = useState('');
@@ -1516,12 +1191,6 @@ function ChaseVoiceSettingsSection() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  // Example-driven voice tuning (§9.3): paste real emails → distil into guidance.
-  const [showLearn, setShowLearn] = useState(false);
-  const [examples, setExamples] = useState('');
-  const [learning, setLearning] = useState(false);
-  const [proposed, setProposed] = useState('');
-  const [learnError, setLearnError] = useState('');
   // Master auto-send switch (§10). Off = jobs set to Auto-send only create drafts.
   const [sendEnabled, setSendEnabled] = useState(false);
   const [sendSaving, setSendSaving] = useState(false);
@@ -1551,19 +1220,6 @@ function ChaseVoiceSettingsSection() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not update the auto-send switch');
     } finally { setSendSaving(false); }
-  }
-
-  async function learnFromExamples() {
-    setLearning(true); setLearnError(''); setProposed('');
-    try {
-      const res = await api.post<{ data: { proposed: string } }>(
-        '/auto-chase/voice/learn',
-        { examples, current: val },
-      );
-      setProposed(res.data.proposed);
-    } catch (e) {
-      setLearnError(e instanceof Error ? e.message : 'Could not learn from these examples');
-    } finally { setLearning(false); }
   }
 
   async function load() {
@@ -1598,7 +1254,7 @@ function ChaseVoiceSettingsSection() {
       <h2 className="text-lg font-semibold text-gray-900 mb-1">Auto-Chase — draft voice</h2>
       <p className="text-sm text-gray-500 mb-4">
         Extra tone guidance appended to the AI chase-draft prompt (the “Draft chase” button on enquiries).
-        Your steer on “more of this / less of that” — takes effect on the next draft, no deploy needed.
+        The house voice is built in; this box is your steer on top of it (“more of this / less of that”) — takes effect on the next draft, no deploy needed.
         The hard rules (checking-in not renegotiating, never fabricate, urgency matched to the hire date) can’t be overridden here.
       </p>
       {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
@@ -1656,7 +1312,7 @@ function ChaseVoiceSettingsSection() {
         value={val}
         onChange={(e) => { setVal(e.target.value); setSuccess(''); }}
         rows={6}
-        placeholder={'e.g. Keep it really casual and friendly — we\'re a small team, not a corporate. Avoid exclamation marks. Sign off as "Cheers, the Ooosh team". Never mention the exact price.'}
+        placeholder={'Small adjustments on top of the house voice, e.g. Second chases even shorter. Never mention the exact price.'}
         className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[120px]"
       />
       <div className="flex items-center gap-3 mt-3">
@@ -1664,60 +1320,6 @@ function ChaseVoiceSettingsSection() {
           {saving ? 'Saving…' : 'Save voice'}
         </button>
         {val !== orig && <button onClick={() => setVal(orig)} className="text-sm text-gray-500 hover:text-gray-700">Reset</button>}
-      </div>
-
-      {/* Example-driven voice tuning (§9.3) — teach the voice by showing real
-          emails instead of hand-writing the guidance above. */}
-      <div className="mt-5 border-t border-gray-100 pt-4">
-        <button
-          type="button"
-          onClick={() => setShowLearn((v) => !v)}
-          className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700"
-        >
-          {showLearn ? '▾' : '▸'} Teach the voice from real examples
-        </button>
-        {showLearn && (
-          <div className="mt-3">
-            <p className="text-xs text-gray-500 mb-2">
-              Paste a few real examples — client emails and the actual replies your team sent are ideal.
-              We’ll distil the tone/style into a proposed guidance note, which you can review and drop into
-              the box above before saving. Style only — client names, prices and job details are never baked in.
-            </p>
-            <textarea
-              value={examples}
-              onChange={(e) => setExamples(e.target.value)}
-              rows={7}
-              placeholder={'Paste example emails here, e.g.\n\nCLIENT: Hi, any update on the quote for the two vans?\nOOOSH: Hey! Yep all good to go whenever you are — just give us a shout and we\'ll get it locked in. Cheers, the Ooosh team'}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[120px]"
-            />
-            {learnError && <div className="mt-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{learnError}</div>}
-            <div className="flex items-center gap-3 mt-2">
-              <button
-                onClick={learnFromExamples}
-                disabled={learning || examples.trim() === ''}
-                className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50"
-              >
-                {learning ? 'Learning…' : '✨ Suggest guidance from these'}
-              </button>
-            </div>
-            {proposed && (
-              <div className="mt-3 rounded-lg border border-purple-200 bg-purple-50/60 p-3">
-                <div className="text-xs font-semibold text-purple-700 mb-1">Proposed voice guidance</div>
-                <p className="text-sm text-gray-700 whitespace-pre-line">{proposed}</p>
-                <div className="flex items-center gap-3 mt-3">
-                  <button
-                    onClick={() => { setVal(proposed); setSuccess(''); setProposed(''); }}
-                    className="px-3 py-1.5 bg-ooosh-600 text-white rounded text-sm"
-                  >
-                    Use this ↑
-                  </button>
-                  <button onClick={() => setProposed('')} className="text-sm text-gray-500 hover:text-gray-700">Discard</button>
-                </div>
-                <p className="mt-2 text-[11px] text-gray-400">“Use this” drops it into the box above — review, tweak, then <strong>Save voice</strong> to apply.</p>
-              </div>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -2244,132 +1846,1228 @@ function VehicleIssueSettingsSection() {
   );
 }
 
-// ── COT card register (admin only) ──────────────────────────────────────────
-// Admin sets each staff member's company card (last 4 + a friendly label). The
-// cost-capture flow stamps the card holder + last 4 from here server-side, so
-// staff never type card details when logging a company-card purchase.
+// ── Staff Calendar & Time (spec §13) ────────────────────────────────────────
 
-interface CotCardRow {
-  id: string;
-  email: string;
-  is_active: boolean;
-  first_name: string | null;
-  last_name: string | null;
-  cot_card_last4: string | null;
-  cot_card_label: string | null;
-  agreement_status: string | null;
-  agreement_completed_at: string | null;
+/**
+ * The thresholds the staff time module runs on.
+ *
+ * These exist as settings rather than constants for one reason: spec §17 lists
+ * statutory specifics that want a sanity check from the accountants before
+ * go-live — the pro-rata rounding rule, whether bank holidays are granted, how
+ * banked overtime is handled at year end. A correction should be a settings
+ * change, not a deploy, and that only holds if there is somewhere to change it.
+ *
+ * Everything is stored as text and read through backend
+ * services/staff-settings.ts, which falls back to a documented default if a
+ * value is empty or malformed — so a typo here degrades rather than breaks.
+ */
+/**
+ * The three links the approval email sends a freelancer on day one.
+ *
+ * Here rather than in the code because a WhatsApp group invite link is
+ * effectively a password — reset the group and every approval email points at a
+ * dead invite until someone deploys. Emptying a box removes that block from the
+ * email rather than sending a broken link, so clearing the WhatsApp link the
+ * moment it leaks is a safe thing to do at 11pm.
+ */
+/**
+ * Every `shop` system setting (docs/SHOP-SALES-SPEC.md §19), as plain boxes.
+ *
+ * Deliberately generic — the till's settings are few, change rarely, and are
+ * all read defensively by the backend (a bad value falls back, it never
+ * breaks a sale). JSON-typed values are checked here before saving so a typo
+ * can't be stored in the first place.
+ */
+function ShopSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=shop');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const row of res.data) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load the shop settings.');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const next = vals[row.key] ?? '';
+        if ((row.value ?? '') === next) continue;
+        if (row.value_type === 'json') {
+          try { JSON.parse(next); } catch {
+            setError(`"${row.label ?? row.key}" isn't valid JSON — nothing saved.`);
+            return;
+          }
+        }
+        changed[row.key] = next;
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} setting${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Shop till</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        The weekly shop job, discount limits, test accounts and reminders. Lists and limits are
+        JSON — e.g. <code className="font-mono text-xs">[16749, 16757]</code>.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {settings.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''}
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className={`px-2 py-1.5 rounded border border-gray-300 text-sm ${row.value_type === 'json' ? 'font-mono' : ''}`} />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
 }
 
-function CotCardRegisterSection() {
-  const [rows, setRows] = useState<CotCardRow[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, { last4: string; label: string }>>({});
-  const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState<string | null>(null);
+/**
+ * Settings › Claims (docs/INCIDENT-CLAIMS-SPEC.md). The broker address, the
+ * insured block printed on every broker PDF, and the four numbers behind the
+ * estimated vehicle value (§6.6). Plain text boxes — each is one value.
+ */
+/**
+ * Card reader (docs/STRIPE-TERMINAL-SPEC.md §11): test or live, and which roles see
+ * "Card reader" on Record Payment. Admin only — it decides whether real cards are charged.
+ */
+function CardReaderSettingsSection() {
+  const [mode, setMode] = useState<'test' | 'live'>('test');
+  const [roles, setRoles] = useState('admin');
+  const [orig, setOrig] = useState<{ mode: string; roles: string } | null>(null);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [savedId, setSavedId] = useState<string | null>(null);
+  const [success, setSuccess] = useState('');
 
-  useEffect(() => {
-    api.get<{ data: CotCardRow[] }>('/users/cot-cards')
-      .then((res) => {
-        setRows(res.data);
-        const d: Record<string, { last4: string; label: string }> = {};
-        res.data.forEach((r) => { d[r.id] = { last4: r.cot_card_last4 || '', label: r.cot_card_label || '' }; });
-        setDrafts(d);
-      })
-      .catch((err) => { console.error('Failed to load COT cards:', err); setError('Could not load staff.'); })
-      .finally(() => setLoading(false));
-  }, []);
+  useEffect(() => { void load(); }, []);
 
-  async function save(id: string) {
-    const draft = drafts[id];
-    if (draft.last4 && !/^\d{4}$/.test(draft.last4)) { setError('Last 4 must be exactly 4 digits.'); return; }
-    setError('');
-    setSavingId(id);
+  async function load() {
     try {
-      await api.patch(`/users/${id}/cot-card`, {
-        cot_card_last4: draft.last4 || null,
-        cot_card_label: draft.label.trim() || null,
-      });
-      setRows((prev) => prev.map((r) => r.id === id ? { ...r, cot_card_last4: draft.last4 || null, cot_card_label: draft.label.trim() || null } : r));
-      setSavedId(id);
-      setTimeout(() => setSavedId((s) => s === id ? null : s), 2500);
-    } catch (err) {
-      console.error('Save COT card failed:', err);
-      setError(err instanceof Error ? err.message : 'Save failed.');
-    } finally {
-      setSavingId(null);
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=money');
+      const get = (k: string) => res.data.find(r => r.key === k)?.value ?? '';
+      const m = get('stripe_terminal_mode') === 'live' ? 'live' : 'test';
+      const r = get('stripe_terminal_roles') || 'admin';
+      setMode(m); setRoles(r); setOrig({ mode: m, roles: r });
+    } catch {
+      setError('Could not load the card reader settings (has migration 291 run?).');
     }
   }
 
-  const name = (r: CotCardRow) => [r.first_name, r.last_name].filter(Boolean).join(' ') || r.email;
-  const dirty = (r: CotCardRow) => (drafts[r.id]?.last4 || '') !== (r.cot_card_last4 || '') || (drafts[r.id]?.label.trim() || '') !== (r.cot_card_label || '');
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const cleanRoles = roles.split(',').map(x => x.trim()).filter(Boolean).join(',') || 'admin';
+      await api.put('/system-settings', { settings: { stripe_terminal_mode: mode, stripe_terminal_roles: cleanRoles } });
+      setSuccess('Saved. Reload any open job page to pick it up.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
 
-  if (loading) {
-    return (
-      <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-2">COT Card Register</h2>
-        <p className="text-sm text-gray-500">Loading…</p>
+  if (!orig) return error ? <div className="mb-6 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div> : null;
+  const changed = mode !== orig.mode || roles !== orig.roles;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Card reader</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        The Stripe S700 on Record Payment. Test uses Stripe&apos;s simulated reader and no card is charged;
+        live sends the payment to the real reader.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+          <label htmlFor="stripe_terminal_mode" className="text-sm text-gray-700">
+            Mode
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_mode</span>
+          </label>
+          <select id="stripe_terminal_mode" value={mode} onChange={e => setMode(e.target.value === 'live' ? 'live' : 'test')}
+            className="px-2 py-1.5 rounded border border-gray-300 text-sm max-w-xs">
+            <option value="test">Test (simulated reader)</option>
+            <option value="live">Live (real S700, real cards)</option>
+          </select>
+        </div>
+        <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+          <label htmlFor="stripe_terminal_roles" className="text-sm text-gray-700">
+            Who can use it (comma-separated roles)
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_roles</span>
+          </label>
+          <input id="stripe_terminal_roles" value={roles} onChange={e => setRoles(e.target.value)}
+            placeholder="admin" className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+        </div>
+        <p className="text-xs text-gray-500">
+          Roles: admin, manager, staff, general_assistant (weekend managers follow manager). Leave as admin while testing.
+        </p>
       </div>
-    );
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving || !changed}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Login security & the warehouse kiosk (docs/STAFF-LOGIN-SECURITY-SPEC.md §6, §4.4–4.5):
+ * the date from which every login needs a second factor, the addresses the kiosk
+ * PIN is accepted from, the reader on the kiosk till, and when the PIN was last
+ * changed (the quarterly reminder counts from it). Admin only.
+ * Also the freelancer portal's switch-on date for its emailed code
+ * (docs/FREELANCER-PORTAL-SPEC.md §7; empty = off).
+ */
+function LoginAndKioskSettingsSection() {
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [orig, setOrig] = useState<Record<string, string> | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const KEYS = ['staff_2fa_enforced_from', 'portal_2fa_enforced_from', 'kiosk_device_required', 'kiosk_allowed_ips', 'stripe_terminal_kiosk', 'kiosk_pin_rotated_at'];
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const [sec, money] = await Promise.all([
+        api.get<{ data: SystemSetting[] }>('/system-settings?category=security'),
+        api.get<{ data: SystemSetting[] }>('/system-settings?category=money'),
+      ]);
+      const all = [...sec.data, ...money.data];
+      const next: Record<string, string> = {};
+      for (const k of KEYS) next[k] = all.find(r => r.key === k)?.value ?? '';
+      setVals(next); setOrig(next);
+    } catch {
+      setError('Could not load the login security settings (has migration 297 run?).');
+    }
+  }
+
+  async function save(patch?: Record<string, string>) {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const settings = { ...vals, ...(patch || {}) };
+      settings.kiosk_allowed_ips = settings.kiosk_allowed_ips.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean).join(', ');
+      await api.put('/system-settings', { settings });
+      setSuccess('Saved.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (!orig) return error ? <div className="mb-6 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div> : null;
+  const changed = KEYS.some(k => vals[k] !== orig[k]);
+  const today = new Date().toLocaleDateString('en-CA');
+  const row = 'grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center';
+  const input = 'px-2 py-1.5 rounded border border-gray-300 text-sm';
+  // Same rule as the server (kiosk-devices.ts): only an explicit 'false' is off.
+  const deviceLockOn = vals.kiosk_device_required !== 'false';
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Login security &amp; kiosk</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Every staff login has a second step (passkey or email code, remembered per device). The warehouse iPad keeps its PIN
+        and now has a till; the PIN only works on the tablets set up below.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        <div className={row}>
+          <label htmlFor="staff_2fa_enforced_from" className="text-sm text-gray-700">
+            Second factor required from
+            <span className="block text-xs text-gray-400 font-mono">staff_2fa_enforced_from</span>
+          </label>
+          <input id="staff_2fa_enforced_from" type="date" value={vals.staff_2fa_enforced_from}
+            onChange={e => setVals(v => ({ ...v, staff_2fa_enforced_from: e.target.value }))} className={`${input} max-w-xs`} />
+        </div>
+        <p className="text-xs text-gray-500">Before this date a person with no second factor sees a banner; from it the login insists.</p>
+
+        {/* Freelancer portal two-step sign-in (FREELANCER-PORTAL-SPEC §7). Ships off. */}
+        <div className={row}>
+          <label htmlFor="portal_2fa_enforced_from" className="text-sm text-gray-700">
+            Freelancer portal: code required from
+            <span className="block text-xs text-gray-400 font-mono">portal_2fa_enforced_from</span>
+          </label>
+          <span className="flex items-center gap-3">
+            <input id="portal_2fa_enforced_from" type="date" value={vals.portal_2fa_enforced_from}
+              onChange={e => setVals(v => ({ ...v, portal_2fa_enforced_from: e.target.value }))} className={`${input} max-w-xs`} />
+            {vals.portal_2fa_enforced_from && (
+              <button type="button" onClick={() => setVals(v => ({ ...v, portal_2fa_enforced_from: '' }))}
+                className="px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50">
+                Clear (off)
+              </button>
+            )}
+          </span>
+        </div>
+        <p className="text-xs text-gray-500">
+          {vals.portal_2fa_enforced_from
+            ? 'From this date, a freelancer signing in on a phone the portal doesn\'t remember gets a 6-digit code by email. Signing up or resetting a password counts as the code. Tell freelancers first; there is no banner.'
+            : 'Empty, so off: the portal asks for a password only. Pick a date to switch the emailed code on.'}
+          {' '}Help for one freelancer is on their Freelancer tab (Portal sign-in).
+        </p>
+
+        {/* The tablet lock (STAFF-LOGIN-SECURITY-SPEC §9, services/kiosk-devices.ts). */}
+        <div className={row}>
+          <label htmlFor="kiosk_device_required" className="text-sm text-gray-700">
+            Kiosk PIN works on
+            <span className="block text-xs text-gray-400 font-mono">kiosk_device_required</span>
+          </label>
+          <select id="kiosk_device_required" value={deviceLockOn ? 'true' : 'false'}
+            onChange={e => setVals(v => ({ ...v, kiosk_device_required: e.target.value }))} className={`${input} max-w-xs`}>
+            <option value="true">Only the tablets set up below</option>
+            <option value="false">Any device (not recommended)</option>
+          </select>
+        </div>
+        <KioskTablets lockOn={deviceLockOn} />
+
+        <div className={row}>
+          <label htmlFor="kiosk_allowed_ips" className="text-sm text-gray-700">
+            Kiosk PIN accepted from (public IPs)
+            <span className="block text-xs text-gray-400 font-mono">kiosk_allowed_ips</span>
+          </label>
+          <input id="kiosk_allowed_ips" value={vals.kiosk_allowed_ips}
+            onChange={e => setVals(v => ({ ...v, kiosk_allowed_ips: e.target.value }))} placeholder="Optional — leave empty" className={input} />
+        </div>
+        {!vals.kiosk_allowed_ips.trim() && (deviceLockOn ? (
+          <p className="text-xs text-gray-500">Optional. The tablet lock above holds the PIN to the warehouse; add addresses only if the yard has a fixed one (the broadband&apos;s address can change).</p>
+        ) : (
+          <p className="text-xs text-amber-700">Empty, and the tablet lock is off — the kiosk PIN is accepted from anywhere on the internet.</p>
+        ))}
+
+        <div className={row}>
+          <label htmlFor="stripe_terminal_kiosk" className="text-sm text-gray-700">
+            Card reader on the kiosk till
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_kiosk</span>
+          </label>
+          <select id="stripe_terminal_kiosk" value={vals.stripe_terminal_kiosk === 'true' ? 'true' : 'false'}
+            onChange={e => setVals(v => ({ ...v, stripe_terminal_kiosk: e.target.value }))} className={`${input} max-w-xs`}>
+            <option value="false">Off — cash only on the kiosk</option>
+            <option value="true">On — the reader, the sale still names a person</option>
+          </select>
+        </div>
+
+        <div className={row}>
+          <span className="text-sm text-gray-700">
+            Warehouse PIN last changed
+            <span className="block text-xs text-gray-400 font-mono">kiosk_pin_rotated_at</span>
+          </span>
+          <span className="flex items-center gap-3 text-sm">
+            <span>{vals.kiosk_pin_rotated_at || '—'}</span>
+            <button type="button" onClick={() => void save({ kiosk_pin_rotated_at: today })} disabled={saving}
+              className="px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+              PIN changed today
+            </button>
+          </span>
+        </div>
+        <p className="text-xs text-gray-500">
+          The PIN itself is <code>WAREHOUSE_PIN</code> in the server&apos;s .env. Admins are reminded three months after this date.
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving || !changed}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface KioskTablet {
+  id: string;
+  label: string;
+  status: 'active' | 'waiting';
+  created_at: string;
+  created_by_name: string | null;
+  setup_expires_at: string | null;
+  activated_at: string | null;
+  last_used_at: string | null;
+  last_used_ip: string | null;
+}
+
+/**
+ * The warehouse kiosk tablets (docs/STAFF-LOGIN-SECURITY-SPEC.md §9,
+ * services/kiosk-devices.ts): the tablets set up, codes still waiting to be
+ * typed, "Set up a tablet" (a one-time code, 10 minutes) and "Forget". These
+ * act at once — they are not part of the section's Save.
+ */
+function KioskTablets({ lockOn }: { lockOn: boolean }) {
+  const [rows, setRows] = useState<KioskTablet[] | null>(null);
+  const [label, setLabel] = useState('Warehouse iPad');
+  const [shown, setShown] = useState<{ id: string; code: string; label: string; expires_at: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ data: KioskTablet[] }>('/warehouse/devices');
+      setRows(res.data);
+    } catch {
+      setError('Could not load the kiosk tablets (has migration 323 run?).');
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function setUp() {
+    setBusy(true); setError('');
+    try {
+      const res = await api.post<{ data: { id: string; code: string; label: string; expires_at: string } }>(
+        '/warehouse/devices', { label });
+      setShown(res.data);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not make a set-up code');
+    } finally { setBusy(false); }
+  }
+
+  async function forget(t: KioskTablet) {
+    const question = t.status === 'active'
+      ? `Forget "${t.label}"? The PIN stops working on it straight away (a session already open on it ends within 12 hours).`
+      : `Cancel the set-up code for "${t.label}"?`;
+    if (!window.confirm(question)) return;
+    setBusy(true); setError('');
+    try {
+      await api.delete(`/warehouse/devices/${t.id}`);
+      if (shown?.id === t.id) setShown(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not forget the tablet');
+    } finally { setBusy(false); }
+  }
+
+  const when = (iso: string | null) => iso
+    ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '—';
+  const clock = (iso: string | null) => iso
+    ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+    : '—';
+  const active = (rows ?? []).filter(r => r.status === 'active');
+  const button = 'px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50';
+
+  return (
+    <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-start">
+      <span className="text-sm text-gray-700">
+        Kiosk tablets
+        <span className="block text-xs text-gray-400 font-mono">kiosk_devices</span>
+      </span>
+      <div className="space-y-2">
+        {error && <p className="text-xs text-red-700">{error}</p>}
+        {rows === null && !error && <p className="text-xs text-gray-500">Loading…</p>}
+
+        {(rows ?? []).map(t => (
+          <div key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-200 px-3 py-2 text-sm">
+            <span>
+              <span className="font-medium text-gray-900">{t.label}</span>
+              {t.status === 'active' ? (
+                <span className="block text-xs text-gray-500">
+                  Set up {when(t.activated_at)}{t.created_by_name ? ` (code from ${t.created_by_name})` : ''}
+                  {' · '}last used {when(t.last_used_at)}{t.last_used_ip ? ` from ${t.last_used_ip}` : ''}
+                </span>
+              ) : (
+                <span className="block text-xs text-amber-700">Waiting for its code to be typed on the tablet (until {clock(t.setup_expires_at)})</span>
+              )}
+            </span>
+            <button type="button" onClick={() => void forget(t)} disabled={busy} className={button}>
+              {t.status === 'active' ? 'Forget' : 'Cancel code'}
+            </button>
+          </div>
+        ))}
+
+        {rows !== null && active.length === 0 && lockOn && (
+          <p className="text-xs text-amber-700">No tablet is set up, so the kiosk PIN works nowhere until one is.</p>
+        )}
+
+        {shown && (
+          <div className="rounded border border-purple-200 bg-purple-50 p-3 text-sm space-y-1">
+            <p className="text-gray-700">Set-up code for <strong>{shown.label}</strong>, valid until {clock(shown.expires_at)}:</p>
+            <p className="text-2xl font-mono tracking-widest text-gray-900">{shown.code}</p>
+            <p className="text-xs text-gray-600">
+              On the tablet, tap &quot;Set up this tablet&quot; under the PIN box and type this code. It works once.
+            </p>
+            <button type="button" onClick={() => { setShown(null); void load(); }} className={button}>Done</button>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={label} onChange={e => setLabel(e.target.value)} maxLength={60} aria-label="Tablet name"
+            className="px-2 py-1.5 rounded border border-gray-300 text-sm w-48" />
+          <button type="button" onClick={() => void setUp()} disabled={busy || !label.trim()} className={button}>
+            Set up a tablet
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ClaimsSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=claims');
+      // The default-watchers list is edited as JSON by hand for now; keep it out of this box list.
+      const rows = res.data.filter(r => r.key !== 'claims_default_watchers');
+      setSettings(rows);
+      const v: Record<string, string> = {};
+      for (const row of rows) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load claims settings (has migration 259 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const orig = row.value ?? '';
+        if (orig !== (vals[row.key] ?? '')) changed[row.key] = vals[row.key];
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} setting${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Insurance claims</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Where claim PDFs are emailed, the insured details printed on them, and the curve behind each van&apos;s
+        estimated value: a drop on first registration, then a yearly rate that falls each year down to a floor.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {settings.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''}
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FreelancerLinksSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=freelancers');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const row of res.data) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load freelancer links (has migration 230 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const orig = row.value ?? '';
+        if (orig !== (vals[row.key] ?? '')) changed[row.key] = vals[row.key];
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} link${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Freelancer welcome links</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Sent automatically in the approval email. Change one here and the next approval
+        uses it — no deploy needed. Leave a box empty to drop that part of the email.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {settings.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[14rem_minmax(0,1fr)] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''} placeholder="https://…"
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+
+      <p className="mt-3 text-xs text-gray-400">
+        Anyone forwarded the approval email can use the WhatsApp invite link — reset the
+        group link and update it here if it ever gets out.
+      </p>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Editors for the staff settings stored as JSON. Each takes the raw string
+ * and hands back a new one, so the section's save path does not change.
+ *
+ * Both fall back to the raw text box when the stored value doesn't parse:
+ * silently replacing somebody's hand-edited setting with an empty editor
+ * would lose it on the next save. The backend readers already tolerate junk
+ * (getReviewQuestions / getReviewIntervals fall back to built-in defaults).
+ */
+type JsonEditor = (p: { value: string; onChange: (next: string) => void }) => JSX.Element;
+
+function RawJsonBox({ value, onChange, why }: { value: string; onChange: (v: string) => void; why: string }) {
+  return (
+    <div>
+      <p className="text-xs text-amber-700 mb-1">{why} Showing the raw value — fix it here or clear it to start again.</p>
+      <textarea value={value} onChange={e => onChange(e.target.value)} rows={4}
+        className="w-full px-2 py-1.5 rounded border border-gray-300 text-sm font-mono" />
+    </div>
+  );
+}
+
+/** staff.review_questions — a JSON array of strings, asked of both sides. */
+const ReviewQuestionsEditor: JsonEditor = ({ value, onChange }) => {
+  let questions: string[] | null = null;
+  try {
+    const parsed = value.trim() ? JSON.parse(value) : [];
+    if (Array.isArray(parsed) && parsed.every(q => typeof q === 'string')) questions = parsed;
+  } catch { /* falls through to the raw box */ }
+  if (!questions) {
+    return <RawJsonBox value={value} onChange={onChange} why="This isn’t a list of questions." />;
+  }
+  const list = questions;
+  const write = (next: string[]) => onChange(JSON.stringify(next));
+  const move = (i: number, by: number) => {
+    const next = [...list];
+    const [q] = next.splice(i, 1);
+    next.splice(i + by, 0, q);
+    write(next);
+  };
+  return (
+    <div className="space-y-2">
+      {list.map((q, i) => (
+        <div key={i} className="flex items-start gap-2">
+          <span className="text-xs text-gray-400 w-5 pt-2 text-right">{i + 1}.</span>
+          <textarea value={q} rows={2}
+            onChange={e => write(list.map((x, j) => (j === i ? e.target.value : x)))}
+            className="flex-1 px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          <div className="flex flex-col gap-0.5 text-xs">
+            <button type="button" onClick={() => move(i, -1)} disabled={i === 0}
+              className="px-1.5 text-gray-500 hover:text-gray-800 disabled:opacity-30" aria-label="Move up">▲</button>
+            <button type="button" onClick={() => move(i, 1)} disabled={i === list.length - 1}
+              className="px-1.5 text-gray-500 hover:text-gray-800 disabled:opacity-30" aria-label="Move down">▼</button>
+          </div>
+          <button type="button" onClick={() => write(list.filter((_, j) => j !== i))}
+            className="text-xs text-red-600 hover:text-red-800 pt-2">Remove</button>
+        </div>
+      ))}
+      <button type="button" onClick={() => write([...list, ''])}
+        className="text-sm text-ooosh-600 hover:underline">+ Add a question</button>
+      <p className="text-xs text-gray-400">
+        Both sides answer the same questions before a review. Rewording one only affects future
+        reviews — past answers keep the wording they were asked with. Empty questions are ignored.
+      </p>
+    </div>
+  );
+};
+
+/** staff.doc_review_intervals — months per staff document type; 0 = never. */
+const DocIntervalsEditor: JsonEditor = ({ value, onChange }) => {
+  let map: Record<string, number> | null = null;
+  try {
+    const parsed = value.trim() ? JSON.parse(value) : {};
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) map = parsed;
+  } catch { /* falls through to the raw box */ }
+  if (!map) {
+    return <RawJsonBox value={value} onChange={onChange} why="This isn’t a table of months." />;
+  }
+  const current = map;
+  const known = STAFF_DOC_TYPES.map(t => t.value);
+  // Keep anything the setting mentions that the form doesn't know, so a
+  // hand-added type isn't dropped on save.
+  const rows = [...STAFF_DOC_TYPES, ...Object.keys(current).filter(k => !known.includes(k)).map(k => ({ value: k, label: k }))];
+  return (
+    <div>
+      <div className="grid grid-cols-[minmax(0,1fr)_6rem] sm:grid-cols-[16rem_6rem] gap-x-3 gap-y-1.5 items-center">
+        {rows.map(t => (
+          <div key={t.value} className="contents">
+            <label htmlFor={`interval-${t.value}`} className="text-sm text-gray-700">{t.label}</label>
+            <input id={`interval-${t.value}`} type="number" min={0} max={600} inputMode="numeric"
+              value={String(current[t.value] ?? 0)}
+              onChange={e => {
+                const n = Math.max(0, Math.min(600, Math.round(Number(e.target.value) || 0)));
+                onChange(JSON.stringify({ ...current, [t.value]: n }));
+              }}
+              className="px-2 py-1 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-gray-400 mt-2">
+        Months. Used to suggest the “then, on” date when a record is filed — 0 means don’t suggest
+        one. It never changes a date already set on a record.
+      </p>
+    </div>
+  );
+};
+
+const STRUCTURED_EDITORS: Record<string, JsonEditor> = {
+  'staff.review_questions': ReviewQuestionsEditor,
+  'staff.doc_review_intervals': DocIntervalsEditor,
+};
+
+function StaffTimeSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=staff_time');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const row of res.data) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load staff time settings (has migration 216 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const orig = row.value ?? '';
+        if (orig !== (vals[row.key] ?? '')) changed[row.key] = vals[row.key];
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved ${Object.keys(changed).length} setting${Object.keys(changed).length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return null;
+
+  // The internal "last reminded" stamp is machinery, not config — shown last
+  // and set apart, because clearing it is a deliberate act (it makes the
+  // year-end cash-out reminder fire again).
+  const INTERNAL = 'staff.overtime_cashout_reminded_year';
+  const editable = settings.filter(row => row.key !== INTERNAL);
+  // The per-year override rows are handled by BankHolidayOverrides below,
+  // which can reach years nobody seeded. They are filtered out here so they do
+  // not also appear as raw text boxes.
+  const thresholdRows = editable.filter(row => !row.key.startsWith('staff.bank_holidays.'));
+  const internal = settings.find(row => row.key === INTERNAL);
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Staff time &amp; company calendar</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Holiday, overtime and absence thresholds, the bank holiday calendar, and the
+        days the company closes. Changing one takes effect within a minute — no deploy
+        needed.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {thresholdRows.map(row => STRUCTURED_EDITORS[row.key] ? (
+          // A JSON setting gets a real editor rather than a one-line box.
+          // It still reads and writes the same string, so saving is unchanged.
+          <div key={row.key} className="pt-2">
+            <p className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </p>
+            <div className="mt-2">
+              {(() => {
+                const Editor = STRUCTURED_EDITORS[row.key];
+                return <Editor value={vals[row.key] ?? ''}
+                  onChange={next => setVals(v => ({ ...v, [row.key]: next }))} />;
+              })()}
+            </div>
+          </div>
+        ) : (
+          <div key={row.key} className="grid sm:grid-cols-[minmax(0,1fr)_10rem] gap-2 sm:items-center">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            <input id={row.key} value={vals[row.key] ?? ''}
+              onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+              className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+
+      <BankHolidayOverrides onError={setError} onSuccess={setSuccess} />
+
+      <CompanyDaysSection onError={setError} onSuccess={setSuccess} />
+
+      <div className="mt-4 flex items-center gap-3">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {internal && (
+          <span className="text-xs text-gray-400">
+            Year-end cash-out reminder last sent for:{' '}
+            <strong>{internal.value || 'never'}</strong>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Bank holidays — computed for any year, overridable for the odd one.
+ *
+ * The dates are worked out from the rules (`services/bank-holidays.ts`) rather
+ * than stored, so there is no year to "add" and nothing to keep topped up. This
+ * shows what any year resolves to and lets an admin pin a corrected list if the
+ * arithmetic is ever wrong — which needs its own endpoint, because the generic
+ * settings PUT only updates rows that already exist.
+ */
+function BankHolidayOverrides({ onError, onSuccess }: {
+  onError: (m: string) => void;
+  onSuccess: (m: string) => void;
+}) {
+  const thisYear = new Date().getUTCFullYear();
+  const [year, setYear] = useState(thisYear);
+  const [dates, setDates] = useState<string[]>([]);
+  const [draft, setDraft] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.get<{ data: string[] }>(`/staff-calendar/bank-holidays?year=${year}`);
+      setDates(res.data);
+      setDraft(res.data.join(', '));
+    } catch {
+      onError('Could not load bank holidays.');
+    } finally { setLoading(false); }
+  }, [year, onError]);
+
+  useEffect(() => { void load(); setEditing(false); }, [load]);
+
+  async function saveOverride(list: string[]) {
+    setSaving(true);
+    try {
+      await api.put(`/staff-calendar/bank-holidays/${year}`, { dates: list });
+      onSuccess(list.length > 0
+        ? `${year} pinned to ${list.length} date${list.length === 1 ? '' : 's'}.`
+        : `${year} handed back to the automatic dates.`);
+      setEditing(false);
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to save those dates');
+    } finally { setSaving(false); }
   }
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <h2 className="text-lg font-semibold text-gray-900 mb-1">COT Card Register</h2>
-      <p className="text-xs text-gray-500 mb-4">
-        Set each staff member's company card. The cost-capture form stamps the card holder + last 4 from here automatically — staff never type card details.
-      </p>
-      {error && <div className="mb-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="text-left text-gray-500 border-b border-gray-200">
-              <th className="py-2 pr-3 font-medium">Staff</th>
-              <th className="py-2 px-3 font-medium">Card last 4</th>
-              <th className="py-2 px-3 font-medium">Card label</th>
-              <th className="py-2 px-3 font-medium">Card agreement</th>
-              <th className="py-2 pl-3 font-medium text-right">&nbsp;</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id} className={`border-b border-gray-100 ${r.is_active ? '' : 'opacity-50'}`}>
-                <td className="py-2 pr-3 text-gray-800">{name(r)}{!r.is_active && <span className="text-xs text-gray-400"> (inactive)</span>}</td>
-                <td className="py-2 px-3">
-                  <input value={drafts[r.id]?.last4 ?? ''} inputMode="numeric" maxLength={4}
-                    onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], last4: e.target.value.replace(/\D/g, '').slice(0, 4) } }))}
-                    placeholder="1234" className="w-20 border border-gray-300 rounded-md px-2 py-1 text-sm" />
-                </td>
-                <td className="py-2 px-3">
-                  <input value={drafts[r.id]?.label ?? ''} maxLength={60}
-                    onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: { ...d[r.id], label: e.target.value } }))}
-                    placeholder="e.g. Amex ·1234" className="w-40 border border-gray-300 rounded-md px-2 py-1 text-sm" />
-                </td>
-                <td className="py-2 px-3">
-                  {!r.cot_card_label ? (
-                    <span className="text-xs text-gray-400">—</span>
-                  ) : r.agreement_status === 'completed' ? (
-                    <span className="text-xs text-green-700">Signed{r.agreement_completed_at ? ` ${new Date(r.agreement_completed_at).toLocaleDateString('en-GB')}` : ''}</span>
-                  ) : r.agreement_status === 'lapsed' ? (
-                    <span className="text-xs text-amber-700">Renewal due</span>
-                  ) : (
-                    <span className="text-xs text-amber-700">Outstanding</span>
-                  )}
-                </td>
-                <td className="py-2 pl-3 text-right">
-                  {savedId === r.id ? <span className="text-xs text-green-600">Saved ✓</span> : (
-                    <button onClick={() => save(r.id)} disabled={savingId === r.id || !dirty(r)}
-                      className="px-3 py-1 text-xs text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-40">
-                      {savingId === r.id ? '…' : 'Save'}
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="mt-5 pt-4 border-t border-gray-100">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <h3 className="text-sm font-semibold text-gray-900">Bank holidays</h3>
+        <select value={year} onChange={e => setYear(Number(e.target.value))}
+          aria-label="Bank holiday year"
+          className="px-2 py-1 rounded border border-gray-300 text-sm">
+          {Array.from({ length: 8 }, (_, i) => thisYear - 1 + i).map(y => (
+            <option key={y} value={y}>{y}</option>
+          ))}
+        </select>
       </div>
+      <p className="text-xs text-gray-500 mb-3">
+        England &amp; Wales, <strong>worked out automatically</strong> for any year —
+        weekend substitutes included — so there is nothing to keep topped up. Under the{' '}
+        <code>use_allowance</code> policy these are marked on the calendar but are
+        ordinary working days. A one-off royal bank holiday is not a date change, it is
+        the company being shut — that is a company day, not this.
+      </p>
+
+      {loading ? (
+        <div className="text-sm text-gray-400">Loading…</div>
+      ) : editing ? (
+        <div className="space-y-2">
+          <textarea rows={3} value={draft} onChange={e => setDraft(e.target.value)}
+            className="w-full px-2 py-1.5 rounded border border-gray-300 text-sm font-mono"
+            placeholder="2029-01-01, 2029-03-30, …" />
+          <div className="flex flex-wrap gap-2">
+            <button disabled={saving}
+              onClick={() => void saveOverride(
+                draft.split(',').map(d => d.trim()).filter(Boolean))}
+              className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+              Pin these dates
+            </button>
+            <button disabled={saving} onClick={() => void saveOverride([])}
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">
+              Use the automatic dates
+            </button>
+            <button onClick={() => { setEditing(false); setDraft(dates.join(', ')); }}
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {dates.map(d => (
+              <span key={d} className="text-xs px-2 py-1 rounded bg-violet-50 text-violet-800 font-mono">
+                {d}
+              </span>
+            ))}
+          </div>
+          <button onClick={() => setEditing(true)}
+            className="text-sm text-ooosh-600 hover:underline">
+            Correct {year}&apos;s dates
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Company days — the days the company grants to everyone (spec §20).
+ *
+ * Lives next to bank holidays because they are the same kind of thing from a
+ * staff member's point of view: days that are not normal working days. The
+ * difference is that bank holidays are computed and are NOT days off under the
+ * current policy, whereas these are granted and cost nobody any allowance.
+ *
+ * The staff calendar links here, because noticing you need one and configuring
+ * it are different moments and only the second wants a form.
+ */
+function CompanyDaysSection({ onError, onSuccess }: {
+  onError: (m: string) => void;
+  onSuccess: (m: string) => void;
+}) {
+  interface CompanyDay {
+    id: string; dayDate: string; label: string; recurs: boolean;
+    status: 'active' | 'cancelled'; notes: string | null;
+  }
+  interface Occurrence { date: string; label: string; companyDayId: string }
+  interface ReclaimCandidate {
+    dayId: string; personId: string; personName: string;
+    date: string; minutes: number; leaveType: string;
+  }
+
+  const thisYear = new Date().getUTCFullYear();
+  const [days, setDays] = useState<CompanyDay[]>([]);
+  const [occurrences, setOccurrences] = useState<Occurrence[]>([]);
+  const [year, setYear] = useState(thisYear);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [reclaim, setReclaim] = useState<{ dayLabel: string; id: string; candidates: ReclaimCandidate[] } | null>(null);
+
+  const [dayDate, setDayDate] = useState(`${thisYear}-12-25`);
+  const [label, setLabel] = useState('');
+  const [recurs, setRecurs] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.get<{ data: CompanyDay[]; occurrences: Occurrence[] }>(
+        `/staff-calendar/company-days?year=${year}`);
+      setDays(res.data);
+      setOccurrences(res.occurrences ?? []);
+    } catch {
+      onError('Could not load company days (has migration 219 run?).');
+    } finally { setLoading(false); }
+  }, [year, onError]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function add() {
+    if (!label.trim()) { onError('Give the day a name — it shows on everyone\'s calendar.'); return; }
+    setSaving(true);
+    try {
+      const res = await api.post<{ data: CompanyDay; reclaimCandidates: ReclaimCandidate[] }>(
+        '/staff-calendar/company-days', { dayDate, label, recurs });
+      onSuccess(`${res.data.label} added.`);
+      setAdding(false); setLabel(''); setRecurs(false);
+      // Anyone who had already booked it off has paid for a day they are now
+      // being given. Surfaced immediately, applied only if asked.
+      if (res.reclaimCandidates?.length > 0) {
+        setReclaim({ dayLabel: res.data.label, id: res.data.id, candidates: res.reclaimCandidates });
+      }
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to add that day');
+    } finally { setSaving(false); }
+  }
+
+  async function giveBack(ids: string[]) {
+    if (!reclaim) return;
+    setSaving(true);
+    try {
+      await api.post(`/staff-calendar/company-days/${reclaim.id}/reclaim`, { leaveDayIds: ids });
+      onSuccess(`${ids.length} booked day${ids.length === 1 ? '' : 's'} given back.`);
+      setReclaim(null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to give those days back');
+    } finally { setSaving(false); }
+  }
+
+  async function cancel(d: CompanyDay) {
+    const reason = window.prompt(`Why is "${d.label}" being withdrawn? (kept on the record)`);
+    if (!reason) return;
+    try {
+      await api.post(`/staff-calendar/company-days/${d.id}/cancel`, { reason });
+      onSuccess(`${d.label} withdrawn.`);
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to withdraw that day');
+    }
+  }
+
+  const fmt = (iso: string) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    return Number.isNaN(dt.getTime()) ? iso
+      : dt.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+  };
+
+  return (
+    <div className="mt-5 pt-4 border-t border-gray-100">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <h3 className="text-sm font-semibold text-gray-900">Company days</h3>
+        <div className="flex items-center gap-2">
+          <select value={year} onChange={e => setYear(Number(e.target.value))}
+            aria-label="Company day year"
+            className="px-2 py-1 rounded border border-gray-300 text-sm">
+            {Array.from({ length: 4 }, (_, i) => thisYear - 1 + i).map(y => (
+              <option key={y} value={y}>{y}</option>
+            ))}
+          </select>
+          <button onClick={() => setAdding(a => !a)}
+            className="px-3 py-1 text-sm rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50">
+            {adding ? 'Cancel' : 'Add a day'}
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">
+        Days the company gives everyone — a Christmas closure, a day around a bank
+        holiday. They <strong>cost nobody any allowance</strong>, nobody can book leave
+        on them, and they do not count toward cover. Anyone who had already booked one
+        off gets it handed back.
+      </p>
+
+      {adding && (
+        <div className="mb-3 p-3 rounded border border-ooosh-200 bg-ooosh-50/40 space-y-2">
+          <div className="grid sm:grid-cols-3 gap-2">
+            <label className="text-sm">
+              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">Date</span>
+              <input type="date" value={dayDate} onChange={e => setDayDate(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+            </label>
+            <label className="text-sm sm:col-span-2">
+              <span className="block text-xs uppercase tracking-wide text-gray-400 mb-1">What is it</span>
+              <input value={label} onChange={e => setLabel(e.target.value)}
+                placeholder="Christmas Day · Office closed"
+                className="w-full px-2 py-1.5 rounded border border-gray-300 bg-white" />
+            </label>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={recurs} onChange={e => setRecurs(e.target.checked)} />
+            Every year on this date
+          </label>
+          <p className="text-xs text-gray-500">
+            Tick it for something fixed like Christmas Day and it looks after itself.
+            Leave it for a one-off — you get a reminder each November to set the next
+            year&apos;s.
+          </p>
+          <button disabled={saving} onClick={() => void add()}
+            className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+            Add it
+          </button>
+        </div>
+      )}
+
+      {reclaim && (
+        <div className="mb-3 p-3 rounded border border-sky-200 bg-sky-50">
+          <p className="text-sm text-sky-900 mb-2">
+            <strong>{reclaim.candidates.length}</strong> booked day
+            {reclaim.candidates.length === 1 ? ' has' : 's have'} been overtaken by{' '}
+            {reclaim.dayLabel}. Give the allowance back?
+          </p>
+          <ul className="text-sm text-sky-900 mb-2 space-y-0.5">
+            {reclaim.candidates.map(c => (
+              <li key={c.dayId}>
+                {c.personName} — {fmt(c.date)} ({c.leaveType === 'toil' ? 'TOIL' : 'holiday'})
+              </li>
+            ))}
+          </ul>
+          <div className="flex gap-2">
+            <button disabled={saving}
+              onClick={() => void giveBack(reclaim.candidates.map(c => c.dayId))}
+              className="px-3 py-1.5 text-sm rounded bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50">
+              Give all {reclaim.candidates.length} back
+            </button>
+            <button onClick={() => setReclaim(null)}
+              className="px-3 py-1.5 text-sm rounded border border-sky-300 bg-white hover:bg-sky-100">
+              Leave them as they are
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="text-sm text-gray-400">Loading…</div>
+      ) : (
+        <>
+          {days.length === 0 ? (
+            <div className="text-sm text-gray-400 mb-2">None set up.</div>
+          ) : (
+            <ul className="divide-y divide-gray-100 border border-gray-200 rounded mb-2">
+              {days.map(d => (
+                <li key={d.id} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
+                  <span className="font-medium text-gray-900">{d.label}</span>
+                  <span className="text-gray-500">
+                    {d.recurs
+                      ? `every ${fmt(d.dayDate).replace(/^\w{3} /, '')}`
+                      : fmt(d.dayDate) + ' ' + d.dayDate.slice(0, 4)}
+                  </span>
+                  {d.recurs && (
+                    <span className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                      Recurring
+                    </span>
+                  )}
+                  <button onClick={() => void cancel(d)}
+                    className="ml-auto text-xs text-red-600 hover:underline">
+                    Withdraw
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="text-xs text-gray-500">
+            <span className="font-medium">{year}:</span>{' '}
+            {occurrences.length === 0
+              ? 'no company days'
+              : occurrences.map(o => `${fmt(o.date)} (${o.label})`).join(' · ')}
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -18,7 +18,8 @@
     "paths": {
       "@/*": ["./src/*"],
       "@shared/*": ["../shared/types/*"],
-      "@calc": ["../backend/src/services/crew-transport-calculator.ts"]
+      "@calc": ["../backend/src/services/crew-transport-calculator.ts"],
+      "@claimform": ["../backend/src/services/claim-form-fields.ts"]
     },
     "baseUrl": "."
   },

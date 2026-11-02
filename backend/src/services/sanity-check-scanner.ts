@@ -21,6 +21,19 @@
  *     that reintroduced a timestamp-less book-out (the RX73TBZ 16057↔16149
  *     mis-attribution state). One alert per job, deduped via a notes marker.
  *
+ *   • runBookedSplitScan — proactive escalation alarm for the "confirmed in
+ *     OP but never Booked in HireHop" split-brain (job 16513). A HireHop 327
+ *     storm can make the post-payment status-push fail silently, leaving a job
+ *     at pipeline_status='confirmed' (or further) while jobs.status stays < 2
+ *     in HireHop. The booked-status reconciler (services/booked-status-
+ *     reconciler.ts) heals these silently on the 30-min sync, but if HireHop
+ *     stays unreachable the job sits stuck with no one told. This scanner
+ *     emails jon@ ONCE per stuck job after a 2-hour grace, deduped via
+ *     `jobs.booked_split_alerted_at` (migration 189). Scoped on `status < 2`
+ *     so a legit last-minute booking racing confirmed→prepping→dispatched
+ *     (where HH status climbs to >= 2) never trips it. The marker is cleared
+ *     in-scan once the job recovers (status >= 2) or goes terminal.
+ *
  *   • runStuckOnHireScan — detection scanner for the multi-van book-out
  *     scramble (docs/MULTI-VAN-BOOKOUT-SCRAMBLE.md §6). Finds vehicles
  *     projected `hire_status='On Hire'` with NO live booked_out/active
@@ -29,6 +42,14 @@
  *     but owns no assignment and can't be checked in). Alerts jon@ ONCE per
  *     stuck van, deduped via `fleet_vehicles.stuck_onhire_alerted_at` (marker
  *     cleared in syncFleetHireStatus when the van leaves On Hire).
+ *
+ *   • runDoubleHeldExcessScan — data-integrity tripwire for the excess
+ *     rollover chain: more than one LIVE (taken/partially_paid) `job_excess`
+ *     record on the same `hh_deposit_id`. The chain's invariant is one live
+ *     record per physical deposit; a second one double-counts the money in
+ *     Total Held and the Money-tab "on account" banner and hides the "Apply
+ *     Rolled Over Excess" option on the next hire (Lime Garden, deposit 7767,
+ *     Oct 2026). Alerts jon@ once per record, deduped via a notes marker.
  *
  * The pipeline_status markers are cleared on transitions out of their
  * respective pipeline_status so a re-entered state can warn afresh — handled in
@@ -162,6 +183,13 @@ export async function runDispatchSanityScan(): Promise<{ checked: number; warned
     try {
       const hhStatus: number = job.status;
       const hhStatusLabel = HH_STATUS_LABELS[hhStatus] || `Status ${hhStatus}`;
+      // Staff-facing wording only — HH status integers/labels are internal
+      // plumbing and mean nothing to the reader, so the email never shows them.
+      // Part Dispatched (4) means some items were scanned out; anything lower
+      // means the checkout never happened in HH at all.
+      const mismatchLine = hhStatus === 4
+        ? "HireHop still has items that haven't been dispatched"
+        : "the job hasn't been dispatched in HireHop at all";
       const jobRef = job.hh_job_number
         ? `J-${job.hh_job_number}`
         : (job.job_name || 'Unknown job');
@@ -187,10 +215,7 @@ export async function runDispatchSanityScan(): Promise<{ checked: number; warned
           jobRef,
           jobName: job.job_name || '',
           jobNumber: job.hh_job_number ? String(job.hh_job_number) : '',
-          source: 'Sanity scanner (30-min post-dispatch check)',
-          actorLabel: 'scheduler',
-          hhStatusLabel,
-          hhStatusCode: String(hhStatus),
+          mismatchLine,
           opJobUrl,
           hhJobUrl,
         },
@@ -199,7 +224,7 @@ export async function runDispatchSanityScan(): Promise<{ checked: number; warned
       if (result.success) {
         warned++;
       } else {
-        console.warn(`[sanity-scanner] dispatch warning send failed for ${jobRef}:`, result);
+        console.warn(`[sanity-scanner] dispatch warning send failed for ${jobRef} (HH ${hhStatusLabel}):`, result);
       }
     } catch (err) {
       console.error(`[sanity-scanner] dispatch scan error for job ${job.id}:`, err);
@@ -349,6 +374,115 @@ export async function runBookedOutNoTimestampScan(): Promise<{ checked: number; 
   return { checked: candidates.rows.length, warned };
 }
 
+// Operationally past-confirmed pipeline statuses. In all of these, HireHop
+// should be at status >= 2 (Booked). A job in one of these with jobs.status < 2
+// is the "confirmed in OP, never Booked in HH" split-brain (job 16513). Enquiry
+// stages (new_enquiry/quoting/paused/provisional) are legitimately < 2, and
+// lost/cancelled are terminal — both excluded.
+const BOOKED_SPLIT_STATUSES = [
+  'confirmed',
+  'prepping',
+  'prepped',
+  'dispatched',
+  'returned_incomplete',
+  'returned',
+  'completed',
+];
+
+/**
+ * Escalation alarm for the OP↔HireHop "Booked" split-brain (job 16513).
+ *
+ * Finds jobs OP believes are past-confirmed (BOOKED_SPLIT_STATUSES) but HireHop
+ * never received the Booked push for (jobs.status < 2), stuck for over 2 hours
+ * (pipeline_status_changed_at grace). The booked-status reconciler retries the
+ * push every 30-min sync; this alarm only fires when that keeps failing (a
+ * persistent HireHop outage), so a genuinely stuck job surfaces instead of
+ * sitting silent.
+ *
+ * The `status < 2` guard is what keeps a legitimate last-minute booking racing
+ * confirmed→prepping→dispatched from tripping this: once the HH push lands and
+ * status climbs to >= 2, the job drops out of the candidate set.
+ *
+ * One alert per stuck job — deduped via `jobs.booked_split_alerted_at`, stamped
+ * FIRST (a transient send failure must not re-fire on the next sweep). The
+ * marker is cleared in-scan for any job that has recovered (status >= 2) or gone
+ * terminal (lost/cancelled), so a re-stuck job can warn afresh. Recipient is
+ * jon@ (a data-integrity anomaly he wants to action), matching runStuckOnHireScan.
+ */
+export async function runBookedSplitScan(): Promise<{ checked: number; warned: number }> {
+  // Clear the marker for any job that's no longer stuck — the exact inverse of
+  // the candidate condition below (minus grace), so a recovered/terminal job is
+  // released and can re-alert if it ever gets stuck again.
+  await query(
+    `UPDATE jobs
+        SET booked_split_alerted_at = NULL, updated_at = NOW()
+      WHERE booked_split_alerted_at IS NOT NULL
+        AND NOT (pipeline_status = ANY($1::text[]) AND COALESCE(status, 0) < 2)`,
+    [BOOKED_SPLIT_STATUSES]
+  );
+
+  const candidates = await query(
+    `SELECT id, hh_job_number, job_name, pipeline_status, status
+       FROM jobs
+      WHERE pipeline_status = ANY($1::text[])
+        AND COALESCE(status, 0) < 2
+        AND hh_job_number IS NOT NULL
+        AND booked_split_alerted_at IS NULL
+        AND pipeline_status_changed_at IS NOT NULL
+        AND pipeline_status_changed_at < NOW() - INTERVAL '2 hours'
+        AND is_deleted = false
+      ORDER BY pipeline_status_changed_at ASC
+      LIMIT 50`,
+    [BOOKED_SPLIT_STATUSES]
+  );
+
+  if (candidates.rows.length === 0) return { checked: 0, warned: 0 };
+
+  let warned = 0;
+  const frontendUrl = getFrontendUrl();
+
+  for (const job of candidates.rows) {
+    try {
+      const hhNum: number | null = job.hh_job_number;
+      const jobRef = hhNum ? `HH #${hhNum}` : (job.job_name || 'Unknown job');
+      const opJobUrl = `${frontendUrl}/jobs/${job.id}`;
+      const hhJobUrl = hhNum ? `https://myhirehop.com/job.php?id=${hhNum}` : '';
+
+      // Stamp the marker FIRST — stamp-first, like the sibling scanners.
+      await query(
+        `UPDATE jobs SET booked_split_alerted_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [job.id]
+      );
+
+      const html = `
+        <p><strong>Booking not registered in HireHop — OP↔HireHop split-brain.</strong></p>
+        <p><strong>${jobRef}</strong>${job.job_name ? ` (${job.job_name})` : ''} has been
+        <code>pipeline_status='${job.pipeline_status}'</code> in OP for over 2 hours, but
+        HireHop still shows it at status <strong>${job.status ?? 0}</strong> (below Booked).</p>
+        <p>This is the job-16513 pattern: the post-payment "Booked" push to HireHop failed
+        (typically a 327 rate-limit storm) and the retry keeps failing. The booked-status
+        reconciler retries every 30-min sync, so a persistent alert means HireHop is likely
+        unreachable or the push is being rejected — please check HireHop and, if needed, set
+        the job to Booked manually.</p>
+        ${hhJobUrl ? `<p><a href="${hhJobUrl}">Open job in HireHop</a> · ` : '<p>'}<a href="${opJobUrl}">Open job in OP</a></p>
+        <p style="color:#888;font-size:12px">Sanity scanner — confirmed in OP, not Booked in HireHop (2h+).</p>
+      `;
+
+      const result = await emailService.sendRaw({
+        to: 'jon@oooshtours.co.uk',
+        subject: `⚠ Booking not in HireHop — ${jobRef}`,
+        html,
+      });
+      if (result.success) warned++;
+      else console.warn(`[sanity-scanner] booked-split alert send failed for ${jobRef}:`, result);
+    } catch (err) {
+      console.error(`[sanity-scanner] booked-split scan error for job ${job.id}:`, err);
+    }
+  }
+
+  return { checked: candidates.rows.length, warned };
+}
+
 /**
  * Best-effort: read the van's most recent book-out event from R2 and return its
  * HireHop job number. The stuck van's live DB assignment points at its PREVIOUS
@@ -467,4 +601,104 @@ export async function runStuckOnHireScan(): Promise<{ checked: number; warned: n
   }
 
   return { checked: candidates.rows.length, warned };
+}
+
+// Marker appended to job_excess.notes once a double-held deposit has been
+// alerted, so each record is reported once (not every 15 minutes).
+const DOUBLE_HELD_MARKER = '[sanity: double-held deposit alerted]';
+
+/**
+ * Double-held excess scanner (Oct 2026, Lime Garden / HH deposit 7767).
+ *
+ * When excess is applied forward to a new hire the previous hop flips to
+ * 'rolled_over', so each physical deposit is counted ONCE by v_excess_held.
+ * Before the Oct 2026 picker fix (routes/excess.ts, POST /:id/payment) the flip
+ * could land on an already-rolled-over hop, leaving two records 'taken' on one
+ * hh_deposit_id: Total Held and the "Client has £X on account" banner read
+ * double, and GET /:id/available-rollover — which refuses a source that shares
+ * its deposit with another live record — hid the apply button on the next hire.
+ *
+ * Finds every deposit with more than one live record and emails jon@ once per
+ * record (stamp-first, like the sibling scanners), naming the records and the
+ * hand-fix: the OLDER hop (its money moved on to the newer one) should be
+ * rolled_over.
+ */
+export async function runDoubleHeldExcessScan(): Promise<{ checked: number; warned: number }> {
+  const deposits = await query(
+    `SELECT hh_deposit_id
+       FROM job_excess
+      WHERE hh_deposit_id IS NOT NULL
+        AND excess_status IN ('taken', 'partially_paid')
+      GROUP BY hh_deposit_id
+     HAVING COUNT(*) > 1
+      ORDER BY hh_deposit_id
+      LIMIT 50`
+  );
+
+  if (deposits.rows.length === 0) return { checked: 0, warned: 0 };
+
+  let warned = 0;
+  const frontendUrl = getFrontendUrl();
+
+  for (const dep of deposits.rows) {
+    const depositId: number = dep.hh_deposit_id;
+    try {
+      const recs = await query(
+        `SELECT je.id, je.job_id, je.excess_status, je.excess_amount_taken, je.payment_date,
+                je.held_on_account, je.notes, j.hh_job_number, j.job_name
+           FROM job_excess je
+           LEFT JOIN jobs j ON j.id = je.job_id
+          WHERE je.hh_deposit_id = $1
+            AND je.excess_status IN ('taken', 'partially_paid')
+          ORDER BY je.payment_date ASC NULLS LAST, je.created_at ASC`,
+        [depositId]
+      );
+      const unalerted = recs.rows.filter((r: any) => !(r.notes || '').includes(DOUBLE_HELD_MARKER));
+      if (unalerted.length === 0) continue; // every record in this group already reported
+
+      // Stamp the marker on the unreported records FIRST — a transient send
+      // failure must not re-fire on the next scan.
+      await query(
+        `UPDATE job_excess
+            SET notes = CASE WHEN notes IS NULL OR notes = '' THEN $2
+                             ELSE notes || E'\\n' || $2 END
+          WHERE id = ANY($1::uuid[])`,
+        [unalerted.map((r: any) => r.id), DOUBLE_HELD_MARKER]
+      );
+
+      const rowsHtml = recs.rows.map((r: any) => {
+        const ref = r.hh_job_number ? `HH #${r.hh_job_number}` : '(no HH job)';
+        const paid = r.payment_date ? new Date(r.payment_date).toLocaleDateString('en-GB') : '—';
+        const link = r.job_id ? `<a href="${frontendUrl}/jobs/${r.job_id}?tab=money">${ref}</a>` : ref;
+        return `<li>${link} — ${r.job_name || ''} · <code>${r.excess_status}</code>${r.held_on_account ? ' (held on account)' : ''}
+          · £${Number(r.excess_amount_taken || 0).toFixed(2)} · paid ${paid} · <code>${r.id}</code></li>`;
+      }).join('');
+
+      const html = `
+        <p><strong>Data-integrity tripwire: one HireHop deposit, ${recs.rows.length} live excess records.</strong></p>
+        <p>HireHop deposit <strong>#${depositId}</strong> is held by more than one <code>taken</code> /
+        <code>partially_paid</code> record. The rollover chain should leave ONE live record per deposit —
+        every extra one double-counts the money in Total Held and the Money-tab "on account" banner,
+        and hides "Apply Rolled Over Excess" on the client's next hire.</p>
+        <ul>${rowsHtml}</ul>
+        <p>Usually the OLDER record is the stale one (its money moved on to the newer hire but it was
+        never flipped). Hand-fix, once you've confirmed which:</p>
+        <pre>UPDATE job_excess SET excess_status = 'rolled_over', held_on_account = FALSE, updated_at = NOW()
+ WHERE id = '&lt;stale record id&gt;' AND excess_status = 'taken';</pre>
+        <p style="color:#888;font-size:12px">Sanity scanner — double-held excess deposit check.</p>
+      `;
+
+      const result = await emailService.sendRaw({
+        to: 'jon@oooshtours.co.uk',
+        subject: `⚠ Excess double-held — HH deposit #${depositId} (${recs.rows.length} live records)`,
+        html,
+      });
+      if (result.success) warned++;
+      else console.warn(`[sanity-scanner] double-held excess alert send failed for deposit ${depositId}:`, result);
+    } catch (err) {
+      console.error(`[sanity-scanner] double-held excess scan error for deposit ${depositId}:`, err);
+    }
+  }
+
+  return { checked: deposits.rows.length, warned };
 }

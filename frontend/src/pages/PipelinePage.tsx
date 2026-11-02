@@ -8,6 +8,12 @@ import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PERSON_ORG_ROLES } from '@shared/index';
+import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
+import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
+import { stripOptionSuffix } from '../lib/quoteOptions';
+import { PROJECT_COPY } from '../lib/projectCopy';
+import { ukToday } from '../lib/ukDate';
+import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 
 // Roles available for the "Linked organisations" picker on a job. These map
 // to `job_organisations.role` (VARCHAR(50), free-text). Keep aligned with the
@@ -237,6 +243,61 @@ function sortJobs(jobs: Job[], mode: SortMode): Job[] {
 
 // ── Client Picker (search People & Organisations) ──────────────────────────
 
+// ── Quote options: one card per group ──────────────────────────────────────
+//
+// Alternative quotes for one enquiry (docs/QUOTE-VERSIONS-SPEC.md §6.4) are
+// sibling jobs sharing a group_id. On the board and the list they collapse
+// onto ONE card per group per column: the group's lead (pinned or most
+// progressed) when it sits in this column, else the lowest option number here.
+// A chevron expands the others in place. Members that sit in other columns
+// render there, each badged "1 of 4 options" so the split stays visible.
+
+interface BoardEntry { job: Job; others: Job[] }
+
+function collapseByGroup(list: Job[]): BoardEntry[] {
+  const out: BoardEntry[] = [];
+  const seen = new Set<string>();
+  for (const job of list) {
+    const gid = job.group_id;
+    if (!gid || !job.group_summary) { out.push({ job, others: [] }); continue; }
+    if (seen.has(gid)) continue;
+    seen.add(gid);
+    const here = list.filter((j) => j.group_id === gid);
+    const leadId = job.group_summary.lead_job_id;
+    const rep = here.find((j) => j.id === leadId)
+      ?? [...here].sort((a, b) => (a.option_no ?? 0) - (b.option_no ?? 0))[0];
+    out.push({ job: rep, others: here.filter((j) => j.id !== rep.id) });
+  }
+  return out;
+}
+
+function groupBadgeText(entry: BoardEntry): string | null {
+  const gs = entry.job.group_summary;
+  if (!gs) return null;
+  const here = entry.others.length + 1;
+  return here === gs.member_count ? `${gs.member_count} options` : `${here} of ${gs.member_count} options`;
+}
+
+/** The "3 options ▾" pill on a collapsed card or row; a plain tag when there's nothing to expand. */
+function GroupBadge({ entry, expanded, onToggle }: { entry: BoardEntry; expanded: boolean; onToggle: () => void }) {
+  const text = groupBadgeText(entry);
+  if (!text) return null;
+  const cls = 'text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-ooosh-100 text-ooosh-700 whitespace-nowrap';
+  if (entry.others.length === 0) {
+    return <span className={cls} title="Other options of this enquiry sit in other columns">{text}</span>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      className={`${cls} hover:bg-ooosh-200`}
+      title={expanded ? 'Hide the other options' : 'Show every option'}
+    >
+      {text} {expanded ? '▴' : '▾'}
+    </button>
+  );
+}
+
 function ClientPicker({
   value,
   onChange,
@@ -393,18 +454,42 @@ interface ReqProgress {
   blocked: number;
 }
 
+/** "Part of a project" chip (docs/JOB-PROJECTS-SPEC.md) — card and list row. */
+function ProjectChip({ name }: { name: string }) {
+  return (
+    <div className="mb-1">
+      <span
+        className="inline-flex max-w-full items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-ooosh-50 text-ooosh-700 border border-ooosh-200 truncate"
+        title={PROJECT_COPY.chipTitle(name)}
+      >
+        {name}
+      </span>
+    </div>
+  );
+}
+
 function PipelineCard({
   job,
   onDragStart,
   onClick,
   onChase,
   progress,
+  groupEntry,
+  groupExpanded,
+  onToggleGroup,
+  isGroupMember,
 }: {
   job: Job;
   onDragStart: (e: React.DragEvent, job: Job) => void;
   onClick: (job: Job) => void;
   onChase: (job: Job) => void;
   progress?: ReqProgress;
+  /** Quote options: the collapsed group this card stands for (board only). */
+  groupEntry?: BoardEntry;
+  groupExpanded?: boolean;
+  onToggleGroup?: () => void;
+  /** An option shown beneath its collapsed group card. */
+  isGroupMember?: boolean;
 }) {
   const isLost = job.pipeline_status === 'lost';
   const chase = isLost ? { text: '', urgency: 'none' as const } : chaseDueLabel(job.next_chase_date);
@@ -419,7 +504,7 @@ function PipelineCard({
       onDragStart={(e) => onDragStart(e, job)}
       onClick={() => onClick(job)}
       className={`bg-white rounded-lg shadow-sm border border-gray-200 p-3 cursor-grab active:cursor-grabbing
-        hover:shadow-md transition-shadow ${borderClass}`}
+        hover:shadow-md transition-shadow ${borderClass} ${isGroupMember ? 'ml-3 border-dashed' : ''}`}
     >
       {/* Row 1: Job number + (real status badge if visiting Chasing) + value */}
       <div className="flex items-center justify-between mb-1 gap-2">
@@ -437,6 +522,9 @@ function PipelineCard({
             </a>
           ) : (
             <span className="text-xs font-mono text-gray-400">NEW</span>
+          )}
+          {groupEntry && onToggleGroup && (
+            <GroupBadge entry={groupEntry} expanded={!!groupExpanded} onToggle={onToggleGroup} />
           )}
           {/* Underlying status badge: shown when card is visiting the Chasing
               virtual column so the real lifecycle state stays visible. */}
@@ -463,28 +551,22 @@ function PipelineCard({
         })()}
       </div>
 
-      {/* Row 2: Job name */}
+      {/* Row 2: Job name — a grouped job's "(Option N)" suffix becomes its own line */}
       <div className="text-sm font-medium text-gray-900 truncate mb-0.5">
-        {job.job_name || 'Untitled'}
+        {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled') : (job.job_name || 'Untitled')}
       </div>
-
-      {/* Row 3: Band (if linked) takes top slot, else Client */}
-      {(job as any).band_name ? (
-        <>
-          <div className="text-xs text-purple-700 font-medium truncate mb-0.5">
-            {(job as any).band_name} <span className="text-purple-400 font-normal">(Band)</span>
-          </div>
-          {(job.company_name || job.client_name) && (
-            <div className="text-xs text-gray-400 truncate mb-1">
-              Billed to: {job.company_name || job.client_name}
-            </div>
-          )}
-        </>
-      ) : (
-        <div className="text-xs text-gray-500 truncate mb-1">
-          {job.company_name || job.client_name || '—'}
+      {job.option_no && (
+        <div className="text-[11px] font-medium text-ooosh-700 truncate mb-0.5">
+          Option {job.option_no}{job.option_label ? ` · ${job.option_label}` : ''}
         </div>
       )}
+
+      {/* Row 3: Lead organisation, else the client. One line either way — a
+          lead org no longer demotes the client to a "Billed to:" sub-line. */}
+      <div className="text-xs text-gray-500 truncate mb-1">
+        {jobDisplayOrgNameOr(job)}
+      </div>
+      {job.job_project_name && <ProjectChip name={job.job_project_name} />}
 
       {/* Row 4: Dates */}
       {job.job_date && (
@@ -565,12 +647,14 @@ function TransitionModal({
   isOpen,
   targetStatus,
   jobId,
+  hireStart,
   onConfirm,
   onCancel,
 }: {
   isOpen: boolean;
   targetStatus: PipelineStatus | null;
   jobId?: string;
+  hireStart?: string | null;
   onConfirm: (data: Record<string, unknown>) => void;
   onCancel: () => void;
 }) {
@@ -578,11 +662,34 @@ function TransitionModal({
   const [holdDetail, setHoldDetail] = useState('');
   const [setRevisit, setSetRevisit] = useState(false);
   const [revisitDate, setRevisitDate] = useState('');
+  // Staff has taken manual control of the revisit fields — stop re-defaulting them.
+  const [revisitTouched, setRevisitTouched] = useState(false);
   const [confirmedMethod, setConfirmedMethod] = useState<ConfirmedMethod>('deposit');
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
+
+  // This modal stays mounted between opens (it early-returns on !isOpen rather
+  // than being conditionally rendered), so state survives a close. Re-arm the
+  // auto-default each time it opens, otherwise one manual edit would suppress
+  // the default for every later pause until the page is reloaded.
+  useEffect(() => { if (isOpen) setRevisitTouched(false); }, [isOpen]);
+
+  // Mirrors JobDetailPage's StatusTransitionModal — "Under 4-day window" pauses
+  // pre-fill a revisit date a fortnight before the hire starts. Declared BEFORE
+  // the isOpen early-return so hook order stays stable across open/close.
+  const autoRevisit = defaultRevisitDate(hireStart);
+  useEffect(() => {
+    if (targetStatus !== 'paused' || revisitTouched) return;
+    if (holdReason === 'under_minimum' && autoRevisit) {
+      setSetRevisit(true);
+      setRevisitDate(autoRevisit);
+    } else {
+      setSetRevisit(false);
+      setRevisitDate('');
+    }
+  }, [targetStatus, holdReason, autoRevisit, revisitTouched]);
 
   if (!isOpen || !targetStatus) return null;
 
@@ -641,7 +748,7 @@ function TransitionModal({
                 <input
                   type="checkbox"
                   checked={setRevisit}
-                  onChange={(e) => setSetRevisit(e.target.checked)}
+                  onChange={(e) => { setRevisitTouched(true); setSetRevisit(e.target.checked); }}
                   className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
                 />
                 Set a revisit date?
@@ -653,10 +760,15 @@ function TransitionModal({
                 <input
                   type="date"
                   value={revisitDate}
-                  onChange={(e) => setRevisitDate(e.target.value)}
-                  min={new Date().toISOString().split('T')[0]}
+                  onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
+                  min={ukToday()}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 />
+              )}
+              {setRevisit && !revisitTouched && revisitDate === autoRevisit && autoRevisit && (
+                <p className="text-xs text-ooosh-600 mt-1">
+                  Defaulted to {REVISIT_LEAD_DAYS_UNDER_MINIMUM} days before the hire starts — change it if you'd rather come back sooner or later.
+                </p>
               )}
             </div>
           </div>
@@ -776,12 +888,15 @@ function NewEnquiryModal({
   onCreated,
   prefillClientId,
   prefillContactId,
+  prefillProjectId,
 }: {
   isOpen: boolean;
   onClose: () => void;
   onCreated: (jobId?: string) => void;
   prefillClientId?: string | null;
   prefillContactId?: string | null;
+  /** "+ New job in this project" — its dates are filled in and the new job joins it. */
+  prefillProjectId?: string | null;
 }) {
   const [clientName, setClientName] = useState('');
   const [clientId, setClientId] = useState<string | null>(null);
@@ -961,6 +1076,7 @@ function NewEnquiryModal({
       };
       band_info?: { id: string; name: string; do_not_hire: boolean; do_not_hire_reason: string | null; internal_notes: string | null } | null;
     } | null;
+    endorsements?: Endorsement[];
   } | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -1125,6 +1241,35 @@ function NewEnquiryModal({
       }
     })();
   }, [isOpen, prefillClientId, prefillContactId, fetchClientHistory]);
+
+  // "+ New job in this project" (docs/JOB-PROJECTS-SPEC.md): the project's
+  // default dates fill the four date fields, and the job joins the project
+  // once created. Its client arrives as ?client= (the effect above). A
+  // project with no dates leaves the fields alone.
+  const [project, setProject] = useState<{ id: string; name: string } | null>(null);
+  const projectAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!isOpen) { projectAppliedRef.current = false; setProject(null); return; }
+    if (projectAppliedRef.current || !prefillProjectId) return;
+    projectAppliedRef.current = true;
+    (async () => {
+      try {
+        const res = await api.get<{ data: { id: string; name: string; out_date: string | null; job_date: string | null; job_end: string | null; return_date: string | null } }>(`/job-projects/${prefillProjectId}`);
+        const p = res.data;
+        setProject({ id: p.id, name: p.name });
+        if (p.job_date) setJobDate(p.job_date);
+        if (p.job_end) setJobEnd(p.job_end);
+        if (p.out_date) setOutDate(p.out_date);
+        if (p.return_date) setReturnDate(p.return_date);
+        // Out / Return differ from Start / End on a festival (out 5 days,
+        // charged for 1) — unlink them so editing Start doesn't drag them.
+        if (p.out_date && p.out_date !== p.job_date) setOutLinked(false);
+        if (p.return_date && p.return_date !== p.job_end) setReturnLinked(false);
+      } catch {
+        // Project not found — the form works as a plain new enquiry.
+      }
+    })();
+  }, [isOpen, prefillProjectId]);
 
   // Escape key to close
   useEffect(() => {
@@ -1313,7 +1458,7 @@ function NewEnquiryModal({
   };
 
   // Today's date for min constraint (no past dates)
-  const today = new Date().toISOString().split('T')[0];
+  const today = ukToday();
 
   // Helper: add N days to a date string
   const addDays = (dateStr: string, days: number): string => {
@@ -1659,6 +1804,19 @@ function NewEnquiryModal({
         }
       }
 
+      // "+ New job in this project": the new job joins it. Never blocks — a
+      // failure is said after the modal closes, and the job's own
+      // "+ Add to a project" link puts it right.
+      let projectLinkFailed: string | null = null;
+      if (project) {
+        try {
+          await api.post(`/job-projects/${project.id}/jobs`, { job_id: created.id });
+        } catch (projErr) {
+          console.error('Adding the enquiry to its project failed:', projErr);
+          projectLinkFailed = project.name;
+        }
+      }
+
       // Reset form
       setClientName(''); setClientId(null); setIsNewClient(false); setDetails('');
       setOutDate(''); setJobDate(''); setJobEnd(''); setReturnDate('');
@@ -1684,6 +1842,10 @@ function NewEnquiryModal({
       // can race with the navigate and bounce us back to /pipeline.
       onClose();
       onCreated(created.id);
+      if (projectLinkFailed) {
+        const name = projectLinkFailed;
+        setTimeout(() => alert(PROJECT_COPY.enquiryLinkFailed(name)), 100);
+      }
 
       // Defensive alert if any sub-creations silently failed (contacts /
       // linked orgs). The enquiry itself was created, so we don't want to
@@ -1723,6 +1885,11 @@ function NewEnquiryModal({
         {/* Left side: form */}
         <div className="flex-1 min-w-0 p-6 overflow-y-auto">
         <h3 className="text-lg font-semibold mb-4">New Enquiry</h3>
+        {project && (
+          <div className="mb-4 px-3 py-2 rounded-lg bg-ooosh-50 border border-ooosh-200 text-xs text-ooosh-800">
+            {PROJECT_COPY.enquiryBanner(project.name)}
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
@@ -2780,10 +2947,14 @@ function NewEnquiryModal({
               </div>
             )}
 
+            {/* Endorsed artists — only when there are any */}
+            <EndorsementsNote endorsements={clientHistory!.endorsements} />
+
             {/* Working Terms */}
             {clientHistory!.client_info?.working_terms_type && (
-              <div className="mb-3 p-2.5 bg-white border border-gray-200 rounded-lg">
-                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
+              // Faded while Do Not Hire (the red box above leads) — kept, not hidden, in case a manager hires them anyway
+              <div className={`mb-3 p-2.5 bg-white border border-gray-200 rounded-lg ${clientHistory!.client_info.do_not_hire ? 'opacity-50' : ''}`}>
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms{clientHistory!.client_info.do_not_hire && <span className="normal-case font-normal italic"> — on hold while Do Not Hire</span>}</div>
                 <div className="flex items-center gap-2">
                   <span className={`inline-block px-2.5 py-1 rounded text-sm font-semibold text-white ${
                     { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[clientHistory!.client_info.working_terms_type] || 'bg-gray-500'
@@ -3012,6 +3183,13 @@ export default function PipelinePage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [jobs, setJobs] = useState<Job[]>([]);
+  // Quote options: which collapsed group cards are expanded (by group id).
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = (groupId: string) => setExpandedGroups((prev) => {
+    const next = new Set(prev);
+    if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+    return next;
+  });
   const [stats, setStats] = useState<PipelineStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
@@ -3025,7 +3203,7 @@ export default function PipelinePage() {
   // Filters — chase filter can be deep-linked via ?chase= so dashboard cards
   // can drop the user straight onto the right view.
   const [filterLikelihood, setFilterLikelihood] = useState<string>(initialPrefs.filterLikelihood);
-  const VALID_CHASE_FILTERS = ['', 'overdue', 'due_today', 'due_this_week'];
+  const VALID_CHASE_FILTERS = ['', 'due', 'overdue', 'due_today', 'due_this_week'];
   const chaseParam = searchParams.get('chase');
   const initialChase = VALID_CHASE_FILTERS.includes(chaseParam || '')
     ? (chaseParam as string)
@@ -3106,6 +3284,7 @@ export default function PipelinePage() {
   const [transitionModal, setTransitionModal] = useState<{
     jobId: string;
     targetStatus: PipelineStatus;
+    hireStart?: string | null;
   } | null>(null);
   const [chaseModal, setChaseModal] = useState<Job | null>(null);
 
@@ -3219,7 +3398,7 @@ export default function PipelinePage() {
     if (targetStatus === 'chasing') {
       if (job.is_chasing) return;  // already there, nothing to do
       try {
-        const today = new Date().toISOString().split('T')[0];
+        const today = ukToday();
         await api.patch(`/pipeline/${job.id}`, { next_chase_date: today });
         fetchPipeline();
       } catch (err) {
@@ -3250,7 +3429,7 @@ export default function PipelinePage() {
     if (job.pipeline_status === targetStatus) return;
 
     if (['paused', 'confirmed', 'lost'].includes(targetStatus)) {
-      setTransitionModal({ jobId: job.id, targetStatus });
+      setTransitionModal({ jobId: job.id, targetStatus, hireStart: job.job_date || job.out_date });
       return;
     }
 
@@ -3451,6 +3630,7 @@ export default function PipelinePage() {
             className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
           >
             <option value="">All chases</option>
+            <option value="due">Overdue or due today</option>
             <option value="overdue">Overdue</option>
             <option value="due_today">Due today</option>
             <option value="due_this_week">Due this week</option>
@@ -3601,7 +3781,9 @@ export default function PipelinePage() {
             {visibleColumns.map((status) => {
               const config = PIPELINE_STATUS_CONFIG[status];
               const columnJobs = jobsByStatus[status];
-              const columnValue = columnJobs.reduce((sum, j) => sum + (pipelineDisplayValue(j).amount || 0), 0);
+              // One card per options group (its lead); the count and value follow suit.
+              const columnEntries = collapseByGroup(columnJobs);
+              const columnValue = columnEntries.reduce((sum, e) => sum + (pipelineDisplayValue(e.job).amount || 0), 0);
 
               return (
                 <div
@@ -3620,7 +3802,7 @@ export default function PipelinePage() {
                         />
                         <span className="text-sm font-semibold text-gray-900">{config.label}</span>
                         <span className="text-xs text-gray-400 bg-gray-200 px-1.5 py-0.5 rounded-full">
-                          {columnJobs.length}
+                          {columnEntries.length}
                         </span>
                       </div>
                       {columnValue > 0 && (
@@ -3638,16 +3820,35 @@ export default function PipelinePage() {
                         No jobs
                       </div>
                     ) : (
-                      columnJobs.map((job) => (
-                        <PipelineCard
-                          key={job.id}
-                          job={job}
-                          onDragStart={handleDragStart}
-                          onClick={handleCardClick}
-                          onChase={(j) => setChaseModal(j)}
-                          progress={reqProgress[job.id]}
-                        />
-                      ))
+                      columnEntries.map((entry) => {
+                        const gid = entry.job.group_id || '';
+                        const expanded = !!gid && expandedGroups.has(gid);
+                        return (
+                          <div key={entry.job.id} className="space-y-2">
+                            <PipelineCard
+                              job={entry.job}
+                              onDragStart={handleDragStart}
+                              onClick={handleCardClick}
+                              onChase={(j) => setChaseModal(j)}
+                              progress={reqProgress[entry.job.id]}
+                              groupEntry={entry.job.group_summary ? entry : undefined}
+                              groupExpanded={expanded}
+                              onToggleGroup={gid ? () => toggleGroup(gid) : undefined}
+                            />
+                            {expanded && entry.others.map((member) => (
+                              <PipelineCard
+                                key={member.id}
+                                job={member}
+                                onDragStart={handleDragStart}
+                                onClick={handleCardClick}
+                                onChase={(j) => setChaseModal(j)}
+                                progress={reqProgress[member.id]}
+                                isGroupMember
+                              />
+                            ))}
+                          </div>
+                        );
+                      })
                     )}
                   </div>
                 </div>
@@ -3693,17 +3894,31 @@ export default function PipelinePage() {
               }
             });
 
-            const renderListRow = (job: Job) => {
+            const renderListRow = (job: Job, entry?: BoardEntry, isMember = false) => {
               const statusConfig = PIPELINE_STATUS_CONFIG[job.pipeline_status || 'new_enquiry'];
               const chase = job.pipeline_status === 'lost' ? { text: '', urgency: 'none' as const } : chaseDueLabel(job.next_chase_date);
+              const gid = job.group_id || '';
               return (
                 <tr
                   key={job.id}
                   onClick={() => handleCardClick(job)}
-                  className="hover:bg-gray-50 cursor-pointer"
+                  className={`hover:bg-gray-50 cursor-pointer ${isMember ? 'bg-gray-50/60' : ''}`}
                 >
-                  <td className="px-4 py-3">
-                    <div className="text-sm font-medium text-gray-900">{job.job_name || 'Untitled'}</div>
+                  <td className={`px-4 py-3 ${isMember ? 'pl-10' : ''}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-900">
+                        {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled') : (job.job_name || 'Untitled')}
+                      </span>
+                      {entry && entry.job.group_summary && (
+                        <GroupBadge entry={entry} expanded={!!gid && expandedGroups.has(gid)} onToggle={() => gid && toggleGroup(gid)} />
+                      )}
+                    </div>
+                    {job.option_no && (
+                      <div className="text-[11px] font-medium text-ooosh-700">
+                        Option {job.option_no}{job.option_label ? ` · ${job.option_label}` : ''}
+                      </div>
+                    )}
+                    {job.job_project_name && <ProjectChip name={job.job_project_name} />}
                     <div className="text-xs font-mono">
                       {job.hh_job_number ? (
                         <a
@@ -3721,7 +3936,7 @@ export default function PipelinePage() {
                     </div>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-600">
-                    {job.company_name || job.client_name || '—'}
+                    {jobDisplayOrgNameOr(job)}
                   </td>
                   <td className="px-4 py-3">
                     <span
@@ -3790,6 +4005,18 @@ export default function PipelinePage() {
               </thead>
             );
 
+            // Quote options: one row per group per section, expandable.
+            const renderSectionRows = (sectionJobs: Job[]) =>
+              collapseByGroup(sectionJobs).flatMap((entry) => {
+                const gid = entry.job.group_id || '';
+                const expanded = !!gid && expandedGroups.has(gid);
+                return [
+                  renderListRow(entry.job, entry),
+                  ...(expanded ? entry.others.map((m) => renderListRow(m, undefined, true)) : []),
+                ];
+              });
+            const actionEntries = collapseByGroup(actionRequired).length;
+
             const sections = [
               { key: 'action', label: 'Action Required', jobs: actionRequired, bgHeader: 'bg-red-50', textColor: 'text-red-700', borderColor: 'border-red-200 border-l-red-500' },
               { key: 'waiting', label: 'Waiting', jobs: waiting, bgHeader: 'bg-amber-50', textColor: 'text-amber-700', borderColor: 'border-amber-200 border-l-amber-500' },
@@ -3806,7 +4033,7 @@ export default function PipelinePage() {
                     <span className="text-red-600 text-lg">!</span>
                     <div>
                       <span className="text-sm font-semibold text-red-700">
-                        {actionRequired.length} enquir{actionRequired.length === 1 ? 'y' : 'ies'} need{actionRequired.length === 1 ? 's' : ''} attention
+                        {actionEntries} enquir{actionEntries === 1 ? 'y' : 'ies'} need{actionEntries === 1 ? 's' : ''} attention
                       </span>
                       <span className="text-sm text-red-600 ml-2">
                         — overdue chases, due today, or new enquiries without a chase date
@@ -3821,14 +4048,14 @@ export default function PipelinePage() {
                     <div key={section.key} className={`bg-white rounded-xl shadow-sm border border-l-4 ${section.borderColor} overflow-hidden`}>
                       <div className={`${section.bgHeader} px-4 py-2.5 border-b border-gray-200`}>
                         <span className={`text-xs font-semibold ${section.textColor} uppercase tracking-wide`}>
-                          {section.label} ({section.jobs.length})
+                          {section.label} ({collapseByGroup(section.jobs).length})
                         </span>
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full">
                           {tableHead}
                           <tbody className="divide-y divide-gray-200">
-                            {section.jobs.map(renderListRow)}
+                            {renderSectionRows(section.jobs)}
                           </tbody>
                         </table>
                       </div>
@@ -3852,13 +4079,15 @@ export default function PipelinePage() {
         isOpen={showNewEnquiry}
         prefillClientId={searchParams.get('client')}
         prefillContactId={searchParams.get('contact')}
+        prefillProjectId={searchParams.get('project')}
         onClose={() => {
           setShowNewEnquiry(false);
-          if (searchParams.get('newEnquiry') || searchParams.get('client') || searchParams.get('contact')) {
+          if (searchParams.get('newEnquiry') || searchParams.get('client') || searchParams.get('contact') || searchParams.get('project')) {
             const next = new URLSearchParams(searchParams);
             next.delete('newEnquiry');
             next.delete('client');
             next.delete('contact');
+            next.delete('project');
             setSearchParams(next, { replace: true });
           }
         }}
@@ -3871,6 +4100,7 @@ export default function PipelinePage() {
         isOpen={!!transitionModal}
         targetStatus={transitionModal?.targetStatus || null}
         jobId={transitionModal?.jobId}
+        hireStart={transitionModal?.hireStart}
         onConfirm={handleTransitionConfirm}
         onCancel={() => setTransitionModal(null)}
       />

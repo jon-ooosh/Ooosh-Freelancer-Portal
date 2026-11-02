@@ -270,6 +270,24 @@ export interface OnTodayItem {
   href: string;
 }
 
+export interface HoldingUnlinkedItem {
+  id: string;
+  description: string | null;
+  found_in: string | null;
+  found_vehicle_reg: string | null;
+  /** For link_owner this is the found/logged date — an AGE, never a deadline. */
+  action_due: string | null;
+}
+
+export interface ClaimAttentionItem {
+  id: string;
+  stage: string;
+  vehicle_reg: string | null;
+  hh_job_number: number | null;
+  next_check_on: string | null;
+  owner_name: string | null;
+}
+
 export interface PcnAttentionItem {
   id: string;
   reference: string | null;
@@ -317,6 +335,9 @@ export interface OperationsData {
     total_overdue_count?: number;
     client_intros: ClientIntroJob[];
     carnet_count?: number;
+    /** Held items nobody has identified yet (Holding next_action = 'link_owner'). */
+    holding_unlinked_count?: number;
+    holding_unlinked?: HoldingUnlinkedItem[];
     referral_count: number;
     referrals: PendingReferral[];
     excess_count: number;
@@ -340,11 +361,21 @@ export interface OperationsData {
     recharges_to_resolve_total?: number;
     /** High-priority backline demand with no acquisition plan — purchasing prompt. */
     backline_to_buy_count?: number;
+    /** Lead Finder leads to look at — services/leads/attention.ts (full count + top 5). */
+    leads_to_review_count?: number;
+    leads_to_review?: LeadToReview[];
     /** PCN buckets (Step 8) — internal surfacing, never client comms. */
     pcn_nip_urgent?: PcnAttentionItem[];
     pcn_ready_to_transfer?: PcnAttentionItem[];
     pcn_deadline_approaching?: PcnAttentionItem[];
     pcn_awaiting_action?: PcnAttentionItem[];
+    /** Possible insurance claims whose check date has passed or is missing (docs/INCIDENT-CLAIMS-SPEC.md §9.3). */
+    claim_check_overdue?: ClaimAttentionItem[];
+    claim_check_overdue_total?: number;
+    /** Client forms submitted and waiting for a manager's review (next_check_on carries the submitted date). */
+    claim_to_review?: ClaimAttentionItem[];
+    /** Four reminders and no form — chasing stopped (next_check_on carries the last reminder's date). */
+    claim_chase_exhausted?: ClaimAttentionItem[];
   };
   transport_ops: {
     summary: Record<string, number>;
@@ -365,3 +396,16 @@ export interface OperationsData {
   team_activity: TeamMember[];
   recent_activity: RecentActivity[];
 }
+
+/** A lead on the dashboard's "Leads to look at" card. */
+export interface LeadToReview {
+  id: string;
+  artist_name: string;
+  stream: 'cold' | 'warm';
+  relevance_score: number | null;
+  first_date: string | null;
+  origin_country: string | null;
+  matched_org_name: string | null;
+  client_history: { enquiries: number; booked: number; lost: number } | null;
+}
+

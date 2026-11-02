@@ -7,16 +7,27 @@ import {
   PipelineStatus,
   OperationalStatus,
 } from '../../../shared/types';
+import { stripOptionSuffix } from '../lib/quoteOptions';
+import OptionTag from './OptionTag';
+import { PROJECT_COPY } from '../lib/projectCopy';
 
 interface SearchResult {
   id: string;
   name: string;
   subtitle: string | null;
-  type: 'person' | 'organisation' | 'venue' | 'job';
+  // 'project' (docs/JOB-PROJECTS-SPEC.md): `id` is one of its jobs, where the panel lives.
+  type: 'person' | 'organisation' | 'venue' | 'job' | 'project';
   // pipeline_status holds both pre-confirmation (PipelineStatus) and
   // post-confirmation (OperationalStatus) values — typed as string here.
   pipeline_status?: string | null;
   hh_status?: number | null;
+  // A dismissed ("dud-ed") enquiry keeps its pre-confirmation pipeline_status
+  // (new_enquiry/quoting/paused) — dismissal is an overlay flag, not a status
+  // value — so the badge must key off this rather than pipeline_status.
+  is_dismissed?: boolean;
+  // Quote options (spec §6.5): set on a job in an options group → "Option 2 of 3".
+  option_no?: number | null;
+  option_count?: number | null;
 }
 
 const typeLabels: Record<string, string> = {
@@ -24,6 +35,7 @@ const typeLabels: Record<string, string> = {
   organisation: 'Org',
   venue: 'Venue',
   job: 'Job',
+  project: PROJECT_COPY.searchLabel,
 };
 
 const typeColors: Record<string, string> = {
@@ -31,6 +43,7 @@ const typeColors: Record<string, string> = {
   organisation: 'bg-purple-100 text-purple-700',
   venue: 'bg-teal-100 text-teal-700',
   job: 'bg-amber-100 text-amber-700',
+  project: 'bg-ooosh-100 text-ooosh-700',
 };
 
 // Map HireHop integer status → operational status key
@@ -44,6 +57,12 @@ const HH_TO_OPERATIONAL: Record<number, OperationalStatus> = {
 };
 
 function jobBadge(result: SearchResult): { label: string; colour: string } {
+  // A dismissed ("dud-ed") enquiry is no longer an enquiry — short-circuit
+  // before the pipeline_status derivation, which would otherwise render the
+  // blue "Enquiries" badge (dismissal leaves pipeline_status untouched).
+  if (result.is_dismissed) {
+    return { label: 'Dismissed', colour: '#6B7280' };
+  }
   // OP's pipeline_status is the source of truth — it holds both pipeline
   // (pre-confirmation) and operational (post-confirmation) values. HH status
   // is only consulted as a fallback when pipeline_status is missing, since
@@ -135,6 +154,7 @@ export default function GlobalSearch() {
       organisation: `/organisations/${result.id}`,
       venue: `/venues/${result.id}`,
       job: `/jobs/${result.id}`,
+      project: `/jobs/${result.id}`,
     };
     navigate(paths[result.type]);
     setQuery('');
@@ -208,7 +228,10 @@ export default function GlobalSearch() {
                   </span>
                 )}
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{result.name}</p>
+                  <p className="text-sm font-medium text-gray-900 truncate">
+                    {result.option_no && result.option_count ? stripOptionSuffix(result.name) : result.name}{' '}
+                    <OptionTag optionNo={result.option_no} optionCount={result.option_count} />
+                  </p>
                   {result.subtitle && (
                     <p className="text-xs text-gray-500 truncate">{result.subtitle}</p>
                   )}

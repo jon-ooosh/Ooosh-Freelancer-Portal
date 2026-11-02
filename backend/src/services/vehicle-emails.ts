@@ -24,11 +24,16 @@ export async function sendVehicleSwappedEmail(opts: {
   const { jobId, newReg, oldReg, planned } = opts;
   try {
     const jobRow = await query(
-      `SELECT COALESCE(is_internal, false) AS is_internal FROM jobs WHERE id = $1`,
+      `SELECT COALESCE(is_internal, false) AS is_internal, hh_job_number, job_name FROM jobs WHERE id = $1`,
       [jobId]
     );
     if (jobRow.rows.length === 0) return { sent: false, reason: 'no_job' };
     if (jobRow.rows[0].is_internal) return { sent: false, reason: 'internal_job' };
+    // resolveClientEmailTarget only fills jobNumber/jobName on its info@
+    // fallback path, so a normal send went out as "your hire Job # is now…"
+    // with no number (14 Oct 2026). Read them from the job ourselves.
+    const jobNumber = jobRow.rows[0].hh_job_number ? String(jobRow.rows[0].hh_job_number) : '';
+    const jobName = (jobRow.rows[0].job_name as string | null) || '';
 
     const target = await resolveClientEmailTarget(jobId, 'vehicle_swapped');
     const res = await emailService.send('vehicle_swapped', {
@@ -44,8 +49,8 @@ export async function sendVehicleSwappedEmail(opts: {
         : undefined,
       variables: {
         clientName: target.primaryFirstName || target.clientName || 'there',
-        jobName: target.jobName || `Job #${target.jobNumber || ''}`,
-        jobNumber: target.jobNumber || '',
+        jobName,
+        jobNumber,
         newReg,
         oldReg: oldReg || '',
         // Complementary flags — the template engine has no {{else}}, so we

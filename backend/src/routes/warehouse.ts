@@ -21,21 +21,25 @@
  *   • On-Hire flip: pipeline_status='dispatched' + HH writeback to status 5
  */
 import { Router, Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
+import { verifyStaffToken, authenticate, authorize, type AuthRequest } from '../middleware/auth';
+import { signFor, verifyFor } from '../services/tokens';
 import { hhBroker } from '../services/hirehop-broker';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { generateDeliveryNotePdf, type DeliveryNoteItem } from '../services/delivery-note-pdf';
 import { emailService } from '../services/email-service';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { getJobEmailRecipients } from '../services/money-emails';
+import { resolveJobEmailContacts } from '../services/job-contact-candidates';
+import { kioskIpAllowed, bareIp } from '../services/kiosk-till';
+import {
+  kioskDeviceLockOn, kioskDeviceFrom, markKioskDeviceUsed, completeKioskSetup,
+  startKioskSetup, listKioskDevices, forgetKioskDevice,
+} from '../services/kiosk-devices';
 
-if (!process.env.JWT_SECRET) {
-  throw new Error('FATAL: JWT_SECRET environment variable is required');
-}
-const JWT_SECRET: string = process.env.JWT_SECRET;
 const SESSION_TTL_SECONDS = 12 * 60 * 60; // 12h — kiosk left running between shifts
 
 // Stable UUID seeded by migration 031 — used as created_by for PIN-only sessions
@@ -45,6 +49,9 @@ const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 interface WarehouseSessionClaims {
   scope: 'warehouse_session';
   sessionId: string;
+  /** What this PIN session may do: collections here, the till on /api/shop
+   *  (STAFF-LOGIN-SECURITY-SPEC §4.1, services/kiosk-till.ts). */
+  scopes: Array<'collections' | 'till'>;
 }
 
 interface WarehouseRequest extends Request {
@@ -77,26 +84,23 @@ function authenticateWarehouse(req: WarehouseRequest, res: Response, next: NextF
   }
   const token = authHeader.slice(7);
 
-  let decoded: Record<string, unknown>;
-  try {
-    decoded = jwt.verify(token, JWT_SECRET) as Record<string, unknown>;
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return;
-  }
-
-  if (decoded.scope === 'warehouse_session' && typeof decoded.sessionId === 'string') {
+  // Each family verifies against its own audience (services/tokens.ts).
+  const kiosk = verifyFor<{ scope?: string; sessionId?: string; scopes?: unknown }>('warehouse', token);
+  if (kiosk && kiosk.scope === 'warehouse_session' && typeof kiosk.sessionId === 'string') {
     req.warehouseSession = {
       scope: 'warehouse_session',
-      sessionId: decoded.sessionId,
+      sessionId: kiosk.sessionId,
+      // A session minted before the till existed has no scopes claim: collections only.
+      scopes: Array.isArray(kiosk.scopes) ? kiosk.scopes.filter((s): s is 'collections' | 'till' => s === 'collections' || s === 'till') : ['collections'],
     };
     next();
     return;
   }
 
-  // Staff JWT shape: { id, email, role }
-  if (typeof decoded.id === 'string' && typeof decoded.email === 'string' && typeof decoded.role === 'string') {
-    req.staffUser = { id: decoded.id, email: decoded.email, role: decoded.role };
+  // Staff access token — THE staff check, shared with `authenticate`.
+  const staff = verifyStaffToken(token);
+  if (staff) {
+    req.staffUser = { id: staff.id, email: staff.email, role: staff.role };
     next();
     return;
   }
@@ -108,8 +112,19 @@ const router = Router();
 
 // ─── POST /api/warehouse/auth/pin ───────────────────────────────────
 // Validate the kiosk PIN and return a warehouse_session JWT.
+//
+// A static PIN with no attempt limit is a brute-force target (Oct 2026 audit).
+// The kiosk enters it once per 12h session, so 10 tries in 15 minutes per IP
+// covers a fumbled entry and nothing more.
+const pinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many PIN attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
-router.post('/auth/pin', async (req: Request, res: Response) => {
+router.post('/auth/pin', pinLimiter, async (req: Request, res: Response) => {
   try {
     const { pin } = req.body as { pin?: unknown };
     if (typeof pin !== 'string' || !pin) {
@@ -122,19 +137,112 @@ router.post('/auth/pin', async (req: Request, res: Response) => {
       res.status(503).json({ error: 'Warehouse access not configured' });
       return;
     }
+    // Where the PIN works is checked BEFORE the PIN: a device that may not use
+    // it gets the same answer whatever was typed, so it can't test guesses.
+    // (Checked after, a 403 meant "right PIN, wrong place" — that told anyone
+    // the PIN was right.)
+    //
+    // §9: only on a tablet an admin has set up (services/kiosk-devices.ts).
+    let deviceId: string | null = null;
+    if (await kioskDeviceLockOn()) {
+      deviceId = await kioskDeviceFrom(req);
+      if (!deviceId) {
+        console.warn(`[warehouse] PIN refused from ${bareIp(req.ip)} — not a set-up kiosk tablet`);
+        res.status(403).json({
+          error: "This tablet isn't set up for the warehouse. Ask an admin for a set-up code, then tap \"Set up this tablet\".",
+          code: 'kiosk_device_required',
+        });
+        return;
+      }
+    }
+    // §4.4: and, if any are listed, only from the yard's own connections
+    // (`system_settings.kiosk_allowed_ips`; empty = anywhere — optional since §9).
+    if (!(await kioskIpAllowed(req.ip))) {
+      console.warn(`[warehouse] PIN refused from ${bareIp(req.ip)} — not on kiosk_allowed_ips`);
+      res.status(403).json({ error: 'The kiosk PIN only works from the warehouse connection.' });
+      return;
+    }
     if (pin !== expected) {
       res.status(401).json({ error: 'Incorrect PIN' });
       return;
     }
-    const token = jwt.sign(
-      { scope: 'warehouse_session', sessionId: uuid() } satisfies WarehouseSessionClaims,
-      JWT_SECRET,
-      { expiresIn: SESSION_TTL_SECONDS }
+    if (deviceId) await markKioskDeviceUsed(res, deviceId, bareIp(req.ip));
+    const token = signFor(
+      'warehouse',
+      { scope: 'warehouse_session', sessionId: uuid(), scopes: ['collections', 'till'] } satisfies WarehouseSessionClaims,
+      SESSION_TTL_SECONDS
     );
     res.json({ token, expiresIn: SESSION_TTL_SECONDS });
   } catch (err) {
     console.error('[warehouse] PIN auth error:', err);
     res.status(500).json({ error: 'Authentication failed' });
+  }
+});
+
+// ─── The kiosk tablets (STAFF-LOGIN-SECURITY-SPEC §9) ───────────────
+// services/kiosk-devices.ts. The tablet types a one-time code an admin made
+// in Settings; the admin routes list, make and forget them. Above the
+// authenticateWarehouse line on purpose: the set-up is public (the code is
+// the authority) and the admin routes take a staff login only.
+const setupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many set-up attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post('/device/setup', setupLimiter, async (req: Request, res: Response) => {
+  try {
+    const done = await completeKioskSetup(res, (req.body as { code?: unknown } | undefined)?.code);
+    if (!done) {
+      res.status(400).json({ error: "That code didn't work. A code lasts 10 minutes and works once — ask for a new one." });
+      return;
+    }
+    console.log(`[warehouse] kiosk tablet set up: "${done.label}" from ${bareIp(req.ip)}`);
+    res.json({ data: { label: done.label } });
+  } catch (err) {
+    console.error('[warehouse] kiosk tablet set-up error:', err);
+    res.status(500).json({ error: 'Set-up failed' });
+  }
+});
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.get('/devices', authenticate, authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listKioskDevices() });
+  } catch (err) {
+    console.error('[warehouse] list kiosk tablets error:', err);
+    res.status(500).json({ error: 'Could not load the kiosk tablets' });
+  }
+});
+
+router.post('/devices', authenticate, authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const label = String((req.body as { label?: unknown } | undefined)?.label ?? '');
+    res.status(201).json({ data: await startKioskSetup(label, req.user!.id) });
+  } catch (err) {
+    console.error('[warehouse] start kiosk set-up error:', err);
+    res.status(500).json({ error: 'Could not make a set-up code' });
+  }
+});
+
+router.delete('/devices/:id', authenticate, authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) {
+      res.status(400).json({ error: 'Invalid tablet id' });
+      return;
+    }
+    if (!(await forgetKioskDevice(id, req.user!.id))) {
+      res.status(404).json({ error: 'That tablet is not set up (or was already forgotten).' });
+      return;
+    }
+    res.json({ data: { forgotten: true } });
+  } catch (err) {
+    console.error('[warehouse] forget kiosk tablet error:', err);
+    res.status(500).json({ error: 'Could not forget the tablet' });
   }
 });
 
@@ -249,84 +357,6 @@ interface EquipmentItem {
   quantity: number;
 }
 
-interface CollectionContact {
-  personId: string;
-  name: string;
-  email: string;
-  phone: string | null;
-  role: string | null;
-  isPrimary: boolean;
-}
-
-/**
- * Contacts associated with a job, for the "who's collecting?" picker.
- * Mirrors the Job Detail contacts card: per-job `job_contacts` rows first
- * (lead/primary at the top), then candidate people from the client org +
- * any org linked via `job_organisations`. Deduped by person — a ticked
- * job contact wins over the same person surfacing as an org candidate.
- */
-async function getCollectionContacts(jobId: string): Promise<CollectionContact[]> {
-  const tickedResult = await query(
-    `SELECT jc.person_id, jc.is_primary, jc.role_override,
-            p.first_name, p.last_name, p.email, p.phone
-     FROM job_contacts jc
-     JOIN people p ON p.id = jc.person_id AND p.is_deleted = false
-     WHERE jc.job_id = $1
-     ORDER BY jc.is_primary DESC, p.first_name ASC`,
-    [jobId]
-  );
-
-  const candidatesResult = await query(
-    `SELECT DISTINCT ON (p.id)
-            p.id AS person_id,
-            p.first_name, p.last_name, p.email, p.phone,
-            por.role,
-            CASE WHEN o.id = j.client_id THEN 0 ELSE 1 END AS source_priority
-     FROM jobs j
-     JOIN person_organisation_roles por ON por.status = 'active'
-     JOIN organisations o ON o.id = por.organisation_id AND o.is_deleted = false
-     JOIN people p ON p.id = por.person_id AND p.is_deleted = false
-     WHERE j.id = $1
-       AND (
-         o.id = j.client_id
-         OR o.id IN (SELECT organisation_id FROM job_organisations WHERE job_id = j.id)
-       )
-     ORDER BY p.id, source_priority, por.is_primary DESC`,
-    [jobId]
-  );
-
-  const seen = new Set<string>();
-  const contacts: CollectionContact[] = [];
-
-  for (const r of tickedResult.rows as Array<Record<string, any>>) {
-    if (seen.has(r.person_id)) continue;
-    seen.add(r.person_id);
-    contacts.push({
-      personId: r.person_id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email || '',
-      phone: r.phone || null,
-      role: r.role_override || null,
-      isPrimary: !!r.is_primary,
-    });
-  }
-
-  for (const r of candidatesResult.rows as Array<Record<string, any>>) {
-    if (seen.has(r.person_id)) continue;
-    seen.add(r.person_id);
-    contacts.push({
-      personId: r.person_id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email || '',
-      phone: r.phone || null,
-      role: r.role || null,
-      isPrimary: false,
-    });
-  }
-
-  return contacts.filter((c) => c.name);
-}
-
 router.get('/collections/:jobId', async (req: WarehouseRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
@@ -353,7 +383,7 @@ router.get('/collections/:jobId', async (req: WarehouseRequest, res: Response) =
     // a person / per-job contact instead of the org row (common now after the
     // address-book restructure: per-job contacts, merges, HH shell orgs).
     const [contacts, recipients] = await Promise.all([
-      getCollectionContacts(jobId),
+      resolveJobEmailContacts(jobId),
       getJobEmailRecipients(jobId),
     ]);
 

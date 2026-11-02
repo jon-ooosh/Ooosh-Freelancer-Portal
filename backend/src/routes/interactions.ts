@@ -1,14 +1,26 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import emailService from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { shiftLinkPath } from '../services/studio-sitter';
+import { bumpSiblingChaseDates } from '../services/job-groups';
+import { resolveMyThreadMentions, retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
+// Staff only. `authenticate` alone admits EVERY active user: a `freelancer`
+// is an ordinary `users` row and POST /api/auth/login has no role gate, so
+// such an account holds a full OP JWT. Verified safe to gate the whole
+// router — the Next.js portal is hard-prefixed to `/api/portal` in
+// `src/lib/op-api.ts`, the vehicles book-out kiosk's scoped token never calls
+// this router, and every frontend consumer is a staff page. See
+// docs/reference/PLATFORM-CONVENTIONS.md → "Reference-route RBAC".
+router.use(authorize(...STAFF_ROLES));
 
 // Attachment shape — mirrors the metadata returned by
 // POST /api/files/upload?attachment_only=true. Stored on interactions.files
@@ -75,7 +87,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let sql = `
       SELECT i.*,
         u.email as created_by_email,
-        CONCAT(p.first_name, ' ', p.last_name) as created_by_name
+        ${DISPLAY_NAME_SQL} as created_by_name
       FROM interactions i
       LEFT JOIN users u ON u.id = i.created_by
       LEFT JOIN people p ON p.id = u.person_id
@@ -106,6 +118,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       paramIndex++;
       if (req.query.include_issues !== 'true') {
         sql += ` AND i.issue_id IS NULL`;
+      }
+      // Confidentiality backstop: an email hidden from the timeline drops off
+      // the all-staff view but STAYS visible to admin (the record is preserved,
+      // just not surfaced to everyone). Auto-Chase filtering foundation.
+      if (req.user?.role !== 'admin') {
+        sql += ` AND i.hidden_at IS NULL`;
       }
     }
     if (venue_id) {
@@ -179,7 +197,7 @@ router.get('/:id/thread', async (req: AuthRequest, res: Response) => {
     const threadResult = await query(
       `SELECT i.*,
         u.email AS created_by_email,
-        CONCAT(p.first_name, ' ', p.last_name) AS created_by_name
+        ${DISPLAY_NAME_SQL} AS created_by_name
        FROM interactions i
        LEFT JOIN users u ON u.id = i.created_by
        LEFT JOIN people p ON p.id = u.person_id
@@ -204,7 +222,7 @@ router.get('/:id/thread', async (req: AuthRequest, res: Response) => {
       const partResult = await query(
         `SELECT u.id,
           u.email,
-          COALESCE(NULLIF(CONCAT(p.first_name, ' ', p.last_name), ' '), u.email) AS name
+          COALESCE(NULLIF(${DISPLAY_NAME_SQL}, ' '), u.email) AS name
          FROM users u
          LEFT JOIN people p ON p.id = u.person_id
          WHERE u.id = ANY($1::uuid[])`,
@@ -416,6 +434,9 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $2`,
         [chaseDate, job_id, chase_alert_user_id || null, chase_alert_delivery || null]
       );
+      // Quote options: one call covers the whole enquiry — the live siblings
+      // move too, never shortening a sibling's deliberately later date.
+      bumpSiblingChaseDates(job_id, chaseDate).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
     }
 
     // Auto-bump chase on contact-type interactions (call / email / meeting).
@@ -453,13 +474,21 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $1`,
         [job_id]
       );
+      // Quote options: the same bump for the enquiry's other live options.
+      bumpSiblingChaseDates(job_id, null).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
+    }
+
+    // A logged chase (or contact) moves the chase date on: its "Chase due"
+    // bells are done (bell-rules.ts chase_due). Siblings' go on the sweep.
+    if (job_id && (type === 'chase' || CONTACT_BUMP_TYPES.has(type))) {
+      await retireDoneBells('chase_due', job_id);
     }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
 
     // Author display name — used by both mention and thread-reply notifications.
     const creatorResult = await query(
-      `SELECT CONCAT(p.first_name, ' ', p.last_name) as name
+      `SELECT ${DISPLAY_NAME_SQL} as name
        FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
       [req.user!.id]
     );
@@ -495,7 +524,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     // default to the entity's timeline tab.
     const actionUrl = issue_id ? `/operations/problems/${issue_id}`
       : heldItemUrl ? heldItemUrl
-      : shift_id ? `/studio-sitters`
+      : shift_id ? (await shiftLinkPath(shift_id)).path
       : job_id ? `/jobs/${job_id}?tab=timeline`
       : person_id ? `/people/${person_id}`
       : organisation_id ? `/organisations/${organisation_id}`
@@ -524,7 +553,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     if (mentioned_user_ids && mentioned_user_ids.length > 0) {
       // Bulk-load recipients + delivery preferences in one round-trip.
       const recipientResult = await query(
-        `SELECT u.id, u.email, p.first_name,
+        `SELECT u.id, u.email, p.first_name, p.preferred_name,
           COALESCE(
             (SELECT delivery_method FROM user_notification_preferences
               WHERE user_id = u.id AND notification_type = 'mention'),
@@ -577,7 +606,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         // email_sent_at), so we log loudly. Acceptable trade-off — alarming
         // every flake would create more noise than it saves.
         if (wantsEmail) {
-          const recipientName = recipient.first_name || 'there';
+          // What they go by, not what the passport says — this is a greeting.
+          const recipientName = recipient.preferred_name?.trim() || recipient.first_name || 'there';
           const recipientEmail = recipient.email;
           const priorityLabel = priority === 'urgent' ? 'URGENT: ' : priority === 'high' ? 'Important: ' : '';
           const subject = `${priorityLabel}${creatorName} mentioned you`;
@@ -685,6 +715,13 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       }
     }
 
+    // 3) Replying answers whatever the thread asked of YOU — your own mention
+    //    bells on it are done (jon, Oct 2026; notification-resolve.ts). Only
+    //    yours: everyone else's stay until they answer. Never throws.
+    if (parent_interaction_id) {
+      await resolveMyThreadMentions(req.user!.id, result.rows[0].id);
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('Create interaction error:', error);
@@ -730,7 +767,7 @@ router.patch('/:id', validate(editInteractionSchema), async (req: AuthRequest, r
          SET content = $1, edited_at = NOW(), edited_by = $2
        WHERE id = $3
        RETURNING *,
-         (SELECT CONCAT(p.first_name, ' ', p.last_name)
+         (SELECT ${DISPLAY_NAME_SQL}
             FROM users u LEFT JOIN people p ON p.id = u.person_id
            WHERE u.id = interactions.created_by) AS created_by_name`,
       [content.trim(), req.user!.id, req.params.id]
@@ -788,7 +825,9 @@ router.put('/:id/move', validate(moveInteractionSchema), async (req: AuthRequest
 // the surface tidy and avoid arbitrary emoji proliferation.
 //
 // No notifications fire on reactions — this is intentionally the
-// lightweight "I saw it, no follow-up needed" pattern.
+// lightweight "I saw it, no follow-up needed" pattern. For the same reason,
+// ADDING a reaction marks the reactor's own mention bells on that thread done
+// (jon, Oct 2026); taking one off changes nothing.
 
 const REACTION_PALETTE = ['👍', '❤️', '✅', '😂', '🎉', '👀'] as const;
 
@@ -813,7 +852,8 @@ router.post('/:id/reactions', validate(reactionSchema), async (req: AuthRequest,
     }
     const reactions = (current.rows[0].reactions || {}) as Record<string, string[]>;
     const existing = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
-    if (existing.includes(userId)) {
+    const added = !existing.includes(userId);
+    if (!added) {
       reactions[emoji] = existing.filter((u) => u !== userId);
       // Drop the key entirely when the last reactor removes themselves —
       // keeps the JSONB clean instead of accumulating empty arrays.
@@ -826,6 +866,9 @@ router.post('/:id/reactions', validate(reactionSchema), async (req: AuthRequest,
       `UPDATE interactions SET reactions = $1::jsonb WHERE id = $2 RETURNING reactions`,
       [JSON.stringify(reactions), req.params.id]
     );
+
+    // "I saw it" — the reactor's own mention bells on this thread are done.
+    if (added) await resolveMyThreadMentions(userId, req.params.id as string);
 
     res.json({ reactions: result.rows[0].reactions });
   } catch (error) {

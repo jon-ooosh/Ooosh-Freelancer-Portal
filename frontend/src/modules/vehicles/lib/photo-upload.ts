@@ -7,6 +7,7 @@
 
 import type { CapturedPhoto, DamageItem } from '../types/vehicle-event'
 import { apiFetch } from '../config/api-config'
+import { withRetry } from './retry'
 
 interface UploadResult {
   url: string
@@ -64,16 +65,21 @@ export async function uploadAllPhotos(
   let completed = 0
   let failedCount = 0
 
-  // Upload sequentially to avoid overwhelming the function
+  // Upload sequentially to avoid overwhelming the function.
+  // Each photo retries ON ITS OWN: this function never throws, so the
+  // caller's withRetry never re-ran a failed photo — one Wi-Fi/4G handover
+  // mid-upload lost that photo for good (RX22SWN / 16573, Oct 2026).
+  // Re-uploading writes the same R2 key, so a repeat is harmless.
   for (const photo of photos) {
-    try {
-      await uploadPhoto(photo, eventId, vehicleReg)
-      completed++
-    } catch (err) {
-      console.error(`Failed to upload ${photo.angle}:`, err)
+    const result = await withRetry(
+      () => uploadPhoto(photo, eventId, vehicleReg),
+      `Photo upload ${photo.angle}`,
+    )
+    if (!result.success) {
+      console.error(`Failed to upload ${photo.angle}:`, result.error)
       failedCount++
-      completed++
     }
+    completed++
     onProgress?.(completed, photos.length)
   }
 
@@ -127,19 +133,21 @@ export async function uploadDamagePhotos(
     formData.append('file', photo.blob, `damage_${index}.jpg`)
     formData.append('key', key)
 
-    try {
+    // Retried per photo, same as uploadAllPhotos (same key, so a repeat is harmless)
+    const result = await withRetry(async () => {
       const response = await apiFetch('/upload-photo', {
         method: 'POST',
         body: formData,
       })
       if (!response.ok) throw new Error(`Upload failed: ${response.status}`)
+    }, `Damage photo upload ${damageId}/${index}`)
+    if (result.success) {
       ;(keysByDamageId[damageId] ||= []).push(key)
-      completed++
-    } catch (err) {
-      console.error(`Failed to upload damage photo ${damageId}/${index}:`, err)
+    } else {
+      console.error(`Failed to upload damage photo ${damageId}/${index}:`, result.error)
       failedCount++
-      completed++
     }
+    completed++
     onProgress?.(completed, allPhotos.length)
   }
 

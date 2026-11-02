@@ -14,36 +14,79 @@
  * are wired.
  *
  * Guardrails (§9.2): the "checking in, NOT renegotiating" rails live in the code
- * SYSTEM_PROMPT and can't be edited by staff. The `chase_voice_instructions`
- * system-setting is APPENDED — jon's "more of this / less of that" knob, tunable
- * without a deploy.
+ * (RAILS) and can't be edited by staff. Then, in order: the house voice — a Staff
+ * Document shared with Claude and tagged `voice` if one exists, else BUILT_IN_VOICE
+ * — plus any shared `chasing` guides (services/house-knowledge.ts,
+ * AI-KNOWLEDGE-SPEC §4); then the `chase_voice_instructions` system-setting,
+ * jon's "more of this / less of that" knob, tunable without a deploy.
  */
 import { query } from '../config/database';
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
+import {
+  getAnthropicClient,
+  isAnthropicConfigured,
+  readStructuredJson,
+  CLAUDE_SONNET_MODEL,
+} from '../config/anthropic';
 import { getSystemSetting } from '../routes/system-settings';
 import type { HHLineItem } from './hirehop-job-sync';
+import { getGuidesFor, hasTopic, guidesAsPromptText, guidesUsedSummary } from './house-knowledge';
 
-// Spec §9.1 calls for Sonnet 5 — the drafting is nuance-heavy (tone varies by
+/** Which shared guide (and version) a draft was written from. */
+export type GuideUsed = ReturnType<typeof guidesUsedSummary>[number];
+
+// Spec §9.1 calls for Sonnet — the drafting is nuance-heavy (tone varies by
 // relationship) and a client-facing email is the one place we don't cut corners.
-const MODEL_ID = 'claude-sonnet-5';
-const MAX_TOKENS = 800;
+const MODEL_ID = CLAUDE_SONNET_MODEL;
+// Headroom for thinking as well as the draft — thinking counts towards
+// max_tokens on Sonnet 5.5.
+const MAX_TOKENS = 8000;
 
-// The rails. Staff cannot edit these — the chase-voice setting is appended below.
-const SYSTEM_PROMPT = `You draft short chase emails for Ooosh Tours, a music & event transport / backline / rehearsal hire company. A quote went out to a client and we've heard nothing back; you write a brief, warm "just checking in" nudge.
+// The rails. Staff cannot edit these — they beat any guide or setting.
+const RAILS = `You draft short chase emails for Ooosh Tours, a small UK music & event transport / backline / rehearsal hire company. A quote went out to a client and we've heard nothing back; you write a brief "just checking in" nudge.
 
 HARD RULES — never break these:
 - This is a CHECK-IN, never a renegotiation. Do NOT invent discounts, change prices, or offer anything not already in the quote. (Asking whether their requirements have changed, or offering to adjust the quote to suit, is fine — that's not a discount.)
 - Ground every concrete detail (band, dates, what's being hired, job number) ONLY in the data provided. If a detail isn't given, don't mention it. Never guess or fabricate.
 - The dates given below are the ACTUAL hire days (the "inside" dates). If an end date is given it is the LAST hire day — the client returns the next morning, which is NOT a hire day. NEVER describe the hire as running to the return/drop-off date, and never add a day to the range.
 - MATCH THE URGENCY TO HOW SOON THE HIRE STARTS (given below as "days until hire"). NEVER say "no rush" / "no hurry" / "whenever suits" or imply there's plenty of time unless the hire is more than a week away. If the hire is days away (or today/past), be warm but clearly convey we need to hear back soon to lock it in — do not sound relaxed about an imminent booking.
-- SILENCE OVERRIDES RELAXED TONE. If the grounding says we've followed up before with no reply, this is NOT a breezy "no rush" email even when the dates are far off — acknowledge (lightly) that we've reached out, and it's entirely appropriate to ask directly whether they're still interested and to offer them an easy, gracious out ("if you've sorted it elsewhere or no longer need it, no problem at all — just let us know"). Giving them a clean way to say no is welcome, not pushy, and is NOT a renegotiation.
-- Keep it SHORT — 2 short paragraphs max, ideally 3-5 sentences total. Busy people skim.
-- Warm and human, not corporate or pushy. One light question that invites a reply ("any thoughts on the quote?" / "happy to tweak anything?" / "still looking for this?").
-- British English. Sign off with the SENDER'S name if one is given below (e.g. "Cheers, Jon" / "Best, Jon") — this is the real Ooosh staff member sending it. If no sender name is given, sign off as "the Ooosh team". Never invent an individual name.
-- If a prior email thread is provided, match its tone and reference it naturally; if it's a first contact, keep it friendly-neutral.
-- Plain text only. No markdown, no placeholders like [name], no subject-line clichés ("Just following up!!!").
+- SILENCE OVERRIDES RELAXED TONE. If the grounding says we've followed up before with no reply, this is NOT a breezy "no rush" email even when the dates are far off — acknowledge (lightly) that we've reached out, and it's entirely appropriate to ask directly whether they're still interested and to offer them an easy, gracious out ("if you've sorted it elsewhere or no longer need it, no problem at all, just let us know"). Giving them a clean way to say no is welcome, not pushy, and is NOT a renegotiation.
+- One light question that invites a reply. Never pushy.
+- Sign off from the SENDER given below — the real Ooosh staff member sending it. If no sender name is given, sign off as "the Ooosh team". Never invent an individual name.
+- If a prior email thread is provided, reply naturally into it; if it's a first contact, keep it friendly-neutral.
+- Plain text only. No markdown, no placeholders like [name].`;
 
-Return ONLY the tool call with the drafted subject + body.`;
+// The built-in house voice — used ONLY while no Staff Document tagged `voice` is
+// shared with Claude (services/house-knowledge.ts). Once one is, that document IS
+// the voice and this text is skipped, so the two can't contradict each other.
+// Mirrors docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md.
+const BUILT_IN_VOICE = `HOW OOOSH SOUNDS — the house voice:
+- BRIEF BUT COMPLETE. A few sentences is often enough; busy touring people skim. Answer every question in their last message, give them what they need for the next decision, and end with one clear call to action.
+- Never promise an action unless the data you were given says it has been done or will be done (no "I've held the van" or "I'll send the link" on a guess).
+- LAYOUT — exactly this shape. Single line breaks only: NEVER a blank line anywhere in the email, not after the greeting, not between paragraphs, not before the sign-off.
+    Line 1: the greeting with a comma — "Hi Sam," (or "Morning Sam,"), first name only.
+    Then the message, starting on the very next line. It can open with "Hope you're well." on the same line as the first sentence. One to three short lines.
+    Then the closing line with a comma — "Best wishes," / "Many thanks," / "Thanks," / "Best,".
+    Then the sender's name on the last line.
+  For example (layout only — don't copy the words):
+    Hi Sam,
+    Hope you're well. Just following up on the below van quote (#12345) for 5th to 9th May. Since the hire starts in just a few days, we'd need to hear back soon to hold the van for you. Are you still interested, or is there anything you'd like us to adjust?
+    If you've sorted it elsewhere or no longer need it, no problem, just let me know.
+    Best wishes,
+    Jon
+- Never "I hope this email finds you well".
+- Plain, direct and friendly, like a colleague who knows touring inside out. Warm through being helpful and specific, never through enthusiasm or gushing — and never cold or curt either: always the person's name and a human touch.
+- The kind of chase lines we write (vary them, don't copy one verbatim every time): "Just following up to see if you have any questions or wish to proceed with this hire?" / "Just wondering if you'd had any thoughts on the quote?" / "Let me know if you'd like to go ahead, or if anything needs changing."
+- An offer that saves them effort is good: "Let me know if there's a more direct contact to chase on this, to save you being the middle-man."
+- When something is time-critical, say plainly why and by when ("Since the hire starts on Friday, we'd need to hear back by tomorrow to hold the van"). Say it the way a person would — "in just a few days", "this Friday", "next week" — never a mechanical count like "in 5 days".
+- Refer to the quote as "the below quote" when replying into the thread that carries it, and write "I"/"me" for the sender ("just let me know"), not a corporate "we" throughout.
+- When we sent options, help them choose rather than asking if they're still interested: "Which one do you think would best suit your needs for this run?"
+- A natural close when it fits: "Do let me know if you have any questions or would like to lock something in." / "Always happy to quote on anything else you may have coming up." / "Look forward to hearing from you."
+- If they've said they're getting something we also supply from elsewhere (backline, a van), offer in one line to quote for it.
+- Exclamation marks: rarely — at most one, and only where a person genuinely would.
+- British English spelling and idiom (finalise, organise, colour). Use a plain hyphen or a full stop, never an em dash (—).
+- NEVER write these — they read as AI or American: "I hope this email finds you well", "touch base", "circle back", "reach out", "just wanted to", "I wanted to follow up", "I'd be happy to", "don't hesitate", "feel free to", "absolutely", "awesome", "at your earliest convenience", "please advise", "kindly", "Hope you're doing well!", "Looking forward to hearing from you!" (without the exclamation mark it's fine), and subject-line clichés ("Just following up!!!").`;
+
+const RETURN_LINE = 'Return ONLY the JSON object with the drafted subject + body.';
 
 const SCHEMA = {
   type: 'object' as const,
@@ -83,6 +126,10 @@ export interface ChaseContext {
   priorHireCount: number;
   threadText: string | null;   // concatenated prior email thread (Phase 1), if any
   hasThread: boolean;
+  // Quote options: the OTHER options of this enquiry that are still open
+  // ("Option 1 - Self-drive (#16842)"), so one chase covers them all.
+  otherOptions: string[];
+  thisOption: string | null;   // "Option 2 - Van + driver" when the job is one of several
 }
 
 /** Build a short, human list of what's being hired from the cached HH line items. */
@@ -165,7 +212,29 @@ export async function gatherChaseContext(jobId: string): Promise<ChaseContext | 
     priorHireCount: 0,
     threadText: null,
     hasThread: false,
+    otherOptions: [],
+    thisOption: null,
   };
+
+  // Quote options: name the enquiry's other open options so the draft says
+  // "the three options we sent" rather than chasing one of them in isolation.
+  try {
+    const opt = await query(
+      `SELECT j.option_no, j.option_label,
+              (SELECT json_agg(json_build_object('option_no', s.option_no, 'option_label', s.option_label, 'hh_job_number', s.hh_job_number) ORDER BY s.option_no)
+                 FROM jobs s WHERE s.group_id = j.group_id AND s.id <> j.id AND s.is_deleted = false
+                  AND s.dismissed_at IS NULL
+                  AND s.pipeline_status IN ('new_enquiry','quoting','paused','provisional')) AS siblings
+         FROM jobs j WHERE j.id = $1 AND j.group_id IS NOT NULL`,
+      [jobId],
+    );
+    const row = opt.rows[0];
+    if (row) {
+      ctx.thisOption = `Option ${row.option_no}${row.option_label ? ` - ${row.option_label}` : ''}`;
+      ctx.otherOptions = ((row.siblings ?? []) as Array<{ option_no: number; option_label: string | null; hh_job_number: number | null }>)
+        .map((s) => `Option ${s.option_no}${s.option_label ? ` - ${s.option_label}` : ''}${s.hh_job_number ? ` (#${s.hh_job_number})` : ''}`);
+    }
+  } catch { /* optional grounding */ }
 
   // Days until the hire starts (urgency/tone) + hire span in calendar days.
   if (ctx.outDate) {
@@ -296,6 +365,9 @@ function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string
   }
   if (ctx.jobValue != null) lines.push(`Quote value: £${ctx.jobValue.toFixed(2)} (do NOT state the price in the email unless it was already discussed in the thread — reference "the quote")`);
   if (ctx.itemsSummary.length) lines.push(`What they're hiring: ${ctx.itemsSummary.join(', ')}`);
+  if (ctx.thisOption && ctx.otherOptions.length) {
+    lines.push(`This quote is ${ctx.thisOption} of ${ctx.otherOptions.length + 1} options we sent for the SAME hire. The others still open: ${ctx.otherOptions.join('; ')}. Write ONE chase that covers all the options together ("the options we sent over") — do not chase this one as if it were the only quote, and do not send separate emails for the others. Help them choose: ask which option would best suit them.`);
+  }
   lines.push(
     ctx.isRepeatClient
       ? `Relationship: repeat client (${ctx.priorHireCount} prior hire${ctx.priorHireCount === 1 ? '' : 's'} with us — you can be warmer / more familiar).`
@@ -316,9 +388,9 @@ function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string
     );
   }
   if (signOffName && signOffName.trim()) {
-    lines.push(`Sender: ${signOffName.trim()} — sign the email off from them (e.g. "Cheers, ${signOffName.trim()}"). This is the Ooosh staff member sending it.`);
+    lines.push(`Sender: ${signOffName.trim()} — end with a closing line with a comma ("Best wishes," / "Many thanks," / "Best,") and then "${signOffName.trim()}" on the next line, exactly as written. This is the Ooosh staff member sending it.`);
   } else {
-    lines.push('Sender: not specified — sign off as "the Ooosh team".');
+    lines.push('Sender: not specified — end with a closing line with a comma and then "The Ooosh team" on the next line.');
   }
   lines.push('');
   if (ctx.hasThread && ctx.threadText) {
@@ -339,21 +411,32 @@ function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string
 export async function draftChaseEmail(
   jobId: string,
   opts: { signOffName?: string | null } = {},
-): Promise<{ draft: ChaseDraft; context: ChaseContext }> {
+): Promise<{ draft: ChaseDraft; context: ChaseContext; guidesUsed: GuideUsed[] }> {
   if (!isAnthropicConfigured()) {
     throw new Error('ANTHROPIC_API_KEY not configured — cannot draft chases.');
   }
   const context = await gatherChaseContext(jobId);
   if (!context) throw new Error(`Job ${jobId} not found`);
 
-  // Append the tunable chase-voice knob (§9.2) to the code rails.
+  // House guides shared with Claude (AI-KNOWLEDGE-SPEC §4): the voice + chasing.
+  // A shared `voice` guide replaces the built-in voice; the rails always stay.
+  const house = await getGuidesFor(['voice', 'chasing']);
+  const voiceText = hasTopic(house, 'voice') ? '' : `\n\n${BUILT_IN_VOICE}`;
+  const system: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
+    { type: 'text', text: `${RAILS}${voiceText}\n\n${RETURN_LINE}`, cache_control: { type: 'ephemeral' } },
+  ];
+  if (house.guides.length) {
+    system.push({
+      type: 'text',
+      text: `OOOSH'S OWN GUIDES — approved by Ooosh, follow them unless they conflict with a HARD RULE above:\n\n${guidesAsPromptText(house)}`,
+      cache_control: { type: 'ephemeral' },
+    });
+  }
+  // The tunable chase-voice knob (§9.2) — a steer on top of everything else.
   const chaseVoice = (await getSystemSetting('chase_voice_instructions')) || '';
-  const system = chaseVoice.trim()
-    ? [
-        { type: 'text' as const, text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' as const } },
-        { type: 'text' as const, text: `ADDITIONAL VOICE GUIDANCE (from Ooosh, obey unless it conflicts with a HARD RULE):\n${chaseVoice.trim()}` },
-      ]
-    : [{ type: 'text' as const, text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' as const } }];
+  if (chaseVoice.trim()) {
+    system.push({ type: 'text', text: `ADDITIONAL VOICE GUIDANCE (from Ooosh, obey unless it conflicts with a HARD RULE):\n${chaseVoice.trim()}` });
+  }
 
   const client = getAnthropicClient();
   const response = await client.messages.create({
@@ -361,113 +444,13 @@ export async function draftChaseEmail(
     max_tokens: MAX_TOKENS,
     system,
     messages: [{ role: 'user', content: buildUserPrompt(context, opts.signOffName ?? null) }],
-    tools: [
-      {
-        name: 'report_draft',
-        description: 'Return the drafted chase email — subject + plain-text body.',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input_schema: SCHEMA as any,
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'report_draft' },
+    // Structured outputs (json_schema) — replaced forced tool-use, which Sonnet
+    // 5.5 rejects with a 400.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA as any } } as any,
   });
 
-  const toolBlock = response.content.find((b) => b.type === 'tool_use');
-  if (toolBlock && toolBlock.type === 'tool_use') {
-    const out = toolBlock.input as ChaseDraft;
-    return { draft: { subject: out.subject, body: out.body }, context };
-  }
-  throw new Error('Claude did not return a chase draft');
-}
-
-// ── Example-driven voice tuning (spec §9.3 item 3) ──────────────────────────
-// jon wants to shape the chase voice by SHOWING the AI real examples (client
-// emails + our actual replies) rather than hand-writing the guidance. Rather
-// than store raw few-shot examples (which would bloat every draft's prompt, risk
-// copying specifics, and be opaque), we DISTIL the examples into an updated
-// `chase_voice_instructions` note — transparent (jon reads + edits the result),
-// small at runtime (the existing knob), and fully human-in-the-loop (this only
-// PROPOSES; staff review + save via the normal Settings PUT).
-
-const VOICE_LEARN_MODEL = 'claude-sonnet-5'; // nuance-heavy, infrequent — worth Sonnet
-const VOICE_LEARN_MAX_TOKENS = 700;
-
-const VOICE_LEARN_SYSTEM = `You refine a short "voice guidance" note for an AI that drafts chase / follow-up emails for Ooosh Tours (a music & event transport / backline / rehearsal hire company).
-
-You are shown real examples — typically client emails and the actual replies Ooosh staff sent — and (optionally) the current guidance note. Your job: distil what makes Ooosh's voice recognisable (tone, warmth, formality, phrasing habits, sign-off style, sentence length, punctuation quirks) into an UPDATED concise guidance note.
-
-RULES:
-- Output is TONE / STYLE guidance ONLY. Never encode specific client names, prices, dates, or one-off job details — those belong in each draft's grounding, not the voice note.
-- Do NOT restate the AI's hard rules (it's a check-in not a renegotiation; never fabricate; urgency matched to the hire date) — those are already enforced in code. Focus purely on voice.
-- Keep it SHORT and actionable — a handful of plain "do this / avoid that" lines. This note is appended verbatim to the draft prompt, so brevity matters.
-- If current guidance is provided, MERGE — keep what still holds, refine or add from the examples, drop anything the examples contradict. Don't discard good existing guidance wholesale.
-- British English. Plain text, no markdown headers, no preamble.
-
-Return ONLY the tool call with the proposed guidance.`;
-
-const VOICE_LEARN_SCHEMA = {
-  type: 'object' as const,
-  properties: {
-    guidance: {
-      type: 'string',
-      description: 'The proposed updated voice-guidance note (plain text, a handful of lines).',
-    },
-  },
-  required: ['guidance'],
-  additionalProperties: false,
-};
-
-/**
- * Distil example client emails + our replies into a proposed
- * `chase_voice_instructions` note. Does NOT save — the caller returns it for the
- * human to review + save via the existing Settings PUT. Throws if Anthropic
- * isn't configured (caller should 503).
- */
-export async function learnChaseVoice(examples: string, current?: string | null): Promise<string> {
-  if (!isAnthropicConfigured()) {
-    throw new Error('ANTHROPIC_API_KEY not configured — cannot learn chase voice.');
-  }
-  const trimmed = (examples || '').trim();
-  if (!trimmed) throw new Error('No examples provided');
-
-  const parts: string[] = [];
-  if (current && current.trim()) {
-    parts.push('Current voice guidance (merge with / refine from the examples):');
-    parts.push('"""');
-    parts.push(current.trim());
-    parts.push('"""');
-    parts.push('');
-  } else {
-    parts.push('No current voice guidance — build it from the examples below.');
-    parts.push('');
-  }
-  parts.push('Examples (client emails and/or the actual replies Ooosh staff sent):');
-  parts.push('"""');
-  parts.push(trimmed.slice(0, 16000));
-  parts.push('"""');
-
-  const client = getAnthropicClient();
-  const response = await client.messages.create({
-    model: VOICE_LEARN_MODEL,
-    max_tokens: VOICE_LEARN_MAX_TOKENS,
-    system: [{ type: 'text' as const, text: VOICE_LEARN_SYSTEM, cache_control: { type: 'ephemeral' as const } }],
-    messages: [{ role: 'user', content: parts.join('\n') }],
-    tools: [
-      {
-        name: 'report_voice',
-        description: 'Return the proposed voice-guidance note.',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input_schema: VOICE_LEARN_SCHEMA as any,
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'report_voice' },
-  });
-
-  const toolBlock = response.content.find((b) => b.type === 'tool_use');
-  if (toolBlock && toolBlock.type === 'tool_use') {
-    const out = toolBlock.input as { guidance?: string };
-    const guidance = (out.guidance || '').trim();
-    if (guidance) return guidance;
-  }
-  throw new Error('Claude did not return voice guidance');
+  const out = readStructuredJson<ChaseDraft>(response, 'Chase draft');
+  if (!out.subject || !out.body) throw new Error('Claude did not return a chase draft');
+  return { draft: { subject: out.subject, body: out.body }, context, guidesUsed: guidesUsedSummary(house) };
 }

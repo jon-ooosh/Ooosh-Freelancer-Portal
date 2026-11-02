@@ -34,7 +34,7 @@ export function LowStockBanner() {
           </p>
         </div>
         <Link
-          to={vmPath('/settings')}
+          to={vmPath('/settings?tab=stock')}
           className="flex-shrink-0 rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700 active:bg-amber-200"
         >
           View Stock

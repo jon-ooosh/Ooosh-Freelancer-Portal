@@ -8,11 +8,12 @@ import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { fetchFleetCosts } from '../lib/fuel-log-api'
+import { ukToday } from '../../../lib/ukDate'
 
 export function CostReportPage() {
   const currentYear = new Date().getFullYear()
   const [fromDate, setFromDate] = useState(`${currentYear}-01-01`)
-  const [toDate, setToDate] = useState(new Date().toISOString().split('T')[0]!)
+  const [toDate, setToDate] = useState(ukToday())
   const [sortBy, setSortBy] = useState<'totalCost' | 'reg' | 'serviceCost' | 'fuelCost'>('totalCost')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -89,9 +90,9 @@ export function CostReportPage() {
         {/* Quick presets */}
         <div className="flex items-end gap-1.5 pb-0.5">
           {[
-            { label: 'YTD', from: `${currentYear}-01-01`, to: new Date().toISOString().split('T')[0]! },
-            { label: 'Last 30d', from: new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]!, to: new Date().toISOString().split('T')[0]! },
-            { label: 'Last 90d', from: new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0]!, to: new Date().toISOString().split('T')[0]! },
+            { label: 'YTD', from: `${currentYear}-01-01`, to: ukToday() },
+            { label: 'Last 30d', from: new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]!, to: ukToday() },
+            { label: 'Last 90d', from: new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0]!, to: ukToday() },
           ].map(preset => (
             <button
               key={preset.label}

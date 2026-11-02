@@ -1,9 +1,17 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, STAFF_ROLES, authorize, AuthRequest } from '../middleware/auth';
+import { optionCountSql } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — and this one is load-bearing for the gates on people.ts,
+// organisations.ts and venues.ts. Global search reads across `people`,
+// `organisations`, `venues` and `jobs`, so leaving it open would block a
+// freelancer JWT from WRITING that data while still letting it READ the lot.
+// No freelancer surface uses it: the kiosk and the Next.js portal never call
+// /api/search, and every consumer is a staff page.
+router.use(authorize(...STAFF_ROLES));
 
 // GET /api/search?q=searchterm&limit=20
 router.get('/', async (req: AuthRequest, res: Response) => {
@@ -74,7 +82,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
               company_name as subtitle,
               'job' as type,
               pipeline_status,
-              status as hh_status
+              status as hh_status,
+              (dismissed_at IS NOT NULL) as is_dismissed,
+              option_no,
+              ${optionCountSql('jobs')} as option_count
        FROM jobs
        WHERE is_deleted = false AND (
          job_name ILIKE $1 OR company_name ILIKE $1 OR client_name ILIKE $1
@@ -85,11 +96,38 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       jobParams
     );
 
+    // Search projects (docs/JOB-PROJECTS-SPEC.md) — a project has no page of
+    // its own, so the result opens one of its jobs, where the panel lives:
+    // the festival's own (same client as the project) first, then a live one,
+    // then the oldest.
+    const projectResults = await query(
+      `SELECT * FROM (
+         SELECT (SELECT j.id FROM jobs j
+                  WHERE j.job_project_id = jp.id AND j.is_deleted = false
+                  ORDER BY (j.client_id IS DISTINCT FROM jp.client_id),
+                           (j.pipeline_status IN ('lost', 'cancelled')), j.created_at
+                  LIMIT 1) AS id,
+                jp.name,
+                CONCAT_WS(' · ',
+                  o.name,
+                  (SELECT COUNT(*) FROM jobs j WHERE j.job_project_id = jp.id AND j.is_deleted = false) || ' jobs'
+                ) AS subtitle,
+                'project' AS type
+           FROM job_projects jp
+           LEFT JOIN organisations o ON o.id = jp.client_id
+          WHERE jp.name ILIKE $1
+          ORDER BY jp.created_at DESC
+          LIMIT $2
+       ) p WHERE p.id IS NOT NULL`,
+      [searchTerm, perType]
+    );
+
     res.json({
       results: [
         ...peopleResults.rows,
         ...orgResults.rows,
         ...venueResults.rows,
+        ...projectResults.rows,
         ...jobResults.rows,
       ],
     });

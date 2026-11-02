@@ -496,7 +496,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       // Auto-cover from the client's standing held-on-account balance (opt-in,
       // admin-set per client). Runs before the requirement sync so a covered
       // (waived) record is already in place when the card status is derived.
-      await autoCoverExcessFromAccount(client, jobId, expectedExcess, result);
+      // Covers every chargeable record on the job (stub AND driver records), so
+      // a hire form that absorbed the stub can't leave a driver reading "Required".
+      const cover = await applyAccountAutoCover((t, p) => client.query(t, p), jobId, { jobTotal: expectedExcess });
+      if (cover.covered) {
+        result.requirementsUpdated.push(`excess_record (${cover.covered} auto-covered by held-on-account balance)`);
+      }
+      if (cover.reverted) {
+        result.requirementsUpdated.push(`excess_record (auto-cover removed — ${cover.reverted} reverted to needed)`);
+      }
 
       // Promote the excess requirement to 'done' if coverage is already met
       // (e.g. derivation runs after a portal pre-auth has landed).
@@ -510,6 +518,23 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       const reason = isInternal ? 'Internal' : 'Van & Driver';
       await suspendRequirement(client, jobId, 'excess', reason);
       await suspendJobExcess(client, jobId, reason);
+    } else {
+      // No vehicle on HireHop at all (the van came off the quote). The stale
+      // sweep below already removes / flags the hire_forms and excess CARDS,
+      // but until Oct 2026 nothing touched the job_excess record, so the
+      // Money tab and the dispatch banner kept asking for £1,200 on a job
+      // with no van (job 16460). Suspend uncollected records exactly as the
+      // V&D / Internal toggles do — reversible, marker-gated, money-guarded —
+      // so a van re-added during quote churn restores them. Records holding
+      // real money or a live hold are left as they are and flagged instead.
+      const suspended = await suspendJobExcess(client, jobId, 'No vehicle');
+      if (suspended > 0) {
+        result.requirementsUpdated.push(`excess_record (${suspended} suspended — no vehicle on HH)`);
+      }
+      const flagged = await flagChargedExcessWithoutVehicle(client, jobId);
+      if (flagged > 0) {
+        result.mismatchesFlagged.push(`excess_record (${flagged} with money taken/held but no vehicle on HH)`);
+      }
     }
 
     // ── Backline ──
@@ -753,10 +778,11 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       }
 
       // Conditional: cost recharge resolution — only if the job has any cost
-      // flagged for client recharge. Skipped on internal jobs (no client to bill).
+      // flagged for client recharge (a whole cost, or a split share recharged to
+      // this job: v_cost_recharges). Skipped on internal jobs (no client to bill).
       if (!isInternal) {
         const rechargeCount = await client.query(
-          `SELECT COUNT(*) AS cnt FROM costs WHERE job_id = $1 AND recharge_mode <> 'none'`,
+          `SELECT COUNT(*) AS cnt FROM v_cost_recharges WHERE job_id = $1`,
           [jobId]
         );
         if (parseInt(rechargeCount.rows[0]?.cnt || '0') > 0) {
@@ -799,11 +825,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         await ensureCloseout('freelancer_followup', 'Check in with freelancers — expenses, feedback, issues');
       }
 
-      // Conditional: damage review — only if any vehicle assignment has has_damage=true
+      // Conditional: damage review — only if any vehicle assignment has has_damage=true.
+      // Dual job match: a staff-allocation / V&D row carries only
+      // hirehop_job_id (job_id stays NULL until a hire form is submitted),
+      // so a job_id-only test misses damage flagged on exactly those hires.
       const damageCount = await client.query(
         `SELECT COUNT(*) AS cnt FROM vehicle_hire_assignments
-         WHERE job_id = $1 AND has_damage = true`,
-        [jobId]
+         WHERE has_damage = true
+           AND (job_id = $1 OR ($2::int IS NOT NULL AND hirehop_job_id = $2::int))`,
+        [jobId, hhJobNumber ?? null]
       );
       if (parseInt(damageCount.rows[0]?.cnt || '0') > 0) {
         await ensureCloseout('damage_review', 'Vehicle damage flagged during hire — review and resolve');
@@ -1054,7 +1084,7 @@ async function upsertAutoRequirement(
  * as internal. Instead of deleting, marks it as suspended so data persists
  * and can be restored if the toggle was accidental.
  */
-type SuspensionReason = 'Van & Driver' | 'Internal';
+type SuspensionReason = 'Van & Driver' | 'Internal' | 'No vehicle';
 
 async function suspendRequirement(client: any, jobId: string, requirementType: string, reason: SuspensionReason): Promise<void> {
   // Suspend the pre_hire requirement of this type regardless of how it was
@@ -1089,75 +1119,114 @@ async function suspendRequirement(client: any, jobId: string, requirementType: s
   );
 }
 
+/** The marker note stamped on every account-auto-covered excess record. Also
+ *  the signal the frontend keys off to render a distinct "Covered by account"
+ *  pill (via the `auto_covered` flag on excess payloads). */
+export const AUTO_COVER_MARKER = '[Auto-covered by account]';
+
+/** Minimal querier both a transaction client (`client.query`) and the pool
+ *  (`query`) satisfy, so `applyAccountAutoCover` can run inside a hire-form
+ *  transaction OR standalone from quick-assign / derivation. */
+type Querier = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount: number | null }>;
+
 /**
  * Auto-cover a self-drive hire's excess from the client's standing
- * held-on-account balance (migration 169). Opt-in + admin-set per client via
+ * held-on-account balance (migration 174). Opt-in + admin-set per client via
  * `organisations.auto_cover_excess_from_account`.
  *
- * When the client is opted in AND holds enough on account (sum of
- * `v_excess_held` over their `held_on_account = true` records, this job
- * excluded), the derivation record is marked `waived` with an
- * `[Auto-covered by account]` marker note — so the dispatch gate, the Money
- * tab and the close-out card all treat it as resolved, with no fresh excess
- * collected and no per-hire staff action.
+ * Covers EVERY live chargeable excess record on the job — status `needed` /
+ * `pending`, whether it's the pre-hire derivation stub (`assignment_id IS NULL`)
+ * OR an assignment-linked driver record created when a hire form / quick-assign
+ * lands. This is the fix for the "hire form escapes auto-cover" gap: absorbing
+ * the waived stub into a driver assignment un-waives it, so covering only the
+ * stub left the actual driver record reading "Required". Now the WHOLE hire
+ * reads as covered, never "Needed"/"Required" — matching the clarity we give
+ * every other client's excess.
+ *
+ * Sets `excess_status = 'waived'` + the `[Auto-covered by account]` marker so
+ * the dispatch gate, the excess requirement card and the Money tab all treat it
+ * as resolved (waived is in every terminal/covered whitelist), and the UI can
+ * render a distinct purple "Covered by account" pill.
  *
  * STANDING cover: the held balance is NOT consumed (it's a rolling deposit,
- * returned by BACS when the client stops), so concurrent/repeat hires all draw
- * on the same balance — acceptable for the trusted regulars this is enabled for.
- * Only full cover: if the balance is short of `expectedExcess` (e.g. a rare
- * multi-van hire) the record is left `needed` and staff collect / apply as usual
- * (the "client has £X on account" banner still shows).
+ * returned by BACS when the client stops), so repeat hires all draw on the same
+ * balance — acceptable for the trusted regulars this is enabled for. Full cover
+ * only: if the balance is short of the job's total expected excess (a rare
+ * multi-van hire) nothing is covered and staff collect as usual (the "client has
+ * £X on account" banner still shows).
  *
- * Marker-gated + idempotent, mirroring the V&D/Internal suspension: re-runs are
- * no-ops, and turning the flag off (or the balance dropping) reverts a
- * previously auto-covered record back to `needed`. Never touches a record with
- * money attached — only the money-free `needed`/`pending` derivation record (or
- * one we ourselves auto-covered).
+ * Marker-gated + idempotent, and safe for the whole population: a record with
+ * real money (`taken`/`partially_paid`/`pre_auth`) or a top-N loser
+ * (`not_required`) is NEVER touched, and the opted-out / balance-short REVERT
+ * only ever flips records WE auto-covered (marker present) back to `needed` —
+ * a manual staff waive (no marker) is left alone. For a non-opted client it runs
+ * only the marker-guarded revert, which matches nothing.
+ *
+ * Runs from three places so a hire is never briefly "Required": the derivation
+ * engine (sync/webhook/on-demand + revert-on-toggle-off), the hire-form POST,
+ * and quick-assign — the last two the instant a driver's excess record is
+ * written.
+ *
+ * @returns counts of records covered / reverted this pass.
  */
-async function autoCoverExcessFromAccount(
-  client: any,
+export async function applyAccountAutoCover(
+  q: Querier,
   jobId: string,
-  expectedExcess: number,
-  result: DerivationResult
-): Promise<void> {
-  const org = await client.query(
-    `SELECT COALESCE(o.auto_cover_excess_from_account, false) AS opted_in, j.client_id
-     FROM jobs j LEFT JOIN organisations o ON o.id = j.client_id WHERE j.id = $1`,
+  opts?: { jobTotal?: number }
+): Promise<{ covered: number; reverted: number }> {
+  const info = await q(
+    `SELECT COALESCE(o.auto_cover_excess_from_account, false) AS opted_in,
+            j.client_id,
+            COALESCE((j.hh_derived_flags->>'self_drive_count')::int, 0) AS self_drive_count
+     FROM jobs j LEFT JOIN organisations o ON o.id = j.client_id
+     WHERE j.id = $1`,
     [jobId]
   );
-  const optedIn = org.rows[0]?.opted_in === true;
-  const clientId = org.rows[0]?.client_id || null;
+  const row = info.rows[0];
+  if (!row) return { covered: 0, reverted: 0 };
+  const optedIn = row.opted_in === true;
+  const clientId = row.client_id || null;
+  // The job's total expected excess = van_count × £1,200. The derivation engine
+  // passes the freshly-computed figure (its capped self_drive_count isn't
+  // persisted to hh_derived_flags until the end of the run); the standalone
+  // hire-form / quick-assign callers omit it and fall back to the persisted flag
+  // (same value those paths already read for their own van-count logic).
+  const jobTotal = opts?.jobTotal != null
+    ? opts.jobTotal
+    : (parseInt(row.self_drive_count, 10) || 0) * 1200;
 
-  // The standard derivation excess record — no assignment, no money moved.
-  const tgt = await client.query(
-    `SELECT id, excess_status, notes FROM job_excess
-     WHERE job_id = $1 AND assignment_id IS NULL
-       AND excess_status IN ('needed', 'pending', 'waived')
-     ORDER BY created_at ASC LIMIT 1`,
-    [jobId]
-  );
-  const rec = tgt.rows[0];
-  if (!rec) return;
-  const isAutoCovered = String(rec.notes || '').includes('[Auto-covered by account]');
-
-  // Revert a previously auto-covered record back to a live requirement.
-  const revert = async (): Promise<void> => {
-    if (!(isAutoCovered && rec.excess_status === 'waived')) return;
-    await client.query(
+  // Revert only the records WE auto-covered (marker present) back to a live
+  // requirement — leaves a manual staff waive (no marker) untouched. Does NOT
+  // touch excess_amount_required: each record's required figure (the driver's
+  // individual liability, or the derivation stub's van-total) is maintained by
+  // its own creation/derivation path, so we only flip the status label.
+  //
+  // The pattern is a PLAIN '...' string, never E'...' (Oct 2026). In an E''
+  // string Postgres eats the backslashes, so `\[` arrived as a bare `[`, the
+  // marker became a bracket expression with the invalid range `o-c`, and this
+  // UPDATE threw "invalid regular expression" the first time it met a real row
+  // — rolling back the whole derivation for that job. It had never fired.
+  const revert = async (): Promise<number> => {
+    const r = await q(
       `UPDATE job_excess
-       SET excess_status = 'needed', claim_notes = NULL, excess_amount_required = $2,
-           notes = NULLIF(regexp_replace(COALESCE(notes, ''), E'\\n?\\[Auto-covered by account\\][^\\n]*', '', 'g'), ''),
+       SET excess_status = 'needed',
+           claim_notes = NULL,
+           notes = NULLIF(regexp_replace(COALESCE(notes, ''), '\\n?\\[Auto-covered by account\\][^\\n]*', '', 'g'), ''),
            updated_at = NOW()
-       WHERE id = $1`,
-      [rec.id, expectedExcess]
+       WHERE job_id = $1
+         AND excess_status = 'waived'
+         AND COALESCE(notes, '') LIKE '%' || $2 || '%'`,
+      [jobId, AUTO_COVER_MARKER]
     );
-    result.requirementsUpdated.push('excess_record (auto-cover removed — reverted to needed)');
+    return r.rowCount || 0;
   };
 
-  if (!optedIn || !clientId) { await revert(); return; }
+  if (!optedIn || !clientId || jobTotal <= 0) {
+    return { covered: 0, reverted: await revert() };
+  }
 
   // Client's standing held-on-account balance (this job's own records excluded).
-  const bal = await client.query(
+  const bal = await q(
     `SELECT COALESCE(SUM(h.held_amount), 0) AS balance
      FROM job_excess je
      JOIN v_excess_held h ON h.excess_id = je.id
@@ -1167,22 +1236,23 @@ async function autoCoverExcessFromAccount(
   );
   const balance = parseFloat(bal.rows[0]?.balance || 0);
 
-  if (expectedExcess > 0 && balance >= expectedExcess) {
-    if (rec.excess_status === 'waived' && isAutoCovered) return; // already covered — idempotent
-    const marker = `[Auto-covered by account] £${expectedExcess.toLocaleString()} covered by £${balance.toLocaleString()} held on account for this client — no fresh excess collected.`;
-    await client.query(
-      `UPDATE job_excess
-       SET excess_status = 'waived', claim_notes = $2, excess_amount_required = $3,
-           notes = CASE WHEN COALESCE(notes, '') LIKE '%[Auto-covered by account]%' THEN notes
-                        ELSE COALESCE(notes || E'\n', '') || $2 END,
-           updated_at = NOW()
-       WHERE id = $1`,
-      [rec.id, marker, expectedExcess]
-    );
-    result.requirementsUpdated.push(`excess_record (auto-covered by £${balance.toLocaleString()} held on account)`);
-  } else {
-    await revert(); // balance no longer sufficient — revert any prior auto-cover
+  if (balance < jobTotal) {
+    return { covered: 0, reverted: await revert() };
   }
+
+  const marker = `${AUTO_COVER_MARKER} £${jobTotal.toLocaleString()} covered by £${balance.toLocaleString()} held on account for this client — no fresh excess collected.`;
+  const r = await q(
+    `UPDATE job_excess
+     SET excess_status = 'waived',
+         claim_notes = $2,
+         notes = CASE WHEN COALESCE(notes, '') LIKE '%' || $3 || '%' THEN notes
+                      ELSE COALESCE(notes || E'\n', '') || $2 END,
+         updated_at = NOW()
+     WHERE job_id = $1
+       AND excess_status IN ('needed', 'pending')`,
+    [jobId, marker, AUTO_COVER_MARKER]
+  );
+  return { covered: r.rowCount || 0, reverted: 0 };
 }
 
 /**
@@ -1196,41 +1266,74 @@ async function autoCoverExcessFromAccount(
  * (`amount_taken=0`, status `needed`/`pending`); records holding payments or
  * pre-auth holds are left alone — staff resolves those manually because real
  * money has moved (or is held).
+ *
+ * 'No vehicle' (Oct 2026) differs in two ways. It also covers DRIVER-linked
+ * records — a hire form submitted before the van came off leaves one per
+ * driver, and the dispatch banner reads those per assignment — and it keeps
+ * `excess_amount_required` as it was, so a restore puts the driver's own
+ * figure straight back (a waived record may carry an amount; every total
+ * already skips waived). The stub is re-priced on restore regardless.
+ * Returns the number of records suspended.
  */
-async function suspendJobExcess(client: any, jobId: string, reason: SuspensionReason): Promise<void> {
-  await client.query(
+async function suspendJobExcess(client: any, jobId: string, reason: SuspensionReason): Promise<number> {
+  const noVehicle = reason === 'No vehicle';
+  const res = await client.query(
     `UPDATE job_excess
      SET excess_status = 'waived',
-         excess_amount_required = 0,
+         excess_amount_required = CASE WHEN $3::boolean THEN excess_amount_required ELSE 0 END,
          notes = COALESCE(NULLIF(notes, '') || E'\n', '') || $2,
          updated_at = NOW()
      WHERE job_id = $1
-       AND assignment_id IS NULL
+       AND ($3::boolean OR assignment_id IS NULL)
        AND COALESCE(excess_amount_taken, 0) = 0
+       AND COALESCE(amount_held, 0) = 0
        AND excess_status IN ('needed', 'pending')
        AND (notes IS NULL OR notes NOT LIKE '%[Suspended:%')`,
-    [jobId, `[Suspended: ${reason}]`]
+    [jobId, `[Suspended: ${reason}]`, noVehicle]
   );
+  return res.rowCount || 0;
+}
+
+/** The note stamped on a record that holds real money (taken or a live
+ *  pre-auth) on a job that no longer has a vehicle on HireHop. Never
+ *  auto-resolved — "never silently move money". Idempotent: the note is the
+ *  marker, so the 30-minute sync doesn't append it again. */
+const NO_VEHICLE_MONEY_NOTE =
+  '⚠️ No vehicle on HireHop now, but excess money is already taken or held on this record. Review required.';
+
+async function flagChargedExcessWithoutVehicle(client: any, jobId: string): Promise<number> {
+  const res = await client.query(
+    `UPDATE job_excess
+     SET notes = COALESCE(NULLIF(notes, '') || E'\n', '') || $2,
+         updated_at = NOW()
+     WHERE job_id = $1
+       AND excess_status IN ('taken', 'partially_paid', 'pre_auth')
+       AND (notes IS NULL OR notes NOT LIKE '%' || $2 || '%')`,
+    [jobId, NO_VEHICLE_MONEY_NOTE]
+  );
+  return res.rowCount || 0;
 }
 
 /**
- * Restore a job_excess record that was suspended (V&D or Internal). Flips
- * status back to `needed` and strips the marker; the existing updatableExcess
- * logic in the SDH branch then sees a `needed` record with stale (zeroed)
- * required amount and recomputes it via the standard £1,200 ×
- * self_drive_count path. Marker-gated so we never touch records that were
- * genuinely staff-waived.
+ * Restore a job_excess record that was suspended (V&D, Internal or No
+ * vehicle). Flips status back to `needed` and strips the marker; the existing
+ * updatableExcess logic in the SDH branch then sees a `needed` stub with a
+ * stale (zeroed) required amount and recomputes it via the standard £1,200 ×
+ * self_drive_count path. A driver-linked record (only ever suspended by 'No
+ * vehicle', which keeps its amount) comes back at the driver's own figure.
+ * Marker-gated so we never touch records that were genuinely staff-waived.
  */
 async function restoreJobExcessFromSuspension(client: any, jobId: string): Promise<void> {
   await client.query(
     `UPDATE job_excess
      SET excess_status = 'needed',
          notes = NULLIF(TRIM(BOTH E'\n ' FROM
-           REPLACE(REPLACE(COALESCE(notes, ''), '[Suspended: Van & Driver]', ''), '[Suspended: Internal]', '')), ''),
+           REPLACE(REPLACE(REPLACE(COALESCE(notes, ''),
+             '[Suspended: Van & Driver]', ''), '[Suspended: Internal]', ''), '[Suspended: No vehicle]', '')), ''),
          updated_at = NOW()
      WHERE job_id = $1
-       AND assignment_id IS NULL
-       AND (notes LIKE '%[Suspended: Van & Driver]%' OR notes LIKE '%[Suspended: Internal]%')
+       AND (notes LIKE '%[Suspended: Van & Driver]%' OR notes LIKE '%[Suspended: Internal]%'
+            OR notes LIKE '%[Suspended: No vehicle]%')
        AND COALESCE(excess_amount_taken, 0) = 0`,
     [jobId]
   );

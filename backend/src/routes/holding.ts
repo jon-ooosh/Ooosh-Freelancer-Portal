@@ -23,6 +23,8 @@ import { emailService } from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 import { buildMerchLabelPdf } from '../services/holding-label-pdf';
 import { syncMerchRequirementStatus } from '../services/holding-requirement-sync';
+import { HELD_ITEM_SELECT } from '../services/held-item-query';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 
@@ -67,7 +69,11 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
     if (j.rows.length > 0) { jobId = j.rows[0].id; jobName = j.rows[0].job_name; }
   }
 
-  const description = b.box_count ? `${b.box_count} box(es) of merch/equipment` : 'Merch/equipment (box count TBC)';
+  // Description says WHAT it is, never HOW MANY — a count baked in here froze
+  // at declaration time ("5 box(es)…") and stayed wrong once a partial arrival
+  // was booked in. The quantity lives in box_count/received_count and is
+  // rendered from there on every surface (frontend holding/counts.ts).
+  const description = 'Merch/equipment';
 
   const ins = await query(
     `INSERT INTO held_items (
@@ -174,52 +180,9 @@ router.get('/:id/label', async (req: AuthRequest, res: Response) => {
 
 const TERMINAL = ['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'];
 
-// Shared SELECT with the joined display fields the frontend expects
-const SELECT_WITH_JOINS = `
-  SELECT h.*,
-         (p.first_name || ' ' || p.last_name)      AS owner_person_name,
-         o.name                                    AS owner_organisation_name,
-         loc.name                                  AS storage_location_name,
-         j.job_name                                AS job_name,
-         fv.reg                                    AS found_vehicle_reg,
-         (rbp.first_name || ' ' || rbp.last_name)  AS received_by_name,
-         (SELECT COUNT(*)::int FROM interactions i WHERE i.held_item_id = h.id) AS discussion_count,
-         -- Chase derivation — single source of truth; mirrors the daily scan in
-         -- services/holding-reminders.ts so the list, detail card and review
-         -- queue can never disagree about "what's due".
-         CASE
-           WHEN h.kind <> 'lost_property'
-             OR h.status IN ('collected','shipped_back','disposed','cancelled')
-             OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
-             OR h.found_date IS NULL THEN NULL
-           WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE
-             THEN h.expected_collection_date
-           ELSE GREATEST(
-             (h.found_date + INTERVAL '7 days')::date,
-             COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
-           )
-         END                                       AS next_chase_due,
-         CASE
-           WHEN h.kind <> 'lost_property' THEN NULL
-           WHEN h.status IN ('collected','shipped_back','disposed','cancelled')
-             OR (h.owner_person_id IS NULL AND h.owner_organisation_id IS NULL)
-             OR h.found_date IS NULL THEN 'none'
-           WHEN h.expected_collection_date IS NOT NULL AND h.expected_collection_date >= CURRENT_DATE THEN 'paused'
-           WHEN GREATEST(
-             (h.found_date + INTERVAL '7 days')::date,
-             COALESCE((h.last_chased_at + INTERVAL '7 days')::date, (h.found_date + INTERVAL '7 days')::date)
-           ) <= CURRENT_DATE THEN 'due'
-           ELSE 'scheduled'
-         END                                       AS chase_state
-  FROM held_items h
-  LEFT JOIN people p              ON p.id = h.owner_person_id
-  LEFT JOIN organisations o       ON o.id = h.owner_organisation_id
-  LEFT JOIN held_item_locations loc ON loc.id = h.storage_location_id
-  LEFT JOIN jobs j                ON j.id = h.job_id
-  LEFT JOIN fleet_vehicles fv     ON fv.id = h.found_vehicle_id
-  LEFT JOIN users rb              ON rb.id = h.received_by
-  LEFT JOIN people rbp            ON rbp.id = rb.person_id
-`;
+// The shared SELECT (incl. the derived next_action / chase columns) lives in
+// services/held-item-query.ts so the dashboard reads the same definition.
+const SELECT_WITH_JOINS = HELD_ITEM_SELECT;
 
 // ════════════════════════ LOCATIONS (picklist) ════════════════════════
 
@@ -333,20 +296,32 @@ router.get('/by-job/:jobId', async (req: AuthRequest, res: Response) => {
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   const { kind, status, search, owner_unknown, include_done } = req.query;
-  let sql = `${SELECT_WITH_JOINS} WHERE 1=1`;
+  // Wrapped so the ORDER BY can use the derived action_due inside a COALESCE
+  // (Postgres allows a bare output alias in ORDER BY, but not one inside an
+  // expression). Negligible at this table's size — tens of open rows.
+  //
+  // The Holding page filters by next_action CLIENT-side off this one response,
+  // so the action-strip counts stay stable while a filter is applied. No
+  // server-side next_action param — one filter implementation, not two.
+  let sql = `SELECT * FROM (${SELECT_WITH_JOINS}) q WHERE 1=1`;
   const params: unknown[] = [];
   let i = 1;
-  if (kind) { sql += ` AND h.kind = $${i++}`; params.push(kind); }
-  if (status) { sql += ` AND h.status = $${i++}`; params.push(status); }
-  if (owner_unknown === 'true') { sql += ` AND h.owner_unknown = true`; }
-  if (include_done !== 'true') { sql += ` AND h.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')`; }
+  if (kind) { sql += ` AND q.kind = $${i++}`; params.push(kind); }
+  if (status) { sql += ` AND q.status = $${i++}`; params.push(status); }
+  if (owner_unknown === 'true') { sql += ` AND q.owner_unknown = true`; }
+  if (include_done !== 'true') { sql += ` AND q.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')`; }
   if (search) {
-    sql += ` AND (h.description ILIKE $${i} OR h.client_name_text ILIKE $${i} OR h.notes ILIKE $${i}
-                  OR CAST(h.hh_job_number AS TEXT) ILIKE $${i})`;
+    sql += ` AND (q.description ILIKE $${i} OR q.client_name_text ILIKE $${i} OR q.notes ILIKE $${i}
+                  OR CAST(q.hh_job_number AS TEXT) ILIKE $${i})`;
     params.push(`%${search}%`);
     i++;
   }
-  sql += ` ORDER BY COALESCE(h.needed_by, h.dispose_after, h.created_at::date) ASC, h.created_at DESC`;
+  // Resolved rows sink to the bottom when "show done" is on (false < true in
+  // Postgres), then "when does this need me" — action_due, falling back to the
+  // legacy needed-by ordering for rows with no action date.
+  sql += ` ORDER BY (q.next_action = 'none') ASC,
+                    COALESCE(q.action_due, q.needed_by, q.dispose_after, q.created_at::date) ASC,
+                    q.created_at DESC`;
   const result = await query(sql, params);
   res.json({ data: result.rows });
 });
@@ -494,6 +469,7 @@ router.put('/:id', validate(createSchema.partial()), async (req: AuthRequest, re
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
   if (result.rows[0].job_id) await syncMerchRequirementStatus(result.rows[0].job_id);
+  await retireDoneBells('held_item_review', req.params.id as string);
   res.json({ data: result.rows[0] });
 });
 
@@ -530,6 +506,18 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   const clientNameText = b.client_name_text ?? ((ownerGiven || ownerOrgId) ? null : jobCtx.clientName);
 
   // edit=true → authoritative SET (change/clear). Otherwise COALESCE backfill.
+  //
+  // The edit branch casts every parameter it tests with IS NOT NULL. Postgres
+  // types the SET list's expressions BEFORE it assigns them to their columns,
+  // so a bare `$1 IS NOT NULL` reached it untyped and the whole statement was
+  // refused ("could not determine data type of parameter $1") — every edit
+  // from the Holding page's owner/job form 500'd from 14 Oct 2026 until this
+  // fix. The backfill branch never hit it: its COALESCE types the parameter.
+  //
+  // needed_by follows the job when it was the OLD job's out date (i.e. it was
+  // derived, not typed): a box moved from job A to job B otherwise kept A's
+  // deadline. A typed date stays put. In a SET expression `job_id` and
+  // `needed_by` are the row's values BEFORE this update.
   const result = await query(
     edit
       ? `UPDATE held_items SET
@@ -539,10 +527,15 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
             job_id                = $4,
             hh_job_number         = $5,
             owner_unknown         = CASE
-              WHEN $1 IS NOT NULL OR $2 IS NOT NULL OR $3 IS NOT NULL THEN false ELSE true END,
+              WHEN $1::uuid IS NOT NULL OR $2::uuid IS NOT NULL OR $3::text IS NOT NULL THEN false ELSE true END,
             needed_by             = CASE
-              WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
-              THEN (SELECT out_date::date FROM jobs WHERE id = $4)
+              WHEN kind NOT IN ('incoming','temp_storage') THEN needed_by
+              WHEN job_id IS DISTINCT FROM $4::uuid
+                   AND needed_by IS NOT NULL
+                   AND needed_by = (SELECT out_date::date FROM jobs WHERE id = job_id)
+                THEN (SELECT out_date::date FROM jobs WHERE id = $4::uuid)
+              WHEN needed_by IS NULL AND $4::uuid IS NOT NULL
+                THEN (SELECT out_date::date FROM jobs WHERE id = $4::uuid)
               ELSE needed_by END,
             updated_at            = NOW()
          WHERE id = $6 RETURNING *`
@@ -576,6 +569,11 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   if (item.job_id) jobsToSync.add(item.job_id);
   for (const jid of jobsToSync) await syncMerchRequirementStatus(jid);
   if (item.job_id) await logToJobTimeline(item, req.user!.id, 'linked');
+  // Tell the OLD job where its item went, so its timeline doesn't just stop.
+  if (oldJobId && oldJobId !== item.job_id) {
+    await logToJobTimeline({ ...item, job_id: oldJobId }, req.user!.id,
+      item.hh_job_number ? `moved to job #${item.hh_job_number}` : 'unlinked from this job');
+  }
 
   res.json({ data: item });
 });
@@ -605,6 +603,7 @@ router.post('/:id/collected', validate(collectedSchema), async (req: AuthRequest
     await logToJobTimeline(result.rows[0], req.user!.id, status === 'given_to_client' ? 'given to client' : 'collected');
     await syncMerchRequirementStatus(result.rows[0].job_id);
   }
+  await retireDoneBells('held_item_review', req.params.id as string);
   res.json({ data: result.rows[0] });
 });
 
@@ -653,6 +652,7 @@ router.post('/:id/ship-back', validate(shipBackSchema), async (req: AuthRequest,
     await logToJobTimeline(result.rows[0], req.user!.id, emailed ? `shipped back, tracking emailed (${to})` : 'shipped back');
     await syncMerchRequirementStatus(result.rows[0].job_id);
   }
+  await retireDoneBells('held_item_review', req.params.id as string);
   res.json({ data: result.rows[0], emailed, notified_to: emailed ? to : null });
 });
 
@@ -665,6 +665,7 @@ router.post('/:id/dispose', async (req: AuthRequest, res: Response) => {
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
   if (result.rows[0].job_id) await syncMerchRequirementStatus(result.rows[0].job_id);
+  await retireDoneBells('held_item_review', req.params.id as string);
   res.json({ data: result.rows[0] });
 });
 
@@ -864,6 +865,8 @@ router.post('/:id/chase', async (req: AuthRequest, res: Response) => {
   );
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
   if (result.rows[0].job_id) await logToJobTimeline(result.rows[0], req.user!.id, `chase ${tier} sent (${recipient.to})`);
+  // Chased — the daily "N chases ready to review" digest may be done.
+  await retireDoneBells('lost_property_chases');
   res.json({ data: result.rows[0], emailed: true, tier, notified_to: recipient.to });
 });
 

@@ -67,6 +67,7 @@ export interface RosterRow {
     planned_start: string | null;
     planned_end: string | null;
     note_count: number;
+    task_count: number;                // open freelancer tasks on this evening (§21)
     report: {
       submitted_at: string;
       submitted_by_name: string | null;
@@ -140,7 +141,8 @@ async function loadShifts(from: string, to: string): Promise<Map<string, any>> {
             rp.first_name AS report_first, rp.last_name AS report_last,
             a.status AS assignment_status, a.person_id,
             p.first_name, p.last_name, p.tags,
-            (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count
+            (SELECT COUNT(*) FROM interactions i WHERE i.shift_id = s.id)::int AS note_count,
+            (SELECT COUNT(*) FROM freelancer_tasks ft WHERE ft.shift_id = s.id AND ft.status = 'open')::int AS task_count
      FROM studio_sitter_shifts s
      LEFT JOIN studio_sitter_shift_assignments a
        ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
@@ -201,6 +203,7 @@ export async function getRoster(from: string, to: string, includeSpeculative = f
             planned_start: shiftRow.planned_start,
             planned_end: shiftRow.planned_end,
             note_count: shiftRow.note_count ?? 0,
+            task_count: shiftRow.task_count ?? 0,
             report: shiftRow.report_submitted_at && lockupTemplate
               ? {
                   submitted_at: shiftRow.report_submitted_at,
@@ -236,6 +239,58 @@ export interface JobCoverageEvening {
   assignee: { id: string; name: string } | null;
   note_count: number;                // handover-thread messages on this shift
   report_submitted_at: string | null; // lock-up report submitted (null if not)
+}
+
+/** Where a staff link about one shift (lock-up email, handover bell) should land.
+ *  A shift is one evening shared by every band in that night, so: the job itself
+ *  when exactly one job needed a sitter that evening (its Overview shows the
+ *  lock-up report + handover notes), otherwise the Rehearsals roster. Returns a
+ *  path — prefix with the staff domain for emails. Never throws. */
+export async function shiftLinkPath(shiftId: string): Promise<{ path: string; isJob: boolean }> {
+  const roster = { path: '/operations/rehearsals', isJob: false };
+  try {
+    const res = await query(`SELECT shift_date::text AS shift_date FROM studio_sitter_shifts WHERE id = $1`, [shiftId]);
+    if (!res.rows[0]) return roster;
+    const date = String(res.rows[0].shift_date).slice(0, 10);
+    // Include provisional jobs — the night has happened; a firm job wins if both.
+    const jobs = (await loadRehearsalJobs(date, date, true))
+      .filter((j) => j.detail.evenings.some((e) => e.date === date && e.sitter_needed));
+    const firm = jobs.filter((j) => !SPECULATIVE_STATUSES.has(j.pipeline_status || ''));
+    const pick = firm.length > 0 ? firm : jobs;
+    return pick.length === 1 ? { path: `/jobs/${pick[0].id}`, isJob: true } : roster;
+  } catch (err) {
+    console.error('[studio-sitter] shiftLinkPath failed:', err);
+    return roster;
+  }
+}
+
+export interface ShiftJobRef {
+  job_id: string;
+  hh_job_number: number | null;
+  label: string;
+}
+
+/** The rehearsal jobs that needed a sitter on each of these evenings. A shift
+ *  belongs to an evening, not a job (every band in that night shares it), so
+ *  this is how a shift is tied back to its job(s) — e.g. a sitter's History
+ *  rows. Includes provisional jobs, like shiftLinkPath: the night has happened. */
+export async function getSitterJobsByDate(dates: string[]): Promise<Map<string, ShiftJobRef[]>> {
+  const out = new Map<string, ShiftJobRef[]>();
+  if (dates.length === 0) return out;
+  const sorted = [...dates].sort();
+  const wanted = new Set(dates);
+  const jobs = await loadRehearsalJobs(sorted[0], sorted[sorted.length - 1], true);
+  for (const job of jobs) {
+    const label = job.job_name || job.client_name || (job.hh_job_number ? `#${job.hh_job_number}` : 'Rehearsal');
+    for (const eve of job.detail.evenings) {
+      if (!eve.sitter_needed || !wanted.has(eve.date)) continue;
+      const arr = out.get(eve.date) ?? [];
+      arr.push({ job_id: job.id, hh_job_number: job.hh_job_number, label });
+      out.set(eve.date, arr);
+    }
+  }
+  for (const arr of out.values()) arr.sort((a, b) => (a.hh_job_number ?? 0) - (b.hh_job_number ?? 0));
+  return out;
 }
 
 /** Per-job coverage for the job's sitter-needed evenings (drives the card chips). */

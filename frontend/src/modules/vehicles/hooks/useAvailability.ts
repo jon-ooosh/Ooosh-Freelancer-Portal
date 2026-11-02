@@ -21,10 +21,17 @@ export type UnavailableAssignment = {
   status: string
   jobId: string | null
   hirehopJobId: number | null
+  /** The OP job the hold belongs to (resolved by the dual job match), for linking. */
+  opJobId?: string | null
   jobName: string | null
   hhJobNumber: number | null
+  /** YYYY-MM-DD */
   effectiveStart: string | null
+  /** YYYY-MM-DD */
   effectiveEnd: string | null
+  /** HH:MM — the times the overlap test uses (job out/end time, default 09:00) */
+  effectiveStartTime?: string | null
+  effectiveEndTime?: string | null
   driverName: string | null
 }
 

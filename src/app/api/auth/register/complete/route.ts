@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { SignJWT } from 'jose'
 import { registerCompleteOP, isOpClientError, OpApiError } from '@/lib/op-api'
+import { setDeviceCookie, clientUserAgent } from '@/lib/portal-session'
 
 // Session secret for JWT signing
 const getSessionSecret = () => {
@@ -15,6 +16,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { email, password, code } = body
+    // "Remember this phone for 90 days" (two-step sign-in, FREELANCER-PORTAL-SPEC §7):
+    // the sign-up code proved the inbox, so it counts as the second step.
+    const trustDevice = body.trustDevice === true
 
     // Validate input
     if (!email || !password) {
@@ -41,7 +45,7 @@ export async function POST(request: NextRequest) {
     }
 
     try {
-      const opResult = await registerCompleteOP(normalizedEmail, code, password)
+      const opResult = await registerCompleteOP(normalizedEmail, code, password, { trustDevice, userAgent: clientUserAgent(request) })
       if (opResult.success && opResult.user) {
         // Re-sign with SESSION_SECRET so middleware accepts the cookie
         // (same reason as login/route.ts)
@@ -67,6 +71,7 @@ export async function POST(request: NextRequest) {
           maxAge: 30 * 24 * 60 * 60,
           path: '/',
         })
+        setDeviceCookie(response, opResult.deviceToken)
 
         return response
       }

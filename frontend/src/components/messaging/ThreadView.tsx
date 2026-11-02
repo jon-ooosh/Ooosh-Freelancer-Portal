@@ -24,6 +24,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { displayFirstName, displayFullName, nameSearchText } from '../../lib/displayName';
 import { api } from '../../services/api';
 import {
   AttachmentList,
@@ -64,6 +65,7 @@ interface UserOption {
   id: string;
   email: string;
   first_name: string | null;
+  preferred_name?: string | null;
   last_name: string | null;
 }
 
@@ -173,7 +175,7 @@ export default function ThreadView({ interactionId, onAcknowledge, onSnooze, onR
   }, []);
 
   const filteredUsers = users.filter((u) => {
-    const name = `${u.first_name || ''} ${u.last_name || ''}`.toLowerCase();
+    const name = nameSearchText(u);
     return name.includes(mentionFilter.toLowerCase()) || u.email.toLowerCase().includes(mentionFilter.toLowerCase());
   });
 
@@ -198,7 +200,7 @@ export default function ThreadView({ interactionId, onAcknowledge, onSnooze, onR
     const cursorPos = ta.selectionStart;
     const upToCursor = content.slice(0, cursorPos);
     const atPos = upToCursor.lastIndexOf('@');
-    const displayName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email;
+    const displayName = displayFullName(u, u.email);
     const newContent = content.slice(0, atPos) + `@${displayName} ` + content.slice(cursorPos);
     setContent(newContent);
     setShowMentions(false);
@@ -342,11 +344,11 @@ export default function ThreadView({ interactionId, onAcknowledge, onSnooze, onR
                   }`}
                 >
                   <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                    {(u.first_name || u.email)[0].toUpperCase()}
+                    {(displayFirstName(u, u.email)[0] ?? '?').toUpperCase()}
                   </span>
                   <span>
                     <span className="font-medium">
-                      {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
+                      {displayFullName(u, u.email)}
                     </span>
                     {u.first_name && (
                       <span className="text-gray-400 text-xs ml-1.5">{u.email}</span>
@@ -365,7 +367,7 @@ export default function ThreadView({ interactionId, onAcknowledge, onSnooze, onR
               if (!u) return null;
               return (
                 <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
-                  @{u.first_name || u.email}
+                  @{displayFirstName(u, u.email)}
                   <button
                     type="button"
                     onClick={() => setMentionedIds(mentionedIds.filter((id) => id !== uid))}

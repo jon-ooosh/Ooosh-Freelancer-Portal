@@ -4,7 +4,22 @@ import { query } from '../config/database';
  * Set the pre-hire excess requirement light to reflect REAL coverage across the
  * whole job:
  *   - 'done'  (green)  → EVERY excess record on the job is covered
- *   - 'in_progress' (amber) → at least one record still has money outstanding
+ *   - 'in_progress' (amber) → some money has moved, but not enough yet
+ *   - 'not_started' (grey) → nothing has happened to this excess at all
+ *
+ * The not_started arm was added Sep 2026. Before it, this was BINARY — covered
+ * or 'in_progress' — so a job with £1,200 required and nothing collected, on
+ * which nobody had lifted a finger, reported "In progress" on the card, the
+ * dashboard pip AND the pre-hire staff briefing email. It should say To do.
+ * `not_started` maps to `todo` in job-progress-strip.ts, so the one status fix
+ * corrects every surface at once.
+ *
+ * "Started" deliberately does NOT count a `not_required` record. Those are the
+ * top-N losers — created automatically the moment a second driver is added to a
+ * one-van hire, before anyone has done anything — so counting them would flip a
+ * multi-driver job to amber on arrival, which is the same lie in a new place.
+ * It DOES count real money (taken/held) and any deliberate staff decision
+ * (waived / rolled over / reimbursed / claimed / released).
  *
  * "Covered" per record = terminal-covered state, OR (amount_taken + amount_held)
  * meets the required amount. Terminal-covered = waived / rolled_over /
@@ -34,18 +49,32 @@ export async function syncExcessRequirementStatus(
 
   await run(
     `UPDATE job_requirements jr
-     SET status = CASE WHEN cov.covered THEN 'done' ELSE 'in_progress' END,
+     SET status = cov.target,
          updated_at = NOW()
      FROM (
        SELECT
-         NOT EXISTS (
-           SELECT 1 FROM job_excess je
-           WHERE je.job_id = $1
-             AND je.excess_status NOT IN
-               ('waived','rolled_over','not_required','reimbursed','fully_claimed','partially_reimbursed')
-             AND COALESCE(je.excess_amount_taken, 0) + COALESCE(je.amount_held, 0)
-                 < COALESCE(je.excess_amount_required, 0)
-         ) AS covered,
+         CASE
+           -- Fully covered: every record either terminal-covered or funded.
+           WHEN NOT EXISTS (
+             SELECT 1 FROM job_excess je
+             WHERE je.job_id = $1
+               AND je.excess_status NOT IN
+                 ('waived','rolled_over','not_required','reimbursed','fully_claimed','partially_reimbursed')
+               AND COALESCE(je.excess_amount_taken, 0) + COALESCE(je.amount_held, 0)
+                   < COALESCE(je.excess_amount_required, 0)
+           ) THEN 'done'
+           -- Not covered, and nothing has happened yet -> To do, not amber.
+           WHEN NOT EXISTS (
+             SELECT 1 FROM job_excess je3
+             WHERE je3.job_id = $1
+               AND (
+                 COALESCE(je3.excess_amount_taken, 0) + COALESCE(je3.amount_held, 0) > 0
+                 OR je3.excess_status IN
+                   ('waived','rolled_over','reimbursed','fully_claimed','partially_reimbursed','released')
+               )
+           ) THEN 'not_started'
+           ELSE 'in_progress'
+         END AS target,
          EXISTS (SELECT 1 FROM job_excess je2 WHERE je2.job_id = $1) AS has_records
      ) cov
      WHERE jr.job_id = $1
@@ -53,7 +82,7 @@ export async function syncExcessRequirementStatus(
        AND jr.phase = 'pre_hire'
        AND jr.status IN ('not_started', 'in_progress', 'done')
        AND cov.has_records
-       AND jr.status <> (CASE WHEN cov.covered THEN 'done' ELSE 'in_progress' END)`,
+       AND jr.status <> cov.target`,
     [jobId],
   );
 

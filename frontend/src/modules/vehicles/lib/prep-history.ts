@@ -10,6 +10,13 @@ export interface PrepHistoryItem {
   value: string
   detail?: string
   unit?: string
+  /**
+   * Set at prep time from the checklist item's own flagValues, so it is the
+   * authoritative "this answer raised an issue" — not a guess from the wording.
+   * Matters for fluids, whose flagged answers are now 'Empty' and 'Overfull'
+   * as well as 'Problem'. Absent on sessions recorded before it was saved.
+   */
+  flagged?: boolean
 }
 
 export interface PrepHistorySection {
