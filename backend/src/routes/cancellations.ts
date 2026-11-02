@@ -28,6 +28,7 @@ import { cancellationAlertVariables, CANCELLATION_CHASE_DAYS } from '../services
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { fullDisplayName } from '../services/display-name';
 import { ukDatePlus } from '../services/uk-date';
+import { startWatchFromCloseOut } from '../services/leads/band-watch';
 
 const router = Router();
 router.use(authenticate);
@@ -175,6 +176,9 @@ const processSchema = z.object({
   // keep_after_close=true so background scanners still fire them. See
   // CLAUDE.md → "Lost / Cancelled cleanup pattern".
   keep_requirement_ids: z.array(z.string().guid()).optional().nullable(),
+  // The modal's "Watch this band" tick: the band to watch for its next tour
+  // (TOUR-FINDER-SPEC §21; band-watch.ts).
+  watch_band_org_id: z.string().guid().optional().nullable(),
 });
 
 router.post(
@@ -191,7 +195,7 @@ router.post(
         cancellation_tier, cancellation_notice_days,
         breakdown, keep_requirement_ids, cancelled_at,
         cancellation_outstanding_balance,
-        send_client_email,
+        send_client_email, watch_band_org_id,
       } = req.body;
 
       // Verify job exists and is in a cancellable state (confirmed+)
@@ -519,6 +523,11 @@ router.post(
 
       // 12. Log audit
       await logAudit(userId, 'jobs', jobId, 'update', job, { pipeline_status: 'cancelled', cancellation_reason });
+
+      // 13. Band watch — never fails the cancellation.
+      if (watch_band_org_id) {
+        await startWatchFromCloseOut({ jobId, organisationId: watch_band_org_id, userId });
+      }
 
       res.json({ success: true, message: 'Job cancelled successfully' });
     } catch (error) {

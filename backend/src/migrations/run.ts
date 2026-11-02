@@ -363,7 +363,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '321_staff_documents_ai_shared.sql',
         '322_completion_chase_sms_setting.sql',
         '323_kiosk_devices.sql',
-        '324_site_codes.sql',
+        '324_band_watches.sql',
+        '325_site_codes.sql',
       ];
 
       for (const migration of migrations) {

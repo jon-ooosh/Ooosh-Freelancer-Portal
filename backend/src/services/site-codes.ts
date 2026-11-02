@@ -4,7 +4,7 @@
  * reads the code settings for a freelancer.
  *
  * One place to update them: Settings › Out-of-Hours Returns
- * (`ooh_gate_code`, `site_cupboard_code`, `site_lockbox_code`, migration 324).
+ * (`ooh_gate_code`, `site_cupboard_code`, `site_lockbox_code`, migration 325).
  *
  * - The yard GATE code: on any job's page from its first day to the day after
  *   its last (a late collection gets back after midnight). Low secrecy: every

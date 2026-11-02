@@ -24,6 +24,7 @@ import { useEmailProblems } from '../hooks/useEmailProblems';
 import RecordActionsMenu from '../components/RecordActionsMenu';
 import WorkingTermsSummary from '../components/WorkingTermsSummary';
 import EndorsementsPanel from '../components/EndorsementsPanel';
+import WatchBandButton from '../components/leads/WatchBandButton';
 
 interface OrgDetail {
   id: string;
@@ -585,6 +586,8 @@ function OrganisationDetailContent() {
             >
               + New Enquiry
             </button>
+            {/* Band watch — tell us when they next tour (TOUR-FINDER-SPEC §21) */}
+            <WatchBandButton orgId={org.id} orgType={org.type} />
             <button
               onClick={() => setShowEdit(true)}
               className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"

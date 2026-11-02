@@ -352,7 +352,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
           ? `starts ${new Date(`${l.first_date}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })}`
           : undefined,
         sub: sub || undefined,
-        tag: l.stream === 'warm' ? 'WARM' : undefined,
+        tag: l.watched ? 'WATCHED' : l.stream === 'warm' ? 'WARM' : undefined,
         href: `/jobs/leads?lead=${l.id}`,
       };
     }),

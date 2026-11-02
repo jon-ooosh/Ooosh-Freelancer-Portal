@@ -415,7 +415,7 @@ form not in yet" screen was reworded to match the guide (carry on to the custome
 office says the form is done), and the lock-up checklist's built-in photos (Jotform) were dropped from
 the code fallback: the live checklist and its photos are in Settings.
 
-**Codes (Nov 2026, migration 324, `services/site-codes.ts`):** the yard gate code shows on any job's
+**Codes (Nov 2026, migration 325, `services/site-codes.ts`):** the yard gate code shows on any job's
 page from its day to the day after (a late collection is back after midnight); the gate, grey cupboard
 and key lockbox codes show on a studio sitter's shift page on the day only, and still after locking
 up (the keys go back in the lockbox). One place to change them: Settings › Out-of-Hours Returns. Not a

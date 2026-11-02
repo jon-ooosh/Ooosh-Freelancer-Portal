@@ -1509,6 +1509,25 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: DVSA MOT refresh scheduled daily 07:30 Europe/London');
 
+  // ── Band watch ───────────────────────────────────────────────────────────
+  // Daily at 07:05 Europe/London: watched bands due their weekly check are
+  // asked of Ticketmaster (UK + Europe); a new tour becomes a warm lead and
+  // the person who ticked the watch gets a bell. Daily rather than weekly so
+  // a day it can't run (a lead search in progress, Ticketmaster down) is
+  // caught up the next morning. Off switch: band_watch_enabled.
+  // docs/TOUR-FINDER-SPEC.md §21, services/leads/band-watch.ts.
+  cron.schedule('5 7 * * *', async () => {
+    try {
+      const { runBandWatchCheck } = await import('../services/leads/band-watch');
+      const r = await runBandWatchCheck();
+      if (r.skipped) console.log(`Scheduler: band watch skipped (${r.skipped})`);
+      else console.log(`Scheduler: band watch — ${r.checked} checked, ${r.newLeads} new tour(s), ${r.failed} failed`);
+    } catch (err) {
+      console.error('Scheduler: band watch failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: band watch scheduled daily 07:05 Europe/London');
+
   // ── PCN pay-direct chase ladder ──────────────────────────────────────────
   // Daily at 09:35 Europe/London. Chases drivers who were told to pay a charge
   // direct but haven't sent proof, on the 3/5/7-day ladder. info@ alerted at

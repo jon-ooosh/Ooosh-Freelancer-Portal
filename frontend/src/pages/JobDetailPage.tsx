@@ -38,6 +38,7 @@ import { ProjectPanel, AddToProjectModal } from '../components/JobProjects';
 import { PROJECT_COPY } from '../lib/projectCopy';
 import { OPTION_COPY } from '../lib/optionCopy';
 import { isOptionOpen, stripOptionSuffix, ALTERNATIVE_QUOTE_LOST_REASON } from '../lib/quoteOptions';
+import WatchBandTick from '../components/leads/WatchBandTick';
 import { validateDateTimeOrdering, addDays } from '../lib/jobDates';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -8013,6 +8014,10 @@ function StatusTransitionModal({
   // retro note, so every existing "Job retro:" reader keeps working unchanged.
   const [retroNextTime, setRetroNextTime] = useState('');
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
+  // "Watch this band for their next tour" (lost / completed) — the org, or null.
+  const [watchOrgId, setWatchOrgId] = useState<string | null>(null);
+  const offerWatch = targetStatus === 'completed'
+    || (targetStatus === 'lost' && lostReason !== ALTERNATIVE_QUOTE_LOST_REASON);
 
   // Multi-reminder system
   interface Reminder {
@@ -8152,6 +8157,7 @@ function StatusTransitionModal({
         }));
       }
     }
+    if (offerWatch && watchOrgId) data.watch_band_org_id = watchOrgId;
     if (note) data.transition_note = note as string;
     onConfirm(data);
   };
@@ -8492,6 +8498,13 @@ function StatusTransitionModal({
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* Band watch — never for an alternative-quote loss (TOUR-FINDER-SPEC §21) */}
+        {offerWatch && jobId && (
+          <div className="mb-4">
+            <WatchBandTick jobId={jobId} value={watchOrgId} onChange={setWatchOrgId} />
           </div>
         )}
 

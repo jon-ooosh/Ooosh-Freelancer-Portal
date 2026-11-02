@@ -10,7 +10,8 @@ import type {
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PERSON_ORG_ROLES } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 import { jobDisplayOrgNameOr } from '../lib/jobOrgName';
-import { stripOptionSuffix } from '../lib/quoteOptions';
+import { stripOptionSuffix, ALTERNATIVE_QUOTE_LOST_REASON } from '../lib/quoteOptions';
+import WatchBandTick from '../components/leads/WatchBandTick';
 import { PROJECT_COPY } from '../lib/projectCopy';
 import { ukToday } from '../lib/ukDate';
 import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
@@ -669,12 +670,14 @@ function TransitionModal({
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
+  // "Watch this band for their next tour" on a loss — the org, or null.
+  const [watchOrgId, setWatchOrgId] = useState<string | null>(null);
 
   // This modal stays mounted between opens (it early-returns on !isOpen rather
   // than being conditionally rendered), so state survives a close. Re-arm the
   // auto-default each time it opens, otherwise one manual edit would suppress
   // the default for every later pause until the page is reloaded.
-  useEffect(() => { if (isOpen) setRevisitTouched(false); }, [isOpen]);
+  useEffect(() => { if (isOpen) { setRevisitTouched(false); setWatchOrgId(null); } }, [isOpen]);
 
   // Mirrors JobDetailPage's StatusTransitionModal — "Under 4-day window" pauses
   // pre-fill a revisit date a fortnight before the hire starts. Declared BEFORE
@@ -706,6 +709,7 @@ function TransitionModal({
       data.lost_reason = lostReason;
       if (lostDetail) data.lost_detail = lostDetail;
       if (keepRequirementIds.size > 0) data.keep_requirement_ids = Array.from(keepRequirementIds);
+      if (watchOrgId && lostReason !== ALTERNATIVE_QUOTE_LOST_REASON) data.watch_band_org_id = watchOrgId;
     }
     if (note) data.transition_note = note;
     onConfirm(data);
@@ -816,6 +820,10 @@ function TransitionModal({
                 keepIds={keepRequirementIds}
                 onChange={setKeepRequirementIds}
               />
+            )}
+            {/* Band watch — never for an alternative-quote loss (TOUR-FINDER-SPEC §21) */}
+            {jobId && lostReason !== ALTERNATIVE_QUOTE_LOST_REASON && (
+              <WatchBandTick key={jobId} jobId={jobId} value={watchOrgId} onChange={setWatchOrgId} />
             )}
           </div>
         )}

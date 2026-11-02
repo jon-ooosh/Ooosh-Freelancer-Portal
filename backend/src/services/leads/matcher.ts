@@ -165,8 +165,10 @@ const iso = dateOnly;
 export async function linkLeadToOrg(
   leadId: string,
   orgId: string,
-  via: 'org_name' | 'job_name' | 'created',
-  opts: { enrichOrg: boolean },
+  via: 'org_name' | 'job_name' | 'created' | 'watch',
+  // tourLine replaces the "touring the UK" sentence — a band watch hit can be
+  // a European tour with no UK dates (band-watch.ts).
+  opts: { enrichOrg: boolean; tourLine?: string },
 ): Promise<void> {
   const lead = await query(
     `SELECT id, artist_name, uk_date_count, first_date, last_date FROM leads WHERE id = $1`,
@@ -175,9 +177,11 @@ export async function linkLeadToOrg(
   const l = lead.rows[0];
   if (!l) return;
   const hist = await getClientHistory(orgId, { matchVia: via, artistName: l.artist_name });
-  const summary = composeLeadSummary(l.artist_name, {
-    uk_date_count: l.uk_date_count, first_date: iso(l.first_date), last_date: iso(l.last_date),
-  }, hist);
+  const summary = opts.tourLine
+    ? (hist ? `${opts.tourLine} ${describeHistory(hist)}` : opts.tourLine)
+    : composeLeadSummary(l.artist_name, {
+      uk_date_count: l.uk_date_count, first_date: iso(l.first_date), last_date: iso(l.last_date),
+    }, hist);
   await query(
     `UPDATE leads SET matched_organisation_id = $2, match_confidence = 'exact', match_via = $3,
        stream = $4, client_history = $5, ai_summary = $6, history_scored_at = NULL, updated_at = NOW()
