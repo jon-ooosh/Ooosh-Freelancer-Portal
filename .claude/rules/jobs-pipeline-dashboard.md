@@ -40,6 +40,11 @@ Full detail: `docs/reference/PIPELINE-AND-ORGS.md`, `docs/reference/OPERATIONS-M
 - **`is_internal` mutes the client-facing chain only** (hire forms, excess, close-out cards, auto-emails, money overview, last-minute alert). It deliberately KEEPS crew & transport, vehicle allocation, post-hire vehicle/backline cards and dashboard visibility. Gate new client-facing scanners on `COALESCE(j.is_internal, false) = false`.
 - Status-reactive cards (excess, merch, cost-resolve, carnet) are **recomputed from their source data on every mutation**, never hand-ticked. `syncExcessRequirementStatus` is three-way (`not_started` / `in_progress` / `done`) — a binary version reported amber "In progress" on excesses where nothing had happened.
 
+## Backline page (`routes/backline.ts`)
+
+- **Coming Back has a departure-date gate:** both returning queries require `COALESCE(j.out_date, j.job_date)::date <= today`. The warehouse checks kit out in HireHop the day BEFORE a van leaves, so a job going out tomorrow is already HH-5 while OP holds `prepped` — without the gate it shows in Going Out AND Coming Back ("Done" off the prep card; City & Moon 16278). Don't swap it for `pipeline_status = 'dispatched'`: a van that's really out but never clicked Dispatched sits at HH-5 + `prepped` too. The date is the reliable test.
+- The returning queries prefer the `post_hire` card via `DISTINCT ON (j.id) … ORDER BY j.id, CASE WHEN jr.phase = 'post_hire' THEN 0 ELSE 1 END`. Never `ORDER BY jr.phase DESC` — `'pre' > 'post'` alphabetically, so it picks the prep card.
+
 ## Dashboard
 
 - **The canonical "operationally pre-dispatch" filter** — every surface answering "what's going out / overdue to go out" must use it, or the stat card, Today, Coming Up and Overdue Departures visibly disagree:
