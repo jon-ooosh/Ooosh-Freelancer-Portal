@@ -2,9 +2,11 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { hasManagerRole, roleAllowed } from '../lib/roles';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFirstName, displayFullName, displayInitials } from '../lib/displayName';
 import { api } from '../services/api';
 import GlobalSearch from './GlobalSearch';
 import NotificationBell from './NotificationBell';
+import LoginSecurityModal from './LoginSecurityModal';
 
 interface NavItem {
   path: string;
@@ -42,6 +44,7 @@ const navItems: NavItem[] = [
       { path: '/quick', label: '⚡ Quick Log (mobile)' },
       { path: '/operations/transport', label: 'Crew & Transport' },
       { path: '/operations/backline', label: 'Backline' },
+      { path: '/operations/endorsements', label: 'Backline – Endorsements' },
       { path: '/operations/backline-matcher', label: 'Backline Matcher' },
       { path: '/storage', label: 'Storage' },
       { path: '/holding', label: 'Holding' },
@@ -49,7 +52,6 @@ const navItems: NavItem[] = [
       { path: '/operations/carnets', label: 'Carnets' },
       { path: '/operations/rehearsals', label: 'Rehearsals' },
       { path: '/operations/problems', label: 'Problems' },
-      { path: '/operations/issues', label: 'Issues' },
     ],
   },
   {
@@ -64,6 +66,7 @@ const navItems: NavItem[] = [
       { path: '/vehicles/issues', label: 'Issues' },
       { path: '/vehicles/ve103b', label: 'VE103B Certs' },
       { path: '/vehicles/pcns', label: 'PCNs' },
+      { path: '/vehicles/claims', label: 'Claims' },
       { path: '/vehicles/fleet-map', label: 'Fleet Map' },
       { path: '/vehicles/settings', label: 'Settings' },
     ],
@@ -74,7 +77,10 @@ const navItems: NavItem[] = [
     children: [
       { path: '/money/overview', label: 'Overview', roles: ['admin', 'manager'] },
       { path: '/money/excess', label: 'Excess', roles: ['admin', 'manager'] },
-      { path: '/money/costs', label: 'Costs', roles: ['admin', 'manager', 'staff'] },
+      // Every staff role (jon, Oct 2026): general assistants hold company cards
+      // and are chased for receipts too. Approving and paying stay role-gated server-side.
+      { path: '/money/costs', label: 'Costs' },
+      { path: '/money/shop', label: 'Shop Till' },
     ],
   },
 ];
@@ -128,13 +134,13 @@ function NavDropdown({ item, isActive, userRole }: { item: NavItem; isActive: bo
 function UserAvatar({ size = 'sm' }: { size?: 'sm' | 'md' | 'lg' }) {
   const user = useAuthStore((s) => s.user);
   const sizeClasses = { sm: 'w-7 h-7 text-xs', md: 'w-9 h-9 text-sm', lg: 'w-16 h-16 text-xl' };
-  const initials = `${user?.first_name?.[0] || ''}${user?.last_name?.[0] || ''}`.toUpperCase();
+  const initials = displayInitials(user);
 
   if (user?.avatar_url) {
     return (
       <img
         src={`/api/auth/avatar/${user.avatar_url.split('/').pop()}`}
-        alt={`${user.first_name} ${user.last_name}`}
+        alt={displayFullName(user)}
         className={`${sizeClasses[size]} rounded-full object-cover ring-2 ring-ooosh-400`}
       />
     );
@@ -185,7 +191,7 @@ function UserMenu() {
       >
         <UserAvatar size="sm" />
         <span className="hidden sm:inline text-sm text-ooosh-100 max-w-[120px] truncate">
-          {user?.first_name}
+          {displayFirstName(user, '')}
         </span>
         <svg className={`hidden sm:block w-3 h-3 text-ooosh-300 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -195,7 +201,7 @@ function UserMenu() {
         <div className="absolute right-0 top-full mt-1 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50">
           {/* User info header */}
           <div className="px-4 py-3 border-b border-gray-100">
-            <p className="text-sm font-medium text-gray-900">{user?.first_name} {user?.last_name}</p>
+            <p className="text-sm font-medium text-gray-900">{displayFullName(user)}</p>
             <p className="text-xs text-gray-500 truncate">{user?.email}</p>
           </div>
 
@@ -215,25 +221,41 @@ function UserMenu() {
             )}
           </button>
 
+          {/* My Time, My Documents and My Profile were three items answering
+              the same question. One "Me" page with three tabs; the old paths
+              still work and redirect in. */}
           <button
-            onClick={() => { setOpen(false); navigate('/staff/documents'); }}
-            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            My Documents
-          </button>
-
-          <button
-            onClick={() => { setOpen(false); navigate('/profile'); }}
+            onClick={() => { setOpen(false); navigate('/me'); }}
             className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
             </svg>
-            My Profile
+            <span className="whitespace-nowrap">Me: time, docs, profile</span>
           </button>
+
+          <button
+            onClick={() => { setOpen(false); navigate('/staff/calendar'); }}
+            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            Staff Calendar
+          </button>
+
+
+          {isAdmin && (
+            <button
+              onClick={() => { setOpen(false); navigate('/staff/admin'); }}
+              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
+              Staff
+            </button>
+          )}
 
           {isAdmin && (
             <button
@@ -282,6 +304,22 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Login security (STAFF-LOGIN-SECURITY-SPEC §6): the banner's "Set up now"
+  // opens the flow right here; an admin without a passkey gets it unasked and
+  // cannot close it (§1.2). The stored user was written at login, so a session
+  // that predates this code learns its security state from /auth/me once.
+  const [securityOpen, setSecurityOpen] = useState(false);
+  const updateUser = useAuthStore((s) => s.updateUser);
+  useEffect(() => {
+    api.get<{ mfa_enrolled?: boolean; mfa_enforced_from?: string | null; passkeys?: number; passkey_required?: boolean }>('/auth/me')
+      .then((me) => updateUser({
+        mfa_enrolled: me.mfa_enrolled, mfa_enforced_from: me.mfa_enforced_from,
+        passkeys: me.passkeys, passkey_required: me.passkey_required,
+      }))
+      .catch(() => { /* the banner simply waits for the next login */ });
+  }, [updateUser]);
+  const passkeyRequired = user?.passkey_required === true;
 
   function isItemActive(item: NavItem): boolean {
     if (item.children) {
@@ -395,18 +433,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   Inbox
                 </Link>
                 <Link
-                  to="/staff/documents"
+                  to="/me"
                   onClick={() => setMobileMenuOpen(false)}
                   className="block px-3 py-2 rounded text-sm font-medium text-ooosh-100 hover:bg-ooosh-700 hover:text-white transition-colors"
                 >
-                  My Documents
-                </Link>
-                <Link
-                  to="/profile"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="block px-3 py-2 rounded text-sm font-medium text-ooosh-100 hover:bg-ooosh-700 hover:text-white transition-colors"
-                >
-                  My Profile
+                  Me
                 </Link>
                 {hasManagerRole(user?.role) && (
                   <Link
@@ -428,7 +459,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 )}
                 <div className="flex items-center justify-between px-3 py-2">
                   <span className="text-sm text-ooosh-200">
-                    {user?.first_name} {user?.last_name}
+                    {displayFullName(user)}
                   </span>
                   <button
                     onClick={() => { logout(); setMobileMenuOpen(false); }}
@@ -442,6 +473,28 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
         )}
       </header>
+
+      {/* Login security not set up yet (STAFF-LOGIN-SECURITY-SPEC §6): a banner
+          until the enforcement date, then the login itself insists. */}
+      {user && user.mfa_enrolled === false && user.mfa_enforced_from && (
+        <div className="bg-amber-50 border-b border-amber-200">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 text-sm text-amber-900 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span>
+              Set up your login security before{' '}
+              {new Date(user.mfa_enforced_from).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })}
+              {' '}— a passkey or one email code, then your own devices are remembered.
+            </span>
+            <button type="button" onClick={() => setSecurityOpen(true)} className="font-medium underline">Set up now</button>
+          </div>
+        </div>
+      )}
+      {(securityOpen || passkeyRequired) && (
+        <LoginSecurityModal
+          required={passkeyRequired}
+          enforcedFrom={user?.mfa_enforced_from}
+          onClose={() => setSecurityOpen(false)}
+        />
+      )}
 
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

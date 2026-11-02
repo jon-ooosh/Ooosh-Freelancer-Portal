@@ -7,17 +7,21 @@
  *
  * Also handles recording payments (pushes to HH as deposits).
  */
+import { feeInvoiceRows, hireInvoiceRows, cancellationFeeGross } from '../services/cancellation-close';
+import { invoiceGross } from '../services/hh-invoice-close';
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { verifyApiKey } from '../middleware/api-key';
+import { verifyApiKey, apiKeyMayCall } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { pushDepositToHH, HH_BANK_IDS, getMethodForBankId } from '../services/hh-deposit';
+import { fetchDepositAvailability, releaseFromInvoice, revertRelease, type ReleaseResult } from '../services/hh-deposit-release';
+import { syncSavedRowToXero, sendXeroSyncFailedAlert, type XeroSyncResult } from '../services/hh-xero-sync';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
-import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, logResendToTimeline, type StatementPaymentLine } from '../services/money-emails';
+import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert, sendPaymentStatementEmail, sendRefundEmail, logResendToTimeline, resolveClientEmailTarget, type StatementPaymentLine } from '../services/money-emails';
 import {
   triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
   triggerCarnetFormOnConfirmation,
@@ -26,6 +30,10 @@ import {
   type SilentSkipIssue,
 } from '../services/confirmation-hooks';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
+import { fireEventTriggeredReminders } from '../services/requirement-close-sweep';
+import { afterOptionConfirmed } from '../services/option-confirm';
+import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
+import { portalOptionsFor } from '../services/job-groups';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
 import {
@@ -36,6 +44,12 @@ import {
 } from '../services/stripe-event-claim';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import { getPaymentPortalLink } from '../services/payment-portal-link';
+import { recordPayment } from '../services/record-payment';
+import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
+import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment } from '../services/wise-incoming';
+import { ukToday } from '../services/uk-date';
+import { fireArrivalHook } from '../services/close-out-arrival';
 
 const router = Router();
 
@@ -56,6 +70,11 @@ async function authenticateFlexible(req: Request, res: Response, next: NextFunct
       const matched = await verifyApiKey(apiKey);
       if (!matched) {
         res.status(403).json({ error: 'Invalid API key' });
+        return;
+      }
+      if (!apiKeyMayCall(matched.permissions, req.path)) {
+        console.warn(`[money] API key "${matched.name}" (${matched.service}) refused for ${req.method} ${req.path}: not in its permissions`);
+        res.status(403).json({ error: 'API key not permitted for this operation' });
         return;
       }
       (req as any).user = { id: matched.id, role: 'service', name: matched.service };
@@ -139,6 +158,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        WHERE jf.balance_outstanding > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
          AND COALESCE(j.is_internal, false) = false
+         AND COALESCE(j.is_deleted, false) = false
          ${speculativeFilter}`;
     const balances = await query(
       `${balanceSelect} AND o.job_id IS NULL
@@ -163,6 +183,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
          AND jf.hire_value_inc_vat > 0.01
          AND COALESCE(j.pipeline_status, '') IN ('confirmed', 'prepping', 'prepped')
          AND COALESCE(j.is_internal, false) = false
+         AND COALESCE(j.is_deleted, false) = false
        ORDER BY j.out_date ASC NULLS LAST
        LIMIT 200`
     );
@@ -183,7 +204,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        JOIN job_excess je ON je.id = h.excess_id
        LEFT JOIN jobs j ON j.id = je.job_id
        WHERE h.held_amount > 0.01
-         AND (j.id IS NULL OR COALESCE(j.is_internal, false) = false)
+         AND (j.id IS NULL OR (COALESCE(j.is_internal, false) = false AND COALESCE(j.is_deleted, false) = false))
        ORDER BY COALESCE(j.return_date, j.job_end) ASC NULLS LAST
        LIMIT 200`
     );
@@ -197,6 +218,29 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
        LEFT JOIN jobs j ON j.id = jp.job_id
        WHERE jp.payment_type = 'refund' AND jp.payment_status = 'pending'
        ORDER BY jp.payment_date ASC
+       LIMIT 200`
+    );
+
+    // Overpaid invoices — the OTHER kind of "we owe this client money". A
+    // pending refund is a DECISION we made and can be Processed or Cleared; an
+    // overpaid invoice is a STATE OF THE BOOKS with no row to action, usually a
+    // credit note raised after the invoice was paid. Same bucket on the
+    // dashboard because the conclusion is identical, but the rows say which
+    // they are because the actions differ.
+    //
+    // Reads the cached figure written through by the Money tab (migration 211) —
+    // this endpoint deliberately makes no HireHop calls, so a job only appears
+    // once its Money tab has been opened since that shipped. Same caveat as
+    // every other figure here, and the page says so.
+    const clientOverpaid = await query(
+      `SELECT jf.job_id, j.hh_job_number, j.job_name,
+              COALESCE(j.client_name, j.company_name) AS client_name,
+              jf.client_overpaid AS amount, jf.last_synced_at
+       FROM job_financials jf
+       JOIN jobs j ON j.id = jf.job_id
+       WHERE jf.client_overpaid > 0.01
+         AND COALESCE(j.pipeline_status, '') NOT IN ('cancelled', 'lost')
+       ORDER BY jf.client_overpaid DESC
        LIMIT 200`
     );
 
@@ -220,6 +264,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
         deposits_pending: depositsPending.rows,
         excess_held: excessHeld.rows,
         pending_refunds: pendingRefunds.rows,
+        client_overpaid: clientOverpaid.rows,
         totals: {
           balance_outstanding: sum(balances.rows, 'balance_outstanding'),
           balances_count: balances.rows.length,
@@ -234,6 +279,11 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
           excess_held_past_count: excessPastCount,
           pending_refunds: sum(pendingRefunds.rows, 'amount'),
           pending_refunds_count: pendingRefunds.rows.length,
+          client_overpaid: sum(clientOverpaid.rows, 'amount'),
+          client_overpaid_count: clientOverpaid.rows.length,
+          // Headline for the card: both kinds of "we owe this client", since
+          // that is the question someone glancing at it is asking.
+          owed_to_clients: sum(pendingRefunds.rows, 'amount') + sum(clientOverpaid.rows, 'amount'),
         },
       },
     });
@@ -537,12 +587,21 @@ router.post('/balances/bulk-resolve', authorize('admin'), validate(bulkResolveSc
 // HireHop, Stripe, or Xero.
 const DISMISS_REFUND_REASONS = [
   'refunded_externally',  // already refunded directly in HireHop / Stripe / bank
+  // Refunded THROUGH OP, but via the Payment History Refund button rather than
+  // the IOU's own "Process refund" — so a completed refund row was inserted and
+  // the IOU was left behind. Distinct from `refunded_externally`, which says the
+  // money moved outside OP entirely; recording that here would be a small lie in
+  // the audit trail. NOT `completed`: the refund already has its own row, and
+  // marking the IOU complete too would double-count it in every sum over
+  // completed refunds.
+  'refunded_via_op',
   'not_required',         // refund not actually due (artifact / superseded)
   'duplicate',            // duplicate IOU
   'other',
 ] as const;
 const DISMISS_REASON_LABELS: Record<string, string> = {
   refunded_externally: 'Already refunded outside OP',
+  refunded_via_op: 'Refunded in OP, outside this IOU',
   not_required: 'Not required',
   duplicate: 'Duplicate record',
   other: 'Other',
@@ -573,7 +632,7 @@ router.post('/:jobId/dismiss-refund', authorize('admin', 'manager'), validate(di
     }
 
     const reasonLabel = DISMISS_REASON_LABELS[reason] || reason;
-    const stamp = `[Dismissed: ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${new Date().toISOString().split('T')[0]}]`;
+    const stamp = `[Dismissed: ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${ukToday()}]`;
     const updated = await query(
       `UPDATE job_payments
          SET payment_status = 'cancelled',
@@ -625,7 +684,7 @@ router.post('/refunds/bulk-dismiss', authorize('admin'), validate(bulkDismissRef
       reason: string; notes?: string | null; refund_ids?: string[]; logged_before?: string;
     };
     const reasonLabel = DISMISS_REASON_LABELS[reason] || reason;
-    const stamp = `[Dismissed (bulk): ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${new Date().toISOString().split('T')[0]}]`;
+    const stamp = `[Dismissed (bulk): ${reasonLabel}${notes ? ` — ${notes}` : ''} — by ${req.user!.email} on ${ukToday()}]`;
 
     const conds: string[] = [`payment_type = 'refund'`, `payment_status = 'pending'`];
     const params: unknown[] = [stamp, req.user!.id];
@@ -715,6 +774,22 @@ const refundPaymentSchema = z.object({
   // When set, an existing OP `job_payments` pending-refund IOU (e.g. created by
   // a cancellation) is marked completed instead of inserting a new refund row.
   pending_refund_id: z.string().uuid().nullable().optional(),
+  // Email the client confirming the refund. Only meaningful on the record-only
+  // methods: a Stripe refund has genuinely moved the money, so that path always
+  // emails and ignores this. On BACS/cash/Worldpay the money moves by hand, and
+  // the house rule is do-then-record — so the Money tab defaults this ON and
+  // lets whoever is recording it untick when they haven't sent it yet.
+  notify_client: z.boolean().optional(),
+  // Who the refund email goes to (the modal's picker). Omitted = the usual recipients.
+  recipients: z.array(z.object({
+    email: z.string().email().max(255),
+    name: z.string().max(255).nullable().optional(),
+  })).max(10).optional(),
+  // Staff have seen the "this deposit is fully applied to invoice X — I'll
+  // release £Y back from it first" panel and confirmed. Without it a refund
+  // needing a release returns 409 `release_required` rather than quietly
+  // rewriting HireHop paperwork nobody asked about.
+  allow_release: z.boolean().optional(),
 });
 
 // ── GET /api/money/job-lookup/:hhJobNumber — Look up OP job by HireHop job number ──
@@ -742,7 +817,11 @@ router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) =
       return;
     }
 
-    res.json({ data: result.rows[0] });
+    // Quote options (docs/QUOTE-VERSIONS-SPEC.md §9): may this link still be
+    // paid, and which options are its siblings. The portal refuses a payment
+    // on payable:false before any Stripe session exists.
+    const options = await portalOptionsFor(result.rows[0].id);
+    res.json({ data: { ...result.rows[0], ...options } });
   } catch (error) {
     console.error('[money] Job lookup error:', error);
     res.status(500).json({ error: 'Job lookup failed' });
@@ -1071,6 +1150,167 @@ router.get('/:jobId/vat-adjustment', async (req: AuthRequest, res: Response) => 
 
 // ── GET /api/money/:jobId/summary — Full financial summary for a job ──
 
+// ── Incoming bank payments (Wise emails) — see services/wise-incoming.ts ──────
+// Unmatched rows are the queue staff resolve from the Money overview; recent
+// recorded/ignored rows are shown for the record.
+router.get('/incoming-payments', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT i.id, i.status, i.received_at, i.payer_name, i.amount, i.currency, i.fee, i.amount_credited,
+              i.reference, i.transfer_number, i.match_method, i.match_notes, i.candidates,
+              i.matched_job_id, i.payment_type, i.hh_deposit_id, i.hh_push_error, i.resolved_at,
+              i.xero_invoice_id, i.xero_invoice_number, i.xero_payment_id, i.xero_invoices,
+              j.hh_job_number AS matched_hh_job_number, j.job_name AS matched_job_name,
+              COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS resolved_by_name
+         FROM incoming_bank_payments i
+         LEFT JOIN jobs j ON j.id = i.matched_job_id
+         LEFT JOIN users u ON u.id = i.resolved_by
+         LEFT JOIN people pu ON pu.id = u.person_id
+        WHERE i.status = 'unmatched' OR i.received_at >= NOW() - INTERVAL '30 days'
+        ORDER BY (i.status = 'unmatched') DESC, i.received_at DESC
+        LIMIT 200`
+    );
+    res.json({ data: r.rows });
+  } catch (err) {
+    console.error('[money] incoming-payments list failed:', err);
+    res.status(500).json({ error: 'Failed to load incoming payments' });
+  }
+});
+
+const incomingRecordSchema = z.object({
+  job_id: z.string().uuid().optional(),
+  hh_job_number: z.number().int().positive().optional(),
+  payment_type: z.enum(['deposit', 'balance', 'excess']),
+  amount: z.number().min(0.01).optional(),
+}).refine(v => v.job_id || v.hh_job_number, { message: 'job_id or hh_job_number is required' });
+
+router.post('/incoming-payments/:id/record', authorize('admin', 'manager'), validate(incomingRecordSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { job_id, hh_job_number, payment_type, amount } = req.body;
+    let jobId: string | undefined = job_id;
+    if (!jobId && hh_job_number) {
+      const j = await query(`SELECT id FROM jobs WHERE hh_job_number = $1`, [hh_job_number]);
+      jobId = j.rows[0]?.id;
+      if (!jobId) {
+        res.status(404).json({ error: `No job with HireHop number ${hh_job_number} in OP` });
+        return;
+      }
+    }
+    const result = await recordIncomingPaymentOnJob({
+      incomingId: id as string,
+      jobId: jobId!,
+      paymentType: payment_type,
+      amount,
+      actorUserId: req.user!.id,
+      matchMethod: 'manual',
+      matchNotes: `Matched by ${req.user!.email || req.user!.id} from the incoming-payments queue`,
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ data: { ok: true }, hh_push_error: result.hh_push_error || null });
+  } catch (err) {
+    console.error('[money] incoming-payments record failed:', err);
+    res.status(500).json({ error: 'Failed to record incoming payment' });
+  }
+});
+
+const incomingXeroSchema = z.object({ amount: z.number().min(0.01).optional() });
+
+// Record against the Xero-only invoice the matcher found on the row (storage invoices etc.)
+router.post('/incoming-payments/:id/record-xero', authorize('admin', 'manager'), validate(incomingXeroSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const row = await query(`SELECT xero_invoices FROM incoming_bank_payments WHERE id = $1`, [id]);
+    const invoices = (Array.isArray(row.rows[0]?.xero_invoices) ? row.rows[0].xero_invoices : [])
+      .filter((i: { status?: string; amount_due?: number }) => i.status === 'AUTHORISED' && (i.amount_due || 0) > 0);
+    if (invoices.length === 0) {
+      res.status(400).json({ error: 'No open Xero invoice is linked to this payment' });
+      return;
+    }
+    const numbers = invoices.map((i: { invoice_number: string }) => i.invoice_number).join(' + ');
+    const result = await recordIncomingPaymentInXero({
+      incomingId: id as string,
+      invoices,
+      amount: req.body.amount,
+      actorUserId: req.user!.id,
+      matchMethod: 'manual_xero',
+      matchNotes: `Recorded against Xero invoice ${numbers} by ${req.user!.email || req.user!.id} from the incoming-payments queue`,
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[money] incoming-payments record-xero failed:', err);
+    res.status(500).json({ error: 'Failed to record in Xero' });
+  }
+});
+
+// Re-run the matcher on a queued row (refreshes candidates/notes, never records).
+router.post('/incoming-payments/:id/rematch', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await rematchIncomingPayment(req.params.id as string);
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ data: { ok: true, kind: result.kind } });
+  } catch (err) {
+    console.error('[money] incoming-payments rematch failed:', err);
+    res.status(500).json({ error: 'Failed to re-check incoming payment' });
+  }
+});
+
+const incomingIgnoreSchema = z.object({ note: z.string().min(1).max(500) });
+
+router.post('/incoming-payments/:id/ignore', authorize('admin', 'manager'), validate(incomingIgnoreSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    await ignoreIncomingPayment(req.params.id as string, req.user!.id, req.body.note);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[money] incoming-payments ignore failed:', err);
+    res.status(500).json({ error: 'Failed to ignore incoming payment' });
+  }
+});
+
+// ── GET /api/money/:jobId/payment-link — the client's payment portal link ──
+// Computed live from HireHop (see services/payment-portal-link.ts) so it always matches
+// the quote document, which re-issues the link whenever the hire dates change.
+router.get('/:jobId/payment-link', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
+    const jobResult = await query(
+      isUuid
+        ? `SELECT id, hh_job_number FROM jobs WHERE id = $1`
+        : `SELECT id, hh_job_number FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId)]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const hhJobNumber = jobResult.rows[0].hh_job_number as number | null;
+    if (!hhJobNumber) {
+      res.json({ data: null, reason: 'no_hh_job_number' });
+      return;
+    }
+    const link = await getPaymentPortalLink(hhJobNumber);
+    if (!link) {
+      res.json({ data: null, reason: 'hirehop_unavailable' });
+      return;
+    }
+    res.json({ data: link });
+  } catch (err) {
+    console.error('[money] payment-link failed:', err);
+    res.status(500).json({ error: 'Failed to build payment link' });
+  }
+});
+
 router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
   try {
     const jobId = req.params.jobId as string;
@@ -1079,9 +1319,11 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
       isUuid
-        ? `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date
+        ? `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date,
+                  pipeline_status, cancellation_fee
            FROM jobs WHERE id = $1`
-        : `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date
+        : `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date,
+                  pipeline_status, cancellation_fee
            FROM jobs WHERE hh_job_number = $1`,
       [isUuid ? jobId : parseInt(jobId)]
     );
@@ -1128,6 +1370,9 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       id: number; amount: number; date: string; description: string | null;
       memo: string | null; is_excess: boolean; is_refund: boolean;
       is_deposit?: boolean; acc_account_id?: number | null;
+      /** Unallocated money on this deposit — what HireHop will let us refund.
+       *  null when HH published neither reading. */
+      available_to_refund?: number | null;
       bank_name: string | null; entered_by: string | null;
     }> = [];
     // Track HH excess deposits separately for reconciliation
@@ -1236,6 +1481,19 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
           if (absAmount > 0) {
             if (!isExcess) {
+              // How much of this deposit is still unallocated — i.e. what
+              // HireHop will actually let us refund out of it. HH publishes it
+              // as `owing` NEGATED, and also as `credit - paid`; take the
+              // smaller of the two readings so we never over-state it and walk
+              // into a 370 after moving Stripe money (job 15628). The Refund
+              // modal warns off this before anything is submitted.
+              const rawOwing = row.owing ?? data.owing;
+              const rawPaid = row.paid ?? data.paid;
+              const viaOwing = rawOwing == null || rawOwing === '' ? null : -parseFloat(String(rawOwing));
+              const viaPaid = rawPaid == null || rawPaid === '' ? null : absAmount - parseFloat(String(rawPaid));
+              const readings = [viaOwing, viaPaid].filter((v): v is number => v != null && Number.isFinite(v));
+              const availableToRefund = readings.length > 0 ? Math.max(Math.min(...readings), 0) : null;
+
               // Hire deposit — show in Payment History
               deposits.push({
                 id: depositId,
@@ -1246,6 +1504,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
                 is_excess: false,
                 is_refund: isRefund,
                 is_deposit: true, // real kind:6 deposit — can be refunded or applied cross-job
+                available_to_refund: isRefund ? null : availableToRefund,
                 bank_name: getBankName(data.ACC_ACCOUNT_ID),
                 acc_account_id: data.ACC_ACCOUNT_ID != null ? Number(data.ACC_ACCOUNT_ID) : null,
                 entered_by: data.CREATE_USER_NAME || null,
@@ -1503,13 +1762,30 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           );
           const description = String(data.DESCRIPTION || row.desc || '');
           const isExcess = isExcessPayment(description);
+          // Approved only — a DRAFT credit note is a proposal, not money, and
+          // must not move a balance. Mirrors the kind=1 invoice branch above,
+          // which treats status 0 as proforma. This branch previously had no
+          // status check at all.
+          //
+          // Confirmed against HireHop (job 16668, 11 Sep 2026): the SAME credit
+          // note read status 0 / NUMBER "" / credit 0 as a draft and status 2 /
+          // OT-CRE-1219 / credit 30 once approved. HireHop itself only moved the
+          // invoice's `owing` (104 -> 74) on approval, so counting a draft would
+          // put OP at odds with HireHop as well as with reality. The log stays:
+          // it's cheap, and a skipped note that shouldn't have been is far
+          // easier to spot in a log line than in a quietly wrong balance.
+          const creditNoteStatus = parseInt(row.status ?? data.STATUS ?? data.status ?? '0');
+          const isDraftCreditNote = creditNoteStatus === 0;
+          if (creditAmount > 0 && isDraftCreditNote) {
+            console.warn(`[money] Skipping DRAFT credit note (status ${creditNoteStatus}) on job ${hhJobId}: £${creditAmount.toFixed(2)} "${description}"`);
+          }
 
-          if (creditAmount > 0 && !isExcess) {
+          if (creditAmount > 0 && !isExcess && !isDraftCreditNote) {
             totalCreditNotesApplied += creditAmount;
           }
           // Excess credit notes are rare in practice; preserve original behaviour
           // (treat as deposit) for now until we see one in the wild.
-          else if (creditAmount > 0 && isExcess) {
+          else if (creditAmount > 0 && isExcess && !isDraftCreditNote) {
             totalExcessDeposits += creditAmount;
           }
         }
@@ -1534,12 +1810,33 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // for a direct payment. Verified against job 15627 (May 2026): £24 credit
     // note was inflating totalHireDeposits by £24, producing a phantom £2.40
     // overpayment.
-    const directInvoicePayments = Math.max(
-      totalPaidOnApprovedInvoices - hireDepositAppliedToInvoices - totalCreditNotesApplied,
-      0
-    );
+    const invoiceReconciliationGap = totalPaidOnApprovedInvoices - hireDepositAppliedToInvoices - totalCreditNotesApplied;
+    const directInvoicePayments = Math.max(invoiceReconciliationGap, 0);
     if (directInvoicePayments > 0.01) {
       totalHireDeposits += directInvoicePayments;
+    }
+
+    // The NEGATIVE side of that same gap is money the client has overpaid and
+    // is owed back — and it was being thrown away in three separate places
+    // (this clamp, the creditNoteWriteOff clamp, and `owing: Math.max(..., 0)`
+    // on approvedInvoices). The clamps stay: they exist for the job-15627
+    // billing-correction shape and removing them would flip those jobs to
+    // phantom-overpaid. But binning the figure entirely is what let OP print
+    // "PAID IN FULL · £0.00" on two jobs where we genuinely owed the client
+    // money — 15628 (£91.12, refunded in Stripe, invisible here) and 15187
+    // (£120.00 goodwill credit note, still owed).
+    //
+    // Validated against every documented credit-note job: it fires on the two
+    // genuinely-overpaid ones (15628 -£91.12, 15187 -£120.00) and stays silent
+    // on the two where the credit note is doing something else (15627
+    // billing-correction and 15516 write-off both compute exactly £0.00).
+    //
+    // Self-clearing: once the refund is actually made, the deposit→invoice
+    // application drops by that amount and the gap returns to zero on its own.
+    // No stale banner to dismiss.
+    const clientOverpaid = invoiceReconciliationGap < -0.01 ? Math.abs(invoiceReconciliationGap) : 0;
+    if (clientOverpaid > 0) {
+      console.log(`[money] Job ${hhJobId}: HireHop shows £${clientOverpaid.toFixed(2)} overpaid — client is owed a refund`);
     }
 
     // ── Passive Reconciliation: match HH excess deposits → OP excess records ──
@@ -1607,7 +1904,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
     const vatRate = 0.20;
     const vatAmount = hireValueExVat * vatRate;
-    const hireValueIncVat = hireValueExVat + vatAmount;
+    const derivedHireValueIncVat = hireValueExVat + vatAmount;
     const totalDeposits = totalHireDeposits + totalExcessDeposits;
 
     // Credit notes come in two shapes, and only one reduces the balance:
@@ -1624,6 +1921,35 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // Clamped to the remaining balance so a mis-shaped credit note can't flip
     // the job to phantom-overpaid (the pre-15627 symptom).
     const approvedInvoiceTotal = approvedInvoices.reduce((s, inv) => s + inv.amount, 0);
+
+    // ── Pennies: prefer HireHop's invoiced figure over our derived VAT ──────
+    // HireHop gives us the ex-VAT accrued total and we derive VAT ourselves
+    // (`hireValueExVat * 0.20`), while HireHop rounds VAT per line. On a
+    // multi-line job the two land a penny or two apart — job 15628: we derive
+    // £2,209.62, HireHop invoiced £2,209.61 — and that 1p renders as a RED
+    // "Balance Outstanding: £0.01" beside a "100% paid" bar, with a
+    // "Deposit secured" pill instead of "Paid in full".
+    //
+    // lib/money.ts's MONEY_EPSILON can't absorb it: that is half a penny, sized
+    // for the sub-penny residue of our own VAT arithmetic. This is a whole
+    // penny of genuine disagreement between two real figures.
+    //
+    // So when HireHop has invoiced the job and its figure AGREES with ours to
+    // within £1, take HireHop's — it is the number on the document the client
+    // actually received, and ours is a derivation of it. The £1 guard is what
+    // keeps this surgical: it fires only where the two already agree, so it
+    // cannot touch a partly-invoiced job (invoice far below accrued, where
+    // accrued is the honest basis) or the job-15627 billing-correction shape
+    // (invoice £24 ABOVE accrued, which `invoicedOverage` below is there to
+    // handle). Both fall through to the derived figure exactly as before.
+    const INVOICE_ROUNDING_TOLERANCE = 1.00;
+    const useInvoicedValue = approvedInvoiceTotal > 0
+      && Math.abs(approvedInvoiceTotal - derivedHireValueIncVat) < INVOICE_ROUNDING_TOLERANCE;
+    const hireValueIncVat = useInvoicedValue ? approvedInvoiceTotal : derivedHireValueIncVat;
+    if (useInvoicedValue && Math.abs(approvedInvoiceTotal - derivedHireValueIncVat) > 0.005) {
+      console.log(`[money] Job ${hhJobId}: using HireHop's invoiced £${approvedInvoiceTotal.toFixed(2)} over our derived £${derivedHireValueIncVat.toFixed(2)} (${(approvedInvoiceTotal - derivedHireValueIncVat).toFixed(2)} VAT rounding)`);
+    }
+
     const invoicedOverage = Math.max(approvedInvoiceTotal - hireValueIncVat, 0);
     const creditNoteWriteOff = Math.min(
       Math.max(totalCreditNotesApplied - invoicedOverage, 0),
@@ -1710,10 +2036,61 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       } catch { /* non-fatal */ }
     }
 
-    // If VAT adjustment applies, override the VAT figures
+    // If VAT adjustment applies, override the VAT figures.
+    //
+    // Note which total feeds which. WITHOUT a VAT adjustment this is just
+    // `hireValueIncVat`, so it inherits the "prefer HireHop's invoiced figure
+    // when it agrees to within £1" rule above — which is the whole point, since
+    // THIS is the total that reaches the client as `hire_value_inc_vat` and
+    // drives `balance_outstanding`. Rebuilding it from `hireValueExVat` instead
+    // silently bypassed that rule and left job 15628 showing a red £0.01.
+    //
+    // WITH a VAT adjustment the invoiced figure must NOT be preferred: HireHop
+    // doesn't know about international VAT relief, so its invoice carries the
+    // full VAT and taking it would quietly hand the relief back. (The tolerance
+    // guard would refuse anyway — the two differ by the whole VAT saved, far
+    // more than £1 — but relying on that would be relying on an accident.)
     const effectiveVatAmount = vatAdjustment ? vatAdjustment.adjustedVat : vatAmount;
-    const effectiveHireValueIncVat = hireValueExVat + effectiveVatAmount;
-    const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits - creditNoteWriteOff;
+    const effectiveHireValueIncVat = vatAdjustment
+      ? hireValueExVat + effectiveVatAmount
+      : hireValueIncVat;
+    // Keep the header's arithmetic honest: when we've taken HireHop's invoiced
+    // total, the VAT shown must be that total minus ex-VAT, or the Money tab
+    // displays three figures where ex + VAT doesn't equal the total.
+    const displayVatAmount = vatAdjustment ? effectiveVatAmount : effectiveHireValueIncVat - hireValueExVat;
+
+    // A CANCELLED job owes its cancellation charge, not the hire (CANCELLATION-SPEC.md, the
+    // money end). HireHop keeps the hire's lines on a cancelled job — they are the record of
+    // what was booked, and Re-open copies them — so the job total above still reads the whole
+    // hire, and "hire value minus payments" showed a phantom balance owed. Before the fee
+    // invoice the charge is the fee recorded at cancellation; once it is invoiced, the fee
+    // invoice(s). Negative balance = money to refund. The payment portal reads a status-9
+    // job's balance from its invoices the same way (netlify-functions get-job-details-v2.js).
+    let cancellation: {
+      fee_ex_vat: number; fee_inc_vat: number; charge_inc_vat: number; invoiced: boolean;
+      invoice_numbers: string[]; hire_invoiced: boolean; balance: number;
+    } | null = null;
+    if (job.pipeline_status === 'cancelled') {
+      const billingRows = Array.isArray(bl?.rows) ? bl!.rows : [];
+      const feeRows = feeInvoiceRows(billingRows);
+      const feeNet = Math.round((Number(job.cancellation_fee ?? 0) || 0) * 100) / 100;
+      const charge = feeRows.length
+        ? Math.round(feeRows.reduce((s: number, r: any) => s + (invoiceGross(r) ?? 0), 0) * 100) / 100
+        : cancellationFeeGross(feeNet);
+      cancellation = {
+        fee_ex_vat: feeNet,
+        fee_inc_vat: cancellationFeeGross(feeNet),
+        charge_inc_vat: charge,
+        // No fee at all counts as invoiced: there is nothing to raise before refunding.
+        invoiced: feeRows.length > 0 || feeNet < 0.005,
+        invoice_numbers: feeRows.map((r: any) => String(r.data?.NUMBER || '')).filter(Boolean),
+        hire_invoiced: hireInvoiceRows(billingRows).length > 0,
+        balance: Math.round((charge - totalHireDeposits) * 100) / 100,
+      };
+    }
+    const effectiveBalanceOutstanding = cancellation
+      ? cancellation.balance
+      : effectiveHireValueIncVat - totalHireDeposits - creditNoteWriteOff;
 
     // Calculate deposit requirements using effective (VAT-adjusted) total
     let requiredDeposit = Math.max(effectiveHireValueIncVat * 0.25, 100);
@@ -1763,17 +2140,18 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         const hireDepIds = deposits.filter(d => !d.is_refund && d.id).map(d => d.id);
         if (hireDepIds.length > 0) {
           const opPayments = await query(
-            `SELECT hirehop_deposit_id, stripe_payment_intent, payment_method
+            `SELECT hirehop_deposit_id, stripe_payment_intent, payment_method, source
              FROM job_payments
              WHERE job_id = $1 AND hirehop_deposit_id = ANY($2)
                AND payment_type IN ('deposit', 'balance', 'other')`,
             [job.id, hireDepIds]
           );
-          const byHhDep = new Map<number, { stripe_payment_intent: string | null; payment_method: string | null }>();
+          const byHhDep = new Map<number, { stripe_payment_intent: string | null; payment_method: string | null; source: string | null }>();
           for (const r of opPayments.rows) {
             byHhDep.set(r.hirehop_deposit_id, {
               stripe_payment_intent: r.stripe_payment_intent || null,
               payment_method: r.payment_method || null,
+              source: r.source || null,
             });
           }
           for (const d of deposits) {
@@ -1782,6 +2160,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
             if (match) {
               (d as Record<string, unknown>).stripe_payment_intent = match.stripe_payment_intent;
               (d as Record<string, unknown>).op_payment_method = match.payment_method;
+              // 'stripe_terminal' = taken on the card reader (the refund modal says so).
+              (d as Record<string, unknown>).op_source = match.source;
             }
           }
         }
@@ -1794,7 +2174,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // cancellation) awaiting processing. Surfaced so staff can action them from
     // the Money tab via POST /refund-payment with pending_refund_id. No HH/Stripe
     // link yet; the process step picks a deposit to refund against.
-    let pendingRefunds: Array<{ id: number; amount: number; method: string | null; notes: string | null; date: string }> = [];
+    let pendingRefunds: Array<{ id: string; amount: number; method: string | null; notes: string | null; date: string }> = [];
     if (job.id) {
       try {
         const pr = await query(
@@ -1804,7 +2184,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
            ORDER BY payment_date DESC`,
           [job.id]
         );
-        pendingRefunds = pr.rows.map((r: { id: number; amount: string; payment_method: string | null; notes: string | null; payment_date: string }) => ({
+        pendingRefunds = pr.rows.map((r: { id: string; amount: string; payment_method: string | null; notes: string | null; payment_date: string }) => ({
           id: r.id,
           amount: parseFloat(r.amount),
           method: r.payment_method || null,
@@ -1824,15 +2204,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     if (job.id) {
       query(
         `INSERT INTO job_financials
-           (job_id, hire_value_inc_vat, total_hire_deposits, balance_outstanding, vat_saved, last_synced_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())
+           (job_id, hire_value_inc_vat, total_hire_deposits, balance_outstanding, vat_saved, client_overpaid, last_synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
          ON CONFLICT (job_id) DO UPDATE SET
            hire_value_inc_vat  = EXCLUDED.hire_value_inc_vat,
            total_hire_deposits = EXCLUDED.total_hire_deposits,
            balance_outstanding = EXCLUDED.balance_outstanding,
            vat_saved           = EXCLUDED.vat_saved,
+           client_overpaid     = EXCLUDED.client_overpaid,
            last_synced_at      = NOW()`,
-        [job.id, effectiveHireValueIncVat, totalHireDeposits, effectiveBalanceOutstanding, vatAdjustment ? vatAdjustment.vatSaved : 0]
+        [job.id, effectiveHireValueIncVat, totalHireDeposits, effectiveBalanceOutstanding, vatAdjustment ? vatAdjustment.vatSaved : 0, clientOverpaid]
       ).catch((e) => console.error('[money] job_financials write-through failed (non-fatal):', e.message));
     }
 
@@ -1881,7 +2262,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           balance_override: balanceOverride,
           hire_value_ex_vat: hireValueExVat,
           hire_value_inc_vat: effectiveHireValueIncVat,
-          vat_amount: effectiveVatAmount,
+          vat_amount: displayVatAmount,
           original_vat_amount: vatAdjustment ? vatAmount : undefined,
           original_hire_value_inc_vat: vatAdjustment ? hireValueIncVat : undefined,
           vat_adjusted: !!vatAdjustment,
@@ -1891,12 +2272,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           total_excess_deposits: totalExcessDeposits,
           total_credit_notes: totalCreditNotesApplied,
           credit_note_write_off: creditNoteWriteOff,
+          /** Money the client has overpaid and is owed back (0 when square). */
+          client_overpaid: clientOverpaid,
           balance_outstanding: effectiveBalanceOutstanding,
           required_deposit: requiredDeposit,
           deposit_paid: depositPaid,
           deposit_percent: depositPercent,
           deposits,
           pending_refunds: pendingRefunds,
+          /** Set on a cancelled job only — its charge is the fee, not the hire (balance_outstanding follows it). */
+          cancellation,
         },
         excess: {
           records: excessRecords,
@@ -1951,345 +2336,43 @@ router.get('/:jobId/payments', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/money/:jobId/email-default?template=… — who a client money email goes to by itself ──
+// Lets a recipient picker pre-tick the usual people (resolveClientEmailTarget, the one
+// recipient rule). Empty when that would only be the info@ safety net.
+const EMAIL_DEFAULT_TEMPLATES = new Set(['hire_refund_processed', 'payment_received', 'booking_confirmed_deposit']);
+router.get('/:jobId/email-default', async (req: AuthRequest, res: Response) => {
+  try {
+    const template = typeof req.query.template === 'string' ? req.query.template : '';
+    if (!EMAIL_DEFAULT_TEMPLATES.has(template)) { res.status(400).json({ error: 'Unknown template' }); return; }
+    const target = await resolveClientEmailTarget(req.params.jobId as string, template);
+    res.json({ data: { emails: target.isFallback ? [] : [target.primaryEmail, ...target.ccEmails].filter(Boolean) } });
+  } catch (error) {
+    console.error('[money] email-default error:', error);
+    res.status(500).json({ error: 'Failed to read the usual recipients' });
+  }
+});
+
 // ── POST /api/money/:jobId/record-payment — Record a payment ──
 // Creates in OP job_payments table. Optionally pushes to HireHop as a deposit.
 
 router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req: AuthRequest, res: Response) => {
-  try {
-    const { jobId } = req.params;
-    const { payment_type, payment_method, payment_reference, notes, push_to_hirehop } = req.body;
-    let { amount, excess_id, total_collected } = req.body;
-
-    // Look up the job
-    const jobResult = await query(
-      `SELECT id, hh_job_number, client_name, company_name, job_name FROM jobs WHERE id = $1`,
-      [jobId]
-    );
-
-    if (jobResult.rows.length === 0) {
-      res.status(404).json({ error: 'Job not found' });
-      return;
-    }
-
-    const job = jobResult.rows[0];
-
-    // Excess auto-find: if no excess_id passed (frontend used to filter out
-    // 'taken' records, leaving the field empty when an existing record was
-    // present), look up the most recent record on this job. Prefer
-    // pre-collection records first, then fall back to any record so top-ups on
-    // already-collected excesses link correctly.
-    if (payment_type === 'excess' && !excess_id) {
-      const found = await query(
-        `SELECT id FROM job_excess
-         WHERE job_id = $1
-         ORDER BY
-           CASE WHEN excess_status IN ('needed','pending','partially_paid','partial') THEN 0 ELSE 1 END,
-           updated_at DESC
-         LIMIT 1`,
-        [job.id]
-      );
-      if (found.rows.length > 0) {
-        excess_id = found.rows[0].id;
-        console.log(`[money] Auto-linked excess payment to existing record ${excess_id} on job ${job.id}`);
-      }
-    }
-
-    // total_collected → amount delta translation. Used by the new "Total
-    // collected" UX for excess payments.
-    if (total_collected !== undefined && excess_id) {
-      const existingExcess = await query(
-        `SELECT excess_amount_taken FROM job_excess WHERE id = $1`,
-        [excess_id]
-      );
-      if (existingExcess.rows.length > 0) {
-        const previousTaken = parseFloat(existingExcess.rows[0].excess_amount_taken || 0);
-        amount = total_collected - previousTaken;
-
-        if (Math.abs(amount) < 0.005) {
-          res.json({
-            data: { idempotent: true, excess_id, message: 'Total collected already matches — nothing to record.' },
-            hh_push_error: null,
-          });
-          return;
-        }
-
-        if (amount < 0) {
-          res.status(400).json({
-            error: 'Lowering the total collected requires a refund/correction. Use the excess Manage form instead.',
-          });
-          return;
-        }
-      }
-    }
-
-    if (amount === undefined || amount < 0.01) {
-      res.status(400).json({ error: 'Amount must be at least £0.01' });
-      return;
-    }
-
-    // Record in OP
-    const paymentResult = await query(
-      `INSERT INTO job_payments
-        (job_id, hirehop_job_id, payment_type, amount, payment_method,
-         payment_reference, payment_status, source, excess_id,
-         client_name, recorded_by, notes, payment_date)
-       VALUES ($1, $2, $3, $4, $5, $6, 'completed', 'op', $7, $8, $9, $10, NOW())
-       RETURNING *`,
-      [
-        job.id,
-        job.hh_job_number,
-        payment_type,
-        amount,
-        payment_method,
-        payment_reference || null,
-        excess_id || null,
-        job.client_name || job.company_name,
-        req.user!.id,
-        notes || null,
-      ]
-    );
-
-    const payment = paymentResult.rows[0];
-
-    // If this is an excess payment, update the excess record too
-    if (payment_type === 'excess' && excess_id) {
-      // Card-machine EXCESS payments print a slip that needs scanning for audit
-      // — same rule as routes/excess.ts (Worldpay/Amex only; Stripe has an
-      // electronic trail, cash/BACS produce no card receipt). Deliberately gated
-      // on payment_type === 'excess' by living inside this branch: hire deposits
-      // and balances go through the same terminal but are NOT part of the excess
-      // receipt trail, so they must never raise this to-do.
-      //
-      // This route has no receipt-upload step of its own — the flag is what
-      // makes the amber banner and the "Upload Receipt Scan" action appear under
-      // Manage, which is where staff attach it (with the phone/QR handoff).
-      const needsReceipt = payment_method === 'worldpay' || payment_method === 'amex';
-
-      await query(
-        `UPDATE job_excess SET
-          excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
-          excess_status = CASE
-            WHEN COALESCE(excess_amount_taken, 0) + $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
-            ELSE 'partially_paid'
-          END,
-          payment_method = $2,
-          payment_reference = $3,
-          payment_date = NOW(),
-          receipt_required = CASE WHEN $5::boolean THEN TRUE ELSE receipt_required END,
-          receipt_uploaded_at = CASE WHEN $5::boolean THEN NULL ELSE receipt_uploaded_at END,
-          updated_at = NOW()
-        WHERE id = $4`,
-        [amount, payment_method, payment_reference || null, excess_id, needsReceipt]
-      );
-
-      // Promote the excess requirement to 'done' if coverage is now met
-      syncExcessRequirementStatus(job.id).catch(e =>
-        console.error('[money] syncExcessRequirementStatus failed (record-payment):', e)
-      );
-    }
-
-    // Status transition: deposit payment on enquiry/provisional → Booked
-    // A deposit (or full payment) means the job is confirmed.
-    //
-    // INVARIANT: `statusChanged` is true ONLY when THIS payment moved the job
-    // from a pre-confirmed status into 'confirmed'. Once a job is confirmed,
-    // any subsequent payment is just a receipt — it must NOT re-trigger
-    // booking-confirmation behaviour (booking_confirmed_deposit email,
-    // last-minute alert, hire-form auto-send). Use `statusChanged`, never
-    // "is currently confirmed", to gate those side effects.
-    let statusChanged = false;
-    if ((payment_type === 'deposit' || payment_type === 'balance') && amount > 0) {
-      try {
-        const statusResult = await query(
-          `SELECT pipeline_status, hh_job_number FROM jobs WHERE id = $1`,
-          [job.id]
-        );
-        const currentStatus = statusResult.rows[0]?.pipeline_status;
-        const hhNum = statusResult.rows[0]?.hh_job_number;
-
-        if (currentStatus && ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(currentStatus)) {
-          // Move to confirmed in OP
-          await query(
-            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(), updated_at = NOW() WHERE id = $1`,
-            [job.id]
-          );
-          statusChanged = true;
-          console.log(`[money] Job ${job.id} moved to confirmed (deposit received)`);
-
-          // Push status to HireHop (status 2 = Booked).
-          // ⚠️ The broker RESOLVES { success: false } on a rate-limit failure (327/329) — it
-          // does NOT throw. Check pushResult.success before mirroring the status locally, or
-          // OP declares "Booked" off a failed push and the next 30-min sync reverts it
-          // (job 16513 split-brain). On failure, leave jobs.status for the reconciler to retry.
-          if (hhNum) {
-            try {
-              const pushResult = await hhBroker.post('/frames/status_save.php', {
-                job: hhNum,
-                status: 2, // Booked
-                no_webhook: 1,
-              }, { priority: 'high' });
-              if (pushResult.success) {
-                await query(
-                  `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
-                  [job.id]
-                );
-                console.log(`[money] HH job ${hhNum} status updated to Booked`);
-              } else {
-                console.error(
-                  `[money] HH status push to Booked FAILED (record-payment, job ${hhNum}): ${pushResult.error} — leaving jobs.status for the reconciler`
-                );
-              }
-            } catch (pushErr) {
-              console.error('[money] HH status update to Booked threw (record-payment):', pushErr);
-            }
-          }
-        }
-      } catch (err) {
-        console.error('[money] Status transition failed (non-fatal):', err);
-      }
-
-      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now.
-      // Only fires when this payment actually confirmed the booking — subsequent
-      // payments on an already-confirmed job must not re-send the hire form email.
-      if (statusChanged) {
-        (async () => {
-          try {
-            const hfResult = await triggerHireFormEmailOnConfirmationShared(job.id);
-            triggerCarnetFormOnConfirmation(job.id).catch(() => {});
-            const anomaly = hireFormResultIsAnomaly(hfResult);
-            if (anomaly) {
-              await sendConfirmationSilentSkipAlert({
-                jobId: job.id,
-                jobNumber: job.hh_job_number,
-                jobName: job.job_name ?? null,
-                clientName: job.client_name,
-                triggerSource: 'status_change',
-                issues: [anomaly],
-              });
-            }
-          } catch (err) {
-            console.error('[money] Hire form email on confirmation failed (record-payment):', err);
-          }
-        })();
-      }
-    }
-
-    // Push to HireHop as deposit (if requested and job has HH number).
-    //
-    // Failures used to be swallowed silently — the response was 200 OK with
-    // hirehop_deposit_id: null and no signal to the user. We now surface the
-    // error in the response so the frontend can show a "Saved in OP but HH
-    // push failed" banner and prompt for manual link/retry.
-    let hhDepositId: number | null = null;
-    let xeroSynced = false;
-    let hhPushError: string | null = null;
-    if (push_to_hirehop && job.hh_job_number && payment_type !== 'refund' && payment_method !== 'rolled_over') {
-      const pushResult = await pushDepositToHH({
-        hhJobNumber: Number(job.hh_job_number),
-        amount,
-        paymentMethod: payment_method,
-        paymentReference: payment_reference || null,
-        paymentType: payment_type,
-        notes: notes || null,
-      });
-      hhDepositId = pushResult.hhDepositId;
-      xeroSynced = pushResult.xeroSynced;
-      hhPushError = pushResult.error;
-
-      if (hhDepositId) {
-        try {
-          await query(
-            `UPDATE job_payments SET hirehop_deposit_id = $1 WHERE id = $2`,
-            [hhDepositId, payment.id]
-          );
-
-          // Link HH deposit to job_excess record for reconciliation
-          if (payment_type === 'excess' && excess_id) {
-            await query(
-              `UPDATE job_excess SET hh_deposit_id = $1, hh_reconciled_at = NOW(), hh_reconcile_source = 'op_push' WHERE id = $2 AND hh_deposit_id IS NULL`,
-              [hhDepositId, excess_id]
-            );
-          }
-        } catch (linkErr) {
-          console.error('[money] HH deposit linkage update failed (non-fatal):', linkErr);
-        }
-      }
-    } else if (push_to_hirehop && !job.hh_job_number) {
-      // Caller asked for HH push but the job isn't linked to HireHop yet —
-      // surface this so they know the payment is OP-only.
-      hhPushError = 'Job is not linked to HireHop yet — payment recorded in OP only. Create the HH job first to enable HH sync.';
-    }
-
-    // ── Email triggers (fire-and-forget) ──
-    try {
-      const bankLabel = PAYMENT_METHODS_LABELS[payment_method] || payment_method;
-
-      if (payment_type === 'excess') {
-        // Excess payment email — only if linked to an excess record
-        if (excess_id) {
-          sendExcessEmail({
-            templateId: 'excess_payment_confirmed',
-            excessId: excess_id,
-            jobId: job.id,
-            amount,
-            paymentMethod: payment_method,
-          }).catch(e => console.error('[money] Excess email failed:', e));
-        }
-        // Excess payments never trigger booking confirmation or last-minute alerts
-      } else {
-        // Hire payment email — see invariant comment on `statusChanged` above.
-        // `isConfirmingBooking` must reflect "did THIS payment confirm the
-        // booking?", not "is the booking currently confirmed?". Subsequent
-        // payments on already-confirmed jobs are receipts, not confirmations.
-        const payResult = await sendPaymentEmail({
-          jobId: job.id,
-          amount,
-          bankName: bankLabel,
-          paymentType: payment_type,
-          isConfirmingBooking: statusChanged,
-        });
-        if (!payResult.sent) {
-          console.error(
-            `[money] Payment email not sent (record-payment, job ${job.id}): ${payResult.reason}${payResult.error ? ` — ${payResult.error}` : ''}`
-          );
-          sendConfirmationSilentSkipAlert({
-            jobId: job.id,
-            jobNumber: job.hh_job_number,
-            jobName: job.job_name ?? null,
-            clientName: job.client_name,
-            triggerSource: 'status_change',
-            issues: [{
-              kind: 'payment_email',
-              reason: payResult.reason === 'no_recipient'
-                ? 'no client email found in OP address book (client org has no email and no linked contacts with emails)'
-                : 'unexpected error while sending payment confirmation email',
-              context: payResult.error,
-            }],
-          }).catch(e => console.error('[money] Silent-skip alert failed (record-payment):', e));
-        }
-
-        // Last-minute alert: only fires when this payment actually confirmed
-        // the booking. Receipts on already-confirmed jobs must not re-alert.
-        if (statusChanged) {
-          sendLastMinuteAlert(job.id).catch(e => console.error('[money] Last-minute alert failed:', e));
-        }
-      }
-    } catch (emailErr) {
-      console.error('[money] Email trigger error (non-fatal):', emailErr);
-    }
-
-    res.json({
-      data: {
-        ...payment,
-        hirehop_deposit_id: hhDepositId,
-        xero_synced: xeroSynced,
-      },
-      hh_push_error: hhPushError,
-    });
-  } catch (error) {
-    console.error('[money] Record payment error:', error);
-    res.status(500).json({ error: 'Failed to record payment' });
+  // The body lives in services/record-payment.ts (shared with the Wise incoming-payment
+  // matcher); this route only validates and relays the result.
+  const { jobId } = req.params;
+  // `authenticateFlexible` sets req.user.id to an api_keys row id — NOT a users id — for
+  // API-key callers, and assigns role 'service' through an `as any`.
+  const isServiceAccount = !!req.user && (req.user.role as string) === 'service';
+  // Staff record new money by the reader, Stripe, Wise or cash; the rest is admin only
+  // (STRIPE-TERMINAL-SPEC §15). Automation records what actually arrived, unchecked.
+  if (!isServiceAccount && !newPaymentMethodAllowed(req.body.payment_method, req.user?.role)) {
+    res.status(403).json({ error: ADMIN_ONLY_METHOD_MESSAGE });
+    return;
   }
+  const result = await recordPayment(jobId as string, req.body, {
+    userId: req.user!.id,
+    isServiceAccount,
+  });
+  res.status(result.status).json(result.body);
 });
 
 // ── Cross-job credit apply (Phase 2 of CROSS-JOB-EXCESS-APPLY-SPEC) ─────────
@@ -2397,7 +2480,7 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
     }
 
     const resolvedBank = (bank as number | undefined) ?? 169;
-    const currentDate = new Date().toISOString().split('T')[0];
+    const currentDate = ukToday();
     const description = `${job.hh_job_number} - Credit applied to invoice (cross-job → ${target_hh_job})`;
     const memo = `Cross-job credit apply from job ${job.hh_job_number} to job ${target_hh_job} invoice${notes ? ` — ${notes}` : ''} (recorded via Ooosh OP)`;
 
@@ -2418,12 +2501,16 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
     const hhAppId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
 
     if (hhAppId) {
-      try {
-        await hhBroker.post('/php_functions/accounting/tasks.php',
-          { hh_package_type: 1, hh_acc_package_id: 3, hh_task: 'post_payment', hh_id: hhAppId, hh_acc_id: '' },
-          { priority: 'high' });
-      } catch (e) {
-        console.error('[money] Xero sync for cross-job credit failed (non-fatal):', e);
+      const sync = await syncSavedRowToXero(
+        `cross-job credit ${job.hh_job_number} → job ${target_hh_job} invoice ${invoice_id}`,
+        hhResult.data as Record<string, unknown>,
+      );
+      if (!sync.ok) {
+        void sendXeroSyncFailedAlert({
+          jobId: job.id, hhJobNumber: job.hh_job_number, what: 'cross-job credit application',
+          amount, clientName: job.client_name, hhRowId: hhAppId, hhDepositId: hh_deposit_id,
+          error: sync.error || 'Unknown error',
+        });
       }
     }
 
@@ -2462,7 +2549,7 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
 router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
-    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id } = req.body;
+    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id, allow_release, notify_client, recipients } = req.body;
 
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
@@ -2481,14 +2568,14 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
     // original amount for validation. Best-effort: HH-originating deposits
     // may not have an OP row, in which case we just record-keep against HH.
     const opPaymentRes = await query(
-      `SELECT id, amount, stripe_payment_intent, payment_method, payment_type
+      `SELECT id, amount, stripe_payment_intent, payment_method, payment_type, source
        FROM job_payments
        WHERE job_id = $1 AND hirehop_deposit_id = $2
          AND payment_type IN ('deposit', 'balance', 'other')
        ORDER BY payment_date DESC LIMIT 1`,
       [job.id, hh_deposit_id]
     );
-    const originalPayment: { id: number; amount: string; stripe_payment_intent: string | null; payment_method: string; payment_type: string } | null = opPaymentRes.rows[0] || null;
+    const originalPayment: { id: number; amount: string; stripe_payment_intent: string | null; payment_method: string; payment_type: string; source: string | null } | null = opPaymentRes.rows[0] || null;
     let stripePaymentIntent = originalPayment?.stripe_payment_intent || null;
 
     // Validate amount against the original (when we know it). Allow up to the
@@ -2565,7 +2652,129 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       return;
     }
 
-    // ── Step 0: Stripe refund (only when method=stripe_gbp + PI on the row) ──
+    // ── Phase 1: make sure HireHop CAN take the refund, before any cash moves ──
+    // HireHop rejects a refund (`OWNER: 0`) against a deposit that has been fully
+    // applied to an invoice — error 370 — and on job 15628 that fired AFTER the
+    // Stripe refund had already gone through, leaving £91.12 moved and recorded
+    // nowhere. So the fragile HireHop work happens first, while nothing is at
+    // stake, and the irreversible Stripe call happens only once it has landed.
+    //
+    // Ordering note: the refund PAPERWORK still comes after Stripe (Step 1
+    // below). Doing it before would mean HireHop and Xero can say "refunded"
+    // while the money never left — a lying ledger nobody would ever spot —
+    // whereas this way round the failure is a visible phantom balance on a job.
+    // Reversible things first, the irreversible thing last.
+    let releaseUndo: ReleaseResult['undo'] = null;
+    /**
+     * Put a Phase 1 release back when a later step aborts without refunding, and
+     * describe the outcome for the error we're about to return. If the revert
+     * itself fails (it retries once inside), say precisely what to fix by hand:
+     * a wrong figure someone knows about beats a wrong figure they don't.
+     */
+    const undoReleaseNote = async (): Promise<string> => {
+      if (!releaseUndo) return '';
+      const undo = releaseUndo;
+      const reverted = await revertRelease(hh_deposit_id, undo);
+      releaseUndo = null;
+      return reverted.ok
+        ? ' The HireHop release made for this refund has been undone.'
+        : ` ⚠️ OP also could NOT undo the HireHop release: ${reverted.error}. Until HireHop application ${undo.application.applicationId} is set back to £${undo.originalAmount.toFixed(2)} by hand, invoice ${undo.application.invoiceNumber || undo.application.invoiceId} will wrongly show money owing. No money has moved — this is paperwork only.`;
+    };
+    if (job.hh_job_number) {
+      let readFailed = false;
+      const availability = await fetchDepositAvailability(job.hh_job_number, hh_deposit_id).catch((e) => {
+        console.error('[money] Deposit availability read failed:', e instanceof Error ? e.message : e);
+        readFailed = true;
+        return null;
+      });
+
+      // A failed read is not permission to guess. Refunding blind is exactly how
+      // 15628 happened, so stop and say so — and distinguish "HireHop didn't
+      // answer" from "that deposit isn't there", which send staff looking in
+      // completely different places.
+      if (!availability) {
+        res.status(502).json(readFailed ? {
+          error: 'Could not read the deposit from HireHop',
+          detail: 'OP needs HireHop\'s current figures to know whether this deposit can be refunded. Nothing has been refunded. Try again shortly, or check HireHop is responding.',
+        } : {
+          error: 'Deposit not found in HireHop',
+          detail: `HireHop job ${job.hh_job_number} has no deposit ${hh_deposit_id}. It may have been deleted or moved to another job. Nothing has been refunded.`,
+        });
+        return;
+      }
+
+      if (availability.available + 0.005 < amount) {
+        const shortfall = Number((amount - availability.available).toFixed(2));
+        const apps = availability.applications;
+
+        // Scope limit (v1): exactly one invoice application. Spread across
+        // several invoices there is no obvious right one to take it from, and
+        // guessing moves money between invoices nobody asked us to touch.
+        if (apps.length === 0) {
+          res.status(422).json({
+            error: 'Nothing left on this deposit to refund',
+            detail: `HireHop shows £${availability.available.toFixed(2)} unallocated on deposit ${hh_deposit_id}, but £${amount.toFixed(2)} was requested, and there is no invoice application to release it from. It may already have been refunded. Nothing has been refunded.`,
+          });
+          return;
+        }
+        if (apps.length > 1) {
+          res.status(422).json({
+            error: 'This deposit is split across several invoices',
+            detail: `Deposit ${hh_deposit_id} is applied to ${apps.length} invoices (${apps.map((a) => a.invoiceNumber || a.invoiceId).join(', ')}), so OP can't tell which to release £${shortfall.toFixed(2)} from. Do it by hand in HireHop first — see the 370 runbook in MONEY-AND-EXCESS.md. Nothing has been refunded.`,
+          });
+          return;
+        }
+
+        const app = apps[0];
+        if (app.amount + 0.005 < shortfall) {
+          res.status(422).json({
+            error: 'Not enough applied to release',
+            detail: `Releasing £${shortfall.toFixed(2)} would need more than the £${app.amount.toFixed(2)} applied to invoice ${app.invoiceNumber || app.invoiceId}. Nothing has been refunded.`,
+          });
+          return;
+        }
+
+        // Never rewrite HireHop paperwork the user didn't ask about. 409 hands
+        // the frontend everything it needs to explain the change and confirm it.
+        if (!allow_release) {
+          res.status(409).json({
+            error: 'Release needed before this refund',
+            code: 'release_required',
+            detail: `Deposit ${hh_deposit_id} is fully applied to invoice ${app.invoiceNumber || app.invoiceId}, so HireHop has nothing to refund from it. £${shortfall.toFixed(2)} can be released back off that invoice first.`,
+            release: {
+              deposit_id: hh_deposit_id,
+              available: availability.available,
+              shortfall,
+              invoice_id: app.invoiceId,
+              invoice_number: app.invoiceNumber,
+              application_id: app.applicationId,
+              application_amount: app.amount,
+              new_application_amount: Number((app.amount - shortfall).toFixed(2)),
+            },
+          });
+          return;
+        }
+
+        const release = await releaseFromInvoice({
+          hhJobNumber: job.hh_job_number,
+          depositId: hh_deposit_id,
+          application: app,
+          shortfall,
+          requiredAvailable: amount,
+        });
+        if (!release.released) {
+          res.status(502).json({
+            error: 'Could not free up the money in HireHop',
+            detail: `${release.error || 'The release did not complete.'} Nothing has been refunded.`,
+          });
+          return;
+        }
+        releaseUndo = release.undo;
+        console.log(`[money] Released £${shortfall.toFixed(2)} on job ${job.hh_job_number}; deposit ${hh_deposit_id} now has £${release.availableAfter.toFixed(2)} available`);
+      }
+    }
+
+    // ── Phase 2: Stripe refund (only when method=stripe_gbp + PI on the row) ──
     let stripeRefundId: string | null = null;
     const stripeRefundPath = method === 'stripe_gbp' && stripePaymentIntent;
     if (stripeRefundPath) {
@@ -2574,7 +2783,9 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
         return;
       }
       try {
-        const stripe = getStripeClient();
+        // Live, unless the payment came from a TEST-mode card-reader session.
+        const { stripeClientForPaymentIntent } = await import('../services/stripe-terminal');
+        const stripe = await stripeClientForPaymentIntent(stripePaymentIntent as string);
         const refund = await stripe.refunds.create({
           payment_intent: stripePaymentIntent as string,
           amount: Math.round(amount * 100),
@@ -2584,17 +2795,29 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       } catch (err) {
         const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
         console.error('[money] Stripe refund failed:', msg);
-        res.status(502).json({ error: 'Stripe refund failed', detail: msg });
+        // No money moved, so put any Phase 1 release back — otherwise HireHop
+        // shows the invoice owing money the client has already paid. If the
+        // revert also fails (it retries once), say exactly what needs fixing:
+        // a wrong figure someone knows about beats a wrong figure they don't.
+        res.status(502).json({ error: 'Stripe refund failed', detail: `${msg}.${await undoReleaseNote()}` });
         return;
       }
     }
 
-    // ── Step 1: Push negative HH payment application against the deposit ──
+    // ── Phase 3: Push the refund payment application against the deposit ──
+    // Phase 1 guaranteed the deposit has the balance, so a 370 here should now
+    // be impossible; what's left is transient (rate limit, outage), which the
+    // broker retries. If it still fails, the money HAS moved — hence the
+    // hh_push_error surfacing below rather than a silent success.
     let hhPushError: string | null = null;
     let hhPaymentAppId: number | null = null;
+    // The WHOLE save response, kept for Phase 5: HireHop names its own Xero
+    // sync parameters in it (`hh_task`, `hh_acc_package_id`, `hh_package_type`),
+    // so the sync reads them back rather than assuming the hardcoded values.
+    let hhSavedData: Record<string, unknown> | null = null;
     if (job.hh_job_number) {
       try {
-        const currentDate = new Date().toISOString().split('T')[0];
+        const currentDate = ukToday();
         const hhBankId = HH_BANK_IDS[method] || 265;
         const description = `${job.hh_job_number} - Refund${originalPayment?.payment_type ? ' (' + originalPayment.payment_type + ')' : ''}`;
         const memo = `Hire payment refund — via ${method.replace(/_/g, ' ')}${reference ? ` (ref: ${reference})` : ''} (recorded via Ooosh OP)`;
@@ -2615,10 +2838,13 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
             hhPushError = `Stripe refund processed, but HireHop paperwork push failed: ${errText}. Please retry the HH push manually or contact engineering.`;
             console.error('[money] HH refund push failed after Stripe success:', errText);
           } else {
-            res.status(502).json({ error: 'HireHop refund failed', detail: errText });
+            // Record-only method: nothing was refunded and nothing is recorded,
+            // so a Phase 1 release must not be left behind.
+            res.status(502).json({ error: 'HireHop refund failed', detail: `${errText}${await undoReleaseNote()}` });
             return;
           }
         } else {
+          hhSavedData = hhResult.data as Record<string, unknown>;
           hhPaymentAppId = (hhResult.data as { hh_id?: number; id?: number; ID?: number }).hh_id
             ?? (hhResult.data as { hh_id?: number; id?: number; ID?: number }).id
             ?? (hhResult.data as { hh_id?: number; id?: number; ID?: number }).ID
@@ -2630,13 +2856,13 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
           hhPushError = `Stripe refund processed, but HireHop push threw: ${msg}.`;
           console.error('[money] HH refund push threw after Stripe success:', msg);
         } else {
-          res.status(502).json({ error: 'HireHop push error', detail: msg });
+          res.status(502).json({ error: 'HireHop push error', detail: `${msg}${await undoReleaseNote()}` });
           return;
         }
       }
     }
 
-    // ── Step 2: Record in OP job_payments as a refund leg ──
+    // ── Phase 4: Record in OP job_payments as a refund leg ──
     const auditNotes = [
       reference ? `Ref: ${reference}` : null,
       notes || null,
@@ -2704,30 +2930,90 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       );
     }
 
-    // ── Step 3: Trigger Xero sync (best-effort — HH push already succeeded, so
-    // OP and HH are in sync. Without this the refund lands in HH billing but
-    // never posts through to Xero. Mirrors the excess reimburse path. ────────
+    // ── Phase 5: Push the refund through to Xero, and say so if it won't go ──
+    //
+    // Deliberately AFTER the OP record: if this hangs or the process dies
+    // mid-call, a refund that really moved money is already written down.
+    //
+    // This used to fire and discard the result. `hhBroker.post` RESOLVES
+    // `{ success: false }` rather than throwing, so the try/catch never fired
+    // and the log said "triggered" whatever happened — which is how job 15187's
+    // £120 reached Stripe and HireHop, was refused by Xero with a perfectly
+    // clear message, and told nobody. Some refusals are not fixable from OP
+    // (see hh-xero-sync.ts), so the job is to record and report the gap, not
+    // to fail the refund — the money has already gone.
+    let xeroSync: XeroSyncResult | null = null;
     if (hhPaymentAppId) {
-      try {
-        await hhBroker.post('/php_functions/accounting/tasks.php', {
-          hh_package_type: 1,
-          hh_acc_package_id: 3,
-          hh_task: 'post_payment',
-          hh_id: hhPaymentAppId,
-          hh_acc_id: '',
-        }, { priority: 'high' });
-        console.log('[money] Xero sync triggered for hire refund payment application');
-      } catch (e) {
-        console.error('[money] Xero sync for hire refund failed (non-fatal — payment posted, sync may catch up later):', e);
+      xeroSync = await syncSavedRowToXero(`hire refund on job ${job.hh_job_number}`, hhSavedData);
+
+      if (!xeroSync.ok) {
+        const gapNote = `⚠️ Xero sync REFUSED: ${xeroSync.error} — HireHop is correct, Xero needs a manual correction.`;
+
+        // Durable, in three places, because a warning rendered once in a modal
+        // is a warning nobody can find at year end (the 15628 lesson: "the gap
+        // isn't recorded anywhere"). Each is non-fatal on its own.
+        await query(
+          `UPDATE job_payments SET notes = COALESCE(notes || ' — ', '') || $2 WHERE id = $1`,
+          [opResult.rows[0].id, gapNote]
+        ).catch((e) => console.error('[money] refund Xero-gap note update failed (non-fatal):', e));
+
+        await query(
+          `INSERT INTO interactions (type, content, job_id, created_by, source)
+           VALUES ('note', $1, $2, $3, 'system')`,
+          [`Refund of £${amount.toFixed(2)} reached Stripe and HireHop but was REFUSED by Xero — ${xeroSync.error}. HireHop is correct; Xero needs a manual correction. Admin has been emailed.`,
+           job.id, req.user!.id]
+        ).catch((e) => console.error('[money] refund Xero-gap timeline note failed (non-fatal):', e));
+
+        void sendXeroSyncFailedAlert({
+          jobId: job.id,
+          hhJobNumber: job.hh_job_number,
+          what: 'hire refund',
+          amount,
+          clientName: job.client_name,
+          hhRowId: hhPaymentAppId,
+          hhDepositId: hh_deposit_id,
+          moneyMoved: Boolean(stripeRefundId),
+          error: xeroSync.error || 'Unknown error',
+        });
       }
     }
 
-    console.log(`[money] Hire refund recorded: £${amount} on job ${job.id} via ${method}${stripeRefundId ? ` (Stripe ${stripeRefundId})` : ''}${hhPushError ? ' [HH push failed]' : ''}`);
+    // ── Phase 6: Tell the client ──────────────────────────────────────────
+    // A Stripe refund always emails: OP moved the money itself, so the client's
+    // bank is about to show it and silence is its own kind of bad service. The
+    // record-only methods email only when asked, because there the money moves
+    // by hand and OP has no idea whether it has — telling someone a refund is
+    // on its way before anyone has sent it would be worse than saying nothing.
+    // (Excess reimbursements have emailed unconditionally since Jun 2026; this
+    // is that behaviour plus an escape hatch, not a different policy.)
+    //
+    // AWAITED, unlike the fire-and-forget excess path: the modal reports whether
+    // the client was actually told, and a refund staff believe was confirmed but
+    // wasn't is exactly the sort of quiet gap this whole piece of work exists to
+    // close. Never allowed to fail the refund — the money has already moved.
+    const shouldEmail = stripeRefundPath || notify_client === true;
+    let clientEmail: { sent: boolean; toEmail?: string; isFallback?: boolean; error?: string } | null = null;
+    if (shouldEmail) {
+      try {
+        // A card-reader payment is stripe_gbp too, but was never "our online link".
+        const timescaleKey = method === 'stripe_gbp' && originalPayment?.source === 'stripe_terminal' ? 'stripe_terminal' : method;
+        clientEmail = await sendRefundEmail({ jobId: job.id, amount, paymentMethod: timescaleKey, overrideRecipients: recipients });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error('[money] Refund confirmation email threw (refund itself is unaffected):', msg);
+        clientEmail = { sent: false, error: msg };
+      }
+      console.log(`[money] Refund confirmation email: ${clientEmail.sent ? `sent to ${clientEmail.toEmail}${clientEmail.isFallback ? ' (info@ fallback)' : ''}` : `NOT sent — ${clientEmail.error || 'unknown'}`}`);
+    }
+
+    console.log(`[money] Hire refund recorded: £${amount} on job ${job.id} via ${method}${stripeRefundId ? ` (Stripe ${stripeRefundId})` : ''}${hhPushError ? ' [HH push failed]' : ''}${xeroSync && !xeroSync.ok ? ' [Xero sync refused]' : ''}`);
     res.json({
       data: opResult.rows[0],
       ...(stripeRefundId ? { stripe_refund_id: stripeRefundId } : {}),
       ...(hhPaymentAppId ? { hh_payment_application_id: hhPaymentAppId } : {}),
       ...(hhPushError ? { hh_push_error: hhPushError } : {}),
+      ...(xeroSync && !xeroSync.ok ? { xero_sync: xeroSync } : {}),
+      ...(clientEmail ? { client_email: clientEmail } : {}),
     });
   } catch (error) {
     console.error('[money] Refund payment error:', error);
@@ -3091,6 +3377,9 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     // ── Status transition: deposit/balance payment on pre-confirmed job → Confirmed ──
     // Portal already creates the HH deposit, so we only update OP status + push HH status.
     let statusChanged = false;
+    // The status the job was on when this payment confirmed it — sendLastMinuteAlert()
+    // needs it to tell a won booking from a status correction (see migration 226).
+    let confirmedFromStatus: string | null = null;
     if ((payment_type === 'deposit' || payment_type === 'balance') && amount > 0) {
       try {
         const statusResult = await query(
@@ -3100,13 +3389,23 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
         const currentStatus = statusResult.rows[0]?.pipeline_status;
         const hhNum = statusResult.rows[0]?.hh_job_number;
 
-        if (currentStatus && ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(currentStatus)) {
+        // The shared list includes 'paused' — a paused enquiry the client pays for
+        // is won like any other (job 16256 stayed Paused while HireHop said Booked).
+        if (currentStatus && PRE_CONFIRMED_STATUSES.includes(currentStatus)) {
           // Move to confirmed in OP
+          // confirmed_at is stamped here too. Until now only the pipeline
+          // route set it, so every job won by a payment had a NULL
+          // confirmed_at — job 16491 among them — which made the field
+          // useless for "when did we win this". COALESCE so a job that was
+          // already confirmed once keeps its original date.
           await query(
-            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(),
+                             confirmed_at = COALESCE(confirmed_at, NOW()), updated_at = NOW()
+             WHERE id = $1`,
             [job.id]
           );
           statusChanged = true;
+          confirmedFromStatus = currentStatus;
           console.log(`[money] Job ${job.id} moved to confirmed (payment portal deposit received)`);
 
           // Push status to HireHop (status 2 = Booked).
@@ -3151,6 +3450,17 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     // Derivation inside triggerHireFormEmailOnConfirmationShared covers the common
     // "HH-synced job whose requirements hadn't been derived yet" timing gap.
     const silentSkipIssues: SilentSkipIssue[] = [];
+
+    // Event-triggered reminders ("notify me if this job confirms"). The payment
+    // portal is where most confirmations actually happen, and it fired none of
+    // these before. Unattended — no logged-in user — so the actor is null and
+    // the reminder goes to its assignee or, for a "Me" reminder, its creator.
+    if (statusChanged) {
+      await fireEventTriggeredReminders(job.id, 'confirmed', null);
+      // Quote options: the client paid THIS option's link — bell the managers to
+      // mark the other options lost (never automatic; spec §7).
+      void afterOptionConfirmed(job.id, { actorUserId: null, source: 'payment_portal' });
+    }
 
     if (statusChanged) {
       try {
@@ -3204,7 +3514,7 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
 
         // Last-minute alert if job starts within 3 days and we just confirmed
         if (statusChanged) {
-          sendLastMinuteAlert(job.id).catch(e => console.error('[money] Last-minute alert failed (payment-event):', e));
+          sendLastMinuteAlert(job.id, confirmedFromStatus).catch(e => console.error('[money] Last-minute alert failed (payment-event):', e));
         }
       }
     } catch (emailErr) {
@@ -3228,6 +3538,12 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     if (stripe_event_id) {
       markStripeEventProcessed(stripe_event_id, { hhDepositId: hh_deposit_id ?? null })
         .catch(e => console.error('[money] markStripeEventProcessed failed (payment-event):', e));
+    }
+
+    // Hire close-out arrival hook (HIRE-CLOSE-OUT-SPEC §4.5): a hire payment on a job
+    // with one invoice owing is allocated to it. Runs after this answers; never fails it.
+    if ((effectivePaymentType === 'deposit' || effectivePaymentType === 'balance') && amount > 0 && hh_deposit_id) {
+      fireArrivalHook(job.id, hh_deposit_id);
     }
 
     res.json({

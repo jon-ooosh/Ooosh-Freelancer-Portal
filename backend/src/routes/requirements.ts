@@ -6,6 +6,8 @@ import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { ensureBacklineProblemIssue } from '../services/job-issues';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -29,11 +31,18 @@ router.get('/job/:jobId', async (req: AuthRequest, res: Response) => {
               rtd.label AS type_label,
               rtd.icon AS type_icon,
               rtd.steps AS type_steps,
-              p.first_name || ' ' || p.last_name AS assigned_to_name
+              NULLIF(${DISPLAY_NAME_SQL}, ' ') AS assigned_to_name,
+              -- Same rule as DISPLAY_NAME_SQL, spelled out because that constant
+              -- hardcodes the alias p and this is the CREATOR's people row.
+              -- NULLIF because CONCAT yields a single space (not NULL) when the
+              -- LEFT JOIN misses, and that would render as an empty name.
+              NULLIF(CONCAT(COALESCE(NULLIF(cp.preferred_name, ''), cp.first_name), ' ', cp.last_name), ' ') AS created_by_name
        FROM job_requirements jr
        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
        LEFT JOIN users u ON u.id = jr.assigned_to
        LEFT JOIN people p ON p.id = u.person_id
+       LEFT JOIN users cu ON cu.id = jr.created_by
+       LEFT JOIN people cp ON cp.id = cu.person_id
        WHERE jr.job_id = $1 ${phaseFilter}
        ORDER BY jr.sort_order, rtd.sort_order, jr.created_at`,
       [jobId]
@@ -125,8 +134,14 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
     // Look up HH job numbers for these jobs (limit to 10 to avoid rate limiting)
     if (jobsNeedingBillingCheck.size > 0) {
       const checkIds = Array.from(jobsNeedingBillingCheck).slice(0, 10);
+      // Not a cancelled job: its only invoice is the fee, so "every invoice paid"
+      // came true the moment the fee was allocated and ticked Payment while the
+      // refund was still due. The close-out plan ticks a cancellation's card
+      // itself, once nothing is owing or left to refund
+      // (cancellation-close.ts markCancellationReconciled).
       const hhNumbers = await query(
-        `SELECT id, hh_job_number FROM jobs WHERE id = ANY($1) AND hh_job_number IS NOT NULL`,
+        `SELECT id, hh_job_number FROM jobs
+          WHERE id = ANY($1) AND hh_job_number IS NOT NULL AND pipeline_status IS DISTINCT FROM 'cancelled'`,
         [checkIds]
       );
 
@@ -411,6 +426,10 @@ router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest,
         );
       }
     }
+
+    // Done or cancelled: its "Overdue" / "Reminder" bells are done too
+    // (bell-rules.ts requirement_due). The cascade above goes on the sweep.
+    await retireDoneBells('requirement_due', updated.id);
 
     // ── Backline flagged as Problem → register issue ────────────────────────
     // A backline requirement in "Problem" (blocked) status is a real

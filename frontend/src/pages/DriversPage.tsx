@@ -9,6 +9,8 @@ import { TelLink } from '../components/mobile/TapTargets';
 interface DriverListItem {
   /** HH job whose form the driver is mid-way through (no assignment row yet). */
   current_job_number?: number | null;
+  /** current_job_number ONLY while they haven't signed for it and the job is live. */
+  unsigned_job_number?: number | null;
   id: string;
   full_name: string;
   email: string | null;
@@ -19,10 +21,15 @@ interface DriverListItem {
   licence_valid_to: string | null;
   requires_referral: boolean;
   referral_status: string | null;
+  /** Staff adjudication of the iDenfy verdict — outranks the date-based states. */
+  identity_check_status: string | null;
+  licence_issued_by: string | null;
+  licence_issue_country: string | null;
   dvla_check_date: string | null;
   dvla_valid_until: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
+  passport_valid_until: string | null;
   signature_date: string | null;
   is_active: boolean;
   source: string;
@@ -58,7 +65,7 @@ interface DriversResponse {
   };
 }
 
-type StatusKey = 'in_progress' | 'approved' | 'expired' | 'referred_waiting' | 'refer_insurers' | 'not_approved';
+type StatusKey = 'in_progress' | 'approved' | 'expired' | 'referred_waiting' | 'refer_insurers' | 'not_approved' | 'id_check_needed' | 'id_rejected';
 type SortKey = 'last_activity' | 'name' | 'dvla_expiring' | 'points_desc';
 
 
@@ -92,6 +99,8 @@ const STATUS_PILLS: { key: StatusKey; label: string; pillColour: string }[] = [
   { key: 'referred_waiting', label: 'Referred & Waiting', pillColour: 'bg-amber-100 text-amber-700 border-amber-300' },
   { key: 'refer_insurers', label: 'Refer to Insurers', pillColour: 'bg-red-100 text-red-700 border-red-300' },
   { key: 'not_approved', label: 'Not Approved', pillColour: 'bg-red-100 text-red-700 border-red-300' },
+  { key: 'id_check_needed', label: 'ID Check Needed', pillColour: 'bg-red-100 text-red-700 border-red-300' },
+  { key: 'id_rejected', label: 'ID Rejected', pillColour: 'bg-red-100 text-red-700 border-red-300' },
 ];
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
@@ -311,8 +320,8 @@ export default function DriversPage() {
                       <td className="px-4 py-4 whitespace-nowrap">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${status.colour}`}>
                           {status.label}
-                          {status.label === 'In Progress' && driver.current_job_number
-                            ? ` · #${driver.current_job_number}`
+                          {status.label === 'In Progress' && (driver.unsigned_job_number || driver.current_job_number)
+                            ? ` · #${driver.unsigned_job_number || driver.current_job_number}`
                             : ''}
                         </span>
                       </td>
@@ -355,8 +364,8 @@ export default function DriversPage() {
                         {/* A driver mid-form has no assignment row yet, so Hire
                             History is empty and nothing else says which hire
                             they belong to. */}
-                        {status.label === 'In Progress' && driver.current_job_number
-                          ? ` · #${driver.current_job_number}`
+                        {status.label === 'In Progress' && (driver.unsigned_job_number || driver.current_job_number)
+                          ? ` · #${driver.unsigned_job_number || driver.current_job_number}`
                           : ''}
                       </span>
                     }

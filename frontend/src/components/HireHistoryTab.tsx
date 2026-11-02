@@ -1,26 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
-
-const STATUS_MAP: Record<number, string> = {
-  0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
-  5: 'Dispatched', 6: 'Returned Incomplete', 7: 'Returned',
-  8: 'Requires Attention', 9: 'Cancelled', 10: 'Not Interested', 11: 'Completed',
-};
-
-const PIPELINE_LABELS: Record<string, { label: string; colour: string }> = {
-  new_enquiry: { label: 'Enquiry', colour: 'bg-blue-100 text-blue-700' },
-  chasing: { label: 'Chasing', colour: 'bg-amber-100 text-amber-700' },
-  provisional: { label: 'Provisional', colour: 'bg-red-100 text-red-700' },
-  paused: { label: 'Paused', colour: 'bg-gray-100 text-gray-600' },
-  confirmed: { label: 'Confirmed', colour: 'bg-green-100 text-green-700' },
-  lost: { label: 'Lost', colour: 'bg-gray-100 text-gray-500' },
-  prepped: { label: 'Prepped', colour: 'bg-purple-100 text-purple-700' },
-  dispatched: { label: 'Dispatched', colour: 'bg-indigo-100 text-indigo-700' },
-  returned: { label: 'Returned', colour: 'bg-teal-100 text-teal-700' },
-  returned_incomplete: { label: 'Checking In', colour: 'bg-yellow-100 text-yellow-800' },
-  completed: { label: 'Completed', colour: 'bg-emerald-100 text-emerald-700' },
-};
+import { jobStatusDisplay } from '../lib/pipelineStatus';
+import { stripOptionSuffix, ALTERNATIVE_QUOTE_LOST_REASON } from '../lib/quoteOptions';
+import { OPTION_COPY } from '../lib/optionCopy';
+import OptionTag from './OptionTag';
 
 const RETRO_COLOURS: Record<string, { bg: string; text: string; label: string }> = {
   great: { bg: 'bg-green-100', text: 'text-green-700', label: 'Great' },
@@ -67,6 +51,9 @@ interface HireHistoryJob {
   retro_rating: string | null;
   retro_notes: string | null;
   retro_follow_up?: string | null;
+  // Quote options (spec §6.5): set on a job in an options group → "Option 2 of 3".
+  option_no?: number | null;
+  option_count?: number | null;
 }
 
 interface Stats {
@@ -160,10 +147,7 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
   }
 
   function getStatusDisplay(job: HireHistoryJob): { label: string; colour: string } {
-    if (job.pipeline_status && PIPELINE_LABELS[job.pipeline_status]) {
-      return PIPELINE_LABELS[job.pipeline_status];
-    }
-    return { label: STATUS_MAP[job.status] || `Status ${job.status}`, colour: 'bg-gray-100 text-gray-600' };
+    return jobStatusDisplay(job);
   }
 
   function csvEscape(v: unknown): string {
@@ -239,13 +223,23 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
     const statusDisplay = getStatusDisplay(job);
     const retro = job.retro_rating ? RETRO_COLOURS[job.retro_rating] : null;
     const rowRole = job.link_role || job.role || '';
+    // An option the client didn't pick: shown, but greyed — it isn't lost business (spec §6.5).
+    const altLost = job.lost_reason === ALTERNATIVE_QUOTE_LOST_REASON;
+    const tagged = !!(job.option_no && job.option_count);
     return (
-      <tr key={`${job.id}-${rowRole}`} className="hover:bg-gray-50 transition-colors">
+      <tr
+        key={`${job.id}-${rowRole}`}
+        className={`hover:bg-gray-50 transition-colors ${altLost ? 'opacity-60' : ''}`}
+        title={altLost ? OPTION_COPY.tagAltLostTitle : undefined}
+      >
         <td className="px-4 py-3">
           <Link to={`/jobs/${job.id}`} className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700 hover:underline">
             {job.hh_job_number ? `J-${job.hh_job_number}` : 'NEW'}
           </Link>
-          <div className="text-sm text-gray-900 truncate max-w-[200px]">{job.job_name || 'Untitled'}</div>
+          <div className="text-sm text-gray-900 truncate max-w-[200px]">
+            {(tagged ? stripOptionSuffix(job.job_name) : job.job_name) || 'Untitled'}
+          </div>
+          <OptionTag optionNo={job.option_no} optionCount={job.option_count} />
           {job.link_type === 'crew' && (
             <span className="text-[10px] text-indigo-600 font-medium">Crew</span>
           )}

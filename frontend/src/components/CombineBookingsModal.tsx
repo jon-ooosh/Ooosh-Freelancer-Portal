@@ -5,6 +5,8 @@ import { api } from '../services/api';
 // committed booking) keeps its identity and gains the combined date range; the
 // other is retired as cancelled with its deposit reattributed to the survivor
 // in HireHop. See CLAUDE.md "Combine bookings" + backend pipeline.ts.
+// One booking may be out on hire: it is always kept, and the other (not yet
+// started) extends it — the client keeps the van straight on (Oct 2026).
 
 interface Candidate {
   id: string;
@@ -54,6 +56,7 @@ const fmtDate = (d: string | null) =>
 const STATUS_LABELS: Record<string, string> = {
   new_enquiry: 'Enquiry', quoting: 'Enquiry', paused: 'Paused',
   provisional: 'Provisional', confirmed: 'Confirmed', prepped: 'Prepped', prepping: 'Prepping',
+  dispatched: 'On hire',
 };
 
 export default function CombineBookingsModal({ jobId, onClose, onCombined }: Props) {
@@ -159,13 +162,13 @@ export default function CombineBookingsModal({ jobId, onClose, onCombined }: Pro
           {!preview ? (
             <>
               <p className="text-sm text-gray-600 mb-3">
-                Pick another pre-hire booking{clientName ? ` for ${clientName}` : ''} to merge into one.
-                The more-committed booking is kept; the other is retired and its deposit moved across.
+                Pick another booking{clientName ? ` for ${clientName}` : ''} to merge into one.
+                The more-committed booking is kept (a booking that's out on hire always is); the other is retired and its deposit moved across.
               </p>
               {loadingList ? (
                 <p className="text-sm text-gray-500">Loading bookings…</p>
               ) : candidates.length === 0 ? (
-                <p className="text-sm text-gray-500">No other pre-hire bookings for this client to combine with.</p>
+                <p className="text-sm text-gray-500">No other bookings for this client to combine with.</p>
               ) : (
                 <>
                   <input
@@ -239,6 +242,14 @@ export default function CombineBookingsModal({ jobId, onClose, onCombined }: Pro
                 </div>
               ) : (
                 <div className="mb-3">
+                  {preview.survivor.pipeline_status === 'dispatched' && (
+                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2 mb-2">
+                      #{preview.survivor.hh_job_number} is out on hire, so its drivers signed for the old end date.
+                      Afterwards, on that job: <strong>Extend hire form</strong> on each driver, then{' '}
+                      <strong>Hire form ▾ → Generate + Email</strong> so each gets the new end date.
+                      Check the price in HireHop too — it re-prices over the longer hire.
+                    </p>
+                  )}
                   <p className="text-xs text-gray-600 mb-2">
                     This reallocates the deposit in HireHop (and fires a Xero sync). No client emails are sent.
                     Type <strong>{confirmTarget}</strong> to confirm.

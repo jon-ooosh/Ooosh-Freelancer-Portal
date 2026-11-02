@@ -6,7 +6,7 @@
  */
 import { Router } from 'express';
 import { z } from 'zod';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { query } from '../config/database';
 import { decryptDriverRow } from '../services/driver-pii';
 import { uploadToR2, getFromR2, isR2Configured } from '../config/r2';
@@ -17,6 +17,9 @@ const router = Router();
 
 // All routes require authentication
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── POST /generate — Generate a VE103B certificate ────────────────────
 
@@ -310,7 +313,8 @@ const testGenerateSchema = z.object({
   hire_end: z.string().optional(),
 });
 
-router.post('/test-generate', async (req: AuthRequest, res) => {
+// Manager-tier (B.2, Oct 2026): inserts real certificate rows and emails the office.
+router.post('/test-generate', authorize(...MANAGER_ROLES), async (req: AuthRequest, res) => {
   try {
     const body = testGenerateSchema.parse(req.body);
 
@@ -431,7 +435,8 @@ const voidSchema = z.object({
   reason: z.string().min(1).max(500),
 });
 
-router.post('/:id/void', async (req: AuthRequest, res) => {
+// Manager-tier (B.2): voiding and reactivating are BVRLA-reported.
+router.post('/:id/void', authorize(...MANAGER_ROLES), async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
     const body = voidSchema.parse(req.body);
@@ -476,7 +481,7 @@ const reactivateSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
-router.post('/:id/reactivate', async (req: AuthRequest, res) => {
+router.post('/:id/reactivate', authorize(...MANAGER_ROLES), async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
     const body = reactivateSchema.parse(req.body);

@@ -16,8 +16,9 @@
  * must not drift from the router.
  */
 
-import { computeDriverValidity, todayYmd, type DocWindow } from './driver-validity';
+import { computeDriverValidity, isNiLicence, todayYmd, toYmd, type DocWindow } from './driver-validity';
 import { isIdentityAuthorised } from './identity-review';
+import { documentPresence, type DocumentSlot } from './driver-documents';
 
 export type StageState = 'done' | 'todo' | 'blocked' | 'not_required';
 
@@ -35,9 +36,28 @@ export interface VerificationAction {
   /**
    * What the cockpit should offer. `slot` names the evidence group to scroll to
    * or act on, matching the frontend's group keys.
+   *
+   * `send_hire_form` is deliberately NOT actionable from the driver page: hire
+   * forms are generated and linked PER HIRE, so the send lives on the hire's
+   * Job page (the vehicle requirement card), not on the driver record. The kind
+   * survives so the message can name that remedy; the cockpit renders it as a
+   * plain line with no button (Sep 2026).
    */
-  kind: 'compare_identity' | 'set_date' | 'replace_document' | 'send_hire_form' | 'resolve_referral' | 'none';
+  /**
+   * `run_dva_check` is the Northern Ireland case. A DVA licence has no GB share
+   * code, so none of the other remedies fit: the driver cannot upload anything,
+   * and re-sending the hire form just returns them to the same screen. The only
+   * thing that moves it is a member of staff running the nidirect lookup, so
+   * the button goes to the DVLA group where the record-check panel lives.
+   */
+  kind: 'compare_identity' | 'set_date' | 'replace_document' | 'upload_document' | 'send_hire_form' | 'resolve_referral' | 'run_dva_check' | 'none';
   slot?: string;
+  /**
+   * HH job number named in `message`. Set only where the line refers to a
+   * specific hire, so the cockpit can turn the "#16643" in the text into a
+   * link. The message stays readable without it (emails, logs, tests).
+   */
+  jobNumber?: number;
 }
 
 export interface DriverVerificationState {
@@ -58,7 +78,25 @@ export interface VerificationStateInput {
   referral_status?: unknown;
   identity_check_status?: unknown;
   idenfy_face_result?: unknown;
+  idenfy_doc_result?: unknown;
+  idenfy_overall?: unknown;
   licence_issued_by?: unknown;
+  /** Read for the NI path only — whether a nidirect code is waiting on staff. */
+  dvla_check_code?: unknown;
+  /**
+   * HH job the driver has started a hire form for but NOT signed for — from
+   * `unsignedJobNumberSql()` in driver-hire-progress.ts. A signature never
+   * expires, so `signature_date` alone can't say whether they are joined to
+   * the hire in front of them; this can.
+   */
+  unsigned_job_number?: unknown;
+  /** When the driver started the form for `unsigned_job_number`. */
+  current_job_started_at?: unknown;
+  /**
+   * The `drivers.files` JSONB array. Read for one thing: whether a document
+   * actually exists behind a date. See services/driver-documents.ts.
+   */
+  files?: unknown;
   [key: string]: unknown;
 }
 
@@ -141,13 +179,28 @@ export function computeVerificationState(
   stages.push({ key: 'poa2', label: 'POA 2', ...poa2Stage });
 
   // ── 6. DVLA (UK) or passport (non-UK) ───────────────────────────────────
-  const dvlaStage = windowStage(v.dvla, 'DVLA check', today);
+  //
+  // Northern Ireland is UK, so a DVA driver needs this check like any other UK
+  // driver — they just cannot run it themselves (see isNiLicence). The stage
+  // says so rather than reading as an ordinary missing document, because "no
+  // DVLA check on record" sends staff looking for something the driver was
+  // never able to produce.
+  const isNi = isNiLicence(driver);
+  const dvaCode = str(driver.dvla_check_code);
+  const dvlaLabel = isNi ? 'DVA check' : 'DVLA check';
+  const dvlaStage = windowStage(v.dvla, dvlaLabel, today);
   const passportStage = windowStage(v.passport, 'passport check', today);
   stages.push({
     key: 'dvla',
-    label: 'DVLA',
+    label: isNi ? 'DVA' : 'DVLA',
     state: v.isUkDriver ? dvlaStage.state : 'not_required',
-    detail: v.isUkDriver ? dvlaStage.detail : 'UK licence holders only',
+    detail: v.isUkDriver
+      ? (isNi && !v.dvla.valid
+          ? (dvaCode
+              ? `NI licence — code ${dvaCode} supplied, awaiting the nidirect lookup`
+              : 'NI licence — needs a check code from the driver')
+          : dvlaStage.detail)
+      : 'UK licence holders only',
   });
   stages.push({
     key: 'passport',
@@ -157,25 +210,39 @@ export function computeVerificationState(
   });
 
   // ── 7. Signature ────────────────────────────────────────────────────────
+  //
+  // "Signed" is per-HIRE, not per-driver. A returning driver carries last
+  // time's signature_date, so a driver mid-form for a new hire read ✓ here
+  // while nothing joined them to it (Cameron Williams-Hill / 16618, Sep 2026).
   const signed = !!driver.signature_date;
+  const unsignedFor = Number(driver.unsigned_job_number) || null;
   stages.push({
     key: 'signature',
     label: 'Signature',
-    state: signed ? 'done' : 'todo',
-    detail: signed ? null : 'Hire agreement not signed',
+    state: signed && !unsignedFor ? 'done' : 'todo',
+    detail: unsignedFor
+      ? (signed ? `Signed before — not yet for #${unsignedFor}` : `Not yet signed for #${unsignedFor}`)
+      : (signed ? null : 'Hire agreement not signed'),
   });
 
   // ── What needs doing ────────────────────────────────────────────────────
   // Ordered worst-first so the top line is the thing to act on.
 
   if (identityStatus === 'needs_review') {
+    // Says what iDenfy actually objected to. This used to assert a face
+    // mismatch unconditionally, which since the Sep 2026 widening is usually
+    // wrong — the common case is a REJECTED DOCUMENT with a perfectly matching
+    // face (Jo Walker / 16249, Simon Halliday / 15551), and telling staff to
+    // compare two faces that plainly match sends them looking for the wrong
+    // thing. Prefers the specific verdict, falls back to the overall one.
+    const detail = str(driver.idenfy_doc_result) || str(driver.idenfy_face_result) || str(driver.idenfy_overall);
     actions.push({
       severity: 'red',
       kind: 'compare_identity',
       slot: 'identity',
-      message: str(driver.idenfy_face_result)
-        ? `Selfie didn't match the licence photo (${str(driver.idenfy_face_result)}) — compare the two images and accept or reject`
-        : "Selfie didn't match the licence photo — compare the two images and accept or reject",
+      message: detail
+        ? `iDenfy didn't accept this ID check (${detail}) — review the licence and selfie, then accept or reject`
+        : "iDenfy didn't accept this ID check — review the licence and selfie, then accept or reject",
     });
   } else if (identityStatus === 'rejected') {
     actions.push({
@@ -187,7 +254,7 @@ export function computeVerificationState(
   if (v.licence.trusted === false) {
     actions.push({
       severity: 'red', kind: 'send_hire_form', slot: 'identity',
-      message: v.licence.untrustedReason || 'Licence could not be verified — send a new hire form',
+      message: v.licence.untrustedReason || 'Licence could not be verified — send a new hire form from the hire\'s Job page',
     });
   }
 
@@ -202,23 +269,76 @@ export function computeVerificationState(
   }
 
   // Expired / missing documents, each with the specific remedy.
-  const docs: Array<{ slot: string; label: string; win: DocWindow; applies: boolean }> = [
-    { slot: 'dvla', label: 'DVLA check', win: v.dvla, applies: v.isUkDriver },
+  //
+  // The remedy depends on whether the DOCUMENT is there, not just its date —
+  // "add the date on the document" with an Add-the-date button was being shown
+  // for documents that had never been uploaded, pointing staff at an empty
+  // slot (Sep 2026). The file index sits on the same row; see
+  // services/driver-documents.ts for why it is read there and not here.
+  const onFile = documentPresence(driver.files);
+  const docs: Array<{ slot: DocumentSlot; label: string; win: DocWindow; applies: boolean }> = [
+    { slot: 'dvla', label: dvlaLabel, win: v.dvla, applies: v.isUkDriver },
     { slot: 'poa1', label: 'Proof of address 1', win: v.poa1, applies: true },
     { slot: 'poa2', label: 'Proof of address 2', win: v.poa2, applies: true },
     { slot: 'passport', label: 'Passport check', win: v.passport, applies: !v.isUkDriver },
   ];
   for (const doc of docs) {
     if (!doc.applies) continue;
+
+    // Northern Ireland, before the three standard remedies — none of which are
+    // true for a DVA driver. There is nothing for them to upload and nothing a
+    // fresh hire form would unblock; the check exists only once a member of
+    // staff has run it. Intercepting on `!valid` covers both missing and
+    // expired; a VALID window with no document behind it falls through to the
+    // generic "evidence is missing" line below, which is the right remedy
+    // (somebody ran the check and didn't attach the summary).
+    if (doc.slot === 'dvla' && isNi && !doc.win.valid) {
+      actions.push({
+        severity: 'amber', kind: 'run_dva_check', slot: 'dvla',
+        message: dvaCode
+          ? `Northern Ireland licence — the driver has supplied check code ${dvaCode}.`
+            + ` Run the lookup at nidirect and record the result; they cannot do it themselves`
+            + ` and their hire form is parked until you do.`
+          : `Northern Ireland licence — there is no GOV.UK share code for one.`
+            + ` Ask the driver for a nidirect check code, run the lookup, then record the result.`,
+      });
+      continue;
+    }
+
     if (doc.win.until && !doc.win.valid) {
+      // Expired. A new document is needed either way, so the file makes no
+      // difference to the remedy.
       actions.push({
         severity: 'amber', kind: 'send_hire_form', slot: doc.slot,
-        message: `${doc.label} expired ${formatUk(doc.win.until)} — request a new one`,
+        message: `${doc.label} expired ${formatUk(doc.win.until)} — send a hire form from the hire's Job page`,
       });
     } else if (!doc.win.until) {
+      actions.push(onFile[doc.slot]
+        ? {
+            severity: 'amber', kind: 'set_date', slot: doc.slot,
+            message: `${doc.label} is on file but has no date recorded — add the date on the document`,
+          }
+        : {
+            severity: 'amber', kind: 'send_hire_form', slot: doc.slot,
+            message: `${doc.label} hasn't been uploaded — send a hire form from the hire's Job page`,
+          });
+    } else if (!onFile[doc.slot]) {
+      // In date, with nothing behind it. Steven Aldridge / job 16116: the DVLA
+      // DATA is written server-side during validation while the FILE is a
+      // separate upload that can silently not happen, so the window can be
+      // green over an empty slot. Staff can also set a date by hand without
+      // ever uploading.
+      //
+      // Only reachable for a CURRENTLY VALID window, which keeps this off the
+      // pre-OP roster: a driver whose documents lived on Monday.com has no
+      // files here, but their dates lapsed long ago and they take the expired
+      // branch above.
+      // `upload_document`, not `send_hire_form`: the driver has done their part.
+      // The button scrolls to the group, where the Upload control is — staff
+      // usually have the document itself, or can ask for it directly.
       actions.push({
-        severity: 'amber', kind: 'set_date', slot: doc.slot,
-        message: `${doc.label} has no date recorded — add the date on the document`,
+        severity: 'amber', kind: 'upload_document', slot: doc.slot,
+        message: `${doc.label} has a date recorded but no document on file — the evidence is missing`,
       });
     }
   }
@@ -231,11 +351,29 @@ export function computeVerificationState(
   if (v.licence.trusted && v.licence.until && !v.licence.valid) {
     actions.push({
       severity: 'amber', kind: 'send_hire_form', slot: 'identity',
-      message: `Identity check lapsed ${formatUk(v.licence.until)} — send a hire form to re-verify`,
+      message: `Identity check lapsed ${formatUk(v.licence.until)} — send a hire form from the hire's Job page to re-verify`,
     });
   }
 
-  if (!signed && hasContact) {
+  if (unsignedFor) {
+    // Amber, not red: nothing is wrong with the driver, they just stopped short.
+    // Nothing links them to the hire until they sign.
+    //
+    // This line carries the whole story because it is now the ONLY place the
+    // driver page tells it — a second amber box below the Identity card said
+    // the same thing again (Sep 2026 tidy-up). The date and the "for a previous
+    // hire" clause came from there: the stale signature is exactly what made
+    // this state invisible in the first place (Cameron Williams-Hill / 16618).
+    const startedOn = toYmd(driver.current_job_started_at);
+    const lastSigned = toYmd(driver.signature_date);
+    actions.push({
+      severity: 'amber', kind: 'none', slot: 'signature', jobNumber: unsignedFor,
+      message: `Started the hire form for #${unsignedFor}${startedOn ? ` on ${formatUk(startedOn)}` : ''}`
+        + ` but hasn't signed it — they're not on the hire until they do.`
+        + (lastSigned ? ` They last signed on ${formatUk(lastSigned)}, for a previous hire.` : '')
+        + ` Send the hire form link again.`,
+    });
+  } else if (!signed && hasContact) {
     actions.push({
       severity: 'info', kind: 'none', slot: 'signature',
       message: 'Hire agreement not signed yet',

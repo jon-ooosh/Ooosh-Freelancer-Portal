@@ -5,7 +5,11 @@ const TODAY = '2026-08-19';
 const stage = (s: ReturnType<typeof computeVerificationState>, key: string) =>
   s.stages.find(x => x.key === key)!;
 
-/** A UK driver with everything in order. */
+/**
+ * A UK driver with everything in order — dates AND the documents behind them.
+ * The files matter: a date with no document on file is now its own to-do, so a
+ * fixture carrying only dates is not a healthy driver, it is an incomplete one.
+ */
 const healthy = {
   full_name: 'Test Driver',
   email: 'test@example.com',
@@ -18,6 +22,10 @@ const healthy = {
   dvla_check_date: addDaysYmd(TODAY, -5),
   poa1_doc_date: addDaysYmd(TODAY, -10),
   poa2_doc_date: addDaysYmd(TODAY, -10),
+  files: [
+    { tag: 'licence_front' }, { tag: 'licence_back' }, { tag: 'selfie' },
+    { tag: 'poa1' }, { tag: 'poa2' }, { tag: 'dvla_check' }, { tag: 'signature' },
+  ],
 };
 
 describe('healthy driver', () => {
@@ -38,6 +46,67 @@ describe('healthy driver', () => {
   });
 });
 
+describe('Northern Ireland (DVA) licence', () => {
+  // Declan Haughian / 16286: everything done, parked forever on a DVLA step he
+  // could never complete. A DVA licence has no GOV.UK share code.
+  const ni = { ...healthy, licence_issued_by: 'DVA', dvla_check_date: null, dvla_check_code: null };
+
+  it('still requires the record check — NI is UK', () => {
+    const state = computeVerificationState(ni, TODAY);
+    expect(stage(state, 'dvla').state).not.toBe('not_required');
+    expect(stage(state, 'passport').state).toBe('not_required');
+  });
+
+  it('says the driver cannot run it themselves, and does not ask for a hire form', () => {
+    const state = computeVerificationState(ni, TODAY);
+    const action = state.actions.find(a => a.slot === 'dvla')!;
+    expect(action.kind).toBe('run_dva_check');
+    expect(action.message).toMatch(/nidirect/);
+    expect(action.message).not.toMatch(/hire form/);
+  });
+
+  it('names the supplied check code so staff can run the lookup', () => {
+    // Mixed case is real and must survive — upper-casing it breaks the lookup.
+    const state = computeVerificationState({ ...ni, dvla_check_code: 'BML1s646' }, TODAY);
+    expect(stage(state, 'dvla').detail).toMatch(/BML1s646/);
+    expect(state.actions.find(a => a.slot === 'dvla')!.message).toMatch(/BML1s646/);
+  });
+
+  it('asks for a code when the driver has not supplied one', () => {
+    const state = computeVerificationState(ni, TODAY);
+    expect(state.actions.find(a => a.slot === 'dvla')!.message).toMatch(/Ask the driver/);
+  });
+
+  it('goes quiet once the check is recorded with its evidence', () => {
+    const done = { ...ni, dvla_check_date: addDaysYmd(TODAY, -5), dvla_check_code: 'BML1s646' };
+    const state = computeVerificationState(done, TODAY);
+    expect(stage(state, 'dvla').state).toBe('done');
+    expect(state.actions.find(a => a.slot === 'dvla')).toBeUndefined();
+    expect(state.allClear).toBe(true);
+  });
+
+  it('still flags a recorded check with no summary attached', () => {
+    // Staff ran the lookup and didn't upload the PDF — the generic "evidence is
+    // missing" remedy is the right one here, so the NI branch must not swallow it.
+    const noFile = {
+      ...ni,
+      dvla_check_date: addDaysYmd(TODAY, -5),
+      files: healthy.files.filter(f => f.tag !== 'dvla_check'),
+    };
+    const state = computeVerificationState(noFile, TODAY);
+    const action = state.actions.find(a => a.slot === 'dvla')!;
+    expect(action.kind).toBe('upload_document');
+    expect(action.message).toMatch(/DVA check/);
+  });
+
+  it('leaves a GB driver on the DVLA wording', () => {
+    const state = computeVerificationState({ ...healthy, dvla_check_date: null }, TODAY);
+    const action = state.actions.find(a => a.slot === 'dvla')!;
+    expect(action.kind).not.toBe('run_dva_check');
+    expect(stage(state, 'dvla').label).toBe('DVLA');
+  });
+});
+
 describe('identity review', () => {
   it('blocks the identity stage and leads the actions', () => {
     const state = computeVerificationState(
@@ -49,6 +118,25 @@ describe('identity review', () => {
     expect(state.actions[0].kind).toBe('compare_identity');
     expect(state.actions[0].message).toMatch(/FACE_MISMATCH/);
     expect(state.allClear).toBe(false);
+  });
+
+  it('names the DOCUMENT verdict when that is what iDenfy rejected', () => {
+    // Jo Walker / 16249 and Simon Halliday / 15551 both had a perfect face
+    // match and a rejected document. The old wording asserted a face mismatch
+    // unconditionally, sending staff to compare two faces that plainly match.
+    const state = computeVerificationState(
+      {
+        ...healthy,
+        identity_check_status: 'needs_review',
+        idenfy_overall: 'DENIED',
+        idenfy_doc_result: 'DOC_SPOOF_DETECTED',
+        idenfy_face_result: 'FACE_MATCH',
+      },
+      TODAY,
+    );
+    expect(state.actions[0].kind).toBe('compare_identity');
+    expect(state.actions[0].message).toMatch(/DOC_SPOOF_DETECTED/);
+    expect(state.actions[0].message).not.toMatch(/FACE_MATCH/);
   });
 
   it('clears once staff accept', () => {
@@ -134,6 +222,98 @@ describe('a missing date is surfaced as its own to-do', () => {
     const state = computeVerificationState({ ...healthy, dvla_check_date: null }, TODAY);
     const action = state.actions.find(a => a.slot === 'dvla');
     expect(action?.kind).toBe('set_date');
-    expect(action?.message).toMatch(/no date recorded/i);
+    expect(action?.message).toMatch(/on file but has no date recorded/i);
+  });
+});
+
+// The remedy depends on whether the DOCUMENT is there, not just its date.
+// "Add the date on the document" was being shown — with a button — for
+// documents that had never been uploaded (Sep 2026).
+describe('the document behind the date', () => {
+  const noPoa1File = { ...healthy, files: healthy.files.filter(f => f.tag !== 'poa1') };
+
+  it('does not ask for a date on a document that was never uploaded', () => {
+    const state = computeVerificationState({ ...noPoa1File, poa1_doc_date: null }, TODAY);
+    const action = state.actions.find(a => a.slot === 'poa1');
+    expect(action?.message).toMatch(/hasn't been uploaded/i);
+    // send_hire_form gets no button — an Add-the-date button pointing at an
+    // empty slot is the thing this replaces.
+    expect(action?.kind).toBe('send_hire_form');
+  });
+
+  it('flags a date sitting on nothing', () => {
+    // Steven Aldridge / job 16116: DVLA data written server-side, file never
+    // uploaded. The window read green over an empty slot.
+    const state = computeVerificationState({ ...healthy, files: healthy.files.filter(f => f.tag !== 'dvla_check') }, TODAY);
+    const action = state.actions.find(a => a.slot === 'dvla');
+    expect(action?.severity).toBe('amber');
+    expect(action?.kind).toBe('upload_document');
+    expect(action?.message).toMatch(/no document on file/i);
+    expect(state.allClear).toBe(false);
+  });
+
+  it('says nothing extra when a document is missing AND expired', () => {
+    // A new document is needed either way, so the expired line stands alone.
+    const state = computeVerificationState(
+      { ...noPoa1File, poa1_doc_date: addDaysYmd(TODAY, -120) }, TODAY);
+    const poa1 = state.actions.filter(a => a.slot === 'poa1');
+    expect(poa1).toHaveLength(1);
+    expect(poa1[0].message).toMatch(/expired/i);
+  });
+
+  it('never chases a passport file for a UK driver', () => {
+    const state = computeVerificationState(healthy, TODAY);
+    expect(state.actions.some(a => a.slot === 'passport')).toBe(false);
+  });
+});
+
+describe('signed before, but not for the hire in front of them', () => {
+  // Cameron Williams-Hill / job 16618: every document re-verified, April
+  // signature still on file, closed the tab before signing. Everything read
+  // green while nothing linked him to the hire.
+  const state = computeVerificationState({ ...healthy, unsigned_job_number: 16618 }, TODAY);
+
+  it('does not show the signature stage as done', () => {
+    expect(stage(state, 'signature').state).toBe('todo');
+    expect(stage(state, 'signature').detail).toContain('#16618');
+  });
+
+  it('raises an amber action naming the hire', () => {
+    const a = state.actions.find(x => x.slot === 'signature');
+    expect(a?.severity).toBe('amber');
+    expect(a?.message).toContain('#16618');
+    expect(state.allClear).toBe(false);
+  });
+
+  it('is done again once they have signed for it', () => {
+    const done = computeVerificationState({ ...healthy, unsigned_job_number: null }, TODAY);
+    expect(stage(done, 'signature').state).toBe('done');
+  });
+
+  // The driver page used to say all of this a second time, in its own amber box
+  // below the Identity card. The box is gone (Sep 2026), so this line has to
+  // carry everything it did — including the previous signature, which is the
+  // fact that made this state invisible in the first place.
+  it('carries the start date, the previous signature and the job to link to', () => {
+    const full = computeVerificationState({
+      ...healthy,
+      unsigned_job_number: 16618,
+      current_job_started_at: '2026-09-07T21:55:00.000Z',
+      signature_date: '2026-04-24',
+    }, TODAY);
+    const a = full.actions.find(x => x.slot === 'signature');
+    expect(a?.message).toContain('on 07/09/2026');
+    expect(a?.message).toContain('last signed on 24/04/2026, for a previous hire');
+    expect(a?.jobNumber).toBe(16618);
+  });
+
+  it('reads cleanly when there is no start date or previous signature', () => {
+    const bare = computeVerificationState({
+      ...healthy, unsigned_job_number: 16618, current_job_started_at: null, signature_date: null,
+    }, TODAY);
+    const a = bare.actions.find(x => x.slot === 'signature');
+    expect(a?.message).toBe(
+      "Started the hire form for #16618 but hasn't signed it — they're not on the hire until they do. Send the hire form link again."
+    );
   });
 });

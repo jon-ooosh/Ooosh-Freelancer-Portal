@@ -10,6 +10,7 @@
 import { query, getClient } from '../config/database';
 import { hhBroker } from './hirehop-broker';
 import { flagForReview, looksLikeCompanyName } from './sync-review';
+import { jobNameKeepingOptionSuffixSql } from './job-groups';
 
 // HireHop status code → human-readable name
 const HH_JOB_STATUS_MAP: Record<number, string> = {
@@ -329,6 +330,7 @@ export async function fetchActiveHireHopJobs(): Promise<HHJobRow[]> {
     // Filter to jobs only (kind=1), skip projects (kind=6)
     const jobs = data.data.filter(j => j.kind === 1);
     allJobs.push(...jobs);
+    // Shop-sales jobs are stripped further down, once for the whole run.
 
     console.log(`[HH Job Sync] Fetched page ${page}/${data.total} (${jobs.length} jobs, ${allJobs.length} total)`);
 
@@ -339,7 +341,39 @@ export async function fetchActiveHireHopJobs(): Promise<HHJobRow[]> {
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
 
-  return allJobs;
+  // ── Shop-sales jobs never enter OP's `jobs` table ──────────────────────
+  // docs/SHOP-SALES-SPEC.md §3.0. Not a display filter — an exclusion at the
+  // boundary, because a row that was never inserted cannot appear in the
+  // pipeline, On Today, search, Returns or anywhere else, and no chaser or
+  // money email can see it.
+  //
+  // The load-bearing reason is §2.1: sale stock is only consumed while the job
+  // is DISPATCHED, and drops below that release it. OP pushes pipeline_status
+  // to HireHop, so a shop job with an OP row is one stale-enquiry sweep away
+  // from silently un-selling a week of stock. With no row, that is impossible.
+  const { getShopJobNumbers } = await import('./shop-period');
+  const shopJobs = await getShopJobNumbers();
+  if (shopJobs.size === 0) return allJobs;
+
+  // A shop job that got an OP row BEFORE it was excluded (the scratch job
+  // 16749 did) would otherwise sit there forever, never updated but still
+  // found by search. Soft-delete it — the sync skipping it means nothing
+  // would ever bring it back.
+  const hidden = await query(
+    `UPDATE jobs SET is_deleted = true, updated_at = NOW()
+      WHERE hh_job_number = ANY($1::int[]) AND is_deleted = false
+      RETURNING hh_job_number`,
+    [[...shopJobs]],
+  );
+  if (hidden.rows.length) {
+    console.log(`[HH Job Sync] Hid ${hidden.rows.length} shop job(s) that already had an OP row: ${hidden.rows.map((r: any) => r.hh_job_number).join(', ')}`);
+  }
+
+  const kept = allJobs.filter(j => !shopJobs.has(Number(j.NUMBER)));
+  if (kept.length !== allJobs.length) {
+    console.log(`[HH Job Sync] Excluded ${allJobs.length - kept.length} shop-sales job(s)`);
+  }
+  return kept;
 }
 
 // ── Sync jobs into Ooosh ─────────────────────────────────────────────────
@@ -459,7 +493,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
         // search OR still finds the job under its old HireHop name too.
         const updated = await client.query(
           `UPDATE jobs SET
-             job_name = $1, job_type = $2, status = $3, status_name = $4,
+             job_name = ${jobNameKeepingOptionSuffixSql('$1')}, job_type = $2, status = $3, status_name = $4,
              colour = $5,
              client_id = CASE WHEN client_locked_at IS NOT NULL
                               THEN client_id
@@ -935,7 +969,7 @@ export async function syncSingleHireHopJob(
       // sync's identical guard and flagClientMismatch below.
       const updated = await client.query(
         `UPDATE jobs SET
-           job_name = $1, job_type = $2, status = $3, status_name = $4,
+           job_name = ${jobNameKeepingOptionSuffixSql('$1')}, job_type = $2, status = $3, status_name = $4,
            colour = $5,
            client_id = CASE WHEN client_locked_at IS NOT NULL
                             THEN client_id

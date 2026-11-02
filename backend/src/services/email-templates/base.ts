@@ -8,22 +8,30 @@
 
 const OOOSH_PURPLE = '#7B5EA7';
 const OOOSH_DARK = '#1e293b';
-// Logo: stored in R2 at assets/ooosh-logo.png but no public URL yet.
-// TODO: Add logo to emails once a public-accessible URL is available.
+// Logo: in the client signature block below (served from email-assets — see there).
 
 // ── Email signature (client-facing NEW emails only) ──────────────────────
 // Mirrors the company Gmail signature. Applied to the 'client' base-layout
 // footer only — NOT internal ops alerts, and NOT the auto-chase Gmail drafts
 // (those are plain-text and get Gmail's own signature when a human sends them,
-// so adding ours there would double up). Images are hosted on the existing
-// signature CDN and all carry alt text + explicit dimensions, so the block
-// still reads cleanly if a recipient's mail app blocks images.
-const SIG_IMG = 'https://daphnis.wbnusystem.net/~wbplus/websites/AD2903129/images';
-// Two company logos live on a signature variant not in this mailbox. Paste the
-// image URLs here (right-click the image in a current signature email →
-// "Copy image address"). Left blank ⇒ that logo is simply not rendered.
-const OOOSH_LOGO_URL = 'https://pub-0e6f101eb29f4f26b299d7a184b5f609.r2.dev/email-assets/ooosh-tours-logo-small.jpg';        // Ooosh disc logo (130x119)
-const ONE_PERCENT_LOGO_URL = 'https://pub-0e6f101eb29f4f26b299d7a184b5f609.r2.dev/email-assets/1percentbanner-ooosh.jpg';  // "1% for the Planet" banner (400x64)
+// so adding ours there would double up). Images all carry alt text + explicit
+// dimensions, so the block still reads cleanly if a recipient's mail app
+// blocks images.
+//
+// The images are served by OP itself — frontend/public/email-assets/, so
+// https://staff.oooshtours.co.uk/email-assets/… — a subdomain of the address the
+// mail comes from (Oct 2026). They used to load from Cloudflare's r2.dev testing
+// address (rate-limited, not for production, and widely used by phishing) and
+// from the old website builder's servers (gone the day the website changes);
+// Resend's insights flagged both. The production domain is written out rather
+// than read from FRONTEND_URL so every environment's emails show the images.
+// Changing an image? Give it a NEW file name: nginx serves these with a 30-day
+// "immutable" cache.
+const EMAIL_ASSETS = 'https://staff.oooshtours.co.uk/email-assets';
+const SIG_IMG = EMAIL_ASSETS;
+// Left blank ⇒ that logo is simply not rendered.
+const OOOSH_LOGO_URL = `${EMAIL_ASSETS}/ooosh-tours-logo-small.jpg`;        // Ooosh disc logo (130x119)
+const ONE_PERCENT_LOGO_URL = `${EMAIL_ASSETS}/1percentbanner-ooosh.jpg`;  // "1% for the Planet" banner (400x64)
 
 /** The company signature block used in the client base-layout footer. */
 function renderClientSignature(): string {

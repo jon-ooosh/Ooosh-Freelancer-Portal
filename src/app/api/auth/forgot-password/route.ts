@@ -9,7 +9,6 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { checkResetRateLimit } from '@/lib/password-reset'
 import { forgotPasswordOP, isOpClientError } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
@@ -27,13 +26,9 @@ export async function POST(request: NextRequest) {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    // Check rate limit (max 3 requests per hour)
-    if (!checkResetRateLimit(normalizedEmail)) {
-      return NextResponse.json(
-        { error: 'Too many reset requests. Please try again later.' },
-        { status: 429 }
-      )
-    }
+    // Rate limiting is OP's (/api/portal/auth/forgot-password, per IP). The
+    // portal's old in-memory check here never counted anything, so it was removed
+    // (Oct 2026).
 
     try {
       const result = await forgotPasswordOP(normalizedEmail)

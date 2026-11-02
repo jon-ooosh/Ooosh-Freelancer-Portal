@@ -17,7 +17,158 @@ export interface EmailTemplate {
 
 const templates: Record<string, EmailTemplate> = {
 
+  // Staff Calendar: one email per new leave request or overtime entry, sent
+  // immediately. The bell alone gets missed (jon, Sep 2026). Body is built by
+  // services/staff-notifications.ts and passed as bodyHtmlOverride.
+  staff_time_request: {
+    variant: 'internal',
+    preheader: 'A staff time request needs a decision',
+    subject: 'Staff time request',
+    body: '<p>A request is waiting for a decision in the Ooosh Operations Platform.</p>',
+  },
+
+  // Staff Calendar: tells the PERSON who asked what happened to their leave
+  // request or overtime entry — approved, declined (with the reason) or
+  // cancelled. Body built by notifyDecision() in services/staff-notifications.ts.
+  staff_time_decision: {
+    variant: 'internal',
+    preheader: 'An update on your time off or overtime',
+    subject: 'Your request has been decided',
+    body: '<p>Your request has been decided in the Ooosh Operations Platform.</p>',
+  },
+
+  // Staff Calendar: one digest a day listing leave requests and overtime
+  // waiting for a decision. Only sent when something is actually pending —
+  // never an empty email. Body is built by services/staff-notifications.ts and
+  // passed as bodyHtmlOverride, so the template is just the shell.
+  staff_time_digest: {
+    variant: 'internal',
+    preheader: 'Staff time requests waiting for a decision',
+    subject: 'Staff time requests waiting',
+    body: '<p>Requests are waiting for a decision in the Ooosh Operations Platform.</p>',
+  },
+
+  // Staff Calendar: last month's payroll changes (paid overtime, unpaid leave,
+  // sickness), sent once a month from the 1st so the figures reach the payroll
+  // company before the 4th. CSV attached. Body is built by
+  // runPayrollReportEmail() in services/staff-notifications.ts and passed as
+  // bodyHtmlOverride, so the template is just the shell.
+  staff_payroll_report: {
+    variant: 'internal',
+    preheader: "Last month's payroll changes, ready to send",
+    subject: 'Payroll changes for last month',
+    body: '<p>Last month\'s payroll changes are ready in the Ooosh Operations Platform.</p>',
+  },
+
   // ── Client-facing templates ────────────────────────────────────────────
+
+  // Driver hire-form email verification code (OTP). Sent by the hire form app
+  // via POST /api/driver-verification/send-code. Time-sensitive.
+  verification_code: {
+    variant: 'client',
+    preheader: 'Your Ooosh Tours verification code',
+    subject: 'Your Ooosh Tours verification code',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your verification code</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hello,</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Here is your code to continue your Ooosh Tours hire form{{#if jobRef}} for job {{jobRef}}{{/if}}:
+      </p>
+      <p style="margin:0 0 20px;font-size:34px;font-weight:700;letter-spacing:8px;color:#7B5EA7;text-align:center;">{{code}}</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Enter this code to verify your email address. For your security it will expire in {{expiryMinutes}} minutes.
+      </p>
+      <p style="margin:0;font-size:14px;color:#64748b;line-height:1.6;">
+        If you didn't request this, you can safely ignore this email.
+      </p>
+    `,
+  },
+
+  // Driver hire-form completion confirmation ("here's what you submitted").
+  // Sent by the hire form app via POST /api/driver-verification/send-confirmation.
+  // Values are pre-formatted in the endpoint and passed as escaped variables;
+  // structure + conditional rows live here (all single-level {{#if}} blocks).
+  hire_form_confirmation: {
+    variant: 'client',
+    preheader: 'Your Ooosh Tours hire form is complete',
+    subject: 'Hire form completed{{#if jobRef}} — job {{jobRef}}{{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Hire form completed</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Dear {{driverName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{introLine}}</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Subject to any additional checks that may be required, you will be emailed a completed hire form once the
+        hire has started and the vehicle booked out.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#b91c1c;line-height:1.6;">
+        <strong>Important:</strong> until you have received that hire form you are NOT insured and you must NOT drive
+        the vehicle.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Please retain this email for your reference — some of your answers are recorded below. If anything is
+        incorrect, or anything changes before or during your hire, please let us know as soon as possible.
+      </p>
+      <p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6;">
+        In the meantime, please review our driver T&amp;Cs
+        <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#7B5EA7;">here</a>.
+      </p>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Your details</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        <li>Name: {{name}}</li>
+        <li>Email: {{email}}</li>
+        <li>Phone: {{phone}}</li>
+        <li>Nationality: {{nationality}}</li>
+        <li>Date of birth: {{dateOfBirth}}</li>
+      </ul>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Licence details</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        <li>Licence ending: {{licenceEnding}}</li>
+        <li>Issued by: {{licenceIssuedBy}}</li>
+        {{#if licenceValidUntil}}<li>Valid until: {{licenceValidUntil}}</li>{{/if}}
+        {{#if datePassedTest}}<li>Date passed test: {{datePassedTest}}</li>{{/if}}
+      </ul>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Addresses</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        <li>Home address: {{homeAddress}}</li>
+        <li>Licence address: {{licenceAddress}}</li>
+      </ul>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Insurance declaration</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        {{#if showDvlaPoints}}<li>Licence points: <strong>{{dvlaPoints}}</strong></li>{{/if}}
+        {{#if showDvlaPoints}}<li>Endorsements: <strong>{{dvlaEndorsements}}</strong></li>{{/if}}
+        {{#if showDvlaPoints}}<li>Insurance excess (per incident): <strong>{{dvlaExcess}}</strong></li>{{/if}}
+        <li>Told not to drive, or driving restricted (medical): <strong>{{hasDisability}}</strong></li>
+        <li>Motoring convictions (last 5 years): <strong>{{hasRecentConvictions}}</strong></li>
+        <li>Serious motoring convictions: <strong>{{hasConvictions}}</strong></li>
+        <li>Prosecution pending: <strong>{{hasProsecution}}</strong></li>
+        <li>Accidents or claims (last 5 years): <strong>{{hasAccidents}}</strong></li>
+        <li>More than one at fault or still open: <strong>{{hasFaultClaims}}</strong></li>
+        <li>Refused motor insurance or special terms: <strong>{{hasInsuranceIssues}}</strong></li>
+        <li>Banned, disqualified or suspended (last 5 years): <strong>{{hasDrivingBan}}</strong></li>
+      </ul>
+      {{#if additionalDetails}}<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;"><strong>Additional details:</strong> {{additionalDetails}}</p>{{/if}}
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Documents verified</h3>
+      <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;color:#334155;line-height:1.7;">
+        <li>Driving licence: {{docLicence}}</li>
+        <li>Proof of address 1: {{docPoa1}}</li>
+        <li>Proof of address 2: {{docPoa2}}</li>
+        {{#if isDvla}}<li>DVLA check: {{docDvlaCheck}}</li>{{/if}}
+        {{#if isNotDvla}}<li>Passport: {{docPassport}}</li>{{/if}}
+      </ul>
+
+      <p style="margin:16px 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Your digital signature was captured on <strong>{{signatureDate}}</strong>.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If you have any questions, just reply to this email.<br>Thanks,<br><strong>Ooosh Tours</strong>
+      </p>
+    `,
+  },
 
   freelancer_invite: {
     variant: 'client',
@@ -52,8 +203,8 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Once you've submitted the form we'll process your details and reply to confirm whether you've been accepted,
         if we need more information, or otherwise. If accepted, you'll get a link to join the WhatsApp group and our
-        payment/invoicing procedure - in brief, we aim to pay approved invoices on the first Friday one week after
-        submission (normally paid within 7-14 days).
+        payment/invoicing procedure - in brief, we aim to pay invoices on the first Friday one week after we approve
+        them (usually 8-14 days after approval).
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         Any questions in the meantime, just reply to this email. If the button above doesn't work, copy and paste
@@ -109,11 +260,30 @@ const templates: Record<string, EmailTemplate> = {
           </td></tr>
         </table>
       {{/if}}
+      {{#if portalUrl}}
+        <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+          <strong>Your freelancer portal.</strong> Set up your login and you'll be able to see the days we offer you,
+          accept or decline them, and keep your documents up to date. Sign up with this email address
+          ({{portalEmail}}) - we'll send you a code to confirm it's you.
+        </p>
+        <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+          <tr><td style="border-radius:8px;border:1px solid #7B5EA7;">
+            <a href="{{portalUrl}}" style="display:inline-block;padding:11px 20px;font-size:15px;font-weight:600;color:#7B5EA7;text-decoration:none;border-radius:8px;">Set up your portal login →</a>
+          </td></tr>
+        </table>
+      {{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         <strong>Getting paid.</strong> Agree your rate with us before each job, then invoice us for the work you've
-        done. We aim to pay approved invoices on the first Friday one week after submission (normally within 7-14
-        days). You're responsible for your own tax and National Insurance.
+        done. We aim to pay invoices on the first Friday one week after we approve them, so usually 8-14 days after
+        approval. Please don't chase us for payment until 30 days after you sent your invoice. You're responsible
+        for your own tax and National Insurance.
       </p>
+      {{#if invoiceGuideUrl}}
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+          Our short guide - <a href="{{invoiceGuideUrl}}" style="color:#7B5EA7;">how to invoice Ooosh Tours</a> - covers
+          what we need on the invoice and where to send it.
+        </p>
+      {{/if}}
       {{#if notes}}
         <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{notes}}</p>
       {{/if}}
@@ -653,6 +823,162 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  /**
+   * The yard-day OFFER (spec Â§9.4). A QUESTION, not a notification â the two
+   * buttons are the whole point, and every other element is there to let
+   * somebody answer it from a phone without ringing anybody.
+   *
+   * Both buttons land on the same page carrying an intent; neither records
+   * anything on its own. Mail scanners follow links before a human sees them,
+   * so a one-click accept would accept on their behalf.
+   */
+  freelancer_day_offer: {
+    variant: 'internal',
+    preheader: 'Can you work for us on {{bookingDate}}?',
+    subject: 'Are you free on {{bookingDate}}?',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Ooosh work</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      {{#if isChase}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Just a nudge on this one — we have not heard back yet, and it would help to
+        know either way.
+      </p>
+      {{/if}}
+      {{#if notes}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>What we need a hand with:</strong> {{notes}}
+      </p>
+      {{/if}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Day</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{bookingDate}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Hours</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{duration}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Rate</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{rate}}</p>
+          </td>
+        </tr>
+      </table>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+        <tr>
+          <td style="background-color:#15803d;border-radius:6px;">
+            <a href="{{acceptUrl}}" style="display:inline-block;padding:12px 24px;font-size:15px;color:#ffffff;text-decoration:none;font-weight:600;">Yes, I can do it</a>
+          </td>
+          <td style="width:12px;">&nbsp;</td>
+          <td style="background-color:#ffffff;border:1px solid #cbd5e1;border-radius:6px;">
+            <a href="{{declineUrl}}" style="display:inline-block;padding:12px 24px;font-size:15px;color:#475569;text-decoration:none;font-weight:600;">Sorry, I cannot</a>
+          </td>
+        </tr>
+      </table>
+    `,
+  },
+  // Freelancer tasks (STAFF-CALENDAR-SPEC §21): a freelancer's current list for
+  // a day booking or a sitter shift. Sent when staff press "Send update", and
+  // as the 16:00 summary to tonight's sitter when tasks changed. Body is built
+  // by services/freelancer-tasks.ts and passed as bodyHtmlOverride, so the
+  // template is just the shell.
+  freelancer_tasks_updated: {
+    variant: 'internal',
+    preheader: 'What we would like a hand with',
+    subject: 'Your list for the day',
+    body: '<p>Your list for the day is on the Ooosh freelancer portal.</p>',
+  },
+  /**
+   * Details changed, no reply needed (spec §9.4 item 6).
+   *
+   * The counterpart to re-offering: moving the DAY or the HOURS re-opens the
+   * question and sends the offer again, because that is a different commitment.
+   * Changing the rate or what the job is does not — they are told, not re-asked.
+   * Deliberately has NO buttons, so nothing invites an answer nobody needs.
+   */
+  freelancer_day_updated: {
+    variant: 'internal',
+    preheader: 'A change to your day with us on {{bookingDate}}',
+    subject: '{{bookingDate}} — a small change',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">A change to that day</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Nothing has changed about the day itself and you do not need to reply —
+        this is just so you have the current details.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Day</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{bookingDate}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Hours</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{duration}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Rate</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{rate}}</p>
+          </td>
+        </tr>
+      </table>
+      {{#if notes}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>What we need a hand with:</strong> {{notes}}
+      </p>
+      {{/if}}
+      <p style="margin:0;font-size:14px;color:#334155;line-height:1.5;">
+        If any of that does not work for you, get in touch.
+      </p>
+    `,
+  },
+  /**
+   * The day is off (spec Â§9.4, decision 4).
+   *
+   * Sent only when they were actually told about it in the first place.
+   * Somebody who accepted and rearranged around it must not find out by
+   * checking a calendar they cannot see.
+   */
+  freelancer_day_cancelled: {
+    variant: 'internal',
+    preheader: 'The yard day on {{bookingDate}} is no longer going ahead',
+    subject: '{{bookingDate}} — that day is off, sorry',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">That day is off</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      {{#if hadAccepted}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Apologies — we have had to cancel the day you had agreed to, and we know
+        you will have planned around it.
+      </p>
+      {{/if}}
+      {{#if hadNotAccepted}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        We have had to cancel the day we asked you about, so you can ignore that
+        earlier email — no reply needed.
+      </p>
+      {{/if}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Day</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{bookingDate}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Hours</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{duration}}</p>
+          </td>
+        </tr>
+      </table>
+      {{#if reason}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>Why:</strong> {{reason}}
+      </p>
+      {{/if}}
+      <p style="margin:0;font-size:14px;color:#334155;line-height:1.5;">
+        Nothing else is needed from you. We will be in touch about other days.
+      </p>
+    `,
+  },
   freelancer_assignment: {
     variant: 'internal',
     subject: 'Job Assignment — {{jobName}} (#{{jobNumber}}) ({{jobDate}})',
@@ -838,6 +1164,45 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Northern Ireland (DVA) licence check waiting on staff ──────────────
+
+  dva_check_pending: {
+    variant: 'internal',
+    preheader: 'A Northern Ireland driver is waiting on a licence check only we can run',
+    subject: 'NI licence check needed — {{driverName}}{{#if jobNumber}} (job #{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Northern Ireland Licence Check Needed</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        This driver&rsquo;s licence was issued by the DVA in Northern Ireland, not the DVLA{{#if jobNumber}}, on job <strong>#{{jobNumber}}</strong>{{/if}}.
+        NI licences are not held by the GOV.UK share-code service, so they <strong>cannot run their own check</strong> &mdash;
+        they generate a code and somebody here has to do the lookup. Their hire form is parked
+        until that happens, and they cannot get past it on their own.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#fff7ed;border-radius:8px;border:1px solid #fed7aa;">
+            <p style="margin:0 0 8px;font-size:13px;color:#9a3412;font-weight:600;">Driver</p>
+            <p style="margin:0 0 4px;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
+            <p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{driverEmail}}</p>
+            <p style="margin:0 0 4px;font-size:13px;color:#9a3412;font-weight:600;">What you need for the lookup</p>
+            <p style="margin:0 0 2px;font-size:14px;color:#1e293b;">Check code: <strong style="font-family:monospace;">{{checkCode}}</strong></p>
+            <p style="margin:0;font-size:14px;color:#1e293b;">Licence number: <strong style="font-family:monospace;">{{licenceNumber}}</strong></p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Run the check at
+        <a href="https://www.nidirect.gov.uk/services/check-someones-ni-driving-licence-information" style="color:#7B5EA7;">nidirect</a>,
+        then record the result on the driver&rsquo;s record. The code is
+        <strong>single use and expires 21 days after the driver created it</strong> &mdash; if it fails,
+        ask them for a fresh one rather than retrying.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{driverUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Record the check in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
   // ── Mid-tour driver notification ───────────────────────────────────────
 
   mid_tour_driver: {
@@ -908,6 +1273,48 @@ const templates: Record<string, EmailTemplate> = {
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         We have received your payment of <strong>{{amount}}</strong> via {{bankName}} on <strong>{{paymentDate}}</strong> for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
+      </p>
+    `,
+  },
+
+  // Hire-side refund, i.e. a deposit/balance going back — NOT an insurance
+  // excess reimbursement, which has its own templates. Keeping them separate
+  // matters to the client: "your excess is back" and "we've refunded part of
+  // your hire" are different conversations and conflating them invites
+  // "hang on, which money is this?".
+  //
+  // {{refundTimescale}} is method-specific (getRefundTimescale) — a Stripe
+  // refund quotes 5-10 working days, cash asks them to contact us. Deliberately
+  // does not promise a VAT invoice or a credit note: whether either follows
+  // depends on how the refund was raised, and guessing wrong in writing is
+  // worse than saying nothing.
+  //
+  // NO reason/notes variable, deliberately. The refund form's Notes field is
+  // internal ("cancelled late, kept 25%", "client was difficult") and a busy
+  // person ticking "email the client" will not be re-reading what they typed
+  // there. A bare confirmation prompting "why?" is a far better outcome than
+  // internal shorthand landing in a client's inbox; a refund that genuinely
+  // needs explaining deserves a real email from a human.
+  hire_refund_processed: {
+    variant: 'client',
+    preheader: 'A refund has been processed for your booking',
+    subject: 'Refund Processed — {{jobName}} (#{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Refund Processed</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{firstName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We have refunded <strong>{{amount}}</strong> to you for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        {{refundTimescale}}
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Please note that these timescales are approximate and may vary by bank and financial institution.
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
@@ -1043,7 +1450,7 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         We need to let you know that <strong>{{claimAmount}}</strong> of your insurance excess for job <strong>#{{jobNumber}}</strong> has been retained.
       </p>
-      {{reasonSection}}
+      {{#if reason}}<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;"><tr><td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;"><p style="margin:0;font-size:15px;color:#991b1b;">{{reason}}</p></td></tr></table>{{/if}}
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         If you would like to discuss this, please reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
       </p>
@@ -1227,6 +1634,100 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // Sent to the DRIVER (not the client) when they have verified every document
+  // for a hire but stopped short of signing. Nothing joins them to the hire
+  // until they sign, so this is the one email that closes that gap.
+  // services/unsigned-hire-form-nudge.ts, once per (driver, hire).
+  hire_form_unsigned_nudge: {
+    variant: 'client',
+    preheader: 'One last step — sign your hire agreement',
+    subject: 'One last step: sign your hire agreement for #{{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Nearly there — one step left</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{driverName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Thanks for uploading your documents for hire <strong>#{{jobNumber}}</strong>{{#if jobName}} (<strong>{{jobName}}</strong>){{/if}}{{#if startDate}}, starting <strong>{{startDate}}</strong>{{/if}}. They've all been checked and are fine.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        There's just one thing left: <strong>signing the hire agreement</strong>. Until you sign, you're not yet added as a driver on this hire.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center;">
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Takes under a minute — your documents are already done</p>
+            <a href="{{hireFormUrl}}" style="display:inline-block;padding:12px 28px;background-color:#7B5EA7;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">Sign the hire agreement</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Open the link, enter your email and the code we send you, and you'll be taken straight to the signature page.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Any questions or problems, please be in touch.
+      </p>
+    `,
+  },
+
+  // Sent to the DRIVER when they have started a hire form and gone quiet with
+  // documents still outstanding. The sibling of hire_form_unsigned_nudge above:
+  // that one says "only the signature is left", this one says what is actually
+  // left. Sending the optimistic copy to a driver who has barely started tells
+  // them their documents are fine when they have not been uploaded at all.
+  //
+  // ⚠️ The {{#if}} blocks below must stay FLAT — the template engine does not
+  // support nesting (see substituteVariables in email-service.ts) — and the
+  // outstanding items cannot be passed as pre-built HTML because variables are
+  // HTML-escaped. One top-level block per item is the shape that works.
+  // services/unsigned-hire-form-nudge.ts, once per (driver, hire).
+  hire_form_incomplete_nudge: {
+    variant: 'client',
+    preheader: 'Your hire form is still waiting for a few things',
+    subject: 'Please finish your hire form for #{{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your hire form isn&rsquo;t finished yet</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{driverName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        You started the hire form for <strong>#{{jobNumber}}</strong>{{#if jobName}} (<strong>{{jobName}}</strong>){{/if}}{{#if startDate}}, starting <strong>{{startDate}}</strong>{{/if}}, but it&rsquo;s not complete &mdash; so you&rsquo;re not yet added as a driver on this hire.
+      </p>
+      <p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;">
+        Here&rsquo;s what&rsquo;s still needed:
+      </p>
+      <ul style="margin:0 0 16px;padding-left:24px;font-size:15px;color:#334155;line-height:1.8;">
+        {{#if needLicence}}<li>Verify your driving licence &mdash; photos of the front and back, plus a quick selfie check</li>{{/if}}
+        {{#if needPoa1}}<li>Proof of address #1 &mdash; dated within the last 3 months (utility or phone bill, bank statement, etc.)</li>{{/if}}
+        {{#if needPoa2}}<li>Proof of address #2 &mdash; a second, different document, also dated within the last 3 months</li>{{/if}}
+        {{#if needDvla}}<li>A DVLA check code from <a href="https://www.gov.uk/view-driving-licence" style="color:#7B5EA7;text-decoration:none;font-weight:600;">gov.uk/view-driving-licence</a></li>{{/if}}
+        {{#if needPassport}}<li>A photo of your passport</li>{{/if}}
+        <li>Sign the hire agreement &mdash; the last step, once the above are done</li>
+      </ul>
+      {{#if needDvla}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Not sure how to get a check code? See our guide:
+        <a href="https://www.oooshtours.co.uk/how-to-get-a-dvla-check-code" style="color:#7B5EA7;text-decoration:none;font-weight:600;">How to get a DVLA check code</a>.
+        If your licence wasn&rsquo;t issued in the UK, the form will ask for a photo of your passport instead &mdash; it works that out once your licence is verified, so just follow what it asks for.
+      </p>
+      {{/if}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center;">
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Pick up where you left off &mdash; nothing you&rsquo;ve already done is lost</p>
+            <a href="{{hireFormUrl}}" style="display:inline-block;padding:12px 28px;background-color:#7B5EA7;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">Continue your hire form</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        The form is best completed on a smartphone or tablet. Open the link, enter your email and the code we send you, and you&rsquo;ll go straight back to where you got to.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Any questions or problems, please be in touch.
+      </p>
+    `,
+  },
+
   // ── Cancellation templates ──────────────────────────────────────────────
 
   job_cancelled_client: {
@@ -1304,7 +1805,7 @@ const templates: Record<string, EmailTemplate> = {
         <strong>{{jobTypeSummary}}</strong> for <strong>{{jobName}}</strong>
         ({{jobLabel}}) on <strong>{{jobDateFormatted}}</strong> is still in
         the "To Be Arranged" column — that's
-        <strong>{{daysUntilLabel}}</strong> away and needs picking up.
+        <strong>{{daysUntilLabel}}</strong> and needs picking up.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
@@ -1359,6 +1860,47 @@ const templates: Record<string, EmailTemplate> = {
   },
 
   // ── Freelancer portal auth ─────────────────────────────────────────────
+
+  // Staff login second factor (docs/STAFF-LOGIN-SECURITY-SPEC.md §3.3). Job-less.
+  staff_login_code: {
+    variant: 'internal',
+    preheader: 'Your OP login code',
+    subject: 'Your OP login code: {{code}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Your login code</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{name}}, enter this code to finish logging in to OP{{#if deviceLabel}} on {{deviceLabel}}{{/if}}:
+      </p>
+      <div style="margin:0 0 20px;padding:20px;text-align:center;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+        <p style="margin:0;font-size:32px;font-weight:700;letter-spacing:6px;color:#7B5EA7;font-family:monospace;">{{code}}</p>
+      </div>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        It expires in {{expiryMinutes}} minutes. If you did not just try to log in, someone else has your
+        password: change it from My profile straight away and tell an admin.
+      </p>
+    `,
+  },
+
+  // Freelancer portal sign-in code (FREELANCER-PORTAL-SPEC §7). An account email,
+  // never muted by "Job emails". British English, no em dashes (portal copy rule).
+  portal_login_code: {
+    variant: 'internal',
+    preheader: 'Your Ooosh portal sign-in code',
+    subject: 'Your Ooosh portal sign-in code: {{code}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Your sign-in code</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{name}}, enter this code to finish signing in to the Ooosh freelancer portal{{#if deviceLabel}} on {{deviceLabel}}{{/if}}:
+      </p>
+      <div style="margin:0 0 20px;padding:20px;text-align:center;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+        <p style="margin:0;font-size:32px;font-weight:700;letter-spacing:6px;color:#A75390;font-family:monospace;">{{code}}</p>
+      </div>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        It expires in {{expiryMinutes}} minutes. If you didn't just try to sign in, someone else has your
+        password: reset it with "Forgotten it?" on the sign-in page and let the office know.
+      </p>
+    `,
+  },
 
   portal_verification_code: {
     variant: 'internal',
@@ -1475,6 +2017,41 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // A crew job's optional "what's on your hire" note (Oct 2026): sent from the
+  // portal's crew completion only when the freelancer ticks it. Same PDF layout
+  // as the delivery note, without a signature (delivery-note-pdf.ts 'hire').
+  equipment_on_hire_note: {
+    variant: 'client',
+    preheader: 'A note of the equipment on your Ooosh Tours hire',
+    subject: 'Equipment on your hire - {{jobName}} (#{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Equipment on your hire</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Attached is a note of the equipment on your hire for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>), from {{driverName}}, who has been working with you.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Job</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}} (#{{jobNumber}})</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Venue</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{venueName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">From</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If anything doesn't match what you have, let us know on
+        <a href="mailto:info@oooshtours.co.uk" style="color:#7B5EA7;">info@oooshtours.co.uk</a>
+        or call <strong>+44 (0) 1273 911382</strong>.
+      </p>
+    `,
+  },
+
   completion_driver_notes: {
     variant: 'internal',
     subject: 'Driver notes — {{jobName}} (#{{jobNumber}}) ({{completedDate}})',
@@ -1539,6 +2116,46 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // Sent by services/hire-form-errors.ts for a CRITICAL error reported by
+  // the driver hire form app. The email is the action point — there is no
+  // screen for these; every report is in hire_form_error_events.
+  hire_form_error_alert: {
+    variant: 'internal',
+    subject: '[Hire form problem] {{page}} — {{driverEmail}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#b91c1c;">A driver hit a problem on the hire form</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Something failed that the driver may not be able to fix by themselves. Check their record
+        and get in touch if they look stuck.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fee2e2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Driver</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{#if driverName}}{{driverName}} · {{/if}}{{driverEmail}}</p>
+            {{#if jobNumber}}<p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Job</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">#{{jobNumber}}</p>{{/if}}
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">When</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">{{when}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Where</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">{{page}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">What went wrong</p>
+            <p style="margin:0;font-size:13px;color:#1e293b;font-family:monospace;white-space:pre-wrap;">{{error}}</p>
+            {{#if details}}<p style="margin:8px 0 4px;font-size:12px;color:#991b1b;">Details</p>
+            <p style="margin:0;font-size:13px;color:#1e293b;font-family:monospace;white-space:pre-wrap;">{{details}}</p>{{/if}}
+          </td>
+        </tr>
+      </table>
+      {{#if driverUrl}}<p style="margin:0 0 12px;font-size:14px;color:#334155;">
+        <a href="{{driverUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the driver in Ooosh &rarr;</a>
+      </p>{{/if}}
+      <p style="margin:0;font-size:12px;color:#64748b;line-height:1.5;">
+        At most one email per driver per page per hour, and ten an hour in all. Every report,
+        including the ones not emailed, is in the hire_form_error_events table.
+      </p>
+    `,
+  },
+
   monday_fallback_alert: {
     variant: 'internal',
     subject: '[Portal fallback] {{operation}} fell back to Monday',
@@ -1567,28 +2184,49 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // The hand-off of a cancellation's money end (Oct 2026): what is LEFT to do,
+  // not "processed" — the old version read as if everything was finished.
+  // Variables come from services/cancellation-alert.ts. Every {{#if}} is flat
+  // (the engine can't nest), so the box is always drawn and each step is its
+  // own row; `nothingToDo` fills the box when there is no money to move.
   job_cancelled_internal: {
     variant: 'internal',
-    subject: 'Cancellation Processed — {{jobName}} ({{jobNumber}})',
+    subject: 'Cancelled — {{subjectAction}}: {{jobName}} ({{jobRef}})',
     body: `
-      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job Cancelled</h2>
-      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
-        <strong>{{cancelledBy}}</strong> has cancelled job <strong>{{jobName}}</strong> ({{jobNumber}}).
+      {{#if hasMoneySteps}}<h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job cancelled — money still to finish</h2>{{/if}}
+      {{#if nothingToDo}}<h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job cancelled</h2>{{/if}}
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>{{cancelledBy}}</strong> marked <strong>{{jobName}}</strong> ({{jobRef}}) as cancelled.
+        Reason: <strong>{{reason}}</strong>.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
-          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Reason</p>
-            <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{reason}}</p>
-            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Cancellation fee</p>
-            <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{fee}}</p>
-            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Refund due</p>
-            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{refund}}</p>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fcd34d;">
+            <p style="margin:0 0 8px;font-size:12px;color:#92400e;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">Still to do — on the job's Money tab (any manager)</p>
+            <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;font-size:14px;color:#1e293b;line-height:1.5;">
+              {{#if hasFee}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Raise the cancellation fee invoice — {{feeNet}} + VAT = <strong>{{feeGross}}</strong>. The same button puts the client's payment against it.</td></tr>{{/if}}
+              {{#if hasRefund}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Refund the client <strong>{{refund}}</strong> — Pending refunds &rsaquo; Process (target: 10 working days). The Money tab confirms the exact figure once the fee invoice is raised.</td></tr>{{/if}}
+              {{#if hasOwing}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Collect the <strong>{{owing}}</strong> the client still owes — once the fee invoice is raised they can pay it through the payment portal.</td></tr>{{/if}}
+              {{#if hasFee}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Send the fee invoice to the client, then press <em>Mark as sent</em>.</td></tr>{{/if}}
+              {{#if hasExcess}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9744;</td><td style="padding:2px 0;">Excess: <strong>{{excessHeld}}</strong> held — release or reimburse it from the Excess card.</td></tr>{{/if}}
+              {{#if nothingToDo}}<tr><td valign="top" style="width:22px;padding:2px 0;">&#9745;</td><td style="padding:2px 0;">Nothing to invoice, collect or refund, and no excess held.</td></tr>{{/if}}
+            </table>
           </td>
         </tr>
       </table>
-      <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
+      <p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">
+        Finished when the Money tab says <strong>Settled</strong>. The job stays Cancelled — it is never completed.
+      </p>
+      {{#if hasExcess}}<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">The excess is separate: it is finished when the Excess card holds nothing.</p>{{/if}}
+      {{#if hasMoneySteps}}<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">Anything still open on {{chaseFrom}} is chased in the managers' bells each morning until it's done.</p>{{/if}}
+      <p style="margin:16px 0 16px;font-size:14px;color:#334155;">
+        <a href="{{moneyUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Finish on the Money tab &rarr;</a>
+        &nbsp;&nbsp;&middot;&nbsp;&nbsp;
+        <a href="{{listUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">All cancellations still to finish &rarr;</a>
+      </p>
+      <p style="margin:0;font-size:12px;color:#64748b;line-height:1.5;">
+        Already done by OP: the job's other cards closed, any crew and transport stood down, HireHop being set to Cancelled (a refusal is noted on the job's timeline),
+        {{#if clientEmailed}}and a cancellation confirmation emailed to the client.{{/if}}{{#if clientNotEmailed}}and no client email (skipped at cancellation).{{/if}}
       </p>
     `,
   },
@@ -1784,29 +2422,25 @@ const templates: Record<string, EmailTemplate> = {
 
   under_dispatched_warning: {
     variant: 'internal',
-    subject: 'Sanity check: {{jobName}} (#{{jobNumber}}) marked On Hire but HH not fully dispatched',
+    subject: 'Check HireHop: {{jobName}} (#{{jobNumber}}) not dispatched',
     body: `
-      <h2 style="margin:0 0 12px;font-size:18px;color:#92400e;">⚠️ Under-dispatched warning</h2>
+      <h2 style="margin:0 0 12px;font-size:18px;color:#92400e;">⚠️ OP and HireHop don't match</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
-        Job <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>) has just been marked
-        <strong>On Hire</strong> in OP via <strong>{{source}}</strong> by
-        <strong>{{actorLabel}}</strong>, but HireHop status is still
-        <strong>{{hhStatusLabel}}</strong> — not all items appear to be
-        dispatched in HH.
+        <strong>{{jobName}}</strong> (#{{jobNumber}}) is marked <strong>On Hire</strong>
+        in OP, but <strong>{{mismatchLine}}</strong>.
       </p>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
-        OP has gone ahead and pushed the HH status to Dispatched. Please
-        confirm the items are correct, or flip back in HireHop if needed.
+        Please open the job in HireHop and see what's left to be done.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
           <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fde68a;">
-            <p style="margin:0 0 8px;font-size:13px;color:#92400e;">
-              <a href="{{opJobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in OP →</a>
-            </p>
-            {{#if hhJobUrl}}<p style="margin:0;font-size:13px;color:#92400e;">
+            {{#if hhJobUrl}}<p style="margin:0 0 8px;font-size:13px;color:#92400e;">
               <a href="{{hhJobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in HireHop →</a>
             </p>{{/if}}
+            <p style="margin:0;font-size:13px;color:#92400e;">
+              <a href="{{opJobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in OP →</a>
+            </p>
           </td>
         </tr>
       </table>
@@ -1887,11 +2521,20 @@ const templates: Record<string, EmailTemplate> = {
             <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{statusLine}}</p>
             {{#if exceptionsText}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Needs attention</p><p style="margin:0 0 8px;font-size:14px;color:#b45309;white-space:pre-line;">{{exceptionsText}}</p>{{/if}}
             {{#if notes}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Sitter's notes</p><p style="margin:0 0 8px;font-size:14px;color:#1e293b;white-space:pre-line;">{{notes}}</p>{{/if}}
+            {{#if shopLine}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Shop till tonight</p><p style="margin:0;font-size:14px;color:#1e293b;">🛒 {{shopLine}}</p>{{/if}}
           </td>
         </tr>
       </table>
+      {{#if shopReviewText}}<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fcd34d;">
+            <p style="margin:0 0 6px;font-size:14px;color:#92400e;font-weight:600;">To do: {{shopReviewText}}</p>
+            <p style="margin:0;font-size:14px;"><a href="{{shopReviewUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Review and tick them off →</a></p>
+          </td>
+        </tr>
+      </table>{{/if}}
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">{{linkLabel}} →</a>
       </p>
     `,
   },
@@ -1949,7 +2592,7 @@ const templates: Record<string, EmailTemplate> = {
         end-of-night lock-up report. They've been sent a reminder. Worth a check the studio was closed up OK.
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open the studio sitters roster →</a>
+        <a href="{{rosterUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">{{linkLabel}} →</a>
       </p>
     `,
   },
@@ -2242,6 +2885,15 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">{{handlingSentence}} A copy of the notice is attached.</p>
       <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any queries, reply to this email or call {{oooshPhone}}.</p>
     `,
+  },
+
+  // Sent when a review is marked complete (spec §5.5). Always with
+  // bodyHtmlOverride — the summary, actions and any pay change are assembled
+  // per person in services/staff-review-followup.ts.
+  staff_review_followup: {
+    variant: 'internal',
+    subject: 'Your review — {{reviewDate}}',
+    body: `<p>This template should be sent with bodyHtmlOverride. If you're seeing this, the caller forgot.</p>`,
   },
 
 };

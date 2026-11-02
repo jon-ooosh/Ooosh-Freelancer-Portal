@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { vehiclePrepPill } from '../lib/vehiclePrep';
+import { referralBadge } from '../lib/driverStatus';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
@@ -8,6 +9,7 @@ import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
 import PcnHistorySection from '../components/PcnHistorySection';
+import { ClaimsSection } from '../components/claims/format';
 import SendMerchFormButton from '../components/SendMerchFormButton';
 import AddHeldItemButton from '../components/AddHeldItemButton';
 import TransportCalculator from '../components/TransportCalculator';
@@ -26,32 +28,58 @@ import OohReturnModal from '../components/OohReturnModal';
 import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
 import JobContactsCard from '../components/JobContactsCard';
+import { VenuePicker } from '../components/VenuePicker';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
 import CombineBookingsModal from '../components/CombineBookingsModal';
+import QuoteOptionsBar from '../components/QuoteOptionsBar';
+import AddQuoteOptionModal from '../components/AddQuoteOptionModal';
+import { ProjectPanel, AddToProjectModal } from '../components/JobProjects';
+import { PROJECT_COPY } from '../lib/projectCopy';
+import { OPTION_COPY } from '../lib/optionCopy';
+import { isOptionOpen, stripOptionSuffix, ALTERNATIVE_QUOTE_LOST_REASON } from '../lib/quoteOptions';
+import { validateDateTimeOrdering, addDays } from '../lib/jobDates';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { displayFullName } from '../lib/displayName';
 import MoneyTab from '../components/MoneyTab';
 import RackPlanModal from '../components/rackplan/RackPlanModal';
 import RackPlanOverviewCard from '../components/rackplan/RackPlanOverviewCard';
 import StudioHandoverCard from '../components/StudioHandoverCard';
 import RehearsalDetailsCard from '../components/RehearsalDetailsCard';
-import RehearsalProfileFiles from '../components/RehearsalProfileFiles';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
 import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
-import FileEmailModal from '../components/FileEmailModal';
+import EntityFilesSection from '../components/EntityFilesSection';
 import QuoteEditModal from '../components/QuoteEditModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
 import { defaultRevisitDate, REVISIT_LEAD_DAYS_UNDER_MINIMUM } from '../lib/revisitDate';
 import { jobClientName, jobClientNameOr } from '../lib/jobOrgName';
+import { openAuthedFile } from '../lib/openAuthedFile';
+import { ukToday } from '../lib/ukDate';
+import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPlan } from '../lib/closeOutPlan';
+import { cancellationBalance, cancellationFeeGross } from '../lib/money';
+import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
 // an inline array literal would refetch on every parent render.
 const HELD_KINDS = ['incoming', 'temp_storage', 'lost_property'] as const;
+
+// Enquiry dismissal reasons (migration 196) — keep in step with the backend
+// DISMISSAL_REASONS enum in routes/pipeline.ts.
+const DISMISSAL_REASON_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: 'spam', label: 'Spam', hint: 'Bot / junk submission' },
+  { value: 'not_an_enquiry', label: 'Not an enquiry', hint: 'A message that isn’t a booking request' },
+  { value: 'about_an_existing_job', label: 'About an existing job', hint: 'Belongs on another job, not a new one' },
+  { value: 'duplicate', label: 'Duplicate', hint: 'Same enquiry already logged' },
+  { value: 'other', label: 'Other', hint: 'Something else — add a note' },
+];
+const DISMISSAL_REASON_LABELS: Record<string, string> = Object.fromEntries(
+  DISMISSAL_REASON_OPTIONS.map((o) => [o.value, o.label])
+);
 
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
@@ -74,35 +102,6 @@ const STATUS_COLOURS: Record<number, string> = {
   10: 'bg-gray-100 text-gray-500',
   11: 'bg-emerald-100 text-emerald-700',
 };
-
-const FILE_TAGS = [
-  'Stage Plot', 'Rider', 'Tour Dates', 'Quote', 'Invoice',
-  'Contract', 'Production Schedule', 'Site Map', 'Risk Assessment', 'Other',
-] as const;
-
-function fileTagColour(label: string): string {
-  const map: Record<string, string> = {
-    'Stage Plot': 'bg-purple-100 text-purple-700',
-    'Rider': 'bg-blue-100 text-blue-700',
-    'Tour Dates': 'bg-amber-100 text-amber-700',
-    'Quote': 'bg-green-100 text-green-700',
-    'Invoice': 'bg-emerald-100 text-emerald-700',
-    'Contract': 'bg-red-100 text-red-700',
-    'Production Schedule': 'bg-indigo-100 text-indigo-700',
-    'Site Map': 'bg-teal-100 text-teal-700',
-    'Risk Assessment': 'bg-orange-100 text-orange-700',
-  };
-  return map[label] || 'bg-gray-100 text-gray-600';
-}
-
-// Check if a file can be previewed inline
-function isPreviewable(name: string): 'image' | 'pdf' | 'spreadsheet' | null {
-  const lower = name.toLowerCase();
-  if (/\.(jpg|jpeg|png|gif|webp|svg)$/.test(lower)) return 'image';
-  if (/\.pdf$/.test(lower)) return 'pdf';
-  if (/\.(xlsx|xls|csv)$/.test(lower)) return 'spreadsheet';
-  return null;
-}
 
 interface JobDetail {
   id: string;
@@ -163,10 +162,20 @@ interface JobDetail {
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
   combined_into_job_id?: string | null;
+  // Quote options (migration 286) — sibling jobs for one enquiry
+  group_id?: string | null;
+  option_no?: number | null;
+  option_label?: string | null;
+  // Job project (migration 316) — "these jobs belong to the same festival"
+  job_project_id?: string | null;
   // Lost-job fields (mirror of cancellation, populated by pipeline transition)
   lost_at?: string | null;
   lost_reason?: string | null;
   lost_detail?: string | null;
+  // Dismissal (migration 196) — dud/spam/orphan enquiry, distinct from Lost
+  dismissed_at?: string | null;
+  dismissal_reason?: string | null;
+  dismissal_notes?: string | null;
   has_client_email?: boolean;
 }
 
@@ -192,15 +201,16 @@ interface QuoteAssignment {
   is_ooosh_crew?: boolean;
 }
 
+// The STORED engine shape (`quotes.expenses`): `description` is the calculator's
+// label plus any note ("Other: Flight to Milan"). The calculator's on-screen form
+// fields (category/label/included/pdDays) are never saved — reading them here
+// is what left every line in the breakdown nameless (job 16840, Oct 2026).
 interface QuoteExpenseLine {
-  id: string;
-  category: string;
-  label: string;
-  amount: number;
-  included: boolean;
-  chargeMode?: 'included' | 'not_included' | 'recharge' | 'na';
+  type: string;
   description?: string;
-  pdDays?: number;
+  amount: number;
+  includedInCharge?: boolean;
+  chargeMode?: 'included' | 'not_included' | 'recharge' | 'na';
 }
 
 interface SavedQuote {
@@ -311,15 +321,14 @@ function QuoteExpensesBreakdown({ expenses }: { expenses: QuoteExpenseLine[] | n
       </button>
       {open && (
         <div className="mt-1 space-y-0.5 pl-3.5">
-          {lines.map((e) => {
-            const mode = e.chargeMode ?? (e.included ? 'included' : 'not_included');
+          {lines.map((e, i) => {
+            const mode = e.chargeMode ?? (e.includedInCharge === false ? 'not_included' : 'included');
             const pill = EXPENSE_MODE_PILL[mode] || EXPENSE_MODE_PILL.included;
-            const name = EXPENSE_LINE_LABELS[e.category] || e.label || e.category;
+            const name = e.description?.trim() || EXPENSE_LINE_LABELS[e.type] || e.type || 'Expense';
             return (
-              <div key={e.id} className="flex items-center justify-between gap-2">
-                <span className="text-gray-600 truncate">
+              <div key={i} className="flex items-center justify-between gap-2">
+                <span className="text-gray-600 truncate" title={name}>
                   {name}
-                  {e.category === 'pd' && e.pdDays ? ` (${e.pdDays}d)` : ''}
                 </span>
                 <span className="flex items-center gap-2 shrink-0">
                   <span className="text-gray-500">&pound;{Number(e.amount).toFixed(2)}</span>
@@ -343,6 +352,12 @@ interface JobAssignedVehicle {
   status: string;
   /** Fleet prep-readiness projection (`fleet_vehicles.hire_status`). */
   hire_status: string | null;
+  /** When a freelancer collected it on the portal (`soft_checked_in_at`), ISO. */
+  collected_at: string | null;
+  /** Who collected it (migration 319); null on older collections. */
+  collected_by: string | null;
+  /** Checked in at base since (any row returned / `checked_in_at`). */
+  checked_in: boolean;
 }
 
 /**
@@ -401,6 +416,12 @@ interface VehicleAssignment {
   ve103b_ref: string | null;
   hire_form_pdf_key?: string | null;
   hire_form_generated_at?: string | null;
+  /**
+   * Set the moment the agreement send is CLAIMED, ~0.5s before the PDF key
+   * lands. That gap is why "Authorise & send agreement" is keyed off this and
+   * not the key — see the note on `needsAuthorise` below.
+   */
+  hire_form_emailed_at?: string | null;
   excess?: {
     id: string;
     excess_status: string;
@@ -826,7 +847,7 @@ function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapp
         <input type="text" value={checkinNotes} onChange={e => setCheckinNotes(e.target.value)} placeholder="Condition notes" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
         <p className="text-[11px] text-gray-500">
           {planned
-            ? <>Optional — the proper check-in on return captures the full state.</>
+            ? <>Optional — if you have the mileage and fuel at handover, they become the client's end reading at the final check-in (otherwise it shows "not recorded"). A freelancer collecting it on the portal records them instead.</>
             : <>{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</>}
         </p>
       </div>
@@ -926,11 +947,7 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
     setGenerating(true);
     setMessage(null);
     try {
-      const { blob } = await api.blob(`/hire-forms/${assignmentId}/download`);
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank', 'noopener,noreferrer');
-      // Revoke after a delay so the new tab has time to load the PDF.
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      await openAuthedFile(`/hire-forms/${assignmentId}/download`, 'hire-agreement.pdf');
     } catch (err) {
       setMessage(`Error: ${err instanceof Error ? err.message : 'Failed to open PDF'}`);
     } finally {
@@ -1153,7 +1170,7 @@ function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobI
   const [vehicleId, setVehicleId] = useState('');
   const [vehicleSearch, setVehicleSearch] = useState('');
   const [vehicleFocus, setVehicleFocus] = useState(false);
-  const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : new Date().toISOString().substring(0, 10));
+  const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : ukToday());
   // Hire end defaults to JOB END (the real end of charge), NOT return_date
   // (the +1-day warehouse turnaround buffer). Per the CLAUDE.md "Hire Date
   // Resolution" rule — return_date is for warehouse scheduling, never for
@@ -1553,7 +1570,27 @@ function JobAlertBanner({
   );
 }
 
+// React Router reuses ONE component instance across /jobs/A → /jobs/B — only the
+// `id` param changes. That left the previous job's state sitting on the new job's
+// page (HireHop derivation flags, client history, open inline-edit drafts: ~86 of
+// this page's ~100 state slots were never cleared), and let a slow reply for job A
+// resolve into job B's page — the auto HireHop sync ends by calling loadJob(),
+// which would setJob(A) seconds after B had already rendered.
+//
+// Keying the page by `id` makes a job→job navigation a genuine unmount/remount:
+// every state slot starts empty, and a late reply for the old job lands on a dead
+// instance (React discards the update) instead of overwriting the new one. It also
+// removes the one-frame flash of the old job, because the remount happens during
+// the render pass the route change triggers — the first paint is the new instance.
+//
+// Key on `id` ONLY. Keying on the pathname or location.key would remount on every
+// ?tab= click and close any open modal under the user.
 export default function JobDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <JobDetailContent key={id} />;
+}
+
+function JobDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
@@ -1572,11 +1609,37 @@ export default function JobDetailPage() {
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  // The Money tab's dot: the close-out's colour once a hire is back (amber = something
+  // to do, blue = waiting on the client, green = done, red = needs sorting). Read only
+  // for returned jobs — the plan is a live HireHop read, shared (30 s) with the panel
+  // and the Invoice card, so this costs nothing extra when either is on screen.
+  const [closeOutPlan, setCloseOutPlan] = useState<CloseOutPlan | null>(null);
+  // The read failed — the cancelled banner falls back to the figure saved at cancellation.
+  const [closeOutFailed, setCloseOutFailed] = useState(false);
+  const closeOutRelevant = !!id && !!job?.hh_job_number && !job?.is_internal
+    && (job?.pipeline_status === 'returned' || job?.pipeline_status === 'returned_incomplete'
+      || job?.pipeline_status === 'cancelled');   // a cancellation's fee and refund (CANCELLATION-SPEC.md)
+  useEffect(() => {
+    if (!closeOutRelevant || !id) { setCloseOutPlan(null); return; }
+    const unsub = subscribeCloseOutPlan(id, setCloseOutPlan);
+    setCloseOutFailed(false);
+    loadCloseOutPlan(id).then(setCloseOutPlan).catch(() => setCloseOutFailed(true));
+    return unsub;
+  }, [id, closeOutRelevant]);
+  const moneyDot = (() => {
+    if (!closeOutPlan) return null;
+    const v = closeOutView(closeOutPlan, { isManager: false });
+    return v.stage === 'pre' ? null : TONE[v.tone].dot;
+  })();
   // Staging Calculator — modal launch; created plans surface as an Overview card.
   const [showStagingModal, setShowStagingModal] = useState(false);
   const [showRackPlanModal, setShowRackPlanModal] = useState(false);
   const [showBacklineMatcher, setShowBacklineMatcher] = useState(false);
   const [showCombineModal, setShowCombineModal] = useState(false);
+  // Quote options — "+ Add an option" modal, and a signal the bar reloads on.
+  const [showAddOptionModal, setShowAddOptionModal] = useState(false);
+  const [showAddToProjectModal, setShowAddToProjectModal] = useState(false);
+  const [optionsRefresh, setOptionsRefresh] = useState(0);
   const [rackPlanRefreshKey, setRackPlanRefreshKey] = useState(0);
   const [stagingRefreshKey, setStagingRefreshKey] = useState(0);
 
@@ -1585,6 +1648,9 @@ export default function JobDetailPage() {
   // this the active tab "drags across" — e.g. you were on Money on job A,
   // click through to job B and you're still on Money. Re-reads the URL
   // tab param so deep-links still land where they should.
+  // NOTE: the `key={id}` wrapper above now remounts the page on a job change, so
+  // this runs once per mount and the tab can no longer drag across on its own.
+  // Kept as belt-and-braces (and it still handles a tab param that changes).
   useEffect(() => {
     const urlTab = searchParams.get('tab');
     setActiveTab((validTabs as readonly string[]).includes(urlTab || '') ? (urlTab as TabType) : 'overview');
@@ -1642,9 +1708,6 @@ export default function JobDetailPage() {
     pushToHirehop: true,
   });
   const [localSubmitting, setLocalSubmitting] = useState(false);
-  const [venueSearch, setVenueSearch] = useState('');
-  const [venueOptions, setVenueOptions] = useState<{ id: string; name: string; city: string | null }[]>([]);
-  const [showVenueDropdown, setShowVenueDropdown] = useState(false);
 
   // Job organisations (band, promoter, etc.)
   const [jobOrgs, setJobOrgs] = useState<Array<{
@@ -1686,6 +1749,14 @@ export default function JobDetailPage() {
   // Phase D2b: assignment currently being authorised after a referral resolve.
   const [authorisingAssignmentId, setAuthorisingAssignmentId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
+  // Drivers who STARTED the hire form for this hire but haven't signed — no
+  // assignment row exists yet, so nothing else on this tab knows they're
+  // there. Rendered as greyed "not signed" cards above the assignments.
+  const [unsignedDrivers, setUnsignedDrivers] = useState<Array<{
+    id: string; full_name: string; email: string | null; phone: string | null;
+    signature_date: string | null; current_job_started_at: string | null; updated_at: string | null;
+  }>>([]);
+  const [copiedHireFormLink, setCopiedHireFormLink] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
   // Cross-job allocation conflicts — van also booked on another job over
   // overlapping dates. Populated from /assignments/allocation-conflicts/:jobId
@@ -1856,24 +1927,10 @@ export default function JobDetailPage() {
   const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const [internalToggling, setInternalToggling] = useState(false);
-  // Band rehearsal-profile files surfaced on the Files tab (read-only). Fetched
-  // at page level so the count feeds the Files tab badge without opening the tab.
-  const [rehearsalFiles, setRehearsalFiles] = useState<
-    { r2_key: string; filename: string; label?: string | null; comment?: string | null }[]
-  >([]);
-  const [rehearsalAnchor, setRehearsalAnchor] = useState<{ id: string; name: string | null } | null>(null);
-  const hasRehearsal = !!hhSyncResult?.derivation?.flags?.has_rehearsal;
-  useEffect(() => {
-    if (!id || !hasRehearsal) { setRehearsalFiles([]); setRehearsalAnchor(null); return; }
-    let cancelled = false;
-    api.get<{ data: { anchorOrg: { id: string; name: string | null } | null; profile: { files?: typeof rehearsalFiles } | null } }>(
-      `/rehearsals/job/${id}`
-    )
-      .then((r) => { if (!cancelled) { setRehearsalFiles(r.data.profile?.files ?? []); setRehearsalAnchor(r.data.anchorOrg); } })
-      .catch(() => { if (!cancelled) { setRehearsalFiles([]); setRehearsalAnchor(null); } });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, hasRehearsal]);
+  // Band rehearsal desk files used to be fetched here and rendered as their own
+  // read-only card. They now live in organisations.files (migration 204) and reach
+  // the Files tab through the ordinary org → job surfacing, so there is nothing
+  // rehearsal-specific left to fetch. See docs/CROSS-ENTITY-FILES-SPEC.md Phase 3.
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
@@ -1885,44 +1942,8 @@ export default function JobDetailPage() {
     return dateStr;
   }
 
-  // Validate ordering of out/start/end/return datetimes. Returns a friendly
-  // error string if invalid, or null if OK / insufficient data to check.
-  // Mirrors backend validateJobDateTimes — same rules, same messages.
-  function validateDateTimeOrdering(v: {
-    out_date: string; job_date: string; job_end: string; return_date: string;
-    out_time: string; start_time: string; end_time: string; return_time: string;
-  }): string | null {
-    const ms = (date: string, time: string): number => {
-      if (!date) return NaN;
-      const t = (time || '09:00').slice(0, 5);
-      return Date.parse(`${date}T${t}:00Z`);
-    };
-    const oMs = ms(v.out_date, v.out_time);
-    const sMs = ms(v.job_date, v.start_time);
-    const eMs = ms(v.job_end, v.end_time);
-    const rMs = ms(v.return_date, v.return_time);
-    // Out > Start is allowed on the same calendar day (e.g. charge starts 09:00,
-    // client collects at 15:00 — Outgoing here means the physical handover time).
-    // Cross-day Out-after-Start stays blocked: the inbound HH sync would clobber
-    // out_date back to job_date on the next pull (HH never sees the user's
-    // intended later date because we clamp on push), so we don't expose that case.
-    if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs && v.out_date !== v.job_date) {
-      return 'Outgoing date must be on or before Job Start date.';
-    }
-    if (!isNaN(sMs) && !isNaN(eMs) && sMs > eMs) {
-      return 'Job Start date/time must be on or before Job End date/time.';
-    }
-    if (!isNaN(eMs) && !isNaN(rMs) && eMs > rMs) {
-      return 'Job End date/time must be on or before Returning date/time.';
-    }
-    return null;
-  }
-
-  function addDays(dateStr: string, days: number): string {
-    const d = new Date(dateStr);
-    d.setDate(d.getDate() + days);
-    return d.toISOString().split('T')[0];
-  }
+  // validateDateTimeOrdering + addDays live in lib/jobDates.ts (shared with the
+  // Quote-another-option modal so the two editors can't drift).
 
   async function saveInlineField(patch: Record<string, unknown>) {
     if (!job) return;
@@ -2225,6 +2246,9 @@ export default function JobDetailPage() {
   const [showTransitionModal, setShowTransitionModal] = useState(false);
   const [transitionTarget, setTransitionTarget] = useState<PipelineStatus | null>(null);
   const [transitionSaving, setTransitionSaving] = useState(false);
+
+  // Dismiss enquiry (dud/spam/orphan) state
+  const [showDismissModal, setShowDismissModal] = useState(false);
   const statusDropdownRef = useRef<HTMLDivElement>(null);
 
   // Close status dropdown on outside click
@@ -2282,6 +2306,18 @@ export default function JobDetailPage() {
     }
   }
 
+  async function handleUndismiss() {
+    if (!job) return;
+    if (!window.confirm('Restore this enquiry? It will return to the pipeline board.')) return;
+    try {
+      await api.post(`/pipeline/${job.id}/undismiss`, {});
+      await loadJob();
+    } catch (err) {
+      console.error('Undismiss failed:', err);
+      alert('Failed to restore enquiry');
+    }
+  }
+
   // Client trading history for sidebar
   const [clientNotesExpanded, setClientNotesExpanded] = useState(false);
   const [clientHistoryData, setClientHistoryData] = useState<{
@@ -2309,6 +2345,7 @@ export default function JobDetailPage() {
       stats: { total_jobs: string; confirmed_jobs: string; lost_jobs: string; total_confirmed_value: string; total_value: string };
       band_info?: { id: string; name: string; do_not_hire: boolean; do_not_hire_reason: string | null; internal_notes: string | null } | null;
     } | null;
+    endorsements?: Endorsement[];
   } | null>(null);
 
   useEffect(() => {
@@ -2319,11 +2356,15 @@ export default function JobDetailPage() {
       // resolve and overwrite B's state. Worse: loadVehicleAssignments reads
       // job.hh_job_number from state to build its second query, so without
       // this reset it would query A's HH number while displaying B's page.
+      // NOTE: the `key={id}` wrapper means this now runs once on a fresh mount,
+      // where the state is already empty. Kept as belt-and-braces — it is the
+      // only reset path if the keyed wrapper is ever removed.
       setJob(null);
       setInteractions([]);
       setQuotes([]);
       setVehicleAssignments([]);
       setJobAssignedVehicles([]);
+      setUnsignedDrivers([]);
       setDispatchCheck(null);
       setAllocationConflicts([]);
       setDateMismatches([]);
@@ -2500,15 +2541,52 @@ export default function JobDetailPage() {
     }
   }
 
-  async function searchVenues(search: string) {
-    try {
-      const data = await api.get<{ data: { id: string; name: string; city: string | null }[] }>(
-        `/venues?search=${encodeURIComponent(search)}&limit=10`
-      );
-      setVenueOptions(data.data);
-    } catch {
-      console.error('Failed to search venues');
+  // Distinct venues already carried by this job's OTHER transport legs — the
+  // ones of the opposite type to what's being added. A collection is nearly
+  // always from the place we delivered to, and the DELIVERY QUOTE's venue is
+  // the one a human actually chose; `jobs.venue_name` is whatever HireHop
+  // happened to carry and is often blank or unlinked.
+  //
+  // Cancelled legs are excluded — a venue we decided not to go to is not a
+  // sensible default. Deduped on venue_id, falling back to the trimmed name so
+  // two free-text legs to the same place collapse to one entry.
+  function otherJobVenues(
+    forType: 'delivery' | 'collection'
+  ): Array<{ venueId: string | null; venueName: string }> {
+    const oppositeType = forType === 'delivery' ? 'collection' : 'delivery';
+    const seen = new Set<string>();
+    const out: Array<{ venueId: string | null; venueName: string }> = [];
+    for (const q of quotes) {
+      if (q.job_type !== oppositeType) continue;
+      if (q.status === 'cancelled') continue;
+      const name = (q.venue_name || '').trim();
+      if (!name) continue;
+      const key = q.venue_id || name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ venueId: q.venue_id || null, venueName: name });
     }
+    // A leg linked to a real venue record is the more useful default (it's the
+    // one that carries an address through to the freelancer portal).
+    return out.sort((a, b) => Number(!!b.venueId) - Number(!!a.venueId));
+  }
+
+  // The venue to pre-fill when adding a leg of `forType`.
+  //
+  // Exactly one distinct opposite-type venue → use it. MORE than one → return
+  // nothing: on a multi-drop job "the venue we're delivering to" is ambiguous,
+  // and confidently pre-filling the wrong one of three is worse than leaving it
+  // blank. Those candidates surface as click-to-fill chips under the field
+  // instead. No opposite-type legs at all → fall back to the job's own venue.
+  function deriveSiblingVenue(
+    forType: 'delivery' | 'collection'
+  ): { venueId: string; venueName: string } {
+    const candidates = otherJobVenues(forType);
+    if (candidates.length === 1) {
+      return { venueId: candidates[0].venueId || '', venueName: candidates[0].venueName };
+    }
+    if (candidates.length > 1) return { venueId: '', venueName: '' };
+    return { venueId: job?.venue_id || '', venueName: job?.venue_name || '' };
   }
 
   function getDefaultDate(jobType: 'delivery' | 'collection'): string {
@@ -2524,19 +2602,17 @@ export default function JobDetailPage() {
   function openLocalForm() {
     if (!job) return;
     const defaultDate = getDefaultDate('delivery');
+    const venue = deriveSiblingVenue('delivery');
     setLocalFormData({
       jobType: 'delivery',
-      venueId: job.venue_id || '',
-      venueName: job.venue_name || '',
+      venueId: venue.venueId,
+      venueName: venue.venueName,
       jobDate: defaultDate,
       arrivalTime: '',
       freelancerNotes: '',
       notes: '',
       pushToHirehop: true,
     });
-    setVenueSearch(job.venue_name || '');
-    setVenueOptions([]);
-    setShowVenueDropdown(false);
     setShowLocalForm(true);
   }
 
@@ -2844,12 +2920,16 @@ export default function JobDetailPage() {
       // Fetch both so we can see staff allocations for sibling-vehicle
       // inference, then dedupe by id.
       const hhJobNum = job?.hh_job_number ?? null;
-      const [byJobId, byHhJob] = await Promise.all([
+      const [byJobId, byHhJob, unsigned] = await Promise.all([
         api.get<{ data: any[] }>(`/assignments?job_id=${id}`),
         hhJobNum
           ? api.get<{ data: any[] }>(`/assignments?hirehop_job_id=${hhJobNum}`)
           : Promise.resolve({ data: [] }),
+        hhJobNum
+          ? api.get<{ data: any[] }>(`/drivers/unsigned-for-job/${hhJobNum}`).catch(() => ({ data: [] }))
+          : Promise.resolve({ data: [] }),
       ]);
+      setUnsignedDrivers(unsigned.data || []);
       const merged = new Map<string, any>();
       for (const r of (byJobId.data || [])) merged.set(r.id, r);
       for (const r of (byHhJob.data || [])) {
@@ -2944,18 +3024,35 @@ export default function JobDetailPage() {
       const vanMap = new Map<string, JobAssignedVehicle>();
       for (const r of allRows) {
         if (!r.vehicle_id || r.status === 'cancelled') continue;
-        const existing = vanMap.get(r.vehicle_id);
+        let existing = vanMap.get(r.vehicle_id);
         if (!existing) {
-          vanMap.set(r.vehicle_id, {
+          existing = {
             vehicle_id: r.vehicle_id,
             reg: r.vehicle_reg || '',
             type: r.vehicle_type ?? null,
             status: r.status,
             hire_status: r.vehicle_hire_status ?? null,
-          });
+            collected_at: null,
+            collected_by: null,
+            checked_in: false,
+          };
+          vanMap.set(r.vehicle_id, existing);
         } else if ((ASSIGNMENT_STATUS_RANK[r.status] ?? -1) > (ASSIGNMENT_STATUS_RANK[existing.status] ?? -1)) {
           existing.status = r.status;
         }
+        // Portal collection (only the collected row carries it) and whether
+        // the van has been checked in at base since.
+        if (r.soft_checked_in_at && !existing.collected_at) {
+          existing.collected_at = r.soft_checked_in_at;
+          existing.collected_by = (r.soft_checked_in_by_first_name || r.soft_checked_in_by_preferred_name)
+            ? displayFullName({
+                first_name: r.soft_checked_in_by_first_name,
+                last_name: r.soft_checked_in_by_last_name,
+                preferred_name: r.soft_checked_in_by_preferred_name,
+              })
+            : null;
+        }
+        if (r.checked_in_at || r.status === 'returned') existing.checked_in = true;
       }
       setJobAssignedVehicles(Array.from(vanMap.values()));
 
@@ -3223,16 +3320,31 @@ export default function JobDetailPage() {
   })();
   // ─────────────────────────────────────────────────────────────────────────
 
-  const fileCount = (job.files || []).length + rehearsalFiles.length;
+  const fileCount = (job.files || []).length;
   const hhJobUrl = job.hh_job_number
     ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
     : null;
 
   const showClientHistory = clientHistoryData && (parseInt(clientHistoryData.stats.total_jobs) > 0 || clientHistoryData.client_info);
+  // The right-hand column: the job's project panel and/or the client history.
+  const showSidebar = !!showClientHistory || !!job.job_project_id;
 
   return (
-    <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
-      <div className={showClientHistory ? 'flex-1 min-w-0' : ''}>
+    <div className={showSidebar ? 'lg:flex lg:gap-6' : ''}>
+      <div className={showSidebar ? 'flex-1 min-w-0' : ''}>
+      {/* Quote options bar — only renders once the enquiry has two or more options.
+          At the TOP of the page (jon, 13 Oct 2026): which option you are looking at
+          has to be the first thing you see. */}
+      {job.group_id && (
+        <QuoteOptionsBar
+          jobId={job.id}
+          groupId={job.group_id}
+          refreshSignal={`${optionsRefresh}:${job.pipeline_status}`}
+          onAdd={() => setShowAddOptionModal(true)}
+          onRemoved={() => loadJob()}
+        />
+      )}
+
       {/* Combined banner — absorbed booking folded into another. Replaces the
           red cancelled banner (it's a merge, not a real cancellation). */}
       {job.combined_into_job_id && (
@@ -3274,12 +3386,28 @@ export default function JobDetailPage() {
                   {job.cancellation_fee != null && (
                     <span className="text-red-600">
                       Fee retained (ex-VAT): <strong>£{Number(job.cancellation_fee).toFixed(2)}</strong>
-                      <span className="text-red-500/80 ml-1">(inc-VAT £{(Number(job.cancellation_fee) * 1.2).toFixed(2)})</span>
+                      <span className="text-red-500/80 ml-1">(inc-VAT £{cancellationFeeGross(Number(job.cancellation_fee)).toFixed(2)})</span>
                     </span>
                   )}
-                  {job.cancellation_refund != null && Number(job.cancellation_refund) > 0 && (
-                    <span className="text-green-700">Refund due to client: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
-                  )}
+                  {(() => {
+                    // Where the money stands NOW, from the same plan as the Money tab's panel —
+                    // the figure saved at cancellation is only an estimate and never changes.
+                    // Until HireHop has answered, say so — never show the old estimate and then
+                    // change it while someone is on the phone to the client (jon, 14 Oct 2026).
+                    if (!closeOutPlan && !closeOutFailed && job.hh_job_number && !job.is_internal) {
+                      return <span className="text-gray-500 italic">Reading HireHop…</span>;
+                    }
+                    const c = closeOutPlan?.cancellation;
+                    if (c && c.invoiced) {
+                      const v = closeOutView(closeOutPlan!, { isManager: false });
+                      if (v.credit >= 0.005) return <span className="text-green-700">Refund due to client: <strong>£{v.credit.toFixed(2)}</strong></span>;
+                      if (v.owing >= 0.005) return <span className="text-red-700">Fee still owing: <strong>£{v.owing.toFixed(2)}</strong></span>;
+                      if (c.settled) return <span className="text-green-700 font-semibold">Settled — fee paid, nothing left to refund</span>;
+                    }
+                    return job.cancellation_refund != null && Number(job.cancellation_refund) > 0
+                      ? <span className="text-green-700">Refund due to client: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
+                      : null;
+                  })()}
                 </div>
               )}
               {/* One-click into the reimburse modal for any excess still
@@ -3365,12 +3493,45 @@ export default function JobDetailPage() {
                 <p className="text-xs text-orange-600 mt-1">{job.lost_detail}</p>
               )}
             </div>
-            <Link
-              to={`/operations/fill-gap/${job.id}`}
-              className="text-xs px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 whitespace-nowrap text-center shrink-0"
+            {/* Quote options: an option the client didn't pick freed no slot —
+                its sibling is using it. No Fill-a-Gap (spec §8). */}
+            {job.lost_reason === ALTERNATIVE_QUOTE_LOST_REASON ? (
+              <p className="text-xs text-orange-600 max-w-xs">{OPTION_COPY.lostAltBanner}</p>
+            ) : (
+              <Link
+                to={`/operations/fill-gap/${job.id}`}
+                className="text-xs px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 whitespace-nowrap text-center shrink-0"
+              >
+                Find replacement booking &rarr;
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Dismissed banner — dud/spam/orphan enquiry. Grey (not red/orange):
+          this isn't a commercial outcome, it's noise removed from the board.
+          Restore returns it to the pipeline. */}
+      {job.dismissed_at && (
+        <div className="bg-gray-100 border border-gray-300 rounded-xl p-4 mb-4">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-gray-700">
+                🗑️ Enquiry dismissed
+                {` on ${new Date(job.dismissed_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                {job.dismissal_reason ? ` — ${DISMISSAL_REASON_LABELS[job.dismissal_reason] || job.dismissal_reason}` : ''}
+              </p>
+              {job.dismissal_notes && (
+                <p className="text-xs text-gray-600 mt-1">{job.dismissal_notes}</p>
+              )}
+              <p className="text-xs text-gray-500 mt-1">Hidden from the pipeline board and analytics. Not counted as Lost.</p>
+            </div>
+            <button
+              onClick={handleUndismiss}
+              className="text-xs px-3 py-1.5 bg-gray-700 text-white rounded-lg hover:bg-gray-800 whitespace-nowrap text-center shrink-0"
             >
-              Find replacement booking &rarr;
-            </Link>
+              ↩️ Restore enquiry
+            </button>
           </div>
         </div>
       )}
@@ -3496,6 +3657,21 @@ export default function JobDetailPage() {
                           </button>
                         );
                       })}
+                      {/* Dismiss — dud/spam/orphan enquiry. Enquiry-stage only;
+                          distinct from Lost (a real commercial outcome). */}
+                      {['new_enquiry', 'quoting', 'paused'].includes(job.pipeline_status || '') && (
+                        <>
+                          <div className="my-1 border-t border-gray-100" />
+                          <button
+                            onClick={() => { setShowStatusDropdown(false); setShowDismissModal(true); }}
+                            className="w-full text-left px-3 py-1.5 text-sm text-gray-500 hover:bg-gray-50 flex items-center gap-2"
+                            title="Dud / spam / not a real enquiry — hides it from the pipeline without counting as Lost"
+                          >
+                            <span className="w-2 h-2 rounded-full bg-gray-400" />
+                            Dismiss enquiry…
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -3526,7 +3702,15 @@ export default function JobDetailPage() {
                 onClick={startEditName}
                 title="Click to edit job name"
               >
-                {job.job_name || 'Untitled Job'}
+                {job.option_no ? (stripOptionSuffix(job.job_name) || 'Untitled Job') : (job.job_name || 'Untitled Job')}
+                {job.option_no && (
+                  <span
+                    className="inline-flex items-center align-middle ml-2 px-2 py-0.5 rounded-full text-xs font-semibold bg-ooosh-100 text-ooosh-700"
+                    title={job.option_label ? `Option ${job.option_no} · ${job.option_label}` : `Option ${job.option_no}`}
+                  >
+                    Option {job.option_no}
+                  </span>
+                )}
                 <svg className="w-4 h-4 inline-block ml-2 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                 </svg>
@@ -3796,7 +3980,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Outgoing</label>
                     <DatePicker
                       value={editOutDate}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       onChange={(val) => handleEditOutDate(val)}
                     />
                   </div>
@@ -3804,7 +3988,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Job Start</label>
                     <DatePicker
                       value={editJobDate}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       onChange={(val) => handleEditJobDate(val)}
                     />
                     <button
@@ -3823,7 +4007,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Job End</label>
                     <DatePicker
                       value={editJobEnd}
-                      min={editJobDate || new Date().toISOString().split('T')[0]}
+                      min={editJobDate || ukToday()}
                       onChange={(val) => handleEditJobEnd(val)}
                     />
                   </div>
@@ -3831,7 +4015,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs font-medium text-gray-500 mb-1">Returning</label>
                     <DatePicker
                       value={editReturnDate}
-                      min={editJobEnd || new Date().toISOString().split('T')[0]}
+                      min={editJobEnd || ukToday()}
                       onChange={(val) => handleEditReturnDate(val)}
                     />
                     <button
@@ -4066,11 +4250,11 @@ export default function JobDetailPage() {
               })()}
             {['admin', 'manager', 'weekend_manager'].includes(user?.role || '')
               && !job.combined_into_job_id
-              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'].includes(job.pipeline_status || '') && (
+              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping', 'dispatched'].includes(job.pipeline_status || '') && (
               <button
                 onClick={() => setShowCombineModal(true)}
                 className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
-                title="Combine this booking with another pre-hire booking for the same client"
+                title="Combine this booking with another booking for the same client (two that haven't started, or extend one that's out on hire)"
               >
                 <span>🔀</span>
                 <span>Combine</span>
@@ -4095,6 +4279,39 @@ export default function JobDetailPage() {
               <span>🔧</span>
               <span>{internalToggling ? 'Saving…' : job.is_internal ? 'Internal Job ✓' : 'Mark Internal'}</span>
             </button>
+            {/* Subtle links under the buttons: "+ Add to a project" on any job not
+                in one yet (a project panel takes over once it is), and quote
+                options on a lone pre-confirmation enquiry — once the job is in a
+                group the bar below the header carries "+ Add". */}
+            {(() => {
+              const canAddOption = !job.group_id && isOptionOpen(job.pipeline_status) && !job.dismissed_at && !job.combined_into_job_id;
+              const canAddProject = !job.job_project_id;
+              if (!canAddOption && !canAddProject) return null;
+              return (
+                <div className="col-span-2 flex justify-end gap-4">
+                  {canAddProject && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAddToProjectModal(true)}
+                      className="text-xs text-ooosh-600 hover:text-ooosh-800 font-medium"
+                      title={PROJECT_COPY.addLinkTitle}
+                    >
+                      {PROJECT_COPY.addLink}
+                    </button>
+                  )}
+                  {canAddOption && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAddOptionModal(true)}
+                      className="text-xs text-ooosh-600 hover:text-ooosh-800 font-medium"
+                      title={OPTION_COPY.addLinkTitle}
+                    >
+                      {OPTION_COPY.addLink}
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
 
@@ -4436,7 +4653,7 @@ export default function JobDetailPage() {
                tab === 'timeline' ? (<><span className="sm:hidden">Timeline</span><span className="hidden sm:inline">Activity Timeline</span></>) :
                tab === 'transport' ? (<><span className="sm:hidden">Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span><span className="hidden sm:inline">Crew & Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span></>) :
                tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
-               tab === 'money' ? 'Money' :
+               tab === 'money' ? (<>Money{moneyDot && <i className={`inline-block w-1.5 h-1.5 rounded-full ml-1.5 align-middle ${moneyDot}`} />}</>) :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
             );
@@ -4479,6 +4696,9 @@ export default function JobDetailPage() {
             <PcnHistorySection entityType="job" entityId={id} hideWhenEmpty heading="🅿️ Penalty Charge Notices" />
           )}
 
+          {/* Insurance claims on this job — renders only when a case exists. */}
+          {id && <ClaimsSection entityType="job" entityId={id} hideWhenEmpty />}
+
           {/* Holding for this client (incoming deliveries) now lives inside the
               prep checklist's "Held for Clients" block — rolled in with the merch
               requirement so there's one surface. Temp storage + lost property
@@ -4500,6 +4720,7 @@ export default function JobDetailPage() {
             onLaunchStaging={() => setShowStagingModal(true)}
             onLaunchRackPlan={() => setShowRackPlanModal(true)}
             onLaunchBacklineMatcher={() => setShowBacklineMatcher(true)}
+            onOpenMoney={() => setActiveTab('money')}
           />
 
         </div>
@@ -4511,6 +4732,7 @@ export default function JobDetailPage() {
           entityType="job_id"
           entityId={id}
           interactions={interactions}
+          pipelineStatus={job.pipeline_status}
           onInteractionAdded={() => { loadInteractions(); setPrepChecklistKey(k => k + 1); }}
         />
       )}
@@ -4677,7 +4899,10 @@ export default function JobDetailPage() {
                   </span>
                   {/* Assigned chip → Vehicle Detail (view the van). */}
                   {jobAssignedVehicles.map((v) => {
-                    const s = statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
+                    // Collected on the portal, not yet checked in at base.
+                    const s = v.collected_at && !v.checked_in
+                      ? { label: 'Collected', cls: 'bg-amber-100 text-amber-800' }
+                      : statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
                     const prep = vehiclePrepPill(v.hire_status);
                     return (
                       <Link
@@ -4723,9 +4948,82 @@ export default function JobDetailPage() {
                     )
                   ))}
                 </div>
+                {/* A van a freelancer has collected that the warehouse hasn't
+                    checked in yet — the state the chip alone can't say. */}
+                {jobAssignedVehicles.filter((v) => v.collected_at && !v.checked_in).map((v) => {
+                  const d = new Date(v.collected_at as string);
+                  const when = Number.isNaN(d.getTime())
+                    ? null
+                    : d.toLocaleString('en-GB', {
+                        weekday: 'short', day: 'numeric', month: 'short',
+                        hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London',
+                      });
+                  return (
+                    <p key={`collected-${v.vehicle_id}`} className="mt-2 text-sm text-amber-800">
+                      <span aria-hidden>📦 </span>
+                      <span className="font-semibold">{v.reg || 'Van'}</span>
+                      {' '}collected{v.collected_by ? ` by ${v.collected_by}` : ''}
+                      {when ? ` · ${when}` : ''} · awaiting check-in at base
+                    </p>
+                  );
+                })}
               </div>
             );
           })()}
+
+          {/* Started-but-not-signed drivers. A driver who verified every
+              document and closed the tab one screen short of signing has no
+              assignment row, so without this they are invisible here — the
+              "hey, Cameron hasn't finished his hire form" reminder. Greyed
+              and dashed so it can't be mistaken for a live assignment. */}
+          {unsignedDrivers.length > 0 && (
+            <div className="space-y-2 mb-3">
+              {unsignedDrivers.map((d) => {
+                const fmt = (iso: string | null) => iso
+                  ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                  : '—';
+                const link = `https://hireforms.oooshtours.co.uk/?job=${job.hh_job_number}`;
+                return (
+                  <div key={d.id} className="bg-gray-50 rounded-xl border border-dashed border-gray-300 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-gray-200 text-gray-600">
+                          ⏳ Started hire form — not signed
+                        </span>
+                        <Link to={`/drivers/${d.id}`} className="font-semibold text-gray-700 hover:underline">
+                          {d.full_name}
+                        </Link>
+                        {d.email && <span className="text-sm text-gray-400">{d.email}</span>}
+                      </div>
+                      <span className="text-xs text-gray-400">
+                        last activity {fmt(d.updated_at)}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-xs text-gray-500">
+                      Nothing links them to this hire until they sign.
+                      {d.signature_date
+                        ? ` They signed for a previous hire on ${fmt(d.signature_date)}, but not this one.`
+                        : ''}
+                      {' '}If they've gone quiet, send them the hire form link again.
+                      {' '}
+                      <button
+                        type="button"
+                        className="text-ooosh-600 hover:underline"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(link).then(() => {
+                            setCopiedHireFormLink(true);
+                            setTimeout(() => setCopiedHireFormLink(false), 2000);
+                          }).catch(() => undefined);
+                        }}
+                      >
+                        {copiedHireFormLink ? 'Link copied' : 'Copy hire form link'}
+                      </button>
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {vehicleAssignmentsLoading ? (
             <div className="flex justify-center py-12">
@@ -4870,6 +5168,21 @@ export default function JobDetailPage() {
                                 Referral Pending
                               </span>
                             )}
+                            {/* A RESOLVED referral used to vanish from this row
+                                entirely, so the only hint was an unexplained
+                                "Authorise" button. Unresolved ones are already
+                                shouted by the pill above and the held-back pill. */}
+                            {(() => {
+                              const rb = referralBadge(a.requires_referral, a.referral_status);
+                              return rb && !rb.unresolved ? (
+                                <span
+                                  className={`px-2 py-1 rounded-full border font-medium ${rb.className}`}
+                                  title="Insurer referral resolved — a standing approval for this driver. Details on the driver's page."
+                                >
+                                  {rb.label}
+                                </span>
+                              ) : null;
+                            })()}
                             {a.driver_points != null && a.driver_points > 0 && (
                               <span className={`px-2 py-1 rounded-full font-medium ${
                                 a.driver_points >= 10 ? 'bg-red-100 text-red-700' :
@@ -5044,11 +5357,43 @@ export default function JobDetailPage() {
                           );
                         }
                         const wasReferred = a.referral_status === 'approved' || a.referral_status === 'waived';
-                        const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
+                        // Keyed on hire_form_emailed_at, NOT hire_form_pdf_key.
+                        // The book-out agreement is generated asynchronously
+                        // (setImmediate → generateAndEmailHireFormPdf), so for
+                        // the half-second between the send being claimed and the
+                        // PDF landing, the key is still null on a driver who has
+                        // just been booked out and emailed — and this button
+                        // reappeared on them until the next manual refresh
+                        // (Thomas Coyne / 16116, Sep 2026: emailed_at 09:19:57.777,
+                        // generated_at 09:19:57.251, with loadVehicleAssignments()
+                        // firing in between). The email timestamp is claimed
+                        // atomically at the start of the send, so it is the
+                        // honest "has the agreement gone out?" signal.
+                        //
+                        // Gated on a.vehicle_id, NOT effectiveVehicleId. The
+                        // endpoint requires the van to be linked to THIS row
+                        // (it generates the agreement against it) and 400s with
+                        // "No vehicle linked to this assignment" otherwise — so
+                        // keying the button on a sibling allocation offered an
+                        // action that could only fail. With no vehicle_id the
+                        // Allocate Van / Book Out CTA below is the correct next
+                        // step and appears in its place.
+                        //
+                        // Only once the van is OUT (booked_out / active). That is
+                        // the only time an agreement can have been withheld: the
+                        // book-out flips every driver on the van to booked_out,
+                        // held ones included, and the mid-tour add lands them
+                        // there too. Before book-out, the normal book-out hooks
+                        // send it — so a soft/confirmed row offered a button on
+                        // every driver with a standing approval, which would
+                        // have emailed the agreement before the van inspection
+                        // and pinged the team "referral resolved" (Tyler
+                        // Meadham, Oct 2026).
                         const needsAuthorise = wasReferred
+                          && !a.hire_form_emailed_at
                           && !a.hire_form_pdf_key
-                          && !!effectiveVehicleId
-                          && ['soft', 'confirmed', 'booked_out', 'active'].includes(a.status);
+                          && !!a.vehicle_id
+                          && ['booked_out', 'active'].includes(a.status);
                         if (needsAuthorise) {
                           return (
                             <button
@@ -5242,6 +5587,24 @@ export default function JobDetailPage() {
                         />
                       )}
 
+                      {/* Report incident — opens the Problem form on the
+                          Overview pre-filled with this van + driver and the
+                          possible-claim box ticked. Problem-first, always
+                          (docs/INCIDENT-CLAIMS-SPEC.md §3). */}
+                      {a.driver_id && (a.effective_vehicle_id || a.vehicle_id) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveTab('overview');
+                            navigate(`?tab=overview&report_incident=${a.effective_vehicle_id || a.vehicle_id}&incident_driver=${a.driver_id}`);
+                          }}
+                          className="text-xs font-medium text-indigo-700 hover:text-indigo-900"
+                          title="Log an incident (accident, damage) as a Problem and open a possible insurance claim"
+                        >
+                          🛡️ Report incident
+                        </button>
+                      )}
+
                       {/* Hire Form PDF actions */}
                       {a.assignment_type === 'self_drive' && (
                         <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} vehicleId={a.vehicle_id} />
@@ -5272,14 +5635,12 @@ export default function JobDetailPage() {
 
       {/* Files Tab */}
       {activeTab === 'files' && id && (
-        <>
-          <RehearsalProfileFiles anchorOrg={rehearsalAnchor} files={rehearsalFiles} />
-          <JobFilesSection
-            jobId={id}
-            files={job.files || []}
-            onFilesChanged={loadJob}
-          />
-        </>
+        <EntityFilesSection
+          entityType="jobs"
+          entityId={id}
+          files={job.files || []}
+          onChanged={loadJob}
+        />
       )}
 
       {/* Crew & Transport Tab */}
@@ -5863,7 +6224,7 @@ export default function JobDetailPage() {
 
       {/* Money Tab */}
       {activeTab === 'money' && id && (
-        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} />
+        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} onRequestComplete={() => initiateStatusChange('completed' as PipelineStatus)} />
       )}
 
       {/* Rack Planner — launched from the Job Requirements "Tools" menu (modal) */}
@@ -6016,7 +6377,20 @@ export default function JobDetailPage() {
                         key={t}
                         onClick={() => {
                           const newDefault = getDefaultDate(t);
-                          setLocalFormData({ ...localFormData, jobType: t, jobDate: newDefault });
+                          // Re-derive the venue for the new type, but only while
+                          // the field still holds whatever we last suggested —
+                          // never overwrite a venue the user chose themselves.
+                          const suggested = deriveSiblingVenue(localFormData.jobType);
+                          const untouched =
+                            localFormData.venueName === suggested.venueName &&
+                            localFormData.venueId === suggested.venueId;
+                          const next = untouched ? deriveSiblingVenue(t) : null;
+                          setLocalFormData({
+                            ...localFormData,
+                            jobType: t,
+                            jobDate: newDefault,
+                            ...(next ? { venueId: next.venueId, venueName: next.venueName } : {}),
+                          });
                         }}
                         className={`flex-1 px-3 py-2 rounded-lg border text-sm font-medium ${
                           localFormData.jobType === t
@@ -6030,50 +6404,45 @@ export default function JobDetailPage() {
                   </div>
                 </div>
 
-                {/* Venue search */}
-                <div className="relative">
+                {/* Venue — shared picker, so search / link / create-on-no-match
+                    and the "not linked, freelancer sees no address" warning all
+                    behave identically here and in the Edit Quote modal. */}
+                <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
-                  <input
-                    type="text"
-                    value={venueSearch}
-                    onChange={(e) => {
-                      setVenueSearch(e.target.value);
-                      if (e.target.value.length >= 2) {
-                        searchVenues(e.target.value);
-                        setShowVenueDropdown(true);
-                      } else {
-                        setVenueOptions([]);
-                        setShowVenueDropdown(false);
-                      }
-                      // Clear venue selection if text changed
-                      if (e.target.value !== localFormData.venueName) {
-                        setLocalFormData({ ...localFormData, venueId: '', venueName: e.target.value });
-                      }
-                    }}
-                    onFocus={() => {
-                      if (venueOptions.length > 0) setShowVenueDropdown(true);
-                    }}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                    placeholder="Search venues..."
+                  <VenuePicker
+                    value={{ venueId: localFormData.venueId || null, venueName: localFormData.venueName }}
+                    onChange={({ venueId, venueName }) =>
+                      setLocalFormData({ ...localFormData, venueId: venueId || '', venueName })
+                    }
                   />
-                  {showVenueDropdown && venueOptions.length > 0 && (
-                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                      {venueOptions.map((v) => (
-                        <button
-                          key={v.id}
-                          onClick={() => {
-                            setLocalFormData({ ...localFormData, venueId: v.id, venueName: v.name });
-                            setVenueSearch(v.name);
-                            setShowVenueDropdown(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-ooosh-50 flex justify-between"
-                        >
-                          <span className="font-medium text-gray-900">{v.name}</span>
-                          {v.city && <span className="text-xs text-gray-400">{v.city}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  {/* Other venues already on this job — one click to reuse. Shown
+                      when the field is empty or points somewhere else, which is
+                      exactly the multi-drop case where auto-defaulting would be
+                      a guess (see deriveSiblingVenue). */}
+                  {(() => {
+                    const others = otherJobVenues(localFormData.jobType)
+                      .filter((v) => v.venueId !== (localFormData.venueId || null));
+                    if (others.length === 0) return null;
+                    return (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs text-gray-500">Also on this job:</span>
+                        {others.map((v) => (
+                          <button
+                            key={v.venueId ?? v.venueName}
+                            type="button"
+                            onClick={() => setLocalFormData({
+                              ...localFormData,
+                              venueId: v.venueId || '',
+                              venueName: v.venueName,
+                            })}
+                            className="px-2 py-0.5 rounded-full border border-gray-300 text-xs text-gray-600 hover:bg-ooosh-50 hover:border-ooosh-300"
+                          >
+                            {v.venueName}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Date & Time */}
@@ -6083,7 +6452,7 @@ export default function JobDetailPage() {
                     <DatePicker
                       value={localFormData.jobDate}
                       onChange={(val) => setLocalFormData({ ...localFormData, jobDate: val })}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={ukToday()}
                       className={dateChanged ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
                     />
                     {dateChanged && (
@@ -6201,8 +6570,20 @@ export default function JobDetailPage() {
                       const localResult = await api.post<{ id: string }>('/quotes/local', {
                         jobId: job.id,
                         jobType: localFormData.jobType,
-                        venueId: localFormData.venueId || job.venue_id || undefined,
-                        venueName: localFormData.venueName || job.venue_name || undefined,
+                        // Send exactly what the picker holds — no job-level
+                        // fallback. The two used to fall back independently
+                        // (`venueId || job.venue_id`, `venueName ||
+                        // job.venue_name`), so typing a free-text venue after
+                        // clearing the link saved the TYPED NAME against the
+                        // JOB'S venue_id — a quote linked to one venue while
+                        // displaying another. It also silently re-filled a
+                        // field the user had deliberately emptied, which now
+                        // matters because a blank field is how a multi-drop
+                        // job says "don't guess" (see deriveSiblingVenue).
+                        // The picker is already pre-filled with the job venue
+                        // when there's nothing better, so nothing is lost.
+                        venueId: localFormData.venueId || undefined,
+                        venueName: localFormData.venueName || undefined,
                         jobDate: dateStr,
                         arrivalTime: localFormData.arrivalTime || undefined,
                         notes: localFormData.notes || undefined,
@@ -6351,6 +6732,32 @@ export default function JobDetailPage() {
         />
       )}
 
+      {/* Add this job to a project, or start one from it */}
+      {showAddToProjectModal && job && (
+        <AddToProjectModal
+          job={job}
+          onClose={() => setShowAddToProjectModal(false)}
+          onDone={() => { setShowAddToProjectModal(false); loadJob(); }}
+        />
+      )}
+
+      {/* Quote another option / link an existing quote */}
+      {showAddOptionModal && job && (
+        <AddQuoteOptionModal
+          job={job}
+          onClose={() => setShowAddOptionModal(false)}
+          onDone={(newJobId) => {
+            setShowAddOptionModal(false);
+            if (newJobId) {
+              navigate(`/jobs/${newJobId}`);
+            } else {
+              setOptionsRefresh((n) => n + 1);
+              loadJob();
+            }
+          }}
+        />
+      )}
+
       {/* Combine bookings modal */}
       {showCombineModal && job && (
         <CombineBookingsModal
@@ -6397,11 +6804,47 @@ export default function JobDetailPage() {
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
       )}
+
+      {showDismissModal && job && (
+        <DismissEnquiryModal
+          jobName={job.job_name || 'this enquiry'}
+          onClose={() => setShowDismissModal(false)}
+          onDismissed={async () => {
+            setShowDismissModal(false);
+            await loadJob();
+            await loadInteractions();
+          }}
+          submit={(payload) => api.post(`/pipeline/${job.id}/dismiss`, payload)}
+        />
+      )}
+
+      {/* Quote options — on the CONFIRMED option the group has done its job:
+          its siblings live here at the bottom, collapsed and read-only. */}
+      {job.group_id && (
+        <QuoteOptionsBar
+          variant="bottom"
+          jobId={job.id}
+          groupId={job.group_id}
+          refreshSignal={`${optionsRefresh}:${job.pipeline_status}`}
+          onAdd={() => setShowAddOptionModal(true)}
+          onRemoved={() => loadJob()}
+        />
+      )}
       </div>
 
       {/* Client trading history sidebar (desktop only) */}
-      {showClientHistory && (
+      {showSidebar && (
         <div className="hidden lg:block w-72 shrink-0">
+          {/* Job project — "these jobs all belong to the same festival"
+              (docs/JOB-PROJECTS-SPEC.md). Above the client history: it is
+              about THIS piece of work, the history is about the client. */}
+          {job.job_project_id && (
+            <div className="mb-4">
+              <ProjectPanel projectId={job.job_project_id} jobId={job.id} onChanged={() => loadJob()} />
+            </div>
+          )}
+          {showClientHistory && (
+          <>
           {/* Holding FYI — anything we're still holding for this client that
               arrived for a DIFFERENT job (incoming/merch held for a future
               hire, temp storage, lost property). excludeJobId drops items tied
@@ -6432,10 +6875,14 @@ export default function JobDetailPage() {
               </div>
             )}
 
+            {/* Endorsed artists — only when there are any */}
+            <EndorsementsNote endorsements={clientHistoryData!.endorsements} />
+
             {/* Working Terms */}
             {clientHistoryData!.client_info?.working_terms_type && (
-              <div className="mb-3 p-2.5 bg-gray-50 rounded-lg">
-                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
+              // Faded while Do Not Hire (the red box above leads) — kept, not hidden, in case a manager hires them anyway
+              <div className={`mb-3 p-2.5 bg-gray-50 rounded-lg ${clientHistoryData!.client_info.do_not_hire ? 'opacity-50' : ''}`}>
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms{clientHistoryData!.client_info.do_not_hire && <span className="normal-case font-normal italic"> — on hold while Do Not Hire</span>}</div>
                 <div className="flex items-center gap-2">
                   <span className={`inline-block px-2.5 py-1 rounded text-sm font-semibold text-white ${
                     { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[clientHistoryData!.client_info.working_terms_type] || 'bg-gray-500'
@@ -6672,248 +7119,10 @@ export default function JobDetailPage() {
               </>
             )}
           </div>
+          </>
+          )}
         </div>
       )}
-    </div>
-  );
-}
-
-// ── File Viewer Modal ─────────────────────────────────────────────────────
-
-// Inline spreadsheet preview (.xlsx / .xls / .csv). SheetJS is loaded lazily
-// (dynamic import) so the ~400KB parser stays out of the main bundle and only
-// executes when a staff member actually opens a spreadsheet. Renders a
-// read-only data table — computed cell values only; complex formatting, charts
-// and merged-cell layout are lossy (download for full fidelity).
-const SHEET_MAX_ROWS = 500;
-const SHEET_MAX_COLS = 50;
-
-function SpreadsheetPreview({ blob }: { blob: Blob }) {
-  const [book, setBook] = useState<{ XLSX: typeof import('xlsx'); wb: import('xlsx').WorkBook } | null>(null);
-  const [active, setActive] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError('');
-    setActive(0);
-    (async () => {
-      try {
-        const XLSX = await import('xlsx');
-        const buf = await blob.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array' });
-        if (!cancelled) setBook({ XLSX, wb });
-      } catch {
-        if (!cancelled) setError('Could not read this spreadsheet — try downloading it instead.');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [blob]);
-
-  const grid = useMemo(() => {
-    if (!book) return null;
-    const { XLSX, wb } = book;
-    const name = wb.SheetNames[active];
-    const ws = name ? wb.Sheets[name] : undefined;
-    if (!ws) return { rows: [] as string[][], moreRows: 0, moreCols: 0 };
-    const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, blankrows: false, defval: '' });
-    const moreRows = Math.max(0, aoa.length - SHEET_MAX_ROWS);
-    let moreCols = 0;
-    const rows = aoa.slice(0, SHEET_MAX_ROWS).map((r) => {
-      const row = Array.isArray(r) ? r : [];
-      moreCols = Math.max(moreCols, Math.max(0, row.length - SHEET_MAX_COLS));
-      return row.slice(0, SHEET_MAX_COLS).map((c) => (c == null ? '' : String(c)));
-    });
-    return { rows, moreRows, moreCols };
-  }, [book, active]);
-
-  if (loading) {
-    return <div className="animate-spin h-8 w-8 border-4 border-ooosh-600 border-t-transparent rounded-full" />;
-  }
-  if (error || !book || !grid) {
-    return <p className="text-sm text-red-600">{error || 'Could not read this spreadsheet.'}</p>;
-  }
-
-  const [headerRow, ...bodyRows] = grid.rows;
-
-  return (
-    <div className="w-full h-full flex flex-col min-h-0">
-      {book.wb.SheetNames.length > 1 && (
-        <div className="flex flex-wrap gap-1 mb-2 shrink-0">
-          {book.wb.SheetNames.map((name, i) => (
-            <button
-              key={name}
-              type="button"
-              onClick={() => setActive(i)}
-              className={`px-2 py-1 text-xs rounded border ${
-                i === active
-                  ? 'bg-ooosh-600 text-white border-ooosh-600'
-                  : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
-              }`}
-            >
-              {name}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="flex-1 overflow-auto border border-gray-200 rounded min-h-0">
-        {grid.rows.length === 0 ? (
-          <p className="text-sm text-gray-500 p-4">This sheet is empty.</p>
-        ) : (
-          <table className="text-xs border-collapse">
-            {headerRow && (
-              <thead className="sticky top-0 bg-gray-100">
-                <tr>
-                  {headerRow.map((cell, ci) => (
-                    <th key={ci} className="border border-gray-200 px-2 py-1 text-left font-semibold text-gray-700 whitespace-nowrap">
-                      {cell}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-            )}
-            <tbody>
-              {bodyRows.map((row, ri) => (
-                <tr key={ri} className="odd:bg-white even:bg-gray-50">
-                  {(headerRow || []).map((_, ci) => (
-                    <td key={ci} className="border border-gray-200 px-2 py-1 text-gray-700 whitespace-nowrap">
-                      {row[ci] ?? ''}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-      {(grid.moreRows > 0 || grid.moreCols > 0) && (
-        <p className="text-xs text-amber-600 mt-2 shrink-0">
-          Preview truncated
-          {grid.moreRows > 0 ? ` — ${grid.moreRows} more row${grid.moreRows === 1 ? '' : 's'}` : ''}
-          {grid.moreCols > 0 ? ` — ${grid.moreCols} more column${grid.moreCols === 1 ? '' : 's'}` : ''}
-          . Download for the full file.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function FileViewerModal({
-  file,
-  onClose,
-}: {
-  file: FileAttachment | null;
-  onClose: () => void;
-}) {
-  const [objectUrl, setObjectUrl] = useState<string | null>(null);
-  const [blob, setBlob] = useState<Blob | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const loadFile = useCallback(async () => {
-    if (!file) return;
-    setLoading(true);
-    setError('');
-    try {
-      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-      const url = URL.createObjectURL(blob);
-      setObjectUrl(url);
-      setBlob(blob);
-    } catch {
-      setError('Failed to load file');
-    } finally {
-      setLoading(false);
-    }
-  }, [file]);
-
-  useEffect(() => {
-    loadFile();
-    return () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [file]);
-
-  if (!file) return null;
-
-  const previewType = isPreviewable(file.name);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className={`relative bg-white rounded-xl shadow-xl w-full mx-4 max-h-[90vh] flex flex-col ${previewType === 'spreadsheet' ? 'max-w-6xl' : 'max-w-4xl'}`}>
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <div className="flex items-center gap-3 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-900 truncate">{file.name}</h3>
-            {file.label && (
-              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${fileTagColour(file.label)}`}>
-                {file.label}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {objectUrl && (
-              <a
-                href={objectUrl}
-                download={file.name}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
-                Download
-              </a>
-            )}
-            <button
-              onClick={onClose}
-              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-
-        {/* Comment */}
-        {file.comment && (
-          <div className="px-4 py-2 bg-gray-50 border-b border-gray-200">
-            <p className="text-sm text-gray-600">{file.comment}</p>
-          </div>
-        )}
-
-        {/* Content */}
-        <div className="flex-1 overflow-auto p-4 flex items-center justify-center min-h-[300px]">
-          {loading && (
-            <div className="animate-spin h-8 w-8 border-4 border-ooosh-600 border-t-transparent rounded-full" />
-          )}
-          {error && <p className="text-sm text-red-600">{error}</p>}
-          {objectUrl && previewType === 'image' && (
-            <img src={objectUrl} alt={file.name} className="max-w-full max-h-[70vh] object-contain" />
-          )}
-          {objectUrl && previewType === 'pdf' && (
-            <iframe
-              src={objectUrl}
-              title={file.name}
-              className="w-full h-[70vh] border-0"
-            />
-          )}
-          {blob && previewType === 'spreadsheet' && (
-            <SpreadsheetPreview blob={blob} />
-          )}
-          {objectUrl && !previewType && (
-            <div className="text-center">
-              <p className="text-sm text-gray-500 mb-3">Preview not available for this file type.</p>
-              <a
-                href={objectUrl}
-                download={file.name}
-                className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700"
-              >
-                Download File
-              </a>
-            </div>
-          )}
-        </div>
-      </div>
     </div>
   );
 }
@@ -6927,6 +7136,14 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   const [data, setData] = useState<{
     hire_value_inc_vat: number; total_hire_deposits: number;
     balance_outstanding: number; deposit_percent: number; deposit_paid: boolean;
+    /** Money the client has OVERPAID and is owed back. This strip reads the
+     *  same endpoint as the Money tab but copied only the five fields above,
+     *  so an overpaid job read "Paid in full" here while the Money tab said
+     *  "Client is owed £120" (job 15187). Two surfaces, one source, opposite
+     *  conclusions — and the Overview is the one people glance at. */
+    client_overpaid?: number;
+    /** A cancelled job: it owes the fee, not the hire (CANCELLATION-SPEC.md) — same as the Money tab. */
+    cancellation?: { charge_inc_vat: number; invoiced: boolean } | null;
   } | null>(null);
 
   useEffect(() => {
@@ -6934,13 +7151,15 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
     api.get<{ data: { financial: any } }>(`/money/${jobId}/summary`)
       .then(res => {
         const f = res.data.financial;
-        if (f.hire_value_inc_vat > 0) {
+        if (f.hire_value_inc_vat > 0 || f.cancellation) {
           setData({
             hire_value_inc_vat: f.hire_value_inc_vat,
             total_hire_deposits: f.total_hire_deposits,
             balance_outstanding: f.balance_outstanding,
             deposit_percent: f.deposit_percent,
             deposit_paid: f.deposit_paid,
+            client_overpaid: f.client_overpaid,
+            cancellation: f.cancellation ?? null,
           });
         }
       })
@@ -6948,6 +7167,21 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   }, [jobId]);
 
   if (!data) return null;
+
+  if (data.cancellation) {
+    const c = data.cancellation;
+    const b = cancellationBalance(c.charge_inc_vat, data.total_hire_deposits);
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="text-gray-500">
+          Cancelled · fee £{c.charge_inc_vat.toFixed(2)}{c.invoiced ? '' : ' (not invoiced yet)'} · paid £{data.total_hire_deposits.toFixed(2)}
+        </span>
+        <span className={`font-semibold whitespace-nowrap ${b.refundDue ? 'text-amber-700' : b.feeOwing ? 'text-red-600' : 'text-green-700'}`}>
+          {b.refundDue ? `£${b.refundDue.toFixed(2)} refund due` : b.feeOwing ? `£${b.feeOwing.toFixed(2)} fee owing` : 'All square'}
+        </span>
+      </div>
+    );
+  }
 
   const state = getPaymentState(data);
   const stateClass = PAYMENT_STATE_CLASSES[state].text;
@@ -6976,13 +7210,25 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
             £{data.balance_outstanding.toFixed(2)} outstanding
           </span>
         )}
+        {/* The mirror image of "outstanding": money owed the other way. The
+            "Paid in full" label stays true — they paid it all and then some —
+            but on its own it reads as "nothing to do here", which is wrong when
+            we're sitting on a client's money. */}
+        {(data.client_overpaid ?? 0) > 0.009 && (
+          <span
+            className="text-xs font-semibold text-amber-700 whitespace-nowrap"
+            title="HireHop shows this much overpaid on the invoice — see the Money tab to refund it."
+          >
+            £{(data.client_overpaid as number).toFixed(2)} owed to client
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, clientOrgName, derivedFlags, seatAvailability, assignedVehicleRegs, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator, onLaunchStaging, onLaunchRackPlan, onLaunchBacklineMatcher, onOpenMoney }: {
   jobId: string;
   hhJobNumber?: number | null;
   pipelineStatus?: string | null;
@@ -7013,6 +7259,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   onLaunchStaging?: () => void;
   onLaunchRackPlan?: () => void;
   onLaunchBacklineMatcher?: () => void;
+  /** The Invoice card's "Open in Money →" (the close-out lives on the Money tab). */
+  onOpenMoney?: () => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -7140,11 +7388,22 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   const [reminderDelivery, setReminderDelivery] = useState<'both' | 'notification' | 'email'>('both');
   const [reminderAssignees, setReminderAssignees] = useState<string[]>(['']);
   const [reminderEventTrigger, setReminderEventTrigger] = useState('');
-  const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string }>>([]);
+  // `preferred_name` is fetched so the picker shows what people actually go by
+  // (displayFullName is THE definition — see lib/displayName.ts). The list also
+  // drops the current user: "Me" already covers them, and having both meant the
+  // same person appeared twice under two different labels.
+  const currentUser = useAuthStore(s => s.user);
+  const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string; preferred_name?: string | null }>>([]);
+  const otherReminderUsers = useMemo(
+    () => reminderUsers.filter(u => u.id !== currentUser?.id),
+    [reminderUsers, currentUser?.id]
+  );
 
   function ensureReminderUsersLoaded() {
     if (reminderUsers.length === 0) {
-      api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
+      // ?assignable=true drops service / shared / test logins (System Service,
+      // Front Desk, TEST Wood) — nobody reads those inboxes. See routes/users.ts.
+      api.get<{ data: Array<{ id: string; first_name: string; last_name: string; preferred_name?: string | null }> }>('/users?assignable=true')
         .then(res => setReminderUsers(res.data))
         .catch(() => {});
     }
@@ -7396,6 +7655,10 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
               // Merch renders in the dedicated Held-for-Clients block below (card
               // + nested items panel), not as a plain inline card.
               if (req.requirement_type === 'merch') continue;
+              // The payments requirement rides on the Invoice card as its second pill
+              // (one card for the hire close-out, Oct 2026). It still exists — the
+              // derivation engine and the Returns page count it — it just isn't drawn.
+              if (req.requirement_type === 'payment_reconcile' && requirements.some(r => r.requirement_type === 'invoice')) continue;
 
               cards.push(
                 <RequirementCard
@@ -7416,6 +7679,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                   selfDriveVanOverride={selfDriveVanOverride}
                   onVehicleCountOverride={req.requirement_type === 'vehicle' ? changeVehicleCountOverride : undefined}
                   onReload={loadAll}
+                  onOpenMoney={req.requirement_type === 'invoice' ? onOpenMoney : undefined}
                 />
               );
 
@@ -7578,8 +7842,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
                         className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
                       >
                         <option value="">Me</option>
-                        {reminderUsers.map(u => (
-                          <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
+                        {otherReminderUsers.map(u => (
+                          <option key={u.id} value={u.id}>{displayFullName(u)}</option>
                         ))}
                       </select>
                       {reminderAssignees.length > 1 && (
@@ -7615,541 +7879,104 @@ function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, clientOrgId, cli
   );
 }
 
-// ── Files Section ─────────────────────────────────────────────────────────
+// ── Helper Components ─────────────────────────────────────────────────────
 
-function JobFilesSection({
-  jobId,
-  files,
-  onFilesChanged,
+function DismissEnquiryModal({
+  jobName,
+  onClose,
+  onDismissed,
+  submit,
 }: {
-  jobId: string;
-  files: FileAttachment[];
-  onFilesChanged: () => void;
+  jobName: string;
+  onClose: () => void;
+  onDismissed: () => void;
+  submit: (payload: { reason: string; notes: string | null; cleanup_orphans: boolean }) => Promise<{ cleaned?: { orgs: string[]; people: string[] } }>;
 }) {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
-  const [selectedTag, setSelectedTag] = useState('');
-  const [customTag, setCustomTag] = useState('');
-  const [fileComment, setFileComment] = useState('');
-  const [deleting, setDeleting] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const [filterTag, setFilterTag] = useState('');
-  const [viewingFile, setViewingFile] = useState<FileAttachment | null>(null);
-  const [emailingFile, setEmailingFile] = useState<FileAttachment | null>(null);
-  const [dragOver, setDragOver] = useState(false);
+  const [reason, setReason] = useState('spam');
+  const [notes, setNotes] = useState('');
+  const [cleanupOrphans, setCleanupOrphans] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Link-adding mode (external URLs — Dropbox/WeTransfer/Drive links etc.)
-  const [linkMode, setLinkMode] = useState(false);
-  const [linkUrl, setLinkUrl] = useState('');
-  const [linkName, setLinkName] = useState('');
-  const [addingLink, setAddingLink] = useState(false);
-
-  // When the tag is "Other", the user types a free-text tag instead. This
-  // resolves the value actually saved as the label.
-  const effectiveTag = selectedTag === 'Other' ? customTag.trim() : selectedTag;
-  const resetMeta = () => {
-    setSelectedTag('');
-    setCustomTag('');
-    setFileComment('');
-  };
-
-  // Post-save metadata edit — keyed on file URL because that's stable
-  // across re-renders (label/comment shift around as users edit).
-  const [editingFileUrl, setEditingFileUrl] = useState<string | null>(null);
-  const [editLabel, setEditLabel] = useState('');
-  const [editCustomTag, setEditCustomTag] = useState('');
-  const [editComment, setEditComment] = useState('');
-  const [savingEdit, setSavingEdit] = useState(false);
-
-  const effectiveEditTag = editLabel === 'Other' ? editCustomTag.trim() : editLabel;
-
-  const startEdit = (file: FileAttachment) => {
-    setEditingFileUrl(file.url);
-    setEditLabel(file.label || '');
-    setEditCustomTag('');
-    setEditComment(file.comment || '');
-  };
-  const cancelEdit = () => {
-    setEditingFileUrl(null);
-    setEditLabel('');
-    setEditCustomTag('');
-    setEditComment('');
-  };
-  const saveEdit = async (file: FileAttachment) => {
-    setSavingEdit(true);
-    setError('');
+  const handleSubmit = async () => {
+    setSaving(true);
+    setError(null);
     try {
-      await api.patch('/files/update-metadata', {
-        entity_type: 'jobs',
-        entity_id: jobId,
-        file_url: file.url,
-        updates: {
-          label: effectiveEditTag.trim() || null,
-          comment: editComment.trim() || null,
-        },
-      });
-      cancelEdit();
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update file');
-    } finally {
-      setSavingEdit(false);
+      await submit({ reason, notes: notes.trim() || null, cleanup_orphans: cleanupOrphans });
+      onDismissed();
+    } catch (err: unknown) {
+      const body = (err as { body?: { error?: string } })?.body;
+      setError(body?.error || 'Failed to dismiss enquiry');
+      setSaving(false);
     }
   };
-
-  const handleToggleShare = async (file: FileAttachment) => {
-    try {
-      await api.patch('/files/update-metadata', {
-        entity_type: 'jobs',
-        entity_id: jobId,
-        file_url: file.url,
-        updates: { share_with_freelancer: !file.share_with_freelancer },
-      });
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update share status');
-    }
-  };
-
-  const uploadFile = async (file: File) => {
-    setUploading(true);
-    setError('');
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('entity_type', 'jobs');
-      formData.append('entity_id', jobId);
-      if (effectiveTag) formData.append('label', effectiveTag);
-      if (fileComment.trim()) formData.append('comment', fileComment.trim());
-
-      await api.upload('/files/upload', formData);
-      resetMeta();
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed');
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
-  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) void uploadFile(file);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) void uploadFile(file);
-  };
-
-  const addLink = async () => {
-    if (!linkUrl.trim()) return;
-    setAddingLink(true);
-    setError('');
-    try {
-      await api.post('/files/add-link', {
-        entity_type: 'jobs',
-        entity_id: jobId,
-        url: linkUrl.trim(),
-        name: linkName.trim() || undefined,
-        label: effectiveTag || undefined,
-        comment: fileComment.trim() || undefined,
-      });
-      setLinkUrl('');
-      setLinkName('');
-      setLinkMode(false);
-      resetMeta();
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add link');
-    } finally {
-      setAddingLink(false);
-    }
-  };
-
-  const handleDelete = async (fileUrl: string) => {
-    if (!confirm('Delete this file?')) return;
-    setDeleting(fileUrl);
-    try {
-      await api.deleteWithBody('/files/delete', {
-        key: fileUrl,
-        entity_type: 'jobs',
-        entity_id: jobId,
-      });
-      onFilesChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Delete failed');
-    } finally {
-      setDeleting(null);
-    }
-  };
-
-  const existingTags = [...new Set(files.map(f => f.label).filter(Boolean))] as string[];
-  const filteredFiles = filterTag
-    ? files.filter(f => f.label === filterTag)
-    : files;
 
   return (
-    <div className="space-y-6">
-      {/* Upload section */}
-      <div
-        className={`bg-white rounded-xl shadow-sm border p-6 transition-colors ${
-          dragOver ? 'border-ooosh-400 ring-2 ring-ooosh-200 bg-ooosh-50/40' : 'border-gray-200'
-        }`}
-        onDragOver={(e) => { e.preventDefault(); if (!dragOver) setDragOver(true); }}
-        onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
-        onDrop={handleDrop}
-      >
-        <h3 className="text-sm font-semibold text-gray-700 mb-4">Add File or Link</h3>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-bold text-gray-900">Dismiss enquiry</h3>
+        <p className="text-sm text-gray-500 mt-1">
+          Removes <strong>{jobName}</strong> from the pipeline board and analytics.
+          This is for duds — it does <strong>not</strong> count as a Lost enquiry, and you can restore it later.
+        </p>
 
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
-        )}
-
-        <div className="space-y-3">
-          <div className="flex items-end gap-3 flex-wrap">
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Tag</label>
-              <select
-                value={selectedTag}
-                onChange={(e) => setSelectedTag(e.target.value)}
-                className="border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              >
-                <option value="">No tag</option>
-                {FILE_TAGS.map(tag => (
-                  <option key={tag} value={tag}>{tag}</option>
-                ))}
-              </select>
-            </div>
-            {selectedTag === 'Other' && (
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1">Custom tag</label>
-                <input
-                  type="text"
-                  value={customTag}
-                  onChange={(e) => setCustomTag(e.target.value)}
-                  placeholder="e.g. Client Files"
-                  className="border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                />
-              </div>
-            )}
-            <div className="flex-1 min-w-[200px]">
-              <label className="block text-xs font-medium text-gray-500 mb-1">Comment</label>
+        <label className="block mt-4 text-xs font-semibold text-gray-600 uppercase tracking-wide">Reason</label>
+        <div className="mt-2 space-y-1.5">
+          {DISMISSAL_REASON_OPTIONS.map((o) => (
+            <label key={o.value} className="flex items-start gap-2 cursor-pointer p-1.5 rounded hover:bg-gray-50">
               <input
-                type="text"
-                value={fileComment}
-                onChange={(e) => setFileComment(e.target.value)}
-                placeholder="Optional note about this file or link..."
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                type="radio"
+                name="dismiss-reason"
+                value={o.value}
+                checked={reason === o.value}
+                onChange={() => setReason(o.value)}
+                className="mt-0.5"
               />
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                ref={fileInputRef}
-                type="file"
-                onChange={handleUpload}
-                accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.jpg,.jpeg,.png,.gif,.webp,.svg,.zip,.rar"
-                className="hidden"
-                id="file-upload"
-              />
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
-                className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
-              >
-                {uploading ? 'Uploading...' : 'Choose File'}
-              </button>
-              <button
-                onClick={() => { setLinkMode(!linkMode); setError(''); }}
-                className={`px-4 py-2 text-sm font-medium rounded-lg border transition-colors ${
-                  linkMode
-                    ? 'bg-ooosh-50 border-ooosh-300 text-ooosh-700'
-                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
-                }`}
-              >
-                🔗 Add Link
-              </button>
-            </div>
-          </div>
-
-          {linkMode && (
-            <div className="flex items-end gap-3 flex-wrap pt-2 border-t border-gray-100">
-              <div className="flex-1 min-w-[260px]">
-                <label className="block text-xs font-medium text-gray-500 mb-1">Link URL</label>
-                <input
-                  type="url"
-                  value={linkUrl}
-                  onChange={(e) => setLinkUrl(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') void addLink(); }}
-                  placeholder="https://www.dropbox.com/..."
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                  autoFocus
-                />
-              </div>
-              <div className="flex-1 min-w-[180px]">
-                <label className="block text-xs font-medium text-gray-500 mb-1">Display name <span className="text-gray-400">(optional)</span></label>
-                <input
-                  type="text"
-                  value={linkName}
-                  onChange={(e) => setLinkName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') void addLink(); }}
-                  placeholder="e.g. Dropbox — full rider"
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                />
-              </div>
-              <button
-                onClick={() => void addLink()}
-                disabled={addingLink || !linkUrl.trim()}
-                className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
-              >
-                {addingLink ? 'Adding...' : 'Add Link'}
-              </button>
-            </div>
-          )}
-
-          <p className="text-xs text-gray-400">
-            PDF, images, docs, spreadsheets. Max 10MB. Drag &amp; drop a file anywhere on this box. Images and PDFs view inline; links open in a new tab.
-          </p>
-        </div>
-      </div>
-
-      {/* File list */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-gray-700">
-            Files {files.length > 0 && `(${files.length})`}
-          </h3>
-          {existingTags.length > 0 && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-gray-400">Filter:</span>
-              <button
-                onClick={() => setFilterTag('')}
-                className={`text-xs px-2 py-0.5 rounded ${
-                  !filterTag ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:bg-gray-100'
-                }`}
-              >
-                All
-              </button>
-              {existingTags.map(tag => (
-                <button
-                  key={tag}
-                  onClick={() => setFilterTag(tag === filterTag ? '' : tag)}
-                  className={`text-xs px-2 py-0.5 rounded ${
-                    filterTag === tag ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:bg-gray-100'
-                  }`}
-                >
-                  {tag}
-                </button>
-              ))}
-            </div>
-          )}
+              <span className="text-sm text-gray-800">
+                {o.label}
+                <span className="block text-xs text-gray-400">{o.hint}</span>
+              </span>
+            </label>
+          ))}
         </div>
 
-        {filteredFiles.length === 0 ? (
-          <p className="text-sm text-gray-400 py-8 text-center">
-            {files.length === 0 ? 'No files uploaded yet' : 'No files match this filter'}
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {filteredFiles.map((file, idx) => {
-              const isLink = file.type === 'link';
-              const canPreview = !isLink && isPreviewable(file.name);
-              const isEditing = editingFileUrl === file.url;
-              const openFile = () => {
-                if (isLink) {
-                  window.open(file.url, '_blank', 'noopener,noreferrer');
-                } else {
-                  setViewingFile(file);
-                }
-              };
-              return (
-                <div
-                  key={file.url || idx}
-                  className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
-                >
-                  <div className="flex items-start gap-3 min-w-0 flex-1">
-                    <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
-                      isLink ? 'bg-sky-100 text-sky-600' :
-                      file.type === 'image' ? 'bg-purple-100 text-purple-600' :
-                      file.type === 'document' ? 'bg-blue-100 text-blue-600' :
-                      'bg-gray-100 text-gray-500'
-                    }`}>
-                      {isLink ? '🔗' : file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <button
-                          onClick={openFile}
-                          className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate text-left"
-                        >
-                          {file.name}
-                          {isLink ? (
-                            <span className="text-xs text-gray-400 ml-1">(open link ↗)</span>
-                          ) : canPreview ? (
-                            <span className="text-xs text-gray-400 ml-1">(click to view)</span>
-                          ) : null}
-                        </button>
-                        {!isEditing && file.label && (
-                          <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${fileTagColour(file.label)}`}>
-                            {file.label}
-                          </span>
-                        )}
-                      </div>
-                      {isEditing ? (
-                        <div className="mt-2 space-y-2">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <label className="text-xs text-gray-500">Tag:</label>
-                            <select
-                              value={editLabel}
-                              onChange={(e) => setEditLabel(e.target.value)}
-                              className="text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                            >
-                              <option value="">No tag</option>
-                              {FILE_TAGS.map(tag => (
-                                <option key={tag} value={tag}>{tag}</option>
-                              ))}
-                              {/* Preserve a custom value not in the standard list */}
-                              {editLabel && !FILE_TAGS.includes(editLabel as typeof FILE_TAGS[number]) && (
-                                <option value={editLabel}>{editLabel}</option>
-                              )}
-                            </select>
-                            {editLabel === 'Other' && (
-                              <input
-                                type="text"
-                                value={editCustomTag}
-                                onChange={(e) => setEditCustomTag(e.target.value)}
-                                placeholder="Custom tag"
-                                className="text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                              />
-                            )}
-                          </div>
-                          <input
-                            type="text"
-                            value={editComment}
-                            onChange={(e) => setEditComment(e.target.value)}
-                            placeholder="Comment / note about this file"
-                            className="w-full text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                          />
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => saveEdit(file)}
-                              disabled={savingEdit}
-                              className="text-xs px-3 py-1 bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
-                            >
-                              {savingEdit ? 'Saving…' : 'Save'}
-                            </button>
-                            <button
-                              onClick={cancelEdit}
-                              disabled={savingEdit}
-                              className="text-xs px-3 py-1 text-gray-600 hover:bg-gray-100 rounded"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          {file.comment && (
-                            <p className="text-xs text-gray-500 mt-0.5 truncate">{file.comment}</p>
-                          )}
-                          <p className="text-xs text-gray-400">
-                            {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
-                              day: 'numeric', month: 'short', year: 'numeric',
-                            })}
-                          </p>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  {!isEditing && (
-                    <div className="flex items-center gap-2 flex-wrap flex-shrink-0 pl-11 sm:pl-0 sm:ml-2">
-                      <button
-                        onClick={() => handleToggleShare(file)}
-                        className={`text-xs px-2 py-0.5 rounded border transition-colors ${
-                          file.share_with_freelancer
-                            ? 'bg-green-50 border-green-200 text-green-700'
-                            : 'bg-gray-50 border-gray-200 text-gray-400 opacity-100 sm:opacity-0 sm:group-hover:opacity-100'
-                        }`}
-                        title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
-                      >
-                        {file.share_with_freelancer ? 'Shared' : 'Share'}
-                      </button>
-                      {!isLink && (
-                        <button
-                          onClick={() => setEmailingFile(file)}
-                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                          title="Email this file"
-                        >
-                          Email
-                        </button>
-                      )}
-                      <button
-                        onClick={() => startEdit(file)}
-                        className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                        title="Edit tag / comment"
-                      >
-                        Edit
-                      </button>
-                      {!isLink && (
-                        <button
-                          onClick={() => setViewingFile(file)}
-                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                        >
-                          View
-                        </button>
-                      )}
-                      <button
-                        onClick={() => handleDelete(file.url)}
-                        disabled={deleting === file.url}
-                        className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                      >
-                        {deleting === file.url ? '...' : 'Delete'}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
+        <label className="block mt-3 text-xs font-semibold text-gray-600 uppercase tracking-wide">Notes (optional)</label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={2}
+          className="mt-1 w-full border border-gray-300 rounded-md px-2.5 py-1.5 text-sm resize-y"
+          placeholder="Anything worth recording…"
+        />
+
+        <label className="flex items-start gap-2 mt-3 cursor-pointer">
+          <input type="checkbox" checked={cleanupOrphans} onChange={(e) => setCleanupOrphans(e.target.checked)} className="mt-0.5" />
+          <span className="text-sm text-gray-700">
+            Tidy up orphan records
+            <span className="block text-xs text-gray-400">
+              Delete the client/contact that this enquiry created, if nothing else uses them. Records linked to other jobs are always left alone.
+            </span>
+          </span>
+        </label>
+
+        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} disabled={saving} className="px-3.5 py-1.5 text-sm text-gray-600 hover:text-gray-800 disabled:opacity-50">
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="px-3.5 py-1.5 text-sm font-semibold bg-gray-700 text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+          >
+            {saving ? 'Dismissing…' : 'Dismiss enquiry'}
+          </button>
+        </div>
       </div>
-
-      {/* File viewer modal */}
-      {viewingFile && (
-        <FileViewerModal
-          file={viewingFile}
-          onClose={() => setViewingFile(null)}
-        />
-      )}
-
-      {/* File email modal */}
-      {emailingFile && (
-        <FileEmailModal
-          file={{
-            name: emailingFile.name,
-            url: emailingFile.url,
-            label: emailingFile.label,
-            comment: emailingFile.comment,
-          }}
-          entityType="jobs"
-          entityId={jobId}
-          contextLabel="Send this file from the job to one or more recipients"
-          onClose={() => setEmailingFile(null)}
-          onSent={() => {
-            setEmailingFile(null);
-            onFilesChanged();
-          }}
-        />
-      )}
-
     </div>
   );
 }
-
-// ── Helper Components ─────────────────────────────────────────────────────
 
 function StatusTransitionModal({
   targetStatus,
@@ -8182,6 +8009,9 @@ function StatusTransitionModal({
   const [note, setNote] = useState('');
   const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
+  // Optional second retro question. Saved as a "Next time:" line inside the same
+  // retro note, so every existing "Job retro:" reader keeps working unchanged.
+  const [retroNextTime, setRetroNextTime] = useState('');
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
 
   // Multi-reminder system
@@ -8195,7 +8025,15 @@ function StatusTransitionModal({
   const [reminders, setReminders] = useState<Reminder[]>([
     { text: '', date: '', delivery: 'both', priority: 'normal', userId: '' },
   ]);
-  const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string }>>([]);
+  const [showReminders, setShowReminders] = useState(false);
+  const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }>>([]);
+  // Same rule as the reminder modal: "Remind me" already covers the current
+  // user, so they must not also appear by name.
+  const currentUser = useAuthStore(s => s.user);
+  const otherTeamUsers = useMemo(
+    () => teamUsers.filter(u => u.id !== currentUser?.id),
+    [teamUsers, currentUser?.id]
+  );
 
   // "Under 4-day window" pauses get a pre-filled revisit date — the hire is worth
   // another swing once the diary loosens, so default it to a fortnight before the
@@ -8217,19 +8055,29 @@ function StatusTransitionModal({
   // Load team users for "remind someone else"
   useEffect(() => {
     if (targetStatus !== 'completed') return;
-    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string }> }>('/users')
+    // Same real-people filter as the reminder modal — see routes/users.ts.
+    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string; preferred_name?: string | null }> }>('/users?assignable=true')
       .then(res => setTeamUsers(res.data))
       .catch(() => {});
   }, [targetStatus]);
   const [outstandingItems, setOutstandingItems] = useState<string[]>([]);
+  // Open Problems (job_issues not resolved / written off / cancelled). Firmer
+  // than the close-out items: only a manager may complete over them, with a
+  // reason — the server enforces the same (routes/pipeline.ts).
+  const [openProblems, setOpenProblems] = useState<Array<{ id: string; summary: string; severity: string; status: string }>>([]);
+  const isManagerUser = hasManagerRole(currentUser?.role);
   const [upcomingJobs, setUpcomingJobs] = useState<Array<{
     id: string; hh_job_number: number | null; job_name: string | null;
     job_date: string | null; pipeline_status: string | null;
   }>>([]);
 
-  // Fetch outstanding close-out items + upcoming client jobs when completing
+  // Fetch outstanding close-out items + open Problems + upcoming client jobs when completing
   useEffect(() => {
     if (targetStatus !== 'completed' || !jobId) return;
+
+    api.get<{ data: Array<{ id: string; summary: string; severity: string; status: string }> }>(`/problems/job/${jobId}`)
+      .then(res => setOpenProblems((res.data || []).filter(p => !['resolved', 'written_off', 'cancelled'].includes(p.status))))
+      .catch(() => {});
 
     // Close-out progress
     api.post<{ data: Record<string, { items: Array<{ label: string; status: string }> }> }>(
@@ -8286,7 +8134,11 @@ function StatusTransitionModal({
       if (keepRequirementIds.size > 0) data.keep_requirement_ids = Array.from(keepRequirementIds);
     } else if (targetStatus === 'completed') {
       data.retro_rating = retroRating;
-      if (retroNotes) data.retro_notes = retroNotes;
+      const retroText = [
+        retroNotes.trim(),
+        retroNextTime.trim() ? `Next time: ${retroNextTime.trim()}` : '',
+      ].filter(Boolean).join('\n');
+      if (retroText) data.retro_notes = retroText;
       // Collect valid reminders (have text + date)
       const validReminders = reminders.filter(r => r.text.trim() && r.date);
       if (validReminders.length > 0) {
@@ -8309,11 +8161,15 @@ function StatusTransitionModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/30" onClick={onCancel} />
-      <div className="relative bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
-        <h3 className="text-lg font-semibold mb-4">
+      {/* Capped at 90% of the window: the title and the buttons stay put and
+          the middle scrolls, so a long completion (open Problems, outstanding
+          items, reminders) can never push Confirm off the screen. */}
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 max-h-[90vh] flex flex-col">
+        <h3 className="text-lg font-semibold px-6 pt-6 pb-4 shrink-0">
           Move to <span style={{ color: config.colour }}>{config.label}</span>
         </h3>
 
+        <div className="flex-1 min-h-0 overflow-y-auto px-6">
         {targetStatus === 'paused' && (
           <div className="space-y-3 mb-4">
             <label className="block text-sm font-medium text-gray-700">Reason for pausing</label>
@@ -8353,7 +8209,7 @@ function StatusTransitionModal({
                   type="date"
                   value={revisitDate}
                   onChange={(e) => { setRevisitTouched(true); setRevisitDate(e.target.value); }}
-                  min={new Date().toISOString().split('T')[0]}
+                  min={ukToday()}
                   className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm"
                 />
               )}
@@ -8414,6 +8270,37 @@ function StatusTransitionModal({
 
         {targetStatus === 'completed' && (
           <div className="space-y-3 mb-4">
+            {openProblems.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm">
+                <div className="font-medium text-red-800 mb-1">
+                  {openProblems.length === 1 ? 'A Problem is still open on this job:' : `${openProblems.length} Problems are still open on this job:`}
+                </div>
+                <ul className="text-red-700 text-xs space-y-0.5">
+                  {openProblems.map(p => (
+                    <li key={p.id} className="flex items-center gap-1.5">
+                      <span className={`w-1.5 h-1.5 rounded-full ${p.severity === 'urgent' ? 'bg-red-600' : 'bg-red-400'}`} />
+                      {p.summary} <span className="text-red-400">({p.status.replace(/_/g, ' ')})</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-red-700 mt-2">
+                  {isManagerUser
+                    ? 'A manager can complete the job anyway — say why below. It goes on the timeline.'
+                    : 'Resolve them first, or ask a manager to complete the job with a reason.'}
+                </p>
+                {/* The reason sits with the warning it answers, rather than at
+                    the foot of the modal (the general note below is hidden
+                    while this one is showing — they share `note`). */}
+                <label className="block text-xs font-medium text-red-800 mt-3 mb-1">Reason (required — Problems still open)</label>
+                <input
+                  type="text"
+                  placeholder="Why is this job being completed with Problems open?"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  className={`w-full border rounded px-3 py-2 text-sm bg-white ${!note.trim() ? 'border-red-300' : 'border-gray-300'}`}
+                />
+              </div>
+            )}
             {outstandingItems.length > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm">
                 <div className="font-medium text-amber-800 mb-1">Outstanding close-out items:</div>
@@ -8451,10 +8338,26 @@ function StatusTransitionModal({
               placeholder="Anything to note? Lessons learned, client feedback, things to improve..."
               value={retroNotes}
               onChange={(e) => setRetroNotes(e.target.value)}
-              rows={3}
+              rows={2}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
-            {/* Reminders */}
+            <textarea
+              placeholder="Anything we'd do differently next time? (optional)"
+              value={retroNextTime}
+              onChange={(e) => setRetroNextTime(e.target.value)}
+              rows={2}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+            {/* Reminders — folded away until asked for; most completions don't set one */}
+            {!showReminders ? (
+              <button
+                type="button"
+                onClick={() => setShowReminders(true)}
+                className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+              >
+                + Add a follow-up reminder
+              </button>
+            ) : (
             <div className="space-y-2">
               <label className="block text-xs font-medium text-gray-600">Follow-up reminders</label>
               {reminders.map((rem, idx) => {
@@ -8538,9 +8441,9 @@ function StatusTransitionModal({
                         className="border border-gray-300 rounded px-2 py-1 text-xs flex-1 min-w-[100px]"
                       >
                         <option value="">Remind me</option>
-                        {teamUsers.map(u => (
+                        {otherTeamUsers.map(u => (
                           <option key={u.id} value={u.id}>
-                            {u.first_name} {u.last_name}
+                            {displayFullName(u)}
                           </option>
                         ))}
                       </select>
@@ -8567,6 +8470,7 @@ function StatusTransitionModal({
                 </button>
               )}
             </div>
+            )}
           </div>
         )}
 
@@ -8591,18 +8495,23 @@ function StatusTransitionModal({
           </div>
         )}
 
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
-          <input
-            type="text"
-            placeholder="Why are you changing the status?"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-          />
+        {/* With open Problems on a completion, the (required) reason lives in
+            the red box above instead. */}
+        {!(targetStatus === 'completed' && openProblems.length > 0) && (
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
+            <input
+              type="text"
+              placeholder="Why are you changing the status?"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+          </div>
+        )}
         </div>
 
-        <div className="flex gap-3 justify-end">
+        <div className="flex gap-3 justify-end px-6 py-4 border-t border-gray-100 shrink-0">
           <button
             onClick={onCancel}
             className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
@@ -8611,7 +8520,8 @@ function StatusTransitionModal({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={saving}
+            disabled={saving || (targetStatus === 'completed' && openProblems.length > 0 && (!isManagerUser || !note.trim()))}
+            title={targetStatus === 'completed' && openProblems.length > 0 && !isManagerUser ? 'Only a manager can complete a job with open Problems' : undefined}
             className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
           >
             {saving ? 'Saving...' : 'Confirm'}

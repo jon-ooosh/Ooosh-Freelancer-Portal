@@ -4,7 +4,7 @@
  * Cross-module register for things that need a human to chase on a job —
  * vehicle damage, missing items, breakdowns, client disputes, mid-tour
  * scratches that need handling at check-in. NOT to be confused with
- * routes/issues.ts which is the OP platform bug tracker.
+ * the old platform bug tracker (routes/issues.ts, retired Sep 2026).
  *
  * Storage: dedicated job_issues table (migration 075). Phase 1 used
  * job_requirements with requirement_type='issue' — that data was migrated
@@ -34,6 +34,9 @@ import {
   notifyIssueRecipients,
   sendVehicleIssueAlertEmail,
 } from '../services/job-issues';
+import { notifyVehicleSaleOfIssue } from '../services/vehicle-sales';
+import { autoLinkIssueToOpenClaim } from '../services/incident-claims';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -185,6 +188,7 @@ const ISSUE_SELECT = `
   ji.reported_by, ji.assigned_to, ji.watchers,
   ji.due_date, ji.surface_on,
   ji.estimated_cost, ji.actual_cost, ji.excess_id,
+  ji.claim_id,
   ji.created_at, ji.updated_at, ji.resolved_at,
   j.hh_job_number, j.job_name, j.client_name, j.company_name,
   fv.reg AS vehicle_reg, fv.simple_type AS vehicle_type,
@@ -365,7 +369,10 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       issueId, req.user!.id, body.severity,
       `New issue: ${body.summary.slice(0, 80)}`,
       `${body.category} — ${body.severity}`,
+      { resolveKey: 'problem_open' },
     );
+    // Van for sale with chosen photos → "check its sale photos" (VEHICLE-SALES-SPEC D6).
+    await notifyVehicleSaleOfIssue(issueId, req.user!.id);
 
     // Direct email for vehicle damage/breakdown (gated internally on
     // vehicle anchor + category) — see sendVehicleIssueAlertEmail.
@@ -491,8 +498,14 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
         id, req.user!.id, effectiveSeverity,
         `You've been assigned an issue: ${before.summary?.slice(0, 80) || 'Issue'}`,
         `Assigned by issue update`,
+        { resolveKey: 'problem_open' },
       );
     }
+
+    // Closed? Its "New issue" / "re-flagged" / "assigned" bells are done with,
+    // for everyone (bell-rules.ts problem_open). The rule decides — this is a
+    // no-op while the Problem is still open. Never throws.
+    await retireDoneBells('problem_open', id);
 
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [id]);
     res.json({ data: full.rows[0] });
@@ -616,14 +629,19 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
         await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
       }
 
+      // Damage on a van + hire that already has an open insurance case joins
+      // it (docs/INCIDENT-CLAIMS-SPEC.md §3). No-op otherwise.
+      await autoLinkIssueToOpenClaim(issueId, body.vehicle_id, jobId ?? existing.rows[0].job_id ?? null, req.user!.id);
+
       // Reflag pings watchers + assignee + reporter — the original
       // reporter cares that "their" issue is still happening.
       await notifyIssueRecipients(
         issueId, req.user!.id, body.severity,
         `Issue re-flagged: ${body.summary.slice(0, 80)}`,
         eventBody,
-        { includeReporter: true }
+        { includeReporter: true, resolveKey: 'problem_open' }
       );
+      await notifyVehicleSaleOfIssue(issueId, req.user!.id);
 
       // Persist any photos the caller already uploaded to R2 (e.g. the
       // check-in flow's damage-photo keys). Dedup'd by r2_key.
@@ -672,11 +690,16 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       component_key: body.component_key,
     });
 
+    // Joins an open insurance case on the same van + hire (spec §3). No-op otherwise.
+    await autoLinkIssueToOpenClaim(issueId, body.vehicle_id, jobId, req.user!.id);
+
     await notifyIssueRecipients(
       issueId, req.user!.id, body.severity,
       `New issue: ${body.summary.slice(0, 80)}`,
       `${body.category} — flagged from ${body.source_module}`,
+      { resolveKey: 'problem_open' },
     );
+    await notifyVehicleSaleOfIssue(issueId, req.user!.id);
 
     if (body.r2_photo_keys?.length) {
       await attachExternalIssuePhotos(issueId, req.user!.id, body.r2_photo_keys);

@@ -12,9 +12,10 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { ukToday } from '../lib/ukDate';
 
 interface FreelancerHistoryItem {
-  source: 'crew' | 'sitter' | 'vehicle';
+  source: 'crew' | 'sitter' | 'vehicle' | 'yard';
   id: string;
   title: string;
   role: string | null;
@@ -33,6 +34,8 @@ interface FreelancerHistoryItem {
   client_name: string | null;
   vehicle_reg: string | null;
   run_combined_fee: number | null;
+  // Sitter rows: every job that needed a sitter that evening (can be several).
+  jobs?: Array<{ job_id: string; hh_job_number: number | null; label: string }>;
 }
 
 interface FreelancerHistorySummary {
@@ -49,7 +52,10 @@ interface FreelancerHistorySectionProps {
 
 type FilterPill = 'all' | 'upcoming' | 'past' | 'dead';
 
-const DEAD_STATUSES = new Set(['cancelled', 'declined']);
+// Work that did not happen. `withdrew` and `lapsed` join the set: a day
+// somebody pulled out of, or never answered, is not work they did — but each
+// keeps its own LABEL, because why it did not happen is the useful part.
+const DEAD_STATUSES = new Set(['cancelled', 'declined', 'withdrew', 'lapsed']);
 
 function statusPillClass(status: string): string {
   switch (status) {
@@ -63,7 +69,14 @@ function statusPillClass(status: string): string {
       return 'bg-blue-100 text-blue-800';
     case 'declined':
     case 'cancelled':
+    case 'withdrew':
       return 'bg-red-100 text-red-700';
+    case 'offered':
+      return 'bg-amber-100 text-amber-800';
+    case 'accepted':
+      return 'bg-green-100 text-green-800';
+    case 'lapsed':
+      return 'bg-gray-100 text-gray-600';
     default:
       // returned / swapped / anything else
       return 'bg-gray-100 text-gray-600';
@@ -82,6 +95,12 @@ function statusLabel(status: string): string {
     active: 'On Hire',
     returned: 'Returned',
     swapped: 'Swapped',
+    // Yard-day statuses (freelancer_day_bookings). `lapsed` and `withdrew` are
+    // deliberately distinct from `declined` — see the staff-calendar rules.
+    offered: 'Offered',
+    accepted: 'Accepted',
+    withdrew: 'Pulled out',
+    lapsed: 'No reply',
   };
   return labels[status] || status;
 }
@@ -89,6 +108,7 @@ function statusLabel(status: string): string {
 function sourceBadge(item: FreelancerHistoryItem): { icon: string; label: string } {
   if (item.source === 'sitter') return { icon: '🎸', label: 'Studio Sitter' };
   if (item.source === 'vehicle') return { icon: '🚐', label: 'Van' };
+  if (item.source === 'yard') return { icon: '🔧', label: 'Yard day' };
   const jt = item.job_type;
   const label = jt === 'delivery' ? 'Delivery'
     : jt === 'collection' ? 'Collection'
@@ -148,7 +168,7 @@ export default function FreelancerHistorySection({ entityId }: FreelancerHistory
     );
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ukToday();
   const isDead = (it: FreelancerHistoryItem) => DEAD_STATUSES.has(it.assignment_status);
   // Upcoming = still-live assignment whose (end || start) date is today or later.
   // Cancelled/declined rows always live in History — they're not pending work.
@@ -271,7 +291,19 @@ function HistoryTable({ items }: { items: FreelancerHistoryItem[] }) {
                   {it.source === 'crew' && it.is_local ? ' (local)' : ''}
                 </td>
                 <td className="px-4 py-2.5">
-                  {it.job_id ? (
+                  {it.jobs && it.jobs.length > 0 ? (
+                    // A sitter evening shared by several bands — one link per job.
+                    <div className="space-y-1">
+                      {it.jobs.map((j) => (
+                        <div key={j.job_id}>
+                          <Link to={`/jobs/${j.job_id}`} className="text-sm text-ooosh-600 hover:text-ooosh-800 font-medium">
+                            {j.label}
+                          </Link>
+                          {j.hh_job_number ? <p className="text-xs text-gray-500">#{j.hh_job_number}</p> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : it.job_id ? (
                     <Link to={`/jobs/${it.job_id}`} className="text-sm text-ooosh-600 hover:text-ooosh-800 font-medium">
                       {it.title}
                     </Link>

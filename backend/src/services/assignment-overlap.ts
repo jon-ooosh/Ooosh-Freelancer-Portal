@@ -23,6 +23,12 @@ import { query } from '../config/database';
  * Statuses that do NOT occupy a van (available):
  *   returned, cancelled, swapped
  *
+ * …except a hold that never left the yard on a FINISHED job — see
+ * `holdOccupiesSql()` below. A soft/confirmed row on a completed, cancelled
+ * or lost job doesn't occupy the van (the "dummy MOT job" case, HH 16768,
+ * Oct 2026: completed, but its soft hold on RX72TKO kept the van out of the
+ * picker until the job's original end date).
+ *
  * Multi-driver on one van: assignments on the same job share a van slot, so
  * overlap checks exclude the target job from the search. Passing both the
  * OP job UUID (`jobId`) and the HireHop job number (`hirehopJobId`) catches
@@ -37,6 +43,32 @@ import { query } from '../config/database';
  */
 
 const OCCUPYING_STATUSES = ['soft', 'confirmed', 'booked_out', 'active'] as const;
+
+/**
+ * THE rule for "does this live hold still occupy the van?", beyond its own
+ * status and dates. Shared by `findOverlappingAssignments()` (every write-path
+ * check and the Job Detail clash banner) and `GET /api/assignments/availability`
+ * (the Allocations and swap pickers), so the picker and the save never disagree.
+ *
+ * A hold that never left the yard (`soft` / `confirmed`) stops counting once
+ * its job is finished — completed, cancelled or lost. Lost and cancelled jobs
+ * already soft-cancel their rows (`job-close-cascade.ts`); completing a job
+ * does not, and there are several routes to "completed" (status modal,
+ * close-out, HireHop sync / webhook), so this is a read-side rule rather than
+ * another sweep that could miss one. Nothing is changed in the data:
+ * re-opening the job brings the hold back.
+ *
+ * `booked_out` / `active` rows still count on a finished job — that van may
+ * genuinely not be back. A row with no matching job (j.* all NULL) still
+ * counts, as before.
+ *
+ * Returns a SQL predicate; pass the aliases used for vehicle_hire_assignments
+ * and the joined jobs row.
+ */
+export function holdOccupiesSql(vha = 'vha', j = 'j'): string {
+  return `NOT (${vha}.status IN ('soft', 'confirmed')
+               AND COALESCE(${j}.pipeline_status, '') IN ('completed', 'cancelled', 'lost'))`;
+}
 
 export type OverlapTarget = {
   vehicleId: string;
@@ -150,6 +182,7 @@ export async function findOverlappingAssignments(
      LEFT JOIN drivers d ON d.id = vha.driver_id
      WHERE vha.vehicle_id = $1
        AND vha.status = ANY($2::text[])
+       AND ${holdOccupiesSql('vha', 'j')}
        AND ($3::uuid IS NULL OR vha.id != $3::uuid)
        AND NOT (
          ($4::uuid IS NOT NULL AND vha.job_id = $4::uuid)

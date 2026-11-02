@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { api } from '../../services/api';
+import { useState } from 'react';
+import { useAuthedFileUrl } from '../../hooks/useAuthedFileUrl';
 
 /**
  * Thumbnail for a driver document, fetched with the session JWT.
@@ -15,45 +15,24 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
   filename?: string;
   onOpen?: () => void;
 }) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  // Decided from the fetched blob's real MIME type, not the filename.
-  //
-  // Guessing by extension gets DVLA checks wrong: they come through as PDFs (and
-  // sometimes with no extension at all), so an extension test either renders a
-  // broken <img> or mislabels a real image. The bytes are authoritative and we
-  // are fetching them anyway.
-  const [isImage, setIsImage] = useState<boolean | null>(null);
-  const [isPdf, setIsPdf] = useState(false);
+  // Note this one does NOT take the `enabled: false` shortcut that skips
+  // non-images. Driver evidence is decided from the fetched blob's real MIME
+  // type, not the filename: DVLA checks come through as PDFs (and sometimes
+  // with no extension at all), so an extension test either renders a broken
+  // <img> or mislabels a real image. The PDF branch below wants the bytes
+  // anyway, to preview page 1.
+  const { ref, url: src, contentType, failed } = useAuthedFileUrl(fileKey);
+  // Separate from the fetch failing: the bytes can arrive fine and still not
+  // decode (a truncated upload, an image format this browser won't take).
+  const [imgFailed, setImgFailed] = useState(false);
 
-  useEffect(() => {
-    let objectUrl: string | null = null;
-    let cancelled = false;
-
-    api.blob(`/files/download?key=${encodeURIComponent(fileKey)}`)
-      .then(({ blob, contentType }) => {
-        if (cancelled) return;
-        const type = contentType || blob.type || '';
-        // The object URL is created for PDFs too — the browser's own viewer
-        // renders page 1 as the thumbnail, so a DVLA summary previews like
-        // everything else instead of showing a generic file icon.
-        objectUrl = URL.createObjectURL(
-          type ? new Blob([blob], { type }) : blob,
-        );
-        setSrc(objectUrl);
-        setIsImage(type.startsWith('image/'));
-        setIsPdf(type.includes('pdf'));
-      })
-      .catch(() => { if (!cancelled) setFailed(true); });
-
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [fileKey]);
+  const isImage = src === null ? null : contentType.startsWith('image/');
+  const isPdf = contentType.includes('pdf');
 
   if (isImage === null && !failed) {
-    return <div className="w-20 h-20 rounded-lg border border-gray-200 bg-gray-100 animate-pulse" />;
+    // Carries the ref: until this resolves it is the only element on screen,
+    // so it is what tells the hook the thumbnail has been scrolled to.
+    return <div ref={ref} className="w-20 h-20 rounded-lg border border-gray-200 bg-gray-100 animate-pulse" />;
   }
 
   // PDFs: render page 1 through the browser's built-in viewer, scaled into the
@@ -64,6 +43,7 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
   if (!isImage && isPdf && src) {
     return (
       <button
+        ref={ref}
         type="button"
         onClick={onOpen}
         title={filename || 'Open document'}
@@ -87,6 +67,7 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
   if (!isImage) {
     return (
       <button
+        ref={ref}
         type="button"
         onClick={onOpen}
         title={filename || 'Open document'}
@@ -98,7 +79,7 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
     );
   }
 
-  if (failed) {
+  if (failed || imgFailed) {
     return (
       <div className="w-20 h-20 flex items-center justify-center rounded-lg border border-gray-200 bg-gray-50 text-[10px] text-gray-400 text-center px-1">
         Couldn&rsquo;t load
@@ -107,11 +88,12 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
   }
 
   if (!src) {
-    return <div className="w-20 h-20 rounded-lg border border-gray-200 bg-gray-100 animate-pulse" />;
+    return <div ref={ref} className="w-20 h-20 rounded-lg border border-gray-200 bg-gray-100 animate-pulse" />;
   }
 
   return (
     <button
+      ref={ref}
       type="button"
       onClick={onOpen}
       className="w-20 h-20 rounded-lg border border-gray-200 overflow-hidden hover:border-ooosh-400 focus:outline-none focus:ring-2 focus:ring-ooosh-500"
@@ -120,7 +102,7 @@ export function DocumentThumb({ fileKey, filename, onOpen }: {
       <img
         src={src}
         alt={filename || 'Document'}
-        onError={() => setFailed(true)}
+        onError={() => setImgFailed(true)}
         className="w-full h-full object-cover"
       />
     </button>

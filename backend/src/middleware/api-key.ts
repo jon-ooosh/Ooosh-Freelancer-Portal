@@ -68,3 +68,33 @@ export async function verifyApiKey(apiKey: string): Promise<ApiKeyRow | null> {
 
   return null;
 }
+
+/**
+ * Which money operation a request is, for `api_keys.permissions` (Oct 2026, payment
+ * portal audit B.6). A key's `permissions` row is a JSON array of these names, or
+ * `money:*` for everything. An EMPTY array (the column default, every key today) still
+ * means unrestricted, so nothing changes until a row is set — then it is enforced:
+ *
+ *   UPDATE api_keys
+ *      SET permissions = '["money:job-lookup","money:excess-info","money:stripe-event","money:payment-event"]'
+ *    WHERE service = 'payment_portal';
+ *
+ * Those four are everything the portal calls. Without this, any valid key reached every
+ * money route without an `authorize()` — `refund-payment` (Stripe refund + HireHop + Xero),
+ * `record-payment`, `summary`, `payments`… — so a leaked Netlify env was money out.
+ * `req.path` here is relative to the router mount (`/api/money`).
+ */
+export function moneyOperationFor(path: string): string | null {
+  if (/^\/job-lookup\/[^/]+\/?$/.test(path)) return 'money:job-lookup';
+  if (/^\/stripe-event\/(claim|record-deposit)\/?$/.test(path)) return 'money:stripe-event';
+  if (/^\/[^/]+\/excess-info\/?$/.test(path)) return 'money:excess-info';
+  if (/^\/[^/]+\/payment-event\/?$/.test(path)) return 'money:payment-event';
+  return null;
+}
+
+export function apiKeyMayCall(permissions: unknown, path: string): boolean {
+  const perms = Array.isArray(permissions) ? permissions.map(String) : [];
+  if (perms.length === 0 || perms.includes('money:*')) return true;
+  const op = moneyOperationFor(path);
+  return op !== null && perms.includes(op);
+}

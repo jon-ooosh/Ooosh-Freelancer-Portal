@@ -1,16 +1,21 @@
 import { useState, useEffect } from 'react';
 import { EvidenceGroup, type EvidenceGroupSpec, type EvidenceFile } from '../components/drivers/EvidenceGroup';
 import { StageTracker, WhatNeedsDoing, type DriverVerificationState, type VerificationAction } from '../components/drivers/VerificationCockpit';
-import { deriveDriverStatus } from '../lib/driverStatus';
+import { deriveDriverStatus, isNiLicence } from '../lib/driverStatus';
 import { hasManagerRole, roleAllowed } from '../lib/roles';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import OohComplianceTab from '../components/OohComplianceTab';
 import PcnHistorySection from '../components/PcnHistorySection';
+import { ClaimsSection } from '../components/claims/format';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
+import { openR2Key } from '../lib/openAuthedFile';
+import { ukToday } from '../lib/ukDate';
+import EmailProblemFlag from '../components/EmailProblemFlag';
+import { useEmailProblems } from '../hooks/useEmailProblems';
 
 interface FileAttachment {
   name: string;
@@ -74,6 +79,8 @@ interface DriverDetail {
   identity_review_notes: string | null;
   current_job_number: number | null;
   current_job_started_at: string | null;
+  /** current_job_number ONLY while they haven't signed for it and the job is live. */
+  unsigned_job_number: number | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
   dvla_valid_until: string | null;
@@ -88,6 +95,10 @@ interface DriverDetail {
   has_accidents: boolean;
   has_insurance_issues: boolean;
   has_driving_ban: boolean;
+  // Migration 298 — null means the driver last answered the old question set.
+  has_recent_convictions: boolean | null;
+  has_fault_claims: boolean | null;
+  address_mismatch: boolean | null;
   additional_details: string | null;
   insurance_status: string | null;
   overall_status: string | null;
@@ -178,6 +189,16 @@ function formatDateTime(d: string | null): string {
   }
 }
 
+/** "just now" / "3 min ago" / "2 hr ago" for the header refresh stamp. */
+function formatAgo(at: Date, now: number): string {
+  const secs = Math.max(0, Math.round((now - at.getTime()) / 1000));
+  if (secs < 60) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  return `${hrs} hr ago`;
+}
+
 function toInputDate(d: string | null): string {
   if (!d) return '';
   try {
@@ -197,6 +218,39 @@ function toInputDate(d: string | null): string {
   }
 }
 
+/**
+ * iDenfy's verdict codes in English.
+ *
+ * The panel used to print the raw codes ("Document check: DOC_SPOOF_DETECTED"),
+ * which tells a member of staff nothing about what to look for in the images.
+ * Deliberately non-judgemental wording: the commonest cause of a spoof flag is
+ * glare on a real licence photographed flat under a light, not fraud.
+ *
+ * Unknown codes fall through to the raw value rather than being swallowed —
+ * iDenfy adds tags, and a code we can't translate is still evidence.
+ */
+const IDENFY_VERDICT_PLAIN: Record<string, string> = {
+  DOC_SPOOF_DETECTED: 'iDenfy judged the document image to be a photo of a SCREEN or a printout rather than the physical card. Glare on the laminate, or photographing it off a monitor, both trigger this.',
+  DOC_SIDE_MISMATCH: 'The front and back images don\u2019t belong to the same document \u2014 usually the front was uploaded twice.',
+  DOC_FACE_MISMATCH: 'The selfie didn\u2019t match the photo on the document.',
+  FACE_MISMATCH: 'The selfie didn\u2019t match the photo on the document.',
+  NO_FACE_FOUND: 'No face could be found in the selfie.',
+  TOO_MANY_FACES: 'More than one face was visible in the selfie.',
+  FACE_TOO_BLURRY: 'The selfie was too blurry to compare.',
+  AUTO_UNVERIFIABLE: 'iDenfy could not run the comparison automatically.',
+  DOC_EXPIRED: 'The document had already expired.',
+  DOC_NOT_FOUND: 'No document could be read from the images.',
+  DOC_DOB_ERROR: 'The date of birth on the document didn\u2019t match what the driver entered.',
+  DOC_NAME_ERROR: 'The name on the document didn\u2019t match what the driver entered.',
+  DOC_NUMBER_ERROR: 'The document number could not be read or did not validate.',
+  DOC_ANALYSIS_ERROR: 'iDenfy could not analyse the document images.',
+};
+
+function plainVerdict(code: string | null | undefined): string | null {
+  if (!code) return null;
+  return IDENFY_VERDICT_PLAIN[code.toUpperCase().trim()] || null;
+}
+
 function IdentityReviewPanel({ driver, onDriverUpdate }: {
   driver: DriverDetail;
   onDriverUpdate: (d: DriverDetail) => void;
@@ -214,6 +268,19 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
   if (driver.idenfy_doc_result) detail.push(`Document check: ${driver.idenfy_doc_result}`);
   for (const t of driver.idenfy_mismatch_tags || []) detail.push(`Mismatch: ${t}`);
   for (const r of driver.idenfy_suspicion_reasons || []) detail.push(`Flag: ${r}`);
+
+  // What actually went wrong, in English, worst-first. The document verdict
+  // leads because that is what the widened Sep 2026 trigger mostly catches —
+  // both drivers that prompted it had a PERFECT face match and a rejected
+  // document, so leading with the face would have described the wrong problem.
+  const plainReasons = [
+    plainVerdict(driver.idenfy_doc_result),
+    plainVerdict(driver.idenfy_face_result),
+    ...(driver.idenfy_mismatch_tags || []).map(plainVerdict),
+    ...(driver.idenfy_suspicion_reasons || []).map(plainVerdict),
+  ].filter((x): x is string => !!x);
+  const uniquePlainReasons = Array.from(new Set(plainReasons));
+  const faceMatched = (driver.idenfy_face_result || '').toUpperCase() === 'FACE_MATCH';
 
   async function resolve(outcome: 'accepted' | 'rejected') {
     setBusy(outcome);
@@ -244,12 +311,36 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
       </h3>
 
       {status === 'needs_review' && (
-        <p className="text-sm text-gray-700 mb-3">
-          iDenfy couldn&rsquo;t match this driver&rsquo;s selfie to the photo on their licence. That&rsquo;s
-          often just an old licence photo or a change in appearance &mdash; compare the
-          <strong> Selfie</strong> and <strong>Licence Front</strong> images below and decide.
-          Until then they can&rsquo;t be assigned to a hire and won&rsquo;t be sent a hire agreement.
-        </p>
+        <div className="mb-3">
+          <p className="text-sm text-gray-700">
+            iDenfy did not accept this check
+            {driver.idenfy_overall ? <> (<strong>{driver.idenfy_overall}</strong>)</> : null}.
+            Look at the <strong>Licence Front</strong>, <strong>Licence Back</strong> and{' '}
+            <strong>Selfie</strong> images on this page and decide. Until you do, this driver
+            can&rsquo;t be assigned to a hire and won&rsquo;t be sent a hire agreement.
+          </p>
+          {uniquePlainReasons.length > 0 && (
+            <ul className="mt-2 text-sm text-gray-700 space-y-1">
+              {uniquePlainReasons.map((r) => <li key={r}>&bull; {r}</li>)}
+            </ul>
+          )}
+          {faceMatched && (
+            <p className="mt-2 text-sm text-gray-700">
+              Note: the <strong>face matched</strong> the photo on the document &mdash; whatever
+              iDenfy objected to, it wasn&rsquo;t the driver&rsquo;s appearance.
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              const el = document.getElementById('evidence-identity');
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }}
+            className="mt-3 text-sm font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline"
+          >
+            Show the licence &amp; selfie images &darr;
+          </button>
+        </div>
       )}
 
       {detail.length > 0 && (
@@ -373,6 +464,20 @@ function buildEvidenceGroups(driver: DriverDetail): EvidenceGroupSpec[] {
       key: 'signature',
       title: 'Signature',
       slots: [{ label: 'Signature', match: ['Signature', 'signature', 'sig'] }],
+      // A signature doesn't expire — it's per HIRE. So instead of an expiry
+      // pill, say when they last signed and, if they're mid-form for a hire
+      // they haven't signed for, say so in amber. That second state is the
+      // one every surface used to miss (Cameron Williams-Hill / 16618).
+      headerRight: driver.unsigned_job_number ? (
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-800">
+          Not yet signed for #{driver.unsigned_job_number}
+          {driver.signature_date ? ` · last signed ${formatDate(driver.signature_date)}` : ''}
+        </span>
+      ) : driver.signature_date ? (
+        <span className="text-xs text-gray-500">Signed {formatDate(driver.signature_date)}</span>
+      ) : (
+        <span className="text-xs text-gray-400">Not signed</span>
+      ),
     },
   ];
 }
@@ -485,10 +590,27 @@ const FIELD_LABELS: Record<string, string> = {
   passport_valid_until: 'Passport Valid Until', referral_notes: 'Referral Notes',
   has_disability: 'Disability', has_convictions: 'Convictions', has_prosecution: 'Prosecution',
   has_accidents: 'Accidents', has_insurance_issues: 'Insurance Issues', has_driving_ban: 'Driving Ban',
+  has_recent_convictions: 'Convictions (5 yrs)', has_fault_claims: '2+ At-Fault/Open Claims',
+  address_mismatch: 'Address Differs From Licence',
   additional_details: 'Additional Details', insurance_status: 'Insurance Status',
 };
 
+// Keyed by the route id so /drivers/A → /drivers/B is a genuine
+// unmount/remount. React Router otherwise reuses ONE instance and only swaps
+// the param, leaving the previous driver's state on the new page and letting a
+// slow reply for the old id resolve into it (no fetch here is cancellable).
+// See `.claude/rules/frontend.md` → Detail pages; JobDetailPage has the long
+// version.
+//
+// Key on `id` ONLY — never the pathname or a ?tab= param, or every tab click
+// would remount the page. The hand-written tab/cache resets below are kept as
+// belt-and-braces, and the tab effect still handles same-page ?tab= changes.
 export default function DriverDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <DriverDetailContent key={id} />;
+}
+
+function DriverDetailContent() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
@@ -500,6 +622,8 @@ export default function DriverDetailPage() {
   const canEditDates = roleAllowed(user?.role, ['admin', 'manager', 'staff', 'general_assistant']);
 
   const [driver, setDriver] = useState<DriverDetail | null>(null);
+  // Is the driver's email bouncing / blocked by Resend? (hire forms go there)
+  const emailProblems = useEmailProblems([driver?.email]);
   const [hireHistory, setHireHistory] = useState<HireHistoryItem[]>([]);
   const [excessHistory, setExcessHistory] = useState<ExcessHistoryItem[]>([]);
   const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
@@ -509,6 +633,11 @@ export default function DriverDetailPage() {
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [verificationState, setVerificationState] = useState<DriverVerificationState | null>(null);
   const [loading, setLoading] = useState(true);
+  // Refresh button (top right): staff "watch" a driver complete a form live
+  // and want a one-click re-read plus an honest "how stale is this?" stamp.
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess' | 'ooh' | 'pcns'>('details');
   const [pcnCount, setPcnCount] = useState<{ open: number; total: number } | null>(null);
   const [editing, setEditing] = useState(false);
@@ -519,6 +648,12 @@ export default function DriverDetailPage() {
   useEffect(() => {
     if (id) { loadDriver(); loadVerificationState(); }
   }, [id]);
+
+  // Re-render the "Refreshed N min ago" label without refetching anything.
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Reset tab + per-tab caches when switching drivers (component instance
   // is reused across /drivers/A → /drivers/B). Without this the active
@@ -542,15 +677,36 @@ export default function DriverDetailPage() {
     if (id && activeTab === 'details') loadAuditLog();
   }, [id, activeTab]);
 
-  async function loadDriver() {
-    setLoading(true);
+  async function loadDriver(opts: { silent?: boolean } = {}) {
+    // `silent` keeps the page mounted: `loading=true` swaps the whole page for
+    // the "Loading driver..." placeholder, which is right on first mount but
+    // would flash the page away on a refresh click.
+    if (!opts.silent) setLoading(true);
     try {
       const data = await api.get<{ data: DriverDetail }>(`/drivers/${id}`);
       setDriver(data.data);
+      setLastRefreshedAt(new Date());
     } catch (err) {
       console.error('Failed to load driver:', err);
     } finally {
-      setLoading(false);
+      if (!opts.silent) setLoading(false);
+    }
+  }
+
+  /** Top-right Refresh: re-read everything the current view is showing. */
+  async function refreshAll() {
+    if (!id || refreshing) return;
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        loadDriver({ silent: true }),
+        loadVerificationState(),
+        activeTab === 'details' ? loadAuditLog() : Promise.resolve(),
+        activeTab === 'hires' ? loadHireHistory() : Promise.resolve(),
+        activeTab === 'excess' ? loadExcessHistory() : Promise.resolve(),
+      ]);
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -613,18 +769,15 @@ export default function DriverDetailPage() {
     await loadVerificationState();
   }
 
-  /** "What needs doing" click-through — scroll to the group that needs work. */
+  /**
+   * "What needs doing" click-through — scroll to the group that needs work.
+   * `send_hire_form` lines never reach here (the cockpit renders them without a
+   * button): hire forms are sent per HIRE from the Job page, not from a driver.
+   */
   function handleVerificationAction(action: VerificationAction) {
-    if (action.slot) {
-      const el = document.getElementById(`evidence-${action.slot}`);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        return;
-      }
-    }
-    if (action.kind === 'send_hire_form' && driver?.current_job_number) {
-      navigate(`/jobs?search=${driver.current_job_number}`);
-    }
+    if (!action.slot) return;
+    const el = document.getElementById(`evidence-${action.slot}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   async function loadAuditLog() {
@@ -677,6 +830,8 @@ export default function DriverDetailPage() {
       has_accidents: driver.has_accidents,
       has_insurance_issues: driver.has_insurance_issues,
       has_driving_ban: driver.has_driving_ban,
+      has_recent_convictions: driver.has_recent_convictions,
+      has_fault_claims: driver.has_fault_claims,
       additional_details: driver.additional_details || '',
       insurance_status: driver.insurance_status || '',
     });
@@ -718,16 +873,14 @@ export default function DriverDetailPage() {
     );
   }
 
-  const dvlaCheckAge = driver.dvla_check_date
-    ? Math.floor((Date.now() - new Date(driver.dvla_check_date).getTime()) / (1000 * 60 * 60 * 24))
-    : null;
-  const dvlaCheckStale = dvlaCheckAge !== null && dvlaCheckAge > 180;
-
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div>
+      {/* Header — stacks below `sm`. Side by side at every width, the four
+          action buttons overflowed the viewport on a phone while the rest of
+          the page tucked correctly (Sep 2026). `min-w-0` lets the identity
+          column shrink instead of forcing the row wider than the screen. */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
           <button
             onClick={() => navigate('/drivers')}
             className="text-sm text-gray-500 hover:text-gray-700 mb-2 inline-flex items-center gap-1"
@@ -749,7 +902,12 @@ export default function DriverDetailPage() {
             })()}
           </div>
           <div className="mt-1 flex items-center gap-3 text-sm text-gray-500">
-            {driver.email && <span>{driver.email}</span>}
+            {driver.email && (
+              <span className="inline-flex items-center gap-2">
+                {driver.email}
+                <EmailProblemFlag problem={emailProblems.problemFor(driver.email)} onMarkFixed={emailProblems.markFixed} />
+              </span>
+            )}
             {driver.phone && (
               <span>
                 {driver.phone_country && <span className="text-gray-400">{driver.phone_country} </span>}
@@ -781,7 +939,32 @@ export default function DriverDetailPage() {
             </span>
           </div>
         </div>
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="flex flex-wrap items-center gap-2 justify-start sm:justify-end">
+          {!editing && (
+            <div className="flex items-center gap-2 mr-1">
+              {lastRefreshedAt && (
+                <span className="text-xs text-gray-400" title={lastRefreshedAt.toLocaleString('en-GB')}>
+                  Refreshed {formatAgo(lastRefreshedAt, nowTick)}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={refreshAll}
+                disabled={refreshing}
+                title="Re-read this driver's record — useful while watching someone complete a form"
+                className="inline-flex items-center gap-1.5 border border-gray-300 text-gray-700 px-3 py-2 rounded text-sm font-medium hover:bg-gray-50 disabled:opacity-60 transition-colors"
+              >
+                <svg
+                  className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {refreshing ? 'Refreshing…' : 'Refresh'}
+              </button>
+            </div>
+          )}
           {!editing && (
             <SnapshotPdfButton driverId={driver.id} driverName={driver.full_name} />
           )}
@@ -848,12 +1031,10 @@ export default function DriverDetailPage() {
         </button>
       </div>
 
-      {/* DVLA stale warning */}
-      {dvlaCheckStale && (
-        <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-700">
-          DVLA check is {dvlaCheckAge} days old (last: {formatDate(driver.dvla_check_date)}). Consider requesting a fresh check code.
-        </div>
-      )}
+      {/* No DVLA-age banner here. It predated services/driver-validity.ts and
+          used a 180-day threshold of its own, while the policy window is 30 —
+          so it could only ever fire when "What needs doing" already carried the
+          DVLA line, in softer and less accurate words. (Sep 2026) */}
 
       {/* Tabs */}
       <div className="mt-6 border-b border-gray-200">
@@ -900,7 +1081,13 @@ export default function DriverDetailPage() {
             onVerificationAction={handleVerificationAction}
           />
         )}
-        {activeTab === 'hires' && <HireHistoryTab history={hireHistory} />}
+        {activeTab === 'hires' && (
+          <>
+            {/* Insurance claims where this driver was identified — only when any exist. */}
+            <ClaimsSection entityType="driver" entityId={driver.id} hideWhenEmpty />
+            <HireHistoryTab history={hireHistory} />
+          </>
+        )}
         {activeTab === 'ooh' && <OohComplianceTab driverId={driver.id} />}
         {activeTab === 'pcns' && (
           <PcnHistorySection
@@ -1016,6 +1203,17 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
   const [adjustedExcess, setAdjustedExcess] = useState('');
   const [showResolve, setShowResolve] = useState(false);
   const [error, setError] = useState('');
+  // Date the driver was referred to the insurer. Required to resolve as
+  // approved/declined (backend enforces it too); pre-filled when "Mark as
+  // Referred" already stamped one. Also used to backfill a resolved
+  // referral that predates the requirement.
+  const [referralDate, setReferralDate] = useState(toInputDate(driver.referral_date));
+  const [savingDate, setSavingDate] = useState(false);
+  // Follow the record — "Mark as Referred" stamps a date after mount.
+  useEffect(() => {
+    setReferralDate(toInputDate(driver.referral_date));
+  }, [driver.referral_date]);
+  const today = ukToday();
   // Mirror the driver's existing dates exactly — empty stays empty.
   // Falling back to today on null fields would let staff inadvertently
   // FABRICATE a check date that never happened (e.g. DVLA date for a
@@ -1035,21 +1233,38 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
   const reasons: string[] = [];
   if (driver.referral_notes) reasons.push(driver.referral_notes);
   if (driver.has_disability) reasons.push('Declared disability/medical condition');
-  if (driver.has_convictions) reasons.push('Declared motoring convictions');
+  if (driver.has_convictions) reasons.push('Declared a serious motoring conviction');
   if (driver.has_prosecution) reasons.push('Declared pending prosecution');
-  if (driver.has_accidents) reasons.push('Declared previous accidents');
+  // Since migration 298 an accident or claim is only a declaration; the
+  // referral is has_fault_claims. Older answers (NULL) keep the old reading.
+  // Same rule as backend services/referral-alert.ts.
+  if (driver.has_fault_claims) reasons.push('Declared more than one at-fault or open claim (5 years)');
+  else if (driver.has_accidents && driver.has_fault_claims == null) reasons.push('Declared previous accidents');
   if (driver.has_insurance_issues) reasons.push('Declared insurance issues (declined/cancelled/special terms)');
   if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
   if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
-  if (driver.licence_issue_country && !['GB', 'UK', 'DVLA'].includes(driver.licence_issue_country.toUpperCase())) {
+  if (driver.licence_issue_country && !['GB', 'UK', 'GBR', 'DVLA', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(driver.licence_issue_country.toUpperCase())) {
     reasons.push(`Non-standard licence country: ${driver.licence_issue_country}`);
   }
   if (reasons.length === 0 && driver.additional_details) reasons.push(driver.additional_details);
   if (reasons.length === 0) reasons.push('Flagged by hire form verification process');
 
-  const isResolved = driver.referral_status === 'approved' || driver.referral_status === 'declined';
+  // 'waived' is a resolution like any other — staff judged no insurer referral
+  // was needed. Omitting it here left the panel amber and still offering
+  // "Resolve Referral" on a driver the backend had already cleared
+  // (requires_referral = false), so the record read as outstanding forever
+  // (Thomas Coyne / 16116, Sep 2026).
+  const isResolved = driver.referral_status === 'approved'
+    || driver.referral_status === 'declined'
+    || driver.referral_status === 'waived';
+
+  const needsReferralDate = outcome === 'approved' || outcome === 'declined';
 
   async function handleResolve() {
+    if (needsReferralDate && !referralDate) {
+      setError('Enter the date the driver was referred to the insurer.');
+      return;
+    }
     setResolving(true);
     setError('');
     try {
@@ -1057,6 +1272,9 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
         outcome,
         notes,
       };
+      if (needsReferralDate) {
+        payload.referral_date = referralDate;
+      }
       if (adjustedExcess) {
         payload.adjusted_excess = parseFloat(adjustedExcess);
       }
@@ -1073,9 +1291,27 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
     }
   }
 
+  // Backfill the referral date on an already-resolved referral (resolved
+  // before the date was required, so the panel read "—" with no way to fix it).
+  async function saveReferralDate() {
+    if (!referralDate) return;
+    setSavingDate(true);
+    setError('');
+    try {
+      const result = await api.put<{ data: DriverDetail }>(`/drivers/${driver.id}`, {
+        referral_date: referralDate,
+      });
+      onDriverUpdate(result.data);
+    } catch (err: any) {
+      setError(err.message || 'Failed to save referral date');
+    } finally {
+      setSavingDate(false);
+    }
+  }
+
   return (
     <div className={`bg-white rounded-xl shadow-sm border-2 p-6 ${
-      driver.referral_status === 'approved' ? 'border-green-200'
+      driver.referral_status === 'approved' || driver.referral_status === 'waived' ? 'border-green-200'
         : driver.referral_status === 'declined' ? 'border-red-200'
         : 'border-amber-300'
     }`}>
@@ -1105,7 +1341,34 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
         <div>
           <dt className="text-xs text-gray-500">Referral Date</dt>
-          <dd className="text-sm text-gray-900">{formatDate(driver.referral_date) || formatDate(driver.created_at)}</dd>
+          {driver.referral_date ? (
+            <dd className="text-sm text-gray-900">{formatDate(driver.referral_date)}</dd>
+          ) : driver.referral_status === 'approved' || driver.referral_status === 'declined' ? (
+            <dd className="text-sm">
+              <span className="text-amber-700">Not recorded</span>
+              <div className="flex items-center gap-1.5 mt-1">
+                <input
+                  type="date"
+                  value={referralDate}
+                  max={today}
+                  onChange={(e) => setReferralDate(e.target.value)}
+                  className="rounded border border-gray-300 px-2 py-1 text-xs"
+                />
+                <button
+                  onClick={saveReferralDate}
+                  disabled={!referralDate || savingDate}
+                  className="px-2 py-1 rounded text-xs font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 disabled:opacity-50"
+                >
+                  {savingDate ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+              {error && !showResolve && <p className="text-xs text-red-600 mt-1">{error}</p>}
+            </dd>
+          ) : (
+            <dd className="text-sm text-gray-500">
+              {driver.referral_status === 'waived' ? 'Not referred (waived)' : 'Not yet referred'}
+            </dd>
+          )}
         </div>
         {driver.referral_notes && (
           <div className="md:col-span-2">
@@ -1125,7 +1388,6 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
               onClick={async () => {
                 setError('');
                 try {
-                  const today = new Date().toISOString().split('T')[0];
                   const result = await api.put<{ data: DriverDetail }>(`/drivers/${driver.id}`, {
                     referral_status: 'pending',
                     referral_date: today,
@@ -1181,6 +1443,19 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
               <p className="text-xs text-gray-400 mt-0.5">Leave blank if standard excess applies</p>
             </div>
           </div>
+
+          {needsReferralDate && (
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Date referred to insurer <span className="text-red-500">*</span></label>
+              <input
+                type="date"
+                value={referralDate}
+                max={today}
+                onChange={(e) => setReferralDate(e.target.value)}
+                className="rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+            </div>
+          )}
 
           <div>
             <label className="block text-xs text-gray-500 mb-1">Resolution Notes</label>
@@ -1255,6 +1530,383 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
 }
 
 // ── Details Tab ──
+
+/**
+ * Licence record check — the staff-side way to record a DVLA or DVA check.
+ *
+ * ONE panel for both regimes, because they are the same check with different
+ * plumbing. A GB driver generates a share code and the hire-form app reads
+ * their uploaded summary with nobody involved; this is the manual path for when
+ * that didn't happen. A Northern Ireland driver has no GOV.UK share code at
+ * all — DVA run their own service at nidirect where the DRIVER creates a code
+ * and a THIRD PARTY does the lookup — so for them this panel is the only way
+ * the result can ever be recorded (Declan Haughian / 16286, Sep 2026).
+ *
+ * WHY IT ISN'T THE "add the date" CONTROL ON THE GROUP ABOVE
+ * ---------------------------------------------------------
+ * Because a date on its own is the bug. Setting `dvla_check_date` opens the
+ * 30-day window, satisfies the hire-form router and releases the driver to
+ * signature — while `licence_points` stays at 0 and the excess stays at the
+ * £1,200 floor. The driver gets insured on an assumed clean licence. Points,
+ * offences and the excess they attract are collected here together, or not at
+ * all.
+ *
+ * The excess is DERIVED, never typed: the figure comes back from
+ * POST /drivers/licence-excess-preview, which runs the same
+ * services/licence-excess.ts the save runs. Mirroring the Markerstudy tiers in
+ * the browser would have made a fourth live definition of a number we charge
+ * customers.
+ *
+ * Declared at the top level, like every other panel on this page. A component
+ * declared inside another component is a new function object on every parent
+ * render, so React throws the subtree away and remounts it — which silently
+ * reverts half-typed form state (the Sep 2026 insurance-questionnaire bug in
+ * the hire-form app). Don't move it inside DetailsTab.
+ */
+interface ExcessPreview {
+  amount: number | null;
+  surchargeNet: number;
+  requiresReferral: boolean;
+  reasons: string[];
+  basis: string;
+}
+
+const NIDIRECT_CHECK_URL =
+  'https://www.nidirect.gov.uk/services/check-someones-ni-driving-licence-information';
+
+function LicenceRecordCheckPanel({ driver, canEdit, onDriverUpdate }: {
+  driver: DriverDetail;
+  canEdit: boolean;
+  onDriverUpdate: (d: DriverDetail) => void;
+}) {
+  const isNi = isNiLicence(driver);
+  const source: 'DVLA' | 'DVA' = isNi ? 'DVA' : 'DVLA';
+  const hasCheck = !!driver.dvla_check_date;
+
+  // Open by default for the case that cannot resolve itself: an NI driver with
+  // no check on record is parked in their own hire form until somebody here
+  // acts, so the form is the point of the card rather than something hidden
+  // behind a button.
+  const [open, setOpen] = useState(isNi && !hasCheck);
+  const [checkDate, setCheckDate] = useState('');
+  const [checkCode, setCheckCode] = useState(driver.dvla_check_code || '');
+  // EMPTY, not '0'. A default of zero makes "I forgot to type the points" look
+  // identical to "the licence is clean" — and the difference between those two
+  // is what the driver gets charged. The save button stays disabled until
+  // somebody has actually entered a number, even if that number is 0.
+  const [points, setPoints] = useState('');
+  const [disqualified, setDisqualified] = useState(false);
+  const [rows, setRows] = useState<{ code: string; points: string }[]>([]);
+  const [preview, setPreview] = useState<ExcessPreview | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const pointsNum = Number.parseInt(points, 10);
+  const pointsValid = Number.isFinite(pointsNum) && pointsNum >= 0 && pointsNum <= 100;
+  const endorsements = rows
+    .filter(r => r.code.trim())
+    .map(r => ({ code: r.code.trim(), points: Number.parseInt(r.points, 10) || 0 }));
+
+  // The excess preview, debounced. Derived server-side on purpose — see above.
+  useEffect(() => {
+    if (!open || !pointsValid) { setPreview(null); return; }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      api.post<{ data: ExcessPreview }>('/drivers/licence-excess-preview', {
+        points: pointsNum,
+        endorsements,
+        has_disqualification: disqualified,
+      })
+        .then(res => { if (!cancelled) setPreview(res.data); })
+        // A preview that can't be fetched must not look like a £0 excess.
+        .catch(() => { if (!cancelled) setPreview(null); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, pointsValid, pointsNum, disqualified, JSON.stringify(endorsements)]);
+
+  async function handleSave() {
+    setSaving(true);
+    setError('');
+    try {
+      const result = await api.post<{ data: DriverDetail; excess: ExcessPreview }>(
+        `/drivers/${driver.id}/licence-record-check`,
+        {
+          source,
+          check_date: checkDate,
+          check_code: checkCode.trim() || null,
+          points: pointsNum,
+          endorsements,
+          has_disqualification: disqualified,
+        },
+      );
+      onDriverUpdate(result.data);
+      setOpen(false);
+    } catch (err: any) {
+      setError(err.message || 'Failed to record the check');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const needsAttention = isNi && !hasCheck;
+
+  return (
+    <div className={`bg-white rounded-xl shadow-sm border p-4 sm:p-6 ${
+      needsAttention ? 'border-amber-300 border-2' : 'border-gray-200'
+    }`}>
+      <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+        <h3 className="text-sm font-semibold text-gray-700">
+          Licence record check
+          <span className={`ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+            isNi ? 'bg-sky-100 text-sky-800' : 'bg-gray-100 text-gray-600'
+          }`}>
+            {isNi ? 'Northern Ireland · DVA' : 'DVLA'}
+          </span>
+        </h3>
+        {canEdit && !open && (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="text-xs font-medium text-ooosh-700 hover:text-ooosh-800 underline whitespace-nowrap"
+          >
+            {hasCheck ? 'Record a new check' : 'Record the check'}
+          </button>
+        )}
+      </div>
+
+      {/* The NI briefing. Staff meet this maybe twice a year, so the panel says
+          what to do rather than assuming anyone remembers. */}
+      {isNi && (
+        <div className="mb-4 rounded-lg bg-sky-50 border border-sky-200 px-3 py-3 text-sm text-sky-900">
+          <p className="mb-2">
+            A DVA licence is not held by the GOV.UK share-code service, so this driver
+            <strong> cannot run their own check</strong>. They create a check code at nidirect
+            and somebody here does the lookup.
+          </p>
+          <dl className="mb-2 space-y-0.5">
+            <div className="flex gap-2">
+              <dt className="text-xs text-sky-700 w-28 shrink-0 pt-0.5">Check code</dt>
+              <dd className="font-mono text-sm">
+                {driver.dvla_check_code || <span className="text-sky-700 font-sans">not supplied yet</span>}
+              </dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="text-xs text-sky-700 w-28 shrink-0 pt-0.5">Licence number</dt>
+              <dd className="font-mono text-sm">{driver.licence_number || '—'}</dd>
+            </div>
+          </dl>
+          <p className="mb-2">
+            <a href={NIDIRECT_CHECK_URL} target="_blank" rel="noopener noreferrer"
+               className="font-medium underline">
+              Check this licence at nidirect →
+            </a>
+          </p>
+          {/* Printed on the summary itself: "This code is now invalid and cannot
+              be used again." Worth saying out loud — a fumbled lookup means
+              going back to the driver, not retrying. */}
+          <p className="text-xs text-sky-700">
+            The code is <strong>single use</strong> and expires 21 days after the driver created it.
+            If the lookup fails, ask them for a fresh one rather than retrying.
+          </p>
+        </div>
+      )}
+
+      {/* What's on record now. */}
+      <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm mb-1">
+        <div>
+          <dt className="text-xs text-gray-500">Checked on</dt>
+          <dd className="text-gray-900">{formatDate(driver.dvla_check_date)}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-gray-500">Valid until</dt>
+          <dd className="text-gray-900">{formatDate(driver.dvla_valid_until)}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-gray-500">Points</dt>
+          <dd className="text-gray-900">{driver.licence_points ?? 0}</dd>
+        </div>
+        <div>
+          <dt className="text-xs text-gray-500">Offences</dt>
+          <dd className="text-gray-900">{(driver.licence_endorsements || []).length}</dd>
+        </div>
+      </dl>
+
+      {!canEdit && (
+        <p className="mt-3 text-xs text-gray-400">You don&rsquo;t have permission to record a check.</p>
+      )}
+
+      {canEdit && open && (
+        <div className="mt-4 pt-4 border-t border-gray-200 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-xs text-gray-500">
+                Date the check was run <span className="text-red-500">*</span>
+              </span>
+              {/* The "Date summary generated" on the document, NOT today — it is
+                  the FROM date the 30-day window is derived from. */}
+              <input
+                type="date" value={checkDate} onChange={e => setCheckDate(e.target.value)}
+                max={ukToday()}
+                className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+              <span className="text-xs text-gray-400">
+                As printed on the summary, not today&rsquo;s date
+              </span>
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-500">Check code</span>
+              {/* Stored exactly as typed. DVA codes are mixed case
+                  ("BML1s646") and upper-casing one breaks the lookup. */}
+              <input
+                type="text" value={checkCode} onChange={e => setCheckCode(e.target.value)}
+                placeholder={isNi ? 'e.g. BML1s646' : 'e.g. Kd mN 3g pQ'}
+                autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm font-mono focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+              <span className="text-xs text-gray-400">Case matters — copy it exactly</span>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-xs text-gray-500">
+                Total penalty points <span className="text-red-500">*</span>
+              </span>
+              <input
+                type="number" min={0} max={100} value={points}
+                onChange={e => setPoints(e.target.value)}
+                placeholder="Read it off the summary — 0 if clean"
+                className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+            </label>
+            <label className="flex items-start gap-2 pt-5">
+              <input
+                type="checkbox" checked={disqualified}
+                onChange={e => setDisqualified(e.target.checked)}
+                className="mt-0.5 rounded border-gray-300"
+              />
+              <span className="text-sm text-gray-700">
+                Shows a current or previous disqualification
+                <span className="block text-xs text-gray-400">Goes to the insurer either way</span>
+              </span>
+            </label>
+          </div>
+
+          {/* Offences. Codes and points drive the excess tier, so they are
+              entered individually rather than as a total — a single 6-point
+              SP30 and two 3-pointers both read as "6 points" and attract
+              different excess. */}
+          <div>
+            <span className="text-xs text-gray-500">Offences on the record</span>
+            {rows.length === 0 && (
+              <p className="text-xs text-gray-400 mt-1">
+                None added — leave empty if the summary shows no offences.
+              </p>
+            )}
+            <div className="mt-1 space-y-2">
+              {rows.map((row, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input
+                    type="text" value={row.code}
+                    onChange={e => setRows(rows.map((r, j) => j === i ? { ...r, code: e.target.value } : r))}
+                    placeholder="Code (e.g. SP30)"
+                    className="w-36 rounded border border-gray-300 px-2 py-1.5 text-sm font-mono uppercase focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  />
+                  <input
+                    type="number" min={0} max={20} value={row.points}
+                    onChange={e => setRows(rows.map((r, j) => j === i ? { ...r, points: e.target.value } : r))}
+                    placeholder="Points"
+                    className="w-24 rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  />
+                  <button
+                    type="button" onClick={() => setRows(rows.filter((_, j) => j !== i))}
+                    className="text-xs text-gray-400 hover:text-red-600"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button" onClick={() => setRows([...rows, { code: '', points: '3' }])}
+              className="mt-2 text-xs font-medium text-ooosh-700 hover:text-ooosh-800 underline"
+            >
+              + Add an offence
+            </button>
+          </div>
+
+          {/* The derived figure. Shown before saving so nobody is agreeing to a
+              number they can't see — and never editable here: the override is
+              the Calculated Excess card, which is manager-tier. */}
+          {preview && (
+            <div className={`rounded-lg px-3 py-2 text-sm border ${
+              preview.requiresReferral
+                ? 'bg-amber-50 border-amber-200 text-amber-900'
+                : 'bg-green-50 border-green-200 text-green-900'
+            }`}>
+              {preview.requiresReferral ? (
+                <>
+                  <p className="font-medium">Insurer referral required — no excess will be quoted</p>
+                  <ul className="list-disc list-inside text-xs mt-1">
+                    {preview.reasons.map((r, i) => <li key={i}>{r}</li>)}
+                  </ul>
+                  <p className="text-xs mt-1">
+                    Saving raises the referral flag and leaves the current excess untouched.
+                    The insurer&rsquo;s answer goes in through Resolve Referral.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="font-medium">
+                    Excess: £{preview.amount?.toLocaleString('en-GB')}
+                  </p>
+                  <p className="text-xs mt-0.5">{preview.basis}</p>
+                  {driver.excess_locked && (
+                    <p className="text-xs mt-1 text-amber-800">
+                      This driver&rsquo;s excess is locked, so saving will record the check and
+                      leave the £{Number(driver.calculated_excess_amount || 0).toLocaleString('en-GB')} already
+                      set by hand.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {error && <p className="text-sm text-red-600">{error}</p>}
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button" onClick={handleSave}
+              disabled={saving || !checkDate || !pointsValid}
+              className="px-3 py-1.5 rounded-lg bg-ooosh-600 text-white text-sm font-medium hover:bg-ooosh-700 disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Record check'}
+            </button>
+            <button
+              type="button" onClick={() => { setOpen(false); setError(''); }}
+              className="px-3 py-1.5 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            {(!checkDate || !pointsValid) && (
+              <span className="text-xs text-gray-400">
+                {!checkDate
+                  ? 'Enter the date on the summary to save'
+                  : 'Enter the total penalty points to save'}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-gray-400">
+            Upload the summary itself into the DVLA check slot above — the date and the
+            evidence belong together.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function DetailsTab({
   driver,
@@ -1356,13 +2008,17 @@ function DetailsTab({
   const homeAddress = driver.address_full ||
     [driver.address_line1, driver.address_line2, driver.city, driver.postcode].filter(Boolean).join(', ');
 
+  // Order follows the hire form. The two "(5 yrs)" declarations never refer on
+  // their own (migration 298); the line under each is the one that does.
   const insuranceFields = [
-    { key: 'has_disability', label: 'Disability' },
-    { key: 'has_convictions', label: 'Convictions' },
-    { key: 'has_prosecution', label: 'Prosecution' },
-    { key: 'has_accidents', label: 'Accidents' },
+    { key: 'has_disability', label: 'Medical restriction' },
+    { key: 'has_recent_convictions', label: 'Convictions (5 yrs)' },
+    { key: 'has_convictions', label: 'Serious conviction' },
+    { key: 'has_prosecution', label: 'Prosecution pending' },
+    { key: 'has_accidents', label: 'Accidents/claims (5 yrs)' },
+    { key: 'has_fault_claims', label: '2+ at fault or open' },
     { key: 'has_insurance_issues', label: 'Insurance Issues' },
-    { key: 'has_driving_ban', label: 'Driving Ban' },
+    { key: 'has_driving_ban', label: 'Ban/suspension' },
   ];
 
   return (
@@ -1404,18 +2060,11 @@ function DetailsTab({
         </div>
       </div>
 
-      {/* Which hire is this? A driver part-way through the form has no
-          vehicle_hire_assignments row yet, so the Hire History tab is empty and
-          nothing tells staff what a stuck driver relates to. */}
-      {driver.current_job_number && !driver.signature_date && (
-        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
-          Currently completing a hire form for job{' '}
-          <Link to={`/jobs?search=${driver.current_job_number}`} className="font-semibold underline">
-            #{driver.current_job_number}
-          </Link>
-          {driver.current_job_started_at && <> &middot; started {formatDate(driver.current_job_started_at)}</>}
-        </div>
-      )}
+      {/* "Started the hire form for #N but hasn't signed it" is NOT repeated
+          here. It was a second amber box saying what the amber line in "What
+          needs doing" already says; that line now carries the start date, the
+          previous signature and the link to the job, so this one only added
+          scrolling. (Sep 2026) */}
 
       {/* Insurance Questionnaire — now always shown and editable */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -1435,7 +2084,7 @@ function DetailsTab({
                 </label>
               ) : (
                 <>
-                  <span className={`w-2 h-2 rounded-full ${(driver as any)[key] ? 'bg-red-500' : 'bg-green-500'}`} />
+                  <span className={`w-2 h-2 rounded-full ${(driver as any)[key] === true ? 'bg-red-500' : (driver as any)[key] === false ? 'bg-green-500' : 'bg-gray-300'}`} title={(driver as any)[key] == null ? 'Not asked' : undefined} />
                   <span className="text-gray-700">{label}</span>
                 </>
               )}
@@ -1530,6 +2179,11 @@ function DetailsTab({
             {!editing && homeAddress && driver.licence_address && addressesDiffer(homeAddress, driver.licence_address) && (
               <p className="text-xs text-amber-600 mt-1">Address differs from home address</p>
             )}
+            {!editing && driver.address_mismatch === true && (
+              <p className="text-xs text-amber-600 mt-1">
+                Driver said their proofs of address show a different address, so a UK licence holder also needs a passport check
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -1537,6 +2191,11 @@ function DetailsTab({
       {renderGroup('poa1')}
       {renderGroup('poa2')}
       {renderGroup('dvla')}
+      <LicenceRecordCheckPanel
+        driver={driver}
+        canEdit={canEditDates}
+        onDriverUpdate={onDriverUpdate}
+      />
       {renderGroup('passport')}
       {renderGroup('signature')}
 
@@ -1568,10 +2227,7 @@ function DetailsTab({
                   <button
                     onClick={async () => {
                       try {
-                        const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-                        const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
-                        window.open(blobUrl, '_blank');
-                        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+                        await openR2Key(file.url, file.name || undefined);
                       } catch { /* ignore */ }
                     }}
                     className="text-ooosh-600 hover:text-ooosh-700 truncate max-w-[60vw] sm:max-w-none"
@@ -1639,6 +2295,9 @@ function DetailsTab({
                       const label = FIELD_LABELS[key] || key;
                       const oldStr = oldVal == null || oldVal === '' ? 'empty' : String(oldVal);
                       const newStr = newVal == null || newVal === '' ? 'empty' : String(newVal);
+                      // Entries written before Oct 2026 logged every re-derived
+                      // window, changed or not — hide those non-changes.
+                      if (oldStr === 'empty' && newStr === 'empty') return null;
                       // Format date values
                       const isDate = key.includes('date') || key.includes('valid') || key.includes('until');
                       const displayOld = isDate && oldStr !== 'empty' ? formatDate(oldStr) : oldStr;

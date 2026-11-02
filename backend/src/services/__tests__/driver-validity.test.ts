@@ -4,6 +4,11 @@ import {
   addDaysYmd,
   toYmd,
   touchesValidity,
+  outstandingDocuments,
+  hasAllRequiredDocuments,
+  isUkLicence,
+  isNiLicence,
+  backfillFromDates,
 } from '../driver-validity';
 
 // Fixed "today" so these never rot.
@@ -103,6 +108,22 @@ describe('window derivation', () => {
     expect(v.dvla.valid).toBe(true);
   });
 
+  it('gives a passport 90 days from the check date', () => {
+    // Was 30 while the hire-form app sent `today + 90`, so backfillFromDates
+    // back-computed a check date 60 days AFTER the real check and staff read
+    // that as "Checked on" (Louis Salanson / 16507). Migration 207.
+    const v = computeDriverValidity({ passport_check_date: '2026-08-01' }, TODAY);
+    expect(v.passport.until).toBe('2026-10-30');
+    expect(v.passport.cappedBy).toBeNull();
+  });
+
+  it('round-trips a passport expiry back to the same check date', () => {
+    // backfillFromDates and persistableWindows must agree, or a caller that
+    // writes one end silently moves the other.
+    const back = backfillFromDates({ passport_valid_until: '2026-10-30' });
+    expect(back.passport_check_date).toBe('2026-08-01');
+  });
+
   it("caps the passport window at the passport's printed expiry", () => {
     const v = computeDriverValidity({
       passport_check_date: '2026-08-01',
@@ -153,5 +174,126 @@ describe('touchesValidity', () => {
     expect(touchesValidity(['dvla_check_date'])).toBe(true);
     expect(touchesValidity(['poa1_doc_date', 'phone'])).toBe(true);
     expect(touchesValidity(['phone', 'address_full'])).toBe(false);
+  });
+});
+
+describe('outstandingDocuments', () => {
+  // Everything in date on TODAY.
+  const complete = {
+    idenfy_check_date: '2026-08-09',
+    licence_issued_by: 'DVLA',
+    dvla_check_date: '2026-08-09',
+    poa1_doc_date: '2026-08-09',
+    poa2_doc_date: '2026-08-09',
+  };
+
+  it('reports nothing outstanding for a complete UK driver', () => {
+    const v = computeDriverValidity(complete, TODAY);
+    expect(outstandingDocuments(v)).toEqual({
+      licence: false, poa1: false, poa2: false, dvla: false, passport: false,
+    });
+    expect(hasAllRequiredDocuments(v)).toBe(true);
+  });
+
+  it('asks a UK driver for DVLA and never for a passport', () => {
+    const v = computeDriverValidity({ ...complete, dvla_check_date: null }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.dvla).toBe(true);
+    expect(out.passport).toBe(false);
+    expect(hasAllRequiredDocuments(v)).toBe(false);
+  });
+
+  it('asks a non-UK driver for a passport and never for DVLA', () => {
+    const v = computeDriverValidity({
+      idenfy_check_date: '2026-08-09',
+      licence_issued_by: 'Bundesdruckerei',
+      licence_issue_country: 'DE',
+      poa1_doc_date: '2026-08-09',
+      poa2_doc_date: '2026-08-09',
+    }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.passport).toBe(true);
+    expect(out.dvla).toBe(false);
+  });
+
+  it('counts an untrusted licence as outstanding', () => {
+    // A check date with no licence identity behind it is not evidence — the
+    // nudge must chase for the licence, not tell them their documents are fine.
+    const v = computeDriverValidity({ ...complete, licence_issued_by: null }, TODAY);
+    expect(outstandingDocuments(v).licence).toBe(true);
+    expect(hasAllRequiredDocuments(v)).toBe(false);
+  });
+
+  it('counts each proof of address separately', () => {
+    const v = computeDriverValidity({ ...complete, poa2_doc_date: '2026-01-01' }, TODAY);
+    const out = outstandingDocuments(v);
+    expect(out.poa1).toBe(false);
+    expect(out.poa2).toBe(true);
+  });
+});
+
+describe('isUkLicence', () => {
+  it('recognises a DVLA licence', () => {
+    expect(isUkLicence({ licence_issued_by: 'DVLA' })).toBe(true);
+    expect(isUkLicence({ licence_issued_by: ' dvla ' })).toBe(true);
+    expect(isUkLicence({ licence_issued_by: 'DVA' })).toBe(true);   // Northern Ireland
+  });
+
+  it('accepts the country as a NAME, not just the ISO code', () => {
+    // The hire-form webhook writes licence_issue_country through
+    // getCountryName(), i.e. "United Kingdom" — while every consumer compared
+    // it to "GB", so that half of the test never once matched.
+    expect(isUkLicence({ licence_issue_country: 'GB' })).toBe(true);
+    expect(isUkLicence({ licence_issue_country: 'United Kingdom' })).toBe(true);
+    expect(isUkLicence({ licence_issue_country: 'UNITED KINGDOM' })).toBe(true);
+  });
+
+  it('does not treat a passport authority as a UK licence', () => {
+    // HMPO is the UK Passport Office. It reached licence_issued_by because an
+    // expired PASSPORT session was processed down the licence path
+    // (Charlie McWilliams / 15727). It is UK, but it is not a licence
+    // authority — so the driver must not be classed as a DVLA driver on it.
+    expect(isUkLicence({ licence_issued_by: 'HMPO' })).toBe(false);
+  });
+
+  it('is false for a genuinely foreign licence and for no data at all', () => {
+    expect(isUkLicence({ licence_issued_by: 'ZA', licence_issue_country: 'South Africa' })).toBe(false);
+    expect(isUkLicence({})).toBe(false);
+    expect(isUkLicence(null)).toBe(false);
+  });
+
+  it('drives isUkDriver on computeDriverValidity', () => {
+    expect(computeDriverValidity({ licence_issue_country: 'United Kingdom' }, TODAY).isUkDriver).toBe(true);
+    expect(computeDriverValidity({ licence_issued_by: 'HMPO' }, TODAY).isUkDriver).toBe(false);
+  });
+});
+
+describe('isNiLicence', () => {
+  it('recognises a DVA licence', () => {
+    expect(isNiLicence({ licence_issued_by: 'DVA' })).toBe(true);
+    expect(isNiLicence({ licence_issued_by: ' dva ' })).toBe(true);
+  });
+
+  it('is false for GB, for a passport authority, and for no data', () => {
+    expect(isNiLicence({ licence_issued_by: 'DVLA' })).toBe(false);
+    expect(isNiLicence({ licence_issued_by: 'HMPO' })).toBe(false);
+    expect(isNiLicence({})).toBe(false);
+    expect(isNiLicence(null)).toBe(false);
+  });
+
+  // The two must never disagree. An NI licence that wasn't also UK would be
+  // routed to the passport regime while being offered the NI check panel —
+  // a contradiction with no way out for staff.
+  it('implies isUkLicence', () => {
+    expect(isUkLicence({ licence_issued_by: 'DVA' })).toBe(true);
+    expect(computeDriverValidity({ licence_issued_by: 'DVA' }, TODAY).isUkDriver).toBe(true);
+  });
+
+  // A DVA driver still needs the record check — the regime is unchanged, only
+  // who can go and get it. This is the whole reason the hire form dead-ended.
+  it('leaves the DVLA check outstanding for a DVA driver', () => {
+    const v = computeDriverValidity({ licence_issued_by: 'DVA', idenfy_check_date: TODAY }, TODAY);
+    expect(outstandingDocuments(v).dvla).toBe(true);
+    expect(outstandingDocuments(v).passport).toBe(false);
   });
 });

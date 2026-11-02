@@ -51,6 +51,8 @@ export interface SoftCheckInEventInput {
   toReg?: string | null;
   /** Combined reason code + details, e.g. "Breakdown: brake fault on the M6". */
   swapReason?: string | null;
+  /** Fleet status shown on the event. Defaults to 'Not Ready' (breakdown). */
+  hireStatus?: string | null;
 }
 
 /**
@@ -65,6 +67,7 @@ export async function recordSoftCheckInEvent(input: SoftCheckInEventInput): Prom
 
   const id = randomUUID();
   const now = new Date().toISOString();
+  const hireStatus = input.hireStatus || 'Not Ready';
 
   // The PDF/regen path parses `details` for "Driver:" and "Notes:" lines, so
   // keep that shape and add the swap context lines around it.
@@ -85,7 +88,7 @@ export async function recordSoftCheckInEvent(input: SoftCheckInEventInput): Prom
     mileage: input.mileage ?? null,
     fuelLevel: input.fuelLevel ?? null,
     hireHopJob: input.hhJob != null ? String(input.hhJob) : null,
-    hireStatus: 'Not Ready',
+    hireStatus,
     driverName: input.driverName || null,
     notes: input.notes || null,
     details: detailLines.join('\n'),
@@ -104,7 +107,7 @@ export async function recordSoftCheckInEvent(input: SoftCheckInEventInput): Prom
     mileage: event.mileage,
     fuelLevel: event.fuelLevel,
     hireHopJob: event.hireHopJob,
-    hireStatus: 'Not Ready',
+    hireStatus,
     createdAt: now,
   });
   await writeR2Json(indexKey, indexData);

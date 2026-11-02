@@ -106,8 +106,8 @@ export async function syncDocumentAssignments(documentId: string): Promise<numbe
     created += 1;
     // Assigned notification (bell; escalation scheduler handles email per prefs).
     await query(
-      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-       VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, '/staff/documents', 'normal')`,
+      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+       VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, '/staff/documents', 'normal', 'staff_doc_to_complete')`,
       [userId, `Document to ${verb}: ${doc.title}`,
        `Please ${verb} “${doc.title}” in your Staff Documents.`, documentId],
     ).catch((e) => console.error('[staff-documents] assign notification failed:', e));

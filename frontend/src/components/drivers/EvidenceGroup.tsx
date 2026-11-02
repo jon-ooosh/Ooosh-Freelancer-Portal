@@ -1,6 +1,7 @@
-import { useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { api } from '../../services/api';
 import { DocumentThumb } from './DocumentThumb';
+import { openR2Key } from '../../lib/openAuthedFile';
 
 /**
  * One block of evidence: the image(s), the date staff set, the expiry OP
@@ -50,6 +51,11 @@ export interface EvidenceGroupSpec {
   until?: string | null;
   /** Explanation shown when there is no derived window. */
   emptyHint?: string;
+  /**
+   * Replaces the expiry pill. For groups that don't HAVE an expiry — the
+   * signature — where "No expiry set" reads as a data gap when it isn't one.
+   */
+  headerRight?: React.ReactNode;
 }
 
 /**
@@ -59,6 +65,13 @@ export interface EvidenceGroupSpec {
  * 'license_front' / 'Licence Front'), which is how the driver snapshot PDF
  * silently dropped licence and POA images for months. Matching on a token
  * rather than an exact string means a new variant doesn't break the group.
+ *
+ * ⚠️ This answers "which file goes in which thumbnail slot" and needs the file
+ * objects. The other two questions — which document IS this file (the snapshot
+ * PDF) and does it EXIST at all (what "What needs doing" tells staff) — are both
+ * answered by backend/src/services/driver-documents.ts, which holds the same
+ * spellings and is the only other copy. Add a new spelling to BOTH, or the page
+ * will show a thumbnail the list above it says is missing (or the reverse).
  */
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -173,10 +186,7 @@ export function EvidenceGroup({
 
   async function handleOpen(file: EvidenceFile) {
     try {
-      const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-      const url = URL.createObjectURL(new Blob([blob], { type: contentType }));
-      window.open(url, '_blank');
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      await openR2Key(file.url, file.name);
     } catch {
       setError('Could not open that file');
     }
@@ -212,8 +222,8 @@ export function EvidenceGroup({
       <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
         <h3 className="text-sm font-semibold text-gray-700">{spec.title}</h3>
         <div className="text-right">
-          <ExpiryPill until={spec.until} />
-          {!spec.until && spec.emptyHint && (
+          {spec.headerRight ?? <ExpiryPill until={spec.until} />}
+          {!spec.headerRight && !spec.until && spec.emptyHint && (
             <p className="text-[11px] text-amber-600 mt-0.5 max-w-[18rem]">{spec.emptyHint}</p>
           )}
         </div>

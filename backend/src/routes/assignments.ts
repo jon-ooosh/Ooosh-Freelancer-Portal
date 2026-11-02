@@ -11,11 +11,12 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
   findOverlappingAssignments,
   buildConflictPayload,
+  holdOccupiesSql,
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { syncVehicleRequirementStatus } from '../services/vehicle-requirement-sync';
@@ -26,6 +27,9 @@ import { recordSoftCheckInEvent } from '../services/vehicle-event-log';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── Schemas ──
 
@@ -95,6 +99,11 @@ const BASE_SELECT = `
     d.identity_check_status AS driver_identity_check_status,
     d.calculated_excess_amount AS driver_calculated_excess,
     p.first_name || ' ' || p.last_name AS freelancer_name,
+    -- Who collected the van on the portal (migration 319) — Job Detail's
+    -- "collected by …, awaiting check-in" line names them with displayFullName.
+    sc.first_name AS soft_checked_in_by_first_name,
+    sc.last_name AS soft_checked_in_by_last_name,
+    sc.preferred_name AS soft_checked_in_by_preferred_name,
     je.id AS excess_id,
     je.excess_status,
     je.excess_amount_required,
@@ -107,6 +116,7 @@ const BASE_SELECT = `
   LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
   LEFT JOIN drivers d ON d.id = vha.driver_id
   LEFT JOIN people p ON p.id = vha.freelancer_person_id
+  LEFT JOIN people sc ON sc.id = vha.soft_checked_in_by_person_id
   LEFT JOIN job_excess je ON je.assignment_id = vha.id
 `;
 
@@ -215,6 +225,12 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
     // window uses the same 09:00 default so back-to-back hires (one ending
     // 9am, next starting 9am) are not treated as overlapping. See
     // services/assignment-overlap.ts for the full rationale.
+    //
+    // A hold on a finished job doesn't count (holdOccupiesSql — the same rule
+    // findOverlappingAssignments applies, so the picker and the save agree).
+    // Dates go out as text from SQL, not via toISOString() on a DATE, so the
+    // picker's "held until" can't slip a day; the times are the ones the
+    // overlap test uses, so staff can see exactly when the hold ends.
     const result = await query(
       `SELECT DISTINCT ON (vha.vehicle_id)
          vha.vehicle_id,
@@ -222,10 +238,13 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
          vha.status,
          vha.job_id,
          vha.hirehop_job_id,
+         j.id AS op_job_id,
          j.job_name,
          j.hh_job_number,
-         COALESCE(vha.hire_start, j.job_date::DATE) AS effective_start,
-         COALESCE(vha.hire_end, j.job_end::DATE) AS effective_end,
+         COALESCE(vha.hire_start, j.job_date::DATE)::text AS effective_start,
+         COALESCE(vha.hire_end, j.job_end::DATE)::text AS effective_end,
+         to_char(COALESCE(j.out_time, TIME '09:00'), 'HH24:MI') AS effective_start_time,
+         to_char(COALESCE(j.end_time, TIME '09:00'), 'HH24:MI') AS effective_end_time,
          d.full_name AS driver_name,
          fv.reg AS vehicle_reg
        FROM vehicle_hire_assignments vha
@@ -235,6 +254,7 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
        LEFT JOIN drivers d ON d.id = vha.driver_id
        WHERE vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
          AND vha.vehicle_id IS NOT NULL
+         AND ${holdOccupiesSql('vha', 'j')}
          AND ($3::integer IS NULL OR vha.hirehop_job_id IS DISTINCT FROM $3::integer)
          AND ($4::uuid IS NULL OR vha.job_id IS DISTINCT FROM $4::uuid)
          AND (COALESCE(vha.hire_start, j.job_date::DATE) + COALESCE(j.out_time, TIME '09:00'))
@@ -256,10 +276,13 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
           status: r.status,
           jobId: r.job_id,
           hirehopJobId: r.hirehop_job_id,
+          opJobId: r.op_job_id ?? null,
           jobName: r.job_name,
           hhJobNumber: r.hh_job_number,
-          effectiveStart: r.effective_start ? new Date(r.effective_start).toISOString().slice(0, 10) : null,
-          effectiveEnd: r.effective_end ? new Date(r.effective_end).toISOString().slice(0, 10) : null,
+          effectiveStart: r.effective_start ? String(r.effective_start).slice(0, 10) : null,
+          effectiveEnd: r.effective_end ? String(r.effective_end).slice(0, 10) : null,
+          effectiveStartTime: r.effective_start_time ?? null,
+          effectiveEndTime: r.effective_end_time ?? null,
           driverName: r.driver_name,
         })),
       },
@@ -679,10 +702,10 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
         let vehicleReg = '';
         if (assignment.vehicle_id) {
           const vResult = await query(
-            `SELECT registration FROM fleet_vehicles WHERE id = $1`,
+            `SELECT reg FROM fleet_vehicles WHERE id = $1`,
             [assignment.vehicle_id]
           );
-          vehicleReg = vResult.rows[0]?.registration || '';
+          vehicleReg = vResult.rows[0]?.reg || '';
         }
 
         const noteText = vehicleReg
@@ -1600,13 +1623,19 @@ router.post(
       }
     }
 
-    // 4b. Interim assessment on the swapped-out van's Event History (breakdown
-    // only). Puts the soft check-in on the van's timeline and lets staff produce
+    // 4b. Interim assessment on the swapped-out van's Event History (breakdown,
+    // or a planned swap with a reading). Puts the soft check-in on the van's timeline and lets staff produce
     // the Interim Assessment PDF on demand via the existing Event History
     // "regenerate PDF" affordance (it derives isInterim from the soft-check-in
-    // eventType). Planned swaps skip this — the van takes a normal full check-in
-    // on return, which produces its own condition report. Best-effort.
-    if (!isPlanned && orig.vehicle_reg) {
+    // eventType). A planned swap writes it only when staff entered a reading:
+    // the van still takes a normal full check-in on return, but that check-in
+    // compares the client's fuel/miles book-out -> swap from this event, and
+    // without one the client figures read "not recorded". Best-effort.
+    const hasSoftReading = !!(soft_checkin && (
+      (soft_checkin.mileage && soft_checkin.mileage > 0) ||
+      soft_checkin.fuel_level || soft_checkin.location || soft_checkin.notes
+    ));
+    if (orig.vehicle_reg && (!isPlanned || hasSoftReading)) {
       const swapDriverNames = slotRows
         .map((r: any) => r.driver_name)
         .filter(Boolean)
@@ -1621,6 +1650,8 @@ router.post(
         driverName: swapDriverNames || orig.driver_name || null,
         toReg: newVehicle.reg,
         swapReason: swap_reason,
+        // Planned: the van is fine, so its timeline shouldn't say Not Ready.
+        hireStatus: isPlanned ? 'Prep Needed' : 'Not Ready',
       }).catch(err => console.warn('[assignments] swap interim event-history write failed:', err));
     }
 

@@ -34,11 +34,13 @@ import { buildConsumptionTransactions } from '../lib/stock-consumption'
 import { VehicleIssuesBanner } from '../components/issues/VehicleIssuesBanner'
 import { TurnaroundSchedule } from '../components/dashboard/TurnaroundSchedule'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
+import GiveToFreelancer from '../../../components/GiveToFreelancer'
 import type { SignatureCaptureHandle } from '../components/book-out/SignatureCapture'
 import type { Vehicle } from '../types/vehicle'
 import type { CapturedPhoto } from '../types/vehicle-event'
 import { FUEL_LEVELS } from '../types/vehicle-event'
 import type { FuelLevel } from '../types/vehicle-event'
+import { ukToday } from '../../../lib/ukDate'
 
 // ── Types ──
 
@@ -71,7 +73,15 @@ const OVERALL_STATUS_OPTIONS = [
 
 type Phase = 'queue' | 'prepping' | 'complete'
 
-export function PrepPage() {
+/**
+ * `freelancerPrep` — opened from a freelancer's van-prep task on the portal
+ * (STAFF-CALENDAR-SPEC §21.6). The page starts straight on that van, hides the
+ * staff-only dashboard pieces, and the finish screen points back to the portal.
+ * The server holds the session to that one van whatever the page does.
+ */
+export function PrepPage({ freelancerPrep }: {
+  freelancerPrep?: { vehicleReg: string; returnUrl: string | null }
+} = {}) {
   const queryClient = useQueryClient()
   const { data: allVehicles, isLoading: vehiclesLoading } = useVehicles()
   const { data: settings } = useSettings()
@@ -131,6 +141,18 @@ export function PrepPage() {
     () => activeVehicles.filter(v => v.hireStatus !== 'Prep Needed'),
     [activeVehicles],
   )
+
+  // Freelancer mode: open straight on the task's van, once.
+  const autoStarted = useRef(false)
+  useEffect(() => {
+    if (!freelancerPrep || autoStarted.current || phase !== 'queue' || !allVehicles) return
+    const want = freelancerPrep.vehicleReg.toUpperCase().replace(/\s+/g, '')
+    const v = allVehicles.find(x => x.reg.toUpperCase().replace(/\s+/g, '') === want)
+    if (!v) return
+    autoStarted.current = true
+    void handleStartPrep(v)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [freelancerPrep, allVehicles, phase])
 
   // Get prep checklist sections from R2 settings (fallback to defaults)
   const sections: PrepSection[] = useMemo(() => {
@@ -456,6 +478,9 @@ export function PrepPage() {
       let createdCount = 0
       let reflaggedCount = 0
       let failedCount = 0
+      // Freelancer prep: Problems are staff-only (403). The flags are saved
+      // with the prep and the office is belled to raise them (§21.6).
+      let forOfficeCount = 0
       const mileageInt = mileage ? parseInt(mileage, 10) : null
 
       for (const flagged of flaggedItems) {
@@ -480,6 +505,7 @@ export function PrepPage() {
             }),
           })
           if (!resp.ok) {
+            if (freelancerPrep && (resp.status === 401 || resp.status === 403)) { forOfficeCount++; continue }
             failedCount++
             console.warn(`[prep] auto-create failed for ${flagged.itemName}:`, resp.status)
             continue
@@ -496,6 +522,7 @@ export function PrepPage() {
       const parts: string[] = []
       if (createdCount) parts.push(`${createdCount} new`)
       if (reflaggedCount) parts.push(`${reflaggedCount} re-flagged`)
+      if (forOfficeCount) parts.push(`${forOfficeCount} sent to the office to review`)
       if (failedCount) parts.push(`${failedCount} failed`)
       results.push({
         label: 'Issues logged',
@@ -514,7 +541,7 @@ export function PrepPage() {
         preparedBy,
         mileage: isNaN(parsedMileage) ? null : parsedMileage,
         fuelLevel,
-        date: new Date().toISOString().slice(0, 10),
+        date: ukToday(),
         startedAt: actualStartedAt,
         completedAt,
         durationMinutes,
@@ -532,6 +559,9 @@ export function PrepPage() {
           })),
           notes: sectionNotes[sec.name] || '',
         })),
+        // Opened from a freelancer task: the server bells the office about any
+        // flags, whichever login sent the save (§21.10).
+        ...(freelancerPrep ? { freelancerTaskPrep: true } : {}),
         flaggedItems: flaggedItems.map(f => ({
           checklistItem: f.itemName,
           selectedOption: f.selectedOption,
@@ -704,6 +734,16 @@ export function PrepPage() {
           </div>
         )}
 
+        {freelancerPrep ? (
+          <div className="flex gap-3">
+            <a
+              href={freelancerPrep.returnUrl || '#'}
+              className="flex-1 rounded-lg bg-ooosh-navy py-3 text-center text-sm font-medium text-white"
+            >
+              Back to the freelancer portal
+            </a>
+          </div>
+        ) : (
         <div className="flex gap-3">
           <button
             onClick={handleReset}
@@ -718,6 +758,7 @@ export function PrepPage() {
             View Fleet
           </Link>
         </div>
+        )}
       </div>
     )
   }
@@ -782,7 +823,8 @@ export function PrepPage() {
 
         {/* Open issues banner */}
         <div className="px-4 pt-3">
-          <VehicleIssuesBanner vehicleId={selectedVehicle.id} />
+          {/* Known issues come from /api/problems — staff-only, so not in freelancer mode. */}
+          {!freelancerPrep && <VehicleIssuesBanner vehicleId={selectedVehicle.id} />}
         </div>
 
         {/* Validation toast */}
@@ -991,6 +1033,7 @@ export function PrepPage() {
       {/* Forward-facing fleet turnaround view. The "Prep this van" CTAs fire
           handleStartPrep directly — same behaviour as the Start Prep button
           on a queue card below. */}
+      {!freelancerPrep && (
       <TurnaroundSchedule
         onStartPrep={(reg) => {
           const v = (allVehicles || []).find(
@@ -999,6 +1042,7 @@ export function PrepPage() {
           if (v) handleStartPrep(v)
         }}
       />
+      )}
 
       <div className="flex items-center justify-between">
         <div>
@@ -1026,7 +1070,7 @@ export function PrepPage() {
           <p className="text-xs font-semibold text-amber-600 uppercase tracking-wide">Prep Needed</p>
           {prepQueue.map(v => (
             <div key={v.id} id={`prep-card-${v.reg}`} className="scroll-mt-4">
-              <VehiclePrepCard vehicle={v} onStartPrep={handleStartPrep} />
+              <VehiclePrepCard vehicle={v} onStartPrep={handleStartPrep} showGive={!freelancerPrep} />
             </div>
           ))}
         </div>
@@ -1621,9 +1665,11 @@ function DetailInput({
 function VehiclePrepCard({
   vehicle,
   onStartPrep,
+  showGive = false,
 }: {
   vehicle: Vehicle
   onStartPrep: (v: Vehicle) => void
+  showGive?: boolean
 }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -1655,6 +1701,8 @@ function VehiclePrepCard({
       </div>
 
       <div className="mt-2 flex items-center justify-end gap-2">
+        {/* Staff only, and only when somebody is in today/tomorrow (§21.4). */}
+        {showGive && <GiveToFreelancer vehicleId={vehicle.id} reg={vehicle.reg} className="mr-auto" />}
         <Link
           to={vmPath(`/vehicles/${vehicle.id}?tab=preps`)}
           className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-100"

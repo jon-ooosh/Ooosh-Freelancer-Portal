@@ -8,6 +8,7 @@
  */
 import { query } from '../config/database';
 import { getSystemSetting } from '../routes/system-settings';
+import { DISPLAY_NAME_SQL } from './display-name';
 
 export type OohViolationType =
   | 'parked_blocking'
@@ -250,12 +251,12 @@ export async function getDriverCompliance(driverId: string): Promise<DriverCompl
   const v = await query(
     `SELECT v.id, v.occurred_on, v.type, v.severity, v.notes, v.dismissed, v.created_at,
             v.job_id, j.hh_job_number, fv.reg AS vehicle_reg,
-            u_p.full_name AS logged_by_name
+            NULLIF(${DISPLAY_NAME_SQL}, ' ') AS logged_by_name
        FROM ooh_return_violations v
        LEFT JOIN jobs j ON j.id = v.job_id
        LEFT JOIN fleet_vehicles fv ON fv.id = v.vehicle_id
        LEFT JOIN users u ON u.id = v.logged_by
-       LEFT JOIN people u_p ON u_p.id = u.person_id
+       LEFT JOIN people p ON p.id = u.person_id
       WHERE v.driver_id = $1
       ORDER BY v.occurred_on DESC, v.created_at DESC`,
     [driverId],

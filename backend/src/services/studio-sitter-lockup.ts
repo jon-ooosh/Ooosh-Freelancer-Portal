@@ -24,6 +24,8 @@ import { query, getClient } from '../config/database';
 import { getSystemSetting } from '../routes/system-settings';
 import { emailService } from './email-service';
 import { getPresignedDownloadUrl } from '../config/r2';
+import { greetingName, fullDisplayName } from './display-name';
+import { retireDoneBells } from './notification-resolve';
 
 // ── Template types ──────────────────────────────────────────────────────────
 
@@ -75,13 +77,15 @@ const REF_ROOM_3 = 'https://www.jotform.com/uploads/jonwood/form_files/IMG_3635.
  * notes boxes collapse to per-exception "why?" notes + the final notes field.
  */
 export const DEFAULT_TEMPLATE: LockupTemplate = {
-  version: 1,
+  version: 2,
   intro:
     "Quick walk round before you lock up. Flag anything that isn't right — we'd rather know tonight than find out tomorrow.",
   items: [
     // ── Upstairs ─────────────────────────────────────────────────────────
     { id: 'clients_out_on_time', section: 'Upstairs', label: 'Were the clients out on time? (if not, note how late & why below)', type: 'yesno', expected: 'yes' },
-    { id: 'clients_paid', section: 'Upstairs', label: 'Have the clients paid? (if so, note how below and put the card receipt in the till)', type: 'yesno', expected: 'yes', note_prompt: 'How did they pay / what’s outstanding? (and pop the card receipt in the till)' },
+    // Was "Have the clients paid?" — the shop till now records what WAS paid,
+    // so the report only asks about what wasn't (migration 251, jon Sep 2026).
+    { id: 'money_outstanding', section: 'Upstairs', label: "Any money outstanding? (anything a band still owes that didn't go through the shop till)", type: 'yesno', expected: 'no', note_prompt: 'Who owes what, and what for?' },
     { id: 'pas_amps_powered_down', section: 'Upstairs', label: "PAs, amps, client equipment / pedals etc powered down", type: 'yesno', expected: 'yes' },
     { id: 'litter_cleared', section: 'Upstairs', label: 'Cups / glasses / plates cleared away, all litter collected and bin bag changed', type: 'yesno', expected: 'yes' },
     { id: 'crockery_washed', section: 'Upstairs', label: 'All cups / crockery washed or loaded into the downstairs dishwasher', type: 'yesno', expected: 'yes' },
@@ -284,6 +288,34 @@ export interface LockupContext {
   continuing_derived: boolean;    // what the schedule says, before any override
   submitted: (StoredReport & { submitted_at: string }) | null;
   has_shift: boolean;
+  /** What the shop till took tonight (SHOP-SALES-SPEC.md §5) — null with no shift. */
+  shop: ShopTonight | null;
+}
+
+/** The till's takings for one evening, as the lock-up report shows them. */
+export interface ShopTonight {
+  sales: number;
+  taken: number;
+  refunded: number;
+  byTender: Array<{ tender: string; label: string; amount: number }>;
+  onTheirBill: number;
+  toReview: number;
+}
+
+/**
+ * The shop summary for a shift. Loaded lazily — the shop module pulls in the
+ * HireHop/Xero plumbing, which the lock-up report otherwise never needs — and
+ * never allowed to break the report: a failure just means no shop box.
+ */
+async function shopTonight(shiftId: string | null | undefined): Promise<ShopTonight | null> {
+  if (!shiftId) return null;
+  try {
+    const { getShiftShopSummary } = await import('./shop-reconcile');
+    return await getShiftShopSummary(shiftId);
+  } catch (err) {
+    console.error('[studio-lockup] shop summary failed (non-fatal):', err);
+    return null;
+  }
 }
 
 function normaliseStored(raw: any, derived: boolean): StoredReport {
@@ -335,6 +367,7 @@ export async function getLockupContext(date: string): Promise<LockupContext> {
     continuing_derived: derived,
     submitted: stored ? { ...stored, submitted_at: shift!.report_submitted_at! } : null,
     has_shift: !!shift,
+    shop: await shopTonight(shift?.id),
   };
 }
 
@@ -464,11 +497,27 @@ export async function submitLockupReport(
     }
     if (notesText) { lines.push(''); lines.push(notesText); }
 
-    await client.query(
-      `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
-       VALUES ('note', $1, $2, NULL, $3, $4::jsonb)`,
-      [lines.join('\n'), shiftId, sitterName, JSON.stringify(allPhotos)]
-    );
+    // The night's till takings, so the handover says what came in without
+    // anyone opening the Shop page. Only when something was sold.
+    const shop = await shopTonight(shiftId);
+    if (shop && shop.sales > 0) {
+      const { describeShiftShop } = await import('./shop-reconcile');
+      lines.push('');
+      lines.push(`🛒 Shop: ${describeShiftShop(shop)}${shop.toReview ? ` (${shop.toReview} to review on the Shop Till page)` : ''}`);
+    }
+
+    // A bare "all clear" with nothing else to say is noise on the thread — the
+    // roster's Lock-up ✓ pill already says it, and it made every night read
+    // "Notes (1)". Post only when there is something to read: a flagged item,
+    // a note, a photo or shop takings. (The office bell + email still go.)
+    const worthPosting = exceptions.length > 0 || lines.length > 1 || allPhotos.length > 0;
+    if (worthPosting) {
+      await client.query(
+        `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
+         VALUES ('note', $1, $2, NULL, $3, $4::jsonb)`,
+        [lines.join('\n'), shiftId, sitterName, JSON.stringify(allPhotos)]
+      );
+    }
 
     await client.query('COMMIT');
   } catch (e) {
@@ -477,6 +526,10 @@ export async function submitLockupReport(
   } finally {
     client.release();
   }
+
+  // A late report: the office's "Lock-up not submitted" bells are done
+  // (bell-rules.ts lockup_missing). After COMMIT; never throws.
+  await retireDoneBells('lockup_missing', shiftId);
 
   notifyStaffOfLockup(date, shiftId, sitterName, exceptions, notesText).catch((err) =>
     console.error('[studio-lockup] staff notify failed (non-fatal):', err)
@@ -494,8 +547,27 @@ async function notifyStaffOfLockup(
   const title = flagged
     ? `🔒 Lock-up — ${exceptions.length} item${exceptions.length !== 1 ? 's' : ''} need attention (${sitterName})`
     : `🔒 Lock-up submitted — all clear (${sitterName})`;
-  const content = [...exceptions.map((e) => `• ${e.label}: ${e.answer}`), ...(notes ? [notes] : [])]
-    .join('\n').slice(0, 400) || 'No issues flagged.';
+  // The shop till's night, and — the bit that gets missed — sitter sales
+  // waiting for a staff tick (jon, Sep 2026: "it will be missed otherwise").
+  const shop = await shopTonight(shiftId);
+  let shopLine = '';
+  let shopReviewText = '';
+  if (shop && shop.sales > 0) {
+    const { describeShiftShop } = await import('./shop-reconcile');
+    shopLine = describeShiftShop(shop);
+    if (shop.toReview > 0) {
+      shopReviewText = `${shop.toReview} shop sale${shop.toReview === 1 ? '' : 's'} from tonight to review`;
+    }
+  }
+
+  const content = [
+    ...exceptions.map((e) => `• ${e.label}: ${e.answer}`),
+    ...(notes ? [notes] : []),
+    ...(shopReviewText ? [`🛒 ${shopReviewText}`] : []),
+  ].join('\n').slice(0, 400) || 'No issues flagged.';
+
+  const { shiftLinkPath } = await import('./studio-sitter');
+  const link = await shiftLinkPath(shiftId);
 
   try {
     const staff = await query(
@@ -504,8 +576,8 @@ async function notifyStaffOfLockup(
     for (const row of staff.rows) {
       await query(
         `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-         VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, '/studio-sitters', $5, NOW())`,
-        [row.id, title, content, shiftId, flagged ? 'high' : 'low']
+         VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, $5, $6, NOW())`,
+        [row.id, title, content, shiftId, link.path, flagged ? 'high' : 'low']
       );
     }
   } catch (err) {
@@ -523,7 +595,11 @@ async function notifyStaffOfLockup(
           : 'All clear — nothing flagged',
         exceptionsText: exceptions.map((e) => `${e.label}: ${e.answer}`).join('\n'),
         notes: notes || '',
-        rosterUrl: 'https://staff.oooshtours.co.uk/studio-sitters',
+        rosterUrl: `https://staff.oooshtours.co.uk${link.path}`,
+        linkLabel: link.isJob ? 'Open the job' : 'Open the Rehearsals roster',
+        shopLine,
+        shopReviewText,
+        shopReviewUrl: 'https://staff.oooshtours.co.uk/money/shop?tab=review',
       },
     });
   } catch (err) {
@@ -543,7 +619,7 @@ async function notifyStaffOfLockup(
 export async function runLockupChase(): Promise<number> {
   const due = await query(
     `SELECT s.id AS shift_id, s.shift_date::text AS shift_date,
-            p.first_name, p.last_name, p.email
+            p.first_name, p.last_name, p.preferred_name, p.email
      FROM studio_sitter_shifts s
      JOIN studio_sitter_shift_assignments a ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
      JOIN people p ON p.id = a.person_id
@@ -557,9 +633,11 @@ export async function runLockupChase(): Promise<number> {
   let sent = 0;
   for (const row of due.rows) {
     const dateIso = String(row.shift_date).slice(0, 10);
-    const sitterName = `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Studio sitter';
+    const sitterName = fullDisplayName(row) || 'Studio sitter';
     // Stamp first (dedup): a send failure must not re-fire on the next pass.
     await query(`UPDATE studio_sitter_shifts SET lockup_chase_sent_at = NOW() WHERE id = $1`, [row.shift_id]);
+    const { shiftLinkPath } = await import('./studio-sitter');
+    const link = await shiftLinkPath(row.shift_id);
 
     // Office bell (admins/managers).
     try {
@@ -568,12 +646,12 @@ export async function runLockupChase(): Promise<number> {
       );
       for (const u of staff.rows) {
         await query(
-          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, '/studio-sitters', 'normal', NOW())`,
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, $5, 'normal', NOW(), 'lockup_missing')`,
           [u.id,
            `🔒 Lock-up not submitted — ${formatLongDate(dateIso)} (${sitterName})`,
            `${sitterName} hasn't submitted a lock-up report for ${formatLongDate(dateIso)}. A reminder has been sent.`,
-           row.shift_id]
+           row.shift_id, link.path]
         );
       }
     } catch (err) { console.error('[studio-lockup-chase] bell insert failed:', err); }
@@ -582,7 +660,11 @@ export async function runLockupChase(): Promise<number> {
     try {
       await emailService.send('studio_lockup_missing', {
         to: 'info@oooshtours.co.uk',
-        variables: { sitterName, date: formatLongDate(dateIso), rosterUrl: 'https://staff.oooshtours.co.uk/studio-sitters' },
+        variables: {
+          sitterName, date: formatLongDate(dateIso),
+          rosterUrl: `https://staff.oooshtours.co.uk${link.path}`,
+          linkLabel: link.isJob ? 'Open the job' : 'Open the Rehearsals roster',
+        },
       });
     } catch (err) { console.error('[studio-lockup-chase] office email failed:', err); }
 
@@ -592,7 +674,7 @@ export async function runLockupChase(): Promise<number> {
         await emailService.send('studio_lockup_reminder', {
           to: row.email,
           variables: {
-            sitterFirstName: row.first_name || 'there',
+            sitterFirstName: greetingName(row),
             date: formatLongDate(dateIso),
             lockupUrl: `https://hireforms.oooshtours.co.uk/shift/${dateIso}/lockup`,
           },
@@ -616,7 +698,7 @@ export async function notifySitterOfStaffReply(
   shiftId: string, replyText: string, staffUserId: string,
 ): Promise<void> {
   const r = await query(
-    `SELECT s.shift_date::text AS shift_date, p.first_name, p.email
+    `SELECT s.shift_date::text AS shift_date, p.first_name, p.preferred_name, p.email
      FROM studio_sitter_shifts s
      JOIN studio_sitter_shift_assignments a ON a.shift_id = s.id AND a.status IN ('assigned','confirmed')
      JOIN people p ON p.id = a.person_id
@@ -637,7 +719,7 @@ export async function notifySitterOfStaffReply(
   await emailService.send('studio_shift_reply', {
     to: row.email,
     variables: {
-      sitterFirstName: row.first_name || 'there',
+      sitterFirstName: greetingName(row),
       staffName,
       date: formatLongDate(dateIso),
       replyText: replyText.length > 1200 ? replyText.slice(0, 1200) + '…' : replyText,
@@ -690,6 +772,8 @@ export interface ShiftReport {
   notes: { text: string; photos: ReadPhoto[] };
   continuing_tomorrow: boolean;
   exceptions: LockupException[];
+  /** The till's takings that night, and how many sitter sales await review. */
+  shop: ShopTonight | null;
 }
 
 /** Presign stored photo blobs for a staff read view (R2 keys → time-limited URLs). */
@@ -708,7 +792,7 @@ async function presignPhotos(photos: UploadedPhoto[] | undefined): Promise<ReadP
 export async function getShiftReport(date: string): Promise<ShiftReport> {
   const template = await getLockupTemplate();
   const r = await query(
-    `SELECT s.report_answers, s.report_submitted_at,
+    `SELECT s.id, s.report_answers, s.report_submitted_at,
             CONCAT(p.first_name, ' ', p.last_name) AS submitter_name
      FROM studio_sitter_shifts s
      LEFT JOIN people p ON p.id = s.report_submitted_by
@@ -717,10 +801,14 @@ export async function getShiftReport(date: string): Promise<ShiftReport> {
     [date]
   );
   const row = r.rows[0];
+  // Shown even before the report is in: staff checking the night can see the
+  // till's takings and whether sitter sales are waiting for review.
+  const shop = await shopTonight(row?.id);
   if (!row || !row.report_submitted_at || !row.report_answers) {
     return {
       date, submitted: false, submitted_at: null, submitted_by_name: null, template,
       answers: {}, exception_notes: {}, item_notes: {}, notes: { text: '', photos: [] }, continuing_tomorrow: false, exceptions: [],
+      shop,
     };
   }
   const stored = normaliseStored(row.report_answers, false);
@@ -746,6 +834,7 @@ export async function getShiftReport(date: string): Promise<ShiftReport> {
     notes,
     continuing_tomorrow: stored.continuing_tomorrow,
     exceptions: computeExceptions(template, stored.answers, stored.continuing_tomorrow),
+    shop,
   };
 }
 

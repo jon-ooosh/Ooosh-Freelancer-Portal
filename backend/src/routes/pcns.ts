@@ -234,11 +234,16 @@ router.get('/match', async (req: AuthRequest, res: Response) => {
     res.status(400).json({ error: 'reg and offence_at are required' });
     return;
   }
-  const offenceDate = new Date(offenceAt);
-  if (isNaN(offenceDate.getTime())) {
-    res.status(400).json({ error: 'offence_at is not a valid date' });
+  const parsedOffence = new Date(offenceAt);
+  if (isNaN(parsedOffence.getTime())) {
+    res.status(400).json({ error: `offence_at is not a valid date/time (received "${offenceAt}")` });
     return;
   }
+  // Matching works at DAY granularity, so take the calendar date straight off
+  // the supplied string rather than round-tripping through UTC: an offence at
+  // 00:30 BST would otherwise resolve to the previous day and miss its hire.
+  const offenceDay = /^(\d{4}-\d{2}-\d{2})/.exec(offenceAt)?.[1]
+    ?? parsedOffence.toISOString().slice(0, 10);
 
   const result = await query(
     `SELECT vha.id              AS assignment_id,
@@ -266,7 +271,7 @@ router.get('/match', async (req: AuthRequest, res: Response) => {
        AND $2::date >= COALESCE(vha.hire_start, j.job_date::date)
        AND $2::date <= COALESCE(vha.hire_end, j.job_end::date)
      ORDER BY vha.hire_start NULLS LAST`,
-    [reg, offenceDate.toISOString()]
+    [reg, offenceDay]
   );
 
   // Dedup per (driver, jobKey) so dual rows (staff-allocation + hire-form) on
@@ -307,7 +312,7 @@ router.get('/match', async (req: AuthRequest, res: Response) => {
        AND $1::date <= (COALESCE(j.job_end, j.return_date, j.job_date))::date
      ORDER BY j.job_date NULLS LAST
      LIMIT 25`,
-    [offenceDate.toISOString()]
+    [offenceDay]
   );
 
   res.json({ data: { drivers, match_count: drivers.length, crew_candidates: crew.rows } });
@@ -468,7 +473,11 @@ const createSchema = z.object({
   client_organisation_id: z.string().uuid().optional().nullable(),
   hh_job_number: z.number().int().optional().nullable(),
   vehicle_reg: z.string().optional().nullable(),
-  offence_at: z.string().optional().nullable(),
+  // Guarded: a malformed value used to reach Postgres and 500 on the
+  // timestamptz cast, losing the whole record entry.
+  offence_at: z.string()
+    .refine((v) => !isNaN(new Date(v).getTime()), { message: 'offence_at is not a valid date/time' })
+    .optional().nullable(),
   offence_time_text: z.string().optional().nullable(),
   issued_date: z.string().optional().nullable(),
   location: z.string().optional().nullable(),

@@ -25,7 +25,9 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from
 import { logAudit } from '../middleware/audit';
 import { getFrontendUrl } from '../config/app-urls';
 import { emailService } from '../services/email-service';
+import { getSystemSettings } from './system-settings';
 import { uploadToR2 } from '../config/r2';
+import { documentsOnFile, toFileList } from '../services/freelancer-documents';
 
 const router = Router();
 
@@ -33,6 +35,22 @@ const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
 // Statuses where the tokenised form link is still live.
 const LIVE_TOKEN_STATUSES = ['invited', 'more_info'];
+
+/**
+ * What a freelancer is told when the link they clicked is no longer live.
+ *
+ * Per status, because the three closed states mean completely different things
+ * to the person holding the link, and one message for all three reads as a
+ * fault. Simon Bull (Sept 2026) submitted his form, clicked his link again a
+ * minute later out of habit, was told "This application form is no longer
+ * open" — and reported a broken link, because nothing said the reason it was
+ * closed is that he'd already done it.
+ */
+const CLOSED_FORM_MESSAGE: Record<string, string> = {
+  applied: "Thanks — we've already got your sign-up and we're looking at it now. There's nothing more to do here; if we need anything else we'll email you a fresh link.",
+  approved: "You're already signed up with us, so this form is closed. Any questions, just reply to our email.",
+  declined: 'This application form is no longer open. If you think that\'s wrong, reply to our email and we\'ll take a look.',
+};
 
 // Which T&Cs / GDPR text the freelancer agreed to (bump when the text changes).
 const TCS_VERSION = 'v1-2026-07';
@@ -141,7 +159,8 @@ async function loadTokenApplication(token: string): Promise<
             p.phone, p.mobile, p.date_of_birth, p.home_address,
             p.emergency_contact_name, p.emergency_contact_phone, p.skills,
             p.licence_number, p.licence_issued_by, p.licence_expiry, p.licence_passed_date,
-            p.passport_expiry, p.day_rate_note
+            p.passport_expiry, p.day_rate_note, p.files,
+            fa.decision_notes
        FROM freelancer_applications fa
        JOIN people p ON p.id = fa.person_id
       WHERE fa.form_token = $1`,
@@ -152,7 +171,8 @@ async function loadTokenApplication(token: string): Promise<
   }
   const row = result.rows[0];
   if (!LIVE_TOKEN_STATUSES.includes(row.status)) {
-    return { ok: false, code: 410, message: 'This application form is no longer open.' };
+    const message = CLOSED_FORM_MESSAGE[row.status] || 'This application form is no longer open.';
+    return { ok: false, code: 410, message };
   }
   return { ok: true, app: row, person: row };
 }
@@ -171,6 +191,10 @@ router.get('/apply/:token', publicLimiter, async (req: Request, res: Response) =
         valid: true,
         terms: FREELANCER_TERMS,
         tcs_version: TCS_VERSION,
+        // What we asked for when we re-opened the form, so they can read it on
+        // the form itself rather than keeping our email open beside it.
+        request_note: loaded.app.status === 'more_info' ? (loaded.app.decision_notes || null) : null,
+        documents_on_file: documentsOnFile(p.files),
         prefill: {
           first_name: p.first_name || '',
           last_name: p.last_name || '',
@@ -280,10 +304,22 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
       : [];
     const isDriving = skills.some((s) => /driv/i.test(s));
 
+    // Keys already on this person's record. A re-opened form hands their own
+    // documents back so they don't have to re-upload everything to give us one
+    // missing thing, which means the submission legitimately carries keys this
+    // form never minted (a document staff uploaded by hand lives under
+    // files/people/...). Accepting a key we can see on the person's own record
+    // adds nothing a token holder didn't already have; accepting an arbitrary
+    // key would let them attach any object in the bucket.
+    const existingKeys = new Set(
+      toFileList(loaded.person.files).map((f) => f.url).filter((u): u is string => typeof u === 'string')
+    );
     const documents: { r2_key: string; label: string; filename: string; content_type?: string }[] =
       Array.isArray(b.documents)
         ? b.documents
-            .filter((d: { r2_key?: string }) => d && typeof d.r2_key === 'string' && d.r2_key.startsWith('files/freelancers/'))
+            .filter((d: { r2_key?: string }) =>
+              d && typeof d.r2_key === 'string'
+              && (d.r2_key.startsWith('files/freelancers/') || existingKeys.has(d.r2_key)))
             .map((d: { r2_key: string; label?: string; filename?: string; content_type?: string }) => ({
               r2_key: d.r2_key,
               label: textOrNull(d.label) || 'Document',
@@ -291,7 +327,14 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
               content_type: d.content_type,
             }))
         : [];
+    // Carried-over documents are NOT new evidence. The distinction matters:
+    // dvla_check_date below is stamped with TODAY, and driver-validity.ts runs a
+    // 30-day window off that column — so re-dating it because a months-old check
+    // rode along on a re-submit would tell us a licence check is current when it
+    // is nothing of the sort.
+    const newDocuments = documents.filter((d) => !existingKeys.has(d.r2_key));
     const hasDvlaDoc = documents.some((d) => /dvla/i.test(d.label));
+    const hasNewDvlaDoc = newDocuments.some((d) => /dvla/i.test(d.label));
     const hasPliDoc = documents.some((d) => /\bpli\b|public liab/i.test(d.label));
 
     // ── Age gate: 18+ generally, 23+ to drive for us (insurer minimum) ──
@@ -372,9 +415,12 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
       .filter(Boolean)
       .join(' — ') || null;
 
-    // ── Files: append the uploaded documents to people.files ────────────
+    // ── Files: append what's NEW to people.files ─────────────────────────
+    // Only the new ones. A re-submit carries their existing documents back to
+    // us, and appending those again would stack a second (then a third) copy of
+    // the same R2 object on the record and leave staff guessing which is current.
     const nowIso = new Date().toISOString();
-    const fileEntries = documents.map((d) => ({
+    const fileEntries = newDocuments.map((d) => ({
       name: d.filename,
       url: d.r2_key,
       type: d.content_type === 'application/pdf' ? 'document' : 'image',
@@ -428,7 +474,7 @@ router.post('/apply/:token/submit', publicLimiter, async (req: Request, res: Res
         isDriving ? textOrNull(b.licence_issued_by) : null,
         isDriving ? isoDateOrNull(b.licence_expiry) : null,
         isDriving ? isoDateOrNull(b.licence_passed_date) : null,
-        hasDvlaDoc ? nowIso.slice(0, 10) : null,
+        hasNewDvlaDoc ? nowIso.slice(0, 10) : null,
         isoDateOrNull(b.passport_expiry),
         hasPliDoc ? isoDateOrNull(b.pli_expiry) : null,
         dayRateNote,
@@ -728,7 +774,7 @@ router.get('/applications/:id', async (req: AuthRequest, res: Response) => {
 // Shared loader for a review action — the application + linked person, or null.
 async function loadReviewApplication(id: string) {
   const result = await query(
-    `SELECT fa.id AS app_id, fa.status, fa.form_token, fa.person_id,
+    `SELECT fa.id AS app_id, fa.status, fa.form_token, fa.person_id, fa.decision_notes,
             p.first_name, p.preferred_name, p.email,
             p.freelancer_joined_date, p.freelancer_next_review_date
        FROM freelancer_applications fa
@@ -741,6 +787,47 @@ async function loadReviewApplication(id: string) {
 
 // Statuses an application can be reviewed FROM (a submitted or info-requested form).
 const REVIEWABLE_STATUSES = ['applied', 'more_info'];
+
+/**
+ * THE approval email — everything a newly approved freelancer needs on day one:
+ * the WhatsApp group work is offered in, their portal login, and how to invoice
+ * us. Sent on approval and re-sent on demand (people lose emails), so it lives
+ * here rather than inline in the approve route: two copies would drift, and the
+ * copy that drifts is the one nobody is watching.
+ *
+ * All three links are system_settings rather than constants — a WhatsApp group
+ * invite is effectively a password and gets rotated, and when it does, every
+ * approval email points at a dead invite until someone can deploy. Each block in
+ * the template is conditional, so an emptied setting drops its block rather than
+ * emailing a broken link.
+ */
+async function sendApprovalEmail(
+  app: Record<string, unknown>,
+  notes: string | null
+): Promise<{ success: boolean; skipped?: boolean; error?: string }> {
+  if (!app.email) return { success: false, skipped: true, error: 'No email on file.' };
+
+  const links = await getSystemSettings([
+    'freelancer_whatsapp_url',
+    'freelancer_portal_url',
+    'freelancer_invoice_guide_url',
+  ]).catch(() => ({} as Record<string, string | null>));
+
+  const r = await emailService.send('freelancer_approved', {
+    to: app.email as string,
+    variables: {
+      firstName: (app.preferred_name || app.first_name || 'there') as string,
+      whatsappUrl: links.freelancer_whatsapp_url || '',
+      portalUrl: links.freelancer_portal_url || '',
+      // Portal registration matches on the email we hold, so tell them WHICH
+      // address to use — theirs may not be the one they'd reach for.
+      portalEmail: app.email as string,
+      invoiceGuideUrl: links.freelancer_invoice_guide_url || '',
+      notes: notes || '',
+    },
+  });
+  return { success: r.success, error: r.error };
+}
 
 // ── POST /api/freelancers/applications/:id/approve ─────────────────────────
 // Clear the freelancer for work. MANAGER_ROLES (booking/money consequence).
@@ -786,25 +873,49 @@ router.post('/applications/:id/approve', authorize(...MANAGER_ROLES), async (req
       [personId, '✅ Freelancer application approved.', req.user!.id]
     ).catch((e) => console.error('[freelancers] approve timeline note failed:', e));
 
-    // Approval email (WhatsApp link + payments reference). Best-effort.
-    let emailResult: { success: boolean; skipped?: boolean; error?: string } = { success: false, skipped: true };
-    if (app.email) {
-      const r = await emailService.send('freelancer_approved', {
-        to: app.email as string,
-        variables: {
-          firstName: (app.preferred_name || app.first_name || 'there') as string,
-          whatsappUrl: '',        // set when the WhatsApp invite link is available
-          notes: notes || '',
-        },
-      });
-      emailResult = { success: r.success, error: r.error };
-    } else {
-      emailResult = { success: false, skipped: true, error: 'No email on file.' };
-    }
+    const emailResult = await sendApprovalEmail(app, notes);
 
     res.json({ data: { ok: true }, email_result: emailResult });
   } catch (error) {
     console.error('[freelancers] approve error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/freelancers/applications/:id/resend-approval ─────────────────
+// Send the welcome email again. STAFF_ROLES — this re-sends what they were
+// already told, it does not decide anything, so it sits with the other resend
+// rather than behind the approve/decline gate.
+//
+// Approve itself refuses to run twice (409 Already approved), and rightly so:
+// it stamps joined dates and flips is_approved. That left no way to get the
+// email back to someone who deleted it, and no way at all to reach the
+// freelancers approved before the email carried the WhatsApp, portal and
+// invoicing links.
+router.post('/applications/:id/resend-approval', async (req: AuthRequest, res: Response) => {
+  try {
+    const app = await loadReviewApplication(String(req.params.id));
+    if (!app) { res.status(404).json({ error: 'Application not found' }); return; }
+    if (app.status !== 'approved') {
+      res.status(409).json({ error: `This application is '${app.status}' — approve it first.` });
+      return;
+    }
+
+    const emailResult = await sendApprovalEmail(app, textOrNull(app.decision_notes));
+
+    // Worth a timeline entry: "did anyone actually send them their links?" is
+    // the question this button exists to answer.
+    if (emailResult.success) {
+      await query(
+        `INSERT INTO interactions (person_id, type, content, created_by, source)
+         VALUES ($1, 'note', $2, $3, 'system')`,
+        [app.person_id, '📧 Welcome email re-sent (WhatsApp, portal and invoicing links).', req.user!.id]
+      ).catch((e) => console.error('[freelancers] resend-approval timeline note failed:', e));
+    }
+
+    res.json({ data: { ok: true }, email_result: emailResult });
+  } catch (error) {
+    console.error('[freelancers] resend-approval error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -575,11 +575,21 @@ class HireHopBroker {
   }
 
   private async parseResponse<T>(response: Response): Promise<HireHopResponse<T>> {
+    // The URL carries the API token as a query parameter — log the path only.
+    const safePath = (u: string) => { try { return new URL(u).pathname; } catch { return '(unparseable url)'; } };
     const text = await response.text();
 
-    // HTML response = auth failure
+    // HTML instead of JSON. With a 5xx status it is HireHop's (or its CDN's)
+    // error page — an outage, not our token: a 502 mid-run was reported as
+    // "Authentication failed" (shop nominal fix, 28 Sep 2026). Worded so it is
+    // still NOT retried ("HTTP 5" would be): a POST that 502s may have landed,
+    // and retrying it blind could write twice. Otherwise HTML means auth.
     if (text.trim().startsWith('<')) {
-      console.error('[HH Broker] Received HTML response (auth failure). Status:', response.status, 'URL:', response.url, 'First 200 chars:', text.substring(0, 200));
+      if (response.status >= 500) {
+        console.error('[HH Broker] HireHop returned an error page. Status:', response.status, 'Path:', safePath(response.url));
+        return { success: false, error: `HireHop is having problems (error page, status ${response.status}) — not an OP or token fault; try again shortly` };
+      }
+      console.error('[HH Broker] Received HTML response (auth failure). Status:', response.status, 'Path:', safePath(response.url), 'First 200 chars:', text.substring(0, 200));
       return { success: false, error: 'Authentication failed — check API token', isAuthError: true };
     }
 

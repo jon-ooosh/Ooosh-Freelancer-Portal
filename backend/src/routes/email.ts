@@ -4,12 +4,16 @@
  * Admin endpoints for email configuration, status, and audit log.
  */
 import { Router, Response } from 'express';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { emailService } from '../services/email-service';
+import { getOpenProblems, markProblemFixed } from '../services/email-delivery';
 import { query } from '../config/database';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 /**
  * GET /api/email/status
@@ -146,6 +150,43 @@ router.get('/log', authorize('admin'), async (req: AuthRequest, res: Response) =
   } catch (err) {
     console.error('[email/log] Error:', err);
     res.status(500).json({ error: 'Failed to fetch email log' });
+  }
+});
+
+/**
+ * GET /api/email/problems?emails=a@x.com,b@y.com
+ * Open delivery problems (bounced / blocked by Resend / reported as spam) for
+ * these addresses — the warning shown next to an email in the address book and
+ * on a job's contacts. Fed by Resend's webhook (services/email-delivery.ts).
+ */
+router.get('/problems', async (req: AuthRequest, res: Response) => {
+  try {
+    const raw = String(req.query.emails || '');
+    const emails = raw.split(',').map((e) => e.trim()).filter(Boolean);
+    res.json({ data: await getOpenProblems(emails) });
+  } catch (err) {
+    console.error('[email/problems] Error:', err);
+    res.status(500).json({ error: 'Failed to load email problems' });
+  }
+});
+
+/**
+ * POST /api/email/problems/resolve  { email }
+ * "Mark as fixed" — a person says the address is sorted. (It also clears by
+ * itself when a later email to the address is delivered.)
+ */
+router.post('/problems/resolve', async (req: AuthRequest, res: Response) => {
+  try {
+    const email = String(req.body?.email || '').trim();
+    if (!email.includes('@')) {
+      res.status(400).json({ error: 'An email address is required' });
+      return;
+    }
+    const resolved = await markProblemFixed(email, req.user!.id);
+    res.json({ data: { resolved } });
+  } catch (err) {
+    console.error('[email/problems/resolve] Error:', err);
+    res.status(500).json({ error: 'Failed to mark the address as fixed' });
   }
 });
 

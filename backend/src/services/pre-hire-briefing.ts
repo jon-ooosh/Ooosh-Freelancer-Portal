@@ -20,6 +20,7 @@ import { emailService } from './email-service';
 import { renderBriefingHtml, buildSubject } from './email-templates/pre-hire-briefing';
 import { resolveHireFormContacts, ResolvedContact } from './hire-form-contacts';
 import { calculateVatAdjustment } from './vat-adjustment';
+import { getPaymentPortalLink } from './payment-portal-link';
 
 /** Match the OP-wide convention pinned in CLAUDE.md: requirements with a
  *  `[Suspended: <reason>]` marker in `notes` (Van & Driver or Internal) are
@@ -187,6 +188,10 @@ export interface JobBriefing {
    *  reference the previous send and include the link. Null on non-self-
    *  drive hires or when we don't have a HH job number. */
   hire_form_link: BriefingHireFormLink | null;
+  /** The client's payment portal link (computed live from HireHop, see
+   *  services/payment-portal-link.ts). Null when the job has no HH number or
+   *  HireHop couldn't supply the job data. */
+  payment_portal_url: string | null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -364,14 +369,22 @@ export async function buildBriefing(
         ORDER BY rtd.sort_order ASC NULLS LAST, jr.requirement_type ASC`,
       [jobId],
     ),
-    // Excess records on this job (driver-linked or job-level)
+    // Excess records on this job (driver-linked or job-level).
+    //
+    // Skips `not_required` (a driver Covered by another driver's excess on the
+    // same van) and `waived` (nothing owed), as every other excess total does
+    // (the portal's excess-info, the Wise matcher). Either can still carry an
+    // amount: a referral approval writes the insurer's figure onto a Covered
+    // record, and an account auto-cover keeps the amount for reference. Summing
+    // them asked the client for £3,000 on a one-van hire whose excess was
+    // £1,500 (job 16564, Oct 2026).
     query(
       `SELECT je.id, je.excess_status, je.excess_amount_required,
-              je.excess_amount_taken
+              je.excess_amount_taken, je.amount_held
          FROM job_excess je
          LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-        WHERE je.job_id = $1
-           OR vha.job_id = $1`,
+        WHERE (je.job_id = $1 OR vha.job_id = $1)
+          AND je.excess_status NOT IN ('not_required', 'waived')`,
       [jobId],
     ),
     // Drivers linked via vehicle_hire_assignments. Hire-form status is
@@ -480,6 +493,10 @@ export async function buildBriefing(
   for (const row of excessResult.rows as Array<Record<string, unknown>>) {
     excess_required += parseFloat((row.excess_amount_required as string | number | null) as string) || 0;
     excess_taken += parseFloat((row.excess_amount_taken as string | number | null) as string) || 0;
+    // A pre-auth holds its value in amount_held, not excess_amount_taken (0
+    // until capture) — count it, or a client who has pre-authed still reads
+    // as owing the whole excess.
+    excess_taken += parseFloat((row.amount_held as string | number | null) as string) || 0;
   }
 
   // Hire value + deposits from HH billing_list when available. Mirrors the
@@ -626,6 +643,19 @@ export async function buildBriefing(
     && (derivedFlags?.self_drive_count ?? derivedFlags?.vehicle_count ?? 0) > 0;
   const has_backline = !!derivedFlags?.has_backline;
   const equipment_summary = summariseEquipment(derivedFlags);
+
+  // ── Payment portal link ────────────────────────────────────────────
+  // Live from HireHop so it matches the quote document's link. Best-effort:
+  // the client draft falls back to "the blue link at the bottom of the quote".
+  let payment_portal_url: string | null = null;
+  if (hhJobNumber) {
+    try {
+      const link = await getPaymentPortalLink(hhJobNumber);
+      payment_portal_url = link?.url ?? null;
+    } catch (err) {
+      console.warn(`[pre-hire-briefing] payment portal link failed for HH#${hhJobNumber}:`, err);
+    }
+  }
 
   // ── Hire form link + last-send metadata ────────────────────────────
   // Only populate for self-drive hires with a HH number — these are the
@@ -781,6 +811,7 @@ export async function buildBriefing(
     contacts,
     holding,
     hire_form_link,
+    payment_portal_url,
   };
 }
 

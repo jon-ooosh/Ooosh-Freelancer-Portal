@@ -8,6 +8,8 @@
  * how the router and the staff UI came to disagree (job 16291).
  */
 
+import { Link } from 'react-router-dom';
+
 export type StageState = 'done' | 'todo' | 'blocked' | 'not_required';
 
 export interface VerificationStage {
@@ -22,6 +24,8 @@ export interface VerificationAction {
   message: string;
   kind: string;
   slot?: string;
+  /** HH job named in `message` — rendered as a link to the job (see below). */
+  jobNumber?: number;
 }
 
 export interface DriverVerificationState {
@@ -72,6 +76,27 @@ export function StageTracker({ stages }: { stages: VerificationStage[] }) {
   );
 }
 
+/**
+ * Turn the "#16643" inside an action's message into a link to that job.
+ *
+ * A driver part-way through a form has no vehicle_hire_assignments row yet, so
+ * the Hire History tab is empty and this line is staff's only route to the hire
+ * it belongs to. The backend owns the wording; all this does is linkify the one
+ * token it already names, so the message stays readable everywhere else.
+ */
+function actionMessage(action: VerificationAction) {
+  const token = action.jobNumber ? `#${action.jobNumber}` : '';
+  const at = token ? action.message.indexOf(token) : -1;
+  if (at === -1) return action.message;
+  return (
+    <>
+      {action.message.slice(0, at)}
+      <Link to={`/jobs?search=${action.jobNumber}`} className="font-semibold underline">{token}</Link>
+      {action.message.slice(at + token.length)}
+    </>
+  );
+}
+
 const SEVERITY: Record<VerificationAction['severity'], { box: string; dot: string; label: string }> = {
   red:   { box: 'border-red-200 bg-red-50',     dot: 'text-red-600',   label: 'text-red-900' },
   amber: { box: 'border-amber-200 bg-amber-50', dot: 'text-amber-600', label: 'text-amber-900' },
@@ -96,13 +121,17 @@ export function WhatNeedsDoing({ state, onAction }: {
       <ul className="space-y-2">
         {state.actions.map((action, i) => {
           const tone = SEVERITY[action.severity];
-          const actionable = action.kind !== 'none';
+          // `send_hire_form` gets no button: hire forms are generated and linked
+          // per HIRE, so the send lives on the hire's Job page (vehicle card),
+          // not here. The line still tells staff what to do; a button that only
+          // scrolled the page while reading "Send hire form" was a false promise.
+          const actionable = action.kind !== 'none' && action.kind !== 'send_hire_form';
           return (
             <li key={i} className={`flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 ${tone.box}`}>
               <span className={`text-sm ${tone.dot}`} aria-hidden>
                 {action.severity === 'red' ? '✕' : action.severity === 'amber' ? '⚠' : 'ℹ'}
               </span>
-              <span className={`text-sm flex-1 min-w-[12rem] ${tone.label}`}>{action.message}</span>
+              <span className={`text-sm flex-1 min-w-[12rem] ${tone.label}`}>{actionMessage(action)}</span>
               {actionable && (
                 <button
                   type="button"
@@ -124,6 +153,10 @@ const ACTION_LABEL: Record<string, string> = {
   compare_identity: 'Compare photos',
   set_date: 'Add the date',
   replace_document: 'Replace document',
-  send_hire_form: 'Send hire form',
+  upload_document: 'Upload it',
   resolve_referral: 'Resolve referral',
+  // Northern Ireland. Scrolls to the DVLA group, where the record-check panel
+  // is — a DVA driver cannot produce a GOV.UK share code, so the only thing
+  // that moves this is a member of staff running the nidirect lookup.
+  run_dva_check: 'Record the check',
 };

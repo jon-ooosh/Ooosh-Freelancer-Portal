@@ -27,6 +27,7 @@ import { query } from '../config/database';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
 import { decryptDriverRow } from './driver-pii';
+import { isUkLicence } from './driver-validity';
 
 export interface ReferralAlertResult {
   sent: boolean;
@@ -133,18 +134,47 @@ async function buildAndSend(
     hirehopJobId = jobRow.rows[0]?.hirehop_job_id ?? null;
   }
 
+  // Still nothing? The signature-step trigger usually fires BEFORE
+  // POST /api/hire-forms has created the vehicle_hire_assignment, so there is
+  // no assignment to read yet and the email went out as "job #N/A". The job
+  // number the driver arrived with is on their login code
+  // (driver_verification_codes.job_id, written by /send-code) — use the most
+  // recent one from the last week as a fallback.
+  let jobFromHireFormLink = false;
+  if (hirehopJobId === null && driver.email) {
+    const codeRow = await query(
+      `SELECT job_id
+         FROM driver_verification_codes
+        WHERE lower(email) = lower($1)
+          AND job_id IS NOT NULL
+          AND created_at > NOW() - INTERVAL '7 days'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [driver.email]
+    );
+    const raw = String(codeRow.rows[0]?.job_id ?? '').trim();
+    if (/^\d+$/.test(raw)) {
+      hirehopJobId = Number(raw);
+      jobFromHireFormLink = true;
+    }
+  }
+
   // Build human-readable reasons
   const reasons: string[] = [];
   if (referralReason) reasons.push(referralReason);
   if (driver.referral_notes && driver.referral_notes !== referralReason) reasons.push(driver.referral_notes);
   if (driver.has_disability) reasons.push('Declared disability/medical condition');
-  if (driver.has_convictions) reasons.push('Declared motoring convictions');
+  if (driver.has_convictions) reasons.push('Declared a serious motoring conviction');
   if (driver.has_prosecution) reasons.push('Declared pending prosecution');
-  if (driver.has_accidents) reasons.push('Declared previous accidents');
+  // Since migration 298 an accident or claim is only a DECLARATION; the
+  // referral is "more than one at fault or still open" (has_fault_claims).
+  // Answers from before then (has_fault_claims NULL) keep the old reading.
+  if (driver.has_fault_claims) reasons.push('Declared more than one at-fault or open claim (5 years)');
+  else if (driver.has_accidents && driver.has_fault_claims == null) reasons.push('Declared previous accidents');
   if (driver.has_insurance_issues) reasons.push('Declared insurance issues');
   if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
   if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
-  if (driver.licence_issue_country && !['GB', 'UK', 'DVLA'].includes(String(driver.licence_issue_country).toUpperCase())) {
+  if (driver.licence_issue_country && !isUkLicence(driver)) {
     reasons.push(`Non-standard licence country: ${driver.licence_issue_country}`);
   }
   if (reasons.length === 0) reasons.push('Flagged by hire form verification process');
@@ -161,8 +191,7 @@ async function buildAndSend(
     let logoImage: Buffer | null = null;
     try { logoImage = await fetchLogo(); } catch { /* skip */ }
 
-    const isUk = (driver.licence_issue_country || '').toUpperCase() === 'GB' ||
-      (driver.licence_issued_by || '').toUpperCase().includes('DVLA');
+    const isUk = isUkLicence(driver);
 
     const snapshotData = {
       driverName: driver.full_name || driverName,
@@ -188,6 +217,8 @@ async function buildAndSend(
       hasAccidents: driver.has_accidents || false,
       hasInsuranceIssues: driver.has_insurance_issues || false,
       hasDrivingBan: driver.has_driving_ban || false,
+      hasRecentConvictions: driver.has_recent_convictions ?? null,
+      hasFaultClaims: driver.has_fault_claims ?? null,
       additionalDetails: driver.additional_details || '',
       jobId: hirehopJobId ? String(hirehopJobId) : 'N/A',
       documents,
@@ -211,7 +242,9 @@ async function buildAndSend(
       driverEmail,
       jobNumber: hirehopJobId ? String(hirehopJobId) : 'N/A',
       referralReasons: reasons.map(r => `• ${r}`).join('<br/>'),
-      linkedJobs: driver.linked_jobs || 'No active hires',
+      linkedJobs: driver.linked_jobs === 'No active hires' && jobFromHireFormLink
+        ? `Not linked yet — driver came in via the hire form for job #${hirehopJobId}`
+        : (driver.linked_jobs || 'No active hires'),
       driverUrl: `${frontendUrl}/drivers/${driverId}`,
     },
     attachments,

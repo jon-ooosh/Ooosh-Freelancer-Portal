@@ -11,6 +11,7 @@
 import { useEffect, useState, Fragment, type ReactNode } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
+import { cls, BackLink, Banner } from '@/components/ui'
 
 interface ResourceDetail {
   id: string
@@ -34,19 +35,19 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   return parts.map((part, i) => {
     const key = `${keyPrefix}-${i}`
     if (part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={key} className="font-semibold text-gray-900">{part.slice(2, -2)}</strong>
+      return <strong key={key} className="font-semibold text-hf-ink">{part.slice(2, -2)}</strong>
     }
     const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
     if (link) {
       return (
-        <a key={key} href={link[2]} target="_blank" rel="noopener noreferrer" className="text-ooosh-600 underline">
+        <a key={key} href={link[2]} target="_blank" rel="noopener noreferrer" className="text-hf-link underline">
           {link[1]}
         </a>
       )
     }
     if (/^https?:\/\//.test(part)) {
       return (
-        <a key={key} href={part} target="_blank" rel="noopener noreferrer" className="text-ooosh-600 underline break-all">
+        <a key={key} href={part} target="_blank" rel="noopener noreferrer" className="text-hf-link underline break-all">
           {part}
         </a>
       )
@@ -65,7 +66,7 @@ function renderMarkdown(body: string): ReactNode[] {
   const flushParagraph = () => {
     if (paragraph.length) {
       blocks.push(
-        <p key={`p-${key++}`} className="text-sm text-gray-700 leading-relaxed">
+        <p key={`p-${key++}`} className="text-[16px] text-hf-body leading-[1.55]">
           {renderInline(paragraph.join(' '), `p-${key}`)}
         </p>
       )
@@ -76,14 +77,14 @@ function renderMarkdown(body: string): ReactNode[] {
     if (listItems.length) {
       const ordered = listItems[0].ordered
       const items = listItems.map((it, i) => (
-        <li key={`li-${key}-${i}`} className="text-sm text-gray-700 leading-relaxed">
+        <li key={`li-${key}-${i}`} className="text-[16px] text-hf-body leading-[1.55]">
           {renderInline(it.text, `li-${key}-${i}`)}
         </li>
       ))
       blocks.push(
         ordered
-          ? <ol key={`l-${key++}`} className="list-decimal pl-5 space-y-1.5">{items}</ol>
-          : <ul key={`l-${key++}`} className="list-disc pl-5 space-y-1.5">{items}</ul>
+          ? <ol key={`l-${key++}`} className="list-decimal pl-5 space-y-2 marker:text-hf-muted">{items}</ol>
+          : <ul key={`l-${key++}`} className="list-disc pl-5 space-y-2 marker:text-hf-muted">{items}</ul>
       )
       listItems = []
     }
@@ -97,8 +98,8 @@ function renderMarkdown(body: string): ReactNode[] {
     if (heading) {
       flushParagraph(); flushList()
       const level = heading[1].length
-      const cls = level === 1 ? 'text-lg font-semibold text-gray-900' : level === 2 ? 'text-base font-semibold text-gray-900' : 'text-sm font-semibold text-gray-900'
-      blocks.push(<h2 key={`h-${key++}`} className={`${cls} mt-1`}>{renderInline(heading[2], `h-${key}`)}</h2>)
+      const hcls = level === 1 ? 'text-[20px] font-bold text-hf-ink' : level === 2 ? 'text-[17px] font-semibold text-hf-ink' : 'text-[16px] font-semibold text-hf-ink'
+      blocks.push(<h2 key={`h-${key++}`} className={`${hcls} mt-2`}>{renderInline(heading[2], `h-${key}`)}</h2>)
       continue
     }
 
@@ -158,40 +159,34 @@ export default function ResourceReaderPage() {
   }, [id, router])
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-20">
-      <header className="bg-white shadow-sm border-b border-gray-100 sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-4 flex items-center gap-3">
-          <Link href="/resources" className="p-2 -ml-2 text-gray-600 hover:text-gray-900 transition-colors">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <h1 className="text-lg font-semibold text-gray-900 truncate">
-            {resource?.title || 'Document'}
-          </h1>
-        </div>
+    <div className="min-h-screen bg-hf-page safe-top pb-16">
+      <header className="max-w-lg mx-auto px-5 pt-3 flex flex-col gap-2">
+        <BackLink href="/resources" label="Resources" />
+        <h1 className="text-[26px] font-bold tracking-[-0.02em] leading-[1.2] text-hf-ink">
+          {resource?.title || (loading ? '' : 'Document')}
+        </h1>
       </header>
 
-      <main className="max-w-lg mx-auto px-4 py-6">
+      <main className="max-w-lg mx-auto px-4 pt-4">
         {error && (
-          <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-            {error}
-            <Link href="/resources" className="ml-2 underline hover:no-underline">Back to resources</Link>
-          </div>
+          <Banner tone="error" className="mb-4">
+            {error}{' '}
+            <Link href="/resources" className="underline font-semibold">Back to resources</Link>
+          </Banner>
         )}
 
         {loading ? (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 animate-pulse space-y-3">
-            <div className="h-4 bg-gray-200 rounded w-3/4"></div>
-            <div className="h-4 bg-gray-200 rounded w-full"></div>
-            <div className="h-4 bg-gray-200 rounded w-5/6"></div>
+          <div className={`${cls.card} p-5 animate-pulse flex flex-col gap-3`}>
+            <div className="h-4 bg-hf-track rounded w-3/4" />
+            <div className="h-4 bg-hf-track rounded w-full" />
+            <div className="h-4 bg-hf-track rounded w-5/6" />
           </div>
         ) : resource && resource.kind === 'markdown' ? (
-          <article className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 space-y-3">
+          <article className={`${cls.card} p-5 flex flex-col gap-3.5`}>
             {renderMarkdown(resource.body || '')}
           </article>
         ) : !error ? (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8 text-center text-gray-500 text-sm">
+          <div className={`${cls.card} p-8 text-center text-hf-muted text-[15px]`}>
             This document isn&apos;t available to read here.
           </div>
         ) : null}

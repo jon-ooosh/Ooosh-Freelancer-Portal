@@ -10,9 +10,9 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
-import { getGmailIngestionStatus, runIngestionForPrimaryMailbox } from '../services/gmail-ingestion';
+import { getGmailIngestionStatus, runIngestionForAllMailboxes, getAllGmailIngestionStatus } from '../services/gmail-ingestion';
 import { runEmailRetentionSweep } from '../services/email-retention';
-import { draftChaseEmail, learnChaseVoice } from '../services/chase-draft';
+import { draftChaseEmail } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
 import { getJobCommsSummaryStatus, generateJobCommsSummary } from '../services/comms-summary';
 import { answerCommsQuery } from '../services/comms-query';
@@ -20,10 +20,14 @@ import { backfillOpenPipelineThreads, type BackfillScope, type BackfillSummary }
 import { getJobQuoteVersions, sweepQuoteVersions, type QuoteSweepSummary } from '../services/quote-versions';
 import { runDueAutoChases } from '../services/auto-chase-runner';
 import { isAnthropicConfigured } from '../config/anthropic';
-import { isGmailConfigured } from '../config/gmail';
+import { greetingName } from '../services/display-name';
+import { isGmailConfigured, getPrimaryMailbox } from '../config/gmail';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 /**
  * First name of the logged-in staff member, for personalising the chase
@@ -34,14 +38,15 @@ async function senderFirstName(userId?: string): Promise<string | null> {
   if (!userId) return null;
   try {
     const r = await query(
-      `SELECT p.first_name, p.last_name
+      `SELECT p.first_name, p.last_name, p.preferred_name
          FROM users u JOIN people p ON p.id = u.person_id
         WHERE u.id = $1`,
       [userId],
     );
     const row = r.rows[0];
     if (!row) return null;
-    const name = String(row.first_name || row.last_name || '').trim();
+    // Preferred name first ("Jon", not "Jonathan").
+    const name = greetingName(row, '') || String(row.last_name || '').trim();
     return name || null;
   } catch {
     return null;
@@ -59,12 +64,13 @@ router.get('/status', authorize('admin', 'manager'), async (_req: AuthRequest, r
   }
 });
 
-// POST /api/auto-chase/ingest — manual ingestion run (admin only). Handy for
-// establishing the baseline + a first live test before the cron cadence.
+// POST /api/auto-chase/ingest — manual ingestion run across ALL mailboxes (admin
+// only): info@ (full) + every configured manager mailbox (matched-only). Handy for
+// establishing a new mailbox's baseline + a first live test before the cron cadence.
 router.post('/ingest', authorize('admin'), async (_req: AuthRequest, res: Response) => {
   try {
-    const summary = await runIngestionForPrimaryMailbox();
-    res.json({ data: summary });
+    const summaries = await runIngestionForAllMailboxes();
+    res.json({ data: summaries });
   } catch (error) {
     console.error('[auto-chase] manual ingest error:', error);
     res.status(500).json({ error: 'Ingestion run failed' });
@@ -102,6 +108,173 @@ router.get('/unmatched', authorize('admin', 'manager'), async (req: AuthRequest,
   }
 });
 
+// ── Manual attribution backstops on ingested emails ────────────────────────
+// Two human controls over what the deterministic matcher attached (spec §5.3a):
+//   * detach / move  — accuracy backstop ("this isn't job A" / "→ actually B").
+//     STAFF_ROLES: a mis-attach is low-harm + recoverable, and correcting it is
+//     day-to-day work.
+//   * hide / unhide  — confidentiality backstop. Drops an email off the all-staff
+//     timeline + the AI reads (summary / dispute helper) but keeps it visible to
+//     ADMIN, audit preserved. Admin-only: hiding conceals, so it must not be a
+//     lever a staff member can pull on (e.g.) a client complaint about themselves.
+// All scoped to ingested emails (type='email' AND gmail_message_id IS NOT NULL)
+// so this route can't touch staff notes / money-audit rows.
+async function loadIngestedEmail(id: string): Promise<{ id: string; job_id: string | null } | null> {
+  const r = await query(
+    `SELECT id, job_id FROM interactions
+      WHERE id = $1 AND type = 'email' AND gmail_message_id IS NOT NULL`,
+    [id],
+  );
+  return r.rows[0] ?? null;
+}
+
+// POST /api/auto-chase/emails/:id/hide — hide an ingested email from the
+// all-staff timeline (admin still sees it). Admin only.
+router.post('/emails/:id/hide', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    await query(
+      `UPDATE interactions SET hidden_at = NOW(), hidden_by = $2 WHERE id = $1`,
+      [row.id, req.user?.id ?? null],
+    );
+    res.json({ data: { id: row.id, hidden: true } });
+  } catch (error) {
+    console.error('[auto-chase] hide email error:', error);
+    res.status(500).json({ error: 'Failed to hide email' });
+  }
+});
+
+// POST /api/auto-chase/emails/:id/unhide — restore a hidden email. Admin only.
+router.post('/emails/:id/unhide', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    await query(`UPDATE interactions SET hidden_at = NULL, hidden_by = NULL WHERE id = $1`, [row.id]);
+    res.json({ data: { id: row.id, hidden: false } });
+  } catch (error) {
+    console.error('[auto-chase] unhide email error:', error);
+    res.status(500).json({ error: 'Failed to unhide email' });
+  }
+});
+
+// POST /api/auto-chase/emails/:id/detach — "this isn't this job". Tombstone:
+// keeps job_id so the email stays on the timeline as a greyed "removed from this
+// job · Re-attach" line (recoverable if the detach was wrong), but flags it
+// detached so it drops out of the AI reads (summary / dispute helper). STAFF_ROLES.
+router.post('/emails/:id/detach', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    await query(
+      `UPDATE interactions SET detached_at = NOW(), detached_by = $2 WHERE id = $1`,
+      [row.id, req.user?.id ?? null],
+    );
+    res.json({ data: { id: row.id, detached: true } });
+  } catch (error) {
+    console.error('[auto-chase] detach email error:', error);
+    res.status(500).json({ error: 'Failed to detach email' });
+  }
+});
+
+// POST /api/auto-chase/emails/:id/reattach — undo a detach (clears the tombstone).
+router.post('/emails/:id/reattach', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    await query(`UPDATE interactions SET detached_at = NULL, detached_by = NULL WHERE id = $1`, [row.id]);
+    res.json({ data: { id: row.id, detached: false } });
+  } catch (error) {
+    console.error('[auto-chase] reattach email error:', error);
+    res.status(500).json({ error: 'Failed to reattach email' });
+  }
+});
+
+// POST /api/auto-chase/emails/:id/move — re-home to a different job. Body:
+// { job_id }. Clears any detach tombstone (the email now belongs to the target).
+// STAFF_ROLES.
+router.post('/emails/:id/move', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const targetJobId = String(req.body?.job_id || '').trim();
+    if (!targetJobId) return res.status(400).json({ error: 'job_id is required' });
+    const row = await loadIngestedEmail(String(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Ingested email not found' });
+    const target = await query(`SELECT id FROM jobs WHERE id = $1 AND is_deleted = false`, [targetJobId]);
+    if (target.rows.length === 0) return res.status(404).json({ error: 'Target job not found' });
+    await query(
+      `UPDATE interactions
+          SET job_id = $2,
+              reattached_from_job_id = $3,
+              reattached_at = NOW(),
+              reattached_by = $4,
+              detached_at = NULL,
+              detached_by = NULL
+        WHERE id = $1`,
+      [row.id, targetJobId, row.job_id, req.user?.id ?? null],
+    );
+    res.json({ data: { id: row.id, job_id: targetJobId } });
+  } catch (error) {
+    console.error('[auto-chase] move email error:', error);
+    res.status(500).json({ error: 'Failed to move email' });
+  }
+});
+
+// GET /api/auto-chase/mailboxes — per-mailbox ingestion status: info@ (full) +
+// each manager mailbox (matched-only), each probed live so a delegation gap
+// surfaces inline. Admin only (managing which mailboxes we read is sensitive).
+router.get('/mailboxes', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const status = await getAllGmailIngestionStatus();
+    res.json({ data: status });
+  } catch (error) {
+    console.error('[auto-chase] mailboxes status error:', error);
+    res.status(500).json({ error: 'Failed to read mailbox status' });
+  }
+});
+
+// PUT /api/auto-chase/mailboxes — set the manager-mailbox list. Body:
+// { mailboxes: string[] }. Each must be an @oooshtours.co.uk address and not the
+// primary info@. Stored in system_settings.gmail_manager_mailboxes (JSON). Admin
+// only. Returns the fresh per-mailbox status so the UI reflects connectivity.
+router.put('/mailboxes', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const input = Array.isArray(req.body?.mailboxes) ? req.body.mailboxes : null;
+    if (!input) return res.status(400).json({ error: 'mailboxes must be an array' });
+
+    const primary = getPrimaryMailbox().toLowerCase();
+    const seen = new Set<string>();
+    const clean: string[] = [];
+    const rejected: string[] = [];
+    for (const item of input) {
+      const addr = String(item || '').trim().toLowerCase();
+      if (!addr) continue;
+      const valid = /^[^@\s]+@oooshtours\.co\.uk$/.test(addr);
+      if (!valid || addr === primary) { rejected.push(addr); continue; }
+      if (seen.has(addr)) continue;
+      seen.add(addr);
+      clean.push(addr);
+    }
+    if (rejected.length > 0) {
+      return res.status(400).json({
+        error: `Only @oooshtours.co.uk mailboxes (other than ${primary}) can be added. Rejected: ${rejected.join(', ')}`,
+      });
+    }
+
+    await query(
+      `INSERT INTO system_settings (key, value, category, value_type, updated_at, updated_by)
+       VALUES ('gmail_manager_mailboxes', $1, 'chase', 'text', NOW(), $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = EXCLUDED.updated_by`,
+      [JSON.stringify(clean), req.user?.id ?? null],
+    );
+
+    const status = await getAllGmailIngestionStatus();
+    res.json({ data: status });
+  } catch (error) {
+    console.error('[auto-chase] set mailboxes error:', error);
+    res.status(500).json({ error: 'Failed to save mailbox list' });
+  }
+});
+
 // POST /api/auto-chase/preview-draft/:jobId — generate an AI chase draft for a
 // job and return it as JSON WITHOUT creating a Gmail draft. Lets us judge draft
 // quality on real jobs before the Gmail `compose` scope + draft-creation slice
@@ -112,8 +285,8 @@ router.post('/preview-draft/:jobId', authorize('admin', 'manager'), async (req: 
   }
   try {
     const signOffName = await senderFirstName(req.user?.id);
-    const { draft, context } = await draftChaseEmail(String(req.params.jobId), { signOffName });
-    res.json({ data: { draft, context } });
+    const { draft, context, guidesUsed } = await draftChaseEmail(String(req.params.jobId), { signOffName });
+    res.json({ data: { draft, context, guidesUsed } });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (/not found/i.test(message)) return res.status(404).json({ error: message });
@@ -355,27 +528,6 @@ router.get('/quote-versions-sweep', authorize('admin', 'manager'), (_req: AuthRe
       ...quoteSweepState.summary,
     },
   });
-});
-
-// POST /api/auto-chase/voice/learn — distil example client emails + our replies
-// into a PROPOSED chase_voice_instructions note (§9.3). Does NOT save — returns
-// the proposal for the human to review + save via the Settings PUT. Manager-tier
-// (this shapes every future client-facing chase). Needs Anthropic.
-router.post('/voice/learn', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
-  if (!isAnthropicConfigured()) {
-    return res.status(503).json({ error: 'Voice learning unavailable — ANTHROPIC_API_KEY not configured.' });
-  }
-  try {
-    const body = (req.body || {}) as { examples?: string; current?: string };
-    const examples = String(body.examples || '').trim();
-    if (!examples) return res.status(400).json({ error: 'Paste some example emails to learn from.' });
-    const proposed = await learnChaseVoice(examples, body.current ?? null);
-    res.json({ data: { proposed } });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[auto-chase] voice learn error:', error);
-    res.status(500).json({ error: message || 'Failed to learn chase voice' });
-  }
 });
 
 export default router;

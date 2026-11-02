@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { SignJWT } from 'jose'
 import { loginToOP } from '@/lib/op-api'
 import { checkRateLimit, recordFailedAttempt, clearFailedAttempts } from '@/lib/login-rate-limit'
+import { readDeviceCookie, clientUserAgent } from '@/lib/portal-session'
 
 // Session secret for JWT signing
 const getSessionSecret = () => {
@@ -15,16 +16,16 @@ const getSessionSecret = () => {
 // Shown when the account is already locked out (15-min cooldown). Steers the
 // user to the reset flow rather than letting them keep hammering a 429.
 const LOCKOUT_MESSAGE =
-  'Sign-in is paused after too many attempts. Please reset your password using "Forgot your password?" below, or try again in 15 minutes.'
+  'Sign-in is paused after too many attempts. Please reset your password using "Forgotten it?" above, or try again in 15 minutes.'
 
 // Wrong-password copy. As the user approaches the lockout we tell them how many
 // attempts remain and, on the final one, point them straight at Forgot Password.
 function wrongPasswordMessage(remainingAttempts: number): string {
   if (remainingAttempts <= 0) {
-    return 'Incorrect password. For security we\'ve paused sign-in for this account — please reset your password using "Forgot your password?" below.'
+    return 'Incorrect password. For security we\'ve paused sign-in for this account. Please reset your password using "Forgotten it?" above.'
   }
   const attempts = remainingAttempts === 1 ? '1 attempt' : `${remainingAttempts} attempts`
-  return `Incorrect password — ${attempts} left before you'll need to reset your password.`
+  return `Incorrect password - ${attempts} left before you'll need to reset your password.`
 }
 
 export async function POST(request: NextRequest) {
@@ -53,7 +54,10 @@ export async function POST(request: NextRequest) {
 
     try {
       console.log('Login: trying OP backend for:', normalizedEmail)
-      const opResult = await loginToOP(normalizedEmail, password)
+      const opResult = await loginToOP(normalizedEmail, password, {
+        deviceToken: readDeviceCookie(request),
+        userAgent: clientUserAgent(request),
+      })
 
       if (opResult.success && opResult.user) {
         clearFailedAttempts(normalizedEmail)
@@ -90,6 +94,21 @@ export async function POST(request: NextRequest) {
         return response
       }
 
+      // Right password, but two-step sign-in wants a code first (FREELANCER-
+      // PORTAL-SPEC §7). No session yet: the login page asks for the code and
+      // sends it to /api/auth/login/code with `pending`.
+      if (opResult.pending) {
+        clearFailedAttempts(normalizedEmail)
+        return NextResponse.json({
+          success: false,
+          needsCode: true,
+          pending: opResult.pending,
+          emailHint: opResult.emailHint,
+          codeSent: opResult.codeSent,
+          codeError: opResult.codeError,
+        })
+      }
+
       // OP returned 401 — credentials definitively wrong (or account not in
       // OP yet). A freelancer who genuinely only exists elsewhere should use
       // Forgot Password to register on OP.
@@ -101,9 +120,20 @@ export async function POST(request: NextRequest) {
         )
       }
 
+      // OP's own answer is the right one to show for these (Oct 2026): 403 =
+      // right password but no longer an approved freelancer; 429 = this
+      // account is paused after too many wrong passwords (OP counts per
+      // account, which this instance's in-memory counter can't).
+      if (opResult.status === 403 || opResult.status === 429) {
+        return NextResponse.json(
+          { error: opResult.error || LOCKOUT_MESSAGE },
+          { status: opResult.status }
+        )
+      }
+
       // Any other OP failure that wasn't a thrown error.
       return NextResponse.json(
-        { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
+        { error: "Incorrect password. Please try again, or use \"Forgotten it?\" above if you've forgotten it." },
         { status: 401 }
       )
     } catch (opError) {

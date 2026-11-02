@@ -52,13 +52,19 @@
  * (manjagoproduction@, 18 Aug 2026). `trusted: false` is how that shape is
  * represented here, and an untrusted licence yields a NULL window everywhere.
  */
+import { ukToday } from './uk-date';
 
 /** Ooosh acceptance windows, in days from the FROM date. */
 export const VALIDITY_WINDOW_DAYS = {
   licence: 90,
   dvla: 30,
   poa: 90,
-  passport: 30,
+  // 90 days from the date of checking, same as the licence, capped by the
+  // passport's own printed expiry. Was 30 while the hire-form app wrote
+  // `passportValidUntil = today + 90` — so backfillFromDates back-computed a
+  // check date 60 days AFTER the real one and staff read that as "Checked on"
+  // (Louis Salanson / 16507). Resolved to 90 both sides, migration 207.
+  passport: 90,
 } as const;
 
 export interface DocWindow {
@@ -101,6 +107,73 @@ export interface DriverValidityInput {
   passport_check_date?: unknown;
   passport_expiry?: unknown;
   passport_valid_until?: unknown;
+}
+
+/**
+ * The issuer string iDenfy returns for a Northern Ireland licence.
+ *
+ * Shared by `isUkLicence` and `isNiLicence` below ON PURPOSE. These two must
+ * agree about the same driver: a licence that is NI but not UK would be routed to the passport
+ * regime while also being offered the NI record-check panel, which is a
+ * contradiction staff would have no way to resolve. One token, two readers.
+ */
+const DVA_ISSUER = 'DVA';
+
+/**
+ * THE definition of "is this a UK (DVLA) licence?".
+ *
+ * Lives here because it decides which DOCUMENT REGIME applies — a UK driver
+ * needs a DVLA check, a non-UK driver needs a passport — so it belongs beside
+ * the windows it gates.
+ *
+ * Accepts the country as either an ISO code or a full name. The hire-form
+ * webhook writes `licence_issue_country` through getCountryName(), i.e. the
+ * NAME ("United Kingdom"), while every consumer compared it to the CODE
+ * ("GB") — so that half of the test never once matched and UK detection has
+ * always rested entirely on `licence_issued_by === 'DVLA'`. That mattered the
+ * day an expired PASSPORT session leaked into the licence path and overwrote
+ * `licence_issued_by` with 'HMPO' (Charlie McWilliams / 15727, Sep 2026):
+ * nothing was left to recognise him by, his passed DVLA check stopped
+ * counting, and OP started demanding a passport he did not need.
+ */
+export function isUkLicence(driver: {
+  licence_issued_by?: unknown;
+  licence_issue_country?: unknown;
+} | null | undefined): boolean {
+  if (!driver) return false;
+  const issuedBy = String(driver.licence_issued_by ?? '').trim().toUpperCase();
+  if (issuedBy.includes('DVLA') || issuedBy === DVA_ISSUER) return true;   // DVA = Northern Ireland
+  const country = String(driver.licence_issue_country ?? '').trim().toUpperCase();
+  return ['GB', 'UK', 'GBR', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(country);
+}
+
+/**
+ * Is this a Northern Ireland (DVA) licence?
+ *
+ * NI is the UK, so `isUkLicence` is true and the driver correctly needs a
+ * licence-record check rather than a passport. What they CANNOT do is produce
+ * one themselves through GOV.UK: `viewdrivingrecord.service.gov.uk` holds GB
+ * licences only, so the hire form's DVLA step dead-ended a DVA driver on a link
+ * that would never work for them — six router branches all leading back to
+ * `dvla-check` with no way out (Declan Haughian / 16286, Sep 2026).
+ *
+ * DVA run their own equivalent at nidirect. The driver creates a licence check
+ * code there and a member of staff runs the lookup; the code is single-use and
+ * expires 21 days after they created it. So this flag means precisely: "needs a
+ * record check, but a human has to go and get it".
+ *
+ * Deliberately NOT broadened to spellings like "DRIVER & VEHICLE AGENCY".
+ * `isUkLicence` does not recognise those either, so such a driver would be
+ * classified non-UK and sent down the passport path — widening only this side
+ * would split the two. If iDenfy ever starts returning a different string, both
+ * need changing together, and the regime change wants thinking about on its own
+ * (see the Charlie McWilliams / 15727 note above for what disturbing it costs).
+ */
+export function isNiLicence(driver: {
+  licence_issued_by?: unknown;
+} | null | undefined): boolean {
+  if (!driver) return false;
+  return String(driver.licence_issued_by ?? '').trim().toUpperCase() === DVA_ISSUER;
 }
 
 const EMPTY_WINDOW: DocWindow = {
@@ -153,9 +226,9 @@ function minYmd(a: string | null, b: string | null): string | null {
   return a < b ? a : b;
 }
 
-/** Today in UTC as YYYY-MM-DD. Comparisons are plain string compares. */
+/** Today (UK) as YYYY-MM-DD — services/uk-date.ts. Comparisons are plain string compares. */
 export function todayYmd(): string {
-  return new Date().toISOString().slice(0, 10);
+  return ukToday();
 }
 
 function buildWindow(opts: {
@@ -207,7 +280,7 @@ export function computeDriverValidity(
 
   const issuedBy = typeof driver.licence_issued_by === 'string'
     ? driver.licence_issued_by.trim() : '';
-  const isUkDriver = issuedBy === 'DVLA' || driver.licence_issue_country === 'GB';
+  const isUkDriver = isUkLicence(driver);
 
   // ── Licence: iDenfy check + 90d, capped at the licence's own expiry ────────
   // Untrusted without a licence identity (see INTEGRITY GUARD above).
@@ -250,7 +323,7 @@ export function computeDriverValidity(
     from: toYmd(driver.poa2_doc_date), days: VALIDITY_WINDOW_DAYS.poa, today,
   });
 
-  // Passport: checked like the DVLA (check + 30d), capped at the passport's
+  // Passport: checked like the licence (check + 90d), capped at the passport's
   // own printed expiry.
   const passport = buildWindow({
     from: toYmd(driver.passport_check_date), days: VALIDITY_WINDOW_DAYS.passport,
@@ -258,6 +331,49 @@ export function computeDriverValidity(
   });
 
   return { licence, dvla, poa1, poa2, passport, isUkDriver };
+}
+
+/** Which of the documents this driver actually needs are missing or lapsed. */
+export interface OutstandingDocuments {
+  licence: boolean;
+  poa1: boolean;
+  poa2: boolean;
+  /** UK licence holders only — false for everyone else. */
+  dvla: boolean;
+  /** Non-UK licence holders only — false for everyone else. */
+  passport: boolean;
+}
+
+/**
+ * THE definition of "which documents is this driver still missing".
+ *
+ * Policy: everybody needs a licence check and both proofs of address; UK
+ * licence holders also need a DVLA check, everyone else a passport. That rule
+ * used to live only inside `analyzeDocuments()` in routes/driver-verification.ts
+ * (as the `allValid` line), which was fine while the hire-form router was its
+ * only consumer. The unsigned-form nudge needs the same answer to decide
+ * whether to chase for documents or for a signature, so it lives here with the
+ * windows it is derived from rather than being written out a second time.
+ *
+ * NOT covered: the extra passport a UK driver needs when their proof-of-address
+ * doesn't match their licence address. The hire-form router handles it (the
+ * driver's choice is stored as `drivers.address_mismatch` since migration 298,
+ * Oct 2026, and every `calculateNextStep` branch checks it). This function and
+ * its callers (the unsigned-form nudge) don't read it yet.
+ */
+export function outstandingDocuments(v: DriverValidity): OutstandingDocuments {
+  return {
+    licence: !v.licence.valid,
+    poa1: !v.poa1.valid,
+    poa2: !v.poa2.valid,
+    dvla: v.isUkDriver && !v.dvla.valid,
+    passport: !v.isUkDriver && !v.passport.valid,
+  };
+}
+
+/** True when nothing on `outstandingDocuments()` is outstanding. */
+export function hasAllRequiredDocuments(v: DriverValidity): boolean {
+  return !Object.values(outstandingDocuments(v)).some(Boolean);
 }
 
 /**

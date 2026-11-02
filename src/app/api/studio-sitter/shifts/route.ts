@@ -20,6 +20,7 @@ import {
   isOpClientError,
   OpApiError,
 } from '@/lib/op-api'
+import { readSince } from '@/lib/history'
 
 export async function GET(request: NextRequest) {
   try {
@@ -34,8 +35,9 @@ export async function GET(request: NextRequest) {
     }
 
     try {
-      const data = await getSitterShiftsFromOP(sessionToken)
-      return NextResponse.json({ success: true, shifts: data.shifts || [] })
+      // `since` adds `past`, the nights the Completed page lists (lib/history.ts).
+      const data = await getSitterShiftsFromOP(sessionToken, readSince(request.nextUrl.searchParams.get('since')))
+      return NextResponse.json({ success: true, shifts: data.shifts || [], ...(data.past ? { past: data.past } : {}) })
     } catch (opError) {
       // 4xx = legitimate negative response (e.g. session expired) — propagate.
       if (isOpClientError(opError)) {

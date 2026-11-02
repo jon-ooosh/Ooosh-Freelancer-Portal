@@ -59,6 +59,17 @@ export interface TraccarTrip {
   endAddress?: string
 }
 
+/**
+ * A tracker with no satellite fix reports 0,0 ("Null Island", in the Gulf of
+ * Guinea) — never a real place for one of our vans. Drop it everywhere.
+ * Backend twin: services/gps-trackers.ts isRealFix().
+ */
+export function isRealFix(p: { latitude: number; longitude: number } | null | undefined): boolean {
+  if (!p) return false
+  if (!Number.isFinite(p.latitude) || !Number.isFinite(p.longitude)) return false
+  return !(p.latitude === 0 && p.longitude === 0)
+}
+
 /** Convert knots to mph */
 export function knotsToMph(knots: number): number {
   return Math.round(knots * 1.151)

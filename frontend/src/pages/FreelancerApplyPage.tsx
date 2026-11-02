@@ -4,7 +4,7 @@
  * this form ENRICHES that same person and fires an "all good?" alert to info@.
  * The token IS the gate — usable only while the application is invited/more_info.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 const SKILLS = [
@@ -32,7 +32,11 @@ interface Prefill {
   licence_number: string; licence_issued_by: string; licence_expiry: string;
   licence_passed_date: string; passport_expiry: string; day_rate_note: string;
 }
-interface DocRef { r2_key: string; label: string; filename: string; content_type?: string; }
+interface DocRef {
+  r2_key: string; label: string; filename: string; content_type?: string;
+  /** Already on their record before this visit — carried back, not uploaded now. */
+  on_file?: boolean;
+}
 interface RefEntry { name: string; company: string; email: string; phone: string; role: string; consent: boolean; }
 
 export default function FreelancerApplyPage() {
@@ -43,6 +47,7 @@ export default function FreelancerApplyPage() {
   const [submitting, setSubmitting] = useState(false);
   const [terms, setTerms] = useState('');
   const [tcsVersion, setTcsVersion] = useState('');
+  const [requestNote, setRequestNote] = useState('');
 
   // core
   const [firstName, setFirstName] = useState('');
@@ -91,30 +96,66 @@ export default function FreelancerApplyPage() {
   const hasOther = skills.includes('Other');
   const wantsEu = lookingFor.includes('uk_eu');
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch(`/api/freelancers/apply/${token}`);
-        const j = await res.json();
-        if (!res.ok) { setError(j.error || 'This link is not valid.'); }
-        else {
-          setTerms(j.data.terms || '');
-          setTcsVersion(j.data.tcs_version || '');
-          const p: Prefill = j.data.prefill || {};
-          setFirstName(p.first_name || ''); setLastName(p.last_name || '');
-          setPreferredName(p.preferred_name || ''); setEmail(p.email || '');
-          setPhone(p.phone || ''); setMobile(p.mobile || ''); setDob(p.date_of_birth || '');
-          setHomeAddress(p.home_address || '');
-          setEmName(p.emergency_contact_name || ''); setEmPhone(p.emergency_contact_phone || '');
-          setSkills(Array.isArray(p.skills) ? p.skills : []);
-          setLicenceNumber(p.licence_number || ''); setLicenceIssuedBy(p.licence_issued_by || '');
-          setLicenceExpiry(p.licence_expiry || ''); setLicencePassed(p.licence_passed_date || '');
-          setPassportExpiry(p.passport_expiry || ''); setDayRate(p.day_rate_note || '');
-        }
-      } catch { setError('Could not load the form.'); }
-      finally { setLoading(false); }
-    })();
+  // Load (or re-load) the form context for this token. Pulled out of the mount
+  // effect so the dead-end screen below can retry it without a page reload.
+  const loadContext = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/freelancers/apply/${token}`);
+      const j = await res.json();
+      if (!res.ok) { setError(j.error || 'This link is not valid.'); }
+      else {
+        setError('');
+        setTerms(j.data.terms || '');
+        setTcsVersion(j.data.tcs_version || '');
+        setRequestNote(j.data.request_note || '');
+        // Documents we already hold, shown as "already on file" so a re-opened
+        // form doesn't make them photograph a licence we have twice over.
+        const onFile: DocRef[] = Array.isArray(j.data.documents_on_file) ? j.data.documents_on_file : [];
+        setDocs(onFile.map((d) => ({ ...d, on_file: true })));
+        const p: Prefill = j.data.prefill || {};
+        setFirstName(p.first_name || ''); setLastName(p.last_name || '');
+        setPreferredName(p.preferred_name || ''); setEmail(p.email || '');
+        setPhone(p.phone || ''); setMobile(p.mobile || ''); setDob(p.date_of_birth || '');
+        setHomeAddress(p.home_address || '');
+        setEmName(p.emergency_contact_name || ''); setEmPhone(p.emergency_contact_phone || '');
+        setSkills(Array.isArray(p.skills) ? p.skills : []);
+        setLicenceNumber(p.licence_number || ''); setLicenceIssuedBy(p.licence_issued_by || '');
+        setLicenceExpiry(p.licence_expiry || ''); setLicencePassed(p.licence_passed_date || '');
+        setPassportExpiry(p.passport_expiry || ''); setDayRate(p.day_rate_note || '');
+      }
+    } catch { setError('Could not load the form.'); }
+    finally { setLoading(false); }
   }, [token]);
+
+  useEffect(() => { loadContext(); }, [loadContext]);
+
+  /**
+   * Re-check the link whenever this page comes back into view.
+   *
+   * A freelancer reads our email in their mail app, so clicking the link twice
+   * doesn't reload anything — the browser restores the SAME rendered page from
+   * its back/forward cache. Simon Bull (Sept 2026) submitted his form, clicked
+   * his link a minute later, was correctly told the form had closed, and was
+   * then shown that same cached screen when he re-opened the link we had just
+   * re-opened for him: the nginx log has a 304 on the HTML and no API call at
+   * all. He reported a broken link; the link was live.
+   *
+   * Only ever re-checks while we're SHOWING that dead end — a re-fetch on a
+   * half-filled form would overwrite what they'd typed with the pre-fill, which
+   * is exactly what happens when someone leaves the page to fetch a photo of
+   * their licence and comes back.
+   */
+  useEffect(() => {
+    if (!error || done) return;
+    const recheck = () => { if (document.visibilityState === 'visible') loadContext(); };
+    const onPageShow = (e: PageTransitionEvent) => { if (e.persisted) recheck(); };
+    window.addEventListener('pageshow', onPageShow);
+    document.addEventListener('visibilitychange', recheck);
+    return () => {
+      window.removeEventListener('pageshow', onPageShow);
+      document.removeEventListener('visibilitychange', recheck);
+    };
+  }, [error, done, loadContext]);
 
   function toggle(list: string[], setList: (v: string[]) => void, v: string) {
     setList(list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
@@ -170,7 +211,7 @@ export default function FreelancerApplyPage() {
         return setError('Please complete all of your driving licence details.');
       }
       const has = (l: string) => docs.some((d) => d.label === l);
-      if (!has('Licence Front') || !has('Licence Back') || !has('DVLA Summary')) {
+      if (!has('Licence Front') || !has('Licence Back') || !has('DVLA Check')) {
         return setError('Please upload your licence (front and back) and a DVLA check summary.');
       }
     }
@@ -213,7 +254,18 @@ export default function FreelancerApplyPage() {
   }
 
   if (loading) return <Shell><p className="text-slate-400">Loading…</p></Shell>;
-  if (error && !terms && !done) return <Shell><p className="text-red-600">{error}</p></Shell>;
+  if (error && !terms && !done) return (
+    <Shell>
+      <p className="text-red-600">{error}</p>
+      <button
+        type="button"
+        onClick={() => { setLoading(true); loadContext(); }}
+        className="mt-4 px-4 py-2 rounded bg-[#7B5EA7] text-white text-sm font-semibold"
+      >
+        Try again
+      </button>
+    </Shell>
+  );
   if (done) return (
     <Shell>
       <h1 className="text-xl font-bold text-slate-800 mb-2">Thank you</h1>
@@ -227,6 +279,20 @@ export default function FreelancerApplyPage() {
     <Shell>
       <h1 className="text-2xl font-bold text-slate-800">Freelancer sign-up</h1>
       <p className="text-sm text-slate-500 mb-5">Please fill this in as fully as you can. Fields marked * are required.</p>
+
+      {/* What we asked for, on the form itself. Without this they have to keep
+          our email open beside the form to remember why they're back here. */}
+      {requestNote && (
+        <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm font-semibold text-amber-900 mb-1">We just need one more thing</p>
+          <p className="text-sm text-amber-800">{requestNote}</p>
+          <p className="text-xs text-amber-700 mt-2">
+            Everything you sent us before is still here — add or correct what's asked above,
+            then sign and send it back. Anything marked "already on file" only needs
+            replacing if it's changed.
+          </p>
+        </div>
+      )}
 
       <Section title="About you" required>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -292,7 +358,7 @@ export default function FreelancerApplyPage() {
           <Section title="Licence & DVLA documents" required>
             <DocUpload token={token!} label="Licence Front" docs={docs} setDocs={setDocs} setError={setError} />
             <DocUpload token={token!} label="Licence Back" docs={docs} setDocs={setDocs} setError={setError} />
-            <DocUpload token={token!} label="DVLA Summary" docs={docs} setDocs={setDocs} setError={setError} />
+            <DocUpload token={token!} label="DVLA Check" docs={docs} setDocs={setDocs} setError={setError} />
           </Section>
 
           <Section title="Insurance questionnaire">
@@ -361,7 +427,7 @@ export default function FreelancerApplyPage() {
         </label>
       </Section>
 
-      <Section title="Signature" required>
+      <Section title="Signature" required hint={requestNote ? 'please sign again to confirm' : undefined}>
         <canvas ref={canvasRef} width={600} height={160} onPointerDown={start} onPointerMove={move} onPointerUp={() => { drawing.current = false; }} onPointerLeave={() => { drawing.current = false; }}
           className="w-full border border-slate-300 rounded-lg bg-white touch-none" style={{ maxWidth: 600 }} />
         <button onClick={clearSig} className="text-xs text-slate-500 underline mt-1">Clear signature</button>
@@ -399,18 +465,30 @@ function DocUpload({ token, label, docs, setDocs, setError }: {
     finally { setBusy(false); }
   }
 
+  // One picker, three captions. A document we already hold gets "Replace"
+  // rather than a green tick: a tick against the blurry licence photo we just
+  // asked them to redo invites them to send us the blurry one again.
+  const picker = (text: string) => (
+    <label htmlFor={inputId} className="text-xs text-purple-600 hover:text-purple-800 cursor-pointer underline">
+      {busy ? 'Uploading…' : text}
+      <input id={inputId} type="file" accept="image/*,application/pdf" capture="environment" className="hidden" onChange={onPick} disabled={busy} />
+    </label>
+  );
+
   return (
     <div className="flex items-center gap-3 mb-1.5">
       <span className="text-sm text-slate-700 w-44 shrink-0">{label}</span>
-      {existing ? (
+      {existing && existing.on_file ? (
+        <span className="text-xs text-slate-500 flex items-center gap-2">
+          Already on file — {existing.filename}
+          {picker('Replace')}
+        </span>
+      ) : existing ? (
         <span className="text-xs text-green-700 flex items-center gap-2">✓ {existing.filename}
           <button onClick={() => setDocs(docs.filter((d) => d.label !== label))} className="text-slate-400 hover:text-red-500 underline">remove</button>
         </span>
       ) : (
-        <label htmlFor={inputId} className="text-xs text-purple-600 hover:text-purple-800 cursor-pointer underline">
-          {busy ? 'Uploading…' : 'Upload'}
-          <input id={inputId} type="file" accept="image/*,application/pdf" capture="environment" className="hidden" onChange={onPick} disabled={busy} />
-        </label>
+        picker('Upload')
       )}
     </div>
   );

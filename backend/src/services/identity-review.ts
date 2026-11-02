@@ -60,6 +60,52 @@ export function faceNeedsReview(faceResult: string | null | undefined): boolean 
 }
 
 /**
+ * Overall verdicts that mean iDenfy did NOT accept the check.
+ *
+ * `EXPIRED` is deliberately absent and must stay that way. It is not a verdict:
+ * iDenfy fires it when "the user never completes the verification and the token
+ * reaches its tokenExpiry or the session exceeds sessionLength" — i.e. the
+ * driver opened the link and wandered off. Treating an abandoned tab as a
+ * failed check would flag innocent drivers several times a week and the flag
+ * would stop being believed. What an EXPIRED session must never do is leave
+ * EVIDENCE behind; that is handled in the hire-form app, which no longer writes
+ * a check date or any licence field for one.
+ */
+const REVIEWABLE_OVERALL = new Set(['DENIED', 'SUSPECTED']);
+
+/**
+ * Does this iDenfy result need a human before the driver goes any further?
+ *
+ * WHY THIS REPLACED THE FACE-ONLY TEST
+ * ------------------------------------
+ * faceNeedsReview() below was written for the Aug 2026 face-match work and does
+ * its job exactly as specified — but it only ever looked at ONE of the three
+ * answers iDenfy gives us. The overall verdict and the document verdict were
+ * persisted and then read by nothing except the alert email, so iDenfy could
+ * reject a licence outright and OP would wave the driver through:
+ *
+ *   Jo Walker / 16249    DENIED · DOC_SPOOF_DETECTED · face FACE_MATCH
+ *   Simon Halliday/15551 DENIED · DOC_SIDE_MISMATCH  · face FACE_MATCH
+ *
+ * In both, the face matched perfectly and the DOCUMENT was the problem, so the
+ * face test was never going to catch either. `overall` is the field to key on
+ * because it is independent of iDenfy's tag vocabulary — a spoof might be
+ * reported in fraudTags, mismatchTags or autoDocument depending on their schema
+ * version, but a rejection is always DENIED.
+ *
+ * A mismatch is usually innocent (a bad capture, glare on the laminate, an
+ * older licence photo) — this is "someone must look", not "rejected".
+ */
+export function idenfyNeedsReview(verdict: {
+  overall?: string | null;
+  faceResult?: string | null;
+}): boolean {
+  const overall = (verdict.overall || '').toUpperCase().trim();
+  if (REVIEWABLE_OVERALL.has(overall)) return true;
+  return faceNeedsReview(verdict.faceResult);
+}
+
+/**
  * True when the driver may be assigned / receive paperwork.
  *
  * Mirrors isDriverAuthorisedForAgreement's fail-open stance: an unknown or

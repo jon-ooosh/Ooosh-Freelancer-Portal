@@ -15,10 +15,32 @@
 export interface DriverStatusInput {
   requires_referral: boolean;
   referral_status: string | null;
+  /**
+   * Staff adjudication of the iDenfy verdict. Outranks everything below it: a
+   * driver iDenfy rejected is not "Approved" and not merely "In Progress",
+   * whatever their dates say. Omitted here until Sep 2026, so a flagged driver
+   * still badged green in the list while their own page said otherwise.
+   */
+  identity_check_status?: string | null;
   signature_date: string | null;
+  /**
+   * HH job the driver has started a hire form for but NOT signed for (from
+   * `unsignedJobNumberSql` on the backend). A signature never expires, so a
+   * returning driver mid-form for a new hire otherwise reads "Approved" while
+   * nothing joins them to it (Cameron Williams-Hill / 16618, Sep 2026).
+   */
+  unsigned_job_number?: number | null;
   licence_valid_to: string | null;
   dvla_valid_until?: string | null;
   poa1_valid_until: string | null;
+  /**
+   * Only applies to non-UK licence holders — UK drivers do a DVLA check
+   * instead. Which regime a driver is in is decided by the two licence fields
+   * below, mirroring services/driver-validity.ts `isUkLicence`.
+   */
+  passport_valid_until?: string | null;
+  licence_issued_by?: string | null;
+  licence_issue_country?: string | null;
 }
 
 export interface DriverStatus {
@@ -40,10 +62,50 @@ function isExpired(date: string | null | undefined): boolean {
   return d < today;
 }
 
+/**
+ * Mirrors `isUkLicence` in backend/src/services/driver-validity.ts. Accepts the
+ * country as a code OR a name — the hire-form webhook writes the name
+ * ("United Kingdom"), not the code.
+ */
+function isUkLicence(driver: DriverStatusInput): boolean {
+  const issuedBy = (driver.licence_issued_by || '').trim().toUpperCase();
+  if (issuedBy.includes('DVLA') || issuedBy === DVA_ISSUER) return true;
+  const country = (driver.licence_issue_country || '').trim().toUpperCase();
+  return ['GB', 'UK', 'GBR', 'UNITED KINGDOM', 'GREAT BRITAIN'].includes(country);
+}
+
+/** The issuer string iDenfy returns for a Northern Ireland licence. */
+const DVA_ISSUER = 'DVA';
+
+/**
+ * Mirrors `isNiLicence` in backend/src/services/driver-validity.ts.
+ *
+ * NI is the UK, so these drivers need a licence record check like any other UK
+ * driver — they just cannot produce one themselves, because
+ * viewdrivingrecord.service.gov.uk holds GB licences only. DVA run their own
+ * check-code service at nidirect and a member of staff has to run the lookup.
+ *
+ * Display only — nothing gates on it. It changes which instructions staff are
+ * shown on the record-check panel, never whether the check is required.
+ */
+export function isNiLicence(driver: { licence_issued_by?: string | null }): boolean {
+  return (driver.licence_issued_by || '').trim().toUpperCase() === DVA_ISSUER;
+}
+
 export function deriveDriverStatus(driver: DriverStatusInput): DriverStatus {
   const green = 'bg-green-100 text-green-700';
   const amber = 'bg-amber-100 text-amber-700';
   const red = 'bg-red-100 text-red-700';
+
+  // Photo ID adjudication comes FIRST — an unresolved or rejected iDenfy check
+  // already blocks assignment and withholds the agreement, so the badge has to
+  // say so rather than reading "Approved" off dates iDenfy didn't accept.
+  if (driver.identity_check_status === 'needs_review') {
+    return { label: 'ID Check Needed', colour: red };
+  }
+  if (driver.identity_check_status === 'rejected') {
+    return { label: 'ID Rejected', colour: red };
+  }
 
   if (driver.requires_referral) {
     if (driver.referral_status === 'approved') return { label: 'Approved', colour: green };
@@ -53,15 +115,55 @@ export function deriveDriverStatus(driver: DriverStatusInput): DriverStatus {
     return { label: 'Refer to Insurers', colour: red };
   }
 
-  if (!driver.signature_date) return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+  if (driver.unsigned_job_number || !driver.signature_date) {
+    return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+  }
 
   if (
     isExpired(driver.licence_valid_to) ||
     isExpired(driver.dvla_valid_until) ||
-    isExpired(driver.poa1_valid_until)
+    isExpired(driver.poa1_valid_until) ||
+    (!isUkLicence(driver) && isExpired(driver.passport_valid_until))
   ) {
     return { label: 'Expired', colour: amber };
   }
 
   return { label: 'Approved', colour: green };
+}
+
+export interface ReferralBadge {
+  label: string;
+  /** Tailwind classes for a small bordered pill. */
+  className: string;
+  /** True while the referral still needs a human decision. */
+  unresolved: boolean;
+}
+
+/**
+ * Insurance-referral pill for a driver on a JOB surface (requirement card,
+ * Drivers & Vehicles row). Same vocabulary as `deriveDriverStatus` above.
+ *
+ * An approval is a STANDING approval for the driver (jon, Oct 2026): a later
+ * hire form that declares the same issue re-sets `requires_referral` but
+ * leaves `referral_status = 'approved'`. Keying a red "Referral" pill on the
+ * flag alone shouted three times on an already-cleared driver while the
+ * Drivers tab said nothing (Tyler Meadham, Oct 2026). So the pill shows the
+ * OUTCOME, and only an unresolved referral is red/amber.
+ *
+ * Returns null for a driver who was never referred.
+ */
+export function referralBadge(
+  requiresReferral: boolean | null | undefined,
+  referralStatus: string | null | undefined,
+): ReferralBadge | null {
+  const green = 'bg-green-50 text-green-700 border-green-200';
+  const amber = 'bg-amber-50 text-amber-700 border-amber-200';
+  const red = 'bg-red-50 text-red-600 border-red-200';
+
+  if (referralStatus === 'approved') return { label: 'Referral approved', className: green, unresolved: false };
+  if (referralStatus === 'waived') return { label: 'Referral waived', className: green, unresolved: false };
+  if (!requiresReferral) return null;
+  if (referralStatus === 'declined') return { label: 'Referral declined', className: red, unresolved: true };
+  if (referralStatus === 'pending' || referralStatus === 'submitted') return { label: 'Referred & waiting', className: amber, unresolved: true };
+  return { label: 'Refer to insurers', className: red, unresolved: true };
 }

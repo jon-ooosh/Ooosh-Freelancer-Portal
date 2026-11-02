@@ -2,10 +2,11 @@
  * Phase 1 — Collect. Ported from `collector.py`.
  *
  * Resolves each monitored venue's Discovery API id, then pulls upcoming music
- * events per venue into `tf_events`. Window is [today, today + maxWeeks]: we
- * collect from *today* (not today + minLeadWeeks) so a tour's true earliest
- * visible date is known — the "too imminent / already running" drop happens at
- * detection against that true first date, not by hiding near dates here.
+ * events per venue into `tf_events`, for the run's search window. Collecting
+ * only the window is safe: detection then looks up each act's FULL UK dates
+ * from today, so a tour that really started before the window is still seen
+ * as such and dropped — and on a targeted search ("tours starting in March")
+ * we don't spend Ticketmaster calls on months nobody asked about.
  */
 import { query } from '../../config/database';
 import { MONITORED_VENUES, MonitoredVenue } from './venues';
@@ -139,10 +140,10 @@ export interface CollectSummary {
   newEvents: number;
 }
 
-/** Collect events across all monitored venues for the [today, today+maxWeeks] window. */
-export async function collectAll(maxWeeks: number): Promise<CollectSummary> {
-  const start = new Date();
-  const end = new Date(start.getTime() + maxWeeks * 7 * 24 * 60 * 60 * 1000);
+/** Collect events across all monitored venues for the window (YYYY-MM-DD, inclusive). */
+export async function collectAll(window: { from: string; to: string }): Promise<CollectSummary> {
+  const start = new Date(`${window.from}T00:00:00Z`);
+  const end = new Date(`${window.to}T23:59:59Z`);
 
   let venuesResolved = 0;
   let venuesCollected = 0;

@@ -17,6 +17,12 @@
  * the wrong record are reported as UNDER-COLLECTED for a human to decide (top
  * up, or accept). Those are never auto-changed.
  *
+ * SCOPE: live hires only. A finished hire (returned / completed / cancelled /
+ * lost) is never reshuffled — its excess is history, and moving the charge
+ * between drivers on a settled job achieves nothing but retrospectively
+ * inflating "required". The reconcile itself enforces this; the scan query
+ * below matches it so the job count reported is the job count considered.
+ *
  * Usage (cd backend):
  *   npx tsx src/scripts/reconcile-excess-topn.ts                 # dry run
  *   npx tsx src/scripts/reconcile-excess-topn.ts --commit
@@ -41,14 +47,16 @@ async function main() {
        FROM jobs j
        JOIN job_excess je ON je.job_id = j.id AND je.assignment_id IS NOT NULL
       WHERE COALESCE(j.is_internal, false) = false
-        AND j.pipeline_status NOT IN ('lost', 'cancelled')
+        AND j.pipeline_status NOT IN
+            ('returned_incomplete', 'returned', 'completed', 'cancelled', 'lost')
         ${ONE_JOB ? 'AND j.hh_job_number = $1' : ''}
         ${UPCOMING ? 'AND COALESCE(j.job_date, j.out_date) >= CURRENT_DATE' : ''}
       ORDER BY starts DESC NULLS LAST`,
     ONE_JOB ? [ONE_JOB] : [],
   );
 
-  console.log(`Scanning ${jobs.rows.length} job(s) with driver-linked excess records.\n`);
+  console.log(`Scanning ${jobs.rows.length} live job(s) with driver-linked excess records.`);
+  console.log(`(Finished hires are excluded — their excess is settled history.)\n`);
 
   let changed = 0;
   let underCollected = 0;

@@ -12,6 +12,9 @@ export default defineConfig({
       // with the backend (which owns the file) so the modal display === the saved /
       // HireHop-pushed figure. The file is pure TS with no backend-only imports.
       '@calc': path.resolve(__dirname, '../backend/src/services/crew-transport-calculator.ts'),
+      // The possible-claim form's field catalogue — one definition read by the
+      // staff form here and the broker PDF on the backend (docs/INCIDENT-CLAIMS-SPEC.md).
+      '@claimform': path.resolve(__dirname, '../backend/src/services/claim-form-fields.ts'),
     },
   },
   server: {

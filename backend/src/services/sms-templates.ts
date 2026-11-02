@@ -17,6 +17,30 @@ const templates: Record<string, SmsTemplate> = {
       `Please park considerately and do NOT block the neighbours' gates. ` +
       `Full instructions for how to return are: {{parkingFormUrl}}`,
   },
+
+  // Possible insurance claim (docs/INCIDENT-CLAIMS-SPEC.md §21): sent with the
+  // first email of a client's form link, when we have their mobile. GSM
+  // characters only (no dashes / curly quotes) so it stays one 160-char segment.
+  claim_form_link: {
+    body:
+      `Ooosh! Tours: please fill in our incident form for van {{vehicleReg}}{{jobRef}}: {{formUrl}}`,
+  },
+
+  // Sent alongside the 3rd email reminder (services/claim-chase.ts).
+  claim_form_reminder: {
+    body:
+      `Ooosh! Tours: reminder to finish our incident form for van {{vehicleReg}}{{jobRef}} ` +
+      `({{done}}/{{total}} done): {{formUrl}}`,
+  },
+
+  // A freelancer who hasn't completed their job on the portal, with the 2nd
+  // reminder email (services/completion-chaser.ts). Plain characters only; the
+  // link is long, so this is usually two segments.
+  completion_chase: {
+    body:
+      `Ooosh! Tours: your {{kind}}{{venuePart}} isn't marked as done yet. ` +
+      `Please finish it here: {{link}}`,
+  },
 };
 
 export default templates;

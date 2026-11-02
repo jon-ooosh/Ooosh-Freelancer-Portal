@@ -1,14 +1,29 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { recentlyViewedOrderSql, recordAddressBookView } from '../services/address-book-views';
+import { phoneDigitsForSearch } from '../services/address-book-search';
+import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
+import { redactPrivateFields, redactPrivateFieldsAll } from '../services/people-private-fields';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { getSitterJobsByDate, type ShiftJobRef } from '../services/studio-sitter';
+import { ukToday } from '../services/uk-date';
+import { notAltQuoteLossSql, optionCountSql } from '../services/job-groups';
+import { portalSignInStatus, issuePortalCodeForStaff, portalSignOutEverywhere } from '../services/portal-login-security';
 
 const router = Router();
 
 // All people routes require authentication
 router.use(authenticate);
+// Staff only. `authenticate` alone admits EVERY active user: a `freelancer`
+// is an ordinary `users` row and POST /api/auth/login has no role gate, so
+// such an account holds a full OP JWT. Verified safe to gate the whole
+// router — the Next.js portal is hard-prefixed to `/api/portal` in
+// `src/lib/op-api.ts`, the vehicles book-out kiosk's scoped token never calls
+// this router, and every frontend consumer is a staff page. See
+// docs/reference/PLATFORM-CONVENTIONS.md → "Reference-route RBAC".
+router.use(authorize(...STAFF_ROLES));
 
 const fileSchema = z.object({
   name: z.string(),
@@ -18,9 +33,18 @@ const fileSchema = z.object({
   uploaded_by: z.string(),
 });
 
+/** '' and '   ' mean "not set", not "set to nothing". */
+function blankToNull(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
+}
+
 const createPersonSchema = z.object({
   first_name: z.string().min(1).max(255),
   last_name: z.string().min(1).max(255),
+  // What they like to be known as. OPTIONAL — blank falls back to first_name
+  // via services/display-name.ts, so nothing ever renders an empty greeting.
+  // Same column the staff Employment card writes, so the two cannot diverge.
+  preferred_name: z.string().max(255).optional().nullable(),
   email: z.string().email().optional().nullable(),
   phone: z.string().max(50).optional().nullable(),
   mobile: z.string().max(50).optional().nullable(),
@@ -122,15 +146,31 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const params: unknown[] = [];
     let paramIndex = 1;
 
+    // Search: name / email, plus the name of an org they're CURRENTLY at, plus
+    // phone numbers when the search looks like one (digits only, so "07700 900123"
+    // finds "+44 7700 900123"). Name/email matches sort first — see ORDER BY below.
+    let searchParam: string | null = null;
     if (search) {
+      searchParam = `$${paramIndex}`;
+      const phone = phoneDigitsForSearch(String(search));
       sql += ` AND (
         p.first_name ILIKE $${paramIndex} OR
         p.last_name ILIKE $${paramIndex} OR
         p.email ILIKE $${paramIndex} OR
-        CONCAT(p.first_name, ' ', p.last_name) ILIKE $${paramIndex}
+        CONCAT(p.first_name, ' ', p.last_name) ILIKE $${paramIndex} OR
+        EXISTS (
+          SELECT 1 FROM person_organisation_roles sr
+          JOIN organisations so ON so.id = sr.organisation_id AND so.is_deleted = false
+          WHERE sr.person_id = p.id AND sr.status = 'active' AND so.name ILIKE $${paramIndex}
+        )${phone ? ` OR
+        regexp_replace(CONCAT_WS(' ', p.mobile, p.phone, p.international_phone), '\\D', '', 'g') LIKE $${paramIndex + 1}` : ''}
       )`;
-      params.push(`%${search}%`);
+      params.push(`%${String(search).trim()}%`);
       paramIndex++;
+      if (phone) {
+        params.push(`%${phone}%`);
+        paramIndex++;
+      }
     }
 
     if (tag) {
@@ -222,7 +262,16 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       'last_contacted': `${lastContactSubquery} DESC NULLS LAST`,
       'review_due': 'p.freelancer_next_review_date ASC NULLS LAST',
     };
-    const orderBy = sortMap[sort as string] || 'p.last_name, p.first_name';
+    let orderBy = sortMap[sort as string] || 'p.last_name, p.first_name';
+    if (sort === 'recently_viewed') {
+      params.push(req.user!.id);
+      orderBy = `${recentlyViewedOrderSql('person', 'p.id', `$${paramIndex}`)}, p.last_name, p.first_name`;
+      paramIndex++;
+    } else if (searchParam && orderBy === 'p.last_name, p.first_name') {
+      // Name order with a search: people whose own name/email matched come before
+      // people only found via their org or phone (keeps short pickers useful).
+      orderBy = `CASE WHEN CONCAT(p.first_name, ' ', p.last_name) ILIKE ${searchParam} OR p.email ILIKE ${searchParam} THEN 0 ELSE 1 END, ${orderBy}`;
+    }
 
     sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
@@ -230,7 +279,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const result = await query(sql, params);
 
     res.json({
-      data: result.rows,
+      // `SELECT p.*` above would otherwise hand the whole team the private
+      // staff columns migration 206 added — see services/people-private-fields.ts.
+      data: redactPrivateFieldsAll(result.rows),
       pagination: {
         page: parseInt(page as string),
         limit: parseInt(limit as string),
@@ -331,7 +382,11 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    res.json(result.rows[0]);
+    // Only the Person page passes this — pickers/forms reading this GET don't count as a view.
+    if (req.query.track_view === '1') void recordAddressBookView(req.user?.id, 'person', String(req.params.id));
+
+    // Same `SELECT p.*` redaction as the list above.
+    res.json(redactPrivateFields(result.rows[0]));
   } catch (error) {
     console.error('Get person error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -342,7 +397,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
-      first_name, last_name, email, phone, mobile, international_phone,
+      first_name, last_name, preferred_name, email, phone, mobile, international_phone,
       notes, tags, files, preferred_contact_method, home_address, date_of_birth,
       is_freelancer, freelancer_joined_date, freelancer_next_review_date,
       skills, is_insured_on_vehicles, is_approved, has_tshirt,
@@ -355,17 +410,17 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
 
     const result = await query(
       `INSERT INTO people (
-        first_name, last_name, email, phone, mobile, international_phone,
+        first_name, last_name, preferred_name, email, phone, mobile, international_phone,
         notes, tags, files, preferred_contact_method, home_address, date_of_birth,
         is_freelancer, freelancer_joined_date, freelancer_next_review_date,
         skills, is_insured_on_vehicles, is_approved, has_tshirt,
         emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
         working_terms_type, working_terms_credit_days, working_terms_notes,
         created_by
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
        RETURNING *`,
       [
-        first_name, last_name, email?.toLowerCase(), phone, mobile, international_phone,
+        first_name, last_name, blankToNull(preferred_name), email?.toLowerCase(), phone, mobile, international_phone,
         notes, tags, JSON.stringify(files), preferred_contact_method, home_address, date_of_birth,
         is_freelancer, freelancer_joined_date || null, freelancer_next_review_date || null,
         skills, is_insured_on_vehicles, is_approved, has_tshirt,
@@ -377,7 +432,9 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
 
     await logAudit(req.user!.id, 'people', result.rows[0].id, 'create', null, result.rows[0]);
 
-    res.status(201).json(result.rows[0]);
+    // `RETURNING *` — same redaction as the GETs, so a write can't hand back
+    // what a read would strip.
+    res.status(201).json(redactPrivateFields(result.rows[0]));
   } catch (error) {
     console.error('Create person error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -394,11 +451,19 @@ router.put('/:id', validate(updatePersonSchema), async (req: AuthRequest, res: R
       return;
     }
 
+    // A cleared "likes to be known as" must store NULL, not ''. Same rule the
+    // staff Employment card follows (services/staff-employment.ts): absent key
+    // = leave alone, empty = clear. Without this the column fills with empty
+    // strings that every reader then has to NULLIF away.
+    if (req.body.preferred_name !== undefined) {
+      req.body.preferred_name = blankToNull(req.body.preferred_name);
+    }
+
     // Optimistic locking: if client sends version, check it matches
     const clientVersion = req.body.version;
     const fields = Object.entries(req.body).filter(([k, v]) => v !== undefined && k !== 'version');
     if (fields.length === 0) {
-      res.json(current.rows[0]);
+      res.json(redactPrivateFields(current.rows[0]));
       return;
     }
 
@@ -427,7 +492,11 @@ router.put('/:id', validate(updatePersonSchema), async (req: AuthRequest, res: R
 
     await logAudit(req.user!.id, 'people', req.params.id as string, 'update', current.rows[0], result.rows[0]);
 
-    res.json(result.rows[0]);
+    // `RETURNING *` hands back every column, private ones included — this
+    // route is gated on STAFF_ROLES, so it needs the same redaction as the
+    // GETs (docs/STAFF-RECORDS-SPEC.md §21.1). The audit row above keeps the
+    // full snapshot; redactPrivateFields() returns a copy.
+    res.json(redactPrivateFields(result.rows[0]));
   } catch (error) {
     console.error('Update person error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -666,6 +735,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
                j.job_date, j.job_end, j.return_date, j.job_value,
                j.client_name, j.company_name, j.lost_reason, j.lost_detail,
+               j.option_no, j.group_id,
                jo.role AS link_role, o.name AS link_org_name,
                'organisation' AS link_type
         FROM person_organisation_roles por
@@ -680,6 +750,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
                j.job_date, j.job_end, j.return_date, j.job_value,
                j.client_name, j.company_name, j.lost_reason, j.lost_detail,
+               j.option_no, j.group_id,
                qa.role AS link_role, NULL AS link_org_name,
                'crew' AS link_type
         FROM quote_assignments qa
@@ -694,6 +765,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const jobsResult = await query(
       `${personJobsCTE}
        SELECT pj.*,
+              ${optionCountSql('pj')} AS option_count,
               (SELECT i.content FROM interactions i
                WHERE i.job_id = pj.id AND i.content LIKE 'Job retro:%'
                ORDER BY i.created_at DESC LIMIT 1
@@ -718,10 +790,10 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const statsResult = await query(
       `${personJobsCTE}
        SELECT
-         COUNT(*) AS total_jobs,
+         COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('pj')}) AS total_jobs,
          COUNT(*) FILTER (WHERE pj.pipeline_status = 'completed' OR pj.status = 11) AS completed_jobs,
          COUNT(*) FILTER (WHERE pj.pipeline_status = 'confirmed' OR pj.status = 2) AS confirmed_jobs,
-         COUNT(*) FILTER (WHERE pj.pipeline_status = 'lost') AS lost_jobs,
+         COUNT(*) FILTER (WHERE pj.pipeline_status = 'lost' AND ${notAltQuoteLossSql('pj')}) AS lost_jobs,
          COALESCE(SUM(pj.job_value), 0) AS total_value
        FROM person_jobs pj${filterSql}`,
       [id, ...filterParams]
@@ -854,15 +926,32 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
       [id]
     );
 
-    const [crewRes, sitterRes, vehicleRes] = await Promise.all([
-      crewPromise, sitterPromise, vehiclePromise,
+    // 4. YARD DAYS. Added Sep 2026: freelancer_day_bookings arrived with its
+    //    own module and was never wired into this view, so somebody whose only
+    //    work with us has been yard days had an EMPTY history tab — which reads
+    //    as "we have never used them" rather than "this list does not know
+    //    about that kind of work".
+    //
+    //    No status filter, matching the other three: a declined or withdrawn
+    //    day is exactly the kind of thing this view exists to show.
+    const yardPromise = query(
+      `SELECT b.id, b.booking_date::text AS booking_date, b.duration_type,
+              b.start_time::text AS start_time, b.end_time::text AS end_time,
+              b.status, b.agreed_rate, b.expected_total, b.notes
+         FROM freelancer_day_bookings b
+        WHERE b.person_id = $1`,
+      [id]
+    );
+
+    const [crewRes, sitterRes, vehicleRes, yardRes] = await Promise.all([
+      crewPromise, sitterPromise, vehiclePromise, yardPromise,
     ]);
 
     const toNum = (v: any): number | null =>
       v === null || v === undefined || v === '' ? null : Number(v);
 
     interface FreelancerHistoryItem {
-      source: 'crew' | 'sitter' | 'vehicle';
+      source: 'crew' | 'sitter' | 'vehicle' | 'yard';
       id: string;
       title: string;
       role: string | null;
@@ -881,9 +970,22 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
       client_name: string | null;
       vehicle_reg: string | null;
       run_combined_fee: number | null;
+      // Sitter rows only: every job that needed a sitter that evening (a
+      // shift is per evening, so it can belong to more than one job).
+      jobs?: ShiftJobRef[];
     }
 
     const items: FreelancerHistoryItem[] = [];
+
+    // Non-fatal: a failure here only costs the sitter rows their job links.
+    let sitterJobs = new Map<string, ShiftJobRef[]>();
+    try {
+      sitterJobs = await getSitterJobsByDate(
+        sitterRes.rows.map((r: any) => r.shift_date).filter(Boolean),
+      );
+    } catch (err) {
+      console.error('[people] sitter job lookup failed (non-fatal):', err);
+    }
 
     for (const r of crewRes.rows) {
       // Fee for display: person's agreed rate wins, else quote-level fee.
@@ -932,6 +1034,7 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
         client_name: null,
         vehicle_reg: null,
         run_combined_fee: null,
+        jobs: sitterJobs.get(r.shift_date) ?? [],
       });
     }
 
@@ -960,6 +1063,38 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
     }
 
     // Sort date_start DESC, nulls last (frontend splits upcoming/past)
+    for (const r of yardRes.rows) {
+      // A yard day has no job, no venue and no client — it is a day at our own
+      // yard. Those fields stay null rather than being filled with something
+      // plausible-looking, so the tab can tell the two kinds of work apart.
+      const hours = r.duration_type === 'hours' && r.start_time && r.end_time
+        ? ` (${String(r.start_time).slice(0, 5)}\u2013${String(r.end_time).slice(0, 5)})`
+        : r.duration_type === 'half_day' ? ' (half day)' : '';
+      items.push({
+        source: 'yard',
+        id: r.id,
+        title: r.notes ? `Yard day \u2014 ${r.notes}${hours}` : `Yard day${hours}`,
+        role: 'Yard',
+        job_type: null,
+        is_local: true,
+        date_start: r.booking_date || null,
+        date_end: r.booking_date || null,
+        // expected_total is what the day is worth; agreed_rate alone would
+        // under-report an hourly day.
+        fee: toNum(r.expected_total) ?? toNum(r.agreed_rate),
+        assignment_status: r.status,
+        quote_ops_status: null,
+        pipeline_status: null,
+        hh_job_number: null,
+        job_id: null,
+        quote_id: null,
+        venue_name: null,
+        client_name: null,
+        vehicle_reg: null,
+        run_combined_fee: null,
+      });
+    }
+
     items.sort((a, b) => {
       if (!a.date_start && !b.date_start) return 0;
       if (!a.date_start) return 1;
@@ -972,7 +1107,7 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
     // date_start falls in the current calendar year — past AND booked-ahead
     // within this year both count (deliberately simple).
     const DEAD = new Set(['cancelled', 'declined']);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = ukToday();
     const yearPrefix = today.slice(0, 4);
 
     let totalGigs = 0;
@@ -1004,6 +1139,63 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
     });
   } catch (error) {
     console.error('Freelancer history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Portal sign-in (FREELANCER-PORTAL-SPEC §7): the Freelancer tab's card ──
+// Anyone on the staff team (jon, Oct 2026). Both actions are audit-logged;
+// the code itself never is.
+
+async function portalPerson(id: string) {
+  const r = await query(
+    `SELECT id, is_freelancer, portal_password_hash IS NOT NULL AS has_password
+       FROM people WHERE id = $1 AND is_deleted = false`,
+    [id]
+  );
+  return r.rows[0] as { id: string; is_freelancer: boolean; has_password: boolean } | undefined;
+}
+
+router.get('/:id/portal-sign-in', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    res.json({ data: await portalSignInStatus(person.id) });
+  } catch (error) {
+    console.error('Portal sign-in status error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// "Give them a sign-in code": for a freelancer whose code email isn't arriving.
+// Read it out on the phone; they still need their password.
+router.post('/:id/portal-sign-in/code', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    if (!person.has_password) {
+      res.status(400).json({ error: "They haven't set up a portal login yet, so a code won't help. They need to register first." });
+      return;
+    }
+    const issued = await issuePortalCodeForStaff(person.id, req.user!.id);
+    await logAudit(req.user!.id, 'people', person.id, 'portal_sign_in_code', null, { expires_minutes: issued.expiresMinutes });
+    res.json({ data: issued });
+  } catch (error) {
+    console.error('Portal sign-in code error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// "Sign them out everywhere": forgets every remembered phone and ends every portal session.
+router.post('/:id/portal-sign-in/sign-out', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    await portalSignOutEverywhere(person.id);
+    await logAudit(req.user!.id, 'people', person.id, 'portal_sign_out_everywhere', null, {});
+    res.json({ data: { ok: true } });
+  } catch (error) {
+    console.error('Portal sign-out everywhere error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

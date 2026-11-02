@@ -11,48 +11,80 @@
 
 import { useState, useEffect } from 'react';
 import { api } from '../../services/api';
+import { useAuthedFileUrl } from '../../hooks/useAuthedFileUrl';
 
 export interface ReceiptLike {
   receipt_r2_key?: string | null;
   receipt_filename?: string | null;
   supplier_name?: string | null;
+  /** Extra evidence filed with the same payable — surfaced as a "+N" pip. */
+  supporting_documents?: { r2_key: string; filename: string }[] | null;
+}
+
+// Receipts are stored as `files/attachments/<uploader>/<uuid><ext>`, with the
+// extension carried over from the original upload (see routes/files.ts), so the
+// key alone tells us whether a thumbnail is even possible. That matters: a PDF
+// can't be drawn in a 32px box, and downloading it to work that out is what made
+// the Costs list pull ~100MB over ~90 requests before it settled.
+const IMAGE_EXT = /\.(jpe?g|png|gif|webp|avif|bmp|heic|heif)$/i;
+function looksLikeImage(cost: ReceiptLike): boolean {
+  return IMAGE_EXT.test(cost.receipt_r2_key || '') || IMAGE_EXT.test(cost.receipt_filename || '');
 }
 
 /**
  * Small receipt thumbnail. Image → thumbnail, PDF/other → 📎 icon.
  * Click opens the lightbox. Renders nothing when there's no receipt on file —
  * callers that want a "no receipt" affordance should render their own.
+ *
+ * Only image receipts are fetched, and only once the row is actually on screen:
+ * the Costs list renders up to 200 rows and every fetch here pulls the FULL
+ * original (a 3MB phone photo) through the API. Until real thumbnails exist
+ * (files.ts `thumbnail_key`, still a Phase B stub) that restraint is the only
+ * thing keeping the page quick.
  */
 export function ReceiptThumb({ cost, onOpen, size = 'md' }: {
   cost: ReceiptLike;
   onOpen: () => void;
   size?: 'sm' | 'md';
 }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [isImage, setIsImage] = useState(false);
   const key = cost.receipt_r2_key;
-  useEffect(() => {
-    if (!key) return;
-    let objUrl = ''; let cancelled = false;
-    api.blob(`/files/download?key=${encodeURIComponent(key)}`)
-      .then(({ blob, contentType }) => {
-        if (cancelled) return;
-        if (contentType.startsWith('image/')) {
-          setIsImage(true);
-          objUrl = URL.createObjectURL(blob);
-          setUrl(objUrl);
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
-  }, [key]);
+  // `enabled` is the cheap half: a PDF receipt never makes a thumbnail, so it
+  // is never fetched. The rest — waiting for the row to scroll into range,
+  // aborting if it scrolls away again — is the hook's job.
+  const { ref, url, contentType } = useAuthedFileUrl(key, { enabled: looksLikeImage(cost) });
+  // Neither the extension nor the content type proves the BROWSER can draw it.
+  // A .heic straight off an iPhone is a genuine image/heic and every browser
+  // but Safari refuses it, which rendered an empty box where the 📎 belonged.
+  // Same story for a truncated upload. Only the decode is the last word, so
+  // mirror DocumentThumb and keep a local flag for it. (Same-shape state as
+  // the hook's own `failed`, which only covers the fetch.)
+  const [imgFailed, setImgFailed] = useState(false);
+  // A new file in the same slot deserves a fresh attempt.
+  useEffect(() => { setImgFailed(false); }, [url]);
+  // The extension got us this far; the content type is what decides. A
+  // mislabelled upload falls back to the 📎 rather than a broken <img>.
+  const thumb = url && !imgFailed && contentType.startsWith('image/') ? url : null;
+
   if (!key) return null;
   const box = size === 'sm' ? 'w-6 h-6' : 'w-8 h-8';
+  // Supporting docs are extra evidence on the same payable. A count pip is
+  // enough here — the documents themselves are managed in the capture modal.
+  const extra = cost.supporting_documents?.length ?? 0;
   return (
-    <button onClick={onOpen} title="View receipt"
-      className={`shrink-0 ${box} rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400`}>
-      {isImage && url ? <img src={url} alt="receipt" className="w-full h-full object-cover" /> : <span className="text-sm">📎</span>}
-    </button>
+    <span ref={ref} className="relative inline-flex shrink-0">
+      <button onClick={onOpen} title={extra ? `View receipt (+${extra} supporting)` : 'View receipt'}
+        className={`shrink-0 ${box} rounded border border-gray-200 overflow-hidden bg-gray-50 flex items-center justify-center hover:border-purple-400`}>
+        {thumb
+          ? <img src={thumb} alt="receipt" className="w-full h-full object-cover" onError={() => setImgFailed(true)} />
+          : <span className="text-sm">📎</span>}
+      </button>
+      {extra > 0 && (
+        <span className="absolute -top-1 -right-1 px-1 min-w-[14px] text-[9px] leading-[14px] text-center font-semibold
+                         text-white bg-purple-600 rounded-full pointer-events-none">
+          +{extra}
+        </span>
+      )}
+    </span>
   );
 }
 

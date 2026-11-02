@@ -1,12 +1,17 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { buildProgressStrips, StripPhase } from '../services/job-progress-strip';
 import { getRoster } from '../services/studio-sitter';
 import { HELD_ITEM_SELECT } from '../services/held-item-query';
+import { ukToday } from '../services/uk-date';
+import { nonLeadMemberIds } from '../services/job-groups';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // SQL fragment: a HireHop-status-6 ("Returned Incomplete") job is only genuinely
 // checking in once its hire is actually due back (return_date within a day, or
@@ -56,6 +61,8 @@ router.post('/job-progress', async (req: AuthRequest, res: Response) => {
 // ── GET /api/dashboard/operations — aggregated operational data for Command Centre ──
 router.get('/operations', async (req: AuthRequest, res: Response) => {
   try {
+    // Quote options: alternative quotes for one enquiry count once (their lead).
+    const nonLeadOptionIds = await nonLeadMemberIds();
     const results = await Promise.all([
       // 1. Today's schedule — going out
       // Jobs with out_date or job_date = today, NOT yet actually on hire.
@@ -385,7 +392,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         FROM fleet_vehicles
       `),
 
-      // 13. Pipeline stats
+      // 13. Pipeline stats — enquiry stages only, dismissed hidden, one per
+      // quote group: the same jobs as the Pipeline page header. The previous
+      // blacklist (everything but confirmed / lost) put 1,581 completed jobs
+      // and every prepped / dispatched / returned one on this card.
       query(`
         SELECT
           pipeline_status,
@@ -393,20 +403,22 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           COALESCE(SUM(job_value), 0) as total_value
         FROM jobs
         WHERE is_deleted = false
-          AND pipeline_status IS NOT NULL
-          AND pipeline_status NOT IN ('confirmed', 'lost')
+          AND dismissed_at IS NULL
+          AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+          AND NOT (id = ANY($1::uuid[]))
         GROUP BY pipeline_status
         ORDER BY pipeline_status
-      `),
+      `, [nonLeadOptionIds]),
 
-      // 14. Pipeline total active value
+      // 14. Pipeline total active value — the same jobs as 13.
       query(`
         SELECT COALESCE(SUM(job_value), 0) as total
         FROM jobs
         WHERE is_deleted = false
-          AND pipeline_status NOT IN ('confirmed', 'lost')
-          AND pipeline_status IS NOT NULL
-      `),
+          AND dismissed_at IS NULL
+          AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+          AND NOT (id = ANY($1::uuid[]))
+      `, [nonLeadOptionIds]),
 
       // 15. Stat card counts.
       // going_out_count uses the same status filter as the Today section
@@ -425,15 +437,27 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
             OR (return_date IS NOT NULL AND return_date::date = CURRENT_DATE + 1)
           )) as coming_back_count,
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (4, 5) AND return_date IS NOT NULL AND return_date::date < CURRENT_DATE) as overdue_count,
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status NOT IN ('confirmed', 'lost') AND next_chase_date IS NOT NULL AND next_chase_date <= CURRENT_DATE) as chases_due_count,
+          -- Chases due: the same rule as the Pipeline list the card links to
+          -- (/pipeline?chase=due) — enquiry stages only, dismissed hidden, one
+          -- per quote group, overdue or due today. The previous blacklist
+          -- counted dispatched and completed jobs still carrying an old chase
+          -- date (29 of 33 on 22 Oct 2026), which the list never showed.
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+             AND dismissed_at IS NULL
+             AND next_chase_date IS NOT NULL AND next_chase_date <= CURRENT_DATE
+             AND NOT (id = ANY($1::uuid[]))) as chases_due_count,
           -- Pre-confirmation statuses only. Whitelist matches the Pipeline page
           -- columns (Enquiries / Chasing-derived / Provisional / Paused) and the
           -- chase-model definition in CLAUDE.md. The previous blacklist swept in
           -- every operational + historical job (prepping / prepped / dispatched /
           -- returned / completed / cancelled) and reported ~1100+ on a fleet
-          -- with ~40 actual open enquiries.
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')) as open_enquiries_count
-      `),
+          -- with ~40 actual open enquiries. Dismissed enquiries are hidden from
+          -- the Pipeline page, so they are left out here too (Oct 2026) — the
+          -- card then agrees with the Pipeline section's "open enquiries".
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+             AND dismissed_at IS NULL
+             AND NOT (id = ANY($1::uuid[]))) as open_enquiries_count
+      `, [nonLeadOptionIds]),
 
       // 16. Today's transport quotes (departures with crew/vehicle info)
       query(`
@@ -700,13 +724,14 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // The "buried" surface the cost lifecycle work is about — staff log a
       // refuel recharge at check-in and it sits unresolved. Scoped to active /
       // finished hires so dead enquiries don't surface; internal jobs excluded.
+      // One row per job a recharge bills (v_cost_recharges): a split cost
+      // recharged to three jobs is three to resolve.
       query(`
-        SELECT COUNT(*) AS count, COALESCE(SUM(COALESCE(c.recharge_amount, c.amount_net, c.amount_gross, 0)), 0) AS total_amount
-        FROM costs c
-        JOIN jobs j ON j.id = c.job_id
-        WHERE c.recharge_mode <> 'none'
-          AND COALESCE(c.recharge_status, 'pending') = 'pending'
-          AND c.cost_intent IS DISTINCT FROM 'quote_actual'
+        SELECT COUNT(*) AS count, COALESCE(SUM(COALESCE(r.recharge_amount, r.share_net, r.share_gross, 0)), 0) AS total_amount
+        FROM v_cost_recharges r
+        JOIN jobs j ON j.id = r.job_id
+        WHERE r.is_pending
+          AND r.cost_intent IS DISTINCT FROM 'quote_actual'
           AND COALESCE(j.is_internal, false) = false
           AND j.pipeline_status NOT IN ('lost', 'cancelled', 'new_enquiry', 'quoting', 'paused', 'provisional')
       `),
@@ -806,7 +831,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
     // with none assigned (Rehearsals module). Amber dashboard bucket. Non-fatal.
     let sitterGaps: { date: string; jobs: string[] }[] = [];
     try {
-      const _from = new Date().toISOString().slice(0, 10);
+      const _from = ukToday();
       const _toD = new Date(); _toD.setUTCDate(_toD.getUTCDate() + 14);
       const roster = await getRoster(_from, _toD.toISOString().slice(0, 10));
       sitterGaps = roster
@@ -848,6 +873,17 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       `);
       backlineToBuy = parseInt(bb.rows[0].count as string, 10) || 0;
     } catch { /* non-fatal — pre-migration or table absent */ }
+
+    // Leads to look at (Lead Finder) — new, still-sellable, good-scoring leads.
+    // The definition lives in services/leads/attention.ts; blue, self-hiding
+    // bucket. Defensive so a pre-271 DB can't 500 the dashboard.
+    let leadAttention: { total: number; items: unknown[] } = { total: 0, items: [] };
+    try {
+      const { getLeadAttention } = await import('../services/leads/attention');
+      leadAttention = await getLeadAttention();
+    } catch (err) {
+      console.warn('Dashboard leads attention skipped:', (err as Error).message);
+    }
 
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
@@ -1016,6 +1052,16 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       console.warn('Dashboard PCN attention skipped:', (err as Error).message);
     }
 
+    // ── Possible-claim check dates (docs/INCIDENT-CLAIMS-SPEC.md §9.3) ─────
+    // Defensive, like the PCN block: a pre-migration env can't 500 the dashboard.
+    let claimAttention = { check_overdue: [] as unknown[], check_overdue_total: 0, to_review: [] as unknown[], chase_exhausted: [] as unknown[] };
+    try {
+      const { getClaimAttentionBuckets } = await import('../services/incident-claims');
+      claimAttention = await getClaimAttentionBuckets();
+    } catch (err) {
+      console.warn('Dashboard claim attention skipped:', (err as Error).message);
+    }
+
     res.json({
       stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
       on_today: onToday,
@@ -1089,6 +1135,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // ── Backline to buy (demand tracker) ──
         // High-priority gaps with no acquisition plan yet — purchasing prompt.
         backline_to_buy_count: backlineToBuy,
+        // ── Leads to look at (Lead Finder) — full count + top 5 ──
+        leads_to_review_count: leadAttention.total,
+        leads_to_review: leadAttention.items,
         // ── Outstanding staff documents (managers) ──
         // Pending/lapsed tracked-document assignments across active staff.
         staff_documents_outstanding_count: staffDocsOutstanding,
@@ -1102,6 +1151,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         pcn_ready_to_transfer: pcnAttention.ready_to_transfer,
         pcn_deadline_approaching: pcnAttention.deadline_approaching,
         pcn_awaiting_action: pcnAttention.awaiting_action,
+        // ── Possible claims whose check date has passed or is missing ──
+        claim_check_overdue: claimAttention.check_overdue,
+        claim_check_overdue_total: claimAttention.check_overdue_total,
+        claim_to_review: claimAttention.to_review,
+        claim_chase_exhausted: claimAttention.chase_exhausted,
       },
       transport_ops: {
         summary: transportOpsSummary,

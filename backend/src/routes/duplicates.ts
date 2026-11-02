@@ -1,9 +1,14 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
+import { ukToday } from '../services/uk-date';
+import { findSimilarOrganisations, findSimilarPeople } from '../services/address-book-similar';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 interface DuplicateGroup {
   match_type: string;
@@ -19,6 +24,23 @@ interface DuplicateGroup {
     organisations: string[];
   }>;
 }
+
+// GET /api/duplicates/similar — "did you mean…?" while creating a person or org.
+// ?type=person&first=&last=&phone=  |  ?type=organisation&name=   (exclude_id optional)
+// Warn-only; see services/address-book-similar.ts.
+router.get('/similar', async (req: AuthRequest, res: Response) => {
+  try {
+    const q = (k: string) => (typeof req.query[k] === 'string' ? (req.query[k] as string) : undefined);
+    const excludeId = q('exclude_id') && /^[0-9a-f-]{36}$/i.test(q('exclude_id')!) ? q('exclude_id') : undefined;
+    const data = q('type') === 'organisation'
+      ? await findSimilarOrganisations({ name: q('name'), excludeId })
+      : await findSimilarPeople({ first: q('first'), last: q('last'), phone: q('phone'), excludeId });
+    res.json({ data });
+  } catch (error) {
+    console.error('Similar records error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // GET /api/duplicates — find potential duplicate people
 router.get('/', async (_req: AuthRequest, res: Response) => {
@@ -126,7 +148,8 @@ router.get('/', async (_req: AuthRequest, res: Response) => {
 });
 
 // POST /api/duplicates/merge — merge two people records
-router.post('/merge', async (req: AuthRequest, res: Response) => {
+// Manager-tier (B.2, Oct 2026): a merge soft-deletes a person and moves their history.
+router.post('/merge', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const { keep_id, merge_id } = req.body;
 
@@ -217,7 +240,7 @@ router.post('/merge', async (req: AuthRequest, res: Response) => {
     // that keeps the same email is a landmine: any email->person lookup that
     // doesn't filter is_deleted (e.g. portal login) can bind to the dead row.
     // The original email is preserved in the audit note.
-    const mergedOn = new Date().toISOString().split('T')[0];
+    const mergedOn = ukToday();
     const mergedEmailNote = merge.email ? ` (was ${merge.email})` : '';
     await query(
       `UPDATE people SET is_deleted = true, email = NULL, notes = COALESCE(notes, '') || $1 WHERE id = $2`,

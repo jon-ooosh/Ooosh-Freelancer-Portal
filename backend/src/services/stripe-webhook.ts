@@ -12,6 +12,14 @@
  *   charge.refunded                  → email info@ (notify only; staff reconcile).
  *   refund.updated / charge.refund.updated (status=failed) → email info@ (refund
  *                                       bounced at the issuer — reimburse another way).
+ *   terminal.reader.action_succeeded/_failed, payment_intent.succeeded/_payment_failed
+ *                                     → card-reader payments (services/stripe-terminal.ts);
+ *                                       anything that isn't a reader payment is ignored.
+ *
+ * Two signing secrets: the live endpoint's (STRIPE_WEBHOOK_SECRET) and, while the
+ * card reader is being tested, the TEST-mode endpoint's (STRIPE_TEST_WEBHOOK_SECRET).
+ * A test-mode event only ever reaches the card-reader handler — never the live
+ * excess / refund / dispute handlers.
  *
  * Idempotency: stripe_events table. A row is inserted on receipt; processed_at is
  * stamped only after the handler succeeds. A failed handler returns 500 so Stripe
@@ -22,11 +30,12 @@ import { query } from '../config/database';
 import { getStripeClient, isStripeConfigured } from '../config/stripe';
 import { emailService } from './email-service';
 import { markExcessReleased } from './excess-preauth';
+import { handleTerminalWebhookEvent, isTerminalEventType } from './stripe-terminal';
 
 // Minimal structural types for the webhook payload fields we read. The Stripe v22
 // SDK doesn't merge its resource types into the default export's namespace, and
 // the codebase avoids naming `Stripe.*` types, so we type just what we use.
-type StripeEventLike = { id: string; type: string; data: { object: unknown } };
+type StripeEventLike = { id: string; type: string; livemode?: boolean; data: { object: unknown } };
 type PaymentIntentObj = { id: string };
 type DisputeObj = {
   id: string;
@@ -90,13 +99,17 @@ async function findExcessByPaymentIntent(pi: string | null): Promise<ExcessRow |
  *    the reimbursed CHILD. The refund was actually handled downstream — chase the
  *    chain by `hh_deposit_id` and, if a sibling was reimbursed, name that hire.
  * Only genuinely-unresolved outcomes keep the "reconcile manually" nudge.
+ *
+ * `actionNeeded` decides whether the alert email is sent at all (Sep 2026):
+ * a "recorded, no action needed" email for every OP-initiated reimburse was
+ * pure noise, so only outcomes a human must act on reach the inbox.
  */
 async function describeUnwindNote(
   result: { updated: boolean; newStatus: string; reason?: string },
   ex: ExcessRow
-): Promise<string> {
+): Promise<{ note: string; actionNeeded: boolean }> {
   if (result.updated) {
-    return `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`;
+    return { note: `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`, actionNeeded: false };
   }
 
   const reason = result.reason || '';
@@ -115,9 +128,12 @@ async function describeUnwindNote(
       ).catch(() => ({ rows: [] as Array<{ hirehop_job_id: number | null }> }));
       reimbursedOn = sib.rows[0]?.hirehop_job_id ?? null;
     }
-    return reimbursedOn
-      ? `This excess was rolled forward to hire #${reimbursedOn} and reimbursed there — no action needed.`
-      : `This excess was rolled forward to a later hire; the refund is tracked on that hire — no action needed.`;
+    return {
+      note: reimbursedOn
+        ? `This excess was rolled forward to hire #${reimbursedOn} and reimbursed there — no action needed.`
+        : `This excess was rolled forward to a later hire; the refund is tracked on that hire — no action needed.`,
+      actionNeeded: false,
+    };
   }
 
   // Other benign terminal / already-recorded outcomes.
@@ -129,11 +145,11 @@ async function describeUnwindNote(
     reason === 'record already released' ||
     reason === 'record already waived'
   ) {
-    return `OP excess already reflects this refund (${reason}) — no action needed.`;
+    return { note: `OP excess already reflects this refund (${reason}) — no action needed.`, actionNeeded: false };
   }
 
   // Genuinely unresolved (needed/pending/not_required/excess-not-found, etc.).
-  return `OP excess not changed: ${reason}. Reconcile manually if needed.`;
+  return { note: `OP excess not changed: ${reason}. Reconcile manually if needed.`, actionNeeded: true };
 }
 
 function jobRef(ex: ExcessRow | null): string {
@@ -227,7 +243,6 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
     case 'charge.refunded': {
       const charge = event.data.object as ChargeObj;
       const piRef = piId(charge.payment_intent);
-      const refunded = (charge.amount_refunded / 100).toFixed(2);
 
       // Use the latest refund's id for dedup — OP-initiated reimburse (Jun 2026)
       // pre-records a refund_leg keyed `stripe_refund_<id>` so this webhook
@@ -242,14 +257,35 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
         : `stripe_charge_${charge.id}`;
       const stripeRefundId = latestRefund?.id || null;
 
+      // The amount this event is about is THIS refund, not
+      // `charge.amount_refunded` — that field is the CUMULATIVE refunded total
+      // on the charge, so a second partial refund reports the running total and
+      // unwinding it would re-apply the first refund on top of itself. Each leg
+      // is one refund. Fall back to the cumulative figure only when Stripe
+      // didn't send the refunds list (defensive — charge.refunded always does).
+      const refunded = (latestRefund ? latestRefund.amount / 100 : charge.amount_refunded / 100).toFixed(2);
+
       // Two paths arrive here: refund of an EXCESS (stripe_payment_intent_id
       // on job_excess matches) or refund of a HIRE PAYMENT (stripe_payment_intent
       // on job_payments matches the original payment). Try excess first, then
       // hire. Differentiate the email content so staff aren't told "no matching
       // excess" when it was a hire payment refund the whole time.
+      // A card-reader shop sale refunded from the till (shop-sales.ts reverseShopSale):
+      // the till already recorded it and the drain handles HireHop — nothing to tell info@.
+      if (piRef) {
+        const shop = await query(`SELECT id FROM shop_sales WHERE stripe_payment_intent = $1 LIMIT 1`, [piRef]);
+        if (shop.rows.length > 0) {
+          console.log(`[stripe-webhook] charge.refunded for shop sale ${shop.rows[0].id} (card reader) — recorded by the till, no action`);
+          break;
+        }
+      }
+
       const ex = await findExcessByPaymentIntent(piRef);
       let subject: string;
       let bodyLines: string[];
+      // Only email when a human has to act. Benign outcomes (OP already
+      // recorded it, or recorded it automatically) are logged, not emailed.
+      let actionNeeded = true;
 
       if (ex && piRef) {
         // ── Excess refund path ──
@@ -264,7 +300,9 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
             method: 'stripe_gbp',
             notes: `Stripe charge ${charge.id}`,
           });
-          unwindNote = await describeUnwindNote(result, ex);
+          const described = await describeUnwindNote(result, ex);
+          unwindNote = described.note;
+          actionNeeded = described.actionNeeded;
         } catch (err) {
           console.error('[stripe-webhook] charge.refunded excess unwind failed:', err);
           unwindNote = `OP excess auto-unwind failed — please reconcile manually on the Money tab.`;
@@ -314,6 +352,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
           }
 
           if (alreadyRecorded) {
+            actionNeeded = false;
             subject = `Stripe refund recorded — £${refunded} (already on OP)`;
             bodyLines = [
               `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
@@ -341,6 +380,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
                   `Auto-recorded from Stripe webhook (charge ${charge.id})`,
                 ]
               );
+              actionNeeded = false;
               subject = `Stripe hire payment refund recorded — £${refunded}`;
               bodyLines = [
                 `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
@@ -365,9 +405,21 @@ async function processStripeEvent(event: StripeEventLike): Promise<boolean> {
         ];
       }
 
-      await alertInfo(subject, bodyLines);
+      if (actionNeeded) {
+        await alertInfo(subject, bodyLines);
+      } else {
+        console.log(`[stripe-webhook] ${subject} — no action needed, alert email suppressed (charge ${charge.id})`);
+      }
       break;
     }
+    // Card-reader payments. Returns false for anything that isn't one (a portal
+    // PaymentIntent, say), so the receipt row is dropped exactly as for `default`.
+    case 'terminal.reader.action_succeeded':
+    case 'terminal.reader.action_failed':
+    case 'payment_intent.succeeded':
+    case 'payment_intent.payment_failed':
+    case 'payment_intent.amount_capturable_updated':
+      return handleTerminalWebhookEvent(event);
     default:
       // Subscribed to a narrow set; ignore anything else quietly.
       console.log(`[stripe-webhook] Ignoring unhandled event type: ${event.type}`);
@@ -393,10 +445,22 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
     // signature and returns the parsed, typed event (we read it structurally).
     event = getStripeClient().webhooks.constructEvent(req.body, sig as string, secret);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('[stripe-webhook] signature verification failed:', msg);
-    res.status(400).send(`Webhook signature verification failed`);
-    return;
+    // Not signed by the live endpoint — try the test endpoint's secret (card-reader
+    // testing). Verification is local, so the live client does the check for both.
+    const testSecret = process.env.STRIPE_TEST_WEBHOOK_SECRET;
+    let testEvent: StripeEventLike | null = null;
+    if (testSecret) {
+      try {
+        testEvent = getStripeClient().webhooks.constructEvent(req.body, sig as string, testSecret);
+      } catch { /* fall through to the 400 below */ }
+    }
+    if (!testEvent) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[stripe-webhook] signature verification failed:', msg);
+      res.status(400).send(`Webhook signature verification failed`);
+      return;
+    }
+    event = testEvent;
   }
 
   try {
@@ -411,7 +475,11 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       [event.id, event.type]
     );
 
-    const handled = await processStripeEvent(event);
+    // A test-mode event may only reach the card-reader handler: every other handler
+    // here acts on live money (excess holds, refunds, disputes).
+    const handled = event.livemode === false && !isTerminalEventType(event.type)
+      ? false
+      : await processStripeEvent(event);
 
     if (handled) {
       await query(`UPDATE stripe_events SET processed_at = NOW() WHERE id = $1`, [event.id]);
