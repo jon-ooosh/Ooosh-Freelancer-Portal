@@ -68,7 +68,8 @@ const LEAD_COLUMNS = `
   matched_organisation_id, match_confidence, match_candidates, match_via, rejected_org_ids, stream, contacts,
   client_history, history_scored_at, known_contacts,
   status, status_reason, status_note, assigned_to, converted_job_id, created_at, updated_at,
-  first_run_id, contacted_at, researched_at, research_status, external_links`;
+  first_run_id, contacted_at, researched_at, research_status, external_links,
+  watch_id, tour_dates, uk_position`;
 
 // Same columns, prefixed for the list query's joins.
 const LEAD_COLUMNS_PREFIXED = LEAD_COLUMNS.split(',').map((c) => `l.${c.trim()}`).join(', ');

@@ -407,5 +407,7 @@ export interface LeadToReview {
   origin_country: string | null;
   matched_org_name: string | null;
   client_history: { enquiries: number; booked: number; lost: number } | null;
+  /** Found by a band watch (TOUR-FINDER-SPEC §21) — listed first. */
+  watched?: boolean;
 }
 

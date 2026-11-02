@@ -6,7 +6,8 @@
  *
  * Events: found · matched · match_confirmed · match_rejected · researched ·
  * research_failed · address_book · contact_added · contact_removed · outreach ·
- * enquiry · dismissed · restored · status
+ * enquiry · dismissed · restored · status · watch_found (a band watch found the
+ * tour) · watched (a tour the search found turned out to be a watched band's)
  */
 import { query } from '../../config/database';
 

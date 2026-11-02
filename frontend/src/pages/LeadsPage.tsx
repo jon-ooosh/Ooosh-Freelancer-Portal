@@ -16,8 +16,10 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import {
   Lead, LeadRun, LeadStage, STAGE_TABS, REASON_LABEL, EVENT_SHORT, fmtDate, fmtDateYear,
-  tourJobBadge, isLiveTourJob,
+  tourJobBadge, isLiveTourJob, UK_POSITION_LABEL, tourCountries,
 } from '../components/leads/leadTypes';
+import WatchedBandsPanel from '../components/leads/WatchedBandsPanel';
+import WatchedLeadPeople from '../components/leads/WatchedLeadPeople';
 import LeadTourJobs from '../components/leads/LeadTourJobs';
 import DismissLeadModal from '../components/leads/DismissLeadModal';
 import RunSearchModal from '../components/leads/RunSearchModal';
@@ -118,7 +120,16 @@ export default function LeadsPage() {
   // Tab + filters come from the URL (validated — a bad value falls back to the default).
   const tabParam = searchParams.get('tab');
   const tab: LeadStage = STAGES.includes(tabParam as LeadStage) ? (tabParam as LeadStage) : 'review';
+  // The Watched bands tab is the band watch list, not a lead stage (TOUR-FINDER-SPEC §21).
+  const watchedTab = tabParam === 'watched';
   const filters = useMemo(() => filtersFromParams(searchParams), [searchParams]);
+  const openWatched = () => {
+    const p = new URLSearchParams(searchParams);
+    p.set('tab', 'watched');
+    p.delete('stale');
+    setSearchParams(p, { replace: true });
+    setExpanded(null);
+  };
   const setTab = (t: LeadStage) => {
     const p = new URLSearchParams(searchParams);
     if (t === 'review') p.delete('tab'); else p.set('tab', t);
@@ -397,12 +408,18 @@ export default function LeadsPage() {
       <div className="flex gap-1 border-b border-gray-200 mb-3 overflow-x-auto">
         {STAGE_TABS.map((t) => (
           <button key={t.key} onClick={() => setTab(t.key)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap ${tab === t.key ? 'border-[#7B5EA7] text-[#7B5EA7]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+            className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap ${tab === t.key && !watchedTab ? 'border-[#7B5EA7] text-[#7B5EA7]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
             {t.label} <span className="text-xs text-gray-400">{counts[t.key]}</span>
           </button>
         ))}
+        <button onClick={openWatched}
+          className={`ml-auto px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap ${watchedTab ? 'border-[#7B5EA7] text-[#7B5EA7]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+          title="Bands we're watching for their next tour">
+          👁 Watched bands
+        </button>
       </div>
 
+      {watchedTab ? <WatchedBandsPanel canManage={canRun} /> : (<>
       <LeadFilters value={filters} onChange={setFilters} leads={leads} runs={runs}
         showStale={tab === 'contacted'} shown={shown.length} total={afterStarted.length} />
 
@@ -462,6 +479,9 @@ export default function LeadsPage() {
                       {l.stream === 'warm' && (
                         <span className="ml-1.5 align-middle text-[10px] font-semibold uppercase tracking-wide bg-green-100 text-green-700 px-1.5 py-0.5 rounded" title="A band we know — remarketing">Warm</span>
                       )}
+                      {l.watch_id && (
+                        <span className="ml-1 inline-block whitespace-nowrap align-middle text-[10px] font-semibold uppercase tracking-wide bg-purple-100 text-[#7B5EA7] px-1.5 py-0.5 rounded" title="A band we asked to watch for their next tour">👁 Watched</span>
+                      )}
                       {l.matched_organisation_id && l.matched_org_name && (
                         <Link to={`/organisations/${l.matched_organisation_id}`} onClick={(e) => e.stopPropagation()}
                           className={`block text-xs hover:underline ${l.stream === 'warm' ? 'text-green-700' : 'text-gray-500'}`}>
@@ -516,6 +536,11 @@ export default function LeadsPage() {
                     <td className="px-3 py-2 whitespace-nowrap text-gray-600">
                       {fmtDate(l.first_date)} – {fmtDate(l.last_date)}
                       {started && <div className="text-[10px] text-gray-400">already started</div>}
+                      {l.watch_id && (l.tour_dates?.length ?? 0) > 0 && (
+                        <div className="text-[10px] text-gray-500" title={UK_POSITION_LABEL[l.uk_position ?? 'none']}>
+                          {l.tour_dates!.length} dates · {tourCountries(l.tour_dates)}
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-right text-gray-600">{l.uk_date_count}</td>
                     <td className="px-3 py-2 text-center whitespace-nowrap">
@@ -594,6 +619,13 @@ export default function LeadsPage() {
                               <p className="mb-2"><span className="text-gray-400">Dismiss note:</span> {l.status_note}</p>
                             )}
                             {l.ai_summary && <p className="mb-2 text-gray-700">{l.ai_summary}</p>}
+                            {l.watch_id && (l.tour_dates?.length ?? 0) > 0 && (
+                              <p className="mb-2">
+                                <span className="text-gray-400">Tour ({UK_POSITION_LABEL[l.uk_position ?? 'none']}):</span>{' '}
+                                {l.tour_dates!.map((d) => `${fmtDate(d.date)} ${d.city || d.venue} (${d.country === 'GB' ? 'UK' : d.country})`).join(' · ')}
+                              </p>
+                            )}
+                            {l.watch_id && <WatchedLeadPeople leadId={l.id} />}
                             {(l.client_history?.lost_reasons?.length ?? 0) > 0 && (
                               <p className="mb-2"><span className="text-gray-400">Why we lost them:</span> {(l.client_history?.lost_reasons ?? []).map((r) => `${r.reason} ×${r.count}`).join(', ')}</p>
                             )}
@@ -649,6 +681,7 @@ export default function LeadsPage() {
           </table>
         </div>
       )}
+      </>)}
 
       {modal?.kind === 'run' && (
         <RunSearchModal

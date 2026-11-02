@@ -2,7 +2,8 @@
 
 > **Status (Oct 2026): LIVE under Jobs → Leads.** §1–13 are the original design; §14–19 are
 > what was built on top of it, in order. **§20 is the current state and what's left — read
-> that first.** §21 is the band watch (DRAFT, not built): watching a known band for its next tour.
+> that first.** §21 is the band watch: watching a known band for its next tour (steps 1–2
+> built Nov 2026 — §21.7 is what shipped).
 
 ## 1. Motivation
 
@@ -503,16 +504,18 @@ jon asked whether the Leads date bug existed elsewhere. Findings:
   FROM a lead (`converted_job_id`), never linked tour jobs.
 
 **Open / next candidates:**
-- **Band watch** (§21) — watch a known band and get a warm lead when it next tours. Agreed, not built.
+- **Band watch** (§21) — watch a known band and get a warm lead when it next tours. Steps 1–2
+  built (§21.7); next is step 3, the back catalogue, then step 4, the Claude web check.
 - **Outreach email drafting** (§6 Phase 7) — folds into the auto-chase "voice" work on the
   Enquiries pipeline (AUTO-CHASE-SPEC) rather than being built separately.
 - **MusicBrainz value check** — jon expects little from it. Look at how often `external_links`
   carries MusicBrainz-only links; drop it if it adds nothing.
 - **SQL `CURRENT_DATE` in UK terms** — only if a midnight–1am BST edge ever bites (§19.1).
 
-## 21. Band watch — "tell me when they're next over" (DRAFT, Oct 2026 — not built)
+## 21. Band watch — "tell me when they're next over" (steps 1–2 BUILT, Nov 2026)
 
-Agreed with jon, 26–29 Oct 2026. Nothing below is built yet.
+Agreed with jon, 26–29 Oct 2026. Build steps 1–2 (the watch list and the Ticketmaster check)
+shipped in Nov 2026 — §21.7 is what was built and where it differs from this design.
 
 ### 21.1 Why
 
@@ -652,5 +655,46 @@ Structured output (`readStructuredJson()`): `status` (`dates` | `announced_no_da
 ### 21.6 Open
 
 - **Bandsintown access** — jon to ask.
-- **Who gets the bell when the person who ticked the watch has left?** Probably the managers;
-  decide at build.
+- ~~Who gets the bell when the person who ticked the watch has left?~~ Decided at build: every
+  active manager-tier user (§21.7).
+
+### 21.7 What steps 1–2 built (Nov 2026)
+
+Migration 324 (`band_watches`; `leads.watch_id`, `tour_dates`, `uk_position`; setting
+`band_watch_enabled`). Logic in `services/leads/band-watch.ts` (pure tour rules in
+`watch-tours.ts`, tested), routes in `routes/band-watches.ts` (`/api/band-watches`).
+
+- **The tick** (`components/leads/WatchBandTick.tsx`, ticked by default) is on FOUR doors, not
+  three: the Job page's Lost and Completed modal, the **Kanban's Lost modal** (`PipelinePage.tsx`,
+  a common way to lose an enquiry), and the Cancel modal. It sends `watch_band_org_id` with the
+  status change; `routes/pipeline.ts` / `routes/cancellations.ts` call
+  `startWatchFromCloseOut()`, which never fails the close-out and ignores an alternative-quote loss
+  (the tick is hidden for one too). It starts UNticked for a band someone stopped watching, and
+  when the job has no Band org and its client is plainly a company (management, promoter, venue,
+  label, agency, festival, supplier, hire company, booking agent) — then it asks for the band. A
+  non-band that still gets watched has "Not a band — stop watching" on the Match these list.
+- **The org page** has "👁 Watch for tours" (shown for types band / client / unknown / other, or
+  whenever a watch exists), with Stop.
+- **Leads › 👁 Watched bands** (`WatchedBandsPanel.tsx`): "Match these" first (pick the
+  Ticketmaster act, search another name, or "Not on Ticketmaster"), then every watch with where it
+  came from, its next tour and what the last check found; "Wrong band?", Stop, Stopped list with
+  Watch again, and **Check now** (manager).
+- **The check** runs daily at 07:05 UK and checks each watch weekly (oldest first, up to 400 a run;
+  skipped while a lead search runs — they share Ticketmaster's call budget). Every UK and European
+  date from today to ~18 months out (add-ons like parking and upgrades, and duplicate listings, are
+  dropped); a gap of more than 30 days splits two tours; a tour starting before
+  `lead_lookahead_min_weeks` is dropped. The result is kept on the watch (`last_tm_result`).
+- **A tour the search already found** (same act, overlapping dates) is tagged with `watch_id` and
+  gets the European dates — never a second lead. Its UK fields stay the search's.
+- **A new tour** is a warm lead (`lead_source = 'band_watch'`, `match_via = 'watch'`), linked to the
+  band with its history, its jobs synced, scored (the scorer is told where the UK sits), then a
+  **bell** (FYI) to whoever last ticked the watch — or, if they've left, every active manager-tier
+  user. Lead events `watch_found` and `watched`.
+- **On the lead:** a "👁 Watched" badge, "n dates · countries" under the dates, the full tour in the
+  expanded row, and **"People we've dealt with at this band"** — its people and job contacts, when
+  we were last in touch, flagged if it's over a year (`GET /band-watches/lead/:id/people`).
+- **Dashboard:** watched leads first on "Leads to look at", tagged WATCHED.
+- **Org merge** moves a watch to the kept org (unless it already has one).
+- Off switch: `UPDATE system_settings SET value = 'false' WHERE key = 'band_watch_enabled';`
+  (the tick still records watches; Check now still works).
+

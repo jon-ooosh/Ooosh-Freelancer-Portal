@@ -43,6 +43,7 @@ import {
 import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 import { forClientContext } from '../services/endorsements';
 import { retireDoneBells } from '../services/notification-resolve';
+import { startWatchFromCloseOut } from '../services/leads/band-watch';
 
 const router = Router();
 router.use(authenticate);
@@ -518,6 +519,9 @@ const updateStatusSchema = z.object({
   // scanner, hire-form auto-emailer, etc.) still fire them. See CLAUDE.md →
   // "Lost / Cancelled cleanup pattern".
   keep_requirement_ids: z.array(z.string().guid()).optional().nullable(),
+  // The close-out modal's "Watch this band" tick (lost / completed): the band
+  // to watch for its next tour. TOUR-FINDER-SPEC §21; band-watch.ts.
+  watch_band_org_id: z.string().guid().optional().nullable(),
 });
 
 router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthRequest, res: Response) => {
@@ -527,7 +531,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       pipeline_status, hold_reason, hold_reason_detail, revisit_date,
       confirmed_method, lost_reason, lost_detail, transition_note,
       retro_rating, retro_notes, retro_follow_up, retro_follow_up_date,
-      retro_reminders, keep_requirement_ids,
+      retro_reminders, keep_requirement_ids, watch_band_org_id,
     } = req.body;
 
     // Get current state
@@ -892,6 +896,18 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
         jobId,
         reason: pipeline_status as 'lost' | 'cancelled',
         actorUserId: req.user!.id,
+      });
+    }
+
+    // Band watch — "tell me when this band is next over" (TOUR-FINDER-SPEC
+    // §21). Never on an alternative-quote loss; never fails the status change.
+    if (watch_band_org_id && pipeline_status !== fromStatus
+        && (pipeline_status === 'lost' || pipeline_status === 'completed' || pipeline_status === 'cancelled')) {
+      await startWatchFromCloseOut({
+        jobId,
+        organisationId: watch_band_org_id,
+        userId: req.user!.id,
+        lostReason: pipeline_status === 'lost' ? lost_reason : null,
       });
     }
 

@@ -1115,6 +1115,16 @@ router.post('/:id/merge',
         [keepId, loserId]
       );
 
+      // band_watches — one per org. The loser's watch moves to the keeper unless
+      // the keeper is already watched; one left behind on the merged-away org
+      // is never checked (the band watch skips deleted orgs). TOUR-FINDER-SPEC §21.
+      await client.query(
+        `UPDATE band_watches SET organisation_id = $1, updated_at = NOW()
+          WHERE organisation_id = $2
+            AND NOT EXISTS (SELECT 1 FROM band_watches WHERE organisation_id = $1)`,
+        [keepId, loserId]
+      );
+
       // external_id_map — UNIQUE(entity_type, entity_id, external_system).
       // Reassign loser rows to keeper, dropping ones where keeper already has a row for that system.
       // (Keeper's existing external_id wins; loser's HH/Xero IDs that conflict are recorded in notes via backref.)
