@@ -28,7 +28,7 @@ export async function GET() {
       return NextResponse.json({ success: false, error: 'Not authenticated' }, { status: 401 })
     }
 
-    const sessionToken = cookies().get('session')?.value
+    const sessionToken = (await cookies()).get('session')?.value
     if (!sessionToken) {
       return NextResponse.json({ success: false, error: 'Session token missing' }, { status: 401 })
     }
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
 
     const body: MuteRequest = await request.json()
 
-    const sessionToken = cookies().get('session')?.value
+    const sessionToken = (await cookies()).get('session')?.value
     if (!sessionToken) {
       return NextResponse.json({ success: false, error: 'Session token missing' }, { status: 401 })
     }
