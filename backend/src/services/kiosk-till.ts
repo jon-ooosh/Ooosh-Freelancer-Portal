@@ -6,7 +6,8 @@
  * the shop routes, held to an allow-list exactly as FREELANCER_PREP_ALLOW holds
  * a prep session (routes/vehicles.ts). This file answers:
  *
- *   • May the PIN be exchanged from this address? (`kiosk_allowed_ips`, §4.4)
+ *   • May the PIN be exchanged from this address? (`kiosk_allowed_ips`, §4.4 —
+ *     optional since §9: the main lock is the set-up tablet, services/kiosk-devices.ts)
  *   • Is this bearer a till session, and may it call THIS route? (§4.2)
  *   • Who is selling? A person from the dropdown (`listAssignablePeople`, §4.3) —
  *     a kiosk sale is recorded against that person, never against a login.
@@ -75,7 +76,7 @@ export function bareIp(ip: string | undefined): string {
   return String(ip || '').replace(/^::ffff:/i, '').trim();
 }
 
-/** Empty list = anywhere (the Settings page warns when it is empty). */
+/** Empty list = anywhere (the Settings page warns when it is empty and the tablet lock is off). */
 export async function kioskIpAllowed(ip: string | undefined): Promise<boolean> {
   const list = await kioskAllowedIps();
   if (list.length === 0) return true;

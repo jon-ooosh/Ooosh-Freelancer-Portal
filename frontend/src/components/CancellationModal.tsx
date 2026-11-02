@@ -180,16 +180,20 @@ export default function CancellationModal({
   // the fee invoice will be — so the email's refund is the refund the panel will offer.
   const feeIncVat = cancellationFeeGross(effectiveFee);
   const balance = cancellationBalance(feeIncVat, totalHireDepositsPaid);
-  const actualRefund = totalHireDepositsPaid > 0
+  const haveDepositData = moneySummary !== null;
+  // Fall back to the calculator's figure only when the payments couldn't be read.
+  // A client who has paid NOTHING owes the fee — the old test (paid > 0) offered
+  // them the T&Cs' theoretical refund instead, and filed a pending refund for
+  // money we never received (Oct 2026).
+  const actualRefund = haveDepositData
     ? balance.refundDue
     : calculatedRefundExVat;
-  const outstandingBalance = totalHireDepositsPaid > 0
+  const outstandingBalance = haveDepositData
     ? balance.feeOwing
     : 0;
   const allSquare = effectiveFee > 0
     && totalHireDepositsPaid > 0
     && Math.abs(feeIncVat - totalHireDepositsPaid) < 0.5;
-  const haveDepositData = moneySummary !== null;
 
   // Type-to-confirm guard: kicks in for the 100% tier OR retained fee >= £500.
   // Big-money or short-notice cancellations are the ones we don't want misclicks on.

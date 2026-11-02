@@ -352,6 +352,12 @@ interface JobAssignedVehicle {
   status: string;
   /** Fleet prep-readiness projection (`fleet_vehicles.hire_status`). */
   hire_status: string | null;
+  /** When a freelancer collected it on the portal (`soft_checked_in_at`), ISO. */
+  collected_at: string | null;
+  /** Who collected it (migration 319); null on older collections. */
+  collected_by: string | null;
+  /** Checked in at base since (any row returned / `checked_in_at`). */
+  checked_in: boolean;
 }
 
 /**
@@ -3018,18 +3024,35 @@ function JobDetailContent() {
       const vanMap = new Map<string, JobAssignedVehicle>();
       for (const r of allRows) {
         if (!r.vehicle_id || r.status === 'cancelled') continue;
-        const existing = vanMap.get(r.vehicle_id);
+        let existing = vanMap.get(r.vehicle_id);
         if (!existing) {
-          vanMap.set(r.vehicle_id, {
+          existing = {
             vehicle_id: r.vehicle_id,
             reg: r.vehicle_reg || '',
             type: r.vehicle_type ?? null,
             status: r.status,
             hire_status: r.vehicle_hire_status ?? null,
-          });
+            collected_at: null,
+            collected_by: null,
+            checked_in: false,
+          };
+          vanMap.set(r.vehicle_id, existing);
         } else if ((ASSIGNMENT_STATUS_RANK[r.status] ?? -1) > (ASSIGNMENT_STATUS_RANK[existing.status] ?? -1)) {
           existing.status = r.status;
         }
+        // Portal collection (only the collected row carries it) and whether
+        // the van has been checked in at base since.
+        if (r.soft_checked_in_at && !existing.collected_at) {
+          existing.collected_at = r.soft_checked_in_at;
+          existing.collected_by = (r.soft_checked_in_by_first_name || r.soft_checked_in_by_preferred_name)
+            ? displayFullName({
+                first_name: r.soft_checked_in_by_first_name,
+                last_name: r.soft_checked_in_by_last_name,
+                preferred_name: r.soft_checked_in_by_preferred_name,
+              })
+            : null;
+        }
+        if (r.checked_in_at || r.status === 'returned') existing.checked_in = true;
       }
       setJobAssignedVehicles(Array.from(vanMap.values()));
 
@@ -4227,11 +4250,11 @@ function JobDetailContent() {
               })()}
             {['admin', 'manager', 'weekend_manager'].includes(user?.role || '')
               && !job.combined_into_job_id
-              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping'].includes(job.pipeline_status || '') && (
+              && ['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'prepped', 'prepping', 'dispatched'].includes(job.pipeline_status || '') && (
               <button
                 onClick={() => setShowCombineModal(true)}
                 className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
-                title="Combine this booking with another pre-hire booking for the same client"
+                title="Combine this booking with another booking for the same client (two that haven't started, or extend one that's out on hire)"
               >
                 <span>🔀</span>
                 <span>Combine</span>
@@ -4876,7 +4899,10 @@ function JobDetailContent() {
                   </span>
                   {/* Assigned chip → Vehicle Detail (view the van). */}
                   {jobAssignedVehicles.map((v) => {
-                    const s = statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
+                    // Collected on the portal, not yet checked in at base.
+                    const s = v.collected_at && !v.checked_in
+                      ? { label: 'Collected', cls: 'bg-amber-100 text-amber-800' }
+                      : statusChip[v.status] || { label: v.status, cls: 'bg-gray-100 text-gray-600' };
                     const prep = vehiclePrepPill(v.hire_status);
                     return (
                       <Link
@@ -4922,6 +4948,25 @@ function JobDetailContent() {
                     )
                   ))}
                 </div>
+                {/* A van a freelancer has collected that the warehouse hasn't
+                    checked in yet — the state the chip alone can't say. */}
+                {jobAssignedVehicles.filter((v) => v.collected_at && !v.checked_in).map((v) => {
+                  const d = new Date(v.collected_at as string);
+                  const when = Number.isNaN(d.getTime())
+                    ? null
+                    : d.toLocaleString('en-GB', {
+                        weekday: 'short', day: 'numeric', month: 'short',
+                        hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London',
+                      });
+                  return (
+                    <p key={`collected-${v.vehicle_id}`} className="mt-2 text-sm text-amber-800">
+                      <span aria-hidden>📦 </span>
+                      <span className="font-semibold">{v.reg || 'Van'}</span>
+                      {' '}collected{v.collected_by ? ` by ${v.collected_by}` : ''}
+                      {when ? ` · ${when}` : ''} · awaiting check-in at base
+                    </p>
+                  );
+                })}
               </div>
             );
           })()}
@@ -7964,6 +8009,9 @@ function StatusTransitionModal({
   const [note, setNote] = useState('');
   const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
+  // Optional second retro question. Saved as a "Next time:" line inside the same
+  // retro note, so every existing "Job retro:" reader keeps working unchanged.
+  const [retroNextTime, setRetroNextTime] = useState('');
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
 
   // Multi-reminder system
@@ -8086,7 +8134,11 @@ function StatusTransitionModal({
       if (keepRequirementIds.size > 0) data.keep_requirement_ids = Array.from(keepRequirementIds);
     } else if (targetStatus === 'completed') {
       data.retro_rating = retroRating;
-      if (retroNotes) data.retro_notes = retroNotes;
+      const retroText = [
+        retroNotes.trim(),
+        retroNextTime.trim() ? `Next time: ${retroNextTime.trim()}` : '',
+      ].filter(Boolean).join('\n');
+      if (retroText) data.retro_notes = retroText;
       // Collect valid reminders (have text + date)
       const validReminders = reminders.filter(r => r.text.trim() && r.date);
       if (validReminders.length > 0) {
@@ -8286,6 +8338,13 @@ function StatusTransitionModal({
               placeholder="Anything to note? Lessons learned, client feedback, things to improve..."
               value={retroNotes}
               onChange={(e) => setRetroNotes(e.target.value)}
+              rows={2}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+            <textarea
+              placeholder="Anything we'd do differently next time? (optional)"
+              value={retroNextTime}
+              onChange={(e) => setRetroNextTime(e.target.value)}
               rows={2}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />

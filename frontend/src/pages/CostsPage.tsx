@@ -12,7 +12,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { ReceiptThumb, ReceiptPreview } from '../components/costs/CostReceipt';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
@@ -91,6 +91,9 @@ function workLabel(c: { work_item_count?: number; work_summary?: { jobs: number;
   ].filter(Boolean);
   return bits.join(' · ') || `${c.work_item_count} item${c.work_item_count === 1 ? '' : 's'}`;
 }
+
+/** A phone-sized screen, where capturing opens the phone receipt page (/receipt). */
+const isPhoneWidth = () => typeof window !== 'undefined' && window.innerWidth < 640;
 
 /** What the resolve modal needs for this row's recharge. */
 function rechargeTarget(c: CostRow): RechargeCost {
@@ -203,6 +206,7 @@ const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: str
 
 export default function CostsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const { user } = useAuthStore();
   const role = user?.role || '';
   const isManager = hasManagerRole(role);
@@ -385,9 +389,11 @@ export default function CostsPage() {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, [focusCostId, loading, rows]);
 
-  // Deep-link from /quick "Upload receipt" → open the capture modal directly.
+  // Deep-link "?capture=1" → open the capture modal directly (on a phone, the
+  // phone receipt page instead: one question per screen).
   useEffect(() => {
     if (searchParams.get('capture') === '1') {
+      if (isPhoneWidth()) { navigate('/receipt'); return; }
       setShowCapture(true);
       searchParams.delete('capture');
       setSearchParams(searchParams, { replace: true });
@@ -584,7 +590,7 @@ export default function CostsPage() {
     <div className="p-4 sm:p-6 max-w-7xl mx-auto">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Costs</h1>
-        <button onClick={() => setShowCapture(true)}
+        <button onClick={() => (isPhoneWidth() ? navigate('/receipt') : setShowCapture(true))}
           className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md">
           + Capture cost
         </button>

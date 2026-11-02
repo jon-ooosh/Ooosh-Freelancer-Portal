@@ -14,9 +14,11 @@
  * are wired.
  *
  * Guardrails (§9.2): the "checking in, NOT renegotiating" rails live in the code
- * SYSTEM_PROMPT and can't be edited by staff. The `chase_voice_instructions`
- * system-setting is APPENDED — jon's "more of this / less of that" knob, tunable
- * without a deploy.
+ * (RAILS) and can't be edited by staff. Then, in order: the house voice — a Staff
+ * Document shared with Claude and tagged `voice` if one exists, else BUILT_IN_VOICE
+ * — plus any shared `chasing` guides (services/house-knowledge.ts,
+ * AI-KNOWLEDGE-SPEC §4); then the `chase_voice_instructions` system-setting,
+ * jon's "more of this / less of that" knob, tunable without a deploy.
  */
 import { query } from '../config/database';
 import {
@@ -27,6 +29,10 @@ import {
 } from '../config/anthropic';
 import { getSystemSetting } from '../routes/system-settings';
 import type { HHLineItem } from './hirehop-job-sync';
+import { getGuidesFor, hasTopic, guidesAsPromptText, guidesUsedSummary } from './house-knowledge';
+
+/** Which shared guide (and version) a draft was written from. */
+export type GuideUsed = ReturnType<typeof guidesUsedSummary>[number];
 
 // Spec §9.1 calls for Sonnet — the drafting is nuance-heavy (tone varies by
 // relationship) and a client-facing email is the one place we don't cut corners.
@@ -35,11 +41,8 @@ const MODEL_ID = CLAUDE_SONNET_MODEL;
 // max_tokens on Sonnet 5.5.
 const MAX_TOKENS = 8000;
 
-// The rails. Staff cannot edit these — the chase-voice setting is appended below.
-// The house voice section below is the For-Claude half of the draft guide
-// docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md — change both together until the
-// voice moves into a Staff Document (AI-KNOWLEDGE-SPEC.md §4).
-const SYSTEM_PROMPT = `You draft short chase emails for Ooosh Tours, a small UK music & event transport / backline / rehearsal hire company. A quote went out to a client and we've heard nothing back; you write a brief "just checking in" nudge.
+// The rails. Staff cannot edit these — they beat any guide or setting.
+const RAILS = `You draft short chase emails for Ooosh Tours, a small UK music & event transport / backline / rehearsal hire company. A quote went out to a client and we've heard nothing back; you write a brief "just checking in" nudge.
 
 HARD RULES — never break these:
 - This is a CHECK-IN, never a renegotiation. Do NOT invent discounts, change prices, or offer anything not already in the quote. (Asking whether their requirements have changed, or offering to adjust the quote to suit, is fine — that's not a discount.)
@@ -50,10 +53,15 @@ HARD RULES — never break these:
 - One light question that invites a reply. Never pushy.
 - Sign off from the SENDER given below — the real Ooosh staff member sending it. If no sender name is given, sign off as "the Ooosh team". Never invent an individual name.
 - If a prior email thread is provided, reply naturally into it; if it's a first contact, keep it friendly-neutral.
-- Plain text only. No markdown, no placeholders like [name].
+- Plain text only. No markdown, no placeholders like [name].`;
 
-HOW OOOSH SOUNDS — the house voice (taken from the emails Jon and Will actually send, with Jon's own edits to earlier drafts; write like them):
-- SHORT. Most of our emails are two to four sentences; a plain chase is often a single line. Busy touring people skim.
+// The built-in house voice — used ONLY while no Staff Document tagged `voice` is
+// shared with Claude (services/house-knowledge.ts). Once one is, that document IS
+// the voice and this text is skipped, so the two can't contradict each other.
+// Mirrors docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md.
+const BUILT_IN_VOICE = `HOW OOOSH SOUNDS — the house voice:
+- BRIEF BUT COMPLETE. A few sentences is often enough; busy touring people skim. Answer every question in their last message, give them what they need for the next decision, and end with one clear call to action.
+- Never promise an action unless the data you were given says it has been done or will be done (no "I've held the van" or "I'll send the link" on a guess).
 - LAYOUT — exactly this shape. Single line breaks only: NEVER a blank line anywhere in the email, not after the greeting, not between paragraphs, not before the sign-off.
     Line 1: the greeting with a comma — "Hi Sam," (or "Morning Sam,"), first name only.
     Then the message, starting on the very next line. It can open with "Hope you're well." on the same line as the first sentence. One to three short lines.
@@ -73,11 +81,12 @@ HOW OOOSH SOUNDS — the house voice (taken from the emails Jon and Will actuall
 - Refer to the quote as "the below quote" when replying into the thread that carries it, and write "I"/"me" for the sender ("just let me know"), not a corporate "we" throughout.
 - When we sent options, help them choose rather than asking if they're still interested: "Which one do you think would best suit your needs for this run?"
 - A natural close when it fits: "Do let me know if you have any questions or would like to lock something in." / "Always happy to quote on anything else you may have coming up." / "Look forward to hearing from you."
+- If they've said they're getting something we also supply from elsewhere (backline, a van), offer in one line to quote for it.
 - Exclamation marks: rarely — at most one, and only where a person genuinely would.
 - British English spelling and idiom (finalise, organise, colour). Use a plain hyphen or a full stop, never an em dash (—).
-- NEVER write these — they read as AI or American: "I hope this email finds you well", "touch base", "circle back", "reach out", "just wanted to", "I wanted to follow up", "I'd be happy to", "don't hesitate", "feel free to", "absolutely", "awesome", "at your earliest convenience", "please advise", "kindly", "Hope you're doing well!", "Looking forward to hearing from you!" (without the exclamation mark it's fine), and subject-line clichés ("Just following up!!!").
+- NEVER write these — they read as AI or American: "I hope this email finds you well", "touch base", "circle back", "reach out", "just wanted to", "I wanted to follow up", "I'd be happy to", "don't hesitate", "feel free to", "absolutely", "awesome", "at your earliest convenience", "please advise", "kindly", "Hope you're doing well!", "Looking forward to hearing from you!" (without the exclamation mark it's fine), and subject-line clichés ("Just following up!!!").`;
 
-Return ONLY the JSON object with the drafted subject + body.`;
+const RETURN_LINE = 'Return ONLY the JSON object with the drafted subject + body.';
 
 const SCHEMA = {
   type: 'object' as const,
@@ -402,21 +411,32 @@ function buildUserPrompt(ctx: ChaseContext, signOffName?: string | null): string
 export async function draftChaseEmail(
   jobId: string,
   opts: { signOffName?: string | null } = {},
-): Promise<{ draft: ChaseDraft; context: ChaseContext }> {
+): Promise<{ draft: ChaseDraft; context: ChaseContext; guidesUsed: GuideUsed[] }> {
   if (!isAnthropicConfigured()) {
     throw new Error('ANTHROPIC_API_KEY not configured — cannot draft chases.');
   }
   const context = await gatherChaseContext(jobId);
   if (!context) throw new Error(`Job ${jobId} not found`);
 
-  // Append the tunable chase-voice knob (§9.2) to the code rails.
+  // House guides shared with Claude (AI-KNOWLEDGE-SPEC §4): the voice + chasing.
+  // A shared `voice` guide replaces the built-in voice; the rails always stay.
+  const house = await getGuidesFor(['voice', 'chasing']);
+  const voiceText = hasTopic(house, 'voice') ? '' : `\n\n${BUILT_IN_VOICE}`;
+  const system: Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> = [
+    { type: 'text', text: `${RAILS}${voiceText}\n\n${RETURN_LINE}`, cache_control: { type: 'ephemeral' } },
+  ];
+  if (house.guides.length) {
+    system.push({
+      type: 'text',
+      text: `OOOSH'S OWN GUIDES — approved by Ooosh, follow them unless they conflict with a HARD RULE above:\n\n${guidesAsPromptText(house)}`,
+      cache_control: { type: 'ephemeral' },
+    });
+  }
+  // The tunable chase-voice knob (§9.2) — a steer on top of everything else.
   const chaseVoice = (await getSystemSetting('chase_voice_instructions')) || '';
-  const system = chaseVoice.trim()
-    ? [
-        { type: 'text' as const, text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' as const } },
-        { type: 'text' as const, text: `ADDITIONAL VOICE GUIDANCE (from Ooosh, obey unless it conflicts with a HARD RULE):\n${chaseVoice.trim()}` },
-      ]
-    : [{ type: 'text' as const, text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' as const } }];
+  if (chaseVoice.trim()) {
+    system.push({ type: 'text', text: `ADDITIONAL VOICE GUIDANCE (from Ooosh, obey unless it conflicts with a HARD RULE):\n${chaseVoice.trim()}` });
+  }
 
   const client = getAnthropicClient();
   const response = await client.messages.create({
@@ -432,5 +452,5 @@ export async function draftChaseEmail(
 
   const out = readStructuredJson<ChaseDraft>(response, 'Chase draft');
   if (!out.subject || !out.body) throw new Error('Claude did not return a chase draft');
-  return { draft: { subject: out.subject, body: out.body }, context };
+  return { draft: { subject: out.subject, body: out.body }, context, guidesUsed: guidesUsedSummary(house) };
 }

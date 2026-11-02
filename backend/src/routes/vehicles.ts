@@ -3571,13 +3571,19 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
         const assignmentId = req.bookoutSession.assignmentId;
         const quoteId = req.bookoutSession.quoteId;
         const actor = req.bookoutSession.freelancerEmail || 'freelancer collection';
+        const collectorId = req.bookoutSession.freelancerPersonId || null;
+        // Only the FIRST save stamps (time + who, migration 319) and returns
+        // the job — so a retried or re-sent save adds no second timeline note.
+        let firstCollectionJobId: string | null = null;
         try {
-          await query(
+          const stamped = await query(
             `UPDATE vehicle_hire_assignments
-                SET soft_checked_in_at = COALESCE(soft_checked_in_at, NOW()), updated_at = NOW()
-              WHERE id = $1`,
-            [assignmentId]
+                SET soft_checked_in_at = NOW(), soft_checked_in_by_person_id = $2, updated_at = NOW()
+              WHERE id = $1 AND soft_checked_in_at IS NULL
+              RETURNING COALESCE(job_id, (SELECT j.id FROM jobs j WHERE j.hh_job_number = hirehop_job_id LIMIT 1)) AS job_id`,
+            [assignmentId, collectorId]
           );
+          firstCollectionJobId = stamped.rows[0]?.job_id ?? null;
           if (quoteId) {
             const { stampQuoteLeg, maybeCloseQuote } = await import('../services/quote-completion');
             await stampQuoteLeg(quoteId, 'van');
@@ -3585,6 +3591,32 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           }
         } catch (err) {
           console.warn('[vehicles/events] freelancer soft check-in completion failed:', err);
+        }
+
+        // Say so on the job's Activity Timeline — a collection used to leave
+        // no trace on the job at all (HH 16044). Never fails the save.
+        if (firstCollectionJobId) {
+          try {
+            const { fullDisplayName } = await import('../services/display-name');
+            const who = collectorId
+              ? (await query(
+                  `SELECT first_name, last_name, preferred_name, email FROM people WHERE id = $1`,
+                  [collectorId]
+                )).rows[0]
+              : null;
+            const name = fullDisplayName(who, req.bookoutSession.freelancerEmail || 'a freelancer');
+            await query(
+              `INSERT INTO interactions (type, content, job_id, created_by, source)
+               VALUES ('note', $1, $2, $3, 'system')`,
+              [
+                `📦 ${reg} collected from the client by ${name} — awaiting check-in at base.`,
+                firstCollectionJobId,
+                '00000000-0000-0000-0000-000000000000', // system user
+              ]
+            );
+          } catch (err) {
+            console.warn('[vehicles/events] collection timeline note failed:', err);
+          }
         }
       }
     }

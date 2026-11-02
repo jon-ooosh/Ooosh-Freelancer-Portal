@@ -25,7 +25,7 @@ import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
-import { verifyStaffToken } from '../middleware/auth';
+import { verifyStaffToken, authenticate, authorize, type AuthRequest } from '../middleware/auth';
 import { signFor, verifyFor } from '../services/tokens';
 import { hhBroker } from '../services/hirehop-broker';
 import { autoDispatchJob } from '../services/auto-dispatch';
@@ -35,6 +35,10 @@ import { uploadToR2, isR2Configured } from '../config/r2';
 import { getJobEmailRecipients } from '../services/money-emails';
 import { resolveJobEmailContacts } from '../services/job-contact-candidates';
 import { kioskIpAllowed, bareIp } from '../services/kiosk-till';
+import {
+  kioskDeviceLockOn, kioskDeviceFrom, markKioskDeviceUsed, completeKioskSetup,
+  startKioskSetup, listKioskDevices, forgetKioskDevice,
+} from '../services/kiosk-devices';
 
 const SESSION_TTL_SECONDS = 12 * 60 * 60; // 12h — kiosk left running between shifts
 
@@ -133,18 +137,36 @@ router.post('/auth/pin', pinLimiter, async (req: Request, res: Response) => {
       res.status(503).json({ error: 'Warehouse access not configured' });
       return;
     }
-    if (pin !== expected) {
-      res.status(401).json({ error: 'Incorrect PIN' });
-      return;
+    // Where the PIN works is checked BEFORE the PIN: a device that may not use
+    // it gets the same answer whatever was typed, so it can't test guesses.
+    // (Checked after, a 403 meant "right PIN, wrong place" — that told anyone
+    // the PIN was right.)
+    //
+    // §9: only on a tablet an admin has set up (services/kiosk-devices.ts).
+    let deviceId: string | null = null;
+    if (await kioskDeviceLockOn()) {
+      deviceId = await kioskDeviceFrom(req);
+      if (!deviceId) {
+        console.warn(`[warehouse] PIN refused from ${bareIp(req.ip)} — not a set-up kiosk tablet`);
+        res.status(403).json({
+          error: "This tablet isn't set up for the warehouse. Ask an admin for a set-up code, then tap \"Set up this tablet\".",
+          code: 'kiosk_device_required',
+        });
+        return;
+      }
     }
-    // §4.4: the PIN is accepted only from the yard's own connections
-    // (`system_settings.kiosk_allowed_ips`; empty = anywhere). Checked AFTER
-    // the PIN so a wrong address learns nothing about the PIN.
+    // §4.4: and, if any are listed, only from the yard's own connections
+    // (`system_settings.kiosk_allowed_ips`; empty = anywhere — optional since §9).
     if (!(await kioskIpAllowed(req.ip))) {
       console.warn(`[warehouse] PIN refused from ${bareIp(req.ip)} — not on kiosk_allowed_ips`);
       res.status(403).json({ error: 'The kiosk PIN only works from the warehouse connection.' });
       return;
     }
+    if (pin !== expected) {
+      res.status(401).json({ error: 'Incorrect PIN' });
+      return;
+    }
+    if (deviceId) await markKioskDeviceUsed(res, deviceId, bareIp(req.ip));
     const token = signFor(
       'warehouse',
       { scope: 'warehouse_session', sessionId: uuid(), scopes: ['collections', 'till'] } satisfies WarehouseSessionClaims,
@@ -154,6 +176,73 @@ router.post('/auth/pin', pinLimiter, async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[warehouse] PIN auth error:', err);
     res.status(500).json({ error: 'Authentication failed' });
+  }
+});
+
+// ─── The kiosk tablets (STAFF-LOGIN-SECURITY-SPEC §9) ───────────────
+// services/kiosk-devices.ts. The tablet types a one-time code an admin made
+// in Settings; the admin routes list, make and forget them. Above the
+// authenticateWarehouse line on purpose: the set-up is public (the code is
+// the authority) and the admin routes take a staff login only.
+const setupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many set-up attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post('/device/setup', setupLimiter, async (req: Request, res: Response) => {
+  try {
+    const done = await completeKioskSetup(res, (req.body as { code?: unknown } | undefined)?.code);
+    if (!done) {
+      res.status(400).json({ error: "That code didn't work. A code lasts 10 minutes and works once — ask for a new one." });
+      return;
+    }
+    console.log(`[warehouse] kiosk tablet set up: "${done.label}" from ${bareIp(req.ip)}`);
+    res.json({ data: { label: done.label } });
+  } catch (err) {
+    console.error('[warehouse] kiosk tablet set-up error:', err);
+    res.status(500).json({ error: 'Set-up failed' });
+  }
+});
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.get('/devices', authenticate, authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listKioskDevices() });
+  } catch (err) {
+    console.error('[warehouse] list kiosk tablets error:', err);
+    res.status(500).json({ error: 'Could not load the kiosk tablets' });
+  }
+});
+
+router.post('/devices', authenticate, authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const label = String((req.body as { label?: unknown } | undefined)?.label ?? '');
+    res.status(201).json({ data: await startKioskSetup(label, req.user!.id) });
+  } catch (err) {
+    console.error('[warehouse] start kiosk set-up error:', err);
+    res.status(500).json({ error: 'Could not make a set-up code' });
+  }
+});
+
+router.delete('/devices/:id', authenticate, authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) {
+      res.status(400).json({ error: 'Invalid tablet id' });
+      return;
+    }
+    if (!(await forgetKioskDevice(id, req.user!.id))) {
+      res.status(404).json({ error: 'That tablet is not set up (or was already forgotten).' });
+      return;
+    }
+    res.json({ data: { forgotten: true } });
+  } catch (err) {
+    console.error('[warehouse] forget kiosk tablet error:', err);
+    res.status(500).json({ error: 'Could not forget the tablet' });
   }
 });
 

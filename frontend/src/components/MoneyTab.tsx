@@ -2114,7 +2114,11 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
                       {dep.is_refund ? '-' : ''}£{Number(dep.amount).toFixed(2)}
                     </p>
-                    {!dep.is_refund && (
+                    {/* Only a real HireHop payment (a deposit) can be refunded. The other
+                        rows — "Excess applied to hire invoice", credit moved between jobs,
+                        a payment typed straight onto an invoice — aren't money the client
+                        sent us here, and the refund route can't act on them (job 16491). */}
+                    {!dep.is_refund && dep.is_deposit && (
                       <button
                         onClick={() => openRefundModal(dep)}
                         className="text-xs text-ooosh-600 hover:text-ooosh-700 underline"

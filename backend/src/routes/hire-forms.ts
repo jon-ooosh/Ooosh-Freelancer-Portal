@@ -418,7 +418,10 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // data.assignment.id regardless of whether the call was a fresh create
       // or a dedup hit.
       await client.query('COMMIT');
-      client.release();
+      // No client.release() here — the `finally` below hands the connection
+      // back. Releasing it twice threw after the reply had gone, and a failed
+      // read below would have sent the catch's ROLLBACK down a connection that
+      // might by then belong to another request (SECURITY-AUDIT-BRIEF B.5).
       console.log(`[hire-forms] Deduplicated: existing assignment ${existingAssignment.rows[0].id} for driver ${driverId}`);
       const full = await getPool().query(
         `SELECT a.*, d.full_name AS driver_name, fv.reg AS vehicle_reg
@@ -457,8 +460,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       });
       if (conflicts.length > 0) {
         await client.query('ROLLBACK');
-        client.release();
-        return res.status(409).json(buildConflictPayload(conflicts));
+        return res.status(409).json(buildConflictPayload(conflicts)); // `finally` releases
       }
     }
 
