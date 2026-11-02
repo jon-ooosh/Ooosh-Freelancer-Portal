@@ -651,7 +651,8 @@ async function fetchWithTimeout(
 async function clearSessionCookie(): Promise<void> {
   try {
     const { cookies } = await import('next/headers')
-    cookies().delete('session')
+    const cookieStore = await cookies()
+    cookieStore.delete('session')
   } catch {
     // Not in a route handler: nothing to set the cookie on.
   }
