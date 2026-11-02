@@ -58,6 +58,9 @@ export interface PortalJob {
   completeFrom?: string | null
   // Job detail only: has the van leg really happened (booked out / collected)?
   vanLegDone?: boolean
+  // Job detail only: the yard gate code, from the job's day to the day after,
+  // else null (OP services/site-codes.ts). Never on the job lists.
+  gateCode?: string | null
   // D&C specific
   whatIsIt?: string
   clientEmail?: string | null
@@ -173,6 +176,9 @@ export interface SitterShiftDetail {
   jobs: SitterShiftJob[]
   /** Tonight's tasks (STAFF-CALENDAR-SPEC §21). */
   tasks?: PortalFreelancerTask[]
+  /** The gate, grey cupboard and lockbox codes, on the day of the shift only
+   *  (OP services/site-codes.ts); null on any other day or when none is set. */
+  codes?: { gate: string | null; cupboard: string | null; lockbox: string | null } | null
 }
 
 export interface SitterShiftDetailResponse extends SitterShiftDetail {

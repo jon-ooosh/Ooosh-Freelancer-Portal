@@ -1444,6 +1444,8 @@ function OohSettingsSection() {
           <h2 className="text-lg font-semibold text-gray-900">Out-of-Hours Returns</h2>
           <p className="text-xs text-gray-500 mt-0.5">
             Settings used in the OOH info email — gate code, yard address, key-drop photo.
+            The freelancer portal shows the codes on the day only: the gate code on any job,
+            all three on a studio sitter&apos;s shift.
           </p>
         </div>
         {!editing ? (

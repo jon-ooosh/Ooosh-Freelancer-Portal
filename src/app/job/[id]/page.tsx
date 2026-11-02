@@ -26,7 +26,7 @@ import Link from 'next/link'
 import {
   AlertTriangle, Search, RefreshCw, MapPin, Navigation, Copy, Check, Phone, Mail,
   FileText, Image as ImageIcon, Paperclip, ExternalLink, ChevronDown, Play, CalendarPlus,
-  Bell, BellOff, Receipt, PoundSterling, User, Minus, Plus, Timer, Users, X,
+  Bell, BellOff, Receipt, PoundSterling, User, Minus, Plus, Timer, Users, X, KeyRound,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { downloadIcs } from '@/lib/calendar'
@@ -57,6 +57,8 @@ interface Job {
   completionNotes?: string
   // Crew and People work: YYYY-MM-DD it can be completed from (its last day)
   completeFrom?: string | null
+  // The yard gate code, from the job's day to the day after (OP site-codes.ts)
+  gateCode?: string | null
   // Crew job fields
   board?: 'dc' | 'crew'
   jobType?: string                    // "Transport + Crew" or "Crew Only"
@@ -326,6 +328,25 @@ function NoteCard({ title, text, tone = 'amber' }: { title: string; text: string
     <div className={`${box} rounded-[14px] px-3.5 py-3 flex flex-col gap-1`}>
       <div className={`${cls.kindLabel} ${head}`}>{title}</div>
       <p className="text-[15px] leading-[1.45] text-hf-body whitespace-pre-wrap">{text}</p>
+    </div>
+  )
+}
+
+/**
+ * The Ooosh yard gate code. OP only sends it from the job's day to the day
+ * after (services/site-codes.ts), so it is never on the page ahead of time.
+ */
+function GateCodeCard({ code }: { code: string }) {
+  return (
+    <div className={`${cls.card} px-4 py-3 flex items-center gap-3`}>
+      <KeyRound size={20} strokeWidth={1.8} className="flex-none text-hf-muted" />
+      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+        <span className={`${cls.kindLabel} text-hf-muted`}>Ooosh yard gate code</span>
+        <span className="text-[13px] text-hf-muted leading-[1.4]">
+          Back after hours? Van keys go in the key drop under the first window, never the letterbox or the grey cupboard.
+        </span>
+      </div>
+      <span className="flex-none text-[22px] font-bold tracking-[0.08em] text-hf-ink tabular">{code}</span>
     </div>
   )
 }
@@ -863,6 +884,8 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
           wrote for crewed jobs were invisible to the freelancer (Jul 2026). */}
       {job.keyNotes && <NoteCard title="Key notes" text={job.keyNotes} />}
 
+      {job.gateCode && <GateCodeCard code={job.gateCode} />}
+
       {/* Work Description — always shown, with fallback if empty */}
       <TextCard title="Work details">
         {job.workDescription ? (
@@ -1180,6 +1203,7 @@ export default function JobDetailsPage() {
                 dateLine={dayLabel(job.date)}
               />
             )}
+            {isMultiStop && job.gateCode && <GateCodeCard code={job.gateCode} />}
 
             {/* Single job or first stop header */}
             {!isMultiStop && (
@@ -1195,6 +1219,8 @@ export default function JobDetailsPage() {
 
                 {/* Key Notes */}
                 {job.keyNotes && <NoteCard title="Key notes" text={job.keyNotes} />}
+
+                {job.gateCode && <GateCodeCard code={job.gateCode} />}
 
                 {/* Location */}
                 {venue && (venue.address || venue.loadInAddress || venue.whatThreeWords) && (
