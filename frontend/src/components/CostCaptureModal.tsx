@@ -37,6 +37,7 @@ import {
   jobLabel, newChoice, num, planSplit, savedToWhoPays, vansOnDate, workAmounts, workPool, rowVerdict, type VanRow,
 } from './costs/costJobs';
 import { useJobInfo } from './costs/useJobInfo';
+import { readReceipt, readErrorMessage, amountsFromRead, preparePhoto, uploadReceiptFile } from './costs/receiptRead';
 import { openR2Key } from '../lib/openAuthedFile';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { Cost, CostDocument, CostType, CostPaymentMethod, CostPaymentStatus } from '../../../shared/types';
@@ -61,6 +62,10 @@ interface Props {
   presetIssueId?: string | null;
   /** Open with the Jobs section in view (the Costs list's ⑂, which used to open the split modal). */
   focusJobs?: boolean;
+  /** A document handed over (the phone's "Open the full form"): read as if just picked. */
+  initialFile?: File | null;
+  /** "What is it?" already answered where the form was opened from. */
+  initialKind?: 'receipt' | 'bill' | null;
 }
 
 // Single source of truth for the staff-facing category picker. Each choice
@@ -233,7 +238,7 @@ interface SavedShare {
 }
 interface DuplicateCost { id: string; supplier_name: string | null; amount_gross: number; cost_date: string | null; payment_method: string | null; has_receipt: boolean; uploaded_by_name: string | null }
 
-export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, existing, presetJobId, presetVehicleId, presetIssueId, focusJobs }: Props) {
+export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, existing, presetJobId, presetVehicleId, presetIssueId, focusJobs, initialFile, initialKind }: Props) {
   const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
   // The cached login user can be stale if an admin set this staff member's COT
@@ -259,7 +264,7 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
   // a pay-later supplier bill is a Bill; anything paid already, or my own money
   // (Reimburse me), is a Receipt.
   const [kind, setKind] = useState<Kind | null>(() => {
-    if (!existing) return null;
+    if (!existing) return initialKind ?? null;
     if (existing.is_credit) return 'refund';
     return existing.payment_method === 'not_yet_paid' ? 'bill' : 'receipt';
   });
@@ -354,7 +359,7 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
   // (22 costs ever had lines, 21 of them from the AI).
   const [lines, setLines] = useState<LineDraft[]>([]);
   const [linesTouched, setLinesTouched] = useState(false);
-  const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>(existing?.payment_method || 'cot_card');
+  const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>(existing?.payment_method || (initialKind === 'bill' ? 'not_yet_paid' : 'cot_card'));
   const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>(existing?.payment_status || 'paid');
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [notes, setNotes] = useState(existing?.notes || '');
@@ -362,6 +367,8 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
+  // Shrinking / converting a photo before it is shown or read (a few hundred ms).
+  const [preparingPhoto, setPreparingPhoto] = useState(false);
   const [extractError, setExtractError] = useState<string>('');
   const [aiPrefilled, setAiPrefilled] = useState(false);
   const [aiConfidence, setAiConfidence] = useState<'high' | 'medium' | 'low' | null>(null);
@@ -764,32 +771,9 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
     setAiPrefilled(false);
     setVehicleRegNote(null);
     try {
-      const fd = new FormData();
-      fd.append('file', file);
-      const res = await api.upload<{
-        data: {
-          supplier: string | null;
-          cost_date: string | null;
-          due_date: string | null;
-          amount_gross: number | null;
-          amount_vat: number | null;
-          amount_net: number | null;
-          vat_treatment: 'standard' | 'no_vat';
-          invoice_number: string | null;
-          job_number: string | null;
-          vehicle_reg: string | null;
-          mileage: number | null;
-          service_type: 'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other' | null;
-          description: string | null;
-          category_code: string | null;
-          confidence: 'high' | 'medium' | 'low';
-          lines?: Array<{ description: string | null; amount_gross: number; amount_vat: number; category_code: string | null }>;
-          supplier_matched?: { from: string; to: string };
-          xero_contact_id?: string | null;
-          supplier_suggestion?: { name: string; xero_contact_id: string };
-        };
-      }>('/costs/extract', fd);
-      const ex = res.data;
+      // The same read as the phone's receipt page (costs/receiptRead.ts), asked
+      // again on its own if the reply was lost.
+      const ex = await readReceipt(file);
       if (ex.supplier) setSupplierName(ex.supplier);
       // An alias or exact match arrives already applied, with the contact id.
       if (ex.xero_contact_id) setXeroContactId(ex.xero_contact_id);
@@ -804,35 +788,17 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
       if (ex.description) setDescription(ex.description);
       if (ex.category_code) setCategoryCode(ex.category_code);
       // The document is authoritative on VAT: no VAT shown → No VAT, never an
-      // assumed 20%. When VAT IS shown, use the document's actual figures —
-      // only snap to the 20%-auto mode when the VAT really is 20% of net;
-      // otherwise keep all three figures verbatim in Manual mode (recomputing
-      // at a forced 20% was mangling correct extractions on non-20% docs).
+      // assumed 20%; a VAT that isn't 20% of net stays verbatim in Manual
+      // (amountsFromRead() in costs/receiptRead.ts, shared with the phone).
       setVatTouched(true);
-      const gross = ex.amount_gross;
-      const vat = ex.amount_vat;
-      const net = ex.amount_net;
-      if (ex.vat_treatment === 'standard' && vat != null && vat > 0 && net != null && gross != null) {
-        const is20 = Math.abs(vat - round2(net * 0.2)) <= 0.02;
-        setVatMode(is20 ? 'vat20' : 'manual');
-        setAmountGross(gross.toFixed(2));
-        setAmountVat(vat.toFixed(2));
-        setAmountNet(net.toFixed(2));
-      } else if (ex.vat_treatment === 'standard' && gross != null) {
-        // VAT-bearing but incomplete figures — derive at 20% from gross.
-        setVatMode('vat20');
-        setAmountGross(String(gross));
-        const derivedNet = round2(gross / 1.2);
-        setAmountNet(derivedNet.toFixed(2));
-        setAmountVat(round2(gross - derivedNet).toFixed(2));
+      const read = amountsFromRead(ex);
+      if (read) {
+        setVatMode(read.vatMode);
+        setAmountGross(read.gross);
+        setAmountVat(read.vat);
+        setAmountNet(read.net);
       } else {
         setVatMode('none');
-        const total = gross ?? net;
-        if (total != null) {
-          setAmountGross(total.toFixed(2));
-          setAmountNet(total.toFixed(2));
-          setAmountVat('0.00');
-        }
       }
       // Job number is a suggestion only — staff confirm before it links.
       setSuggestedJobNumber(ex.job_number ? ex.job_number.replace(/\D/g, '') || null : null);
@@ -872,26 +838,35 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
       // Not sure of everything: open the amounts so they get checked.
       setAmountsOpen(ex.confidence !== 'high');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
       // 503 from the backend = no API key. Don't make it look like a bug.
-      if (msg.includes('not configured')) {
-        setExtractError('AI extraction isn\'t enabled on the server yet — fill in the form manually.');
-      } else {
-        setExtractError(msg);
-      }
+      setExtractError(readErrorMessage(err));
     } finally {
       setExtracting(false);
     }
   }
 
-  function pickReceipt(file: File | null) {
-    setReceiptFile(file);
+  // A photo is shrunk and converted (an iPhone's HEIC) before anything else, so
+  // the preview, the AI, R2 and Xero all get the same small JPEG.
+  async function pickReceipt(picked: File | null) {
     setAiPrefilled(false);
     setAiConfidence(null);
     setExtractError('');
     setSuggestedJobNumber(null);
-    if (file && !isEdit) void extractReceipt(file);
+    if (!picked) { setReceiptFile(null); return; }
+    setPreparingPhoto(true);
+    const file = await preparePhoto(picked);
+    setPreparingPhoto(false);
+    setReceiptFile(file);
+    if (!isEdit) void extractReceipt(file);
   }
+
+  // A document handed over from the phone page: read it as if it had just been picked.
+  const handedOver = useRef(false);
+  useEffect(() => {
+    if (handedOver.current || !initialFile || isEdit) return;
+    handedOver.current = true;
+    void pickReceipt(initialFile);
+  }); // eslint-disable-line react-hooks/exhaustive-deps
 
   const viewExistingReceipt = useCallback(async () => {
     if (!existing?.receipt_r2_key) return;
@@ -907,10 +882,14 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
   }, []);
 
   const totalSupporting = supportingDocs.length + newSupportingFiles.length;
-  function addSupporting(picked: File[]) {
-    if (picked.length) {
-      setNewSupportingFiles((prev) => [...prev, ...picked].slice(0, MAX_SUPPORTING_DOCS - supportingDocs.length));
-    }
+  // Photos are prepared one at a time (one decoded image in memory at once).
+  async function addSupporting(picked: File[]) {
+    if (!picked.length) return;
+    setPreparingPhoto(true);
+    const ready: File[] = [];
+    for (const f of picked) ready.push(await preparePhoto(f));
+    setPreparingPhoto(false);
+    setNewSupportingFiles((prev) => [...prev, ...ready].slice(0, MAX_SUPPORTING_DOCS - supportingDocs.length));
   }
   // Whether this cost becomes a Xero bill (pay-later) or a spend-money
   // transaction.
@@ -1225,11 +1204,9 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
     try {
       let receiptKey = existing?.receipt_r2_key ?? null;
       let receiptName = existing?.receipt_filename ?? null;
+      // Uploads are asked again if the reply was lost (an upload is safe to repeat).
       if (receiptFile) {
-        const fd = new FormData();
-        fd.append('file', receiptFile);
-        fd.append('attachment_only', 'true');
-        const up = await api.upload<{ r2_key: string; filename: string }>('/files/upload', fd);
+        const up = await uploadReceiptFile(receiptFile);
         receiptKey = up.r2_key;
         receiptName = up.filename;
       }
@@ -1240,10 +1217,7 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
       let allSupporting = supportingDocs;
       if (newSupportingFiles.length) {
         const uploaded = await Promise.all(newSupportingFiles.map(async (file) => {
-          const dfd = new FormData();
-          dfd.append('file', file);
-          dfd.append('attachment_only', 'true');
-          const up = await api.upload<{ r2_key: string; filename: string }>('/files/upload', dfd);
+          const up = await uploadReceiptFile(file);
           return {
             r2_key: up.r2_key,
             filename: up.filename,
@@ -1480,6 +1454,9 @@ export default function CostCaptureModal({ onClose, onSaved, onRecordRefund, exi
                   onChange={(e) => { const f = e.target.files?.[0] || null; e.target.value = ''; pickReceipt(f); }} />
               </label>
             </div>
+            {preparingPhoto && (
+              <div className="mb-2 px-3 py-2 text-xs rounded-md border border-gray-200 bg-white text-gray-600">Getting the photo ready…</div>
+            )}
             {extracting && (
               <div className="mb-2 px-3 py-2 text-xs rounded-md border border-purple-200 bg-purple-50 text-purple-800">✨ Reading the document…</div>
             )}

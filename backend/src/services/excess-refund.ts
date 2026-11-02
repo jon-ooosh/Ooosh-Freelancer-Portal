@@ -20,6 +20,7 @@
 import { query } from '../config/database';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
 import { ukToday } from './uk-date';
+import type { DepositAvailability } from './hh-deposit-release';
 
 export type RefundSource = 'stripe_webhook' | 'payment_event' | 'hh_reconcile' | 'manual';
 
@@ -46,6 +47,41 @@ export interface RefundLeg {
 export function isDuplicateLeg(legs: RefundLeg[] | null | undefined, ref: string | null | undefined): boolean {
   if (!ref) return false; // No ref → caller owns its own idempotency.
   return Array.isArray(legs) && legs.some((l) => l.ref === ref);
+}
+
+/**
+ * Can HireHop refund `amount` out of this excess payment? null when it can;
+ * otherwise the sentence to show: what HireHop has free, where the rest went,
+ * and what to do. The reimburse route asks BEFORE the card is refunded —
+ * HireHop refuses a refund out of money applied to an invoice (error 370), and
+ * that refusal used to land after Stripe had already paid out. Job 16491
+ * (Oct 2026): £841.32 of a £1,200 excess was applied to the damage invoice by
+ * hand, OP didn't know, and Reimburse offered the full £1,200.
+ */
+export function excessRefundShortfall(amount: number, availability: DepositAvailability): string | null {
+  const free = availability.available;
+  if (amount <= free + 0.005) return null;
+  const money = (n: number) => `£${n.toFixed(2)}`;
+  const id = availability.depositId;
+  const apps = availability.applications;
+  const onInvoices = apps.length
+    ? ` ${money(apps.reduce((s, a) => s + a.amount, 0))} of it is on `
+      + `${new Set(apps.map((a) => a.invoiceId)).size === 1 ? 'invoice' : 'invoices'} `
+      + `${[...new Set(apps.map((a) => a.invoiceNumber || String(a.invoiceId)))].join(', ')}.`
+    : '';
+  const nothingRefunded = ' Nothing has been refunded.';
+  if (free < 0.005) {
+    return `HireHop has nothing left on excess payment ${id} to refund.${onInvoices}`
+      + (apps.length
+        ? ' If that charge is right, OP needs to record it: remove it in HireHop and use Claim instead. If it shouldn\'t be there, remove it in HireHop and try again.'
+        : ' It may already have been refunded in HireHop.')
+      + nothingRefunded;
+  }
+  return `HireHop has only ${money(free)} of excess payment ${id} free to refund, not ${money(amount)}.${onInvoices}`
+    + (apps.length
+      ? ` If that charge is right, reimburse ${money(free)} and choose "Retained by Ooosh" for the rest. If it shouldn't be there, remove it in HireHop first.`
+      : ' The rest may already have been refunded in HireHop.')
+    + nothingRefunded;
 }
 
 export interface UnwindRefundInput {

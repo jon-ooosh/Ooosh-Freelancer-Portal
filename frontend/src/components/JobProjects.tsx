@@ -20,6 +20,7 @@ import { PROJECT_COPY as C } from '../lib/projectCopy';
 import { jobStatusDisplay } from '../lib/pipelineStatus';
 import { stripOptionSuffix } from '../lib/quoteOptions';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { ukToday } from '../lib/ukDate';
 
 interface ProjectMember {
   id: string;
@@ -65,13 +66,76 @@ function gbp(n: number): string {
   return `£${n.toLocaleString('en-GB', { maximumFractionDigits: 0 })}`;
 }
 
-/** "12 Aug" from a YYYY-MM-DD, built from its parts (no UTC shift). */
-function shortDay(ymd: string | null): string {
-  if (!ymd) return '';
+interface Ymd { y: number; m: number; d: number }
+
+/** A YYYY-MM-DD as its parts (no UTC shift), or null if it isn't a real day. */
+function ymdParts(ymd: string | null): Ymd | null {
+  if (!ymd) return null;
   const [y, m, d] = ymd.slice(0, 10).split('-').map(Number);
-  const dt = new Date(y, (m || 1) - 1, d || 1);
-  if (Number.isNaN(dt.getTime())) return '';
-  return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  if (!y || !m || !d) return null;
+  const dt = new Date(y, m - 1, d);
+  // A day that rolls over (31 Nov -> 1 Dec) isn't a real day.
+  if (Number.isNaN(dt.getTime()) || dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
+  return { y, m, d };
+}
+
+function sameDay(a: Ymd | null, b: Ymd | null): boolean {
+  return !!a && !!b && a.y === b.y && a.m === b.m && a.d === b.d;
+}
+
+function thisUkYear(): number {
+  return Number(ukToday().slice(0, 4));
+}
+
+/** "12 Aug", or "12 Aug 2027" with the year. */
+function dayText(p: Ymd, withYear: boolean): string {
+  return new Date(p.y, p.m - 1, p.d).toLocaleDateString('en-GB', withYear
+    ? { day: 'numeric', month: 'short', year: 'numeric' }
+    : { day: 'numeric', month: 'short' });
+}
+
+/**
+ * A Start-End span, short: "10 Nov", "10-21 Nov", "28 Nov-2 Dec". The year
+ * only when it isn't this year ("10-12 Aug 2027"), on both ends if it crosses one.
+ */
+function spanText(start: string | null, end: string | null): string {
+  const thisYear = thisUkYear();
+  const s = ymdParts(start);
+  const e = ymdParts(end);
+  if (s && e) {
+    if (sameDay(s, e)) return dayText(s, s.y !== thisYear);
+    if (s.y !== e.y) return `${dayText(s, true)}-${dayText(e, true)}`;
+    const head = s.m === e.m ? String(s.d) : dayText(s, false);
+    return `${head}-${dayText(e, e.y !== thisYear)}`;
+  }
+  const one = s || e;
+  return one ? dayText(one, one.y !== thisYear) : '';
+}
+
+/**
+ * The panel's dates line: the Start-End span, plus "out" / "back" only on a day
+ * that differs from Start / End ("10-21 Nov · back 22 Nov"). `full` names all
+ * four, for the hover.
+ */
+function projectDatesText(p: { out_date: string | null; job_date: string | null; job_end: string | null; return_date: string | null }): { line: string; full: string } {
+  const thisYear = thisUkYear();
+  const o = ymdParts(p.out_date);
+  const s = ymdParts(p.job_date);
+  const e = ymdParts(p.job_end);
+  const b = ymdParts(p.return_date);
+  // Out / back carry the year only when the span doesn't already say it.
+  const outRefYear = (s ?? e)?.y ?? thisYear;
+  const backRefYear = (e ?? s)?.y ?? thisYear;
+
+  const parts: string[] = [];
+  if (o && !sameDay(o, s)) parts.push(`${C.datesOut} ${dayText(o, o.y !== outRefYear)}`);
+  const span = spanText(p.job_date, p.job_end);
+  if (span) parts.push(span);
+  if (b && !sameDay(b, e)) parts.push(`${C.datesBack} ${dayText(b, b.y !== backRefYear)}`);
+
+  const one = (x: Ymd | null) => (x ? dayText(x, x.y !== thisYear) : '-');
+  const full = `${C.dates}: ${C.outField} ${one(o)} · ${C.startField} ${one(s)} · ${C.endField} ${one(e)} · ${C.returnField} ${one(b)}`;
+  return { line: parts.join(' · '), full };
 }
 
 /** "12 Aug" from a stored timestamp. */
@@ -149,7 +213,7 @@ export function ProjectPanel({ projectId, jobId, onChanged }: {
 
   const r = project.rollup;
   const newJobUrl = `/pipeline?newEnquiry=1&project=${project.id}${project.client_id ? `&client=${project.client_id}` : ''}`;
-  const hasDates = project.out_date || project.job_date || project.job_end || project.return_date;
+  const dates = projectDatesText(project);
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-ooosh-200 p-4">
@@ -185,10 +249,8 @@ export function ProjectPanel({ projectId, jobId, onChanged }: {
               <dd className="text-gray-700">{project.lead_name || C.noLead}</dd>
             </div>
             <div className="flex gap-2"><dt className="text-gray-400 w-12 shrink-0">Dates</dt>
-              <dd className="text-gray-700" title={C.dates}>
-                {hasDates
-                  ? <>out {shortDay(project.out_date) || '-'} · {shortDay(project.job_date) || '-'}-{shortDay(project.job_end) || '-'} · back {shortDay(project.return_date) || '-'}</>
-                  : C.noDates}
+              <dd className="text-gray-700" title={dates.line ? dates.full : C.dates}>
+                {dates.line || C.noDates}
               </dd>
             </div>
           </dl>
@@ -562,7 +624,8 @@ export function AddToProjectModal({ job, onClose, onDone }: {
         intro={C.addNewIntro}
         submitLabel={C.create}
         initial={{
-          name: '',
+          // Whatever was typed in the search box starts as the name.
+          name: search.trim().slice(0, 200),
           // Whoever starts the project leads it until somebody changes it.
           lead_user_id: me?.id ?? null,
           lead_name: me ? 'You' : null,
@@ -593,7 +656,7 @@ export function AddToProjectModal({ job, onClose, onDone }: {
         {loading ? (
           <p className="text-xs text-gray-400 py-3">Loading...</p>
         ) : projects.length === 0 ? (
-          <p className="text-xs text-gray-400 py-3">{C.addNone}</p>
+          <p className="text-xs text-gray-400 py-3">{search.trim() ? C.addNoMatch(search.trim()) : C.addNone}</p>
         ) : (
           <ul className="divide-y divide-gray-100 mb-2">
             {projects.map((p) => (
@@ -601,7 +664,7 @@ export function AddToProjectModal({ job, onClose, onDone }: {
                 <div className="min-w-0">
                   <div className="text-sm text-gray-900 truncate">{p.name}</div>
                   <div className="text-[11px] text-gray-500 truncate">
-                    {[p.client_name, p.job_date ? `${shortDay(p.job_date)}${p.job_end && p.job_end !== p.job_date ? `-${shortDay(p.job_end)}` : ''}` : null, C.jobCount(p.job_count)].filter(Boolean).join(' · ')}
+                    {[p.client_name, spanText(p.job_date, p.job_end) || null, C.jobCount(p.job_count)].filter(Boolean).join(' · ')}
                   </div>
                 </div>
                 <button type="button" onClick={() => pick(p.id)} disabled={adding !== null}

@@ -3,6 +3,8 @@ import { api } from '../services/api';
 import MarkdownLite from '../components/MarkdownLite';
 import { openAuthedFile } from '../lib/openAuthedFile';
 import { ukToday } from '../lib/ukDate';
+import { useAuthStore } from '../hooks/useAuthStore';
+import { AI_TOPICS, AI_TOPIC_LABELS, type AiTopic } from '../lib/aiTopics';
 
 export type Mode = 'read_only' | 'tick' | 'sign';
 export type Category = 'policy' | 'agreement' | 'training' | 'official_doc' | 'contract' | 'other';
@@ -18,6 +20,9 @@ export interface DocRow {
   is_active: boolean; current_version: number | null;
   approval_status: ApprovalStatus; review_notes: string | null;
   shareable_with_freelancers: boolean;
+  // Shared with the Claude that drafts client emails (admin-only switch, AI-KNOWLEDGE-SPEC §4).
+  ai_shared?: boolean;
+  ai_topics?: string[] | null;
   tags: string[] | null;
   owner_user_ids: string[] | null;
   content_review_interval_months: number | null;
@@ -597,6 +602,69 @@ export function ViewModal({ doc, canReview, onApprove, onReject, onClose }: {
   );
 }
 
+// ── Share with Claude (admin only) ───────────────────────────────────────────
+// docs/AI-KNOWLEDGE-SPEC.md §4. Whatever is shared here is read by the Claude
+// that drafts client emails, for the topics ticked — so it is admin-only.
+function AiShareModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => void; onSaved: () => void }) {
+  const [shared, setShared] = useState<boolean>(!!doc.ai_shared);
+  const [topics, setTopics] = useState<AiTopic[]>(
+    ((doc.ai_topics || []) as string[]).filter((t): t is AiTopic => (AI_TOPICS as readonly string[]).includes(t)),
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const toggleTopic = (t: AiTopic) => setTopics((cur) => cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]);
+  const save = async () => {
+    setSaving(true); setError('');
+    try {
+      await api.put(`/staff-documents/${doc.id}/ai`, { ai_shared: shared, ai_topics: topics });
+      onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save');
+    } finally { setSaving(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl max-w-lg w-full" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b">
+          <h3 className="font-semibold text-gray-900 truncate">Share with Claude — {doc.title}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+        </div>
+        <div className="p-5 space-y-4">
+          <p className="text-sm text-gray-600">
+            Claude reads the current approved version when it drafts client emails, for the topics you tick.
+            Staff still read it as normal. The hard rules in OP (never invent a discount, never make up a detail) always win over a guide.
+          </p>
+          <label className="flex items-center gap-2 text-sm font-medium text-gray-800">
+            <input type="checkbox" checked={shared} onChange={(e) => setShared(e.target.checked)} />
+            Share this document with Claude
+          </label>
+          <div className={shared ? '' : 'opacity-50 pointer-events-none'}>
+            <div className="text-xs font-semibold text-gray-500 uppercase mb-2">Read for</div>
+            <div className="space-y-2">
+              {AI_TOPICS.map((t) => (
+                <label key={t} className="flex items-start gap-2 text-sm">
+                  <input type="checkbox" className="mt-0.5" checked={topics.includes(t)} onChange={() => toggleTopic(t)} />
+                  <span>
+                    <span className="text-gray-800">{AI_TOPIC_LABELS[t].label}</span>
+                    <span className="block text-xs text-gray-500">{AI_TOPIC_LABELS[t].hint}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+          {error && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
+        </div>
+        <div className="px-5 py-3 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 rounded-md border border-gray-300 text-sm text-gray-700">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-5 py-2 rounded-md bg-purple-700 text-white text-sm font-medium hover:bg-purple-800 disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 export default function StaffDocumentsAdminPage() {
   const [docs, setDocs] = useState<DocRow[]>([]);
@@ -606,6 +674,8 @@ export default function StaffDocumentsAdminPage() {
   const [versionDoc, setVersionDoc] = useState<DocRow | null>(null);
   const [matrixDoc, setMatrixDoc] = useState<DocRow | null>(null);
   const [viewDoc, setViewDoc] = useState<DocRow | null>(null);
+  const [aiDoc, setAiDoc] = useState<DocRow | null>(null);
+  const isAdmin = useAuthStore((st) => st.user?.role) === 'admin';
   const [search, setSearch] = useState('');
   const [tagFilter, setTagFilter] = useState<string | null>(null);
 
@@ -705,6 +775,10 @@ export default function StaffDocumentsAdminPage() {
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${approvalPill(d.approval_status)!.c}`}>{approvalPill(d.approval_status)!.t}</span>
                       )}
                       {reviewDue(d) && <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700">Review due</span>}
+                      {d.ai_shared && (
+                        <span title={`Claude reads this for: ${(d.ai_topics || []).map((t) => AI_TOPIC_LABELS[t as AiTopic]?.label || t).join(', ')}`}
+                          className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700">Shared with Claude</span>
+                      )}
                     </div>
                     <div className="text-xs text-gray-400">
                       {d.category}{!d.is_active && ' · retired'}{d.author_name && ` · by ${d.author_name}`}
@@ -734,6 +808,9 @@ export default function StaffDocumentsAdminPage() {
                     </button>
                     <button onClick={() => setForm({ open: true, doc: d })} className="text-xs text-gray-600 hover:text-purple-700 px-1">Edit</button>
                     <button onClick={() => setVersionDoc(d)} className="text-xs text-gray-600 hover:text-purple-700 px-1">New version</button>
+                    {isAdmin && (
+                      <button onClick={() => setAiDoc(d)} className="text-xs text-indigo-600 hover:text-indigo-800 px-1">Claude</button>
+                    )}
                     {d.completion_mode !== 'read_only' && (
                       <button onClick={() => setMatrixDoc(d)} className="text-xs text-gray-600 hover:text-purple-700 px-1">Who's done</button>
                     )}
@@ -758,6 +835,7 @@ export default function StaffDocumentsAdminPage() {
         onClose={() => setForm({ open: false, doc: null })} onSaved={() => { setForm({ open: false, doc: null }); load(); }} />}
       {versionDoc && <VersionModal doc={versionDoc} onClose={() => setVersionDoc(null)} onSaved={() => { setVersionDoc(null); load(); }} />}
       {matrixDoc && <MatrixModal doc={matrixDoc} onClose={() => setMatrixDoc(null)} />}
+      {aiDoc && <AiShareModal doc={aiDoc} onClose={() => setAiDoc(null)} onSaved={() => { setAiDoc(null); load(); }} />}
       {viewDoc && <ViewModal doc={viewDoc} canReview onApprove={() => approve(viewDoc.id)} onReject={() => reject(viewDoc.id)} onClose={() => setViewDoc(null)} />}
     </div>
   );

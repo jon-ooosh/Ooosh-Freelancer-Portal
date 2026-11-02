@@ -79,6 +79,9 @@ Adding or removing a job writes a note on that job's Activity Timeline ("Added t
 - A project page, a project filter on the pipeline, project-level chasing.
 - HireHop project mirroring.
 - The panel is desktop-only (the right-hand column is `hidden lg:block`, like Client History).
+- Archiving or closing a project. The picker lists newest first, so small "trying to win the
+  backline" projects (a second job for a client already out on a van) will pile up beside the
+  festivals over time (jon, 26 Oct 2026 - noted, not needed yet).
 
 ## 5. Verified
 
@@ -87,3 +90,14 @@ from a job (client + dates default from the job, lead = creator), add/move/remov
 notes, roll-ups with an options group inside the project, out-of-order dates refused, candidates
 by client/dates and by job number, search result, Kanban chip, New Enquiry prefill + banner,
 option copy keeps the project. Not yet used on live data.
+
+## 6. After first use (26 Oct 2026)
+
+- **Search text becomes the name.** In "+ Add to a project", whatever is in the search box starts
+  as the new project's Name on "Start a new project" (editable). With text in the box and nothing
+  found, the picker says `Nothing called "..." - start it below.` rather than "No projects yet".
+- **Shorter dates line.** The panel leads with the Start-End span and adds "out" / "back" only
+  on a day that differs from Start / End: `10-21 Nov · back 22 Nov`, `out 9 Nov · 10-21 Nov ·
+  back 22 Nov`, `28 Nov-2 Dec`. The year shows only when it isn't this (UK) year. Hovering shows
+  all four in full. The picker list uses the same span. Helpers: `projectDatesText()` /
+  `spanText()` in `JobProjects.tsx`.

@@ -26,6 +26,8 @@ import { ukToday } from '../services/uk-date';
 import { recordPreauthHold, PreauthRecordError } from '../services/excess-preauth';
 import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
 import { stripeClientForPaymentIntent } from '../services/stripe-terminal';
+import { findDepositAvailability } from '../services/hh-deposit-release';
+import { excessRefundShortfall } from '../services/excess-refund';
 
 const router = Router();
 router.use(authenticate);
@@ -2540,62 +2542,9 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       return;
     }
 
-    if (stripeRefundPath) {
-      if (!isStripeConfigured()) {
-        res.status(503).json({
-          error: 'Stripe not configured',
-          detail: 'Stripe API key is missing. Use a different reimburse method, or contact engineering.',
-        });
-        return;
-      }
-      try {
-        const stripe = await stripeClientForPaymentIntent(resolvedPi as string);
-        const refund = await stripe.refunds.create({
-          payment_intent: resolvedPi as string,
-          amount: Math.round(amount * 100),
-        });
-        stripeRefundId = refund.id;
-        console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${resolvedPi})`);
-
-        // CLAIM THE REFUND LEG NOW — before the HireHop/Xero work below, not
-        // after the response. Stripe fires `charge.refunded` within a few
-        // hundred milliseconds of the refund being created, and that webhook
-        // applies the refund to this record unless it finds a leg carrying the
-        // same refund id. Writing the leg at the END of this handler (which is
-        // what we used to do) left a window of seconds — the whole HH push —
-        // in which the webhook saw an empty ledger and applied the £ a second
-        // time. Job 15187 lost that race by 2 seconds; the records sitting at
-        // reimbursement_amount = 2 × excess_amount_taken lost it too.
-        //
-        // Safe to claim before the money is recorded: once a Stripe refund
-        // exists, every remaining path through this handler reaches the Step 3
-        // UPDATE (the 422/502 aborts below are all gated on `!stripeRefundPath`).
-        await query(
-          `UPDATE job_excess
-           SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb
-           WHERE id = $2`,
-          [
-            JSON.stringify([{
-              source: 'manual',
-              ref: `stripe_refund_${refund.id}`,
-              amount,
-              at: new Date().toISOString(),
-            }]),
-            id,
-          ]
-        ).catch(e => console.error('[excess] Refund leg claim failed (non-fatal, webhook may double-apply):', e));
-      } catch (err) {
-        const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
-        console.error('[excess] Stripe refund failed:', msg);
-        res.status(502).json({
-          error: 'Stripe refund failed',
-          detail: `${msg} — if the original charge is past Stripe's refund window (~180 days), the card can no longer be refunded. Contact the hirer and reimburse by another method (e.g. BACS) via this form instead.`,
-        });
-        return;
-      }
-    }
-
     // ── Step 1: Find the original HH deposit ID (for HH-linked records) ─────
+    // Runs BEFORE the Stripe refund (Step 0, below) so Step 1b can ask HireHop
+    // whether it can take the refund while nothing has moved yet. Reads only.
     let hhDepositId: number | null = null;
     let hhPaymentAppId: number | null = null;
     // The whole save response — HireHop names its own Xero sync parameters in it.
@@ -2653,16 +2602,17 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       }
 
       // No deposit found → loud fail. The cash chain is broken, refusing to drift.
-      // Exception: when Stripe has already moved the money (Step 0), HH paperwork
-      // is a record-keeping nice-to-have, not a money gate — capture the gap as
-      // hh_push_error and continue. The Stripe webhook will surface the refund
-      // to staff via info@ in parallel.
+      // Exception: on the Stripe path (Step 0, below) the card refund still goes
+      // ahead — HH paperwork is a record-keeping nice-to-have, not a money gate —
+      // so capture the gap as hh_push_error (only shown once Stripe has refunded)
+      // and continue. The Stripe webhook will surface the refund to staff via
+      // info@ in parallel.
       if (!hhDepositId) {
         if (stripeRefundPath) {
           hhPushError = current.payment_method === 'rolled_over'
             ? 'Stripe refund processed, but the HireHop deposit chain back to the original deposit is broken — OP record updated, but you may need to manually create the negative HH payment application to keep HH books matching.'
             : 'Stripe refund processed, but no matching HireHop deposit was found for paperwork — OP record updated. Check the linked HH job and add a manual negative payment application if needed.';
-          console.warn(`[excess] Stripe refund succeeded but HH deposit lookup failed for excess ${id}`);
+          console.warn(`[excess] HH deposit lookup failed for excess ${id} — Stripe refund goes ahead without HH paperwork`);
         } else {
           res.status(422).json({
             error: 'Cannot locate original HireHop deposit',
@@ -2673,9 +2623,108 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
           return;
         }
       }
+    }
 
+    // ── Step 1b: can HireHop take this refund? Asked BEFORE any money moves ──
+    // HireHop refuses a refund out of money that is applied to an invoice (error
+    // 370), and on the Stripe path that refusal used to arrive AFTER the card had
+    // been refunded. Job 16491 (Oct 2026): £841.32 of a £1,200 excess was applied
+    // to the damage invoice by hand, OP didn't know, and Reimburse offered the
+    // full £1,200. The hire Refund has asked first since job 15628; this is the
+    // same check. A failed read is not permission to guess.
+    if (hhDepositId) {
+      // A carried-over excess still sits on the job that took the money, so look
+      // there too (every job a record or payment for this deposit names).
+      const homes = await query(
+        `SELECT hirehop_job_id AS hh FROM job_excess
+          WHERE hh_deposit_id = $1::bigint AND hirehop_job_id IS NOT NULL
+         UNION
+         SELECT hirehop_job_id FROM job_payments
+          WHERE hirehop_deposit_id = $1::bigint AND hirehop_job_id IS NOT NULL`,
+        [hhDepositId]
+      );
+      const jobsToCheck = [Number(current.hirehop_job_id), ...homes.rows.map((r: { hh: number }) => Number(r.hh))];
+      let found: Awaited<ReturnType<typeof findDepositAvailability>> = null;
+      try {
+        found = await findDepositAvailability(Number(hhDepositId), jobsToCheck);
+      } catch (e) {
+        console.error('[excess] Reimburse: HireHop deposit read failed:', e instanceof Error ? e.message : e);
+        res.status(502).json({
+          error: 'Could not read the excess payment from HireHop',
+          detail: 'OP needs HireHop\'s current figures to know how much of this excess it can refund. Nothing has been refunded. Try again shortly, or check HireHop is responding.',
+        });
+        return;
+      }
+      if (!found) {
+        res.status(422).json({
+          error: 'Excess payment not found in HireHop',
+          detail: `OP looked for HireHop payment ${hhDepositId} on job ${[...new Set(jobsToCheck)].join(', ')} and it isn't there — it may have been deleted or moved. Use "Link HH Deposit" on the Money tab to point this record at the right payment. Nothing has been refunded.`,
+        });
+        return;
+      }
+      const shortfall = excessRefundShortfall(amount, found.availability);
+      if (shortfall) {
+        res.status(422).json({ error: 'HireHop can\'t refund that much from this excess', code: 'hh_not_enough_free', detail: shortfall });
+        return;
+      }
+    }
 
+    if (stripeRefundPath) {
+      if (!isStripeConfigured()) {
+        res.status(503).json({
+          error: 'Stripe not configured',
+          detail: 'Stripe API key is missing. Use a different reimburse method, or contact engineering.',
+        });
+        return;
+      }
+      try {
+        const stripe = await stripeClientForPaymentIntent(resolvedPi as string);
+        const refund = await stripe.refunds.create({
+          payment_intent: resolvedPi as string,
+          amount: Math.round(amount * 100),
+        });
+        stripeRefundId = refund.id;
+        console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${resolvedPi})`);
 
+        // CLAIM THE REFUND LEG NOW — before the HireHop/Xero work below, not
+        // after the response. Stripe fires `charge.refunded` within a few
+        // hundred milliseconds of the refund being created, and that webhook
+        // applies the refund to this record unless it finds a leg carrying the
+        // same refund id. Writing the leg at the END of this handler (which is
+        // what we used to do) left a window of seconds — the whole HH push —
+        // in which the webhook saw an empty ledger and applied the £ a second
+        // time. Job 15187 lost that race by 2 seconds; the records sitting at
+        // reimbursement_amount = 2 × excess_amount_taken lost it too.
+        //
+        // Safe to claim before the money is recorded: once a Stripe refund
+        // exists, every remaining path through this handler reaches the Step 3
+        // UPDATE (the 422/502 aborts below are all gated on `!stripeRefundPath`).
+        await query(
+          `UPDATE job_excess
+           SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb
+           WHERE id = $2`,
+          [
+            JSON.stringify([{
+              source: 'manual',
+              ref: `stripe_refund_${refund.id}`,
+              amount,
+              at: new Date().toISOString(),
+            }]),
+            id,
+          ]
+        ).catch(e => console.error('[excess] Refund leg claim failed (non-fatal, webhook may double-apply):', e));
+      } catch (err) {
+        const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
+        console.error('[excess] Stripe refund failed:', msg);
+        res.status(502).json({
+          error: 'Stripe refund failed',
+          detail: `${msg} — if the original charge is past Stripe's refund window (~180 days), the card can no longer be refunded. Contact the hirer and reimburse by another method (e.g. BACS) via this form instead.`,
+        });
+        return;
+      }
+    }
+
+    if (isHhLinked) {
       // ── Step 2: Push the refund payment application to HireHop ───────────
       if (hhDepositId) {
         const currentDate = ukToday();

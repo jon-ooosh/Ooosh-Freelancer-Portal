@@ -23,6 +23,22 @@ import { RememberPhone } from '@/components/AuthShell'
 
 const RESEND_SECONDS = 30
 
+/**
+ * Where to go once signed in: back to the page that sent them here (the
+ * middleware passes it as `from` — a reminder text or email links straight to a
+ * job), else the dashboard. Only a plain path on this portal, never another
+ * site: letters, digits, `/`, `-` and `_`, starting with one `/`.
+ */
+function afterSignIn(): string {
+  try {
+    const from = new URLSearchParams(window.location.search).get('from') || ''
+    if (/^\/[A-Za-z0-9][A-Za-z0-9/_-]*$/.test(from) && !from.startsWith('/login')) return from
+  } catch {
+    // fall through
+  }
+  return '/dashboard'
+}
+
 export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -90,8 +106,8 @@ export default function LoginPage() {
         return
       }
 
-      // Redirect to dashboard on success
-      window.location.href = '/dashboard'
+      // Signed in: back to the page they were heading for, else the dashboard
+      window.location.href = afterSignIn()
     } catch (err) {
       setError('An error occurred. Please try again.')
     } finally {
@@ -119,7 +135,7 @@ export default function LoginPage() {
         setError(data.error || 'That code didn\'t work. Please try again.')
         return
       }
-      window.location.href = '/dashboard'
+      window.location.href = afterSignIn()
     } catch (err) {
       setError('An error occurred. Please try again.')
     } finally {

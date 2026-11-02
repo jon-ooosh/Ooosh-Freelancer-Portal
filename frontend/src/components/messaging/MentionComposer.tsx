@@ -72,6 +72,9 @@ interface MentionComposerProps {
   footer?: ReactNode;
   /** Extra className on the outer wrapper. */
   className?: string;
+  /** Drop the 64px minimum height so `rows={1}` really is one line — for a
+   *  composer that sits idle as a single "Add a note…" box until it's used. */
+  compact?: boolean;
   /**
    * Optional pre-loaded user list. If omitted, the primitive fetches
    * GET /users once on mount. Useful for callers that already have a
@@ -91,6 +94,7 @@ export function MentionComposer({
   disabled = false,
   footer,
   className = '',
+  compact = false,
   users: usersProp,
 }: MentionComposerProps) {
   const [users, setUsers] = useState<MentionUser[]>(usersProp ?? []);
@@ -190,7 +194,7 @@ export function MentionComposer({
           placeholder={placeholder}
           rows={rows}
           disabled={disabled}
-          className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
+          className={`w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y ${compact ? 'min-h-0' : 'min-h-[64px]'}`}
         />
         {showMentions && filteredUsers.length > 0 && (
           <div className="absolute left-0 right-0 bottom-full mb-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">

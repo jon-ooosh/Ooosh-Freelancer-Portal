@@ -134,8 +134,14 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
     // Look up HH job numbers for these jobs (limit to 10 to avoid rate limiting)
     if (jobsNeedingBillingCheck.size > 0) {
       const checkIds = Array.from(jobsNeedingBillingCheck).slice(0, 10);
+      // Not a cancelled job: its only invoice is the fee, so "every invoice paid"
+      // came true the moment the fee was allocated and ticked Payment while the
+      // refund was still due. The close-out plan ticks a cancellation's card
+      // itself, once nothing is owing or left to refund
+      // (cancellation-close.ts markCancellationReconciled).
       const hhNumbers = await query(
-        `SELECT id, hh_job_number FROM jobs WHERE id = ANY($1) AND hh_job_number IS NOT NULL`,
+        `SELECT id, hh_job_number FROM jobs
+          WHERE id = ANY($1) AND hh_job_number IS NOT NULL AND pipeline_status IS DISTINCT FROM 'cancelled'`,
         [checkIds]
       );
 

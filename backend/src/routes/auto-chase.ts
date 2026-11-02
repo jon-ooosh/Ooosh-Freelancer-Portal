@@ -285,8 +285,8 @@ router.post('/preview-draft/:jobId', authorize('admin', 'manager'), async (req: 
   }
   try {
     const signOffName = await senderFirstName(req.user?.id);
-    const { draft, context } = await draftChaseEmail(String(req.params.jobId), { signOffName });
-    res.json({ data: { draft, context } });
+    const { draft, context, guidesUsed } = await draftChaseEmail(String(req.params.jobId), { signOffName });
+    res.json({ data: { draft, context, guidesUsed } });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (/not found/i.test(message)) return res.status(404).json({ error: message });

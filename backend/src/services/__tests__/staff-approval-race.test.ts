@@ -31,6 +31,10 @@ const mockQuery = query as jest.MockedFunction<any>;
 const mockGetClient = getClient as jest.MockedFunction<any>;
 
 const ID = '6a1e3c55-0d7b-4f62-9a35-2f7c1b8e4d90';
+// Far in the future on purpose: cancelRequest refuses time off that has
+// already started (spec §5.4.1), so a fixed date near "now" would turn this
+// race test into a test of that rule the day it passed.
+const DAY = '2099-10-30';
 const PERSON = '33333333-3333-3333-3333-333333333333';
 const ADMIN = '587685f2-68f0-443d-ab1a-0129dbfe8f42';
 
@@ -40,6 +44,11 @@ function fakeClient(flipped: number) {
     query: jest.fn(async (text: string) => {
       if (/^\s*UPDATE staff_(leave_requests|overtime_entries)/.test(text)) {
         return { rows: Array.from({ length: flipped }, () => ({ id: ID })) };
+      }
+      // The days a leave approval debits (or a cancel credits) are read inside
+      // the transaction, so a day already handed back is skipped (§5.4.1).
+      if (/FROM staff_leave_request_days/.test(text)) {
+        return { rows: [{ leave_date: DAY, minutes: 420, portion: 'full' }] };
       }
       return { rows: [] };
     }),
@@ -58,10 +67,10 @@ function leaveRequest(status: string) {
   mockQuery
     .mockResolvedValueOnce({ rows: [{
       id: ID, person_id: PERSON, person_name: 'Matt Test', leave_type: 'holiday',
-      start_date: '2026-10-30', end_date: '2026-10-30', total_minutes: 420,
+      start_date: DAY, end_date: DAY, total_minutes: 420,
       status, requested_at: '2026-10-01T09:00:00Z',
     }] })
-    .mockResolvedValueOnce({ rows: [{ leave_date: '2026-10-30', minutes: 420, portion: 'full' }] });
+    .mockResolvedValueOnce({ rows: [{ leave_date: DAY, minutes: 420, portion: 'full' }] });
 }
 
 beforeEach(() => {

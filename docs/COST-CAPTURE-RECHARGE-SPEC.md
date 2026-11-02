@@ -1419,3 +1419,28 @@ Xero contact or normalised name; warn only). The list's `work_summary` gives "1 
 
 **Retired.** `CostAllocationModal.tsx` (⑂ opens the edit form at the Jobs table), the "covers several
 jobs" tick, the "This job so far" box, the fuel banners, the quote/extra cards and recharge selects.
+
+---
+
+## The phone receipt page (Oct 2026, PR 3 of the redesign)
+
+`/receipt` (`frontend/src/pages/ReceiptCapturePage.tsx`), full screen, every staff role, one question per
+screen: snap (with "Waiting for a receipt": my company-card costs with no receipt, which replaced
+`/my-receipts`) → is this right (Receipt / Bill / Refund, then the AI's read, each row tappable) → which
+job → who pays, the van, paid by → done. It is the laptop form's rules with fewer words: who pays through
+`costJobs.ts` `defaultWhoPays()`, the save through `planSplit()` (one job or none), the van on the day
+through `vansOnDate()`. No migration.
+
+**Shared with the laptop form:** `components/costs/receiptRead.ts`: `preparePhoto()` (HEIC → JPEG, 2048px,
+on `lib/imageNormalise.ts`), `readReceipt()` / `amountsFromRead()` (the AI read and its VAT mapping, moved
+out of the modal), `uploadReceiptFile()`, `retryOnNoReply()`. The laptop form now shrinks photos and
+retries uploads too, and takes `initialFile` / `initialKind` so the phone can hand a photo over ("Open the
+full form").
+
+**Backend:** `GET /costs/van-jobs` (the jobs with a van out around a date: two days either side, a
+swapped-out van ending at the swap, the dual assignment↔job match, lost and cancelled jobs left out, the
+receipt's reg first; `search` keeps jobs whose van reg matches); `GET /costs/check-duplicate` returns the
+photo key and answers `?receipt_r2_key=` ("did my save land?"); the receipt chaser links to `/receipt`.
+
+**Never a blind re-send:** reads and uploads repeat only when no reply came (`isNoReply`); the save is
+sent once, and after a lost reply the page looks for its own photo on a cost before offering "Try again".

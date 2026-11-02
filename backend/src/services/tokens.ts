@@ -30,7 +30,8 @@ export type TokenAudience =
   | 'login_pending'           // password accepted, second factor still owed — routes/auth.ts (5 min)
   | 'trusted_device'          // the op_device cookie: this browser passed the second factor — services/staff-login-security.ts (90 days)
   | 'portal_login_pending'    // freelancer portal: password accepted, the emailed code still owed — services/portal-login-security.ts (10 min)
-  | 'portal_device';          // freelancer portal: this phone passed the second step (the portal's portal_device cookie) — same file (90 days)
+  | 'portal_device'           // freelancer portal: this phone passed the second step (the portal's portal_device cookie) — same file (90 days)
+  | 'kiosk_device';           // the op_kiosk_device cookie: this tablet was set up as the warehouse kiosk — services/kiosk-devices.ts (365 days, renewed at each PIN)
 
 if (!process.env.JWT_SECRET) {
   throw new Error('FATAL: JWT_SECRET environment variable is required');

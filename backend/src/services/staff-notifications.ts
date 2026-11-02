@@ -137,30 +137,74 @@ export async function notifyLeaveRequested(requestId: string) {
     const r = await query(
       `SELECT r.id, r.person_id, r.leave_type, r.total_minutes, r.request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
+              o.start_date::text AS was_start, o.end_date::text AS was_end,
+              o.total_minutes AS was_minutes,
+              (p.first_name || ' ' || p.last_name) AS name
+         FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
+         LEFT JOIN staff_leave_requests o ON o.id = r.replaces_request_id
+        WHERE r.id = $1`, [requestId]);
+    const q = r.rows[0];
+    if (!q) return;
+    const link = APPROVALS_URL;
+    const rangeOf = (a: string, b: string) => a === b ? fmtDate(a) : `${fmtDate(a)} – ${fmtDate(b)}`;
+    const range = rangeOf(q.start_date, q.end_date);
+    const what = q.leave_type === 'holiday' ? 'holiday' : q.leave_type === 'toil' ? 'TOIL' : 'unpaid leave';
+    // A CHANGE to approved time off (spec §5.4) says what it was as well as
+    // what it would be — "has requested holiday" would read as a new booking.
+    const was = q.was_start ? rangeOf(q.was_start, q.was_end) : null;
+    const title = was ? `${q.name} asks to change their time off` : `${q.name} has requested ${what}`;
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        title,
+        was
+          ? `Was ${was} (${fmtH(Number(q.was_minutes))}) · now ${range} (${fmtH(Number(q.total_minutes))})`
+          : `${range} · ${fmtH(Number(q.total_minutes))}`,
+        'staff_leave_request', q.id, link, 'normal', true);
+    }
+    await emailApprovers(
+      title,
+      esc(title),
+      [
+        ...(was ? [`Was <strong>${esc(was)}</strong> — ${fmtH(Number(q.was_minutes))}`] : []),
+        `${was ? 'Now ' : ''}<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))}${was ? ` of ${esc(what)}` : ''}`,
+        ...(q.request_note ? [`<span style="color:#64748b;">“${esc(q.request_note)}”</span>`] : []),
+      ],
+      link);
+  } catch (e) { console.error('[staff-notifications] leave requested:', e); }
+}
+
+/**
+ * Somebody asked, in writing, to cancel approved time off (spec §5.4). Same
+ * bell and email as a new request, on the booking itself — answered (approved,
+ * declined or withdrawn) it is retired by `retireLeaveRequestBells`.
+ */
+export async function notifyLeaveCancelAsked(requestId: string) {
+  try {
+    const r = await query(
+      `SELECT r.id, r.leave_type, r.total_minutes, r.cancel_request_note,
+              r.start_date::text AS start_date, r.end_date::text AS end_date,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
         WHERE r.id = $1`, [requestId]);
     const q = r.rows[0];
     if (!q) return;
-    const link = APPROVALS_URL;
     const range = q.start_date === q.end_date
       ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
     const what = q.leave_type === 'holiday' ? 'holiday' : q.leave_type === 'toil' ? 'TOIL' : 'unpaid leave';
+    const title = `${q.name} asks to cancel their ${what}`;
     for (const u of await approverUserIds()) {
-      await notify(u.id, 'follow_up',
-        `${q.name} has requested ${what}`,
-        `${range} · ${fmtH(Number(q.total_minutes))}`,
-        'staff_leave_request', q.id, link, 'normal', true);
+      await notify(u.id, 'follow_up', title, `${range} · ${fmtH(Number(q.total_minutes))}`,
+        'staff_leave_request', q.id, APPROVALS_URL, 'normal', true);
     }
     await emailApprovers(
-      `${q.name} has requested ${what}`,
-      `${esc(q.name)} has requested ${esc(what)}`,
+      title,
+      esc(title),
       [
-        `<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))}`,
-        ...(q.request_note ? [`<span style="color:#64748b;">“${esc(q.request_note)}”</span>`] : []),
+        `<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))} would go back to their balance`,
+        ...(q.cancel_request_note ? [`<span style="color:#64748b;">“${esc(q.cancel_request_note)}”</span>`] : []),
       ],
-      link);
-  } catch (e) { console.error('[staff-notifications] leave requested:', e); }
+      APPROVALS_URL);
+  } catch (e) { console.error('[staff-notifications] leave cancel asked:', e); }
 }
 
 /**
@@ -349,6 +393,12 @@ export async function notifyDecision(opts: {
   summary: string;
   note?: string | null;
   entityId: string;
+  /**
+   * Overrides "Time off declined" / "Your time off has been declined" where
+   * that would mislead — declining an ask to CANCEL leaves the time off
+   * booked, and the person must not read it as their holiday refused (§5.4).
+   */
+  heading?: string;
 }) {
   try {
     const u = await query(
@@ -363,7 +413,7 @@ export async function notifyDecision(opts: {
       .replace(/(\d+) min\b/g, (_m, n: string) => fmtH(Number(n)));
     const MY_TIME = '/me?tab=time';
     await notify(userId, 'system',
-      `${what} ${opts.outcome}: ${summary}`,
+      opts.heading ? `${opts.heading}: ${summary}` : `${what} ${opts.outcome}: ${summary}`,
       opts.note ?? '',
       opts.kind === 'leave' ? 'staff_leave_request' : opts.kind === 'wfh' ? 'staff_wfh_request'
         : opts.kind === 'swap' ? 'staff_pattern_swap' : 'staff_overtime_entry',
@@ -378,7 +428,7 @@ export async function notifyDecision(opts: {
     if (to) {
       const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
       const word = opts.outcome === 'approved' ? 'approved' : opts.outcome === 'declined' ? 'declined' : 'cancelled';
-      const heading = `Your ${opts.kind === 'leave' ? 'time off' : opts.kind === 'wfh' ? 'working-from-home request'
+      const heading = opts.heading ?? `Your ${opts.kind === 'leave' ? 'time off' : opts.kind === 'wfh' ? 'working-from-home request'
         : opts.kind === 'swap' ? 'day swap' : 'overtime'} has been ${word}`;
       const body =
         `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">${esc(heading)}</h2>` +
@@ -590,13 +640,20 @@ export interface DigestResult {
 export async function runStaffTimeDigest(): Promise<DigestResult> {
   const { listSwaps } = await import('./staff-swaps');
   const [leave, overtime, wfh, swaps] = await Promise.all([
+    // New requests, changes to approved ones, and asks to cancel (spec §5.4) —
+    // all three wait on the same person.
     query(
-      `SELECT r.id, r.leave_type, r.total_minutes, r.request_note,
+      `SELECT r.id, r.leave_type, r.total_minutes,
+              CASE WHEN r.status = 'approved' THEN r.cancel_request_note ELSE r.request_note END AS request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
               r.requested_at,
+              (r.status = 'approved') AS is_cancel_ask,
+              o.start_date::text AS was_start, o.end_date::text AS was_end,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
+         LEFT JOIN staff_leave_requests o ON o.id = r.replaces_request_id
         WHERE r.status = 'pending'
+           OR (r.status = 'approved' AND r.cancel_requested_at IS NOT NULL AND r.cancel_declined_at IS NULL)
         ORDER BY r.start_date`),
     query(
       `SELECT e.id, e.minutes, e.reason, e.work_date::text AS work_date,
@@ -639,11 +696,13 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
   if (leave.rows.length > 0) {
     rows.push(`<h3 style="margin:20px 0 8px;font-size:15px;color:#1e293b;">Time off (${leave.rows.length})</h3>`);
     for (const q of leave.rows) {
-      const range = q.start_date === q.end_date
-        ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
+      const rangeOf = (a: string, b: string) => a === b ? fmtDate(a) : `${fmtDate(a)} – ${fmtDate(b)}`;
+      const range = rangeOf(q.start_date, q.end_date);
+      const ask = q.is_cancel_ask ? 'asks to cancel · '
+        : q.was_start ? `asks to change · was ${rangeOf(q.was_start, q.was_end)}, now ` : '';
       rows.push(
         `<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">` +
-        `<strong>${esc(q.name)}</strong> — ${esc(q.leave_type)} · ${esc(range)} · ${fmtH(Number(q.total_minutes))}` +
+        `<strong>${esc(q.name)}</strong> — ${esc(q.leave_type)} · ${esc(ask)}${esc(range)} · ${fmtH(Number(q.total_minutes))}` +
         (q.request_note ? `<br><span style="color:#64748b;">“${esc(q.request_note)}”</span>` : '') +
         `</p>`
       );

@@ -115,3 +115,26 @@ Built as above, with these differences, each the simpler of two ways to the same
   on three jobs are three answers, not five.
 - **A one-job freelancer invoice with a studio evening is a one-share split**, so the evening stays with
   overheads, as agreed.
+
+## What PR 3 built, and where it differs (Oct 2026)
+
+The phone receipt page, `/receipt` (`frontend/src/pages/ReceiptCapturePage.tsx`), as agreed (jon, 26 Oct
+2026), with these settled on the way:
+- **Where and who:** its own full-screen page for every staff role, general assistants included. The
+  Quick Log tile, the Wednesday chaser (email and bell) and "+ Capture cost" on a phone-sized screen open
+  it; `/my-receipts` redirects to it. Costs is in the Money menu for every staff role too.
+- **What it handles:** receipts and bills. Refund opens the refund window; a freelancer's invoice gets
+  "Open the full form" (the laptop form, with the photo handed over), and so does anything needing
+  several jobs, lines or a VAT reclaim.
+- **Which job:** "No job, goes to overheads" first, the job number on the receipt if there is one, then
+  the jobs with a van out around the receipt's date (two days either side; the van whose reg the AI read
+  first; `GET /costs/van-jobs`), then a search by job, client or reg.
+- **Already added:** a snap that matches one of my receipt-less purchases (same amount, same day) or the
+  laptop's duplicate check offers "Attach the photo to it instead?"; one that already has a receipt is a
+  warning only.
+- **Photos:** shrunk to 2048px and HEIC converted to JPEG before upload, on the phone AND the laptop form
+  (`components/costs/receiptRead.ts` `preparePhoto()`, on `lib/imageNormalise.ts`).
+- **Weak signal:** reads and uploads are asked again when no reply came; the save is sent once and, on a
+  lost reply, the page looks for its own photo before offering "Try again".
+- **Receipt / Bill stays the person's answer** on the phone too: the phone starts on Receipt and the AI
+  never switches it, even when it reads a due date.

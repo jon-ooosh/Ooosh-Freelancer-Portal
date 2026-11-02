@@ -138,6 +138,7 @@ middleware; the general `authenticate` accepts exactly one shape.
 | Portal session | `{ id, email, name }` — signed with `SESSION_SECRET` / `PORTAL_SESSION_SECRET`, which is mandatory and must differ from `JWT_SECRET` (Oct 2026) | `portalAuth` — refuses `scope` tokens |
 | Portal sign-in, code owed (10 min) | aud `portal_login_pending`, `{ personId }` | `/api/portal/auth/login/code` + `/send-code` only (`portal-login-security.ts`) |
 | Portal remembered phone (90 days) | aud `portal_device`, `{ personId, deviceId }`; never a session | `/api/portal/auth/login` only, and only with a live `portal_trusted_devices` row |
+| Kiosk tablet (365 days, renewed at each PIN) | aud `kiosk_device`, `{ deviceId }` — the httpOnly `op_kiosk_device` cookie; never a session | `POST /api/warehouse/auth/pin` only, and only with a live `kiosk_devices` row (`kiosk-devices.ts`, `STAFF-LOGIN-SECURITY-SPEC.md` §9) |
 
 **Until Oct 2026 `authenticate` verified the signature and nothing else**, so every
 row above passed it — a public hire-form session read `GET /api/drivers` (proven on

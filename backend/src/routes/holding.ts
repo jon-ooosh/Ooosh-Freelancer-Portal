@@ -506,6 +506,18 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   const clientNameText = b.client_name_text ?? ((ownerGiven || ownerOrgId) ? null : jobCtx.clientName);
 
   // edit=true → authoritative SET (change/clear). Otherwise COALESCE backfill.
+  //
+  // The edit branch casts every parameter it tests with IS NOT NULL. Postgres
+  // types the SET list's expressions BEFORE it assigns them to their columns,
+  // so a bare `$1 IS NOT NULL` reached it untyped and the whole statement was
+  // refused ("could not determine data type of parameter $1") — every edit
+  // from the Holding page's owner/job form 500'd from 14 Oct 2026 until this
+  // fix. The backfill branch never hit it: its COALESCE types the parameter.
+  //
+  // needed_by follows the job when it was the OLD job's out date (i.e. it was
+  // derived, not typed): a box moved from job A to job B otherwise kept A's
+  // deadline. A typed date stays put. In a SET expression `job_id` and
+  // `needed_by` are the row's values BEFORE this update.
   const result = await query(
     edit
       ? `UPDATE held_items SET
@@ -515,10 +527,15 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
             job_id                = $4,
             hh_job_number         = $5,
             owner_unknown         = CASE
-              WHEN $1 IS NOT NULL OR $2 IS NOT NULL OR $3 IS NOT NULL THEN false ELSE true END,
+              WHEN $1::uuid IS NOT NULL OR $2::uuid IS NOT NULL OR $3::text IS NOT NULL THEN false ELSE true END,
             needed_by             = CASE
-              WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
-              THEN (SELECT out_date::date FROM jobs WHERE id = $4)
+              WHEN kind NOT IN ('incoming','temp_storage') THEN needed_by
+              WHEN job_id IS DISTINCT FROM $4::uuid
+                   AND needed_by IS NOT NULL
+                   AND needed_by = (SELECT out_date::date FROM jobs WHERE id = job_id)
+                THEN (SELECT out_date::date FROM jobs WHERE id = $4::uuid)
+              WHEN needed_by IS NULL AND $4::uuid IS NOT NULL
+                THEN (SELECT out_date::date FROM jobs WHERE id = $4::uuid)
               ELSE needed_by END,
             updated_at            = NOW()
          WHERE id = $6 RETURNING *`
@@ -552,6 +569,11 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   if (item.job_id) jobsToSync.add(item.job_id);
   for (const jid of jobsToSync) await syncMerchRequirementStatus(jid);
   if (item.job_id) await logToJobTimeline(item, req.user!.id, 'linked');
+  // Tell the OLD job where its item went, so its timeline doesn't just stop.
+  if (oldJobId && oldJobId !== item.job_id) {
+    await logToJobTimeline({ ...item, job_id: oldJobId }, req.user!.id,
+      item.hh_job_number ? `moved to job #${item.hh_job_number}` : 'unlinked from this job');
+  }
 
   res.json({ data: item });
 });

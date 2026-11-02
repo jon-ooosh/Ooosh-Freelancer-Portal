@@ -84,10 +84,23 @@ function humanisedWhatIsIt(what: string | null): string {
   return what;
 }
 
-function levelLabel(level: number): string {
-  if (level === 3) return 'TOMORROW — not yet arranged';
+/**
+ * The headline. The last reminder normally lands the day before, but it lands
+ * on the day itself when the date was brought forward after the previous
+ * morning's run, so it says which from the days left, never from the level
+ * alone (Frazey Ford, HH 16391, Oct 2026: "TOMORROW" on the day).
+ */
+export function levelLabel(level: number, days: number): string {
+  if (level === 3) return days <= 0 ? 'TODAY — not yet arranged' : 'TOMORROW — not yet arranged';
   if (level === 2) return 'Arriving soon — needs arranging';
   return 'Needs arranging';
+}
+
+/** "that's ___ and needs picking up": today / tomorrow / 3 days away. */
+export function whenLabel(days: number): string {
+  if (days <= 0) return 'today';
+  if (days === 1) return 'tomorrow';
+  return `${days} days away`;
 }
 
 export async function runArrangingChase(): Promise<{ scanned: number; sent: number; skipped: number }> {
@@ -158,11 +171,7 @@ export async function runArrangingChase(): Promise<{ scanned: number; sent: numb
     // Pre-compose phrases the template can't build (simple {{var}} only, no
     // conditionals, and values get HTML-escaped).
     const jobTypeSummary = whatPart ? `${typeLabel} of ${whatPart}` : typeLabel;
-    const daysUntilLabel = days <= 0
-      ? 'today'
-      : days === 1
-        ? '1 day'
-        : `${days} days`;
+    const daysUntilLabel = whenLabel(days);
     const clientLine = row.client_name ? `Client: ${row.client_name}` : ' ';
 
     try {
@@ -170,7 +179,7 @@ export async function runArrangingChase(): Promise<{ scanned: number; sent: numb
         to: STAFF_RECIPIENT,
         variables: {
           level: String(level),
-          levelHeadline: levelLabel(level),
+          levelHeadline: levelLabel(level, days),
           daysUntilLabel,
           jobTypeLabel: typeLabel,
           jobTypeSummary,

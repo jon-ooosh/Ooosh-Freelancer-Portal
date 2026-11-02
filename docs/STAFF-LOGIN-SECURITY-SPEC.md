@@ -319,6 +319,9 @@ editable on Settings › Login security & kiosk ("Second factor required from").
 - **Where the PIN works**: `system_settings.kiosk_allowed_ips` (seeded `95.144.185.166`;
   comma-separated; empty = anywhere, and Settings warns). Checked AFTER the PIN, so a wrong
   address learns nothing about the PIN (401 for a wrong PIN, 403 for a right one from elsewhere).
+  **Superseded by §9 (29 Oct 2026):** that ordering did the opposite — "403 = right PIN" told a
+  wrong address exactly when the PIN was right. Both checks now run BEFORE the PIN, and the
+  address list is optional (the main lock is the set-up tablet).
 - **The allow-list** `KIOSK_TILL_ALLOW` is §4.2's table exactly, applied by
   `staffOrKioskTill()` at the top of `routes/shop.ts` (a staff token still goes through
   `authenticate` + `STAFF_ROLES`; a till session is admitted only to listed routes, 403 for the
@@ -345,3 +348,40 @@ editable on Settings › Login security & kiosk ("Second factor required from").
 
 Deliberately not built: SMS / authenticator apps / SSO (§1), the second office address in the
 IP list (confirm it is fixed first), a kiosk "consumption" (a stock write-off wants a login).
+
+---
+
+## 9. The tablet lock (29 Oct 2026) — `services/kiosk-devices.ts`
+
+**Why.** On 28 Oct 2026 the yard's broadband address changed (`95.144.185.166` →
+`81.153.150.40`, once `.82`) and §4.4's address list locked the warehouse out: the PIN was
+right (the log showed 403s, not 401s). jon emptied the list the next morning and asked for a
+lock that does not depend on the broadband. The address list was standing in for "only the
+warehouse tablet"; this locks the PIN to the tablet itself.
+
+- **Setting up**: Settings › Login security & kiosk › Kiosk tablets › "Set up a tablet"
+  (admin) makes a waiting `kiosk_devices` row and a one-time code `XXXX-XXXX` (no 0/O/1/I,
+  ~40 bits, sha256 at rest, 10 minutes, works once). On the tablet, "Set up this tablet"
+  under the PIN box (it opens by itself when the PIN is refused for this) sends it to
+  `POST /warehouse/device/setup` — public, the code is the authority, 10 tries per 15
+  minutes per address. The row goes live and the tablet gets `op_kiosk_device`: a JWT
+  (audience `kiosk_device`) naming the row, httpOnly, `SameSite=Strict`, path
+  `/api/warehouse`, 365 days and renewed at every good PIN, so a tablet in use never runs
+  out. The ROW is the revocation, as for staff trusted devices.
+- **The PIN route** (`POST /warehouse/auth/pin`): while `system_settings.kiosk_device_required`
+  is on (seeded `true`; anything but `'false'` is on, so a missing setting locks rather than
+  opens), a request without a live tablet cookie gets 403 `code: 'kiosk_device_required'`
+  BEFORE the PIN is compared: nothing but a set-up tablet can test PINs. Then the address
+  list (optional now; also before the PIN), then the PIN, then `last_used_at` /
+  `last_used_ip` are noted and the cookie renewed.
+- **Forget** (or "Cancel code" for one not yet typed): `DELETE /warehouse/devices/:id`.
+  The tablet's next PIN entry is refused at once. A 12-hour session already open on it runs
+  to its end: the session token is not looked up per request. That is a known limit, accepted
+  because the iPad has its own passcode.
+- **When it locks you out**: wiping the iPad or clearing Safari's website data deletes the
+  cookie. The PIN page then says so, and an admin makes a new code. A kiosk run from a
+  Home Screen icon keeps storage separate from Safari, so set it up from the icon.
+- Admin only (`GET` / `POST /warehouse/devices`, `DELETE /warehouse/devices/:id`), like the
+  rest of that Settings section.
+- Tests: `services/__tests__/kiosk-devices.test.ts`, `routes/__tests__/warehouse-pin.test.ts`
+  (a wrong PIN on a device that isn't set up is 403, not 401).
