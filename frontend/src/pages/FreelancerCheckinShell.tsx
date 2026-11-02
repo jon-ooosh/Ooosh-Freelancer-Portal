@@ -18,18 +18,26 @@ import { useSearchParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { CollectionPage } from '../modules/vehicles/pages/CollectionPage'
 import { FreelancerLinkError } from '../modules/vehicles/components/FreelancerLinkError'
+import { FreelancerVanPicker } from '../modules/vehicles/components/FreelancerVanPicker'
 import {
   clearFreelancerSession,
   getFreelancerSession,
   resolveFreelancerCheckinToken,
   setFreelancerSession,
 } from '../modules/vehicles/adapters/freelancer-session'
+import type { FreelancerVanCandidate } from '../modules/vehicles/adapters/freelancer-session'
+import { safeReturnUrl } from '../modules/vehicles/lib/safe-url'
+import { FreelancerTheme, CentredSpinner } from '../modules/vehicles/components/freelancer/ui'
 
 type ShellState =
   | { kind: 'loading' }
   | { kind: 'ready' }
-  | { kind: 'expired'; returnUrl: string | null }
-  | { kind: 'error'; message: string; returnUrl: string | null }
+  // More than one van out on this job — the freelancer picks the reg in front
+  // of them before we mint a session (HH 15307). The HMAC token stays in the
+  // URL until they pick, so a refresh re-shows the picker rather than dying.
+  | { kind: 'select'; candidates: FreelancerVanCandidate[]; hmacToken: string; returnUrl: string | null }
+  | { kind: 'expired'; returnUrl: string | null; startUrl: string | null }
+  | { kind: 'error'; message: string; returnUrl: string | null; startUrl: string | null; code?: string }
 
 const OP_API_BASE = '/api/vehicles'
 
@@ -39,32 +47,90 @@ const queryClient = new QueryClient({
   },
 })
 
+/**
+ * Everything a freelancer sees here wears the portal's look (FREELANCER-PORTAL-SPEC
+ * §11): one theme wrapper, so the staff navy UI is never touched.
+ */
 export default function FreelancerCheckinShell() {
-  const [searchParams, setSearchParams] = useSearchParams()
+  return (
+    <FreelancerTheme>
+      <CheckinShellBody />
+    </FreelancerTheme>
+  )
+}
+
+function CheckinShellBody() {
+  const [searchParams] = useSearchParams()
   const [state, setState] = useState<ShellState>({ kind: 'loading' })
+  const [pickBusyId, setPickBusyId] = useState<string | null>(null)
+  const [pickError, setPickError] = useState<string | null>(null)
+
+  // The token STAYS in the URL once a session exists: a reload of the same
+  // link resumes the session, and a phone that lost its storage just
+  // re-exchanges the link (valid 24h, reusable) — see FreelancerBookoutShell.
+
+  // Claim one van from the picker. Same endpoint, now with the chosen
+  // assignment — the server re-checks it's genuinely a van on this job.
+  const handleSelect = async (candidate: FreelancerVanCandidate) => {
+    if (state.kind !== 'select') return
+    setPickBusyId(candidate.assignmentId)
+    setPickError(null)
+    const result = await resolveFreelancerCheckinToken(
+      OP_API_BASE,
+      state.hmacToken,
+      state.returnUrl,
+      candidate.assignmentId,
+    )
+    if (result.kind === 'ok') {
+      setFreelancerSession(result.token, result.context, state.hmacToken)
+      setState({ kind: 'ready' })
+      return
+    }
+    setPickBusyId(null)
+    setPickError(
+      result.kind === 'error'
+        ? result.error
+        : 'That van could not be claimed — please try another or call the office.',
+    )
+  }
 
   useEffect(() => {
     let cancelled = false
 
     async function init() {
       const hmacToken = searchParams.get('freelancerToken')
-      const returnUrl = searchParams.get('returnUrl')
+      const returnUrl = safeReturnUrl(searchParams.get('returnUrl'))
+      // Where to send them if the van leg can't run — see FreelancerLinkError.
+      const startUrl = safeReturnUrl(searchParams.get('startUrl'))
 
       if (hmacToken) {
-        const result = await resolveFreelancerCheckinToken(OP_API_BASE, hmacToken, returnUrl)
-        if (cancelled) return
-
-        if (!result.ok) {
-          setState({ kind: 'error', message: result.error, returnUrl })
+        // Same link as the session on this phone → a reload, resume it.
+        const existing = getFreelancerSession()
+        if (existing && existing.linkToken === hmacToken) {
+          setState({ kind: 'ready' })
           return
         }
 
-        setFreelancerSession(result.token, result.context)
+        const result = await resolveFreelancerCheckinToken(OP_API_BASE, hmacToken, returnUrl)
+        if (cancelled) return
 
-        const next = new URLSearchParams(searchParams)
-        next.delete('freelancerToken')
-        next.delete('returnUrl')
-        setSearchParams(next, { replace: true })
+        if (result.kind === 'error') {
+          setState({ kind: 'error', message: result.error, returnUrl, startUrl, code: result.code })
+          return
+        }
+
+        if (result.kind === 'select') {
+          // Bin any session left over from an earlier van on this device —
+          // otherwise abandoning the picker and coming back without a token
+          // would resume the OLD van, which is the bug we're fixing.
+          clearFreelancerSession()
+          // Leave the token in the URL — no session yet, and a refresh should
+          // land back on the picker.
+          setState({ kind: 'select', candidates: result.candidates, hmacToken, returnUrl })
+          return
+        }
+
+        setFreelancerSession(result.token, result.context, hmacToken)
 
         setState({ kind: 'ready' })
         return
@@ -76,37 +142,52 @@ export default function FreelancerCheckinShell() {
         return
       }
 
-      setState({ kind: 'expired', returnUrl })
+      setState({ kind: 'expired', returnUrl, startUrl })
     }
 
     init()
     return () => {
       cancelled = true
     }
-  }, [searchParams, setSearchParams])
+  }, [searchParams])
 
   if (state.kind === 'loading') {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-ooosh-navy border-t-transparent" />
-          <p className="mt-4 text-sm text-gray-600">Authorising your collection…</p>
-        </div>
-      </div>
-    )
+    return <CentredSpinner text="Getting your collection ready…" />
   }
 
   if (state.kind === 'error') {
-    return <FreelancerLinkError message={state.message} returnUrl={state.returnUrl} action="check-in" />
+    return (
+      <FreelancerLinkError
+        message={state.message}
+        returnUrl={state.returnUrl}
+        startUrl={state.startUrl}
+        code={state.code}
+        action="check-in"
+      />
+    )
+  }
+
+  if (state.kind === 'select') {
+    return (
+      <FreelancerVanPicker
+        candidates={state.candidates}
+        action="check-in"
+        busyAssignmentId={pickBusyId}
+        error={pickError}
+        onSelect={handleSelect}
+      />
+    )
   }
 
   if (state.kind === 'expired') {
     clearFreelancerSession()
     return (
       <FreelancerLinkError
-        message="Your session has ended (sessions last 4 hours). Head back to the freelancer portal and start the collection again."
+        message="Your session has ended, or isn't on this phone any more. Head back to the freelancer portal and start the collection again."
         returnUrl={state.returnUrl}
+        startUrl={state.startUrl}
         action="check-in"
+        staffLoginHref="/login?redirect=%2Fvehicles%2Fcheck-in"
       />
     )
   }

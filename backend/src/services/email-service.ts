@@ -15,7 +15,7 @@
  *     variables: { clientName: 'John', jobNumber: 'J-1234' },
  *   });
  */
-import nodemailer from 'nodemailer';
+import nodemailer, { type SendMailOptions, type Transporter } from 'nodemailer';
 import { query } from '../config/database';
 import { wrapInBaseLayout, testModeBanner } from './email-templates/base';
 import templates from './email-templates/index';
@@ -153,6 +153,37 @@ function substituteVariables(template: string, variables: Record<string, string>
   return result;
 }
 
+// ── Subject line hygiene ──────────────────────────────────────────────────
+
+/**
+ * Collapse any line break in a subject to a single space. Subjects are often
+ * built from staff-typed text (an issue summary, a bell title) that can span
+ * several lines. Resend REJECTS the whole email with a 422 ("The `\n` is not
+ * allowed in the `subject` field") — the email is lost, not retried. Gmail
+ * SMTP used to fold it silently, which is why this only surfaced after the
+ * switch to Resend (RF21PWX damage issue, Jul + Sep 2026).
+ *
+ * Applied once in send() / sendRaw() / renderPreview() so EVERY template and
+ * raw caller is covered — don't move this out to individual callers.
+ */
+export function oneLineSubject(subject: string): string {
+  return (subject || '').replace(/\s*[\r\n]+\s*/g, ' ').trim();
+}
+
+/**
+ * The HireHop job number an email is about, for `email_log.job_number`: the
+ * `jobNumber` template variable (every job-scoped template is passed one), else
+ * a "#16893" in the subject (raw sends). null when neither is a plain number.
+ * Only used to link a later delivery failure back to its job
+ * (services/email-delivery.ts) — never to decide who an email goes to.
+ */
+export function jobNumberForLog(variable: string | undefined, subject: string): number | null {
+  const v = (variable || '').trim().replace(/^#/, '');
+  if (/^\d{3,8}$/.test(v)) return parseInt(v, 10);
+  const m = (subject || '').match(/#(\d{4,8})\b/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 // ── Transient-error retry ─────────────────────────────────────────────────
 
 /**
@@ -240,7 +271,7 @@ async function sendMailWithRetry(
  * 429 / 5xx as transient. No SDK dependency — uses global fetch (Node 18+).
  */
 async function sendViaResend(
-  mailOptions: nodemailer.SendMailOptions,
+  mailOptions: SendMailOptions,
   apiKey: string,
 ): Promise<{ messageId?: string }> {
   const toList = Array.isArray(mailOptions.to) ? mailOptions.to : mailOptions.to ? [mailOptions.to] : [];
@@ -319,7 +350,9 @@ async function raiseEmailHealthAlert(templateId: string, recipient: string, erro
 
     const content =
       `An email ("${templateId}" to ${recipient}) failed to send after retries: ${errorMessage}. ` +
-      `Outbound email may be down — check SMTP credentials / Google Workspace. ` +
+      `${getEmailConfig().provider === 'resend'
+        ? 'If this is a 422 the email itself was rejected (check its subject/recipient); otherwise Resend may be down — check the Resend dashboard / RESEND_API_KEY.'
+        : 'Outbound email may be down — check SMTP credentials / Google Workspace.'} ` +
       `Further email failures in the next hour are suppressed to avoid noise.`;
 
     for (const a of admins.rows) {
@@ -338,13 +371,13 @@ async function raiseEmailHealthAlert(templateId: string, recipient: string, erro
 // ── Email Service Class ──────────────────────────────────────────────────
 
 class EmailService {
-  private transporter: nodemailer.Transporter | null = null;
+  private transporter: Transporter | null = null;
 
   /**
    * Get or create the nodemailer transport.
    * Lazy-initialized so it doesn't fail on import if SMTP vars aren't set.
    */
-  private getTransporter(): nodemailer.Transporter {
+  private getTransporter(): Transporter {
     if (this.transporter) return this.transporter;
 
     const config = getEmailConfig();
@@ -391,7 +424,7 @@ class EmailService {
    * cross-cutting behaviour — test-mode redirect, retry, outage canary, audit
    * logging — lives above this in send()/sendRaw(), so it's provider-agnostic.
    */
-  private async deliver(mailOptions: nodemailer.SendMailOptions): Promise<{ messageId?: string }> {
+  private async deliver(mailOptions: SendMailOptions): Promise<{ messageId?: string }> {
     const config = getEmailConfig();
     if (config.provider === 'resend') {
       if (!config.resendApiKey) {
@@ -414,7 +447,7 @@ class EmailService {
     const template = templates[templateId];
     if (!template) return { error: `Unknown email template: ${templateId}` };
     const variables = options.variables || {};
-    const subject = options.subjectOverride || substituteVariables(template.subject, variables);
+    const subject = oneLineSubject(options.subjectOverride || substituteVariables(template.subject, variables));
     let bodyHtml = options.bodyHtmlOverride !== undefined
       ? options.bodyHtmlOverride
       : substituteVariables(template.body, variables);
@@ -437,7 +470,7 @@ class EmailService {
     const variables = options.variables || {};
 
     // Build subject and body from template
-    const subject = options.subjectOverride || substituteVariables(template.subject, variables);
+    const subject = oneLineSubject(options.subjectOverride || substituteVariables(template.subject, variables));
     let bodyHtml = options.bodyHtmlOverride !== undefined
       ? options.bodyHtmlOverride
       : substituteVariables(template.body, variables);
@@ -470,7 +503,7 @@ class EmailService {
         contentType: a.contentType,
       }));
 
-      const mailOptions: nodemailer.SendMailOptions = {
+      const mailOptions: SendMailOptions = {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isRedirected ? undefined : options.cc,
@@ -492,6 +525,7 @@ class EmailService {
         status: 'sent',
         message_id: result.messageId || null,
         mode: effectiveMode,
+        job_number: jobNumberForLog(variables.jobNumber || variables.hhJobNumber, subject),
       });
 
       console.log(`[Email] Sent "${templateId}" to ${actualRecipient}${isRedirected ? ` (test mode, intended: ${options.to})` : goingLive && config.mode === 'test' ? ' (live via allowlist)' : ''}`);
@@ -514,6 +548,7 @@ class EmailService {
         status: 'failed',
         error_message: errorMessage,
         mode: isRedirected ? 'test' : 'live',
+        job_number: jobNumberForLog(variables.jobNumber || variables.hhJobNumber, subject),
       });
 
       console.error(`[Email] Failed to send "${templateId}" to ${actualRecipient} (after retries):`, errorMessage);
@@ -544,6 +579,7 @@ class EmailService {
   }): Promise<SendEmailResult> {
     const config = getEmailConfig();
     const isTestMode = config.mode === 'test';
+    const subject = oneLineSubject(options.subject);
     const actualRecipient = isTestMode && config.testRedirect
       ? config.testRedirect
       : options.to;
@@ -558,11 +594,11 @@ class EmailService {
       : wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal' });
 
     try {
-      const mailOptions: nodemailer.SendMailOptions = {
+      const mailOptions: SendMailOptions = {
         from: config.smtp.from,
         to: actualRecipient,
         cc: isTestMode ? undefined : options.cc,
-        subject: isTestMode ? `[TEST] ${options.subject}` : options.subject,
+        subject: isTestMode ? `[TEST] ${subject}` : subject,
         html,
         attachments: options.attachments?.map(a => ({
           filename: a.filename,
@@ -570,16 +606,17 @@ class EmailService {
           contentType: a.contentType,
         })),
       };
-      const result = await sendMailWithRetry(() => this.deliver(mailOptions), `raw "${options.subject}" to ${actualRecipient}`);
+      const result = await sendMailWithRetry(() => this.deliver(mailOptions), `raw "${subject}" to ${actualRecipient}`);
 
       await this.logEmail({
         template_id: '_raw',
         recipient: options.to,
         actual_recipient: actualRecipient,
-        subject: options.subject,
+        subject,
         status: 'sent',
         message_id: result.messageId || null,
         mode: config.mode,
+        job_number: jobNumberForLog(undefined, subject),
       });
 
       return { success: true, messageId: result.messageId };
@@ -590,10 +627,11 @@ class EmailService {
         template_id: '_raw',
         recipient: options.to,
         actual_recipient: actualRecipient,
-        subject: options.subject,
+        subject,
         status: 'failed',
         error_message: errorMessage,
         mode: config.mode,
+        job_number: jobNumberForLog(undefined, subject),
       });
 
       // SMTP-independent outage canary (see send()).
@@ -664,25 +702,43 @@ class EmailService {
     message_id?: string | null;
     error_message?: string;
     mode: EmailMode;
+    /** HireHop job number the email is about (migration 299) — lets a later
+     *  bounce / suppression from Resend link back to its job. */
+    job_number?: number | null;
   }): Promise<string | undefined> {
+    const params = [
+      entry.template_id,
+      entry.recipient,
+      entry.actual_recipient,
+      entry.subject,
+      entry.status,
+      entry.message_id || null,
+      entry.error_message || null,
+      entry.mode,
+    ];
     try {
       const result = await query(
-        `INSERT INTO email_log (template_id, recipient, actual_recipient, subject, status, message_id, error_message, mode)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO email_log (template_id, recipient, actual_recipient, subject, status, message_id, error_message, mode, job_number)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id`,
-        [
-          entry.template_id,
-          entry.recipient,
-          entry.actual_recipient,
-          entry.subject,
-          entry.status,
-          entry.message_id || null,
-          entry.error_message || null,
-          entry.mode,
-        ],
+        [...params, entry.job_number ?? null],
       );
       return result.rows[0]?.id;
     } catch (err) {
+      // 42703 = undefined column: the code is deployed but migration 299 has
+      // not run yet. Log without the job number rather than lose the row —
+      // the scheduler's same-day dedup reads email_log.
+      if ((err as { code?: string })?.code === '42703') {
+        try {
+          const result = await query(
+            `INSERT INTO email_log (template_id, recipient, actual_recipient, subject, status, message_id, error_message, mode)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING id`,
+            params,
+          );
+          return result.rows[0]?.id;
+        } catch { /* fall through to the warning below */ }
+      }
       // Don't fail the email send if logging fails (table might not exist yet)
       console.warn('[Email] Failed to log email to audit trail:', err instanceof Error ? err.message : err);
       return undefined;

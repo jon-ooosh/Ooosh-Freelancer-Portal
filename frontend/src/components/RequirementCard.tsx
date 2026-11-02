@@ -16,11 +16,13 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { STEP_PHASE, FUTURE_STEP } from './CarnetSection';
 import { describePreauth } from '../lib/preauth';
+import { referralBadge } from '../lib/driverStatus';
 import BacklineLocationModal, {
   BacklineLocation,
   backlineLocationIcon,
   backlineLocationLabel,
 } from './BacklineLocationModal';
+import CloseOutSignpost from './CloseOutSignpost';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -34,6 +36,9 @@ export interface JobRequirement {
   notes: string | null;
   assigned_to: string | null;
   assigned_to_name: string | null;
+  /** Creator's name. A reminder set to "Me" stores no assignee, so this is who
+   *  it actually notifies — see services/requirement-close-sweep.ts. */
+  created_by_name?: string | null;
   due_date: string | null;
   is_auto: boolean;
   source: string;
@@ -112,6 +117,7 @@ interface HireFormDriver {
   status: string;
   created_at: string;
   requires_referral: boolean;
+  referral_status: string | null;
   excess_status: string | null;
   excess_amount_required: number | null;
   excess_amount_taken: number | null;
@@ -131,6 +137,7 @@ interface ExcessInfo {
     excess_amount_taken: number;
     amount_held?: number;
     held_expires_at?: string | null;
+    payment_method?: string | null;
     excess_status: string;
     requires_referral: boolean;
   }>;
@@ -215,8 +222,11 @@ export default function RequirementCard({
   selfDriveVanOverride,
   onVehicleCountOverride,
   onReload,
+  onOpenMoney,
 }: {
   req: JobRequirement;
+  /** The Invoice card is a signpost to the Money tab's close-out panel (Oct 2026). */
+  onOpenMoney?: () => void;
   derivedFlags?: DerivedFlags | null;
   /** Regs of vans actually allocated to THIS job — shown on the vehicle
    *  headline ("Vehicle (Self-Drive) — RO23HLU") once a van is linked. */
@@ -673,7 +683,11 @@ export default function RequirementCard({
                     d.driver_id &&
                     (d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active')
                   ).length;
-                  const referralCount = hireFormDrivers.filter(d => d.requires_referral).length;
+                  // Only an UNRESOLVED referral counts — an approval is standing,
+                  // so an approved driver re-declaring the same issue is not news.
+                  const referralCount = hireFormDrivers.filter(
+                    d => d.driver_id && referralBadge(d.requires_referral, d.referral_status)?.unresolved
+                  ).length;
                   // Parse all "sent" entries from the notes — each line was
                   // appended by /api/hire-forms/send-email as:
                   //   "Hire form email sent to a@x.com, b@y.com on DD/MM/YYYY"
@@ -736,9 +750,12 @@ export default function RequirementCard({
                             d.status === 'soft' ? 'bg-amber-400' : 'bg-gray-300'
                           }`} />
                           <span className="text-gray-700">{d.driver_name || 'Unknown driver'}</span>
-                          {d.requires_referral && (
-                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
-                          )}
+                          {(() => {
+                            const rb = referralBadge(d.requires_referral, d.referral_status);
+                            return rb ? (
+                              <span className={`text-[10px] px-1 py-0.5 rounded border ${rb.className}`}>{rb.label}</span>
+                            ) : null;
+                          })()}
                         </div>
                       ))}
                     </div>
@@ -821,9 +838,6 @@ export default function RequirementCard({
                                 £{taken.toLocaleString('en-GB', { minimumFractionDigits: 2 })} / £{required.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
                               </span>
                             </>
-                          )}
-                          {d.requires_referral && (
-                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
                           )}
                         </div>
                       );
@@ -983,30 +997,33 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Invoice — show "Mark as Sent" button when status is in_progress (generated) */}
-            {req.requirement_type === 'invoice' && req.status === 'in_progress' && (
-              <div className="mt-1.5">
-                <button
-                  onClick={() => onStatusChange(req.id, 'done')}
-                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-green-50 text-green-700 border border-green-200 rounded hover:bg-green-100 transition-colors"
-                >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                  Mark as Sent to Client
-                </button>
-              </div>
+            {/* Invoice — a signpost to the close-out on the Money tab (HIRE-CLOSE-OUT-SPEC.md §3,
+                redesign Oct 2026): one pill, one line, the five steps, "Open in Money →".
+                Its status (and the Payment Reconciliation one) still come from the
+                derivation engine and "Mark as sent" on the Money panel; no dropdowns here. */}
+            {req.requirement_type === 'invoice' && jobId && (
+              <CloseOutSignpost jobId={jobId} onOpenMoney={onOpenMoney} />
             )}
 
             {/* Reminder — show due date, assigned user, event trigger, delivery, notes */}
             {req.requirement_type === 'reminder' && (
               <div className="mt-1 text-xs text-gray-500 space-y-0.5">
-                {req.due_date && (
-                  <div className={`font-medium ${new Date(req.due_date) <= new Date() ? 'text-red-600' : 'text-blue-600'}`}>
-                    Due: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                    {new Date(req.due_date) <= new Date() && ' (overdue)'}
-                  </div>
-                )}
+                {req.due_date && (() => {
+                  // A done reminder is never "overdue" — the hourly reminder
+                  // scanner (config/scheduler.ts) already skips done/blocked/
+                  // cancelled, so a red "(overdue)" on a ticked-off card is pure
+                  // noise. Keep the date visible (past tense) so history reads.
+                  // (Cancelled requirements aren't rendered, so `done` covers it.)
+                  const settled = req.status === 'done';
+                  const past = new Date(req.due_date) <= new Date();
+                  const when = new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                  if (settled) return <div className="text-gray-400">{past ? 'Was due' : 'Due'}: {when}</div>;
+                  return (
+                    <div className={`font-medium ${past ? 'text-red-600' : 'text-blue-600'}`}>
+                      Due: {when}{past && ' (overdue)'}
+                    </div>
+                  );
+                })()}
                 {req.event_trigger && (
                   <div className="text-[10px] text-purple-600">
                     Triggers on: job {req.event_trigger}
@@ -1017,8 +1034,13 @@ export default function RequirementCard({
                     Notify via: {req.delivery_method === 'notification' ? 'Bell only' : 'Email only'}
                   </div>
                 )}
-                {req.assigned_to_name && (
-                  <div className="text-gray-400">Assigned to: {req.assigned_to_name}</div>
+                {/* Who this actually notifies. "Me" writes no assignee, so an
+                    unassigned reminder falls back to its creator — showing
+                    nothing made a saved reminder look like it hadn't saved. */}
+                {(req.assigned_to_name || req.created_by_name) && (
+                  <div className="text-gray-400">
+                    Notifies: {req.assigned_to_name || req.created_by_name}
+                  </div>
                 )}
                 {req.notes && <div>{req.notes}</div>}
               </div>
@@ -1061,6 +1083,11 @@ export default function RequirementCard({
                 excess_status: 'pre_auth',
                 amount_held: preAuthTotal,
                 held_expires_at: earliestExpiry ?? null,
+                // Any Stripe hold in the group gets the "release it when the van is
+                // back" wording — those are the ones we can (and should) release.
+                payment_method: preAuths.some(d => d.payment_method === 'stripe_gbp')
+                  ? 'stripe_gbp'
+                  : (preAuths[0]?.payment_method ?? null),
               });
               if (unresolved.length === 0 && preAuths.length === 0) return null;
               return (
@@ -1090,7 +1117,7 @@ export default function RequirementCard({
             })()}
 
             {/* Notes (for types without specific rendering) */}
-            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'damage_review', 'reminder', 'rehearsal'].includes(req.requirement_type) && req.notes && (
+            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'payment_reconcile', 'damage_review', 'reminder', 'rehearsal'].includes(req.requirement_type) && req.notes && (
               <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
             )}
 
@@ -1123,7 +1150,7 @@ export default function RequirementCard({
           )}
 
           {/* Status dropdown — only for non-contextual cards */}
-          {!isContextualStatus && (
+          {!isContextualStatus && req.requirement_type !== 'invoice' && (
             <div className="relative" ref={statusMenuRef}>
               <button
                 onClick={() => {

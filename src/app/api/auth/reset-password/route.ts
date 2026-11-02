@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { SignJWT } from 'jose'
 import { clearFailedAttempts } from '@/lib/login-rate-limit'
 import { resetPasswordOP, isOpClientError, OpApiError } from '@/lib/op-api'
+import { setDeviceCookie, clientUserAgent } from '@/lib/portal-session'
 
 const getSessionSecret = () => {
   const secret = process.env.SESSION_SECRET
@@ -22,6 +23,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { token, password } = body
+    // "Remember this phone for 90 days" (two-step sign-in, FREELANCER-PORTAL-SPEC §7):
+    // the emailed reset link proved the inbox, so it counts as the second step.
+    const trustDevice = body.trustDevice === true
 
     // Validate input
     if (!token || !password) {
@@ -39,7 +43,7 @@ export async function POST(request: NextRequest) {
     }
 
     try {
-      const opResult = await resetPasswordOP(token, password)
+      const opResult = await resetPasswordOP(token, password, { trustDevice, userAgent: clientUserAgent(request) })
       if (opResult.success && opResult.user) {
         // A successful reset proves the user owns this email — clear any
         // failed-login lockout so they're not blocked by a 429 from earlier
@@ -71,6 +75,7 @@ export async function POST(request: NextRequest) {
           maxAge: 30 * 24 * 60 * 60,
           path: '/',
         })
+        setDeviceCookie(response, opResult.deviceToken)
 
         return response
       }

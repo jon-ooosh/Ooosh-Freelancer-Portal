@@ -1,10 +1,14 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, authorize, STAFF_ROLES } from '../middleware/auth';
 import { z } from 'zod';
+import { markMentionsSeen, retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── GET /api/notifications — bell dropdown (legacy, kept for backward compat) ──
 router.get('/', async (req: AuthRequest, res: Response) => {
@@ -78,6 +82,28 @@ router.post('/read', async (req: AuthRequest, res: Response) => {
     console.error('Mark read error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// ── POST /api/notifications/seen — the page a mention sits on is open ──
+//
+// The record's timeline (or the problem's thread) is on screen, so the
+// caller's OWN mention bells for it are marked READ — the dot goes — but not
+// done: seeing a question is not answering it (jon, Oct 2026). Replying or
+// reacting marks them done (routes/interactions.ts). The types are the
+// anchors routes/interactions.ts gives a mention bell.
+const seenSchema = z.object({
+  entity_type: z.enum(['jobs', 'people', 'organisations', 'venues', 'job_issues']),
+  entity_id: z.string().uuid(),
+});
+
+router.post('/seen', async (req: AuthRequest, res: Response) => {
+  const parsed = seenSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+  // Never throws — a bell left unread is not worth an error on the page.
+  const read = await markMentionsSeen(req.user!.id, parsed.data.entity_type, parsed.data.entity_id);
+  res.json({ read });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -364,6 +390,8 @@ router.post('/:id/acknowledge', async (req: AuthRequest, res: Response) => {
              AND status NOT IN ('done', 'cancelled')`,
           [notif.entity_id]
         );
+        // A reminder just marked done: the other copies of its bell are done too.
+        await retireDoneBells('requirement_due', notif.entity_id);
       } catch (cascadeErr) {
         console.warn('[Notifications] Reminder ack cascade failed:', cascadeErr);
       }
@@ -626,12 +654,16 @@ router.post('/:id/unacknowledge', async (req: AuthRequest, res: Response) => {
     const notif = result.rows[0];
 
     // Reverse the reminder cascade if applicable.
+    // The pattern is a PLAIN '...' string, never E'...' (Oct 2026): an E''
+    // string eats the backslashes, so `\[` reached the regex as a bare `[` and
+    // the marker became a one-character class — stripping every M, a, r, k, e,
+    // d… from the notes ("Check the van tyres" came back as "Chhys").
     if (notif.entity_type === 'job_requirements' && notif.entity_id) {
       try {
         await query(
           `UPDATE job_requirements
            SET status = 'in_progress',
-               notes = REGEXP_REPLACE(COALESCE(notes, ''), E'\\n?\\[Marked done via inbox acknowledgement\\]', '', 'g'),
+               notes = REGEXP_REPLACE(COALESCE(notes, ''), '\\n?\\[Marked done via inbox acknowledgement\\]', '', 'g'),
                updated_at = NOW()
            WHERE id = $1
              AND requirement_type = 'reminder'
@@ -763,6 +795,8 @@ router.post('/:id/action', async (req: AuthRequest, res: Response) => {
          WHERE id = $1`,
         [jobId]
       );
+      // Everyone's "Chase due" copies on the job, not just this one (bell-rules.ts).
+      await retireDoneBells('chase_due', jobId);
       summary = `Logged chase on job (interaction ${interactionResult.rows[0].id}).`;
     }
 
@@ -784,6 +818,8 @@ router.post('/:id/action', async (req: AuthRequest, res: Response) => {
       if (updateResult.rows.length === 0) {
         return res.status(409).json({ error: 'Requirement already done or not found' });
       }
+      // Everyone's copies of its "Overdue" / "Reminder" bell (bell-rules.ts).
+      await retireDoneBells('requirement_due', requirementId);
       summary = 'Requirement marked done.';
     }
 

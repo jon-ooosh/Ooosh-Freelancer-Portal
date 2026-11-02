@@ -12,6 +12,8 @@ import fontkit from '@pdf-lib/fontkit';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { getFromR2 } from '../config/r2';
+import { resolveDocumentKey, type DocumentKey } from './driver-documents';
+import { ukToday } from './uk-date';
 
 // ── Types ──
 
@@ -39,6 +41,10 @@ export interface DriverSnapshotData {
   hasAccidents: boolean;
   hasInsuranceIssues: boolean;
   hasDrivingBan: boolean;
+  // Migration 298. null/undefined = the driver last answered the old question
+  // set, which didn't ask these.
+  hasRecentConvictions?: boolean | null;
+  hasFaultClaims?: boolean | null;
   additionalDetails: string;
   // Job reference
   jobId: string;
@@ -113,6 +119,13 @@ function formatDate(d: string | null): string {
 
 function yesNo(v: boolean): string {
   return v ? 'Yes' : 'No';
+}
+
+/** For the questions added in Oct 2026 — older answers never covered them. */
+function yesNoAsked(v: boolean | null | undefined): string {
+  if (v === true) return 'Yes';
+  if (v === false) return 'No';
+  return 'Not asked';
 }
 
 // ── PDF Generation ──
@@ -194,12 +207,14 @@ export async function generateDriverSnapshot(data: DriverSnapshotData): Promise<
   }
 
   drawSection('INSURANCE QUESTIONNAIRE');
-  drawField('Disability', yesNo(data.hasDisability));
-  drawField('Convictions', yesNo(data.hasConvictions));
+  drawField('Medical restriction', yesNo(data.hasDisability));
+  drawField('Convictions (5 years)', yesNoAsked(data.hasRecentConvictions));
+  drawField('Serious conviction', yesNo(data.hasConvictions));
   drawField('Prosecution pending', yesNo(data.hasProsecution));
-  drawField('Accidents (3 years)', yesNo(data.hasAccidents));
+  drawField('Accidents / claims', yesNo(data.hasAccidents));
+  drawField('2+ at fault or open', yesNoAsked(data.hasFaultClaims));
   drawField('Insurance issues', yesNo(data.hasInsuranceIssues));
-  drawField('Driving ban', yesNo(data.hasDrivingBan));
+  drawField('Ban / suspension', yesNo(data.hasDrivingBan));
   if (data.additionalDetails?.trim()) {
     drawField('Additional Details', data.additionalDetails.substring(0, 70));
   }
@@ -250,64 +265,24 @@ export async function generateDriverSnapshot(data: DriverSnapshotData): Promise<
   const pdfBytes = await pdfDoc.save();
 
   const safeName = (data.driverName || 'Driver').replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_');
-  const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '');
+  const dateStr = ukToday().replace(/-/g, '');
   const filename = `${data.jobId}-${safeName}-${dateStr}.pdf`;
 
   return { pdfBytes, filename };
 }
 
 /**
- * Canonical document key → accepted normalised match tokens.
+ * Which of the resolvable documents this PDF actually renders.
  *
- * Normalisation (see `normaliseDocToken`) lowercases and strips every
- * non-alphanumeric character, so British/American spelling and
- * space/underscore/hyphen variants all collapse to the same token:
- *   'Licence Front' | 'licence_front' | 'License Front' | 'license_front'
- *   | 'licence-front'  →  'licencefront' / 'licensefront'
- *   'POA 1' | 'poa1' | 'Proof of Address 1'  →  'poa1' / 'proofofaddress1'
- *
- * Mirrors the frontend's DOCUMENT_CATEGORIES fileLabels lists
- * (frontend/src/pages/DriverDetailPage.tsx) + the Monday migration tags
- * (backend/src/scripts/migrate-monday-driver-files.ts). The live
- * hire-form / iDenfy upload path writes tags like `licence_front` and
- * labels like `license_front` / `poa1`, which the old exact-string map
- * silently skipped — so snapshots came out missing the licence + POAs
- * (only passport/signature happened to match). Match on `tag` first, then
- * fall back to `label`. Keep this in step with the frontend list.
+ * The token lists moved to services/driver-documents.ts, which the staff
+ * cockpit reads too — one set of spellings for both. That module resolves the
+ * iDenfy `selfie` as well; the snapshot has never had a selfie page, so it is
+ * skipped here EXPLICITLY rather than by omission, and skipped before the R2
+ * fetch so nothing is downloaded to be thrown away.
  */
-const DOC_MATCH_TOKENS: Record<string, string[]> = {
-  licenceFront: ['licencefront', 'licensefront'],
-  licenceBack: ['licenceback', 'licenseback'],
-  dvlaCheck: ['dvlacheck', 'dvlacheckcode', 'dvla'],
-  poa1: ['poa1', 'proofofaddress1', 'proofofaddress'],
-  poa2: ['poa2', 'proofofaddress2'],
-  passport: ['passport'],
-  signature: ['signature', 'sig'],
-};
-
-// token → doc key reverse lookup (exact match — so 'proofofaddress2'
-// resolves to poa2 and never falls into poa1's 'proofofaddress').
-const TOKEN_TO_DOC_KEY: Record<string, string> = Object.entries(DOC_MATCH_TOKENS).reduce(
-  (acc, [docKey, tokens]) => {
-    for (const t of tokens) acc[t] = docKey;
-    return acc;
-  },
-  {} as Record<string, string>,
-);
-
-function normaliseDocToken(s: string | undefined | null): string {
-  return (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-/**
- * Resolve a file's doc key from its `tag` (preferred) or `label`.
- * Returns null when neither matches a known document type.
- */
-function resolveDocKey(file: { label?: string; tag?: string }): string | null {
-  const tagKey = TOKEN_TO_DOC_KEY[normaliseDocToken(file.tag)];
-  if (tagKey) return tagKey;
-  return TOKEN_TO_DOC_KEY[normaliseDocToken(file.label)] || null;
-}
+const SNAPSHOT_DOC_KEYS = new Set<DocumentKey>([
+  'licenceFront', 'licenceBack', 'dvlaCheck', 'poa1', 'poa2', 'passport', 'signature',
+]);
 
 /**
  * Load document buffers from R2 for a driver's uploaded files.
@@ -316,8 +291,9 @@ export async function loadDriverDocuments(files: Array<{ label?: string; tag?: s
   const docs: Record<string, Buffer | null> = {};
 
   for (const file of files) {
-    const key = resolveDocKey(file);
-    if (!key || docs[key]) continue;  // Skip unknown labels or already loaded
+    const key = resolveDocumentKey(file);
+    // Skip unknown labels, documents this PDF has no page for, and repeats.
+    if (!key || !SNAPSHOT_DOC_KEYS.has(key) || docs[key]) continue;
 
     try {
       const r2Result = await getFromR2(file.url);

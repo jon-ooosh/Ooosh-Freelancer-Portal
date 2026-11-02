@@ -23,7 +23,7 @@ export interface HireDeposit {
 }
 
 // Mirror of money.ts isExcessPayment — keep in sync.
-function isExcessText(text: string): boolean {
+export function isExcessText(text: string): boolean {
   return /\bexcess\b|\binsurance\b|\bxs\b|\btop[- ]?up\b/.test(text.toLowerCase());
 }
 

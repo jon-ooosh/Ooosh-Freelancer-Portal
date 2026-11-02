@@ -26,11 +26,15 @@ echo "[1/7] Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq curl git build-essential
 
-# --- 2. Node.js 20 LTS ---
+# --- 2. Node.js 22 LTS ---
+# Node 20 reached end of life in April 2026 and gets no security fixes (the
+# Oct 2026 Brotli RCE, CVE-2026-111497, was the one that caught us on 20.20.2).
+# The NodeSource repo this adds is what lets weekly-maintenance.sh's apt upgrade
+# pull later 22.x security releases. Next move: Node 24, before April 2027.
 echo ""
-echo "[2/7] Installing Node.js 20 LTS..."
-if ! command -v node &> /dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 20 ]]; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+echo "[2/7] Installing Node.js 22 LTS..."
+if ! command -v node &> /dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 22 ]]; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
     apt-get install -y -qq nodejs
 fi
 echo "  Node.js $(node -v) installed"

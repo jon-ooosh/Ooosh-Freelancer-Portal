@@ -9,7 +9,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
-import jwt from 'jsonwebtoken';
+import { verifyStaffToken } from './middleware/auth';
 import { createServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
 import dotenv from 'dotenv';
@@ -17,6 +17,8 @@ import routes from './routes';
 import { connectRedis } from './config/redis';
 import { startScheduler } from './config/scheduler';
 import { handleStripeWebhook } from './services/stripe-webhook';
+import { handleResendWebhook } from './services/email-delivery';
+import { setSocketServer } from './config/socket';
 
 dotenv.config({ quiet: true });
 
@@ -82,11 +84,16 @@ app.use(morgan('short'));
 // it BEFORE express.json() (which would consume + reparse the body). Scoped to
 // the one path — everything else still gets JSON parsing below.
 app.post('/api/webhooks/stripe', express.raw({ type: '*/*' }), handleStripeWebhook);
+// Resend (email delivery: bounces, suppressions, spam reports) — same reason:
+// its signature is over the exact raw bytes. services/email-delivery.ts.
+app.post('/api/webhooks/resend', express.raw({ type: '*/*' }), handleResendWebhook);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Make io accessible to routes
 app.set('io', io);
+// …and to services, which have no `req` (config/socket.ts).
+setSocketServer(io);
 
 // Routes
 app.use('/api', routes);
@@ -102,20 +109,22 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Socket.io authentication middleware — verify JWT before allowing connection
+// Socket.io authentication middleware — STAFF access tokens only, the same
+// check as `authenticate`. Until Oct 2026 this verified the signature alone,
+// so any JWT_SECRET-signed token (a public hire-form session, the kiosk, a
+// freelancer book-out) could open a socket (SECURITY-AUDIT-BRIEF B.7).
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token as string | undefined;
   if (!token) {
     return next(new Error('Authentication required'));
   }
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string; email: string; role: string };
-    (socket as unknown as Record<string, unknown>).userId = decoded.id;
-    (socket as unknown as Record<string, unknown>).userEmail = decoded.email;
-    next();
-  } catch {
-    next(new Error('Invalid or expired token'));
+  const user = verifyStaffToken(token);
+  if (!user) {
+    return next(new Error('Invalid or expired token'));
   }
+  (socket as unknown as Record<string, unknown>).userId = user.id;
+  (socket as unknown as Record<string, unknown>).userEmail = user.email;
+  next();
 });
 
 // Socket.io connection handling — only authenticated users reach here
@@ -123,16 +132,13 @@ io.on('connection', (socket) => {
   const userId = (socket as unknown as Record<string, unknown>).userId as string;
   console.log(`Socket connected: ${socket.id} (user: ${userId})`);
 
-  // Auto-join user's notification room (no longer trusts client-supplied userId)
+  // Auto-join user's notification room (no longer trusts client-supplied userId).
+  // This is the ONLY room: the server emits to `user:<id>` and nothing else.
+  // The old `join-entity` / `leave-entity` handlers let any socket join any
+  // room by id; nothing ever emitted to those rooms and no client sent the
+  // event, so they were removed (Oct 2026). Any future room needs an access
+  // check here before the join.
   socket.join(`user:${userId}`);
-
-  socket.on('join-entity', (entityId: string) => {
-    socket.join(`entity:${entityId}`);
-  });
-
-  socket.on('leave-entity', (entityId: string) => {
-    socket.leave(`entity:${entityId}`);
-  });
 
   socket.on('disconnect', () => {
     console.log(`Socket disconnected: ${socket.id}`);
@@ -161,5 +167,32 @@ async function start() {
 }
 
 start();
+
+// Stopping (a deploy's `systemctl restart` sends SIGTERM): stop taking new requests
+// and let the ones already in flight finish, instead of cutting them off half-way —
+// a card payment being recorded, a Money tab reload. Job 16169, 21 Oct 2026: a
+// restart 4 seconds after a card receipt killed the Money tab's reload, and the tab
+// said the request had failed. Socket.io clients are dropped at once; they reconnect
+// to the new process by themselves. Gives up after SHUTDOWN_GRACE_MS (nginx stops
+// waiting for an ordinary request at 60s anyway), inside systemd's own 90s limit.
+const SHUTDOWN_GRACE_MS = 60_000;
+let stopping = false;
+function stopGracefully(signal: string): void {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal} received - finishing requests in progress (up to ${SHUTDOWN_GRACE_MS / 1000}s) before stopping`);
+  setTimeout(() => {
+    console.warn('Requests still running after the grace period - stopping anyway');
+    process.exit(0);
+  }, SHUTDOWN_GRACE_MS).unref();
+  // Disconnects every socket, then closes the HTTP server: no new requests, and the
+  // callback runs once the last one in flight has answered.
+  void io.close(() => {
+    console.log('Requests in progress finished - stopping');
+    process.exit(0);
+  });
+}
+process.on('SIGTERM', () => stopGracefully('SIGTERM'));
+process.on('SIGINT', () => stopGracefully('SIGINT'));
 
 export { io };

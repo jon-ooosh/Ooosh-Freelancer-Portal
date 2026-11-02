@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES, isManagerTier } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
   calculateCosts,
@@ -12,9 +12,14 @@ import {
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { shouldSuppressInformational } from '../services/portal-notification-prefs';
+import { greetingName } from '../services/display-name';
+import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── GET /api/quotes/ops/overview — operations overview (must be before /:id) ──
 
@@ -178,7 +183,9 @@ const updateSettingsSchema = z.object({
   settings: z.record(z.string(), z.number()),
 });
 
-router.put('/settings', validate(updateSettingsSchema), async (req: AuthRequest, res: Response) => {
+// Manager-tier (SECURITY-AUDIT-BRIEF B.2, jon 19 Oct 2026): these are the rates
+// and markups behind every future quote.
+router.put('/settings', authorize(...MANAGER_ROLES), validate(updateSettingsSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { settings } = req.body;
     for (const [key, value] of Object.entries(settings)) {
@@ -860,7 +867,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       (async () => {
         try {
           const assignees = await query(
-            `SELECT qa.person_id, p.first_name, p.last_name, p.email
+            `SELECT qa.person_id, p.first_name, p.last_name, p.preferred_name, p.email
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
              WHERE qa.quote_id = $1 AND qa.status NOT IN ('declined', 'cancelled')
@@ -884,7 +891,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
               await emailService.send('job_change_notification', {
                 to: crew.email,
                 variables: {
-                  freelancerName: crew.first_name || 'there',
+                  freelancerName: greetingName(crew),
                   jobName,
                   jobNumber: String(oldQuote.linked_hh_job_number || ''),
                   jobDate: formattedDate,
@@ -920,6 +927,13 @@ const statusSchema = z.object({
 router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { status, cancelledReason } = req.body;
+
+    // Completing is a manager's call with a reason (POST /:id/complete-override);
+    // this route used to reach the same end state for anyone (B.2, Oct 2026).
+    if (status === 'completed' && !isManagerTier(req.user?.role)) {
+      res.status(403).json({ error: 'Completing a quote is a manager action — ask a manager to complete it.' });
+      return;
+    }
 
     // Capture old status so we can detect draft → confirmed transitions
     // and fire freelancer_assignment emails for pre-existing assignees.
@@ -963,7 +977,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
         try {
           const assignees = await query(
             `SELECT qa.id AS assignment_id, qa.role, qa.agreed_rate, qa.rate_type,
-                    p.id AS person_id, p.first_name, p.email, p.is_freelancer,
+                    p.id AS person_id, p.first_name, p.preferred_name, p.email, p.is_freelancer,
                     q.job_date, q.venue_name, j.job_name, j.hh_job_number
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
@@ -989,7 +1003,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
               );
               continue;
             }
-            const freelancerName = (a.first_name || '').trim() || 'there';
+            const freelancerName = greetingName(a);
             const jobName = a.job_name || a.venue_name || 'a job';
             const jobDate = a.job_date
               ? new Date(a.job_date).toLocaleDateString('en-GB', {
@@ -1165,7 +1179,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
       (async () => {
         try {
           const ctx = await query(
-            `SELECT p.first_name, p.last_name, p.email, p.is_freelancer,
+            `SELECT p.first_name, p.last_name, p.preferred_name, p.email, p.is_freelancer,
                     q.status AS quote_status, q.job_date, q.arrival_time,
                     q.venue_name, q.job_type,
                     j.job_name, j.hh_job_number
@@ -1184,7 +1198,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
           const { suppress } = await shouldSuppressInformational(personId, String(req.params.id));
           if (suppress) return;
 
-          const freelancerName = (row.first_name || '').trim() || 'there';
+          const freelancerName = greetingName(row);
           const jobName = row.job_name || row.venue_name || 'a job';
           const jobDate = row.job_date
             ? new Date(row.job_date).toLocaleDateString('en-GB', {
@@ -1250,6 +1264,12 @@ const opsStatusSchema = z.object({
 router.patch('/:id/ops-status', validate(opsStatusSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { ops_status } = req.body;
+
+    // Same rule as /:id/status: 'completed' is the manager's (B.2, Oct 2026).
+    if (ops_status === 'completed' && !isManagerTier(req.user?.role)) {
+      res.status(403).json({ error: 'Completing a quote is a manager action — ask a manager to complete it.' });
+      return;
+    }
     const updates: string[] = ['ops_status = $1', 'updated_at = NOW()'];
     const params: unknown[] = [ops_status];
 
@@ -1404,7 +1424,7 @@ router.post(
       const result = await query(
         `SELECT q.id AS quote_id, q.job_type, q.venue_name, q.job_date, q.arrival_time,
                 p.id AS person_id, p.email AS person_email,
-                p.first_name, p.last_name,
+                p.first_name, p.last_name, p.preferred_name,
                 j.job_name
          FROM quote_assignments qa
          JOIN quotes q ON q.id = qa.quote_id
@@ -1426,7 +1446,7 @@ router.post(
         return;
       }
 
-      const firstName = (row.first_name || '').trim() || 'there';
+      const firstName = greetingName(row);
       const venueName = row.venue_name || 'the venue';
       const jobName = row.job_name || row.venue_name || 'your job';
       const portalBase = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
@@ -1583,6 +1603,125 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
   }
 });
 
+// ── Quote contacts — who to call on this transport leg ──────────────
+//
+// `quote_contacts` (migration 223). Before this there was no contact field on
+// a quote at all, so the site contact was typed by hand into
+// `freelancer_notes` every time — despite the job already knowing every
+// person at every org on it.
+//
+// Reads are a live join: name / phone / email come from `people` on every
+// request, never copied into the junction. If a number changes, the driver
+// gets the new one. See the migration for why there are no snapshot columns.
+//
+// Deliberately NOT written to `job_contacts` — that drives client email
+// routing (hire forms, confirmations, receipts), and ticking a venue's duty
+// manager onto a delivery must never start emailing them hire forms.
+
+// GET /api/quotes/:id/contacts
+// Returns { data: { ticked: [...], candidates: [...] } } — `ticked` is what's
+// on this leg, `candidates` is everyone reachable through the job's orgs.
+// A candidate already ticked still appears in `candidates` so the picker can
+// render one list with checkboxes rather than two that need reconciling.
+router.get('/:id/contacts', async (req: AuthRequest, res: Response) => {
+  try {
+    const quoteResult = await query(
+      `SELECT id, job_id FROM quotes WHERE id = $1 AND is_deleted = false`,
+      [req.params.id]
+    );
+    if (quoteResult.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+    const { job_id: jobId } = quoteResult.rows[0];
+
+    const tickedResult = await query(
+      `SELECT qc.person_id, qc.label,
+              p.first_name, p.last_name, p.email, p.phone, p.mobile
+       FROM quote_contacts qc
+       JOIN people p ON p.id = qc.person_id AND p.is_deleted = false
+       WHERE qc.quote_id = $1
+       ORDER BY p.first_name ASC`,
+      [req.params.id]
+    );
+
+    const ticked = tickedResult.rows.map((r: Record<string, unknown>) => ({
+      person_id: r.person_id as string,
+      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+      email: (r.email as string) || null,
+      phone: (r.phone as string) || null,
+      mobile: (r.mobile as string) || null,
+      label: (r.label as string) || null,
+    }));
+
+    // A quote can exist without a job (standalone calculator run) — no job
+    // means no org chain, so no candidates. Still return the ticked list.
+    const candidates = jobId ? await resolveJobContactCandidates(jobId) : [];
+
+    res.json({ data: { ticked, candidates } });
+  } catch (error) {
+    console.error('Get quote contacts error:', error);
+    res.status(500).json({ error: 'Failed to load contacts' });
+  }
+});
+
+// PUT /api/quotes/:id/contacts — idempotent replace
+// Mirrors the shape of PUT /api/pipeline/:jobId/contacts. The whole list is
+// sent each time; anything absent is removed.
+const quoteContactsSchema = z.object({
+  contacts: z.array(z.object({
+    person_id: z.string().uuid(),
+    label: z.string().max(100).optional().nullable(),
+  })).max(20),
+});
+
+router.put('/:id/contacts', validate(quoteContactsSchema), async (req: AuthRequest, res: Response) => {
+  const client = await (await import('../config/database')).getClient();
+  try {
+    const quoteCheck = await client.query(
+      `SELECT id FROM quotes WHERE id = $1 AND is_deleted = false`,
+      [req.params.id]
+    );
+    if (quoteCheck.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+
+    const { contacts } = req.body as z.infer<typeof quoteContactsSchema>;
+    // Guard the unique constraint: the same person sent twice (two rows in the
+    // picker payload) would abort the whole transaction on the second INSERT.
+    const seen = new Set<string>();
+    const unique = contacts.filter((c) => {
+      if (seen.has(c.person_id)) return false;
+      seen.add(c.person_id);
+      return true;
+    });
+
+    await client.query('BEGIN');
+    // Replace rather than diff. The set is small (≤20) and a diff would have
+    // to reason about label-only changes; a delete + insert is one behaviour
+    // with no edge cases. `created_at` resetting is acceptable — nothing reads
+    // it, and the audit trail people care about is the quote's own timeline.
+    await client.query('DELETE FROM quote_contacts WHERE quote_id = $1', [req.params.id]);
+    for (const c of unique) {
+      await client.query(
+        `INSERT INTO quote_contacts (quote_id, person_id, label, created_by)
+         VALUES ($1, $2, $3, $4)`,
+        [req.params.id, c.person_id, c.label || null, req.user!.id]
+      );
+    }
+    await client.query('COMMIT');
+
+    res.json({ data: { count: unique.length } });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Update quote contacts error:', error);
+    res.status(500).json({ error: 'Failed to save contacts' });
+  } finally {
+    client.release();
+  }
+});
+
 // ── PUT /api/quotes/:id/run-group — attach/detach a quote to a run ───
 //
 // Accepts an existing run_groups.id OR null (to ungroup). If the UUID
@@ -1715,7 +1854,8 @@ router.patch('/runs/:runId', validate(updateRunSchema), async (req: AuthRequest,
 // Delete (ungroup): FK is ON DELETE SET NULL, so member quotes are
 // ungrouped automatically and their standalone freelancer_fee values
 // become visible again — non-destructive.
-router.delete('/runs/:runId', async (req: AuthRequest, res: Response) => {
+// Manager-tier (B.2): ungrouping a run changes what the client and freelancers are quoted.
+router.delete('/runs/:runId', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
       `DELETE FROM run_groups WHERE id = $1 RETURNING id`,

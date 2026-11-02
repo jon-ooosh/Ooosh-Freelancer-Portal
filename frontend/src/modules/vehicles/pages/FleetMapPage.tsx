@@ -1,10 +1,14 @@
 import { useEffect, useRef, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { vmPath } from '../config/route-paths'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useTraccarDevices } from '../hooks/useTraccar'
 import { useVehicles } from '../hooks/useVehicles'
-import { getPositions } from '../lib/traccar-api'
+import { getPositions, trackerForDevice } from '../lib/traccar-api'
+import { useGpsTrackers } from '../hooks/useGpsTrackers'
+import { TrackersPanel } from '../components/tracking/TrackersPanel'
+import type { GpsTracker } from '../lib/gps-trackers-api'
 import { useQuery } from '@tanstack/react-query'
 import { knotsToMph, timeSince } from '../types/traccar'
 import type { TraccarDevice, TraccarPosition } from '../types/traccar'
@@ -55,10 +59,17 @@ function useAllPositions() {
   })
 }
 
+/** The van a device is in: via the tracker register (IMEI), else by device name = reg. */
 function getVehicleForDevice(
   device: TraccarDevice,
   vehicles: Vehicle[],
+  trackers: GpsTracker[] | undefined,
 ): Vehicle | undefined {
+  const tracker = trackerForDevice(device, trackers)
+  if (tracker?.vehicleId) {
+    const byRegister = vehicles.find(v => v.id === tracker.vehicleId)
+    if (byRegister) return byRegister
+  }
   const normalise = (s: string) => s.replace(/\s+/g, '').toUpperCase()
   const target = normalise(device.name)
   return vehicles.find(v => normalise(v.reg) === target)
@@ -69,7 +80,7 @@ function getMarkerState(
   position: TraccarPosition | undefined,
 ): { icon: L.DivIcon; label: string } {
   if (device.status !== 'online') return { icon: ICONS.offline, label: 'Offline' }
-  if (!position) return { icon: ICONS.stopped, label: 'No position' }
+  if (!position) return { icon: ICONS.stopped, label: 'No GPS fix' }
   const ignition = position.attributes?.ignition
   const speed = knotsToMph(position.speed)
   if (ignition && speed > 2) return { icon: ICONS.moving, label: `${speed} mph` }
@@ -77,10 +88,60 @@ function getMarkerState(
   return { icon: ICONS.stopped, label: 'Stopped' }
 }
 
+type FleetMapTab = 'map' | 'trackers'
+
 export function FleetMapPage() {
+  // ?tab=trackers deep-links the register (the vehicle page links here).
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tab: FleetMapTab = searchParams.get('tab') === 'trackers' ? 'trackers' : 'map'
+  const setTab = (next: FleetMapTab) => {
+    const params = new URLSearchParams(searchParams)
+    if (next === 'map') params.delete('tab')
+    else params.set('tab', next)
+    setSearchParams(params, { replace: true })
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold">Fleet Map</h2>
+        <a
+          href="https://tracking.oooshtours.co.uk/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-100"
+        >
+          Open Traccar
+        </a>
+      </div>
+
+      {/* Tab bar */}
+      <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
+        {(['map', 'trackers'] as const).map(t => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setTab(t)}
+            className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+              tab === t ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 active:text-gray-700'
+            }`}
+          >
+            {t === 'map' ? 'Map' : 'Trackers'}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'map' ? <FleetMapView /> : <TrackersPanel />}
+    </div>
+  )
+}
+
+function FleetMapView() {
   const { data: devices, isLoading: devicesLoading } = useTraccarDevices()
   const { data: positions, isLoading: positionsLoading } = useAllPositions()
   const { data: vehicles } = useVehicles()
+  const { data: trackers } = useGpsTrackers()
 
   const mapRef = useRef<HTMLDivElement>(null)
   const mapInstanceRef = useRef<L.Map | null>(null)
@@ -137,13 +198,13 @@ export function FleetMapPage() {
       if (!position) continue
 
       const { icon, label } = getMarkerState(device, position)
-      const vehicle = vehicles ? getVehicleForDevice(device, vehicles) : undefined
+      const vehicle = vehicles ? getVehicleForDevice(device, vehicles, trackers) : undefined
       const latlng: L.LatLngExpression = [position.latitude, position.longitude]
       bounds.push(latlng)
 
       const popupHtml = `
         <div style="min-width: 140px;">
-          <strong style="font-size: 14px;">${device.name}</strong>
+          <strong style="font-size: 14px;">${vehicle?.reg ?? device.name}</strong>
           ${vehicle ? `<br><span style="font-size: 11px; color: #666;">${vehicle.make} ${vehicle.model} · ${vehicle.simpleType || ''}</span>` : ''}
           <br><span style="font-size: 11px; color: #888;">${label} · ${timeSince(device.lastUpdate)}</span>
           ${vehicle ? `<br><a href="${vmPath(`/vehicles/${vehicle.id}`)}" style="font-size: 11px; color: #2563eb;">View vehicle &rarr;</a>` : ''}
@@ -176,7 +237,7 @@ export function FleetMapPage() {
       map.fitBounds(L.latLngBounds(bounds), { padding: [40, 40], maxZoom: 14 })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [devices, positionMap, vehicles])
+  }, [devices, positionMap, vehicles, trackers])
 
   const isLoading = devicesLoading || positionsLoading
   const trackedCount = devices?.length || 0
@@ -184,28 +245,11 @@ export function FleetMapPage() {
 
   return (
     <div className="space-y-3">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-semibold">Fleet Map</h2>
-          {!isLoading && (
-            <p className="text-xs text-gray-500">
-              {onlineCount} online / {trackedCount} tracked
-            </p>
-          )}
-        </div>
-        <a
-          href="https://tracking.oooshtours.co.uk/"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-100"
-        >
-          Open Traccar
-        </a>
-      </div>
-
       {/* Legend */}
-      <div className="flex gap-3 text-xs text-gray-500">
+      <div className="flex flex-wrap gap-3 text-xs text-gray-500">
+        {!isLoading && (
+          <span className="mr-auto">{onlineCount} online / {trackedCount} tracked</span>
+        )}
         <span className="flex items-center gap-1">
           <span className="inline-block h-3 w-3 rounded-full bg-green-500 border border-white shadow-sm" /> Moving
         </span>
@@ -225,7 +269,7 @@ export function FleetMapPage() {
         <div
           ref={mapRef}
           className="rounded-lg overflow-hidden border border-gray-200"
-          style={{ height: 'calc(100vh - 220px)', minHeight: 400 }}
+          style={{ height: 'calc(100vh - 270px)', minHeight: 400 }}
         />
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center bg-white/60 rounded-lg">
@@ -239,7 +283,8 @@ export function FleetMapPage() {
         <div className="space-y-1">
           {devices.map(device => {
             const position = positionMap.get(device.id)
-            const vehicle = vehicles ? getVehicleForDevice(device, vehicles) : undefined
+            const vehicle = vehicles ? getVehicleForDevice(device, vehicles, trackers) : undefined
+            const tracker = trackerForDevice(device, trackers)
             const { label } = getMarkerState(device, position)
 
             return (
@@ -260,7 +305,10 @@ export function FleetMapPage() {
                   device.status === 'online' ? 'bg-green-500' : 'bg-red-500'
                 }`} />
                 <div className="flex-1 min-w-0">
-                  <span className="text-sm font-medium text-gray-900">{device.name}</span>
+                  <span className="text-sm font-medium text-gray-900">{vehicle?.reg ?? device.name}</span>
+                  {tracker && (
+                    <span className="ml-1.5 font-mono text-xs text-gray-400">#{tracker.trackerNumber}</span>
+                  )}
                   {vehicle && (
                     <span className="ml-1.5 text-xs text-gray-400">{vehicle.simpleType}</span>
                   )}

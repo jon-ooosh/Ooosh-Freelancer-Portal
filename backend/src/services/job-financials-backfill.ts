@@ -14,7 +14,7 @@
  * globally anyway, but the delay keeps the nightly run from starving any
  * real-time user requests. Intended to run at ~03:00 when little else is happening.
  */
-import jwt from 'jsonwebtoken';
+import { signFor } from './tokens';
 import { query } from '../config/database';
 
 interface BackfillOpts {
@@ -33,11 +33,6 @@ export async function backfillJobFinancials(opts: BackfillOpts = {}): Promise<Ba
   const delayMs = opts.delayMs ?? 4000;
   const staleAfterDays = opts.staleAfterDays ?? 7;
 
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    console.warn('[fin-backfill] JWT_SECRET not set — skipping');
-    return { processed: 0, failed: 0, candidates: 0 };
-  }
   const port = process.env.PORT || 3001;
   const base = `http://127.0.0.1:${port}`;
 
@@ -54,7 +49,7 @@ export async function backfillJobFinancials(opts: BackfillOpts = {}): Promise<Ba
     return { processed: 0, failed: 0, candidates: 0 };
   }
   const u = userRes.rows[0] as { id: string; email: string; role: string };
-  const token = jwt.sign({ id: u.id, email: u.email, role: u.role }, secret, { expiresIn: '2h' });
+  const token = signFor('staff', { id: u.id, email: u.email, role: u.role }, '2h');
 
   // Candidates: real jobs (HH-linked, booked or beyond — enquiries have no
   // meaningful billing), not dead, whose cache is missing or stale. Never-synced

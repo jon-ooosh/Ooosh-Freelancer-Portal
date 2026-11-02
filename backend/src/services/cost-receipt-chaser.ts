@@ -4,7 +4,7 @@
  * Company-card (COT) purchases are already in Xero via the bank feed, so the
  * one thing OP needs from staff is the RECEIPT. Without it the bookkeeper chases
  * months later. This sends ONE weekly digest per card-holder summarising their
- * own cot_card costs (older than GRACE_DAYS) that still have no receipt attached,
+ * own cot_card costs (older than RECEIPT_GRACE_DAYS) that still have no receipt attached,
  * deep-linked to their missing-receipt list. A cost drops out the moment a
  * receipt lands (receipt_r2_key set). The weekly cadence is the throttle — no
  * per-cost dedup needed; receipt_chase_sent_at is stamped only as a "last
@@ -17,9 +17,11 @@
  * logged at all are caught later by the Xero-matched reconciliation (future).
  */
 import { query } from '../config/database';
-import { getFrontendUrl } from '../config/app-urls';
 
-const GRACE_DAYS = 3;    // give staff a few days to attach the receipt before the weekly digest picks it up
+// give staff a few days to attach the receipt before the weekly digest picks it up.
+// bell-rules.ts reads it too (cot_receipts), so the digest's bell stays lit
+// exactly as long as this chaser would still count the purchase.
+export const RECEIPT_GRACE_DAYS = 3;
 
 interface ChaseResult { holdersNudged: number; costsChased: number; }
 
@@ -38,10 +40,19 @@ export async function runCostReceiptChase(): Promise<ChaseResult> {
         AND c.uploaded_by IS NOT NULL
         AND c.cost_date <= (CURRENT_DATE - ($1 || ' days')::interval)
       GROUP BY c.uploaded_by`,
-    [String(GRACE_DAYS)]
+    [String(RECEIPT_GRACE_DAYS)]
   );
 
-  const actionUrl = `${getFrontendUrl()}/my-receipts`;
+  // Relative path only. The notification-escalation email builder wraps
+  // action_url with frontendLink(), and NotificationBell / InboxPage navigate()
+  // it directly — both expect a relative path (e.g. '/receipt'). Storing an
+  // absolute URL here double-prepends the host in the email
+  // (staff.oooshtours.co.uk/https://staff.oooshtours.co.uk/receipt) and
+  // breaks the in-app click-through too.
+  // /receipt is the phone receipt page, which lists these first ("Waiting for a
+  // receipt"); it replaced /my-receipts (Oct 2026), which now redirects there,
+  // so bells and emails sent before still land.
+  const actionUrl = '/receipt';
 
   for (const row of due.rows as Array<{ user_id: string; n: number; cost_ids: string[] }>) {
     const n = row.n;
@@ -50,8 +61,8 @@ export async function runCostReceiptChase(): Promise<ChaseResult> {
       + `Please upload the ${n === 1 ? 'receipt' : 'receipts'} so the purchase can be reconciled in Xero.`;
 
     await query(
-      `INSERT INTO notifications (user_id, type, title, content, entity_type, action_url, priority)
-       VALUES ($1, 'follow_up', $2, $3, 'costs', $4, 'normal')`,
+      `INSERT INTO notifications (user_id, type, title, content, entity_type, action_url, priority, resolve_key)
+       VALUES ($1, 'follow_up', $2, $3, 'costs', $4, 'normal', 'cot_receipts')`,
       [row.user_id, title, content, actionUrl]
     );
 

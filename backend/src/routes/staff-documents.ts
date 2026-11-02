@@ -25,20 +25,28 @@ import {
 import { generateStaffDocumentPdf } from '../services/staff-document-pdf';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import { retireDoneBells } from '../services/notification-resolve';
+import type { BellKey } from '../services/bell-rules';
+import { AI_TOPICS } from '../services/house-knowledge';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // Bell + immediate email (the approval flow wants both). email_sent_at is
 // stamped so the Step-7 escalation scheduler doesn't re-email.
 async function emailAndBell(
   userId: string, title: string, content: string, documentId: string,
   actionUrl: string, priority: 'low' | 'normal' | 'high' = 'normal',
+  /** What it asks for — bell-rules.ts retires it once done. Null for FYI ("Approved"). */
+  resolveKey: BellKey | null = null,
 ): Promise<void> {
   await query(
-    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-     VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, $5, $6, NOW())`,
-    [userId, title, content, documentId, actionUrl, priority],
+    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+     VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, $5, $6, NOW(), $7)`,
+    [userId, title, content, documentId, actionUrl, priority, resolveKey],
   ).catch((e) => console.error('[staff-documents] bell failed:', e));
   try {
     const u = await query(`SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1`, [userId]);
@@ -50,6 +58,21 @@ async function emailAndBell(
       });
     }
   } catch (e) { console.error('[staff-documents] email failed:', e); }
+}
+
+/**
+ * A write that can settle a document's bells — completed, retired, a new
+ * version, reviewed, submitted, approved, sent back, deleted. bell-rules.ts
+ * decides for each bell (the "to complete" ones per person). Never throws.
+ */
+async function retireDocumentBells(documentId: string): Promise<void> {
+  await retireDoneBells('staff_doc_to_complete', documentId);
+  await retireDoneBells('staff_doc_content_review', documentId);
+  await retireDoneBells('staff_doc_approval', documentId);
+  await retireDoneBells('staff_doc_changes', documentId);
+  // The managers' "Outstanding staff document" bells point at a person's
+  // assignment, not the document, so check them all (only a handful are open).
+  await retireDoneBells('staff_doc_escalation');
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -314,6 +337,7 @@ router.post('/assignments/:id/complete', authorize(...STAFF_ROLES), async (req: 
     await logAudit(userId, 'staff_document_assignments', a.id, 'update',
       null, { document_id: a.document_id, mode }).catch(() => {});
 
+    await retireDocumentBells(a.document_id as string);
     res.json({ data: { completion_id: completionId, pdf_r2_key: pdfKey, expires_at: expiresAt } });
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -540,6 +564,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'update', null, fields).catch(() => {});
     // Targeting / mode may have changed — re-materialise (idempotent, additive).
     await syncDocumentAssignments(String(req.params.id)).catch((e) => console.error('[staff-documents] patch sync failed:', e));
+    await retireDocumentBells(String(req.params.id));
     res.json({ data: r.rows[0] });
   } catch (error) {
     console.error('[staff-documents] patch error:', error);
@@ -609,14 +634,15 @@ router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest,
     // Notify re-flagged users (best-effort).
     for (const row of reflag.rows) {
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-         VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, '/staff/documents', 'normal')`,
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+         VALUES ($1, 'follow_up', $2, $3, 'staff_documents', $4, '/staff/documents', 'normal', 'staff_doc_to_complete')`,
         [row.user_id, 'A document was updated — please review again',
          'A document you previously completed has a new version. Please review it again in your Staff Documents.',
          req.params.id],
       ).catch(() => {});
     }
     await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'update', null, { version: nextVersion }).catch(() => {});
+    await retireDocumentBells(String(req.params.id));
     res.status(201).json({ data: insRes.rows[0], reflagged: reflag.rows.length });
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -652,6 +678,7 @@ router.post('/:id/mark-reviewed', authorize(...STAFF_ROLES), async (req: AuthReq
       [doc.id, req.user!.id, newDue],
     );
     await logAudit(req.user!.id, 'staff_documents', doc.id, 'update', null, { content_reviewed: true }).catch(() => {});
+    await retireDocumentBells(String(req.params.id));
     res.json({ data: { content_reviewed_at: new Date().toISOString(), content_review_due_date: newDue } });
   } catch (error) {
     console.error('[staff-documents] mark-reviewed error:', error);
@@ -763,9 +790,10 @@ router.post('/:id/submit', authorize(...STAFF_ROLES), async (req: AuthRequest, r
       if (m.id === req.user!.id) continue;
       await emailAndBell(m.id, `Document awaiting approval: ${doc.title}`,
         `${creator.name || 'A staff member'} has proposed the staff document “${doc.title}” — it needs your approval before it goes out.`,
-        doc.id, '/staff/documents/admin', 'high');
+        doc.id, '/staff/documents/admin', 'high', 'staff_doc_approval');
     }
     await logAudit(req.user!.id, 'staff_documents', doc.id, 'update', null, { submitted: true }).catch(() => {});
+    await retireDocumentBells(String(req.params.id));
     res.json({ data: { approval_status: 'pending_approval' } });
   } catch (error) {
     console.error('[staff-documents] submit error:', error);
@@ -788,6 +816,7 @@ router.post('/:id/approve', authorize(...MANAGER_ROLES), async (req: AuthRequest
         `Your staff document “${doc.title}” has been approved and is now live.`, doc.id, '/staff/documents');
     }
     await logAudit(req.user!.id, 'staff_documents', doc.id, 'update', null, { approved: true }).catch(() => {});
+    await retireDocumentBells(String(req.params.id));
     res.json({ data: { approval_status: 'approved' } });
   } catch (error) {
     console.error('[staff-documents] approve error:', error);
@@ -809,12 +838,62 @@ router.post('/:id/reject', authorize(...MANAGER_ROLES), async (req: AuthRequest,
     if (doc.created_by && doc.created_by !== req.user!.id) {
       await emailAndBell(doc.created_by, `Changes requested: ${doc.title}`,
         `Your staff document “${doc.title}” needs changes before it can go out.${reason ? ' Note: ' + reason : ''}`,
-        doc.id, '/staff/documents');
+        doc.id, '/staff/documents', 'normal', 'staff_doc_changes');
     }
     await logAudit(req.user!.id, 'staff_documents', doc.id, 'update', null, { rejected: true }).catch(() => {});
+    await retireDocumentBells(String(req.params.id));
     res.json({ data: { approval_status: 'draft' } });
   } catch (error) {
     console.error('[staff-documents] reject error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/staff-documents/:id/ai — share (or stop sharing) a document with the
+// Claude that drafts client emails, and say which drafting tasks it applies to
+// (docs/AI-KNOWLEDGE-SPEC.md §4). ADMIN ONLY: whatever is shared here shapes every
+// AI-drafted client email. Only an approved, active document with text can be
+// shared — an uploaded PDF has nothing Claude can read. Read back by
+// services/house-knowledge.ts, which also re-checks approval at read time.
+const aiSchema = z.object({
+  ai_shared: z.boolean(),
+  ai_topics: z.array(z.enum(AI_TOPICS)).max(AI_TOPICS.length),
+});
+router.put('/:id/ai', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = aiSchema.safeParse(req.body);
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    const { ai_shared, ai_topics } = parse.data;
+    const cur = await query(
+      `SELECT d.approval_status, d.is_active, v.body
+         FROM staff_documents d
+         LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = TRUE
+        WHERE d.id = $1`,
+      [req.params.id],
+    );
+    if (!cur.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
+    if (ai_shared) {
+      const row = cur.rows[0];
+      if (row.approval_status !== 'approved' || !row.is_active) {
+        res.status(400).json({ error: 'Only an approved, active document can be shared with Claude' }); return;
+      }
+      if (!String(row.body || '').trim()) {
+        res.status(400).json({ error: 'This document has no written text for Claude to read (an uploaded file can\'t be shared)' }); return;
+      }
+      if (!ai_topics.length) {
+        res.status(400).json({ error: 'Pick at least one topic, so Claude knows when to read it' }); return;
+      }
+    }
+    const topics = Array.from(new Set(ai_topics));
+    const r = await query(
+      `UPDATE staff_documents SET ai_shared = $1, ai_topics = $2::text[], updated_at = NOW()
+        WHERE id = $3 RETURNING id, ai_shared, ai_topics`,
+      [ai_shared, topics, req.params.id],
+    );
+    await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'update', null, { ai_shared, ai_topics: topics }).catch(() => {});
+    res.json({ data: r.rows[0] });
+  } catch (error) {
+    console.error('[staff-documents] ai share error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -837,6 +916,7 @@ router.delete('/:id', authorize('admin'), async (req: AuthRequest, res: Response
     const r = await query(`DELETE FROM staff_documents WHERE id = $1 RETURNING id`, [req.params.id]);
     if (!r.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
     await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'delete', null, null).catch(() => {});
+    await retireDocumentBells(String(req.params.id));
     res.json({ data: { deleted: true } });
   } catch (error) {
     console.error('[staff-documents] delete error:', error);

@@ -44,6 +44,12 @@ router.post('/trigger', async (_req: AuthRequest, res: Response) => {
     }
 
     const result = await runBackup();
+    // null = another backup (usually the 02:00 scheduled one) holds the lock.
+    // Not an error — tell the caller to wait rather than reporting a failure.
+    if (!result) {
+      res.status(409).json({ error: 'A backup is already in progress — try again shortly' });
+      return;
+    }
     res.status(201).json({
       message: 'Backup created successfully',
       ...result,

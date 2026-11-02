@@ -11,18 +11,29 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { cascadeJobClose } from '../services/job-close-cascade';
+import { closeJobRequirements } from '../services/requirement-close-sweep';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { readDuplicatedJobNumber } from '../services/job-groups';
 import { calculatePreHireCancellation, calculateEarlyReturn } from '../services/cancellation-calculator';
 import emailService from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { getFrontendUrl } from '../config/app-urls';
+import { cancellationFeeGross } from '../services/cancellation-close';
+import { cancellationAlertVariables, CANCELLATION_CHASE_DAYS } from '../services/cancellation-alert';
+import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { fullDisplayName } from '../services/display-name';
+import { ukDatePlus } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── Calculate cancellation fee (no side effects) ────────────────────────
 
@@ -108,9 +119,14 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
     } catch (e) { console.warn('[Cancellation] vehicles query failed:', e); }
 
     try {
+      // held_amount from v_excess_held — the one definition of "how much do we hold"
+      // (pre-auth money sits in amount_held, not excess_amount_taken).
       excess = await query(
-        `SELECT id, excess_amount_required, excess_status, payment_method
-         FROM job_excess WHERE job_id = $1`,
+        `SELECT je.id, je.excess_amount_required, je.excess_status, je.payment_method,
+                COALESCE(h.held_amount, 0) AS held_amount
+         FROM job_excess je
+         LEFT JOIN v_excess_held h ON h.excess_id = je.id
+         WHERE je.job_id = $1`,
         [jobId]
       );
     } catch (e) { console.warn('[Cancellation] excess query failed:', e); }
@@ -239,187 +255,36 @@ router.post(
         [timelineContent, jobId, userId]
       );
 
-      // 2a. Flag the requirements the user explicitly chose to KEEP alive.
-      // The blanket cancel pass below skips items with keep_after_close=true,
-      // so flagging happens first. Background scanners (reminder scanner,
-      // hire-form auto-emailer, etc.) check this flag and keep firing kept
-      // items even though the parent job is now in a terminal status.
-      if (Array.isArray(keep_requirement_ids) && keep_requirement_ids.length > 0) {
-        try {
-          await query(
-            `UPDATE job_requirements
-             SET keep_after_close = true,
-                 notes = COALESCE(notes, '') ||
-                         E'\n[Kept alive after job cancelled]',
-                 updated_at = NOW()
-             WHERE id = ANY($1::uuid[])
-               AND job_id = $2
-               AND status NOT IN ('done', 'cancelled')`,
-            [keep_requirement_ids, jobId]
-          );
-        } catch (cancelErr) {
-          console.warn('[Cancellation] Failed to flag kept requirements:', cancelErr);
-        }
-      }
+      // 2/3. Requirement cleanup — flag the keeps, fire any reminder whose
+      //      event_trigger is 'cancelled', then sweep the rest. That order is
+      //      load-bearing: swept first, a reminder set to fire on cancellation
+      //      never fires. Shared with the lost transition, the stale-enquiry
+      //      auto-loser and the HH webhook via
+      //      services/requirement-close-sweep.ts.
+      await closeJobRequirements({
+        jobId,
+        reason: 'cancelled',
+        keepRequirementIds: keep_requirement_ids,
+        actorUserId: userId,
+      });
 
-      // 2b. Fire event-triggered reminders (before blanket mark-as-done)
-      try {
-        const triggered = await query(
-          `SELECT jr.id, jr.custom_label, jr.assigned_to, jr.notes, jr.delivery_method, jr.job_id
-           FROM job_requirements jr
-           WHERE jr.job_id = $1
-             AND jr.requirement_type = 'reminder'
-             AND jr.event_trigger = 'cancelled'
-             AND jr.status NOT IN ('done', 'cancelled')`,
-          [jobId]
-        );
+      // 4/5. Cancel the transport/crew side — quotes, crew assignments,
+      //      vehicle hire assignments, plus the freelancer cancellation
+      //      emails. Shared with the lost transition, the stale-enquiry
+      //      auto-loser and the HH webhook via services/job-close-cascade.ts.
+      //      Without the quote cancellation the Transport Ops page keeps
+      //      showing them in their pre-existing ops bucket, because
+      //      effective_ops_status only reads q.status/q.ops_status — not the
+      //      parent job's state.
+      await cascadeJobClose({ jobId, reason: 'cancelled', actorUserId: userId });
 
-        const jobName = job.job_name || job.client_name || `Job ${job.hh_job_number || ''}`;
-        for (const rem of triggered.rows) {
-          const targetUserId = rem.assigned_to || userId;
-          const title = `Reminder triggered: ${rem.custom_label || 'Reminder'}`;
-          const content = `Job cancelled — ${rem.custom_label || 'Reminder'} (${jobName})`;
-          const deliveryMethod = rem.delivery_method || 'both';
-          const priority = deliveryMethod === 'notification' ? 'low' : 'high';
-
-          await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, $6, $7)`,
-            [targetUserId, title, content, rem.job_id, `/jobs/${rem.job_id}?tab=overview`, priority, userId]
-          );
-
-          if (deliveryMethod === 'email' || deliveryMethod === 'both') {
-            try {
-              const userResult = await query('SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1', [targetUserId]);
-              if (userResult.rows.length > 0 && userResult.rows[0].email) {
-                await emailService.sendRaw({
-                  to: userResult.rows[0].email,
-                  subject: title,
-                  html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
-                         <p>Your reminder "<strong>${rem.custom_label || 'Reminder'}</strong>" has been triggered because the job <strong>${jobName}</strong> has been <strong>cancelled</strong>.</p>
-                         ${rem.notes ? `<p>Notes: ${rem.notes}</p>` : ''}
-                         <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
-                });
-              }
-            } catch (emailErr) {
-              console.warn('[Cancellation] Event trigger email failed:', emailErr);
-            }
-          }
-
-          // Mark the reminder as done
-          await query(`UPDATE job_requirements SET status = 'done', updated_at = NOW() WHERE id = $1`, [rem.id]);
-        }
-
-        if (triggered.rows.length > 0) {
-          console.log(`[Cancellation] Fired ${triggered.rows.length} event-triggered reminder(s) for job ${jobId}`);
-        }
-      } catch (triggerErr) {
-        console.warn('[Cancellation] Event trigger check failed:', triggerErr);
-      }
-
-      // 3. Cancel all remaining open requirements EXCEPT those the user
-      // explicitly chose to keep (flagged keep_after_close=true in step 2a).
-      // See CLAUDE.md → "Lost / Cancelled cleanup pattern".
-      await query(
-        `UPDATE job_requirements
-         SET status = 'cancelled',
-             notes = COALESCE(notes, '') || ' [Cancelled]',
-             updated_at = NOW()
-         WHERE job_id = $1
-           AND status NOT IN ('done', 'cancelled')
-           AND keep_after_close = false`,
-        [jobId]
-      );
-
-      // 4. Cancel vehicle assignments.
-      //    Dual job match catches V&D-style rows (`job_id IS NULL`,
-      //    only `hirehop_job_id` set). Exclude already-terminal states
-      //    (returned / swapped) to avoid re-marking historic rows.
-      //    Recompute fleet hire_status for each affected vehicle so the
-      //    cached projection catches up immediately.
-      const sweptVha = await query(
-        `UPDATE vehicle_hire_assignments
-           SET status = 'cancelled',
-               status_changed_at = NOW(),
-               notes = COALESCE(notes, '') || E'\n[Auto-cancelled: job cancelled]',
-               updated_at = NOW()
-         WHERE (job_id = $1
-                OR (job_id IS NULL AND hirehop_job_id = $2::integer))
-           AND status NOT IN ('cancelled', 'returned', 'swapped')
-         RETURNING id, vehicle_id`,
-        [jobId, job.hh_job_number ?? null]
-      );
-      if (sweptVha.rows.length > 0) {
-        const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
-        const seen = new Set<string>();
-        for (const r of sweptVha.rows) {
-          if (r.vehicle_id && !seen.has(r.vehicle_id)) {
-            seen.add(r.vehicle_id);
-            try { await syncFleetHireStatus(r.vehicle_id); }
-            catch (e) { console.warn('[Cancellation] syncFleetHireStatus failed:', e); }
-          }
-        }
-      }
-
-      // 5a. Cancel the transport/crew quotes themselves. Without this the
-      // Transport Ops page keeps showing them in their pre-existing ops
-      // bucket (Arranging/Arranged/…) because effective_ops_status only
-      // reads q.status/q.ops_status — not the parent job's state.
-      await query(
-        `UPDATE quotes
-           SET status = 'cancelled',
-               ops_status = 'cancelled',
-               status_changed_at = NOW(),
-               status_changed_by = $2,
-               cancelled_reason = COALESCE(cancelled_reason, 'Parent job cancelled'),
-               updated_at = NOW()
-         WHERE job_id = $1
-           AND is_deleted = false
-           AND status NOT IN ('cancelled', 'completed')`,
-        [jobId, userId]
-      );
-
-      // 5b. Cancel crew assignments + send emails
-      const crewResult = await query(
-        `SELECT qa.id, qa.role, qa.status, p.first_name, p.last_name, p.email
-         FROM quote_assignments qa
-         JOIN people p ON p.id = qa.person_id
-         WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-           AND qa.status NOT IN ('cancelled', 'declined')`,
-        [jobId]
-      );
-
-      // Cancel all crew assignments
-      if (crewResult.rows.length > 0) {
-        await query(
-          `UPDATE quote_assignments SET status = 'cancelled'
-           WHERE quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-             AND status NOT IN ('cancelled', 'declined')`,
-          [jobId]
-        );
-      }
-
-      // Email crew members
+      // Job display fields — still needed below by the internal + client
+      // cancellation emails (the crew email now lives in the cascade).
       const jobNumber = job.hh_job_number ? `J-${job.hh_job_number}` : 'NEW';
       const jobName = job.job_name || 'Untitled';
       const jobDates = [job.job_date, job.job_end].filter(Boolean).map(
         (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
       ).join(' — ');
-
-      for (const crew of crewResult.rows) {
-        if (crew.email) {
-          emailService.send('job_cancelled_crew', {
-            to: crew.email,
-            variables: {
-              crewName: `${crew.first_name} ${crew.last_name}`.trim(),
-              jobName,
-              jobNumber,
-              jobDates,
-              crewRole: crew.role || 'Crew',
-            },
-          }).catch(err => console.error(`[Cancellation] Failed to email crew ${crew.email}:`, err));
-        }
-      }
 
       // 6. Flag excess records for refund — add cancellation note, don't change status
       // (staff processes actual refund via Money tab / excess ledger)
@@ -429,8 +294,20 @@ router.post(
         [jobId]
       );
 
-      // 7. Write back to HireHop (status 9 = Cancelled)
+      // 7. Write back to HireHop (status 9 = Cancelled). Still in the background, but a
+      // refusal now lands on the job's timeline instead of only in the server log — the
+      // broker RESOLVES {success:false} on a rate limit, so .catch alone never saw it. The
+      // money end reads HireHop's status before raising the fee invoice either way.
       writeBackStatusToHireHop(jobId, 'cancelled', req.user!.email || userId)
+        .then(async (r) => {
+          if (r.success) return;
+          console.error('[Cancellation] HH write-back refused:', r.message);
+          await query(
+            `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation, source)
+             VALUES ('note', $1, $2, $3, 'cancelled', 'system')`,
+            [`⚠️ HireHop was not set to Cancelled (${r.message}). Set it to Cancelled in HireHop by hand.`, jobId, userId]
+          );
+        })
         .catch(err => console.error('[Cancellation] HH write-back error:', err));
 
       // 8. Create pending refund record in job_payments if refund > 0
@@ -446,20 +323,46 @@ router.post(
         }
       }
 
-      // 9. Send internal notification email
+      // 9. Send internal notification email — a to-do list of the money still to
+      // finish (services/cancellation-alert.ts), not a "processed" receipt. The
+      // first day an unfinished card is chased is also step 11's due date.
       const frontendUrl = getFrontendUrl();
-      emailService.send('job_cancelled_internal', {
-        to: 'info@oooshtours.co.uk',
-        variables: {
-          cancelledBy: req.user!.email || 'Unknown',
-          jobName,
-          jobNumber,
-          reason: cancellation_reason,
-          fee: `£${cancellation_fee.toFixed(2)}`,
-          refund: `£${cancellation_refund.toFixed(2)}`,
-          jobUrl: `${frontendUrl}/jobs/${jobId}`,
-        },
-      }).catch(err => console.error('[Cancellation] Internal email failed:', err));
+      const chaseFrom = ukDatePlus(CANCELLATION_CHASE_DAYS);
+      (async () => {
+        try {
+          const [canceller, excess] = await Promise.all([
+            query(
+              `SELECT u.email, p.first_name, p.last_name, p.preferred_name
+                 FROM users u LEFT JOIN people p ON p.id = u.person_id
+                WHERE u.id = $1`,
+              [userId]
+            ),
+            // v_excess_held — the one definition of "how much excess do we hold".
+            query(`SELECT COALESCE(SUM(held_amount), 0) AS held FROM v_excess_held WHERE job_id = $1`, [jobId]),
+          ]);
+          const result = await emailService.send('job_cancelled_internal', {
+            to: 'info@oooshtours.co.uk',
+            variables: cancellationAlertVariables({
+              cancelledBy: fullDisplayName(canceller.rows[0], req.user!.email || 'Unknown'),
+              jobName,
+              hhJobNumber: job.hh_job_number ?? null,
+              reason: cancellation_reason,
+              feeNet: cancellation_fee,
+              feeGross: cancellationFeeGross(cancellation_fee),
+              refund: cancellation_refund,
+              owing: Number(cancellation_outstanding_balance || 0),
+              excessHeld: Number(excess.rows[0]?.held ?? 0),
+              clientEmailed: send_client_email !== false,
+              chaseFrom,
+              moneyUrl: `${frontendUrl}/jobs/${jobId}?tab=money`,
+              listUrl: `${frontendUrl}/jobs/lost-cancelled?tab=cancelled`,
+            }),
+          });
+          if (!result.success) console.error('[Cancellation] Internal email not sent:', result.error);
+        } catch (err) {
+          console.error('[Cancellation] Internal email failed:', err);
+        }
+      })();
 
       // 10. Send client cancellation email — reason-aware intro paragraph.
       // The boilerplate "We're writing to confirm…" line worked for client-led
@@ -549,32 +452,53 @@ router.post(
       })();
 
       // 11. Create cancellation close-out requirements (same pattern as returns close-out)
+      //
+      // The money cards (invoice, payment_reconcile, excess_resolve) are the
+      // cancellation's own follow-ups, so they are made to outlive it: due
+      // CANCELLATION_CHASE_DAYS from now and keep_after_close = true, which is
+      // what lets the 09:30 close-out scanner chase them on a cancelled job and
+      // keeps their bells lit until done (bell-rules.ts requirement_due). Each
+      // ticks itself: invoice on "Mark as sent", payment_reconcile when the
+      // close-out plan says settled, excess_resolve from the excess records.
+      // Cancellations from before Oct 2026 have neither, so they are never chased.
       try {
-        const ensureReq = async (type: string, notes: string) => {
+        const HALF_PENNY = 0.005;
+        const outstanding = Number(cancellation_outstanding_balance || 0);
+        const ensureReq = async (type: string, notes: string, chase: boolean) => {
+          // A card the cancellation sweep just closed (the hire's own invoice
+          // card on a job cancelled after it came back) doesn't count.
           const exists = await query(
-            `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 AND phase = 'post_hire'`,
+            `SELECT id FROM job_requirements
+              WHERE job_id = $1 AND requirement_type = $2 AND phase = 'post_hire' AND status <> 'cancelled'`,
             [jobId, type]
           );
           if (exists.rows.length === 0) {
             await query(
-              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
-               VALUES ($1, $2, 'not_started', $3, true, 'cancellation', 'post_hire')`,
-              [jobId, type, notes]
+              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase, due_date, keep_after_close)
+               VALUES ($1, $2, 'not_started', $3, true, 'cancellation', 'post_hire', $4, $5)`,
+              [jobId, type, notes, chase ? chaseFrom : null, chase]
             );
           }
         };
 
         // Always: invoice for cancellation fee
-        if (cancellation_fee > 0) {
-          await ensureReq('invoice', `Create HireHop invoice for cancellation fee: £${cancellation_fee.toFixed(2)} + VAT (£${(cancellation_fee * 1.2).toFixed(2)} gross)`);
+        if (cancellation_fee >= HALF_PENNY) {
+          await ensureReq('invoice', `Create HireHop invoice for cancellation fee: £${cancellation_fee.toFixed(2)} + VAT (£${cancellationFeeGross(cancellation_fee).toFixed(2)} gross), then send it to the client`, true);
         }
 
-        // Always: client follow-up (confirm cancellation received, handle any queries)
-        await ensureReq('client_followup', 'Confirm client received cancellation notification');
+        // Always: client follow-up (confirm cancellation received, handle any queries).
+        // Not chased — it ticks itself when the fee invoice is marked sent.
+        await ensureReq('client_followup', 'Confirm client received cancellation notification', false);
 
-        // If refund due: payment reconciliation
-        if (cancellation_refund > 0) {
-          await ensureReq('payment_reconcile', `Process refund of £${cancellation_refund.toFixed(2)} to client (10 working day target)`);
+        // Payment reconciliation — on every cancellation that moves money, not only a
+        // refund: a client who still owes the fee needs tracking too. Ticked by the
+        // close-out plan once settled (cancellation-close.ts markCancellationReconciled).
+        if (cancellation_refund >= HALF_PENNY) {
+          await ensureReq('payment_reconcile', `Process refund of £${cancellation_refund.toFixed(2)} to client (10 working day target)`, true);
+        } else if (outstanding >= HALF_PENNY) {
+          await ensureReq('payment_reconcile', `Collect the £${outstanding.toFixed(2)} the client still owes on the cancellation fee`, true);
+        } else if (cancellation_fee >= HALF_PENNY) {
+          await ensureReq('payment_reconcile', 'Put the client\'s payment against the cancellation fee invoice — done when the Money tab says Settled', true);
         }
 
         // If excess records: resolve them
@@ -583,7 +507,11 @@ router.post(
           [jobId]
         );
         if (parseInt(excessCount.rows[0]?.cnt || '0') > 0) {
-          await ensureReq('excess_resolve', 'Resolve insurance excess — reimburse or waive');
+          await ensureReq('excess_resolve', 'Resolve insurance excess — reimburse or waive', true);
+          // Set it from the records now — with nothing held it goes straight to
+          // done, rather than sitting "To do" (and being chased) until the next
+          // excess change happens to re-check it.
+          await syncExcessRequirementStatus(jobId);
         }
       } catch (err) {
         console.warn('[Cancellation] Failed to create close-out requirements:', err);
@@ -720,9 +648,18 @@ router.get('/list', async (req: AuthRequest, res: Response) => {
               j.cancelled_at, j.cancellation_reason, j.cancellation_fee,
               j.cancellation_refund, j.cancellation_tier, j.cancellation_notice_days,
               j.cancellation_notes, j.reopened_to_job_id,
-              m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name
+              m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name,
+              -- Canonical client name + the org ★'d to headline this job. The
+              -- list previously showed HireHop's raw company_name/client_name,
+              -- so a job whose client had been changed in OP kept showing the
+              -- old name here while Job Detail showed the new one.
+              o.name AS client_org_name,
+              (SELECT lo.name FROM job_organisations jo
+                 JOIN organisations lo ON lo.id = jo.organisation_id
+                WHERE jo.job_id = j.id AND jo.is_primary = true LIMIT 1) AS lead_org_name
        FROM jobs j
        LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
+       LEFT JOIN organisations o ON o.id = j.client_id AND o.is_deleted = false
        WHERE ${whereClause}
        ORDER BY ${orderBy}
        LIMIT $${pIdx} OFFSET $${pIdx + 1}`,
@@ -781,9 +718,11 @@ router.post(
             local: new Date().toISOString().replace('T', ' ').substring(0, 16),
           }, { priority: 'high' });
 
-          const hhData = hhResult?.data as { job?: number } | undefined;
-          if (hhData?.job) {
-            newHhJobNumber = hhData.job;
+          // HireHop answers with the new job's data, number under `ID` — the
+          // old `data.job` read never matched (found via Quote options, Oct 2026).
+          const dupNumber = hhResult.success ? readDuplicatedJobNumber(hhResult.data) : null;
+          if (dupNumber) {
+            newHhJobNumber = dupNumber;
             console.log(`[Cancellation] HH duplicate created: J-${newHhJobNumber}`);
 
             // Update HH job dates to 09:00 (duplicate may use current time)

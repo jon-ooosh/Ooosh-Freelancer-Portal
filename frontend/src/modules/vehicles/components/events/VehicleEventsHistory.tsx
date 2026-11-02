@@ -1,8 +1,9 @@
 /**
  * Event History section for a vehicle — lists all book-outs, check-ins,
  * prep events etc. newest-first. Includes inline "Regenerate PDF" action
- * on Book Out and Check In events so staff can re-issue a condition
- * report for damage disputes or correct a mis-fired original.
+ * on Book Out, Check In and Interim Check In (freelancer collection) events
+ * so staff can re-issue a condition report for damage disputes or correct a
+ * mis-fired original.
  */
 
 import { useState } from 'react'
@@ -17,6 +18,14 @@ interface Props {
   /** Vehicle UUID — used to deep-link a book-out/check-in into its full
    *  "life of a hire" comparison page (/vehicles/fleet/:id/hire/:hhJob). */
   vehicleId?: string
+  /**
+   * Deep-link a "Prep Completed" event into its full prep record. The prep
+   * session document in R2 is keyed by the SAME id as the event row
+   * (`prep-sessions/{REG}/{eventId}.json` — see PrepPage's save-prep call),
+   * so the event id is all the Preps tab needs to find the session.
+   * Omitted when the parent has no Preps tab to switch to.
+   */
+  onOpenPrep?: (eventId: string) => void
 }
 
 const EVENT_TYPE_BADGE: Record<string, string> = {
@@ -39,7 +48,7 @@ function formatEventDate(iso: string): string {
   }
 }
 
-export function VehicleEventsHistory({ vehicleReg, vehicleId }: Props) {
+export function VehicleEventsHistory({ vehicleReg, vehicleId, onOpenPrep }: Props) {
   const { data, isLoading, error } = useQuery<EventIndexEntry[]>({
     queryKey: ['vehicle-events', vehicleReg],
     queryFn: () => fetchVehicleEvents(vehicleReg),
@@ -71,7 +80,7 @@ export function VehicleEventsHistory({ vehicleReg, vehicleId }: Props) {
       {events.length > 0 && (
         <ul className="divide-y divide-gray-100">
           {events.map(ev => (
-            <EventRow key={ev.id} event={ev} vehicleReg={vehicleReg} vehicleId={vehicleId} />
+            <EventRow key={ev.id} event={ev} vehicleReg={vehicleReg} vehicleId={vehicleId} onOpenPrep={onOpenPrep} />
           ))}
         </ul>
       )}
@@ -79,13 +88,20 @@ export function VehicleEventsHistory({ vehicleReg, vehicleId }: Props) {
   )
 }
 
-function EventRow({ event, vehicleReg, vehicleId }: { event: EventIndexEntry; vehicleReg: string; vehicleId?: string }) {
+function EventRow({ event, vehicleReg, vehicleId, onOpenPrep }: { event: EventIndexEntry; vehicleReg: string; vehicleId?: string; onOpenPrep?: (eventId: string) => void }) {
   const [regenOpen, setRegenOpen] = useState(false)
   const badgeClass = EVENT_TYPE_BADGE[event.eventType] || 'bg-gray-100 text-gray-700'
   const isHireEvent = event.eventType === 'Book Out' || event.eventType === 'Check In'
-  const canRegen = isHireEvent
+  // A freelancer collection ('Interim Check In') has its own report too: the
+  // van's state when it left the client, often the only photos of the damage
+  // (HH 16044, Oct 2026). The server already rebuilds it; the button was missing.
+  const canRegen = isHireEvent || event.eventType === 'Interim Check In'
   // Entry point to the full "life of a hire" comparison page (out vs back-in).
   const canViewHire = isHireEvent && !!vehicleId && !!event.hireHopJob
+  // Only "Prep Completed" has a stored prep session — "Prep Started" is a
+  // bare marker event written when the prep is opened, before any checklist
+  // data exists, so there is nothing to link it to.
+  const canViewPrep = event.eventType === 'Prep Completed' && !!onOpenPrep
 
   return (
     <li className="py-3">
@@ -135,6 +151,15 @@ function EventRow({ event, vehicleReg, vehicleId }: { event: EventIndexEntry; ve
             >
               View hire →
             </Link>
+          )}
+          {canViewPrep && (
+            <button
+              type="button"
+              onClick={() => onOpenPrep!(event.id)}
+              className="rounded border border-amber-500 bg-white px-3 py-1 text-xs font-medium text-amber-700 hover:bg-amber-50"
+            >
+              View prep →
+            </button>
           )}
           {canRegen && (
             <button

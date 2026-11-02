@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import { api } from '../services/api';
+import { openR2Key } from '../lib/openAuthedFile';
 
 interface FileAttachment {
   name: string;
@@ -102,11 +103,7 @@ export default function FileUpload({ entityType, entityId, files, onFilesChanged
 
   async function handleDownload(file: FileAttachment) {
     try {
-      const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
-      const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
-      window.open(blobUrl, '_blank');
-      // Clean up after a delay to allow the new tab to load
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      await openR2Key(file.url, file.name);
     } catch {
       setError('Download failed');
     }

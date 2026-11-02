@@ -1,8 +1,11 @@
 'use client'
 
 /**
- * Settings Page
- * 
+ * Settings Page (Oct 2026 refresh, design 2h)
+ *
+ * The "Job emails" status and the ways to pause them live in ONE card, so it
+ * is clear what is being paused (design behaviour change 5).
+ *
  * Allows freelancers to:
  * - View their profile info (read-only)
  * - Manage notification preferences (mute/unmute)
@@ -11,7 +14,10 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
+import { Check, BellOff, AlertTriangle } from 'lucide-react'
+import BottomNav from '@/components/BottomNav'
+import { cls, Banner, Chevron, PageSpinner } from '@/components/ui'
+import { ukToday } from '@/lib/ukDate'
 
 // =============================================================================
 // TYPES
@@ -62,7 +68,7 @@ function formatMuteDate(dateStr: string | null): string {
     day: 'numeric',
     month: 'short',
     year: date.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined,
-  })
+  }).replace(',', '')
 }
 
 // =============================================================================
@@ -173,7 +179,7 @@ export default function SettingsPage() {
       
       // Refresh settings
       await fetchSettings()
-      setSuccess('Notifications muted')
+      setSuccess('Job emails paused')
       setShowDatePicker(false)
       setShowIndefiniteConfirm(false)
       
@@ -205,7 +211,7 @@ export default function SettingsPage() {
       }
       
       await fetchSettings()
-      setSuccess('Notifications enabled')
+      setSuccess('Job emails are back on')
       
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to enable notifications')
@@ -233,233 +239,169 @@ export default function SettingsPage() {
   // ===========================================
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading settings...</p>
-        </div>
-      </div>
-    )
+    return <PageSpinner label="Loading settings..." />
   }
 
   // Helper to show spinner on specific button
   const isButtonSaving = (action: string) => saving && savingAction === action
 
+  const initials = (user?.name || '')
+    .split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('')
+
+  const spinner = <span className="w-5 h-5 border-2 border-hf-accent border-t-transparent rounded-full animate-spin" />
+
+  // One pause option: a full-width row in the Job emails card.
+  // Called as a function, not used as a component, so React doesn't remount it each render.
+  const pauseRow = ({ title, sub, onClick, action, danger = false }: {
+    title: string; sub: string; onClick: () => void; action: string; danger?: boolean
+  }) => (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={saving}
+      className="w-full min-h-[56px] px-4 py-2 flex items-center justify-between text-left hover:bg-hf-inset disabled:opacity-50"
+    >
+      <span className="flex flex-col">
+        <span className={`text-[16px] font-medium ${danger ? 'text-hf-error' : 'text-hf-ink'}`}>{title}</span>
+        <span className="text-[14px] text-hf-muted">{sub}</span>
+      </span>
+      {isButtonSaving(action) ? spinner : <Chevron />}
+    </button>
+  )
+  const divider = <div className="h-px bg-hf-divider mx-4" />
+
   return (
-    <div className="min-h-screen bg-gray-50 pb-24">
-      {/* Header */}
-      <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <h1 className="text-xl font-semibold text-gray-900">Settings</h1>
-          </div>
-        </div>
+    <div className="min-h-screen bg-hf-page safe-top pb-32">
+      <header className="max-w-lg mx-auto px-5 pt-6 pb-2">
+        <h1 className={cls.pageTitle}>Settings</h1>
       </header>
 
-      <main className="max-w-lg mx-auto p-4 space-y-6">
-        
+      <main className="max-w-lg mx-auto px-4 pt-3 flex flex-col gap-[18px]">
         {/* Success/Error Messages */}
         {success && (
-          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm flex items-center gap-2">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-            </svg>
-            {success}
-          </div>
+          <Banner tone="success" className="flex items-center gap-2"><Check size={18} strokeWidth={2.4} />{success}</Banner>
         )}
-        
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-            {error}
-          </div>
-        )}
+        {error && <Banner tone="error">{error}</Banner>}
 
-        {/* Profile Section */}
-        <section className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <span>👤</span> Profile
-          </h2>
-          
-          {user ? (
-            <div className="space-y-3">
-              <div>
-                <p className="text-sm text-gray-500">Name</p>
-                <p className="font-medium text-gray-900">{user.name}</p>
-              </div>
-              <div>
-                <p className="text-sm text-gray-500">Email</p>
-                <p className="font-medium text-gray-900">{user.email}</p>
-              </div>
-              <p className="text-xs text-gray-400 mt-2">
-                Contact Ooosh if your details need updating
-              </p>
+        {/* Profile (read-only) */}
+        <div className="flex flex-col gap-2">
+          <section className={`${cls.card} p-4 flex items-center gap-3.5`}>
+            {user ? (
+              <>
+                <div className="w-12 h-12 rounded-full bg-hf-tint text-hf-tint-text flex items-center justify-center text-[18px] font-bold flex-none">
+                  {initials || '?'}
+                </div>
+                <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                  <span className="text-[17px] font-semibold text-hf-ink truncate">{user.name}</span>
+                  <span className="text-[15px] text-hf-muted truncate">{user.email}</span>
+                </div>
+              </>
+            ) : (
+              <p className="text-hf-muted text-[15px]">Could not load your details</p>
+            )}
+          </section>
+          <p className="text-[14px] text-hf-muted px-1">Need to change these? Get in touch with Ooosh.</p>
+        </div>
+
+        {/* Job emails: the status and the ways to pause them, in one card */}
+        <section className={`${cls.card} flex flex-col overflow-hidden`}>
+          <div className="px-4 py-3.5 flex items-start gap-3">
+            <div className="flex-1 flex flex-col gap-0.5">
+              <span className="text-[17px] font-semibold text-hf-ink">Job emails</span>
+              <span className="text-[14px] text-hf-muted">
+                {notifications?.globalMuteActive
+                  ? `Paused until ${formatMuteDate(notifications.globalMuteUntil)}`
+                  : 'New jobs, changes and cancellations'}
+              </span>
             </div>
-          ) : (
-            <p className="text-gray-500">Could not load profile</p>
-          )}
-        </section>
+            {notifications?.globalMuteActive ? (
+              <span className="inline-flex items-center gap-1.5 text-[14px] font-bold bg-hf-amber-bg text-hf-amber-text rounded-full px-2.5 py-1">
+                <BellOff size={15} strokeWidth={2.2} />Paused
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-[14px] font-bold bg-hf-green-tint text-hf-green-text rounded-full px-2.5 py-1">
+                <Check size={15} strokeWidth={2.6} />On
+              </span>
+            )}
+          </div>
 
-        {/* Notifications Section */}
-        <section className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <span>🔔</span> Notifications
-          </h2>
-          
-          {/* Current Status */}
           {notifications?.globalMuteActive ? (
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-medium text-amber-800">🔕 Notifications paused</p>
-                  <p className="text-sm text-amber-600">
-                    Until {formatMuteDate(notifications.globalMuteUntil)}
-                  </p>
-                </div>
-                <button
-                  onClick={handleUnmute}
-                  disabled={saving}
-                  className="bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-amber-700 disabled:opacity-50 flex items-center gap-2"
-                >
-                  {isButtonSaving('unmute') && (
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  )}
-                  Turn On
-                </button>
-              </div>
+            <div className="px-4 pb-4">
+              <button type="button" onClick={handleUnmute} disabled={saving} className={`${cls.btnPrimary} w-full`}>
+                {isButtonSaving('unmute') && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                Turn job emails back on
+              </button>
             </div>
           ) : (
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
-              <div className="flex items-center gap-2">
-                <span className="text-green-600">✓</span>
-                <p className="font-medium text-green-800">Notifications are enabled</p>
-              </div>
-              <p className="text-sm text-green-600 mt-1">
-                You&apos;ll receive emails for new jobs, changes, and cancellations
-              </p>
-            </div>
+            <>
+              {divider}
+              <div className={`${cls.sectionLabel} !tracking-[0.06em] px-4 pt-3 pb-1`}>Pause job emails</div>
+              {pauseRow({ title: "Until end of today", sub: "Back on tomorrow morning", action: "end_of_today", onClick: () => handleMute('end_of_today') })}
+              {divider}
+              {pauseRow({ title: "For 7 days", sub: "Good for a week off", action: "7_days", onClick: () => handleMute('7_days') })}
+              {divider}
+              {pauseRow({ title: "Until a date", sub: "Pick when to switch back on", action: "specific_date", onClick: () => setShowDatePicker(true) })}
+              {divider}
+              {pauseRow({ title: "Until I turn them back on", sub: "You could miss urgent job changes", action: "indefinite", danger: true, onClick: () => setShowIndefiniteConfirm(true) })}
+            </>
           )}
 
-          {/* Mute Options */}
-          {!notifications?.globalMuteActive && (
-            <div className="space-y-3">
-              <p className="text-sm text-gray-600 mb-3">Pause notifications:</p>
-              
-              <button
-                onClick={() => handleMute('end_of_today')}
-                disabled={saving}
-                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-between"
-              >
-                <div>
-                  <p className="font-medium text-gray-900">Until end of today</p>
-                  <p className="text-sm text-gray-500">Resume tomorrow morning</p>
-                </div>
-                {isButtonSaving('end_of_today') && (
-                  <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-                )}
-              </button>
-              
-              <button
-                onClick={() => handleMute('7_days')}
-                disabled={saving}
-                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-between"
-              >
-                <div>
-                  <p className="font-medium text-gray-900">For 7 days</p>
-                  <p className="text-sm text-gray-500">Good for a week off</p>
-                </div>
-                {isButtonSaving('7_days') && (
-                  <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-                )}
-              </button>
-              
-              <button
-                onClick={() => setShowDatePicker(true)}
-                disabled={saving}
-                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-between"
-              >
-                <div>
-                  <p className="font-medium text-gray-900">Until a specific date</p>
-                  <p className="text-sm text-gray-500">Choose when to resume</p>
-                </div>
-                {isButtonSaving('specific_date') && (
-                  <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-                )}
-              </button>
-              
-              <button
-                onClick={() => setShowIndefiniteConfirm(true)}
-                disabled={saving}
-                className="w-full text-left px-4 py-3 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50 border border-red-200 flex items-center justify-between"
-              >
-                <div>
-                  <p className="font-medium text-red-700">⚠️ Until I turn back on</p>
-                  <p className="text-sm text-red-600">You won&apos;t receive any job notifications</p>
-                </div>
-                {isButtonSaving('indefinite') && (
-                  <div className="w-5 h-5 border-2 border-red-500 border-t-transparent rounded-full animate-spin"></div>
-                )}
-              </button>
-            </div>
-          )}
-          
           {/* Per-job mutes info */}
           {notifications && notifications.mutedJobCount > 0 && (
-            <div className="mt-4 pt-4 border-t border-gray-100">
-              <p className="text-sm text-gray-500">
+            <>
+              {divider}
+              <p className="px-4 py-3 text-[14px] text-hf-muted">
                 You also have {notifications.mutedJobCount} individual job{notifications.mutedJobCount !== 1 ? 's' : ''} muted.
                 Manage these from each job&apos;s details page.
               </p>
-            </div>
+            </>
           )}
         </section>
 
-        {/* Logout Section */}
-        <section className="bg-white rounded-xl shadow-sm p-6">
-          <button
-            onClick={handleLogout}
-            className="w-full text-center text-red-600 font-medium py-2 hover:text-red-700"
-          >
-            Log out
-          </button>
-        </section>
-
+        {/* Logout */}
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="h-[54px] rounded-[14px] bg-white border border-hf-border text-[16px] font-semibold text-hf-error hover:bg-hf-inset"
+        >
+          Log out
+        </button>
       </main>
 
       {/* Date Picker Modal */}
       {showDatePicker && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-sm">
-            <h3 className="font-semibold text-gray-900 mb-4">Choose date</h3>
-            <p className="text-sm text-gray-600 mb-4">
-              Notifications will resume after this date
-            </p>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-[18px] p-5 w-full max-w-sm flex flex-col gap-4">
+            <div>
+              <h3 className="text-[18px] font-semibold text-hf-ink">Pause until</h3>
+              <p className="text-[15px] text-hf-muted mt-1">Job emails switch back on after this date</p>
+            </div>
             <input
               type="date"
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}
-              min={new Date().toISOString().split('T')[0]}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg mb-4"
+              min={ukToday()}
+              className={`${cls.input} h-[52px]`}
             />
-            <div className="flex gap-3">
+            <div className="grid grid-cols-2 gap-2.5">
               <button
+                type="button"
                 onClick={() => {
                   setShowDatePicker(false)
                   setSelectedDate('')
                 }}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+                className={cls.btnSecondary}
               >
                 Cancel
               </button>
               <button
+                type="button"
                 onClick={() => selectedDate && handleMute('specific_date', selectedDate)}
                 disabled={!selectedDate || saving}
-                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                className={`${cls.btnPrimary} !h-[50px] !rounded-xl !text-[16px]`}
               >
-                {isButtonSaving('specific_date') && (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                )}
-                Confirm
+                {isButtonSaving('specific_date') && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                Pause
               </button>
             </div>
           </div>
@@ -468,72 +410,35 @@ export default function SettingsPage() {
 
       {/* Indefinite Confirmation Modal */}
       {showIndefiniteConfirm && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-sm">
-            <div className="text-center mb-4">
-              <span className="text-4xl">⚠️</span>
-            </div>
-            <h3 className="font-semibold text-gray-900 mb-2 text-center">Turn off all notifications?</h3>
-            <p className="text-sm text-gray-600 mb-4 text-center">
-              You won&apos;t receive any emails about new jobs, changes, or cancellations until you manually turn notifications back on.
-            </p>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-              <p className="text-sm text-amber-800 text-center">
-                <strong>Important:</strong> You may miss time-sensitive job updates
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-[18px] p-5 w-full max-w-sm flex flex-col gap-4">
+            <div className="flex flex-col items-center gap-2 text-center">
+              <span className="w-12 h-12 rounded-full bg-hf-amber-bg text-hf-amber-text flex items-center justify-center"><AlertTriangle size={24} strokeWidth={2} /></span>
+              <h3 className="text-[18px] font-semibold text-hf-ink">Turn off all job emails?</h3>
+              <p className="text-[15px] text-hf-body leading-[1.45]">
+                You won&apos;t receive any emails about new jobs, changes or cancellations until you turn them back on yourself.
               </p>
             </div>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowIndefiniteConfirm(false)}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
-              >
+            <Banner tone="warning" className="text-center"><strong>Important:</strong> you may miss time-sensitive job updates.</Banner>
+            <div className="grid grid-cols-2 gap-2.5">
+              <button type="button" onClick={() => setShowIndefiniteConfirm(false)} className={cls.btnSecondary}>
                 Cancel
               </button>
               <button
+                type="button"
                 onClick={() => handleMute('indefinite')}
                 disabled={saving}
-                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                className="inline-flex items-center justify-center gap-2 h-[50px] rounded-xl bg-hf-error text-white text-[16px] font-semibold disabled:opacity-50"
               >
-                {isButtonSaving('indefinite') && (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                )}
-                Turn Off
+                {isButtonSaving('indefinite') && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                Turn off
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Bottom Navigation */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200">
-        <div className="max-w-lg mx-auto px-4 py-2 flex justify-around">
-          <Link href="/dashboard" className="flex flex-col items-center py-2 px-3 text-gray-400 hover:text-gray-600">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-            </svg>
-            <span className="text-xs mt-1">Jobs</span>
-          </Link>
-          <Link href="/earnings" className="flex flex-col items-center py-2 px-3 text-gray-400 hover:text-gray-600">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span className="text-xs mt-1">Earnings</span>
-          </Link>
-          <Link href="/resources" className="flex flex-col items-center py-2 px-3 text-gray-400 hover:text-gray-600">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-            </svg>
-            <span className="text-xs mt-1">Resources</span>
-          </Link>
-          <Link href="/settings" className="flex flex-col items-center py-2 px-3 text-purple-600">
-            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            <span className="text-xs mt-1">Settings</span>
-          </Link>
-        </div>
-      </nav>
+      <BottomNav active="settings" />
     </div>
   )
 }

@@ -7,6 +7,11 @@
  *
  * If a valid token already lives in sessionStorage (kiosk left open),
  * we skip the form and redirect immediately.
+ *
+ * The PIN works only on a tablet an admin has set up (STAFF-LOGIN-SECURITY-SPEC
+ * §9, services/kiosk-devices.ts). "Set up this tablet" takes the one-time code
+ * from Settings; the server answers with the tablet's cookie, which this page
+ * never sees (httpOnly). It opens by itself when the PIN is refused for that.
  */
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -17,6 +22,11 @@ export default function WarehousePinPage() {
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupCode, setSetupCode] = useState('');
+  const [setupError, setSetupError] = useState('');
+  const [setupDone, setSetupDone] = useState('');
+  const [settingUp, setSettingUp] = useState(false);
 
   // Skip form if we've already got a session
   useEffect(() => {
@@ -43,6 +53,10 @@ export default function WarehousePinPage() {
       if (!response.ok || !data.token) {
         setError(data.error || 'Incorrect PIN');
         setPin('');
+        if (data.code === 'kiosk_device_required') {
+          setSetupDone('');
+          setSetupOpen(true);
+        }
         return;
       }
       setWarehouseToken(data.token);
@@ -58,6 +72,34 @@ export default function WarehousePinPage() {
   function handlePinChange(e: React.ChangeEvent<HTMLInputElement>) {
     setPin(e.target.value.replace(/\D/g, ''));
     setError('');
+  }
+
+  async function handleSetup(e: React.FormEvent) {
+    e.preventDefault();
+    if (!setupCode.trim()) return;
+    setSettingUp(true);
+    setSetupError('');
+    try {
+      const response = await fetch('/api/warehouse/device/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: setupCode }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.data) {
+        setSetupError(data.error || "That code didn't work.");
+        return;
+      }
+      setSetupDone(`This tablet is set up as "${data.data.label}". Enter the PIN to continue.`);
+      setSetupOpen(false);
+      setSetupCode('');
+      setError('');
+    } catch (err) {
+      console.error('Kiosk set-up error:', err);
+      setSetupError('Could not reach the server. Please try again.');
+    } finally {
+      setSettingUp(false);
+    }
   }
 
   return (
@@ -100,6 +142,47 @@ export default function WarehousePinPage() {
             {isSubmitting ? 'Verifying…' : 'Continue'}
           </button>
         </form>
+
+        {setupDone && <p className="mt-4 text-center text-emerald-700 text-sm">{setupDone}</p>}
+
+        {setupOpen ? (
+          <form onSubmit={handleSetup} className="mt-6 p-4 rounded-xl border border-gray-200 bg-gray-50 space-y-3">
+            <p className="text-sm text-gray-700">
+              Type the set-up code an admin made in Settings › Login security &amp; kiosk. It lasts 10 minutes.
+            </p>
+            <input
+              type="text"
+              value={setupCode}
+              onChange={e => { setSetupCode(e.target.value.toUpperCase()); setSetupError(''); }}
+              placeholder="e.g. K7MP-Q4XR"
+              autoCapitalize="characters"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              maxLength={12}
+              disabled={settingUp}
+              className="w-full text-center text-xl font-mono tracking-widest py-3 px-4 border-2 border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500"
+            />
+            {setupError && <p className="text-center text-red-600 text-sm">{setupError}</p>}
+            <div className="flex gap-2">
+              <button type="button" onClick={() => { setSetupOpen(false); setSetupError(''); }} disabled={settingUp}
+                className="flex-1 py-2 rounded-xl border border-gray-300 text-gray-700 hover:bg-white disabled:opacity-50">
+                Cancel
+              </button>
+              <button type="submit" disabled={settingUp || !setupCode.trim()}
+                className="flex-1 py-2 rounded-xl bg-purple-600 text-white font-semibold hover:bg-purple-700 disabled:bg-gray-300">
+                {settingUp ? 'Setting up…' : 'Set up'}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <p className="text-center mt-6">
+            <button type="button" onClick={() => { setSetupOpen(true); setSetupDone(''); }}
+              className="text-sm text-gray-500 underline hover:text-gray-700">
+              Set up this tablet
+            </button>
+          </p>
+        )}
 
         <p className="text-center text-gray-400 text-sm mt-8">For staff use only</p>
       </div>

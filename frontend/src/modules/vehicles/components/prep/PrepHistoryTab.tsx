@@ -5,13 +5,20 @@
  * Used in VehicleDetailPage as a tab or section.
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '../../config/api-config'
 import type { PrepHistorySession } from '../../lib/prep-history'
 
 interface PrepHistoryTabProps {
   vehicleReg: string
+  /**
+   * Event id of a prep to open straight into its detail modal — the deep-link
+   * target of the "View prep →" button on a "Prep Completed" row in the Events
+   * tab. Prep sessions are stored under the SAME id as their event, so this
+   * matches `session.eventId` directly.
+   */
+  focusEventId?: string | null
 }
 
 async function fetchPrepHistory(vehicleReg: string, limit: number): Promise<{
@@ -72,14 +79,26 @@ function getTyreData(session: PrepHistorySession): {
   }
 }
 
-/** Check if a fluid was topped up in this session */
+/**
+ * Check if a fluid was topped up in this session.
+ *
+ * Two shapes to read. Sessions recorded from late 2026 answer the fluid items
+ * with the LEVEL FOUND and put the action in the detail ("Topped up ~1L");
+ * older ones answered "Topped up" outright. Both count.
+ *
+ * The detail test is anchored to the start of the string deliberately —
+ * "Info stickers (height, AdBlue top up etc)" matches the AdBlue name keyword,
+ * and its free-text detail would otherwise register as an AdBlue top-up.
+ */
 function getFluidStatus(session: PrepHistorySession): string[] {
   const topped: string[] = []
-  const fluidNames = ['Oil level', 'Water level', 'Screen wash', 'Ad Blue', 'AdBlue']
+  // 'Water' (not 'Water level') — the item is called "Water / coolant level",
+  // so the old keyword never matched it and coolant top-ups went unlisted.
+  const fluidNames = ['Oil level', 'Water', 'Screen wash', 'Ad Blue', 'AdBlue']
   for (const sec of session.sections || []) {
     for (const item of sec.items || []) {
       if (fluidNames.some(f => item.name.toLowerCase().includes(f.toLowerCase()))) {
-        if (item.value?.toLowerCase().includes('topped') || item.value?.toLowerCase().includes('top')) {
+        if (item.detail?.trim().startsWith('Topped up') || item.value?.toLowerCase().includes('top')) {
           topped.push(item.name.replace(' level', ''))
         }
       }
@@ -98,8 +117,11 @@ function getProblems(session: PrepHistorySession): string[] {
     for (const item of sec.items || []) {
       // 'N/A' is a legitimate "not fitted / not applicable" answer — NOT a
       // problem (some vans were never fitted with a fire extinguisher, etc.).
-      // Only genuine "Problem" answers count.
-      if (item.value?.toLowerCase().includes('problem')) {
+      // Only genuine flagged answers count. `flagged` is the authoritative one
+      // (set from the item's flagValues at prep time); the word match is the
+      // fallback for sessions saved before that field existed. Without the
+      // former, a fluid found 'Empty' or 'Overfull' would never show here.
+      if (item.flagged === true || item.value?.toLowerCase().includes('problem')) {
         const desc = item.detail || item.name
         problems.push(desc)
       }
@@ -108,14 +130,46 @@ function getProblems(session: PrepHistorySession): string[] {
   return problems
 }
 
-export function PrepHistoryTab({ vehicleReg }: PrepHistoryTabProps) {
+export function PrepHistoryTab({ vehicleReg, focusEventId }: PrepHistoryTabProps) {
   const [limit, setLimit] = useState(10)
   const [selectedSession, setSelectedSession] = useState<PrepHistorySession | null>(null)
+  const [focusMissing, setFocusMissing] = useState(false)
+  // Which focus id we've already acted on, so closing the modal doesn't get
+  // undone by the next render (or a background refetch) re-opening it.
+  const handledFocusRef = useRef<string | null>(null)
   const { data, isLoading, isError } = useQuery({
     queryKey: ['prep-history', vehicleReg, limit],
     queryFn: () => fetchPrepHistory(vehicleReg, limit),
     staleTime: 5 * 60 * 1000,
   })
+
+  // Deep-link from the Events tab: open the matching prep. Only the newest 10
+  // are loaded by default, so if the target is older, widen the page once
+  // (the backend caps at 100) and look again rather than silently doing
+  // nothing. A prep that still isn't there predates prep-session storage.
+  useEffect(() => {
+    if (!focusEventId) return
+    if (handledFocusRef.current === focusEventId) return
+    if (!data) return
+
+    const match = (data.sessions || []).find(
+      s => (s as unknown as Record<string, unknown>).eventId === focusEventId,
+    )
+    if (match) {
+      handledFocusRef.current = focusEventId
+      setFocusMissing(false)
+      setSelectedSession(match)
+      return
+    }
+
+    if (data.sessions.length < data.total && limit < 100) {
+      setLimit(Math.min(data.total, 100))
+      return
+    }
+
+    handledFocusRef.current = focusEventId
+    setFocusMissing(true)
+  }, [focusEventId, data, limit])
 
   if (isLoading) {
     return (
@@ -148,6 +202,12 @@ export function PrepHistoryTab({ vehicleReg }: PrepHistoryTabProps) {
 
   return (
     <div className="space-y-3">
+      {focusMissing && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          Couldn&apos;t find the full record for that prep event — it may predate prep-session storage.
+        </div>
+      )}
+
       {/* Mileage trend summary */}
       {sessions.length >= 2 && (() => {
         const mileages = sessions
@@ -436,7 +496,7 @@ function PrepDetailModal({ session, onClose }: { session: PrepHistorySession; on
               </div>
               <div className="divide-y divide-gray-50">
                 {(sec.items || []).map((item, ii) => {
-                  const flaggedItem = item.value?.toLowerCase().includes('problem')
+                  const flaggedItem = item.flagged === true || item.value?.toLowerCase().includes('problem')
                   return (
                     <div key={ii} className="flex items-start justify-between gap-3 px-3 py-1.5 text-xs">
                       <span className="text-gray-500">{item.name}</span>
