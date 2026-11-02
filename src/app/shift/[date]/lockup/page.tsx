@@ -279,7 +279,7 @@ export default function LockupPage() {
           <h1 className="text-[22px] font-bold tracking-[-0.02em] text-hf-ink">Locked up. Thanks!</h1>
           <p className="mt-2 text-[15px] text-hf-body leading-[1.45]">
             {done.exceptions > 0
-              ? `The office has been alerted about ${done.exceptions} thing${done.exceptions !== 1 ? 's' : ''} that need attention.`
+              ? `The office has been alerted about ${done.exceptions} thing${done.exceptions !== 1 ? 's that need' : ' that needs'} attention.`
               : 'All clear. The office has been notified you’ve finished for the night.'}
           </p>
           <div className="mt-5 flex flex-col gap-2">

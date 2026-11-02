@@ -407,6 +407,16 @@ phone-width), framed by task:
 
 Each opens with three to five rules (check the plate; tap Resume when asked; complete promptly).
 
+**What shipped (Oct to Nov 2026):** `docs/guides/` (its README is how to build and change one). The four
+above are live in Resources. Two more were added at jon's request: **Studio sitting** (draft, with the
+studio manager) and **Working with Ooosh** (draft: what we expect of freelancers and what they can
+expect from us; the "no contract, these are the standards" document). On the way, the freelancer "hire
+form not in yet" screen was reworded to match the guide (carry on to the customer; keys only once the
+office says the form is done), and the lock-up checklist's built-in photos (Jotform) were dropped from
+the code fallback: the live checklist and its photos are in Settings. Still to come: the shop-till
+guide in the new look, a fire procedure for sitters, a short out-of-hours van return guide, the codes
+on the shift and job pages, and a "have they read it?" tick for freelancer documents.
+
 ## 9. The reskin (PR 3, Oct 2026)
 
 The portal now follows `docs/design/freelancer-portal-refresh/` (README there = the brief; the

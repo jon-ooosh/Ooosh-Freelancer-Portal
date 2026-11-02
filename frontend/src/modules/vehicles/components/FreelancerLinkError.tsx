@@ -60,6 +60,10 @@ export function FreelancerLinkError({
   // Lead with the wizard when retrying is pointless. Older portal builds don't
   // send startUrl, so fall back to the existing buttons rather than stranding.
   const wrongLeg = !!wizardUrl && WRONG_LEG_CODES.includes(code || '')
+  // The van is fine, the customer just hasn't finished their hire form. The
+  // delivery still goes ahead: the office sorts the form with the customer
+  // meanwhile, and the keys wait until it's done (jon, Oct 2026).
+  const noHireForm = code === 'no_hire_form' && action === 'book-out'
 
   return (
     <div className="mx-auto flex max-w-lg flex-col gap-5 px-4 py-10">
@@ -70,15 +74,27 @@ export function FreelancerLinkError({
         <h1 className={fl.pageTitle}>
           {wrongLeg
             ? "Looks like there's no van on this job"
-            : "We couldn't link your van automatically"}
+            : noHireForm
+              ? "The customer's hire form isn't in yet"
+              : "We couldn't link your van automatically"}
         </h1>
-        <p className="text-[16px] leading-[1.5] text-hf-body">{message}</p>
+        <p className="text-[16px] leading-[1.5] text-hf-body">
+          {noHireForm
+            ? 'They need to finish and sign it before the van can be booked out.'
+            : message}
+        </p>
         <p className="text-[15px] leading-[1.5] text-hf-muted">
           {wrongLeg ? (
             <>
               Don&apos;t worry, nothing is lost. Go back, pick what you&apos;re really{' '}
               {action === 'check-in' ? 'collecting' : 'delivering'}, and carry on. Call the
               office if you&apos;re not sure.
+            </>
+          ) : noHireForm ? (
+            <>
+              Carry on to the customer as planned and call the office: we&apos;ll sort the
+              form with them. Don&apos;t hand over the keys until we say it&apos;s done, then
+              tap Try again.
             </>
           ) : (
             <>
