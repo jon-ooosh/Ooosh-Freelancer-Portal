@@ -82,6 +82,13 @@ Some artists come with an "OOOSH history" line — what OOOSH's own records say 
 - "No enquiries or hires on record" is neutral — score on the profile.
 - "Cold outreach from us with no reply" is NOT a loss — they never quoted or declined. At most a mild signal; don't score down for one.
 History does not change origin_country or client_tier; those describe the act.
+
+## Watched bands
+Some artists are marked "Watched band": a band OOOSH has worked with (or nearly) and asked to be told about when it next tours. Their dates cover the UK AND mainland Europe, so "UK dates" can be low or zero without that being a weak sign. Weigh where the UK sits in the tour:
+- Starts and/or ends in the UK — the best fit: the van and backline go out from here and come back here.
+- UK dates in the middle — good.
+- No UK dates (mainland only) — still a lead, but score it lower; they may hire in mainland Europe.
+Being watched does not raise a score on its own — the history line still decides how warm they are.
 Mention the history in reasoning whenever it moved the score.
 Valid skip_reason values: "tribute", "comedy", "too_big", "dj", "not_music", "electronic", "theatre", "unknown_insufficient_data".`;
 
@@ -131,7 +138,28 @@ interface LeadRow {
   venues: string[];
   all_dates: string[];
   client_history: ClientHistory | null;
+  watch_id: string | null;
+  tour_dates: Array<{ date: string; country: string }> | null;
+  uk_position: string | null;
 }
+
+/** "UK, DE, NL" in the order a watched band's tour reaches them. */
+function tourCountries(dates: Array<{ country: string }>): string {
+  const seen: string[] = [];
+  for (const d of dates) {
+    const c = d.country === 'GB' ? 'UK' : d.country;
+    if (!seen.includes(c)) seen.push(c);
+  }
+  return seen.join(', ');
+}
+
+const UK_POSITION_LINE: Record<string, string> = {
+  start: 'starts in the UK',
+  end: 'ends in the UK',
+  both: 'starts and ends in the UK',
+  middle: 'UK dates in the middle',
+  none: 'no UK dates (mainland Europe only)',
+};
 
 function buildPrompt(batch: LeadRow[]): string {
   const lines = ['Assess the following artists/tours for OOOSH lead potential:\n'];
@@ -141,6 +169,10 @@ function buildPrompt(batch: LeadRow[]): string {
     lines.push(`UK dates: ${t.uk_date_count}`);
     lines.push(`Date range: ${t.first_date ?? '?'} to ${t.last_date ?? '?'}`);
     lines.push(`Venues: ${(t.venues ?? []).join(', ')}`);
+    if (t.watch_id && t.tour_dates?.length) {
+      lines.push(`Watched band — tour of ${t.tour_dates.length} date(s) in ${tourCountries(t.tour_dates)}; `
+        + `${UK_POSITION_LINE[t.uk_position ?? 'none'] ?? UK_POSITION_LINE.none}`);
+    }
     if (t.client_history) lines.push(`OOOSH history: ${describeHistory(t.client_history)}`);
     lines.push('');
   });
@@ -177,7 +209,8 @@ export async function scoreLeads(): Promise<ScoreSummary> {
   }
 
   const result = await query(
-    `SELECT id, artist_name, uk_date_count, first_date, last_date, venues, all_dates, client_history
+    `SELECT id, artist_name, uk_date_count, first_date, last_date, venues, all_dates, client_history,
+            watch_id, tour_dates, uk_position
        FROM leads
       WHERE status = 'new'
         AND (relevance_score IS NULL

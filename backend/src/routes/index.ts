@@ -60,6 +60,7 @@ import backlineMatcherRouter from './backline-matcher';
 import wiseRouter from './wise';
 import autoChaseRouter from './auto-chase';
 import leadsRouter from './leads';
+import bandWatchesRouter from './band-watches';
 import staffDocumentsRouter from './staff-documents';
 import staffCalendarRouter from './staff-calendar';
 import staffRecordsRouter from './staff-records';
@@ -117,6 +118,7 @@ router.use('/studio-sitters', studioSittersRouter);  // Rehearsals — studio-si
 router.use('/rehearsals', rehearsalsRouter);  // Rehearsals — per-job details, band profile, client info pack
 router.use('/auto-chase', autoChaseRouter);  // Auto-Chase Phase 1 — Gmail ingestion status/manual-run (inert until GMAIL_* env set)
 router.use('/leads', leadsRouter);  // Lead Finder (Tour Finder → OP) — Ticketmaster cold-lead discovery + scoring
+router.use('/band-watches', bandWatchesRouter);  // Band watch — tell me when a known band is next over (TOUR-FINDER-SPEC §21)
 router.use('/staff-documents', staffDocumentsRouter);  // Staff Documents & Training — versioned policies/agreements, tick/sign completion + tracking
 router.use('/staff-calendar', staffCalendarRouter);  // Staff Calendar & Time — working patterns, who's-in calendar (Phase A)
 router.use('/staff-records', staffRecordsRouter);

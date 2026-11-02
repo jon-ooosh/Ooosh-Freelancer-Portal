@@ -13,7 +13,8 @@
  *     (lead_min_relevance_score); COLD leads only at the higher
  *     lead_dashboard_min_score, so a big search doesn't flood the dashboard.
  *
- * Warm first, then best score, then soonest tour. `total` is the FULL count
+ * Watched bands first (band-watch.ts), then warm, then best score, then
+ * soonest tour. `total` is the FULL count
  * (COUNT(*) OVER ()), not the LIMIT-ed row count.
  */
 import { query } from '../../config/database';
@@ -29,6 +30,8 @@ export interface LeadAttentionItem {
   origin_country: string | null;
   matched_org_name: string | null;
   client_history: { enquiries: number; booked: number; lost: number } | null;
+  /** Found by a band watch (TOUR-FINDER-SPEC §21) — first on the card. */
+  watched: boolean;
 }
 
 async function num(key: string, fallback: number): Promise<number> {
@@ -44,7 +47,7 @@ export async function getLeadAttention(limit = 5): Promise<{ total: number; item
 
   const r = await query(
     `SELECT l.id, l.artist_name, l.stream, l.relevance_score, l.first_date, l.origin_country,
-            o.name AS matched_org_name, l.client_history,
+            o.name AS matched_org_name, l.client_history, (l.watch_id IS NOT NULL) AS watched,
             COUNT(*) OVER ()::int AS total_count
        FROM leads l
        LEFT JOIN organisations o ON o.id = l.matched_organisation_id
@@ -56,7 +59,7 @@ export async function getLeadAttention(limit = 5): Promise<{ total: number; item
           (l.stream = 'warm' AND l.relevance_score >= $1::numeric)
           OR (l.stream = 'cold' AND l.relevance_score >= $2::numeric)
         )
-      ORDER BY (l.stream = 'warm') DESC, l.relevance_score DESC, l.first_date ASC
+      ORDER BY (l.watch_id IS NOT NULL) DESC, (l.stream = 'warm') DESC, l.relevance_score DESC, l.first_date ASC
       LIMIT $4`,
     [minScore, coldMin, Math.round(minWeeks), limit],
   );
@@ -73,6 +76,7 @@ export async function getLeadAttention(limit = 5): Promise<{ total: number; item
       client_history: row.client_history
         ? { enquiries: row.client_history.enquiries, booked: row.client_history.booked, lost: row.client_history.lost }
         : null,
+      watched: Boolean(row.watched),
     })),
   };
 }

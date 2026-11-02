@@ -327,7 +327,9 @@ one unmatched review surface, a gated `calls/` R2 prefix, recordings from Twilio
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
 outreach → chased Cold enquiry, jobs-for-this-tour linking. **§20 is the current state and what's
 left.** Searches are run by hand on purpose (no scheduler). Contact research wants management /
-the band / tour managers — not promoters or agents.
+the band / tour managers — not promoters or agents. **§21 is the band watch** (steps 1–2 built Nov
+2026) — "tell me when this band is next over", ticked by default on the close-out modals; the one
+Leads part that runs on a timer. §21.7 is what shipped.
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access|absence`. The person is
@@ -420,6 +422,7 @@ existing definition:
 | Did this job book, get lost, get cancelled? (history views) | `services/job-outcomes.ts` `JOB_OUTCOME_SQL` — org Hire History tab + Leads client history |
 | What does OP know about a lead's band (enquiries, losses, retros)? | `services/leads/history.ts` `getClientHistory()` |
 | Which leads go on the dashboard? | `services/leads/attention.ts` `getLeadAttention()` |
+| Is this band watched for its next tour? Start / stop a watch, its Ticketmaster act, the weekly check | `services/leads/band-watch.ts` — one watch per org; `startWatchFromCloseOut()` from the close-outs (never fails them, never on an alternative-quote loss); a tour becomes a warm lead with `watch_id` (TOUR-FINDER-SPEC §21) |
 | Recording what happened to a lead (who, when) | `services/leads/events.ts` `logLeadEvent()` — never fails the action; read by the Leads timeline + Last activity |
 | Which existing jobs belong to a lead's tour? Is it already quoted / booked? | `services/leads/tour-jobs.ts` — `syncTourJobs()`, `liveTourJobSql()` (drives the In pipeline stage + the dashboard card), `TOUR_JOB_OUTCOME_SQL` |
 | A DATE column as `YYYY-MM-DD` in Leads code | `services/leads/dates.ts` `dateOnly()` — never `toISOString()` on a DATE (node-postgres gives local midnight; UK summer time shifts it a day) |
@@ -581,7 +584,7 @@ HH codes: 0 Enquiry · 1 Provisional · 2 Booked · 3 Prepped · 4 Part Dispatch
 
 ## Scheduled tasks (`config/scheduler.ts`)
 
-Backups 02:00 · job financials 03:00 · Traccar backup + 12-month GPS purge 03:10 UK (off until `TRACCAR_DATABASE_URL` is set — `docs/TRACCAR-POSTGRES.md`) · close-out Xero sweep 03:30 (off until its setting is on) · holiday entitlement 06:05 · Xero reconcile 07:45 ·
+Backups 02:00 · job financials 03:00 · Traccar backup + 12-month GPS purge 03:10 UK (off until `TRACCAR_DATABASE_URL` is set — `docs/TRACCAR-POSTGRES.md`) · close-out Xero sweep 03:30 (off until its setting is on) · holiday entitlement 06:05 · band watch 07:05 (each watch weekly — `band_watch_enabled`) · Xero reconcile 07:45 ·
 bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry

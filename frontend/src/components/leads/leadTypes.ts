@@ -65,7 +65,7 @@ export interface Lead {
   stream: 'cold' | 'warm';
   match_confidence: 'exact' | 'partial' | 'none';
   match_candidates: MatchCandidate[];
-  match_via: 'org_name' | 'job_name' | 'created' | null;
+  match_via: 'org_name' | 'job_name' | 'created' | 'watch' | null;
   matched_organisation_id: string | null;
   matched_org_name: string | null;
   client_history: ClientHistory | null;
@@ -101,6 +101,34 @@ export interface Lead {
   last_event_by: string | null;
   /** Jobs for THIS tour (linked or suggested) — backend services/leads/tour-jobs.ts. */
   tour_jobs: TourJob[] | null;
+  /** Set when a band watch found (or also found) this tour — TOUR-FINDER-SPEC §21. */
+  watch_id: string | null;
+  /** A watched band's tour: every UK and European date with its country. */
+  tour_dates: WatchTourDate[] | null;
+  uk_position: UkPosition | null;
+}
+
+export interface WatchTourDate { date: string; venue: string; city: string; country: string; }
+
+export type UkPosition = 'start' | 'end' | 'both' | 'middle' | 'none';
+
+/** Where the UK sits in a watched band's tour (backend watch-tours.ts UK_POSITION_TEXT). */
+export const UK_POSITION_LABEL: Record<UkPosition, string> = {
+  start: 'starts in the UK',
+  end: 'ends in the UK',
+  both: 'starts and ends in the UK',
+  middle: 'UK dates in the middle',
+  none: 'no UK dates',
+};
+
+/** "UK, DE, NL" in the order the tour reaches them. */
+export function tourCountries(dates: WatchTourDate[] | null): string {
+  const seen: string[] = [];
+  for (const d of dates ?? []) {
+    const c = d.country === 'GB' ? 'UK' : d.country;
+    if (!seen.includes(c)) seen.push(c);
+  }
+  return seen.join(', ');
 }
 
 export interface TourJob {
@@ -180,6 +208,8 @@ export interface LeadEvent {
 
 export const EVENT_LABEL: Record<string, string> = {
   found: 'Found by a search',
+  watch_found: 'Found by the band watch',
+  watched: 'Also a watched band’s tour',
   matched: 'Matched to the address book',
   match_confirmed: 'Match confirmed',
   match_rejected: 'Suggested matches rejected',
@@ -204,7 +234,7 @@ export const EVENT_SHORT: Record<string, string> = {
   researched: 'Researched', research_failed: 'Research failed', research_requested: 'Researching',
   address_book: 'Added to book', contact_added: 'Contact added', contact_removed: 'Contact removed',
   outreach: 'Contacted', enquiry: 'Enquiry', dismissed: 'Dismissed', restored: 'Restored', status: 'Updated',
-  tour_job_linked: 'Job linked', tour_job_unlinked: 'Job unlinked',
+  tour_job_linked: 'Job linked', tour_job_unlinked: 'Job unlinked', watched: 'Watched band', watch_found: 'Found',
 };
 
 /** Dismiss reasons — keys match the backend's DISMISS_REASONS. */
