@@ -340,7 +340,7 @@ JWT auth for free, which is what locks out the old direct-URL access).
   UI renders proper cards with availability pills instead of a markdown blob. The
   well-tuned domain prompt (FT/RT/BD abbreviations, "different model number ≠
   variant" precision) is ported verbatim. **Prompt caching** on the system prompt.
-  Model: `claude-sonnet-4-6`. When a HH job is attached, per-item availability is
+  Model: `CLAUDE_SONNET_MODEL` (`config/anthropic.ts`). When a HH job is attached, per-item availability is
   checked via the broker (`items_picklist_avail.php`, chunked 50s, cached) and
   folded into the prompt so Claude prioritises what's free for the dates.
 - **Demand tracker** (migration 137, `backline_demand`): replaces Monday board
@@ -402,31 +402,75 @@ top-level nav group (jon's call — "streamline rather than expand"). Migration 
   `lead_tour_window_weeks` (6), `lead_min_relevance_score` (6), `lead_contact_research_cap`
   (20), `lead_auto_run_enabled` (false — the future scheduled-run toggle, not yet wired).
 
-**The pipeline** (`runPipeline`): collect → detect → score → match → research, run as one
-background `setImmediate` job writing progress/counts to `lead_runs`.
+**The pipeline** (`runPipeline`): collect → detect → **match → score** → research → known
+contacts, run as one background `setImmediate` job writing progress/counts to `lead_runs`.
+Match runs BEFORE score (Oct 2026) so a matched lead is scored with its OOOSH history in view.
+Manual only — jon (Oct 2026) wants it kept manual; `lead_auto_run_enabled` stays unwired.
+- **Search window:** `POST /run` takes an optional `{ from, to }` — "tours whose FIRST UK
+  date falls between". Default (`defaultSearchWindow()`) = today + min weeks → today + max
+  weeks from the settings. Collection fetches only the window; detection still looks up each
+  act's full UK dates from TODAY, so a tour that really started earlier is still dropped.
 - **Lookahead fix** (the headline value over the old tool): `detector.ts` drops any tour
   whose earliest *visible* UK date is under `today + lead_lookahead_min_weeks` — no point
   surfacing a tour that's already on the road or too soon to sell into.
 - **Scoring** (`scorer.ts`): ported ai_filter prompt (Tier 1 international / Tier 2 within
-  70mi of Shoreham / Tier 3), Claude `claude-sonnet-5` with forced tool-use for structured
-  output + prompt caching, batched 30.
-- **Matching** (`matcher.ts`): `pg_trgm` fuzzy match of the artist name against
-  `organisations` (the `%` operator + `similarity()`; `CREATE EXTENSION pg_trgm` in migration
-  175, though the existing trgm index already required it). Exact (normalised equality) →
-  auto-links + enriches the org's AI Summary; partial (≥ threshold) → surfaces "could this be
-  [Org]?" candidates for a human confirm/reject; none → stays cold. Warm summary
-  (`getWarmSummary` → `composeWarmSummary`) writes a dated `[Lead Finder YYYY-MM-DD] …` block
-  into `organisations.ai_summary` (`appendOrgSummary`).
+  70mi of Shoreham / Tier 3), Claude `CLAUDE_SONNET_MODEL` with structured outputs (json_schema)
+  + prompt caching, batched 30.
+- **Matching** (`matcher.ts`), three ways:
+  1. **Band org by name** — `pg_trgm` against `organisations`. Exact (normalised equality) →
+     auto-links (warm) + enriches the org's AI Summary; partial (≥ threshold) → "could this be
+     [Org]?" for a human.
+  2. **Jobs named after the band** (Oct 2026, the Wedding Present case) — whole-word regex on
+     `jobs.job_name` (`bandNameRegex()`, trgm index from migration 271; names under 5 letters
+     are skipped as too ambiguous), grouped by the job's client org → "booked via [Mgmt]?" —
+     always a suggestion, never automatic.
+  3. **Known contacts** (`linkKnownContacts()`) — researched contacts whose EMAIL is already a
+     person. Flags the lead (`known_contacts`); doesn't make it warm.
+  Rejecting suggestions stores them in `leads.rejected_org_ids` — never re-offered (they used
+  to come straight back on the next run).
+- **Client history** (`history.ts` `getClientHistory()` → `describeHistory()`): enquiries /
+  booked / lost (+ reasons) / cancelled / open, last enquiry + booking, retros, Do Not Hire.
+  Outcome buckets are `services/job-outcomes.ts` — the SAME definitions as the org Hire
+  History tab. A lost reason of "Confirmed Alternative Quote (from us)" is NOT a loss. Scope
+  depends on `leads.match_via`: `org_name`/`created` → every job on the org; `job_name` →
+  only that org's jobs named after the band (a management company books many acts). Stored on
+  `leads.client_history`, refreshed every run; the scorer prompt weighs it (repeat bookers up,
+  a run of losses down, DNH → 1). `history_scored_at` NULL on a matched lead = re-score it.
+  The summary line is also prepended to the org's AI Summary as a dated
+  `[Lead Finder YYYY-MM-DD] …` block (`appendOrgSummary`).
 - **Contact research** (`researcher.ts`): cold/unmatched leads ≥ min score with no contacts →
   Claude + the **web-search tool** (`{ type: 'web_search_20250305', name: 'web_search',
   max_uses: 5 }`) finds management/booking contacts, 90s request timeout, capped per run,
   JSON-parsed with a fence/brace fallback. Errors surface on the run banner (`lastError`).
 
-**Endpoints** (`routes/leads.ts`): `GET /` (list, filter stream/status/min-score),
-`GET /runs/latest`, `GET /settings`, `POST /run` (MANAGER_ROLES — full crawl),
-`POST /process-existing` (MANAGER_ROLES — match+research existing leads only, no TM crawl —
-the fast reprocess path), `POST /cancel` (stop/reset a stuck run), `PATCH /:id` (lifecycle),
-`POST /:id/confirm-match` + `POST /:id/reject-match` (partial-match resolution).
+- **Dismiss reasons** (`POST /:id/dismiss`, `status_reason` + `status_note`): `not_a_fit`
+  (writes `lead_suppressions` — the detector skips that act before any TM call, and its other
+  open tours are dismissed), `timing`, `next_time`, `already_handled`, `other` (note
+  required). `POST /:id/restore` undoes it and lifts the suppression. The list joins each
+  lead's PREVIOUS tour (`prev_*`) so "passed last time: not this time — note" shows on the next.
+- **Re-detection** matches an existing lead by name or TM id with OVERLAPPING dates (not an
+  identical first date), so TM adding/dropping an opening date doesn't resurface a dismissed tour.
+
+**Acting on a lead (Oct 2026):**
+- **Add to address book** (`GET /:id/address-book-preview` → `POST /:id/add-to-address-book`):
+  staff pick a suggested org (job-name ones first, then similar names) or create the band
+  (`type='band'`; an exact-name clash is refused — pick it instead). Chosen researched contacts
+  are found-or-created by EXACT email and linked with their role (manager → Manager,
+  booking_agent → Booking Agent, …); contacts with no email are skipped. Creating a band links
+  the lead with `match_via='created'` but leaves it COLD (in the book, no relationship yet).
+- **Start enquiry** (`GET /:id/enquiry-preview` → `POST /:id/start-enquiry`): OP-native enquiry
+  via the shared `createPipelineEnquiry` — never pushed to HireHop. `enquiry_source` uses the
+  EXISTING pipeline values (`repeat` for warm, `cold_lead` for cold — a new value would fail the
+  job edit form's validation); `leads.converted_job_id` is what marks it Lead-Finder-sourced.
+  Band name goes into the job name when the org is a management company.
+- Find-or-create is shared with the website enquiry intake: `services/address-book-resolve.ts`.
+
+**Endpoints** (`routes/leads.ts`): `GET /` (list; `?view=hidden` = dismissed/not-relevant),
+`GET /runs/latest`, `GET /settings` (+ `default_window`), `POST /run` (MANAGER_ROLES — full
+crawl, optional window), `POST /process-existing` (MANAGER_ROLES — match → score → research
+existing leads, no TM crawl), `POST /cancel`, `PATCH /:id`, `POST /:id/dismiss`,
+`POST /:id/restore`, `POST /:id/confirm-match`, `POST /:id/reject-match`, plus the four
+lead-action endpoints above.
 
 **Zombie-run recovery (the `setImmediate` convention):** the pipeline runs in-process, so a
 deploy restart mid-run kills it while the `lead_runs` row stays `status='running'` forever —
@@ -446,12 +490,50 @@ web-search contact research), #1002 (PR 3 — zombie-run recovery, "Match & rese
 fast path, research timeout/error surfacing, table search + click-to-sort). jon merges each
 to main + deploys manually + validates against a test list before the next.
 
-**Deferred slices (agreed, not built):** scheduled weekly run (`lead_auto_run_enabled` toggle
-is seeded but unwired); dashboard surfacing of new high-score leads; "Create band + link" for
-cold leads (staff-gated address-book create + convert-to-job); outreach-email drafting via the
-Gmail auto-chase infra ("here's a lead + a ready-to-send intro"). **Open discussion:** deepen
-warm matching beyond org-name — some bands are booked under a management/agency org rather than
-a "The Band" org, so a future pass could also match band-role links / people, not just org names.
+**Oct 2026 slice** (migration 271): client history in scoring, job-name + known-contact
+matching, remembered rejections, dismiss reasons + suppression, overlap re-detection, search
+window, Add to address book, Start enquiry. Spec §14.
+
+**Dashboard** (Oct 2026, migration 272): a blue, self-hiding **"Leads to look at"** card in
+Needs Attention. Defined in `services/leads/attention.ts` `getLeadAttention()`: new +
+still sellable + warm ≥ `lead_min_relevance_score` or cold ≥ `lead_dashboard_min_score`
+(default 8). Items deep-link to `/jobs/leads?lead=<id>`. A lead leaves the card when an
+enquiry is started, it's dismissed, or it's marked contacted (a new row action). Spec §15.
+
+**Log outreach** (Oct 2026, replaces "Mark contacted"): `POST /:id/log-outreach`. It notes the
+contact on the lead, and by default opens a Cold enquiry (OP only) whose first chase is N days out,
+so the chase model follows it up. Shares `createEnquiryFromLead()` with Start enquiry. An
+outreach enquiry auto-lost as "No Decision" counts as `outreach_no_reply` in the client
+history, not as a loss. Add to address book now takes editable names and can save shared
+inboxes (info@, bookings@…) as the band's own email (`isGenericMailbox()` /
+`addOrganisationEmail()` in `services/address-book-resolve.ts`). Spec §16.
+
+**Batch layout + contact discovery** (Oct 2026, migration 277): stage tabs (To review ·
+Contacted · In pipeline · Dismissed — `STAGE_SQL`), URL filters, batches (`first_run_id`,
+`GET /leads/runs`, Search history), activity log (`lead_events` via
+`services/leads/events.ts`), compact header + run strip. Research now targets management, the
+band and tour managers first (agents only as a last resort, promoters never), starts from the
+band's own links (`services/leads/links.ts`: Ticketmaster `externalLinks` + MusicBrainz by
+id), is tracked (`researched_at` / `research_status` — no retrying dead ends every run; 30-day
+retry), cap 40. Research again (`POST /:id/research`, background) and hand-added contacts
+(`POST/DELETE /:id/contacts`, `manual: true`, kept through re-research). Spec §17–18.
+
+**Jobs for this tour** (Oct 2026, migration 279): `lead_tour_jobs` + `services/leads/tour-jobs.ts`
+— jobs whose dates overlap the tour ±14 days are auto-linked when the band's org matches
+(management-company matches: only jobs named after the band), suggested when only named after
+the band, or linked by hand; unlinking is remembered. An open/booked linked job → In pipeline,
+off the dashboard card, and Start enquiry / Log outreach refuse (no duplicate enquiries); only
+lost/cancelled/dismissed → "Dismiss — already quoted". Each linked job gets a "🔭 Tour spotted
+by the Lead Finder" note on its Activity Timeline, linking back to the lead (once per link,
+`job_noted_at`, migration 280), and a closing note if it's later unlinked. Spec §19. **§20 of the
+spec is the current state + what's left.**
+
+**Date audit** (Oct 2026, spec §19.1): the server runs in UTC, so DATE reads are fine; the gap
+was "today" computed as the UTC date (yesterday between 00:00 and 01:00 BST). Now one helper each
+side — `services/uk-date.ts` / `frontend/src/lib/ukDate.ts`.
+
+**Deferred (agreed, not built):** scheduled weekly run (jon: keep manual for now); outreach-email drafting — folds into the auto-chase "voice"
+work on the Enquiries pipeline rather than being built separately.
 
 #### Auto-Chase — Gmail ingestion + AI chase drafts (LIVE, Jul 2026)
 
@@ -474,7 +556,7 @@ The auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Work
 - **Persisted match provenance** — the matcher's `method`/`confidence` (previously discarded) now land on `interactions.match_method`/`match_confidence`, driving the timeline provenance chip.
 - **Thread-anchoring** (`gmail-ingestion.ts` `getThreadAnchorJob`) — a reply inherits its thread's anchor job UNLESS it carries its OWN strong evidence for a different job (a `Quote (N)` PDF or an explicit job number in the SUBJECT). A **body** job-number does NOT override the anchor (passing "#15804" references are the drift). A weak/absent match in an anchored thread also inherits, so a bare client reply lands right instead of the unmatched queue. `match_method='thread_anchor'`. The quote-PDF version diff already routes per-filename, so this is purely about email-body timeline attribution.
 - **Manual backstops** (`EmailProvenanceBar` in `ActivityTimeline.tsx`, all on one line under the email; `POST /api/auto-chase/emails/:id/{detach,reattach,move,hide,unhide}`): **Not this job** (detach → **tombstone**, migration 220 `detached_at`/`detached_by` — stays as a greyed "Removed from this job · Re-attach" row, recoverable, excluded from AI reads; STAFF_ROLES); **Move to job** (search by number OR name via `/hirehop/jobs?search=`, re-points `job_id` + clears the tombstone, audit in `reattached_*`; STAFF_ROLES; the generic person/org/venue Move is hidden for ingested emails); **hide/unhide** (confidentiality, **admin only** — drops off the all-staff timeline AND the AI reads but keeps it admin-visible; `hidden_at`/`hidden_by`). Timeline read excludes `hidden_at` for non-admins; `comms-summary` + `comms-query` exclude hidden AND detached ALWAYS.
-- **STATUS (Sep 2026): core done + live.** Ingestion (all mailboxes), summary, dispute helper, quote-PDF diff, AI chase DRAFTS, filtering foundation, manager mailboxes (4 live), timeline clarity and the Phase 4 enquiry webhook are all shipped. **Handover / what's next lives in spec §13.6** — briefly: (1) AI relevance/sensitivity screen (Haiku flag in-timeline as a yellow box + bell, NOT a new surface) is the recommended next build; (2) auto-send (Phase 3) is HELD — the master switch stays OFF until a dedicated **chase-tone polish round** (jon: drafts read "too AI / too American"), then OOO/bounce/hot-inbound suppression, then consider flipping; (3) smaller polish (learn-voice-from-thread, draft-vs-sent capture, backfill across manager mailboxes).
+- **STATUS (Sep 2026): core done + live.** Ingestion (all mailboxes), summary, dispute helper, quote-PDF diff, AI chase DRAFTS, filtering foundation, manager mailboxes (4 live), timeline clarity and the Phase 4 enquiry webhook are all shipped. **Handover / what's next lives in spec §13.6** — briefly: (1) AI relevance/sensitivity screen (Haiku flag in-timeline as a yellow box + bell, NOT a new surface) is the recommended next build; (2) auto-send (Phase 3) is HELD — the master switch stays OFF until a dedicated **chase-tone polish round** (jon: drafts read "too AI / too American"), then OOO/bounce/hot-inbound suppression, then consider flipping; (3) smaller polish (draft-vs-sent capture, backfill across manager mailboxes).
 
 **Manager mailboxes / multi-mailbox (Sep 2026, migration 221 — Phase 1.5). Full design: spec §6 + §13.5.** Ingest managers' `@oooshtours.co.uk` inboxes alongside info@. The list lives in `system_settings.gmail_manager_mailboxes` (JSON), edited from the **admin-only** "Manager mailboxes" Settings section — no deploy (the existing DWD grant already covers every domain mailbox). `runIngestionForAllMailboxes()` (scheduler entry) runs info@ full then each manager **matched-only**: `ingestGmailMessage`'s `queueUnmatched:false` drops a no-match email instead of queuing it, so a manager's non-job mail never surfaces. `getManagerMailboxes()` normalises the list (own-domain, deduped, not the primary); `getAllGmailIngestionStatus()` probes each mailbox live so a delegation gap shows as "Not connected". Routes `GET/PUT /api/auto-chase/mailboxes` (admin). Thread-anchoring + the hide/detach backstops (§5.3a) still apply. **LIVE: info@ + 4 manager mailboxes ingesting (Sep 2026), bedding in.**
 
@@ -487,7 +569,7 @@ The auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Work
 **GO-LIVE STATE (Jul 2026): Phase 1 + most of Phase 2 are LIVE and working on prod.** Emails are ingesting onto job timelines; chase drafts create real Gmail drafts in info@. The service account key is a FILE at `/var/www/ooosh-portal/backend/gmail-sa.json` owned by the service user (`chown --reference=.env` — a `chmod 600` root-owned file gave `EACCES`; match `.env`'s owner). Both `gmail.readonly` + `gmail.compose` scopes are authorised on the DWD client. Baseline established, 10-min ingestion cron running.
 
 **Phase 2 — AI drafts + real Gmail draft creation + search/backfill (Jul 2026):**
-- `services/chase-draft.ts` drafts a "just checking in" chase with Claude Sonnet 5 (`claude-sonnet-5`), forced tool-use, grounded in the quote line items (`jobs.line_items`), repeat-vs-first-contact history, prior ingested email thread, prior chase count, **days-until-hire (urgency/tone)**, and **the INSIDE hire dates**. The "checking-in NOT renegotiating" guardrails live in the code SYSTEM_PROMPT; the `chase_voice_instructions` system-setting is appended (tunable without a deploy). `POST /api/auto-chase/preview-draft/:jobId` returns the draft as JSON without touching Gmail.
+- `services/chase-draft.ts` drafts a "just checking in" chase with Claude Sonnet (`CLAUDE_SONNET_MODEL`), structured outputs, grounded in the quote line items (`jobs.line_items`), repeat-vs-first-contact history, prior ingested email thread, prior chase count, **days-until-hire (urgency/tone)**, and **the INSIDE hire dates**. The "checking-in NOT renegotiating" guardrails live in the code SYSTEM_PROMPT; the `chase_voice_instructions` system-setting is appended (tunable without a deploy). `POST /api/auto-chase/preview-draft/:jobId` returns the draft as JSON without touching Gmail.
 - **INSIDE hire dates (critical grounding rule).** Read from OP's `jobs` (synced from HH). Hire START = `job_date` (fallback `out_date`); last hire DAY = `job_end` date **minus 1 when `job_end`'s time-of-day is a morning marker (`getUTCHours() < 12`)** — Ooosh books `job_end` ~09:00 the morning *after* the last hire day (a hire to the 15th shows `job_end` 16th 09:00; the 16th is the RETURN, not a hire day). Matches OP's own "N days" figure. Fixes both 1-day-as-2-day AND multi-day overstatement. A HARD RULE forbids describing the hire as running to the return date. This is code-only — the voice setting can't reach a factual date calc.
 - `config/gmail.ts` — `gmail.compose` scope on a **separate** JWT client (`getGmailComposeClient`) so ingestion stays strictly read-only; `createGmailDraft()` (`POST /users/{mailbox}/drafts`, base64url RFC822 + optional `threadId`); `gmailSearchMessageIds()` (readonly `messages.list?q=`). **OP only creates drafts — never sends; staff send from Gmail.**
 - `services/gmail-draft.ts` `createChaseDraftForJob()` — AI draft → resolve recipient + thread latch → MIME → create draft. `POST /api/auto-chase/create-draft/:jobId`. Latch order: most recent ingested INBOUND client email on the job (reply into their thread) → else primary `job_contacts` email + a **Gmail search on the HH job number** to latch onto the original sent-quote thread even when the client never replied → else 422 no client email.
@@ -496,7 +578,7 @@ The auto-chase feature — ingest the `info@oooshtours.co.uk` inbox (Google Work
 
 **Phase 2 — automation loop + summary + voice tuning (Jul 2026, SHIPPED — spec §13.2 slices 5-6):**
 - **Per-job conversation SUMMARY** (§7.1) — `services/comms-summary.ts` (Haiku) digests a job's ingested `type='email'` interactions, cached in `job_comms_summaries` (migration 163). `GET`/`POST /api/auto-chase/job-summary/:jobId` (STAFF_ROLES); `ConversationSummary.tsx` at the top of the Activity Timeline (jobs only), auto-generates on a missing/stale cache, renders nothing when Anthropic off / no emails. Staleness is COMPUTED at read time (live count/newest vs stored) — no coupling into the ingest hot path; regeneration is lazy (next viewer of a stale job). Falls back to snippets for retention-stripped bodies.
-- **Example-driven voice tuning** (§9.3) — `learnChaseVoice()` (Sonnet) distils pasted client emails + our replies into a PROPOSED `chase_voice_instructions` note (style only). `POST /api/auto-chase/voice/learn` (manager-tier) returns the proposal; "Teach the voice from real examples" panel in Settings → Auto-Chase reviews + saves it. Distil-into-instructions, NOT raw few-shot (keeps the runtime prompt small + transparent).
+- **Example-driven voice tuning** (§9.3) — REMOVED 16 Oct 2026 (never used). The house voice is written into the `chase-draft.ts` rails from 150 real sent emails; `chase_voice_instructions` remains the no-deploy steer. See `AI-KNOWLEDGE-SPEC.md` §3.
 - **Dispute helper** (§7.2) — `services/comms-query.ts` `answerCommsQuery(jobId, question)` (Sonnet) answers a natural-language question strictly from a job's ingested email chain (quotes + dates, "can't find it" when absent, never guesses); the chain is a prompt-cached block so repeat questions on a job reuse it. `POST /api/auto-chase/comms-query/:jobId` (STAFF_ROLES); surfaced as a "🔎 Ask about these emails" box folded into `ConversationSummary.tsx`. The line-item-diff history table (auto-assembled audit trail) is the still-deferred Phase 4 companion.
 - **Automation loop** (§9-§10, migration 165 master switch, 166 default sender) — the reply-bump + suppression gate + scheduled draft/send:
   - **Reply-bump** (`gmail-ingestion.ts`): a LIVE inbound client email pushes `next_chase_date` forward (sacred-future) + resets `auto_chase_count` (auto-unenrol on reply). Backfill (`forceJobId`) exempt so historical replays never move live chase dates.
@@ -547,4 +629,4 @@ Staff-facing module for policies / agreements / training / official docs / contr
 - **Freelancer shareable (mig 181):** `shareable_with_freelancers`, settable ONLY for **policy / training / other** (agreement/contract/official_doc internal-only — backend-enforced in create/patch) with an on-form signal. **Portal Resources display LIVE (PR #1027):** the Next.js portal `/resources` page reads shareable staff docs from OP (`GET /api/portal/resources` + `/:id`, portal auth) — file docs → presigned R2 url, markdown docs → in-portal reader. Monday retired, no fallback.
 - **Tags / owners / author / content-review (mig 185):** `tags TEXT[]` (freeform categories — vehicles/money/staging — search + filter on the admin Manage page); author surfaced from `created_by`; `owner_user_ids UUID[]` (responsible for keeping it current). **Owner content-review cadence** is distinct from the assignee re-sign cadence: `content_review_interval_months` + `content_review_due_date` — when due, the daily scanner chases owners/author weekly (escalating to managers, laddered, once overdue by `escalate_after_days`) until they **mark reviewed** (`POST /:id/mark-reviewed` — knocks the due date forward, does NOT disturb assignees) OR **publish a new version** (a significant change — advances the clock AND re-arms assignees via the existing new-version flow). Surfaced in My Documents ("Documents you look after — review due") + on the admin list. The assignee manager-escalation is now **laddered** (re-fires every `escalate_after_days`, was once).
 - **COT card agreement** is the seeded first instance (`slug='cot-card-agreement'`, sign, annual, targets card-holders); the COT Card Register (Settings) shows a "Card agreement" Signed/Outstanding/Renewal-due column.
-- **Receipt-chaser companion fix:** `/my-receipts` (all staff, own COT costs missing receipts, upload — the `/money/costs` page is manager-gated so non-manager card-holders had nowhere to go; `cost-receipt-chaser.ts` email repointed there).
+- **Receipt-chaser companion fix:** `/my-receipts` (all staff, own COT costs missing receipts, upload — the `/money/costs` page is manager-gated so non-manager card-holders had nowhere to go; `cost-receipt-chaser.ts` email repointed there). **Since Oct 2026 the phone receipt page `/receipt` is that list** ("Waiting for a receipt", above the camera); `/my-receipts` redirects to it and the chaser links to it.

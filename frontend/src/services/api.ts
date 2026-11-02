@@ -1,4 +1,5 @@
 import { useAuthStore } from '../hooks/useAuthStore';
+import { getWarehouseToken } from './warehouseSession';
 
 const API_BASE = '/api';
 
@@ -45,6 +46,22 @@ async function refreshAccessToken(): Promise<{ accessToken: string; refreshToken
   return refreshPromise;
 }
 
+/** nginx's answers when the server didn't: 502 (down — a deploy restart), 503, 504 (no
+ *  reply within 60s). Our own routes use these codes too, but always with a JSON body. */
+const NO_REPLY_STATUSES = [502, 503, 504];
+const NO_REPLY_MESSAGE = 'No reply from the server - it may be restarting, or still working. Refresh the page to check before trying again.';
+
+/**
+ * The reply never came back, so the work may or may not have happened: nginx's own
+ * error page on a 502/503/504, or the network dropped (fetch throws a TypeError).
+ * Safe to ask again for a READ; for a write, look before repeating it. Job 16169,
+ * 21 Oct 2026: a deploy restart cut off the Money tab's reload straight after a card
+ * receipt went, and the tab said "Request failed".
+ */
+export function isNoReply(e: unknown): boolean {
+  return e instanceof TypeError || (e as { noReply?: boolean } | null)?.noReply === true;
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {}
@@ -58,6 +75,12 @@ async function request<T>(
 
   if (accessToken) {
     headers['Authorization'] = `Bearer ${accessToken}`;
+  } else if (window.location.pathname.startsWith('/warehouse')) {
+    // The warehouse kiosk's PIN session (STAFF-LOGIN-SECURITY-SPEC §4): on the
+    // kiosk pages only, and only when nobody is logged in to OP in this browser.
+    // The server decides what that session may call; nothing here widens it.
+    const kiosk = getWarehouseToken();
+    if (kiosk) headers['Authorization'] = `Bearer ${kiosk}`;
   }
 
   let response = await fetch(`${API_BASE}${path}`, { ...options, headers });
@@ -74,7 +97,14 @@ async function request<T>(
   }
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Request failed' }));
+    // A body that isn't JSON is nginx's own error page, not an answer from us. On a
+    // 502/503/504 that means the server never replied (restarting, or still working
+    // after nginx's 60s) — say so, rather than a bare "Request failed".
+    let noReply = false;
+    const error = await response.json().catch(() => {
+      noReply = NO_REPLY_STATUSES.includes(response.status);
+      return { error: noReply ? NO_REPLY_MESSAGE : 'Request failed' };
+    });
     const baseMsg = error.error || `HTTP ${response.status}`;
     // Include `detail` field when the backend provides extra context (e.g. excess
     // reimburse loud-fail messages). Without this, callers only see the headline.
@@ -91,6 +121,8 @@ async function request<T>(
       // NB `code` above is historically the error MESSAGE, not a machine code —
       // read `body.code` for that.
       body: error as Record<string, unknown>,
+      // The server never answered (isNoReply, above).
+      noReply,
     });
     throw err;
   }

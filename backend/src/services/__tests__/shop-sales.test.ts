@@ -183,3 +183,22 @@ describe('maxDiscountPctForRole', () => {
     await expect(m.maxDiscountPctForRole('freelancer')).resolves.toBe(0);
   });
 });
+
+describe('the card reader tender (STRIPE-TERMINAL-SPEC §14)', () => {
+  it('refuses a card-reader sale nobody took on the reader', async () => {
+    const shop = await freshModule({ stock: [TAPE] });
+    await expect(shop.createShopSale(
+      { kind: 'sale', lines: [{ hhStockId: 25, qty: 1 }], tender: 'card_reader' },
+      { id: 'u1', role: 'admin' },
+    )).rejects.toThrow(/taken on the reader/);
+  });
+
+  it('validateShopSale prices the basket without writing anything', async () => {
+    const shop = await freshModule({ stock: [TAPE] });
+    const r = await shop.validateShopSale(
+      { kind: 'sale', lines: [{ hhStockId: 25, qty: 2 }], tender: 'card_reader' },
+      { id: 'u1', role: 'admin' },
+    );
+    expect(r.totals.gross).toBe(18);
+  });
+});

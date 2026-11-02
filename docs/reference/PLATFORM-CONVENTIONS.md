@@ -106,8 +106,11 @@ API-key path mounted ahead of `authenticate`.
 `leads.ts`, `quotes.ts`, `assignments.ts`, `hire-forms.ts`, `email.ts`,
 `files.ts`, `issues.ts`, `staff-documents.ts`, `system-settings.ts`, `users.ts`,
 `auto-chase.ts`, `cancellations.ts`, `data-cleanup.ts`, `ve103b.ts`, `wise.ts`,
-plus `dashboard.ts`, `duplicates.ts`, `fill-gap.ts` and `notifications.ts` with
-no `authorize()` at all). Some are **deliberately** mixed-audience —
+plus `dashboard.ts`, `duplicates.ts`, `fill-gap.ts` and `notifications.ts`). Since
+Oct 2026 every one of those carries `router.use(authorize(...STAFF_ROLES))` (a
+no-op while only staff hold a staff token) and the remaining question is tiering
+between staff roles — the audited list of ungated manager-worthy endpoints is in
+`docs/SECURITY-AUDIT-BRIEF.md` B.2. Some are **deliberately** mixed-audience —
 `vehicles.ts` serves the freelancer kiosk through `FlexibleVehicleRequest` and
 must never get a blanket staff gate; `hire-forms.ts` has public token paths;
 `notifications.ts` serves whoever is logged in. Each needs its own audit. A
@@ -117,6 +120,44 @@ blanket sweep breaks book-out.
 immediately after `authenticate`, as in `backline.ts`, `carnets.ts`, `excess.ts`,
 `hirehop.ts`, `holding.ts`, `pcns.ts`, `pipeline.ts`. Per-endpoint
 `authorize('admin', 'manager')` stacks on top for the destructive ones.
+
+## Token types — `authenticate` takes STAFF access tokens only (Oct 2026)
+
+`JWT_SECRET` signs every token the platform issues. Each family has its own
+middleware; the general `authenticate` accepts exactly one shape.
+
+| Token | Payload marker | Checked by |
+|---|---|---|
+| Staff access token | `{ id, email, role }` | `authenticate` (+ `authorize()`) |
+| Staff refresh token | `{ id, type: 'refresh' }` | `/auth/refresh` only |
+| Hire-form session (public client) | `{ email, type: 'hire_form_session' }` | `authenticateHireForm` (`driver-verification.ts`) |
+| Claim-form driver session (public) | `{ typ: 'claim_driver' }` | claim-form routes |
+| Warehouse kiosk | `{ scope: 'warehouse_session' }` | `authenticateWarehouse` |
+| Freelancer book-out / collection | `{ scope: 'freelancer_bookout' }` | `authenticateVehicleFlexible` |
+| Freelancer prep (§21.6) | `{ scope: 'freelancer_prep' }` (+ 15-min `freelancer_prep_redeem`) | `authenticateVehicleFlexible` + `FREELANCER_PREP_ALLOW` |
+| Portal session | `{ id, email, name }` — signed with `SESSION_SECRET` / `PORTAL_SESSION_SECRET`, which is mandatory and must differ from `JWT_SECRET` (Oct 2026) | `portalAuth` — refuses `scope` tokens |
+| Portal sign-in, code owed (10 min) | aud `portal_login_pending`, `{ personId }` | `/api/portal/auth/login/code` + `/send-code` only (`portal-login-security.ts`) |
+| Portal remembered phone (90 days) | aud `portal_device`, `{ personId, deviceId }`; never a session | `/api/portal/auth/login` only, and only with a live `portal_trusted_devices` row |
+| Kiosk tablet (365 days, renewed at each PIN) | aud `kiosk_device`, `{ deviceId }` — the httpOnly `op_kiosk_device` cookie; never a session | `POST /api/warehouse/auth/pin` only, and only with a live `kiosk_devices` row (`kiosk-devices.ts`, `STAFF-LOGIN-SECURITY-SPEC.md` §9) |
+
+**Until Oct 2026 `authenticate` verified the signature and nothing else**, so every
+row above passed it — a public hire-form session read `GET /api/drivers` (proven on
+a test database). It now requires `{ id, email, role }` and rejects any `scope`,
+`type` or `typ`. The check is `verifyStaffToken()` in `middleware/auth.ts`, shared
+with the Socket.io handshake — never a second `jwt.verify` for staff. **Every
+family also carries an `aud`, and every verifier names the one it accepts**
+(`services/tokens.ts` `signFor()` / `verifyFor()`, Oct 2026) — a token minted for
+one family can never be verified by another; the portal session is the one
+exception (own secret, also minted by the Netlify app). **A new token family MUST
+get its own audience in `tokens.ts`, carry a marker, and get its own middleware**
+— never widen `authenticate`. A `users` row can no longer hold the `freelancer` role as a login
+(refused at login and refresh; freelancers use the portal). Open follow-ups (`aud`
+claims per token family, the per-router `authorize()` pass) and the public-route
+inventory are in `docs/SECURITY-AUDIT-BRIEF.md`.
+
+**Links taken from a URL are never rendered raw.** `returnUrl` / `startUrl` on the
+freelancer pages go through `modules/vehicles/lib/safe-url.ts` `safeReturnUrl()`
+(http/https only) — `javascript:` in an `<a href>` runs in OP's origin.
 
 ## Crew & Transport System
 
@@ -141,6 +182,15 @@ This is the quoting/costing system for delivery, collection, and crewed jobs. It
 4. **Quotes** are saved to the `quotes` table, linked to a job and optionally a venue
 5. **Crew assignments** via `quote_assignments` junction table — links people to quotes with role, agreed rate, and status
 6. **Quote status lifecycle:** draft → confirmed → completed/cancelled (with `cancelled_reason`)
+7. **The setup / pack-down premium** (the fixed £ beside "Includes setup work on site") is paid to the
+   freelancer AND charged to the client. Hourly mode charges it plus `expense_markup_percent`
+   (a £50 premium = £55 on the client's labour); day-rate mode charges it inside the day-rate markup
+   (×`day_rate_client_markup`), or at cost when a client day rate is typed. **Until Oct 2026 hourly
+   mode never charged it**: the freelancer's fee went up and the client's charge didn't.
+8. **Crew quotes (`applyCrewMultiplier`)** multiply labour, the fee and the totals by crew size,
+   **except fuel**: one van, one tank (jon, Oct 2026; until then a crew of three paid the van's fuel
+   three times). Train fares, hotels and other expenses stay per person in the totals. Saved quotes
+   only change when edited (the HireHop line keeps its old price and is flagged, as for any edit).
 
 ### Venue linkage on a quote (Sep 2026)
 

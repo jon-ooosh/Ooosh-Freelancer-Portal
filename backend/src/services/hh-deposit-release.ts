@@ -44,6 +44,7 @@
  */
 import { hhBroker } from './hirehop-broker';
 import { syncSavedRowToXero } from './hh-xero-sync';
+import { ukToday } from './uk-date';
 
 /** One movement of money OFF a deposit — an invoice application or a refund. */
 export interface DepositApplication {
@@ -154,6 +155,24 @@ export async function fetchDepositAvailability(
 }
 
 /**
+ * The same, when OP can't be sure which HireHop job holds the deposit: an excess
+ * carried over to a later hire still sits on the job that took the money. Tries
+ * each job in turn and stops at the first that has it. A failed read throws
+ * (never a guess); null means none of them has the deposit.
+ */
+export async function findDepositAvailability(
+  depositId: number,
+  hhJobNumbers: number[],
+): Promise<{ hhJobNumber: number; availability: DepositAvailability } | null> {
+  const jobs = [...new Set(hhJobNumbers.filter((n) => Number.isInteger(n) && n > 0))];
+  for (const hhJobNumber of jobs) {
+    const availability = readDepositAvailability(await readBillingRows(hhJobNumber), depositId);
+    if (availability) return { hhJobNumber, availability };
+  }
+  return null;
+}
+
+/**
  * Set an existing deposit→invoice application to `newAmount`, then sync it.
  * Every other field is carried over from the row as HireHop published it, so an
  * edit never silently blanks a description, memo, date or bank.
@@ -165,7 +184,7 @@ async function setApplicationAmount(
 ): Promise<{ ok: boolean; error: string | null }> {
   const res = await hhBroker.post<Record<string, any>>('/php_functions/billing_payments_save.php', {
     id: app.applicationId,
-    date: app.date ? String(app.date).split(' ')[0] : new Date().toISOString().split('T')[0],
+    date: app.date ? String(app.date).split(' ')[0] : ukToday(),
     desc: app.description,
     paid: Number(newAmount.toFixed(2)),
     memo: app.memo,

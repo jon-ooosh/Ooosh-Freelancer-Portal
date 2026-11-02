@@ -34,7 +34,7 @@ import type {
   CapturedPhoto,
   DamageItem,
 } from '../types/vehicle-event'
-import { FUEL_LEVELS, DAMAGE_LOCATIONS } from '../types/vehicle-event'
+import { FUEL_LEVELS, DAMAGE_LOCATIONS, isFuelReduction } from '../types/vehicle-event'
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
@@ -95,7 +95,7 @@ export function CheckInPage() {
   const [queuedOffline, setQueuedOffline] = useState(false)
 
   // Form autosave
-  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft } = useFormAutosave({
+  const { save: autosave, clear: clearAutosave, draftLoaded, draftChecked, dismissDraft, acceptDraft } = useFormAutosave({
     flowType: 'check-in',
     disabled: submitSuccess || queuedOffline,
   })
@@ -178,7 +178,7 @@ export function CheckInPage() {
       signatureBlob: draftLoaded.signatureBlob,
     })
     setStep(draftLoaded.step)
-    dismissDraft()
+    acceptDraft()
   }
 
   // Fetch driver hire forms for this job (for hire dates, insurance, etc.)
@@ -449,11 +449,21 @@ export function CheckInPage() {
       ? mileageNum - form.bookOutMileage
       : null
 
+    // Swapped-out van: the client handed it over AT THE SWAP, so the swap's
+    // soft check-in reading is their end point. Blank swap readings (common
+    // for a breakdown) mean no client comparison — never a fall-back to the
+    // base reading, which includes recovery / garage / our own driving.
+    const swapReading = !collectionData && checkInStatus?.swapped
+      ? (checkInStatus.swapReading ?? { mileage: null, fuelLevel: null, at: null })
+      : null
+
     // Client-chargeable miles: book-out to collection (if collection data exists)
     // The drive from collection point back to base is not the client's responsibility
     const clientMilesDriven = collectionData && form.bookOutMileage
       ? collectionData.mileage - form.bookOutMileage
-      : mileageDiff
+      : swapReading
+        ? (swapReading.mileage != null && form.bookOutMileage ? swapReading.mileage - form.bookOutMileage : null)
+        : mileageDiff
 
     // ── Step 1: Create Monday.com Check In event ──
     setUploadProgress('Creating check-in event...')
@@ -471,6 +481,8 @@ export function CheckInPage() {
             mileageDiff != null ? `Total miles (book-out to base): ${mileageDiff.toLocaleString()}` : null,
             collectionData ? `Client miles (book-out to collection): ${clientMilesDriven?.toLocaleString() ?? '?'}` : null,
             collectionData ? `Collection fuel: ${collectionData.fuelLevel} (by ${collectionData.collectedBy})` : null,
+            swapReading ? `Swapped out mid-hire. Client miles (book-out to swap): ${clientMilesDriven?.toLocaleString() ?? 'not recorded'}` : null,
+            swapReading ? `Swap fuel: ${swapReading.fuelLevel || 'not recorded'}` : null,
             `Photos: ${form.photos.length} captured`,
             form.damageItems.length > 0 ? `Damage items: ${form.damageItems.length}` : 'No new damage',
             !form.driverPresent ? 'Driver not present at check-in' : null,
@@ -798,12 +810,18 @@ export function CheckInPage() {
     setUploadProgress('Generating PDF & sending email...')
     const emailTo = form.bookOutClientEmail
     // Calculate fuel difference for email alert.
-    // When collection data exists, use collection fuel for client charge comparison
-    // (the drive from collection point to base uses fuel that's not the client's responsibility)
-    const clientFuelRef = collectionData?.fuelLevel || form.bookOutFuelLevel
-    const clientFuelLabel = collectionData ? 'collection' : 'book-out'
-    const fuelDiff = clientFuelRef && form.fuelLevel && clientFuelRef !== form.fuelLevel
-      ? `${clientFuelRef} (${clientFuelLabel}) -> ${form.fuelLevel} (base)`
+    // The client's fuel is book-out vs the point THEY handed the van back:
+    // the collection reading when a freelancer collected it (the drive from
+    // collection point to base uses fuel that's not the client's
+    // responsibility), otherwise the check-in reading. Comparing collection
+    // against base measured our own driver's fuel use (16616, Oct 2026).
+    // Only a REDUCTION alerts — more fuel coming back isn't the client's problem.
+    const clientReturnFuel = collectionData ? collectionData.fuelLevel
+      : swapReading ? swapReading.fuelLevel
+      : form.fuelLevel
+    const clientReturnLabel = collectionData ? 'collection' : swapReading ? 'swap' : 'check-in'
+    const fuelDiff = isFuelReduction(form.bookOutFuelLevel, clientReturnFuel)
+      ? `${form.bookOutFuelLevel} at book-out -> ${clientReturnFuel} at ${clientReturnLabel}`
       : null
 
     if (!emailTo && !form.bookOutHireHopJob) {
@@ -845,6 +863,16 @@ export function CheckInPage() {
             bookOutMileage: form.bookOutMileage,
             bookOutFuelLevel: form.bookOutFuelLevel,
             bookOutDate: form.bookOutDate,
+            // Freelancer collection reading, so the PDF shows the same
+            // book-out -> collection comparison the email does
+            collectionMileage: collectionData?.mileage ?? null,
+            collectionFuelLevel: collectionData?.fuelLevel ?? null,
+            collectionDateTime: collectionData?.collectedAt ?? null,
+            // Swapped-out van: the swap reading is the client's end point
+            swappedOut: !!swapReading,
+            swapMileage: swapReading?.mileage ?? null,
+            swapFuelLevel: swapReading?.fuelLevel ?? null,
+            swapDateTime: swapReading?.at ?? null,
             driverPresent: form.driverPresent,
             damageItems: damageItemsWithBase64,
           },
@@ -854,6 +882,7 @@ export function CheckInPage() {
             damageCount: form.damageItems.length,
             fuelDifference: fuelDiff,
             milesDriven: clientMilesDriven,
+            swappedOut: !!swapReading,
           },
         ),
       'Check-in report PDF + email',
@@ -1579,6 +1608,33 @@ function StepReviewBookOut({
           </p>
         </div>
       )}
+
+      {/* Swapped out mid-hire — the client handed the van over at the swap */}
+      {!collectionData && checkInStatus?.swapped && (() => {
+        const sr = checkInStatus.swapReading
+        const at = sr?.at ? new Date(sr.at) : null
+        const atStr = at && !Number.isNaN(at.getTime())
+          ? at.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+          : 'Not recorded'
+        const nothingRecorded = sr?.mileage == null && !sr?.fuelLevel
+        return (
+          <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4">
+            <p className="text-xs font-semibold text-purple-800 uppercase mb-2">
+              Swapped Out Mid-Hire
+            </p>
+            <div className="space-y-1 text-sm">
+              <SummaryRow label="Swapped" value={atStr} />
+              <SummaryRow label="Mileage at Swap" value={sr?.mileage != null ? `${sr.mileage.toLocaleString()} mi` : 'Not recorded'} />
+              <SummaryRow label="Fuel at Swap" value={sr?.fuelLevel || 'Not recorded'} />
+            </div>
+            <p className="mt-2 text-xs text-purple-600">
+              {nothingRecorded
+                ? 'No readings were recorded at the swap, so this check-in will not flag fuel or miles to the client.'
+                : 'Client fuel and miles are taken from the swap reading, not the base reading.'}
+            </p>
+          </div>
+        )
+      })()}
 
       {lightbox && (
         <PhotoLightbox

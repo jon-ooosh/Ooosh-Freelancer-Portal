@@ -10,14 +10,11 @@
  * due date until somebody moves it, and an edit that doesn't touch it is not
  * refused.
  */
+import { ukDatePlus } from '../lib/ukDate';
 
-/** Local today + n days as YYYY-MM-DD — never via toISOString(), which is UTC. */
+/** UK today + n days as YYYY-MM-DD — never via toISOString(), which is UTC (lib/ukDate.ts). */
 export function ymdFromToday(days = 0): string {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
+  return ukDatePlus(days);
 }
 
 const SHORTCUTS: { label: string; days: number }[] = [

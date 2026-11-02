@@ -22,6 +22,16 @@ Full template registry, incident history and messaging spec pointers:
 - **The outage canary must NOT travel over the failing channel.** When a send fails after all retries it writes an **admin bell** (`email_sent_at` pre-stamped so the escalator never tries to email it), deduped hourly.
 - **When a bell and a direct email fire for the same event, set `email_sent_at = NOW()` on the bell** — the escalation scheduler skips notifications that already have it, so the recipient doesn't get the same content twice.
 
+## Did it actually arrive? — `services/email-delivery.ts`
+
+- **`email_log.status = 'sent'` means Resend ACCEPTED it, not that it arrived.** Bounces, suppressions (Resend's block list) and spam reports come back on `POST /api/webhooks/resend` and land in `email_delivery_events` + `email_address_problems` — a bell to managers, an email to info@, a line on the job timeline. Read those tables for "did the client get it?"; don't infer it from `email_log`.
+- **Resend judges each recipient separately.** One email can be delivered to the To and blocked for a CC; Resend's list view still shows the whole row as "Suppressed". A suppression never expires and a re-send changes nothing — somebody fixes the address or removes it in Resend.
+- **Never auto-retry a failed delivery and never auto-remove an address from Resend's suppression list.** Both hide the problem and damage sending reputation for every client.
+- **Not even a SOFT bounce** (Resend type `Transient`; jon asked, Oct 2026 — the answer was no). Resend's own docs say an out-of-office reply can be reported as one, i.e. the email ARRIVED — a retry would send a second booking confirmation or receipt. Several soft subtypes (too large, content or attachment rejected) bounce again identically, and OP keeps no copy of what it sent. A soft bounce alerts in its own words (`soft_bounced` in `email-delivery.ts`, advice per subtype) and never flags the address — Resend doesn't block it.
+- **Never email info@ about one of our own addresses** — if info@ itself were blocked, the alert would trigger itself forever. Bell only.
+- **The job link comes from the `jobNumber` template variable** (stored as `email_log.job_number`) — one more reason every job-scoped template must be passed it.
+- **Anywhere new that shows a client or driver email address should show `components/EmailProblemFlag.tsx`** (data: `hooks/useEmailProblems.ts`, one request per page).
+
 ## Templates
 
 - **Production is `EMAIL_MODE=live` (via Resend) and has been since mid-2026.** Every registered template sends for real to the real recipient — `EMAIL_LIVE_TEMPLATES` is the test-mode allowlist and is **ignored entirely** when the mode is live, so a new template needs nothing added to it. Don't tell anyone to add one, and don't hedge a new email behind "it'll test-redirect until released" — it won't. Feature specs saying a template "ships OFF `EMAIL_LIVE_TEMPLATES`" describe a rollout that predates go-live.
@@ -93,6 +103,45 @@ Warning emails that used to fire inline follow one shape (`services/sanity-check
 
 Adding a scanner: copy the shape, add a marker column, wire the clear into every status-write path. **Don't put the send back inline "just for the urgent case"** — the spam always comes back.
 
+## A bell that asks someone to act retires itself when the thing is done
+
+Until Oct 2026 a bell was a copy of a fact frozen at the moment it happened — approving a holiday left every
+admin's "X has requested holiday" lit until each of them clicked it. Now (jon, Oct 2026):
+
+- **A bell that ASKS for something carries `notifications.resolve_key`** (migration 310), and
+  `services/bell-rules.ts` holds ONE rule per key: "still needed while …", SQL over the bell row `n`.
+  **Set the key at insert. Never on an FYI bell** ("Issue resolved", "Approved", "Renewal coming up") — an FYI
+  bell is done when it is read, and FYI and action bells often share a type and a record, which is exactly why
+  `type` can't be the test (it also drives the Inbox tabs and delivery preferences, so don't split it).
+- **The rule decides; callers only nudge.** Call `retireDoneBells(key, recordId)` from the code that FINISHES
+  the thing (after COMMIT) so the bell goes at once; `sweepDoneBells()` runs every 5 minutes and before each
+  escalation, so a path nobody wired only delays a bell — it never strands one, and a finished thing is never
+  emailed. Don't add a second "is it done?" test anywhere else.
+- **Read AND done, for whoever the rule says is finished** — everyone by default; per person where the rule
+  reads `n.user_id` (a to-do's owner, a document's signer). Done bells stay in the dropdown greyed "✓ Done";
+  the Inbox hides them like any Done item. Never throws.
+- **`latestOnly`** for a reminder that is sent again while still waiting (a digest, a re-armed chase, "due" then
+  "overdue"): only the newest copy to each person stays lit.
+- **A rule is a parameter-free EXISTS** (`bell-rules.test.ts` checks): no `$n`; `[0-9]` not `\d`; guard any cast
+  with CASE. A deleted record reads as done. A rule that needs a module that loads auth or email keeps a copy
+  of the number and the test checks it matches (`HOLD_UNTIL_LEAD_DAYS`, `PIN_ROTATE_DAYS`,
+  `CLAIM_CHASE_ESCALATED`); a light module's number is imported (`COMPLIANCE_DEFAULTS`, `RECEIPT_GRACE_DAYS`)
+  — and that module must then never load `bell-rules` / `notification-resolve` at runtime (`import type` only).
+- **A rule mirroring a scanner must never be NARROWER than the scanner** (the van compliance rules copy
+  `runComplianceCheck` item by item): a bell retired while the scanner still calls it due just comes back.
+- **A scanner's dedup that reads `acknowledged_at` must not mistake a `latestOnly` retirement for a person
+  handling it** — count only the person's newest bell (the requirement Reminder scanner, `scheduler.ts`).
+- **Older wiring, same idea:** leave / overtime / WFH requests and day swaps retire their approvers' `follow_up`
+  bells by type (`retire…Bells()` beside each `notify…Requested()` in `staff-notifications.ts`; day swaps from
+  `staff-swaps.ts` via `retireSwapRequestBells()`, entity `staff_pattern_swap`, the swap's group id). **Mentions are one
+  person's:** a reply or a reaction in the thread marks the replier's own mention bells done
+  (`resolveMyThreadMentions`); opening the timeline or the Problem marks them READ only
+  (`POST /notifications/seen`, `markMentionsSeen`).
+- **Deliberately NOT keyed:** New Enquiry's "Chase reminder" (sent at once with a future date — it would read
+  as done straight away), storage access requests (jon: unused), the prep-flag and low-tread van bells, a send
+  failure / soft-bounce "Email not delivered", and bells with no state to test (failed hooks, payroll, company
+  days). The full keyed list is `BELL_RULES`; what each round covered is in `INBOX-AND-WAREHOUSE.md`.
+
 ## Timelines & threads
 
 - **Scoping guards are load-bearing:** entity timeline reads filter `issue_id IS NULL` / `shift_id IS NULL`. Issue chatter and shift handovers must NOT bubble onto the linked vehicle / driver / organisation timelines.
@@ -108,7 +157,7 @@ Adding a scanner: copy the shape, add a marker column, wire the clear into every
 - **Thread-anchoring: a reply inherits its thread's anchor job.** In `gmail-ingestion.ts`, once a thread's first message strong-matches a job, later messages inherit it UNLESS they carry their OWN strong evidence for a *different* job — a `Quote (N)` PDF or an explicit job number in the **SUBJECT**. A job number in the **BODY does NOT override the anchor** (bodies reference other/past hires in passing — that's the drift). Persist `match_method`/`match_confidence` on every ingested email (the matcher computes them; don't discard them).
 - **Hidden AND detached ingested emails must be excluded from EVERY AI read.** `hidden_at IS NOT NULL` (confidentiality) → dropped from `comms-summary` + `comms-query` **always** (never feed private content to the summary/dispute AI, even for admin) and from the job timeline for non-admins (admin still sees it — hide preserves the record). `detached_at IS NOT NULL` ("Not this job") is a **tombstone** — the email stays on the timeline as a greyed re-attachable row but is excluded from the AI reads too. Hide is **admin-only**; detach/reattach/move is STAFF_ROLES. Route all through `/api/auto-chase/emails/:id/*`; don't add a parallel path. Move-to-job searches `/hirehop/jobs?search=` (matches job number or name).
 - **Manager mailboxes are matched-only; info@ is full.** Multi-mailbox ingestion runs via `runIngestionForAllMailboxes()`; the list is `system_settings.gmail_manager_mailboxes` (admin-only Settings, no deploy). A manager mailbox passes `queueUnmatched:false` — a no-match email is dropped, NOT parked in `gmail_unmatched_inbound`, so a manager's/director's non-job mail never surfaces. Only info@ queues unmatched. Any new mailbox goes through `getManagerMailboxes()` (own-domain only) — never ingest an arbitrary address.
-- **Chase-draft TONE needs work before auto-send is turned on (jon, Sep 2026).** Drafts currently read "too AI / too American". Auto-send (`auto_chase_send_enabled`) is deliberately OFF — the module only drafts. Getting the tone to Ooosh's British, understated voice is a dedicated iterative round (tighten the code SYSTEM_PROMPT in `chase-draft.ts`, lean on `chase_voice_instructions` + `learnChaseVoice`, review real drafts with jon) and must land BEFORE Phase 3 suppression + flipping the switch. Full handover: spec §13.6.
+- **Chase-draft TONE needs work before auto-send is turned on (jon, Sep 2026).** Drafts currently read "too AI / too American". Auto-send (`auto_chase_send_enabled`) is deliberately OFF — the module only drafts. Getting the tone to Ooosh's British, understated voice is a dedicated iterative round and must land BEFORE Phase 3 suppression + flipping the switch. **First round done 16 Oct 2026:** the house voice (modelled on Jon and Will, one voice for every sender) is `BUILT_IN_VOICE` in `chase-draft.ts`, mirroring `docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md`. **Since 26 Oct a Staff Document shared with Claude and tagged `voice` replaces it** (`services/house-knowledge.ts`); the hard rules (`RAILS`) always stay; `chase_voice_instructions` is the no-deploy steer on top. The old `learnChaseVoice` panel is gone. Full handover: `AI-KNOWLEDGE-SPEC.md` §3.
 
 ## Background work
 

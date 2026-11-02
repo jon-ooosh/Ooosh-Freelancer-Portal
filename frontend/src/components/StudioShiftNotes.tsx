@@ -11,6 +11,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 import { AttachmentList, PendingAttachmentStrip, useAttachments, type InteractionAttachment } from './messaging/Attachments';
+import { LinkifiedText } from './LinkifiedText';
 
 interface ShiftMessage {
   id: string;
@@ -28,30 +29,6 @@ function formatMessageTime(iso: string): string {
   return d.toLocaleString('en-GB', {
     weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   });
-}
-
-/** Render message text with bare URLs turned into clickable links. */
-function LinkifiedText({ text }: { text: string }) {
-  const parts = text.split(/(https?:\/\/[^\s]+)/g);
-  return (
-    <>
-      {parts.map((part, i) =>
-        /^https?:\/\//.test(part) ? (
-          <a
-            key={i}
-            href={part}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-purple-600 hover:text-purple-800 underline break-all"
-          >
-            {part}
-          </a>
-        ) : (
-          <span key={i}>{part}</span>
-        )
-      )}
-    </>
-  );
 }
 
 export default function StudioShiftNotes({ shiftId }: { shiftId: string }) {

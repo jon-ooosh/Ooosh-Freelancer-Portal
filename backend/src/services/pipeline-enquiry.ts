@@ -152,6 +152,7 @@ export async function createPipelineEnquiry(
       status, status_name,
       pipeline_status, pipeline_status_changed_at,
       chase_interval_days, next_chase_date,
+      chase_alert_user_id, chase_alert_delivery,
       created_by
     ) VALUES (
       $1, $2, $3, $4, $5, $6,
@@ -163,6 +164,7 @@ export async function createPipelineEnquiry(
       0, 'Enquiry',
       'new_enquiry', NOW(),
       $18, ${chaseDateSql},
+      $23, $24,
       $16
     ) RETURNING *`,
     [
@@ -175,6 +177,12 @@ export async function createPipelineEnquiry(
       chaseDate || String(chaseIntervalDays),
       chaseIntervalDays,
       out_time || '09:00', start_time || out_time || '09:00', return_time || '09:00', end_time || '09:00',
+      // "Alert: X" on the form: the 08:00 chase scanner sends X "Chase due" on
+      // the chase date. Until Oct 2026 it was never saved, so X only ever got
+      // the heads-up below. 'bell' is what the scanner assumes for a blank one;
+      // saving it means the Chase modal shows it too rather than "none".
+      chase_alert_user_id || null,
+      chase_alert_user_id ? 'bell' : null,
     ]
   );
 
@@ -189,15 +197,20 @@ export async function createPipelineEnquiry(
 
   await logAudit(actorId, 'jobs', jobId, 'create', null, result.rows[0]);
 
-  // Create chase alert notification if requested
+  // A heads-up that X will be alerted (an FYI — the alert itself is the
+  // scanner's "Chase due" on the day, which retires once the chase is done).
   if (chase_alert_user_id) {
+    const due = result.rows[0].next_chase_date ? new Date(result.rows[0].next_chase_date as string) : null;
+    const when = due && !Number.isNaN(due.getTime())
+      ? due.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'Europe/London' })
+      : null;
     await query(
       `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, source_user_id)
        VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, 'normal', $5, $6)`,
       [
         chase_alert_user_id,
         `Chase reminder: ${finalJobName}`,
-        `Chase due for ${client_name} — ${finalJobName}`,
+        `You're down to chase ${client_name} — ${finalJobName}${when ? ` on ${when}` : ''}.`,
         jobId,
         `/jobs/${jobId}`,
         actorId,

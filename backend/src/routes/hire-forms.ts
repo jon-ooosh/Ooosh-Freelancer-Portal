@@ -36,9 +36,10 @@ import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
 import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
-import { applyAccountAutoCover } from '../services/hh-requirement-derivation';
+import { applyAccountAutoCover, AUTO_COVER_MARKER } from '../services/hh-requirement-derivation';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
+import { retireDoneBells } from '../services/notification-resolve';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -320,6 +321,9 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     const requiresReferral = f.requires_referral || false;
     const referralReason = f.referral_reason || '';
 
+    // A standing approval (approved/waived) survives a later form that
+    // declares the same issue — see referralCleared below.
+    let referralCleared = false;
     if (requiresReferral) {
       // Leave referral_status NULL on initial submission so the driver
       // lands in the red "Refer to Insurers" todo state — explicit signal
@@ -329,10 +333,13 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // auto-fire of the referral_alert email to admins still happens
       // via the requires_referral flag elsewhere — the alert path is
       // unchanged.
-      await client.query(
-        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2`,
+      const flagged = await client.query(
+        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2
+         RETURNING referral_status`,
         [referralReason, driverId]
       );
+      const status = flagged.rows[0]?.referral_status;
+      referralCleared = status === 'approved' || status === 'waived';
     }
 
     // 3. Excess amount — passed from hire form app, NOT recalculated here
@@ -411,7 +418,10 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // data.assignment.id regardless of whether the call was a fresh create
       // or a dedup hit.
       await client.query('COMMIT');
-      client.release();
+      // No client.release() here — the `finally` below hands the connection
+      // back. Releasing it twice threw after the reply had gone, and a failed
+      // read below would have sent the catch's ROLLBACK down a connection that
+      // might by then belong to another request (SECURITY-AUDIT-BRIEF B.5).
       console.log(`[hire-forms] Deduplicated: existing assignment ${existingAssignment.rows[0].id} for driver ${driverId}`);
       const full = await getPool().query(
         `SELECT a.*, d.full_name AS driver_name, fv.reg AS vehicle_reg
@@ -450,8 +460,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       });
       if (conflicts.length > 0) {
         await client.query('ROLLBACK');
-        client.release();
-        return res.status(409).json(buildConflictPayload(conflicts));
+        return res.status(409).json(buildConflictPayload(conflicts)); // `finally` releases
       }
     }
 
@@ -494,12 +503,19 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       // back to 'pending' at £1,200 the moment the driver's hire form landed,
       // with nothing to tell staff it had happened. Every sibling query in this
       // file already excluded it — this was the one that did not.
+      //
+      // The ONE exception (Oct 2026): a stub waived by account auto-cover
+      // (AUTO_COVER_MARKER in notes). That waive is the machine's, not a staff
+      // decision, and applyAccountAutoCover re-covers the absorbed record right
+      // after COMMIT. Skipping it stranded the stub beside a NEW driver record —
+      // two £1,200 records on a one-van hire, "£2,400 required" (job 16833).
       `SELECT id, excess_amount_taken, excess_status, payment_method, payment_reference, payment_date, hh_deposit_id
        FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND (excess_status <> 'waived' OR COALESCE(notes, '') LIKE '%' || $2 || '%')
        ORDER BY created_at DESC LIMIT 1`,
-      [jobId]
+      [jobId, AUTO_COVER_MARKER]
     ) : { rows: [] };
 
     if (existingPortalExcess.rows.length > 0) {
@@ -673,7 +689,10 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     // happens in setImmediate so it doesn't slow the hire form response.
     const advanceJobId: string | undefined = assignment.job_id;
     if (advanceJobId) {
-      const targetStatus = requiresReferral ? 'in_progress' : 'done';
+      // An insurer approval is STANDING for the driver (jon, Oct 2026), so a
+      // returning approved driver re-declaring the same issue is not a new
+      // referral and must not step the card back to amber (Tyler Meadham).
+      const targetStatus = requiresReferral && !referralCleared ? 'in_progress' : 'done';
       setImmediate(async () => {
         try {
           await query(
@@ -753,6 +772,7 @@ router.get('/by-job/:hirehopJobId', authenticateVehicleFlexible, async (req: Fle
         d.email AS driver_email,
         d.licence_points AS driver_points,
         d.requires_referral,
+        d.referral_status,
         je.excess_amount_required,
         je.excess_amount_taken,
         je.excess_status
@@ -1116,12 +1136,15 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     // internal-job cascade) must never be silently flipped back to 'pending'.
     // 'released' is terminal (migration 087) — absorbing one resurrects a dead
     // pre-auth to 'pending' with stale amount_held (job 15934 incident, Jun 2026).
+    // Exception: a stub waived by account auto-cover (marker present) IS
+    // absorbed — same reason as the hire-form POST above (job 16833).
     const orphanExcess = await query(
       `SELECT id FROM job_excess
        WHERE job_id = $1 AND assignment_id IS NULL
-         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived', 'released')
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'released')
+         AND (excess_status <> 'waived' OR COALESCE(notes, '') LIKE '%' || $2 || '%')
        ORDER BY created_at ASC LIMIT 1`,
-      [f.job_id]
+      [f.job_id, AUTO_COVER_MARKER]
     );
 
     if (orphanExcess.rows.length > 0) {
@@ -2227,6 +2250,9 @@ async function executeAddToHire(opts: {
     }
 
     await dbClient.query('COMMIT');
+
+    // This row is now booked out: its "Mid-tour driver" bell is done.
+    await retireDoneBells('mid_tour_driver', sourceId);
 
     // Fire the post-book-out hook chain per affected assignment (fleet status,
     // agreement PDF + email, multi-van fan-out, OOH, auto-dispatch). Per-van
@@ -3394,9 +3420,11 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
               // email_sent_at = NOW() so the escalation scheduler doesn't fire a
               // duplicate email — the direct mid_tour_driver send below covers it.
               for (const userId of targets.bellUserIds) {
+                // Asks for the driver to be added to the van: retires once
+                // this row is booked out (bell-rules.ts mid_tour_driver).
                 await query(
-                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
-                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at, resolve_key)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW(), 'mid_tour_driver')`,
                   [
                     userId,
                     `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,

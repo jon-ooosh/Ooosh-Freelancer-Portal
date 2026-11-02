@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { getFromR2 } from '../config/r2';
 import { resolveDocumentKey, type DocumentKey } from './driver-documents';
+import { ukToday } from './uk-date';
 
 // ── Types ──
 
@@ -40,6 +41,10 @@ export interface DriverSnapshotData {
   hasAccidents: boolean;
   hasInsuranceIssues: boolean;
   hasDrivingBan: boolean;
+  // Migration 298. null/undefined = the driver last answered the old question
+  // set, which didn't ask these.
+  hasRecentConvictions?: boolean | null;
+  hasFaultClaims?: boolean | null;
   additionalDetails: string;
   // Job reference
   jobId: string;
@@ -114,6 +119,13 @@ function formatDate(d: string | null): string {
 
 function yesNo(v: boolean): string {
   return v ? 'Yes' : 'No';
+}
+
+/** For the questions added in Oct 2026 — older answers never covered them. */
+function yesNoAsked(v: boolean | null | undefined): string {
+  if (v === true) return 'Yes';
+  if (v === false) return 'No';
+  return 'Not asked';
 }
 
 // ── PDF Generation ──
@@ -195,12 +207,14 @@ export async function generateDriverSnapshot(data: DriverSnapshotData): Promise<
   }
 
   drawSection('INSURANCE QUESTIONNAIRE');
-  drawField('Disability', yesNo(data.hasDisability));
-  drawField('Convictions', yesNo(data.hasConvictions));
+  drawField('Medical restriction', yesNo(data.hasDisability));
+  drawField('Convictions (5 years)', yesNoAsked(data.hasRecentConvictions));
+  drawField('Serious conviction', yesNo(data.hasConvictions));
   drawField('Prosecution pending', yesNo(data.hasProsecution));
-  drawField('Accidents (3 years)', yesNo(data.hasAccidents));
+  drawField('Accidents / claims', yesNo(data.hasAccidents));
+  drawField('2+ at fault or open', yesNoAsked(data.hasFaultClaims));
   drawField('Insurance issues', yesNo(data.hasInsuranceIssues));
-  drawField('Driving ban', yesNo(data.hasDrivingBan));
+  drawField('Ban / suspension', yesNo(data.hasDrivingBan));
   if (data.additionalDetails?.trim()) {
     drawField('Additional Details', data.additionalDetails.substring(0, 70));
   }
@@ -251,7 +265,7 @@ export async function generateDriverSnapshot(data: DriverSnapshotData): Promise<
   const pdfBytes = await pdfDoc.save();
 
   const safeName = (data.driverName || 'Driver').replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_');
-  const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '');
+  const dateStr = ukToday().replace(/-/g, '');
   const filename = `${data.jobId}-${safeName}-${dateStr}.pdf`;
 
   return { pdfBytes, filename };

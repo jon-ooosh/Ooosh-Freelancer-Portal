@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { hasManagerRole } from '../lib/roles';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import SlidePanel from '../components/SlidePanel';
@@ -15,6 +15,13 @@ import InviteFreelancerModal from '../components/InviteFreelancerModal';
 import StorageHistorySection from '../components/StorageHistorySection';
 import { PcnHistorySection } from '../components/PcnHistorySection';
 import { PERSON_ORG_ROLES } from '@shared/index';
+import { useTabPresence } from '../hooks/useTabPresence';
+import EntityTabs from '../components/EntityTabs';
+import RecordActionsMenu from '../components/RecordActionsMenu';
+import WorkingTermsSummary from '../components/WorkingTermsSummary';
+import EndorsementsPanel from '../components/EndorsementsPanel';
+import EmailProblemFlag from '../components/EmailProblemFlag';
+import { useEmailProblems } from '../hooks/useEmailProblems';
 
 interface FileAttachment {
   name: string;
@@ -97,6 +104,11 @@ interface Interaction {
 // Key on `id` ONLY — never the pathname or a ?tab= param, or every tab click
 // would remount the page. The hand-written tab/cache resets below are kept as
 // belt-and-braces, and the tab effect still handles same-page ?tab= changes.
+const VALID_PERSON_TABS = [
+  'timeline', 'hire_history', 'freelancer', 'details', 'relationships', 'excess', 'held', 'storage', 'pcn',
+] as const;
+type PersonTab = (typeof VALID_PERSON_TABS)[number];
+
 export default function PersonDetailPage() {
   const { id } = useParams<{ id: string }>();
   return <PersonDetailContent key={id} />;
@@ -109,17 +121,21 @@ function PersonDetailContent() {
   const isAdmin = hasManagerRole(user?.role);
 
   const [person, setPerson] = useState<PersonDetail | null>(null);
-  const [dnoReason, setDnoReason] = useState('');
-  const [showDnoForm, setShowDnoForm] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'freelancer' | 'details' | 'relationships' | 'excess' | 'held' | 'storage' | 'pcn'>('timeline');
+  const [activeTab, setActiveTab] = useState<PersonTab>('timeline');
+  // The tab lives in ?tab= (like the Organisation page) so a link can open on it
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
   const [heldCount, setHeldCount] = useState<number | null>(null);
+  // Which secondary tabs have content — decides main row vs "More"
+  const tabPresence = useTabPresence('person', id, { pcn: !!person?.is_freelancer });
+  // Is this person's email bouncing / blocked by Resend? (services/email-delivery.ts)
+  const emailProblems = useEmailProblems([person?.email]);
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Add relationship
   const [showAddRole, setShowAddRole] = useState(false);
@@ -153,16 +169,28 @@ function PersonDetailContent() {
     }
   }, [id]);
 
-  // Reset tab when switching people — component instance is reused across
-  // /people/A → /people/B so without this the active tab "drags across".
+  // Land on the tab named in ?tab=, else the timeline. Keyed on the ?tab= VALUE
+  // too, so a same-page link that only changes the query string still switches
+  // (same reasoning as OrganisationDetailPage).
   useEffect(() => {
-    setActiveTab('timeline');
+    setActiveTab(VALID_PERSON_TABS.includes(tabParam as PersonTab) ? (tabParam as PersonTab) : 'timeline');
+  }, [id, tabParam]);
+
+  // Counts belong to the person, not the tab — reset only on a person switch
+  useEffect(() => {
     setHeldCount(null);
   }, [id]);
 
+  function selectTab(tab: PersonTab) {
+    setActiveTab(tab);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', tab);
+    setSearchParams(next, { replace: true });
+  }
+
   async function loadPerson() {
     try {
-      const data = await api.get<PersonDetail>(`/people/${id}`);
+      const data = await api.get<PersonDetail>(`/people/${id}?track_view=1`);
       setPerson(data);
     } catch {
       navigate('/people');
@@ -330,7 +358,7 @@ function PersonDetailContent() {
     <div>
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-        <div className="flex items-start justify-between">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex items-center gap-4">
             <div className="w-14 h-14 bg-ooosh-100 text-ooosh-700 rounded-full flex items-center justify-center text-xl font-bold">
               {person.first_name[0]}{person.last_name[0]}
@@ -355,7 +383,7 @@ function PersonDetailContent() {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {isFreelancer && (() => {
               const fp = freelancerStatusPill(person.freelancer_status, person.is_approved);
               return <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${fp.cls}`}>{fp.label}</span>;
@@ -390,41 +418,24 @@ function PersonDetailContent() {
             >
               Edit
             </button>
-            {!person.do_not_hire && isAdmin && (
-              <button
-                onClick={() => setShowDnoForm(true)}
-                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
-                title="Flag as Do Not Hire"
-              >
-                DNH
-              </button>
-            )}
-            <div className="relative">
-              <button
-                onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
-                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
-              >
-                Delete
-              </button>
-              {showDeleteConfirm && (
-                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded shadow-lg p-3 z-10 w-56">
-                  <p className="text-sm text-gray-700 mb-2">Delete this person?</p>
-                  <div className="flex gap-2">
-                    <button onClick={handleDelete} className="flex-1 bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Yes, delete</button>
-                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 border border-gray-300 px-3 py-1 rounded text-sm hover:bg-gray-50">Cancel</button>
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* Do Not Hire is set in Edit → Working Terms; Delete is rare, so it lives in ⋯ */}
+            <RecordActionsMenu
+              actions={[
+                { label: 'Delete', danger: true, onClick: () => { if (confirm(`Delete ${person.first_name} ${person.last_name}?`)) handleDelete(); } },
+              ]}
+            />
           </div>
         </div>
 
         {/* Contact details row */}
         <div className="mt-4 flex flex-wrap gap-6 text-sm text-gray-600">
           {person.email && (
-            <a href={`mailto:${person.email}`} className="hover:text-ooosh-600">
-              {person.email}
-            </a>
+            <span className="inline-flex items-center gap-2">
+              <a href={`mailto:${person.email}`} className="hover:text-ooosh-600">
+                {person.email}
+              </a>
+              <EmailProblemFlag problem={emailProblems.problemFor(person.email)} onMarkFixed={emailProblems.markFixed} />
+            </span>
           )}
           {person.mobile && (
             <a href={`tel:${person.mobile}`} className="hover:text-ooosh-600">
@@ -472,67 +483,22 @@ function PersonDetailContent() {
           )}
         </div>
       )}
-      {/* DNH reason form (shown when DNH button clicked) */}
-      {showDnoForm && !person.do_not_hire && (
-        <div className="mb-4 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
-          <input
-            value={dnoReason}
-            onChange={e => setDnoReason(e.target.value)}
-            placeholder="Reason for Do Not Hire (optional)..."
-            className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm"
-            autoFocus
-          />
-          <button
-            onClick={async () => {
-              await api.post(`/people/${id}/do-not-hire`, { do_not_hire: true, reason: dnoReason || null });
-              setShowDnoForm(false);
-              setDnoReason('');
-              loadPerson();
-            }}
-            className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700"
-          >
-            Confirm
-          </button>
-          <button onClick={() => { setShowDnoForm(false); setDnoReason(''); }} className="text-xs px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
-        </div>
-      )}
-
-      {/* Tabs */}
-      <div className="border-b border-gray-200 mb-6">
-        <nav className="flex gap-6">
-          {([
-            'timeline',
-            ...(isFreelancer ? (['freelancer'] as const) : []),
-            'hire_history',
-            'details', 'relationships', 'excess', 'held', 'storage',
-            ...(isFreelancer ? (['pcn'] as const) : []),
-          ] as const).map((tab) => {
-            const totalOrgs = (person.organisations || []).length;
-            const label = tab === 'timeline' ? 'Activity Timeline'
-              : tab === 'hire_history' ? 'Hire History'
-              : tab === 'freelancer' ? 'Freelancer'
-              : tab === 'details' ? 'Details'
-              : tab === 'excess' ? 'Excess History'
-              : tab === 'held' ? (heldCount ? `Held Items (${heldCount})` : 'Held Items')
-              : tab === 'storage' ? 'Storage'
-              : tab === 'pcn' ? 'PCNs'
-              : `Relationships${totalOrgs ? ` (${totalOrgs})` : ''}`;
-            return (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === tab
-                    ? 'border-ooosh-600 text-ooosh-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </nav>
-      </div>
+      {/* Tabs — main tabs always; the rest only when they have something, else under "More" */}
+      <EntityTabs<PersonTab>
+        active={activeTab}
+        onSelect={selectTab}
+        tabs={[
+          { key: 'timeline', label: 'Activity Timeline' },
+          ...(isFreelancer ? [{ key: 'freelancer' as const, label: 'Freelancer' }] : []),
+          { key: 'hire_history', label: 'Hire History' },
+          { key: 'details', label: 'Details' },
+          { key: 'relationships', label: `Relationships${(person.organisations || []).length ? ` (${(person.organisations || []).length})` : ''}` },
+          { key: 'excess', label: 'Excess History', secondary: true, hasContent: tabPresence.excess },
+          { key: 'held', label: heldCount ? `Held Items (${heldCount})` : 'Held Items', secondary: true, hasContent: tabPresence.held },
+          { key: 'storage', label: 'Storage', secondary: true, hasContent: tabPresence.storage },
+          ...(isFreelancer ? [{ key: 'pcn' as const, label: 'PCNs', secondary: true, hasContent: tabPresence.pcn }] : []),
+        ]}
+      />
 
       {/* Tab Content */}
       {activeTab === 'timeline' && id && (
@@ -562,7 +528,7 @@ function PersonDetailContent() {
               <p className="text-sm text-gray-500">
                 Freelancer details, approval, review dates and documents now live on the{' '}
                 <button
-                  onClick={() => setActiveTab('freelancer')}
+                  onClick={() => selectTab('freelancer')}
                   className="text-ooosh-600 font-medium hover:underline"
                 >
                   Freelancer tab
@@ -571,27 +537,18 @@ function PersonDetailContent() {
             </div>
           )}
 
-          {/* Working Terms */}
+          <WorkingTermsSummary
+            type={person.working_terms_type}
+            creditDays={person.working_terms_credit_days}
+            notes={person.working_terms_notes}
+            doNotHire={person.do_not_hire}
+            doNotHireReason={person.do_not_hire_reason}
+          />
+
+          {/* Artist endorsements — also listed on Operations › Backline – Endorsements */}
           <div className="mt-6 pt-4 border-t">
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">Working Terms</h3>
-            {person.working_terms_type ? (
-              <div className="text-sm">
-                <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold text-white ${
-                  { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[person.working_terms_type] || 'bg-gray-500'
-                }`}>{
-                  { usual: 'USUAL', flex_balance: 'FLEX BALANCE', no_deposit: 'NO DEPOSIT', credit: 'CREDIT', custom: 'CUSTOM' }[person.working_terms_type] || person.working_terms_type
-                }</span>
-                <span className="ml-2 text-gray-500 text-xs">{
-                  { usual: '25% deposit, full balance before hire', flex_balance: '25% deposit, flexible balance', no_deposit: 'Balance by start of hire', credit: 'No deposit, flexible balance', custom: '' }[person.working_terms_type]
-                }</span>
-                {(person.working_terms_type === 'flex_balance' || person.working_terms_type === 'credit') && person.working_terms_credit_days && (
-                  <span className="ml-1 text-gray-500 text-xs">({person.working_terms_credit_days} day credit)</span>
-                )}
-                {person.working_terms_notes && <p className="mt-1 text-gray-500 text-xs">{person.working_terms_notes}</p>}
-              </div>
-            ) : (
-              <p className="text-sm text-gray-400 italic">Not set — edit to configure</p>
-            )}
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Endorsements</h3>
+            <EndorsementsPanel personId={id!} />
           </div>
 
           {/* Internal Notes */}

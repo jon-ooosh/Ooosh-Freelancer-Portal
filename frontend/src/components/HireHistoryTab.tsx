@@ -2,6 +2,9 @@ import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { jobStatusDisplay } from '../lib/pipelineStatus';
+import { stripOptionSuffix, ALTERNATIVE_QUOTE_LOST_REASON } from '../lib/quoteOptions';
+import { OPTION_COPY } from '../lib/optionCopy';
+import OptionTag from './OptionTag';
 
 const RETRO_COLOURS: Record<string, { bg: string; text: string; label: string }> = {
   great: { bg: 'bg-green-100', text: 'text-green-700', label: 'Great' },
@@ -48,6 +51,9 @@ interface HireHistoryJob {
   retro_rating: string | null;
   retro_notes: string | null;
   retro_follow_up?: string | null;
+  // Quote options (spec §6.5): set on a job in an options group → "Option 2 of 3".
+  option_no?: number | null;
+  option_count?: number | null;
 }
 
 interface Stats {
@@ -217,13 +223,23 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
     const statusDisplay = getStatusDisplay(job);
     const retro = job.retro_rating ? RETRO_COLOURS[job.retro_rating] : null;
     const rowRole = job.link_role || job.role || '';
+    // An option the client didn't pick: shown, but greyed — it isn't lost business (spec §6.5).
+    const altLost = job.lost_reason === ALTERNATIVE_QUOTE_LOST_REASON;
+    const tagged = !!(job.option_no && job.option_count);
     return (
-      <tr key={`${job.id}-${rowRole}`} className="hover:bg-gray-50 transition-colors">
+      <tr
+        key={`${job.id}-${rowRole}`}
+        className={`hover:bg-gray-50 transition-colors ${altLost ? 'opacity-60' : ''}`}
+        title={altLost ? OPTION_COPY.tagAltLostTitle : undefined}
+      >
         <td className="px-4 py-3">
           <Link to={`/jobs/${job.id}`} className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700 hover:underline">
             {job.hh_job_number ? `J-${job.hh_job_number}` : 'NEW'}
           </Link>
-          <div className="text-sm text-gray-900 truncate max-w-[200px]">{job.job_name || 'Untitled'}</div>
+          <div className="text-sm text-gray-900 truncate max-w-[200px]">
+            {(tagged ? stripOptionSuffix(job.job_name) : job.job_name) || 'Untitled'}
+          </div>
+          <OptionTag optionNo={job.option_no} optionCount={job.option_count} />
           {job.link_type === 'crew' && (
             <span className="text-[10px] text-indigo-600 font-medium">Crew</span>
           )}

@@ -279,6 +279,8 @@ export async function processCollectionSubmission(
               briefingItems: [],
               signatureBase64,
               isCheckIn: false,
+              isCollection: true,
+              bookOutNotes: damageNotes || undefined,
             },
             [{ driverName, email: clientEmail || null }],
           ),

@@ -7,11 +7,14 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // GET /api/system-settings — list all (optionally filtered by category)
 router.get('/', async (req: AuthRequest, res: Response) => {
@@ -49,6 +52,13 @@ router.put('/', authorize('admin', 'manager'), validate(updateSchema), async (re
       );
     }
     invalidateSystemSettingsCache();
+    // "PIN changed today" — the admins' "Rotate the warehouse PIN" bells are
+    // done once the date is inside the rotation period (bell-rules.ts). Lazy
+    // import: this router is loaded by services the rules module must not pull in.
+    if ('kiosk_pin_rotated_at' in settings) {
+      const { retireDoneBells } = await import('../services/notification-resolve');
+      await retireDoneBells('kiosk_pin_rotation');
+    }
     res.json({ success: true });
   } catch (error) {
     console.error('[system-settings] update error:', error);

@@ -345,6 +345,12 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
       }
     }
 
+    // The fixed "setup work on site" premium: the freelancer is paid it above,
+    // so the client pays it too, plus the expense markup (jon, Oct 2026). Until
+    // then it reached the freelancer's fee but never the client's charge, so
+    // every hourly quote with a premium undercharged by at least the premium.
+    clientChargeLabour += setupPremium * (1 + settings.expense_markup_percent / 100);
+
     // Admin cost — added to client labour charge and to our cost
     adminCost = totalHours * settings.admin_cost_per_hour;
     clientChargeLabour += adminCost;
@@ -418,20 +424,27 @@ function round2(n: number): number {
 
 /**
  * Apply crew-count multiplication to a calculated result.
- * Per-crew costs (labour, fee, total, margin) scale by headcount; fuel /
- * transport / expenses are accounted for once at the trip level and do not.
+ * Per-crew costs (labour, fee, total, margin) scale by headcount. FUEL does
+ * not: the crew share one van, so one tank (jon, Oct 2026; until then the
+ * totals multiplied it with everything else, so a crew of three paid for the
+ * van's fuel three times). Train fares, hotels and other expenses stay per
+ * person in the totals. The itemised fuel / expense / transport fields are one
+ * trip's / one person's figures, as before.
  *
  * Used by BOTH the backend save path and the frontend display so a multi-crew
  * quote shows and saves the same figure.
  */
 export function applyCrewMultiplier(single: CalculatedCosts, crewCount: number): CalculatedCosts {
   if (crewCount <= 1) return single;
-  const scaledClientRounded = Math.round(single.clientChargeTotalRounded * crewCount);
-  const scaledOurCost = round2(single.ourTotalCost * crewCount);
+  // What multiplying the whole total would have added for fuel the crew share.
+  const sharedFuelCharge = single.clientChargeFuel * (crewCount - 1);
+  const sharedFuelCost = single.expectedFuelCost * (crewCount - 1);
+  const scaledClientRounded = Math.round(single.clientChargeTotalRounded * crewCount - sharedFuelCharge);
+  const scaledOurCost = round2(single.ourTotalCost * crewCount - sharedFuelCost);
   return {
     ...single,
     clientChargeLabour: round2(single.clientChargeLabour * crewCount),
-    clientChargeTotal: round2(single.clientChargeTotal * crewCount),
+    clientChargeTotal: round2(single.clientChargeTotal * crewCount - sharedFuelCharge),
     clientChargeTotalRounded: scaledClientRounded,
     freelancerFee: round2(single.freelancerFee * crewCount),
     freelancerFeeRounded: Math.ceil((single.freelancerFeeRounded * crewCount) / 5) * 5,

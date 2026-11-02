@@ -14,13 +14,23 @@ import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } 
 import { uploadToR2 } from '../config/r2';
 import { fetchLogo } from '../services/hire-form-pdf';
 import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../services/driver-pii';
-import { persistableWindows, touchesValidity, backfillFromDates, isUkLicence } from '../services/driver-validity';
+import { persistableWindows, touchesValidity, backfillFromDates, isUkLicence, todayYmd } from '../services/driver-validity';
+import { computeLicenceExcess } from '../services/licence-excess';
+import { sendReferralAlert } from '../services/referral-alert';
 import { sendIdentityReviewAlert } from '../services/identity-review';
 import { computeVerificationState } from '../services/driver-verification-state';
 import { unsignedJobNumberSql, findUnsignedDriversForJob } from '../services/driver-hire-progress';
+import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { reconcileJobExcessTopN } from '../services/excess-topn';
+import { applyAccountAutoCover } from '../services/hh-requirement-derivation';
+import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // ── Schemas ──
 
@@ -82,6 +92,10 @@ const createDriverSchema = z.object({
   has_accidents: z.boolean().optional().default(false),
   has_insurance_issues: z.boolean().optional().default(false),
   has_driving_ban: z.boolean().optional().default(false),
+  // Migration 298. Nullable with no default: NULL means "never asked".
+  has_recent_convictions: z.boolean().nullable().optional(),
+  has_fault_claims: z.boolean().nullable().optional(),
+  address_mismatch: z.boolean().nullable().optional(),
   additional_details: z.string().nullable().optional(),
   insurance_status: z.enum(['Approved', 'Referral', 'Failed']).nullable().optional(),
   overall_status: z.string().max(50).nullable().optional(),
@@ -476,6 +490,22 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
   }
 });
 
+// Normalise before comparing, or nothing ever compares equal: pg returns
+// DATE columns as JS Date objects (String() => "Wed May 28 2026 01:00:00
+// GMT+0100…") while the form posts "2026-05-28". Every date field therefore
+// logged as "changed" on every save, burying the one field staff actually
+// touched in a wall of noise — which is exactly what made the job 16291
+// audit trail hard to read. Shared by every write here that keeps an audit
+// trail, so they agree on what "changed" means.
+const normaliseForCompare = (v: unknown): string => {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
+  const str = String(v);
+  // "2026-05-28T00:00:00.000Z" and "2026-05-28" are the same day.
+  const iso = str.match(/^(\d{4}-\d{2}-\d{2})T/);
+  return iso ? iso[1] : str;
+};
+
 // ── GET /api/drivers/:id/audit-log — Edit history for a driver ──
 
 router.get('/:id/audit-log', async (req: AuthRequest, res: Response) => {
@@ -484,9 +514,12 @@ router.get('/:id/audit-log', async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT al.id, al.user_id, al.action, al.previous_values, al.new_values, al.created_at,
         u.email AS user_email,
-        COALESCE(u.first_name || ' ' || u.last_name, u.email) AS user_name
+        COALESCE(NULLIF(${DISPLAY_NAME_SQL}, ' '), u.email) AS user_name
       FROM audit_log al
       LEFT JOIN users u ON u.id::text = al.user_id
+      -- users carries no name — it points at people (this read u.first_name and
+      -- failed on every call, so Edit history was always empty).
+      LEFT JOIN people p ON p.id = u.person_id
       WHERE al.entity_type = 'driver' AND al.entity_id = $1
       ORDER BY al.created_at DESC
       LIMIT 100`,
@@ -543,21 +576,6 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
     // Track what actually changed for audit
     const changedFields: Record<string, { old: unknown; new: unknown }> = {};
 
-    // Normalise before comparing, or nothing ever compares equal: pg returns
-    // DATE columns as JS Date objects (String() => "Wed May 28 2026 01:00:00
-    // GMT+0100…") while the form posts "2026-05-28". Every date field therefore
-    // logged as "changed" on every save, burying the one field staff actually
-    // touched in a wall of noise — which is exactly what made the job 16291
-    // audit trail hard to read.
-    const normaliseForCompare = (v: unknown): string => {
-      if (v === null || v === undefined) return '';
-      if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
-      const str = String(v);
-      // "2026-05-28T00:00:00.000Z" and "2026-05-28" are the same day.
-      const iso = str.match(/^(\d{4}-\d{2}-\d{2})T/);
-      return iso ? iso[1] : str;
-    };
-
     for (const [key, value] of Object.entries(fields)) {
       const prev = previousValues[key];
       const newVal = value ?? null;
@@ -603,6 +621,10 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
 
     // Dual-write encrypted PII companions for whichever PII fields changed.
     await encryptDriverPiiInto({ query }, String(id), updates);
+    // An edit can settle a referral or record a check date — the rules decide
+    // (bell-rules.ts); a no-op otherwise. Never throws.
+    await retireDoneBells('referral_needed', String(id));
+    await retireDoneBells('dva_check_needed', String(id));
     const updated = decryptDriverRow(result.rows[0]);
     res.json({ data: updated });
   } catch (error) {
@@ -770,21 +792,240 @@ router.patch(
         params,
       );
 
-      await query(
-        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
-         VALUES ($1, 'driver', $2, 'update_document_dates', $3, $4)`,
-        [
-          req.user!.id, id,
-          JSON.stringify(Object.fromEntries(
-            Object.keys(fields).map(k => [k, previous.rows[0][k] ?? null]))),
-          JSON.stringify(fields),
-        ],
+      // Log only what actually moved. Every save re-derives all five
+      // *_valid_until windows, so logging every written column put
+      // "DVLA Valid Until: empty → empty" (×5) on each entry and buried the
+      // one date staff actually changed (Nick Harris, job 16535, Oct 2026).
+      const changed = Object.keys(fields).filter(
+        k => normaliseForCompare(previous.rows[0][k]) !== normaliseForCompare(fields[k]),
       );
+      if (changed.length > 0) {
+        await query(
+          `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+           VALUES ($1, 'driver', $2, 'update_document_dates', $3, $4)`,
+          [
+            req.user!.id, id,
+            JSON.stringify(Object.fromEntries(
+              changed.map(k => [k, previous.rows[0][k] ?? null]))),
+            JSON.stringify(Object.fromEntries(changed.map(k => [k, fields[k]]))),
+          ],
+        );
+      }
 
       res.json({ data: decryptDriverRow(result.rows[0]) });
     } catch (error) {
       console.error('[drivers] Document dates error:', error);
       res.status(500).json({ error: 'Failed to update document dates' });
+    }
+  },
+);
+
+// ── POST /api/drivers/licence-excess-preview — price a record check, write nothing ──
+//
+// Exists so the staff panel can show the excess BEFORE saving without holding a
+// copy of the rule. The alternative was mirroring the Markerstudy tiers in the
+// browser, which would have made a FOURTH live definition of a figure we charge
+// customers (see services/licence-excess.ts for the three that already exist).
+//
+// Read-only and driver-independent — it prices a points shape, not a person.
+// Deliberately not a GET: the endorsement list is structured, and a figure we
+// charge has no business sitting in a URL or a browser history.
+const licenceExcessPreviewSchema = z
+  .object({
+    points: z.number().int().min(0).max(100),
+    endorsements: z.array(endorsementSchema).optional().default([]),
+    has_disqualification: z.boolean().optional().default(false),
+  })
+  .strict();
+
+router.post(
+  '/licence-excess-preview',
+  authorize(...STAFF_ROLES),
+  validate(licenceExcessPreviewSchema),
+  async (req: AuthRequest, res: Response) => {
+    const body = req.body as {
+      points: number;
+      endorsements: { code: string; points: number }[];
+      has_disqualification: boolean;
+    };
+    res.json({
+      data: computeLicenceExcess({
+        points: body.points,
+        endorsements: body.endorsements,
+        hasDisqualification: body.has_disqualification,
+      }),
+    });
+  },
+);
+
+// ── POST /api/drivers/:id/licence-record-check — record a licence record check ──
+//
+// ONE panel for both regimes, because they are the same check with different
+// plumbing:
+//
+//   GB (DVLA)  the driver generates a share code at viewdrivingrecord.service
+//              .gov.uk, uploads the summary, and the hire-form app reads it.
+//              This endpoint is the MANUAL path for when that didn't happen —
+//              a staff re-check, or a driver who emailed the PDF instead.
+//   NI (DVA)   there is no GB share code. The driver creates a check code at
+//              nidirect, a member of staff runs the lookup, and this is the
+//              ONLY way the result can ever be recorded.
+//
+// WHY IT ISN'T JUST A DATE
+// ------------------------
+// `PATCH /:id/document-dates` can already set `dvla_check_date`, and that is
+// exactly the hole this closes. A check date on its own opens the 30-day
+// window, satisfies the hire-form router and releases the driver to signature
+// — while `licence_points` stays at 0 and the excess stays at the £1,200 floor.
+// We'd be insuring them on an assumed clean licence. Points, offences and the
+// excess they attract arrive together here, or not at all.
+//
+// RBAC: STAFF_ROLES, deliberately, matching the upload and the date. Whoever
+// has the document in front of them must be able to finish the job — the
+// manager-tier split on `PUT /:id` is what left dates unrecorded for someone
+// else to do later. The excess is DERIVED here, never typed, so this widens
+// who can RECORD a licence record check without widening who can choose what
+// we charge: `PATCH /:id/calculated-excess` stays admin/manager as the override.
+const licenceRecordCheckSchema = z
+  .object({
+    // Which register the check was run against. Recorded in the audit basis so
+    // a DVA check is never mistaken for a GB one later.
+    source: z.enum(['DVLA', 'DVA']),
+    // The date the check was RUN — the "Date summary generated" on the
+    // document, not today. A FROM date, per services/driver-validity.ts.
+    //
+    // Format-checked here so a malformed date is a 400 rather than a Postgres
+    // 500, and refused if it's in the future: the window is check_date + 30, so
+    // a fat-fingered year would silently hand the driver months of validity on
+    // a 30-day check.
+    check_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'check_date must be YYYY-MM-DD')
+      .refine(d => d <= todayYmd(), 'check_date cannot be in the future'),
+    check_code: z.string().max(50).nullable().optional(),
+    points: z.number().int().min(0).max(100),
+    endorsements: z.array(endorsementSchema).optional().default([]),
+    has_disqualification: z.boolean().optional().default(false),
+    notes: z.string().max(500).optional().default(''),
+  })
+  .strict();
+
+router.post(
+  '/:id/licence-record-check',
+  authorize(...STAFF_ROLES),
+  validate(licenceRecordCheckSchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { id } = req.params;
+      const body = req.body as {
+        source: 'DVLA' | 'DVA';
+        check_date: string;
+        check_code?: string | null;
+        points: number;
+        endorsements: { code: string; points: number; date?: string | null; expiry?: string | null }[];
+        has_disqualification: boolean;
+        notes: string;
+      };
+
+      const previous = await query('SELECT * FROM drivers WHERE id = $1', [id]);
+      if (previous.rows.length === 0) {
+        res.status(404).json({ error: 'Driver not found' });
+        return;
+      }
+      const driver = previous.rows[0];
+
+      const excess = computeLicenceExcess({
+        points: body.points,
+        endorsements: body.endorsements,
+        hasDisqualification: body.has_disqualification,
+      });
+
+      const fields: Record<string, unknown> = {
+        dvla_check_date: body.check_date,
+        // Trimmed but NOT upper-cased. A DVA check code is mixed case
+        // ("BML1s646" — Declan Haughian / 16286); normalising the case would
+        // make a recorded code useless for re-running the lookup.
+        dvla_check_code: body.check_code?.trim() || null,
+        licence_points: body.points,
+        // JSONB — node-postgres sends a JS array as a Postgres ARRAY literal,
+        // which JSONB rejects. An EMPTY array survives, so skipping this breaks
+        // only for drivers who actually have endorsements.
+        licence_endorsements: JSON.stringify(body.endorsements),
+      };
+
+      if (excess.requiresReferral) {
+        // `requires_referral` only; `referral_status` stays NULL so this lands
+        // as the red "nobody has acted" to-do. The hire-form app setting it to
+        // 'pending' itself is the Meadham / 16330 mistake, and a staff write
+        // doing the same thing would read as though the insurer had been
+        // contacted when they haven't.
+        fields.requires_referral = true;
+        fields.referral_notes = [driver.referral_notes, ...excess.reasons]
+          .filter(Boolean).join(' | ');
+        // The excess is deliberately LEFT ALONE on a referral. We do not quote
+        // a figure on a record the insurer hasn't seen, and zeroing or flooring
+        // it would silently move money. The insurer's answer comes back through
+        // `adjusted_excess` on POST /:id/resolve-referral.
+      } else if (driver.excess_locked) {
+        // Staff have pinned this driver's liability by hand. Recompute, show
+        // the figure in the response, change nothing.
+      } else {
+        fields.calculated_excess_amount = excess.amount;
+        fields.calculated_excess_basis = body.notes
+          ? `${excess.basis} (${body.source} check ${body.check_date}: ${body.notes})`
+          : `${excess.basis} (${body.source} check ${body.check_date})`;
+      }
+
+      // A clean check NEVER clears an existing referral. The flag may be up for
+      // something this check cannot see — a declared accident, a medical
+      // condition, an insurer decision — so clearing it here would quietly
+      // release a driver nobody had approved. Only resolve-referral clears it.
+
+      // The derived *_valid_until columns follow the FROM date. Never write one
+      // directly — see services/driver-validity.ts.
+      Object.assign(fields, persistableWindows({ ...driver, ...fields }));
+
+      const params: unknown[] = [];
+      const setClauses = Object.entries(fields).map(([col, value]) => {
+        params.push(value);
+        return `${col} = $${params.length}`;
+      });
+      setClauses.push('updated_at = NOW()');
+      params.push(id);
+
+      const result = await query(
+        `UPDATE drivers SET ${setClauses.join(', ')} WHERE id = $${params.length} RETURNING *`,
+        params,
+      );
+
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+         VALUES ($1, 'driver', $2, 'licence_record_check', $3, $4)`,
+        [
+          req.user!.id, id,
+          JSON.stringify(Object.fromEntries(
+            Object.keys(fields).map(k => [k, driver[k] ?? null]))),
+          JSON.stringify({ ...fields, _source: body.source, _excess: excess }),
+        ],
+      ).catch(err => console.error('[drivers] licence-record-check audit failed:', err));
+
+      // Best-effort, and deduped by its own atomic claim — never let an alert
+      // failure roll back a recorded check.
+      if (excess.requiresReferral) {
+        sendReferralAlert(id as string, { referralReason: excess.reasons.join('; ') })
+          .catch(err => console.error('[drivers] referral alert failed:', err));
+      }
+
+      console.log(
+        `[drivers] ${body.source} record check recorded for ${id} by ${req.user?.email} — ` +
+        `${body.points} pts, ${body.endorsements.length} offence(s), ` +
+        (excess.requiresReferral ? 'REFERRAL' : `£${excess.amount}`),
+      );
+
+      // A check is on file: "NI licence check needed" is done (bell-rules.ts).
+      await retireDoneBells('dva_check_needed', String(id));
+      res.json({ data: decryptDriverRow(result.rows[0]), excess });
+    } catch (error) {
+      console.error('[drivers] Licence record check error:', error);
+      res.status(500).json({ error: 'Failed to record licence record check' });
     }
   },
 );
@@ -892,6 +1133,10 @@ const resolveReferralSchema = z.object({
   //              approved but recorded distinctly for audit clarity.
   outcome: z.enum(['approved', 'declined', 'waived']),
   notes: z.string().optional().default(''),
+  // Date the driver was referred to the insurer (YYYY-MM-DD). Required for
+  // approved/declined unless "Mark as Referred" already stamped one — see the
+  // check in the handler. Not used for waived (no referral happened).
+  referral_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   // Optional adjusted excess amount (insurer may approve with higher excess)
   adjusted_excess: z.number().min(0).nullable().optional(),
   // Optional: extend specific validity dates on approval / waive
@@ -907,7 +1152,7 @@ const resolveReferralSchema = z.object({
 router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(resolveReferralSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { outcome, notes, adjusted_excess, extend_dates } = req.body;
+    const { outcome, notes, referral_date, adjusted_excess, extend_dates } = req.body;
 
     // Fetch current driver
     const current = await query('SELECT * FROM drivers WHERE id = $1', [id]);
@@ -919,6 +1164,18 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
 
     if (!driver.requires_referral) {
       res.status(400).json({ error: 'Driver does not have a pending referral' });
+      return;
+    }
+
+    // An insurer outcome needs the date we referred. Staff who went straight
+    // to "Resolve" (skipping "Mark as Referred") left referral_date NULL with
+    // no way to add it afterwards, so an approval carried no record of when
+    // the insurer was asked (Tyler Meadham, Oct 2026). Record-keeping only —
+    // nothing gates on this date — but an approval is STANDING for the driver,
+    // so it is the evidence behind every later hire.
+    const referredViaInsurer = outcome === 'approved' || outcome === 'declined';
+    if (referredViaInsurer && !referral_date && !driver.referral_date) {
+      res.status(400).json({ error: 'Enter the date the driver was referred to the insurer.' });
       return;
     }
 
@@ -938,6 +1195,9 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
       referral_notes: [driver.referral_notes, notes].filter(Boolean).join(' | '),
       insurance_status: cleared ? 'Approved' : 'Failed',
     };
+    if (referredViaInsurer && referral_date) {
+      updates.referral_date = referral_date;
+    }
     if (cleared) {
       updates.requires_referral = false;
     }
@@ -978,13 +1238,56 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
 
     // Update excess records if adjusted_excess provided
     if (adjusted_excess != null) {
-      await query(
+      const touched = await query(
         `UPDATE job_excess SET excess_amount_required = $1, excess_calculation_basis = $2, updated_at = NOW()
          WHERE assignment_id IN (
            SELECT id FROM vehicle_hire_assignments WHERE driver_id = $3 AND status IN ('soft', 'confirmed', 'booked_out', 'active')
-         )`,
+         )
+         RETURNING job_id`,
         [adjusted_excess, `Referral ${outcome}: ${notes || 'insurer adjustment'}`, id]
       );
+
+      // Re-check who carries each hire's excess. The figure above lands on
+      // every one of this driver's records, including one marked Covered
+      // (not_required) because another driver on the van carries the charge —
+      // and nothing re-ranked afterwards, so the hire kept charging the other
+      // driver's lower figure (job 16564, Oct 2026: Turner's £1,500 sat on his
+      // Covered record while the hire still asked £1,200 on Boyd's, until staff
+      // raised Boyd's by hand). The same top-N the hire-form POST runs, then
+      // account auto-cover (as that POST does), then the excess card re-derived
+      // from the new amounts. Best-effort — never fails the referral save.
+      //
+      // When a record already holding money stops the re-rank (`blocked`),
+      // change nothing: the real run would zero the Covered record and erase
+      // the insurer's figure, which is what the Money tab's shortfall warning
+      // reads to tell staff a top-up is due.
+      const jobIds = [...new Set(touched.rows.map((r: { job_id: string | null }) => r.job_id).filter(Boolean))] as string[];
+      for (const jobId of jobIds) {
+        try {
+          const preview = await reconcileJobExcessTopN(query, jobId, { dryRun: true });
+          if (preview.blocked.length > 0) {
+            console.warn(
+              `[drivers] Referral excess on job ${jobId} not re-ranked — collected money holds the slot; ` +
+              `hire should total £${preview.correctTotal}, chargeable records total £${preview.chargeableTotal}`,
+            );
+          } else {
+            const topn = await reconcileJobExcessTopN(query, jobId);
+            if (topn.changed) console.log(`[drivers] Top-N reconciled after referral (job ${jobId}): ${topn.summary}`);
+          }
+        } catch (topnErr) {
+          console.error(`[drivers] reconcileJobExcessTopN after referral failed for job ${jobId} (non-fatal):`, topnErr);
+        }
+        try {
+          await applyAccountAutoCover(query, jobId);
+        } catch (coverErr) {
+          console.error(`[drivers] applyAccountAutoCover after referral failed for job ${jobId} (non-fatal):`, coverErr);
+        }
+        try {
+          await syncExcessRequirementStatus(jobId);
+        } catch (syncErr) {
+          console.error(`[drivers] syncExcessRequirementStatus after referral failed for job ${jobId} (non-fatal):`, syncErr);
+        }
+      }
     }
 
     // Audit log
@@ -1003,6 +1306,11 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
     }
 
     console.log(`[drivers] Referral resolved: driver=${id}, outcome=${outcome}`);
+    // The referral has an outcome (or an extended check date): the driver's
+    // "Referral needed" / "NI licence check needed" bells are done if the
+    // rules say so (bell-rules.ts). Never throws.
+    await retireDoneBells('referral_needed', String(id));
+    await retireDoneBells('dva_check_needed', String(id));
     res.json({ data: result.rows[0] });
   } catch (error) {
     console.error('[drivers] Resolve referral error:', error);
@@ -1057,6 +1365,8 @@ router.post('/:id/snapshot', authorize('admin', 'manager'), async (req: AuthRequ
       hasAccidents: d.has_accidents || false,
       hasInsuranceIssues: d.has_insurance_issues || false,
       hasDrivingBan: d.has_driving_ban || false,
+      hasRecentConvictions: d.has_recent_convictions ?? null,
+      hasFaultClaims: d.has_fault_claims ?? null,
       additionalDetails: d.additional_details || '',
       jobId: hirehop_job_id ? String(hirehop_job_id) : 'N/A',
       documents,
@@ -1162,6 +1472,8 @@ router.post('/:id/generate-snapshot', authenticate, async (req: AuthRequest, res
       hasAccidents: driver.has_accidents || false,
       hasInsuranceIssues: driver.has_insurance_issues || false,
       hasDrivingBan: driver.has_driving_ban || false,
+      hasRecentConvictions: driver.has_recent_convictions ?? null,
+      hasFaultClaims: driver.has_fault_claims ?? null,
       additionalDetails: driver.additional_details || '',
       jobId: driver.linked_jobs || 'N/A',
       documents,

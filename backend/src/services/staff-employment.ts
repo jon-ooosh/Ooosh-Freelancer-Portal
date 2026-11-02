@@ -19,6 +19,8 @@
 
 import { query, getClient } from '../config/database';
 import { addDaysYmd, shiftMinutes, DATE_RE } from './staff-day-status';
+import { ukToday } from './uk-date';
+import { retireDoneBells } from './notification-resolve';
 
 /**
  * Who may manage staff records. Admin only for now (jon, Sep 2026) — but named
@@ -34,6 +36,8 @@ export interface PatternDayInput {
   startTime?: string | null;  // 'HH:MM'
   endTime?: string | null;
   breakMinutes?: number;
+  /** A regular agreed working-from-home day (spec §19, mig 269). */
+  atHome?: boolean;
 }
 
 export interface EmploymentInput {
@@ -114,6 +118,8 @@ export async function upsertEmployment(personId: string, input: EmploymentInput,
       personParams
     );
   }
+  // Left? No review is owed (bell-rules.ts review_due); a no-op otherwise.
+  await retireDoneBells('review_due', personId);
   return r.rows[0];
 }
 
@@ -263,9 +269,9 @@ export async function createPattern(
     for (const d of rows) {
       await client.query(
         `INSERT INTO staff_working_pattern_days
-           (pattern_id, cycle_week, weekday, is_working, start_time, end_time, break_minutes, minutes)
-         VALUES ($1, $2, $3, $4, $5::time, $6::time, $7, $8)`,
-        [patternId, d.cycleWeek, d.weekday, d.isWorking, d.startTime, d.endTime, d.breakMinutes, d.minutes]
+           (pattern_id, cycle_week, weekday, is_working, start_time, end_time, break_minutes, minutes, at_home)
+         VALUES ($1, $2, $3, $4, $5::time, $6::time, $7, $8, $9)`,
+        [patternId, d.cycleWeek, d.weekday, d.isWorking, d.startTime, d.endTime, d.breakMinutes, d.minutes, d.atHome]
       );
     }
 
@@ -294,7 +300,7 @@ export function normalisePatternDay(d: PatternDayInput, cycleWeeks = 1) {
     throw new Error(`cycleWeek ${cycleWeek} outside a ${cycleWeeks}-week cycle`);
   }
   if (!d.isWorking) {
-    return { cycleWeek, weekday: d.weekday, isWorking: false, startTime: null, endTime: null, breakMinutes: 0, minutes: 0 };
+    return { cycleWeek, weekday: d.weekday, isWorking: false, startTime: null, endTime: null, breakMinutes: 0, minutes: 0, atHome: false };
   }
   if (!d.startTime || !d.endTime) throw new Error('A working day needs both a start and an end time');
 
@@ -310,6 +316,7 @@ export function normalisePatternDay(d: PatternDayInput, cycleWeeks = 1) {
   return {
     cycleWeek, weekday: d.weekday, isWorking: true,
     startTime: d.startTime, endTime: d.endTime, breakMinutes, minutes,
+    atHome: d.atHome === true,
   };
 }
 
@@ -327,7 +334,7 @@ export async function listPatterns(personId: string) {
   const days = await query(
     `SELECT pattern_id, cycle_week, weekday, is_working,
             start_time::text AS start_time, end_time::text AS end_time,
-            break_minutes, minutes
+            break_minutes, minutes, at_home
        FROM staff_working_pattern_days
       WHERE pattern_id = ANY($1::uuid[])
       ORDER BY cycle_week, weekday`,
@@ -533,6 +540,8 @@ export async function upsertReview(
     'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
     [personId]
   );
+  // Booked or recorded — "A staff review is due" is done (bell-rules.ts).
+  await retireDoneBells('review_due', personId);
 
   // Tell the person, with the prep questions (spec §5.2). Once per review —
   // sendReviewInvite owns the invited_at stamp, so editing a note later does
@@ -582,7 +591,7 @@ export async function recordReviewOutcome(
   let salaryId: string | null = null;
   if (input.newSalary != null) {
     if (!(input.newSalary >= 0)) throw new Error('A salary cannot be negative');
-    const effective = input.salaryEffectiveFrom || new Date().toISOString().slice(0, 10);
+    const effective = input.salaryEffectiveFrom || ukToday();
     if (!DATE_RE.test(effective)) throw new Error('salaryEffectiveFrom must be YYYY-MM-DD');
     const sal = await query(
       `INSERT INTO staff_salary_history (person_id, annual_amount, effective_from, reason, created_by)
@@ -602,6 +611,10 @@ export async function recordReviewOutcome(
             outcome        = COALESCE($5, outcome),
             salary_history_id = COALESCE($6, salary_history_id),
             next_review_due = (CURRENT_DATE + ($7 || ' months')::interval)::date,
+            -- An unsent prep draft (mig 262) dies with the meeting: it was
+            -- never shared, and it is private writing we have no reason to keep.
+            self_assessment_draft = NULL,
+            self_assessment_draft_saved_at = NULL,
             updated_at = NOW()
       WHERE id = $1 AND person_id = $2
       RETURNING *`,
@@ -614,6 +627,8 @@ export async function recordReviewOutcome(
     'UPDATE staff_employment SET review_due_chased_at = NULL WHERE person_id = $1',
     [personId]
   );
+  // Booked or recorded — "A staff review is due" is done (bell-rules.ts).
+  await retireDoneBells('review_due', personId);
 
   // The write-up, carrying the agreed summary, the actions and — the point of
   // deciding pay afterwards rather than in the room (§5.1) — the new figure.

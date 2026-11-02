@@ -20,6 +20,7 @@ import DriverDetailPage from './pages/DriverDetailPage';
 import TransportOpsPage from './pages/TransportOpsPage';
 import BacklinePage from './pages/BacklinePage';
 import BacklineMatcherPage from './pages/BacklineMatcherPage';
+import EndorsementsPage from './pages/EndorsementsPage';
 import CarnetsPage from './pages/CarnetsPage';
 import CarnetDetailPage from './pages/CarnetDetailPage';
 import RehearsalsPage from './pages/RehearsalsPage';
@@ -35,11 +36,12 @@ import StaffCalendarPage from './pages/StaffCalendarPage';
 import StaffAdminPage from './pages/StaffAdminPage';
 import StaffAbsencePage from './pages/StaffAbsencePage';
 import StaffDocumentsAdminPage from './pages/StaffDocumentsAdminPage';
-import StaffReceiptsPage from './pages/StaffReceiptsPage';
+import ReceiptCapturePage from './pages/ReceiptCapturePage';
 import LostCancelledPage from './pages/LostCancelledPage';
 import LeadsPage from './pages/LeadsPage';
 import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
+import FreelancerPrepShell from './pages/FreelancerPrepShell';
 import FreelancerCheckinShell from './pages/FreelancerCheckinShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
@@ -55,6 +57,7 @@ import HoldingReceiptPage from './pages/HoldingReceiptPage';
 import QuickActionsPage from './pages/QuickActionsPage';
 import MerchFormPage from './pages/MerchFormPage';
 import RackPlanPublicPage from './pages/RackPlanPublicPage';
+import VehicleForSalePage from './pages/VehicleForSalePage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
@@ -69,6 +72,7 @@ import { CheckInPage as StaffCheckInPage } from './modules/vehicles/pages/CheckI
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { sharedRefreshToken } from './services/api';
 import { getFreelancerSession, isFreelancerSessionActive } from './modules/vehicles/adapters/freelancer-session';
+import { getFreelancerPrepSession, isOnFreelancerPrepPage } from './modules/vehicles/adapters/freelancer-prep-session';
 import FreelancerDayRespondPage from './pages/FreelancerDayRespondPage';
 import MePage from './pages/MePage';
 
@@ -76,10 +80,28 @@ const staffBookOutQueryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 2, retry: 1 } },
 });
 
+/**
+ * Is this tab on the FREELANCER book-out / collection page? The same test
+ * BookOutEntry and CheckInEntry use to show the freelancer shell: one of the
+ * two hand-over paths, with the portal link in the address bar (it stays
+ * there) or a live freelancer session on this phone.
+ */
+function isOnFreelancerHandoverPage(): boolean {
+  try {
+    const { pathname, search } = window.location;
+    if (!/^\/vehicles\/(book-out|check-in)\/?$/.test(pathname)) return false;
+    return new URLSearchParams(search).has('freelancerToken') || isFreelancerSessionActive();
+  } catch {
+    return false;
+  }
+}
+
 // Initialize Vehicle Module with OP auth and API config.
 //
 // getAuthHeaders picks the right token for the current mode:
-//   - Staff logged in → staff JWT (even if a stale freelancer session is
+//   - Freelancer book-out / collection page → that page's freelancer JWT,
+//     never a staff login on the same phone (below)
+//   - Else staff logged in → staff JWT (even if a stale freelancer session is
 //     also present in localStorage; staff session wins)
 //   - Else freelancer session present → scoped freelancer JWT
 //   - Else → no auth header
@@ -89,8 +111,24 @@ const staffBookOutQueryClient = new QueryClient({
 initVehicleModule({
   apiBaseUrl: '/api/vehicles',
   getAuthHeaders: (): Record<string, string> => {
+    // On the freelancer hand-over page the PAGE decides, like the prep page:
+    // the screens run as the freelancer, so the server must hear the same.
+    // A staff login sent here turned a staff member's portal collection into
+    // a staff interim check-in: the van was recorded but the collection never
+    // marked done, so the portal job stayed open and was chased (HH 16044,
+    // Oct 2026). No session → no header: the shell sends them back to the link.
+    if (isOnFreelancerHandoverPage()) {
+      const handover = getFreelancerSession();
+      return handover ? { Authorization: `Bearer ${handover.token}` } : {};
+    }
     const staffToken = useAuthStore.getState().accessToken;
     if (staffToken) return { Authorization: `Bearer ${staffToken}` };
+    // On the freelancer prep page the PAGE decides which session is sent, so a
+    // book-out session left on the same phone never stands in for it (§21.6).
+    if (isOnFreelancerPrepPage()) {
+      const prep = getFreelancerPrepSession();
+      return prep ? { Authorization: `Bearer ${prep.token}` } : {};
+    }
     const freelancer = getFreelancerSession();
     if (freelancer) return { Authorization: `Bearer ${freelancer.token}` };
     return {};
@@ -99,8 +137,13 @@ initVehicleModule({
   sharedRefreshToken: async () => {
     // Freelancer sessions don't refresh — they're one-shot, 4h TTL.
     // If a freelancer's JWT 401s, they have to go back to the portal
-    // and get a new HMAC token. Skip the staff refresh path entirely.
-    if (!useAuthStore.getState().accessToken && isFreelancerSessionActive()) {
+    // and get a new HMAC token. Skip the staff refresh path entirely —
+    // on the hand-over page even when staff are logged in, or the retry
+    // would go out on the staff login (see getAuthHeaders).
+    if (
+      isOnFreelancerHandoverPage()
+      || (!useAuthStore.getState().accessToken && (isFreelancerSessionActive() || isOnFreelancerPrepPage()))
+    ) {
       throw new Error('Freelancer session expired');
     }
     return sharedRefreshToken();
@@ -130,8 +173,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
  */
 function BookOutEntry() {
   const [params] = useSearchParams();
+  const isStaff = useAuthStore((s) => s.isAuthenticated);
   const hasFreelancerToken = params.has('freelancerToken') || isFreelancerSessionActive();
-  if (hasFreelancerToken) {
+  // Not logged in to OP → the freelancer shell (its "no session" screen has a
+  // small staff-login link), never the staff login: a freelancer whose phone
+  // lost its session typed his portal password into it (HH 16714, Oct 2026).
+  if (hasFreelancerToken || !isStaff) {
     return <FreelancerBookoutShell />;
   }
   return (
@@ -154,8 +201,10 @@ function BookOutEntry() {
  */
 function CheckInEntry() {
   const [params] = useSearchParams();
+  const isStaff = useAuthStore((s) => s.isAuthenticated);
   const hasFreelancerToken = params.has('freelancerToken') || isFreelancerSessionActive();
-  if (hasFreelancerToken) {
+  // Not logged in to OP → freelancer shell, never the staff login (see BookOutEntry).
+  if (hasFreelancerToken || !isStaff) {
     return <FreelancerCheckinShell />;
   }
   return (
@@ -177,6 +226,8 @@ export default function App() {
       <Route path="/vehicles/book-out" element={<BookOutEntry />} />
       {/* Public freelancer check-in / collection entry — bypasses ProtectedRoute */}
       <Route path="/vehicles/check-in" element={<CheckInEntry />} />
+      {/* Public freelancer prep (a van-prep task from the portal) — own scoped session, no Layout */}
+      <Route path="/vehicles/freelancer-prep" element={<FreelancerPrepShell />} />
       {/* Public OOH parking-confirmation form — token-authenticated, no Layout wrapper */}
       <Route path="/return-parking/:token" element={<OohReturnParkingPage />} />
       {/* Public mobile receipt capture (QR handoff) — token-authenticated, no Layout wrapper */}
@@ -196,12 +247,18 @@ export default function App() {
       <Route path="/merch-form" element={<MerchFormPage />} />
       {/* Public view-only Rack Plan (tokenised, no login) */}
       <Route path="/rack/:token" element={<RackPlanPublicPage />} />
+      {/* Public van-for-sale page (tokenised, no login) — docs/VEHICLE-SALES-SPEC.md §6 */}
+      <Route path="/van/:token" element={<VehicleForSalePage />} />
       {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
       <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
+      {/* Phone receipt capture, one question per screen — staff JWT, full-screen, no Layout chrome */}
+      <Route path="/receipt" element={<ProtectedRoute><ReceiptCapturePage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
       <Route path="/warehouse" element={<WarehousePinPage />} />
       <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />
       <Route path="/warehouse/collections/:jobId" element={<WarehouseCollectionDetailPage />} />
+      {/* The kiosk till: the same PIN session on the shop routes (STAFF-LOGIN-SECURITY-SPEC §4). */}
+      <Route path="/warehouse/till" element={<ShopTillPage kiosk />} />
       <Route
         path="/*"
         element={
@@ -226,12 +283,15 @@ export default function App() {
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />
                 <Route path="/operations/backline" element={<BacklinePage />} />
+                <Route path="/operations/endorsements" element={<EndorsementsPage />} />
                 <Route path="/operations/backline-matcher" element={<BacklineMatcherPage />} />
                 <Route path="/operations/carnets" element={<CarnetsPage />} />
                 <Route path="/operations/carnets/:id" element={<CarnetDetailPage />} />
                 <Route path="/operations/rehearsals" element={<RehearsalsPage />} />
                 {/* Studio Sitters re-homed under the Rehearsals hub — keep old links working */}
                 <Route path="/operations/studio-sitters" element={<Navigate to="/operations/rehearsals?tab=sitters" replace />} />
+                {/* Old lock-up emails/bells linked here — keep them landing somewhere */}
+                <Route path="/studio-sitters" element={<Navigate to="/operations/rehearsals" replace />} />
                 <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
                 {/* The platform bug tracker was retired Sep 2026 (jon: no longer
                     used). Old emailed links land on the dashboard rather than a
@@ -274,7 +334,8 @@ export default function App() {
                 <Route path="/staff/absence" element={<StaffAbsencePage />} />
                 <Route path="/staff/documents" element={<Navigate to="/me?tab=documents" replace />} />
                 <Route path="/staff/documents/admin" element={<StaffDocumentsAdminPage />} />
-                <Route path="/my-receipts" element={<StaffReceiptsPage />} />
+                {/* Retired into the phone receipt page; old chaser emails and bells still land. */}
+                <Route path="/my-receipts" element={<Navigate to="/receipt" replace />} />
                 <Route path="/profile" element={<Navigate to="/me?tab=profile" replace />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />

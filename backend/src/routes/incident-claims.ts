@@ -27,13 +27,16 @@ import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r
 import {
   CLAIM_STAGES, CLAIM_OUTCOMES, STAGE_LABEL, NOTIFIED_VIA, SHARED_BY_DEFAULT,
   createClaimFromIssue, logClaimEvent, notifyClaimFollowers, claimLabel, notifyClaimMentions,
-  nextWorkingDay, ukDatePlus, stageNeedsCheckDate, getDefaultClaimWatchers,
+  nextWorkingDay, ukDatePlus, stageNeedsCheckDate, getDefaultClaimWatchers, retireClaimBells,
 } from '../services/incident-claims';
 import {
   logIssueEvent, getDefaultVehicleIssueWatchers, notifyIssueRecipients,
 } from '../services/job-issues';
 import { estimateVehicleValue } from '../services/vehicle-value';
-import { resolveOutlineType } from '../services/claim-form-fields';
+import { notifyVehicleSaleOfIssue } from '../services/vehicle-sales';
+import { resolveOutlineType, CLAIM_SECTIONS } from '../services/claim-form-fields';
+import { getRouteForReg } from '../services/traccar-server';
+import { incidentWindow, saveGpsTrace, csvToPoints, MAX_WINDOW_HOURS } from '../services/claim-gps';
 import { createAndSendLink, sendLinkEmail, driversOnVan, saveDamageMarks, saveSketch } from '../services/claim-links';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
 
@@ -111,7 +114,7 @@ const LIST_SELECT = `
   c.incident_at, c.incident_time_text, c.incident_location, c.notified_on, c.notified_via,
   c.broker_ref, c.insurer_ref, c.broker_sent_at,
   c.third_party_claim, c.liability_dispute,
-  c.owner_user_id, c.next_check_on,
+  c.owner_user_id, c.next_check_on, c.chase_level, c.chase_paused_at,
   c.created_at, c.updated_at,
   j.job_name, j.client_name,
   d.full_name AS driver_name,
@@ -208,7 +211,9 @@ router.post('/out-of-the-blue', validate(outOfTheBlueSchema), async (req: AuthRe
     await logIssueEvent(issueId, userId, 'created', body.summary, {
       category: 'dispute', severity: 'normal', source_module: 'manual', alleged_date: body.alleged_date,
     });
-    await notifyIssueRecipients(issueId, userId, 'normal', `New issue: ${body.summary.slice(0, 80)}`, 'dispute — third-party claim');
+    await notifyIssueRecipients(issueId, userId, 'normal', `New issue: ${body.summary.slice(0, 80)}`, 'dispute — third-party claim',
+      { resolveKey: 'problem_open' });
+    await notifyVehicleSaleOfIssue(issueId, userId);
     if (body.job_id) {
       await query(
         `INSERT INTO interactions (type, content, job_id, created_by, source)
@@ -398,7 +403,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     let hireFormDeclarations: Record<string, unknown> | null = null;
     if (claim.driver_id) {
       const dr = await query(
-        `SELECT has_accidents, has_convictions, has_prosecution, has_disability,
+        `SELECT has_accidents, has_convictions, has_prosecution, has_recent_convictions, has_disability,
                 licence_points, licence_endorsements, additional_details
          FROM drivers WHERE id = $1`,
         [claim.driver_id],
@@ -408,8 +413,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         const endorsements = Array.isArray(x.licence_endorsements) ? x.licence_endorsements : [];
         hireFormDeclarations = {
           accidents: !!x.has_accidents,
-          // (b) combined: serious convictions OR pending prosecution OR any points / endorsements.
-          convictions: !!x.has_convictions || !!x.has_prosecution || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
+          // (b) combined: serious convictions OR pending prosecution OR any conviction in the
+          // last 5 years (has_recent_convictions, migration 298) OR any points / endorsements.
+          convictions: !!x.has_convictions || !!x.has_prosecution || !!x.has_recent_convictions || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
           disability: !!x.has_disability,
           licence_points: x.licence_points ?? null,
           endorsements,
@@ -526,18 +532,25 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
     if ('owner_user_id' in body) set('owner_user_id', body.owner_user_id ?? null);
     if ('next_check_on' in body) set('next_check_on', body.next_check_on ?? null, '::date');
     if (body.form_data) {
-      // Whole-object replace; derive the few list/filter columns from it.
+      // Only the sections sent are replaced — the page sends just the ones staff
+      // edited, so a client filling in the same form through their link at the
+      // same time keeps everything else. Derive the list/filter columns from it.
       const fd = body.form_data as Record<string, Record<string, unknown> | unknown>;
-      const inc = (fd.incident && typeof fd.incident === 'object' ? fd.incident : {}) as Record<string, unknown>;
-      set('form_data', JSON.stringify(fd), '::jsonb');
-      const date = typeof inc.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(inc.date) ? inc.date : null;
-      set('incident_at', date ? `${date}T12:00:00Z` : null, '::timestamptz');
-      set('incident_time_text', typeof inc.time === 'string' && inc.time.trim() ? inc.time.trim() : null);
-      set('incident_location', typeof inc.place === 'string' && inc.place.trim() ? inc.place.trim() : null);
+      params.push(JSON.stringify(fd));
+      sets.push(`form_data = form_data || $${params.length}::jsonb`);
+      if (fd.incident && typeof fd.incident === 'object') {
+        const inc = fd.incident as Record<string, unknown>;
+        const date = typeof inc.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(inc.date) ? inc.date : null;
+        set('incident_at', date ? `${date}T12:00:00Z` : null, '::timestamptz');
+        set('incident_time_text', typeof inc.time === 'string' && inc.time.trim() ? inc.time.trim() : null);
+        set('incident_location', typeof inc.place === 'string' && inc.place.trim() ? inc.place.trim() : null);
+      }
     }
     if (sets.length === 0) { res.status(400).json({ error: 'Nothing to update' }); return; }
     sets.push('updated_at = NOW()');
     await query(`UPDATE incident_claims SET ${sets.join(', ')} WHERE id = $1`, params);
+    // A moved check date finishes its "Check in on claim" bell (bell-rules.ts).
+    if ('next_check_on' in body) await retireClaimBells(id);
 
     // Timeline — one event per meaningful change.
     if ('notified_via' in body && (body.notified_via ?? null) !== before.notified_via) {
@@ -587,7 +600,12 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
         await logClaimEvent(id, userId, 'milestone', 'Date we were notified corrected', { kind: 'notified' }, { eventDate: body.notified_on });
       }
     }
-    if (body.form_data) await logClaimEvent(id, userId, 'form_saved', 'Form answers updated');
+    if (body.form_data) {
+      const titles = Object.keys(body.form_data)
+        .map((k) => CLAIM_SECTIONS.find((s) => s.key === k.replace(/_involved$/, ''))?.title)
+        .filter((t, i, a): t is string => !!t && a.indexOf(t) === i);
+      await logClaimEvent(id, userId, 'form_saved', `Form answers updated${titles.length ? ` — ${titles.join(', ')}` : ''}`);
+    }
 
     res.json({ data: { ok: true } });
   } catch (err) {
@@ -615,6 +633,7 @@ router.post('/:id/updates', validate(updateSchema), async (req: AuthRequest, res
     if (mentioned.length) await notifyClaimMentions(id, req.user!.id, mentioned, body.note);
     if (body.next_check_on !== undefined) {
       await query(`UPDATE incident_claims SET next_check_on = $2::date, updated_at = NOW() WHERE id = $1`, [id, body.next_check_on]);
+      await retireClaimBells(id);
       await logClaimEvent(id, req.user!.id, 'next_check',
         body.next_check_on ? `Next check ${ukd(body.next_check_on)}` : 'Next check date cleared',
         { to: body.next_check_on });
@@ -728,6 +747,9 @@ router.post('/:id/stage', validate(stageSchema), async (req: AuthRequest, res: R
       if (body.stage === 'with_broker' && !c.broker_sent_at) sets.push('broker_sent_at = NOW()');
     }
     await query(`UPDATE incident_claims SET ${sets.join(', ')} WHERE id = $1`, params);
+    // Moved on from Submitted — the "Claim form submitted" bells are done; a
+    // closed case or a new check date finishes the others (bell-rules.ts).
+    await retireClaimBells(id);
 
     const label = STAGE_LABEL[body.stage];
     await logClaimEvent(id, req.user!.id, 'stage_change',
@@ -1104,6 +1126,7 @@ router.post('/:id/send-to-broker', authorize(...MANAGER_ROLES), validate(sendSch
        WHERE id = $1`,
       [id, pdfKey, ukDatePlus(14)],
     );
+    await retireClaimBells(id);
     await logClaimEvent(id, req.user!.id, 'broker_sent',
       `Sent to ${to}${attached.length ? ` with ${attached.length} document${attached.length === 1 ? '' : 's'}` : ''}${tooBig.length ? ` (${tooBig.length} too large to attach)` : ''}`,
       { pdf_key: pdfKey, from_stage: c.stage, attached, too_big: tooBig });
@@ -1184,14 +1207,19 @@ router.post('/:id/links', validate(sendLinksSchema), async (req: AuthRequest, re
     }
     const sent = results.filter((r) => r.sent);
     if (sent.length) {
+      // A new recipient gets the full run of reminders (§9.1) — restart the chase.
+      const fresh = sent.some((r) => !r.reused);
       await query(
         `UPDATE incident_claims
             SET stage = CASE WHEN stage = 'open' THEN 'form_out' ELSE stage END,
                 next_check_on = COALESCE(next_check_on, $2::date),
+                chase_level = CASE WHEN $3::boolean THEN 0 ELSE chase_level END,
                 updated_at = NOW()
           WHERE id = $1`,
-        [id, ukDatePlus(3)],
+        [id, ukDatePlus(3), fresh],
       );
+      // A restarted chase answers "Client form not coming back" (bell-rules.ts).
+      await retireClaimBells(id);
       await logClaimEvent(id, req.user!.id, 'form_sent', `Form sent to ${sent.map((r) => r.name).join(', ')}`,
         { recipients: sent.map((r) => r.email) });
       if (c.stage === 'open') {
@@ -1202,6 +1230,139 @@ router.post('/:id/links', validate(sendLinksSchema), async (req: AuthRequest, re
   } catch (err) {
     console.error('Send claim links error:', err);
     res.status(500).json({ error: 'Failed to send the form' });
+  }
+});
+
+// ── GPS trace (§14, §21) ──────────────────────────────────────────────────
+
+const gpsWindowSchema = z.object({ from: z.string().datetime({ offset: true }), to: z.string().datetime({ offset: true }) });
+
+/** The van's reg + the default window for a case (±30 min of the time, else the whole day). */
+async function gpsContext(id: string) {
+  const r = await query(
+    `SELECT COALESCE(fv.reg, c.vehicle_reg) AS reg, c.incident_time_text,
+            to_char(c.incident_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS incident_date
+     FROM incident_claims c LEFT JOIN fleet_vehicles fv ON fv.id = c.vehicle_id
+     WHERE c.id = $1 AND c.is_deleted = false`,
+    [id],
+  );
+  return r.rows[0] || null;
+}
+
+function checkWindow(from: Date, to: Date): string | null {
+  if (!(to > from)) return 'The end must be after the start';
+  if (to.getTime() - from.getTime() > MAX_WINDOW_HOURS * 3600_000) return `At most ${MAX_WINDOW_HOURS} hours at a time`;
+  return null;
+}
+
+router.get('/:id/gps', async (req: AuthRequest, res: Response) => {
+  try {
+    const ctx = await gpsContext(String(req.params.id));
+    if (!ctx) { res.status(404).json({ error: 'Claim not found' }); return; }
+    if (!ctx.reg) { res.status(409).json({ error: 'Set the van on the case first' }); return; }
+    const q = req.query as Record<string, string | undefined>;
+    let from: Date; let to: Date;
+    if (q.from && q.to) {
+      from = new Date(q.from); to = new Date(q.to);
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) { res.status(400).json({ error: 'Bad dates' }); return; }
+    } else if (ctx.incident_date) {
+      ({ from, to } = incidentWindow(ctx.incident_date, ctx.incident_time_text, 30));
+    } else {
+      res.json({ data: { reg: ctx.reg, from: null, to: null, points: [], gps: true, needs_date: true } });
+      return;
+    }
+    const bad = checkWindow(from, to);
+    if (bad) { res.status(400).json({ error: bad }); return; }
+    const points = await getRouteForReg(ctx.reg, from, to);
+    res.json({ data: { reg: ctx.reg, from: from.toISOString(), to: to.toISOString(), points: points || [], gps: points !== null } });
+  } catch (err) {
+    console.error('Claim GPS error:', err);
+    res.status(502).json({ error: 'Could not reach the tracking server' });
+  }
+});
+
+router.post('/:id/gps/attach', validate(gpsWindowSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const ctx = await gpsContext(id);
+    if (!ctx?.reg) { res.status(ctx ? 409 : 404).json({ error: ctx ? 'Set the van on the case first' : 'Claim not found' }); return; }
+    const from = new Date(req.body.from); const to = new Date(req.body.to);
+    const bad = checkWindow(from, to);
+    if (bad) { res.status(400).json({ error: bad }); return; }
+    const r = await saveGpsTrace(id, ctx.reg, from, to, { userId: req.user!.id, auto: false });
+    if (r === null) { res.status(409).json({ error: 'No GPS tracker found for this van' }); return; }
+    if (!r.fileId) { res.status(409).json({ error: 'No GPS positions in that window — nothing saved' }); return; }
+    await query(`UPDATE incident_claims SET updated_at = NOW() WHERE id = $1`, [id]);
+    res.status(201).json({ data: r });
+  } catch (err) {
+    console.error('Claim GPS attach error:', err);
+    res.status(502).json({ error: 'Could not save the trace' });
+  }
+});
+
+/** A saved trace's points, read back from its CSV (the page redraws the route from it). */
+router.get('/:id/gps/files/:fileId', async (req: AuthRequest, res: Response) => {
+  try {
+    const f = await query(
+      `SELECT r2_key FROM incident_claim_files WHERE id = $1 AND claim_id = $2 AND file_type = 'gps_trace'`,
+      [String(req.params.fileId), String(req.params.id)],
+    );
+    if (!f.rows[0]) { res.status(404).json({ error: 'Trace not found' }); return; }
+    const obj = await getFromR2(f.rows[0].r2_key);
+    // Read the stream generically (works whatever stream type the S3 client hands back).
+    const chunks: Buffer[] = [];
+    if (obj.Body) for await (const chunk of obj.Body as AsyncIterable<Uint8Array>) chunks.push(Buffer.from(chunk));
+    const text = Buffer.concat(chunks).toString('utf8');
+    res.json({ data: { points: csvToPoints(text) } });
+  } catch (err) {
+    console.error('Claim GPS file error:', err);
+    res.status(500).json({ error: 'Could not read the trace' });
+  }
+});
+
+// ── Client chase controls (§9.1) — pause needs a reason; restart goes back to reminder 1 ──
+
+router.post('/:id/chase/pause', validate(z.object({ reason: z.string().trim().min(2).max(1000) })), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const reason = (req.body as { reason: string }).reason;
+    // Paused = back on the owner's check date, so make sure there is one.
+    const r = await query(
+      `UPDATE incident_claims
+          SET chase_paused_at = NOW(), chase_paused_reason = $2,
+              next_check_on = COALESCE(next_check_on, $3::date), updated_at = NOW()
+        WHERE id = $1 AND is_deleted = false AND stage = 'form_out' AND chase_paused_at IS NULL
+        RETURNING id`,
+      [id, reason, ukDatePlus(7)],
+    );
+    if (!r.rowCount) { res.status(409).json({ error: 'Chasing is not running on this case' }); return; }
+    await retireClaimBells(id);
+    await logClaimEvent(id, req.user!.id, 'chase_paused', `Reminders paused — ${reason}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Pause claim chase error:', err);
+    res.status(500).json({ error: 'Failed to pause reminders' });
+  }
+});
+
+router.post('/:id/chase/restart', validate(z.object({ reason: z.string().trim().max(1000).optional() })), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const reason = (req.body as { reason?: string }).reason;
+    const r = await query(
+      `UPDATE incident_claims
+          SET chase_level = 0, chase_paused_at = NULL, chase_paused_reason = NULL, updated_at = NOW()
+        WHERE id = $1 AND is_deleted = false AND stage = 'form_out'
+        RETURNING id`,
+      [id],
+    );
+    if (!r.rowCount) { res.status(409).json({ error: 'The form is not out on this case' }); return; }
+    await retireClaimBells(id);
+    await logClaimEvent(id, req.user!.id, 'chase_restarted', `Reminders restarted from 1${reason ? ` — ${reason}` : ''}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('Restart claim chase error:', err);
+    res.status(500).json({ error: 'Failed to restart reminders' });
   }
 });
 

@@ -7,6 +7,7 @@ import {
   outstandingDocuments,
   hasAllRequiredDocuments,
   isUkLicence,
+  isNiLicence,
   backfillFromDates,
 } from '../driver-validity';
 
@@ -264,5 +265,35 @@ describe('isUkLicence', () => {
   it('drives isUkDriver on computeDriverValidity', () => {
     expect(computeDriverValidity({ licence_issue_country: 'United Kingdom' }, TODAY).isUkDriver).toBe(true);
     expect(computeDriverValidity({ licence_issued_by: 'HMPO' }, TODAY).isUkDriver).toBe(false);
+  });
+});
+
+describe('isNiLicence', () => {
+  it('recognises a DVA licence', () => {
+    expect(isNiLicence({ licence_issued_by: 'DVA' })).toBe(true);
+    expect(isNiLicence({ licence_issued_by: ' dva ' })).toBe(true);
+  });
+
+  it('is false for GB, for a passport authority, and for no data', () => {
+    expect(isNiLicence({ licence_issued_by: 'DVLA' })).toBe(false);
+    expect(isNiLicence({ licence_issued_by: 'HMPO' })).toBe(false);
+    expect(isNiLicence({})).toBe(false);
+    expect(isNiLicence(null)).toBe(false);
+  });
+
+  // The two must never disagree. An NI licence that wasn't also UK would be
+  // routed to the passport regime while being offered the NI check panel —
+  // a contradiction with no way out for staff.
+  it('implies isUkLicence', () => {
+    expect(isUkLicence({ licence_issued_by: 'DVA' })).toBe(true);
+    expect(computeDriverValidity({ licence_issued_by: 'DVA' }, TODAY).isUkDriver).toBe(true);
+  });
+
+  // A DVA driver still needs the record check — the regime is unchanged, only
+  // who can go and get it. This is the whole reason the hire form dead-ended.
+  it('leaves the DVLA check outstanding for a DVA driver', () => {
+    const v = computeDriverValidity({ licence_issued_by: 'DVA', idenfy_check_date: TODAY }, TODAY);
+    expect(outstandingDocuments(v).dvla).toBe(true);
+    expect(outstandingDocuments(v).passport).toBe(false);
   });
 });

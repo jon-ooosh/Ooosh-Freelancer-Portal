@@ -5,6 +5,7 @@
 import { useState, useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchFuelLog, createFuelRecord, deleteFuelRecord } from '../../lib/fuel-log-api'
+import { ukToday } from '../../../../lib/ukDate'
 
 interface Props {
   vehicleId: string
@@ -145,7 +146,7 @@ function FuelForm({
   onSave: (params: { date: string; litres?: number | null; cost: number; mileage_at_fill?: number | null; full_tank?: boolean; notes?: string | null }) => Promise<void>
   onClose: () => void
 }) {
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]!)
+  const [date, setDate] = useState(ukToday())
   const [litres, setLitres] = useState('')
   const [cost, setCost] = useState('')
   const [mileage, setMileage] = useState('')

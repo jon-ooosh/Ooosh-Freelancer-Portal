@@ -16,8 +16,10 @@
 import { query } from '../config/database';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import type { BellKey } from './bell-rules';
 
-const HOLD_UNTIL_LEAD_DAYS = 3;
+// bell-rules.ts keeps a copy for its rule; bell-rules.test.ts checks they match.
+export const HOLD_UNTIL_LEAD_DAYS = 3;
 
 interface HoldingReminderResult { chaseDigest: number; holdUntil: number; }
 
@@ -28,13 +30,16 @@ async function adminIds(): Promise<string[]> {
 
 async function notify(
   userIds: string[], title: string, content: string, entityId: string,
-  actionUrl: string, priority: 'low' | 'normal' | 'high' = 'normal'
+  actionUrl: string,
+  /** What it asks for — bell-rules.ts retires it once that is done. */
+  resolveKey: BellKey,
+  priority: 'low' | 'normal' | 'high' = 'normal'
 ): Promise<void> {
   for (const userId of userIds) {
     await query(
-      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-       VALUES ($1, 'follow_up', $2, $3, 'held_items', $4, $5, $6)`,
-      [userId, title, content, entityId, actionUrl, priority]
+      `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, resolve_key)
+       VALUES ($1, 'follow_up', $2, $3, 'held_items', $4, $5, $6, $7)`,
+      [userId, title, content, entityId, actionUrl, priority, resolveKey]
     );
   }
 }
@@ -66,7 +71,7 @@ export async function runHoldingReminders(): Promise<HoldingReminderResult> {
       const reviewUrl = '/holding/lost-property?review=1';
       const title = `Lost property: ${dueCount} chase${dueCount === 1 ? '' : 's'} ready to review`;
       const content = `${dueCount} item${dueCount === 1 ? '' : 's'} due a chase. Review and send (or snooze) on the chase queue.`;
-      await notify(admins, title, content, '00000000-0000-0000-0000-000000000000', reviewUrl, 'normal');
+      await notify(admins, title, content, '00000000-0000-0000-0000-000000000000', reviewUrl, 'lost_property_chases', 'normal');
       try {
         await emailService.sendRaw({
           to: 'info@oooshtours.co.uk',
@@ -101,7 +106,7 @@ export async function runHoldingReminders(): Promise<HoldingReminderResult> {
     const overdue = new Date(h.hold_until) < new Date();
     const title = `Hold/review ${overdue ? 'date passed' : 'date approaching'}: ${h.description || 'item'}`;
     const content = `${who} — hold until ${when}${overdue ? ' (passed)' : ''}. Decide: collect / return / extend.`;
-    await notify(admins, title, content, h.id, `/holding?item=${h.id}`, overdue ? 'high' : 'normal');
+    await notify(admins, title, content, h.id, `/holding?item=${h.id}`, 'held_item_review', overdue ? 'high' : 'normal');
     await query(`UPDATE held_items SET hold_until_reminder_sent_for = hold_until WHERE id = $1`, [h.id]);
     result.holdUntil += 1;
   }

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
 import { Link } from 'react-router-dom';
+import DoNotHireField, { saveDoNotHireIfChanged, type DoNotHireValue } from './DoNotHireField';
+import SimilarRecordsWarning from './SimilarRecordsWarning';
 
 interface PersonFormData {
   first_name: string;
@@ -62,6 +64,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
   const [originalName, setOriginalName] = useState<string>('');
   const [linkedOrgs, setLinkedOrgs] = useState<Array<{ id: string; name: string }>>([]);
   const [syncOrgIds, setSyncOrgIds] = useState<Set<string>>(new Set());
+  // Do Not Hire — saved through its own endpoint (see DoNotHireField)
+  const [dnh, setDnh] = useState<DoNotHireValue>({ on: false, reason: '' });
+  const [dnhOriginal, setDnhOriginal] = useState<DoNotHireValue>({ on: false, reason: '' });
 
   const isEdit = !!personId;
 
@@ -74,6 +79,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
   async function loadPerson(id: string) {
     try {
       const data = await api.get<Record<string, unknown>>(`/people/${id}`);
+      const loadedDnh = { on: !!data.do_not_hire, reason: (data.do_not_hire_reason as string) || '' };
+      setDnh(loadedDnh);
+      setDnhOriginal(loadedDnh);
       setForm({
         first_name: (data.first_name as string) || '',
         last_name: (data.last_name as string) || '',
@@ -176,6 +184,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         const putBody = recordVersion !== null ? { ...body, version: recordVersion } : body;
         const result = await api.put<Record<string, unknown>>(`/people/${personId}`, putBody);
         if (result.version !== undefined) setRecordVersion(result.version as number);
+        await saveDoNotHireIfChanged(api.post, `/people/${personId}/do-not-hire`, dnhOriginal, dnh);
 
         if (syncOrgIds.size > 0) {
           const newName = `${form.first_name.trim()} ${form.last_name.trim()}`.trim();
@@ -213,6 +222,12 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         <Field label="First Name *" value={form.first_name} onChange={v => set('first_name', v)} />
         <Field label="Last Name *" value={form.last_name} onChange={v => set('last_name', v)} />
       </div>
+      {!isEdit && (
+        <SimilarRecordsWarning
+          type="person"
+          params={{ first: form.first_name.trim(), last: form.last_name.trim(), phone: form.mobile.trim() || form.phone.trim() }}
+        />
+      )}
       {/* The same field the staff Employment card offers, on the person record
           so it reaches freelancers and contacts too — they had no way to set it
           except the application form, which most never saw. One column either
@@ -347,6 +362,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
           <input value={form.working_terms_notes} onChange={e => set('working_terms_notes', e.target.value)} placeholder="Any additional terms details..." className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
         </div>
       )}
+      {isEdit && <DoNotHireField value={dnh} onChange={setDnh} />}
 
       {/* Notes */}
       <div>

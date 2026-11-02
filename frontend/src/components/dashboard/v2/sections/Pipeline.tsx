@@ -87,7 +87,7 @@ export default function PipelineBlock({ data }: DashboardSectionProps) {
           <div className="op-card !p-4" style={{ background: 'var(--op-bg)' }}>
             <div className="op-eyebrow mb-1">Active Pipeline Value</div>
             <div className="op-num text-3xl font-semibold leading-tight">{formatCurrency(value)}</div>
-            <div className="text-xs text-gray-500 mt-1">Across {totalCount} open jobs</div>
+            <div className="text-xs text-gray-500 mt-1">Across {totalCount} open enquiries</div>
           </div>
           <div>
             <div className="op-eyebrow mb-2">Quick Actions</div>

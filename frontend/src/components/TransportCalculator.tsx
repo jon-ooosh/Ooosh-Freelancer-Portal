@@ -1513,7 +1513,12 @@ function ExpenseRow({ expense, fuelCost, numberOfDays, onChange, onRemove }: {
         {isOther ? (
           <input type="text" value={expense.description || ''} onChange={(e) => onChange({ ...expense, description: e.target.value })} placeholder="Description..." className="w-full px-2 py-1 text-sm border border-gray-200 rounded" />
         ) : (
-          <span className={`text-sm ${labelColour}`}>{expense.label}</span>
+          // Fixed lines take an optional note too (e.g. "Mont Blanc tunnel"),
+          // saved as "<label>: <note>" exactly like an Other line's description.
+          <div className="flex items-center gap-2">
+            <span className={`text-sm shrink-0 ${labelColour}`}>{expense.label}</span>
+            <input type="text" value={expense.description || ''} onChange={(e) => onChange({ ...expense, description: e.target.value })} placeholder="Note..." className="flex-1 min-w-0 px-2 py-0.5 text-xs border border-gray-200 rounded" />
+          </div>
         )}
       </div>
       <div className="w-16">

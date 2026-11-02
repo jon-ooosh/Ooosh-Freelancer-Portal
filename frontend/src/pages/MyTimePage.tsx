@@ -4,6 +4,8 @@ import { api } from '../services/api';
 import { splitBankHolidays } from '../lib/companyCalendar';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import { QuarterHourSelect } from '../components/QuarterHourSelect';
+import { ukToday } from '../lib/ukDate';
 
 /**
  * My Time — book time off, see your balances, track your requests.
@@ -26,7 +28,8 @@ import { hasManagerRole } from '../lib/roles';
  */
 
 type LeaveType = 'holiday' | 'toil' | 'unpaid';
-interface DaySpec { portion: 'full' | 'am' | 'pm' | 'hours'; startTime?: string; endTime?: string }
+/** 'none' = "not off that day" — only offered when changing a booking (spec §5.4). */
+interface DaySpec { portion: 'full' | 'am' | 'pm' | 'hours' | 'none'; startTime?: string; endTime?: string }
 type LeaveStatus = 'pending' | 'approved' | 'declined' | 'cancelled' | 'withdrawn';
 
 interface LeaveRequest {
@@ -44,7 +47,18 @@ interface LeaveRequest {
   decidedByName: string | null;
   decisionNote: string | null;
   cancellationReason: string | null;
-  days: { date: string; minutes: number; portion: 'full' | 'am' | 'pm' }[];
+  days: { date: string; minutes: number; portion: 'full' | 'am' | 'pm' | 'hours'; startTime?: string | null; endTime?: string | null }[];
+  // Changing / cancelling approved time off (spec §5.4). Optional: an older
+  // backend does not send them, and the page then simply offers nothing.
+  /** On a CHANGE: the approved booking it replaces once approved. */
+  replacesRequestId?: string | null;
+  replaces?: { startDate: string; endDate: string; totalMinutes: number; leaveType: LeaveType; status: LeaveStatus } | null;
+  /** On an approved booking: a change waiting to replace it. */
+  pendingChangeId?: string | null;
+  /** On a booking cancelled by a change: the booking that replaced it. */
+  replacedById?: string | null;
+  /** On an approved booking: an ask to cancel it, and the answer if declined. */
+  cancelAsk?: { requestedAt: string; note: string | null; declinedAt: string | null; declineNote: string | null } | null;
 }
 interface AccountBreakdown {
   inMinutes: number;
@@ -55,6 +69,8 @@ interface AccountBreakdown {
 }
 type BhPolicy = 'use_allowance' | 'granted';
 interface MyBalances {
+  /** Whose figures these are — always sent by /me/balances. */
+  personId?: string;
   year: number;
   holiday: AccountBreakdown;
   overtime: AccountBreakdown;
@@ -62,6 +78,70 @@ interface MyBalances {
    *  an older backend does not send it, and the page then falls back to the
    *  company-wide policy from /bank-holidays. */
   bankHolidayPolicy?: BhPolicy;
+  /** This year's bank holidays the person would otherwise be WORKING (Oct
+   *  2026) — the only ones worth booking off. Absent from an older backend,
+   *  null if the server could not work it out: then every one is offered. */
+  bankHolidaysWorking?: string[] | null;
+}
+/**
+ * A manual adjustment an admin posted to a balance (Oct 2026) — e.g. overtime
+ * brought across from BrightHR. Read from the ledger so the list explains a
+ * figure that no request or overtime entry accounts for.
+ */
+interface Adjustment {
+  id: string;
+  /** 'company_day_lieu' for a day in lieu (spec §20.5b), else 'manual'. */
+  sourceType?: string | null;
+  account: 'holiday' | 'overtime';
+  minutes: number;
+  effectiveDate: string;
+  note: string | null;
+  createdByName: string | null;
+}
+/**
+ * An absence an admin recorded for this person — GET /staff-calendar/me/absences
+ * (Oct 2026). Dates only: the API never sends the type or the reason (spec
+ * §7.2), so it is shown as "Absent" whatever it was.
+ */
+interface MyAbsence {
+  id: string;
+  startDate: string;
+  endDate: string | null;
+  isOpen: boolean;
+  deductsAllowance: boolean;
+  days: { date: string; minutes: number; portion: 'full' | 'am' | 'pm' }[];
+}
+/** A one-off working-from-home request (spec §19) — GET /staff-calendar/wfh. */
+interface WfhRequest {
+  id: string;
+  startDate: string;
+  endDate: string;
+  status: 'pending' | 'approved' | 'declined' | 'withdrawn' | 'cancelled';
+  requestNote: string | null;
+  decidedByName: string | null;
+  decisionNote: string | null;
+}
+/**
+ * A day swap (spec §8.2) — GET /staff-calendar/swaps. Work a day you normally
+ * don't instead of one you normally do. The id is the swap's group id.
+ */
+interface DaySwap {
+  id: string;
+  offDate: string;
+  workDate: string;
+  startTime: string;
+  endTime: string;
+  minutes: number;
+  usualMinutes: number | null;
+  status: 'pending' | 'approved' | 'declined' | 'withdrawn' | 'cancelled';
+  requestNote: string | null;
+  decidedByName: string | null;
+  decisionNote: string | null;
+}
+/** GET /staff-calendar/swaps/preview — what is wrong so far, and the day given up's hours. */
+interface SwapCheck {
+  problems: string[];
+  usual: { startTime: string; endTime: string; minutes: number; breakMinutes: number } | null;
 }
 interface OvertimeEntry {
   id: string;
@@ -87,6 +167,10 @@ interface Impact {
   clashes: { date: string; people: string[] }[];
   coverage: { date: string; scheduled: number; ifApproved: number }[];
   warnings: string[];
+  /** Contracted days in the range marked "not off" (a change only). */
+  notOff?: string[];
+  /** A CHANGE's net effect: minutes > 0 uses more, < 0 gives time back. */
+  change?: { replacesRequestId: string; minutes: number; changedDates: string[]; unchanged?: boolean } | null;
 }
 
 const TYPE_LABELS: Record<LeaveType, string> = {
@@ -188,10 +272,26 @@ function asDays(mins: number, nominal: number | null): string | null {
   return nominal && nominal > 0 ? (mins / nominal).toFixed(1) : null;
 }
 
-export default function MyTimePage() {
+/**
+ * `personId` set = an ADMIN looking at somebody else's time (the Staff page's
+ * Time off tab). Same page, same figures — the two views cannot drift — minus
+ * the things only the person does themselves (logging, booking, withdrawing),
+ * plus Approve / Decline on whatever is still waiting.
+ */
+export default function MyTimePage({ personId }: { personId?: string } = {}) {
   const role = useAuthStore(s => s.user?.role);
+  const adminView = !!personId;
+  // Whose records: that person's, or explicitly MINE — an admin calling the
+  // list endpoints with neither gets the whole team's.
+  const who = personId ? `personId=${encodeURIComponent(personId)}` : 'mine=1';
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [overtime, setOvertime] = useState<OvertimeEntry[]>([]);
+  const [wfh, setWfh] = useState<WfhRequest[]>([]);
+  const [swaps, setSwaps] = useState<DaySwap[]>([]);
+  const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
+  const [absences, setAbsences] = useState<MyAbsence[]>([]);
+  const [wfhOpen, setWfhOpen] = useState(false);
+  const [swapOpen, setSwapOpen] = useState(false);
   const [balances, setBalances] = useState<MyBalances | null>(null);
   const [hasStaffRecord, setHasStaffRecord] = useState(true);
   // The leave year being looked at. Everything on this page is per leave year
@@ -204,6 +304,8 @@ export default function MyTimePage() {
   const [companyDays, setCompanyDays] = useState<{ date: string; label: string }[]>([]);
   // The booking form, when open: which type it starts on and which date.
   const [booking, setBooking] = useState<{ type: LeaveType; seed: string } | null>(null);
+  // Changing or cancelling an approved booking (spec §5.4), when open.
+  const [changing, setChanging] = useState<LeaveRequest | null>(null);
   const [view, setView] = useState<'list' | 'calendar'>(readView);
   const [calMonth, setCalMonth] = useState({ y: CURRENT_YEAR, m: Number(TODAY.slice(5, 7)) - 1 });
   // Overtime logged on this visit, so its row can be picked out in the list.
@@ -216,16 +318,30 @@ export default function MyTimePage() {
     try {
       const from = `${year}-01-01`;
       const to = `${year}-12-31`;
-      const [leave, ot, bal, bh, cd] = await Promise.all([
-        api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}`),
-        api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}`),
+      const [leave, ot, bal, bh, cd, wf, sw, ab] = await Promise.all([
+        api.get<{ data: LeaveRequest[] }>(`/staff-calendar/leave?from=${from}&to=${to}&${who}`),
+        api.get<{ data: OvertimeEntry[] }>(`/staff-calendar/overtime?from=${from}&to=${to}&${who}`),
         api.get<{ data: MyBalances | null; hasStaffRecord?: boolean }>(
-          `/staff-calendar/me/balances?year=${year}`),
+          `/staff-calendar/me/balances?year=${year}${personId ? `&${who}` : ''}`),
         api.get<{ data: string[]; policy?: BhPolicy }>(
           `/staff-calendar/bank-holidays?year=${year}`),
         api.get<{ occurrences: { date: string; label: string }[] }>(
           `/staff-calendar/company-days?year=${year}`),
+        // Decoration on this page — a failure leaves the list without home
+        // days rather than taking the balances down with it.
+        api.get<{ data: WfhRequest[] }>(`/staff-calendar/wfh?from=${from}&to=${to}&${who}`)
+          .catch(() => ({ data: [] as WfhRequest[] })),
+        // Same: a failure leaves the list without swaps, nothing more.
+        api.get<{ data: DaySwap[] }>(`/staff-calendar/swaps?from=${from}&to=${to}&${who}`)
+          .catch(() => ({ data: [] as DaySwap[] })),
+        // Same: a failure leaves the list without absences, nothing more.
+        api.get<{ data: MyAbsence[] }>(
+          `/staff-calendar/me/absences?year=${year}${personId ? `&${who}` : ''}`)
+          .catch(() => ({ data: [] as MyAbsence[] })),
       ]);
+      setWfh(wf.data ?? []);
+      setSwaps(sw.data ?? []);
+      setAbsences(ab.data ?? []);
       setRequests(leave.data);
       setOvertime(ot.data);
       setBalances(bal.data);
@@ -233,12 +349,61 @@ export default function MyTimePage() {
       setBhPolicy(bh.policy ?? 'use_allowance');
       setCompanyDays(cd.occurrences ?? []);
       setHasStaffRecord(bal.hasStaffRecord !== false);
+      // Manual adjustments, so the list accounts for every hour on the cards.
+      // Decoration: a failure leaves them out rather than breaking the page.
+      const pid = bal.data?.personId;
+      if (pid) {
+        type Entry = Adjustment & { entryType: string; sourceType: string | null; reversesEntryId: string | null };
+        const ledgers = await Promise.all((['holiday', 'overtime'] as const).map(a =>
+          api.get<{ data: { entries: Entry[] } }>(
+            `/staff-calendar/employees/${encodeURIComponent(pid)}/balance?account=${a}&year=${year}`)
+            .then(r => r.data.entries ?? []).catch(() => [] as Entry[])));
+        const all = ledgers.flat();
+        // A reversed adjustment and its reversal cancel out — show neither.
+        const reversed = new Set(all.map(e => e.reversesEntryId).filter(Boolean) as string[]);
+        // Manual adjustments, and days in lieu for company days on a day off.
+        setAdjustments(all.filter(e => (e.sourceType === 'manual' || e.sourceType === 'company_day_lieu')
+          && e.entryType === 'adjustment' && !e.reversesEntryId && !reversed.has(e.id)));
+      } else {
+        setAdjustments([]);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load your time');
     } finally { setLoading(false); }
-  }, [year]);
+  }, [year, who, personId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Admin only — the same approve / decline calls the approvals list makes.
+  // A decline needs a reason; the person is told it.
+  // One decision at a time: these are plain text links with no disabled
+  // state, so a double click sent the approval twice (Oct 2026). The server
+  // refuses the second now as well; this stops it being sent.
+  const deciding = useRef(false);
+  async function decide(kind: DecideKind, id: string, action: 'approve' | 'decline' | 'cancel') {
+    if (deciding.current) return;
+    let note: string | null = null;
+    if (action !== 'approve') {
+      note = window.prompt(action === 'cancel'
+        ? (kind === 'swaps'
+          ? 'Why is this swap called off? Both days go back to normal, and they will see this.'
+          : 'Why is this home day called off? They will see this.')
+        : 'Why is this declined? They will see this.');
+      if (!note?.trim()) return;
+    }
+    deciding.current = true;
+    try {
+      await api.post(`/staff-calendar/${kind}/${id}/${action}`,
+        action === 'decline' ? { note } : action === 'cancel' ? { reason: note } : {});
+      setNotice(action === 'approve' ? 'Approved.' : action === 'cancel' ? 'Called off.' : 'Declined.');
+      setError(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally {
+      deciding.current = false;
+    }
+  }
 
   function changeView(v: 'list' | 'calendar') {
     setView(v);
@@ -254,6 +419,28 @@ export default function MyTimePage() {
       : { y, m: 0 });
   }
 
+  async function withdrawWfh(id: string) {
+    if (!confirm('Withdraw this working-from-home request?')) return;
+    try {
+      await api.post(`/staff-calendar/wfh/${id}/withdraw`, {});
+      setNotice('Request withdrawn.');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to withdraw');
+    }
+  }
+
+  async function withdrawSwap(id: string) {
+    if (!confirm('Withdraw this swap?')) return;
+    try {
+      await api.post(`/staff-calendar/swaps/${id}/withdraw`, {});
+      setNotice('Swap withdrawn.');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to withdraw');
+    }
+  }
+
   async function withdraw(id: string) {
     if (!confirm('Withdraw this request?')) return;
     try {
@@ -262,6 +449,43 @@ export default function MyTimePage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to withdraw');
+    }
+  }
+
+  // Take back an ask to cancel that nobody has answered yet.
+  async function withdrawCancelAsk(id: string) {
+    if (!confirm('Withdraw your ask to cancel? The booking stays as it is.')) return;
+    try {
+      await api.post(`/staff-calendar/leave/${id}/cancel-request/withdraw`, {});
+      setNotice('Ask withdrawn — the booking stays as it is.'); setError(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to withdraw');
+    }
+  }
+
+  // Admin, on the Staff page's Time off tab: answer an ask to cancel. Same
+  // one-at-a-time guard as decide() above.
+  async function decideCancelAsk(id: string, action: 'approve' | 'decline') {
+    if (deciding.current) return;
+    let body: Record<string, string> = {};
+    if (action === 'approve') {
+      if (!confirm('Cancel this booking? The time goes back to their balance, and they’re told.')) return;
+    } else {
+      const note = window.prompt('Why is cancelling it declined? The booking stays, and they will see this.');
+      if (!note?.trim()) return;
+      body = { note };
+    }
+    deciding.current = true;
+    try {
+      await api.post(`/staff-calendar/leave/${id}/cancel-request/${action}`, body);
+      setNotice(action === 'approve' ? 'Cancelled — the time is back on their balance.' : 'Declined — the booking stands.');
+      setError(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally {
+      deciding.current = false;
     }
   }
 
@@ -292,23 +516,40 @@ export default function MyTimePage() {
   // already covered by a live request is not "left" — telling someone to book
   // Easter Monday when they already have is a nag people learn to ignore.
   const bh = useMemo(() => {
-    const booked = new Set(requests
-      .filter(r => r.status === 'pending' || r.status === 'approved')
-      .flatMap(r => r.days.map(d => d.date)));
+    const booked = new Set([
+      ...requests
+        .filter(r => r.status === 'pending' || r.status === 'approved')
+        .flatMap(r => r.days.map(d => d.date)),
+      // Off anyway — an absence covers it.
+      ...absences.flatMap(a => a.days.map(d => d.date)),
+    ]);
+    // Only the ones they would otherwise be working (Oct 2026): someone who
+    // never works Mondays was told to book Monday 28 Dec, and the form then
+    // refused it. Unknown (older backend, failed read) = offer them all.
+    const worked = balances?.bankHolidaysWorking ? new Set(balances.bankHolidaysWorking) : null;
     const { working, granted } = splitBankHolidays(bankHolidays, companyDays, TODAY);
     return {
       // Only under use_allowance is a bank holiday something to book at all.
-      toBook: policy === 'use_allowance' ? working.filter(d => !booked.has(d)) : [],
+      toBook: policy === 'use_allowance'
+        ? working.filter(d => !booked.has(d) && (!worked || worked.has(d)))
+        : [],
       granted,
     };
-  }, [requests, bankHolidays, companyDays, policy]);
+  }, [requests, absences, bankHolidays, companyDays, policy, balances]);
 
   const pendingOvertime = overtime
     .filter(e => e.status === 'pending')
     .reduce((s, e) => s + e.minutes, 0);
 
   function openBooking(type: LeaveType, seed = formSeedDate) {
+    setChanging(null);
     setBooking({ type, seed });
+  }
+
+  // One form open at a time — two would both be "the form" on a phone.
+  function openChange(r: LeaveRequest) {
+    setBooking(null);
+    setChanging(r);
   }
 
   return (
@@ -316,7 +557,7 @@ export default function MyTimePage() {
       {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
       {notice && <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{notice}</div>}
 
-      {!hasStaffRecord && (
+      {!hasStaffRecord && !adminView && (
         <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-900">
           <strong className="block">Your login isn&apos;t linked to a staff record.</strong>
           Your hours, holiday and overtime all hang off a staff record, and this login
@@ -336,6 +577,10 @@ export default function MyTimePage() {
       <StatCards balances={balances} year={year} onYear={changeYear}
         pendingOvertime={pendingOvertime} />
 
+      {adminView ? (
+        <MobileTiles balances={balances} year={year} onYear={changeYear}
+          pendingOvertime={pendingOvertime} />
+      ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
         <div className="lg:col-span-2">
           <LogOvertime
@@ -366,6 +611,18 @@ export default function MyTimePage() {
               <button onClick={() => openBooking('toil')}
                 className="w-full py-2.5 rounded-lg border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50 text-sm font-medium">
                 Use overtime as time off
+              </button>
+              {/* Not time off — working, just not here (spec §19). A one-off
+                  day is asked for; a regular one is on the working pattern. */}
+              <button onClick={() => setWfhOpen(true)}
+                className="w-full py-2.5 rounded-lg border border-teal-300 text-teal-800 hover:bg-teal-50 text-sm font-medium">
+                ⌂ Work from home
+              </button>
+              {/* Not time off either — a different day worked instead of a
+                  usual one (spec §8.2). Asked for and approved like holiday. */}
+              <button onClick={() => setSwapOpen(true)}
+                className="w-full py-2.5 rounded-lg border border-indigo-300 text-indigo-800 hover:bg-indigo-50 text-sm font-medium">
+                ⇄ Swap a day
               </button>
               {!isCurrentYear && (
                 <p className="text-xs text-gray-500">
@@ -404,6 +661,29 @@ export default function MyTimePage() {
           </div>
         </div>
       </div>
+      )}
+
+      {wfhOpen && !adminView && (
+        <WfhForm seedDate={formSeedDate}
+          onClose={() => setWfhOpen(false)}
+          onDone={async () => {
+            setWfhOpen(false); setError(null);
+            setNotice('Asked — you’ll hear when it’s been looked at.');
+            await load();
+          }}
+          onError={setError} />
+      )}
+
+      {swapOpen && !adminView && (
+        <SwapForm
+          onClose={() => setSwapOpen(false)}
+          onDone={async () => {
+            setSwapOpen(false); setError(null);
+            setNotice('Asked — you’ll hear when it’s been looked at. Nothing changes on the calendar until it’s approved.');
+            await load();
+          }}
+          onError={setError} />
+      )}
 
       {booking && (
         <BookTimeOff key={`${booking.type}:${booking.seed}`}
@@ -413,11 +693,22 @@ export default function MyTimePage() {
           onError={setError} />
       )}
 
+      {/* The same form, opened on an approved booking: the person asks to
+          change or cancel it; an admin on the Staff page does it outright. */}
+      {changing && (
+        <BookTimeOff key={`change:${changing.id}`}
+          balances={balances} seedDate={changing.startDate} initialType={changing.leaveType}
+          replacing={changing} personId={personId} adminDirect={adminView}
+          onClose={() => setChanging(null)}
+          onBooked={async (msg) => { setNotice(msg); setError(null); setChanging(null); await load(); }}
+          onError={setError} />
+      )}
+
       <section className="bg-white border border-gray-200 rounded-2xl sm:rounded-xl overflow-hidden">
         <div className="px-4 sm:px-5 py-3.5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-baseline gap-x-2.5">
-            <h2 className="text-[17px] font-semibold text-gray-900">Your time</h2>
-            <span className="hidden sm:inline text-[13px] text-gray-500">Holiday, overtime and company days together</span>
+            <h2 className="text-[17px] font-semibold text-gray-900">{adminView ? 'Time off and overtime' : 'Your time'}</h2>
+            <span className="hidden sm:inline text-[13px] text-gray-500">Holiday, overtime, home days, swaps and company days together</span>
           </div>
           <div className="flex bg-gray-100 rounded-lg p-[3px]">
             {(['list', 'calendar'] as const).map(v => (
@@ -433,10 +724,16 @@ export default function MyTimePage() {
         {loading ? (
           <div className="px-5 py-6 text-sm text-gray-500">Loading…</div>
         ) : view === 'list' ? (
-          <TimeList year={year} requests={requests} overtime={overtime} companyDays={companyDays}
+          <TimeList year={year} requests={requests} overtime={overtime} wfh={wfh} onWithdrawWfh={withdrawWfh}
+            swaps={swaps} onWithdrawSwap={withdrawSwap}
+            adjustments={adjustments} absences={absences}
+            companyDays={companyDays}
             bankHolidaysToBook={bh.toBook} freshIds={freshIds}
             onWithdraw={withdraw} onCancelOvertime={cancelOvertime}
-            onBook={isPastYear ? undefined : (d) => openBooking('holiday', d)} />
+            onDecide={adminView ? decide : undefined}
+            onChange={openChange} onWithdrawCancelAsk={withdrawCancelAsk}
+            onDecideCancelAsk={adminView ? decideCancelAsk : undefined}
+            onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         ) : (
           <TimeCalendar month={calMonth}
             onMonth={(next) => {
@@ -446,16 +743,431 @@ export default function MyTimePage() {
               if (next.y !== year) setYear(next.y);
             }}
             onThisMonth={() => changeYear(CURRENT_YEAR)}
-            requests={requests} overtime={overtime} companyDays={companyDays}
+            requests={requests} overtime={overtime} wfh={wfh} swaps={swaps} absences={absences}
+            companyDays={companyDays}
             bankHolidays={bankHolidays} bankHolidaysToBook={bh.toBook}
-            onBook={isPastYear ? undefined : (d) => openBooking('holiday', d)} />
+            onBook={isPastYear || adminView ? undefined : (d) => openBooking('holiday', d)} />
         )}
       </section>
+
+      {/* Your own hours only — an admin looking at somebody already has them,
+          with their history, on the Employment tab. */}
+      {!adminView && <WorkingHoursCard />}
+
+      {/* The person's own link only — never on an admin's view of somebody
+          else, since the link is a credential for THEIR calendar. */}
+      {!adminView && <CalendarFeedCard />}
     </div>
   );
 }
 
-function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onBooked, onError }: {
+interface MyPatternDay { cycleWeek: number; weekday: number; startTime: string | null; endTime: string | null }
+interface MyPattern { effectiveFrom: string; cycleWeeks: number; days: MyPatternDay[]; thisCycleWeek?: number }
+
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+/**
+ * "Your working hours" — what the system THINKS you work, which is what holiday
+ * and overtime are measured against. Shown so a wrong pattern gets spotted by
+ * the one person who would know. Current pattern plus any change already
+ * scheduled; days and times only (jon, Oct 2026) — no notes, breaks or
+ * history. Patterns vary too much here to squeeze into a one-line summary, so
+ * every day is listed as it is.
+ */
+function WorkingHoursCard() {
+  const [data, setData] = useState<{ current: MyPattern | null; upcoming: MyPattern[] } | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ data: { current: MyPattern | null; upcoming: MyPattern[] } | null }>('/staff-calendar/me/patterns')
+      .then(res => { if (!cancelled) setData(res.data); })
+      // Reference information — a failure hides the card rather than the page.
+      .catch(() => { /* leave it hidden */ })
+      .finally(() => { if (!cancelled) setLoaded(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // No staff record: the page already says so at the top.
+  if (!loaded || !data) return null;
+
+  return (
+    <section className="mt-4 bg-white border border-gray-200 rounded-2xl sm:rounded-xl p-5">
+      <h2 className="text-[15px] font-semibold text-gray-900">Your working hours</h2>
+      <p className="text-[13px] text-gray-500">
+        What we have you down to work — your holiday and overtime are worked out from this.
+        If it isn&apos;t right, tell an admin.
+      </p>
+
+      {data.current ? (
+        <PatternWeeks pattern={data.current} />
+      ) : (
+        <p className="mt-3 text-sm text-gray-500">
+          {data.upcoming.length > 0 ? 'No working hours set for now.' : 'No working hours set for you yet — ask an admin.'}
+        </p>
+      )}
+
+      {data.upcoming.map(p => (
+        <div key={p.effectiveFrom} className="mt-4 pt-4 border-t border-gray-100">
+          <h3 className="text-sm font-medium text-gray-900">Changing from {fmtDate(p.effectiveFrom)}</h3>
+          <PatternWeeks pattern={p} />
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function PatternWeeks({ pattern }: { pattern: MyPattern }) {
+  const weeks = pattern.cycleWeeks === 2 ? [1, 2] : [1];
+  // A 2-week pattern alternates; for the current one, say which week is which.
+  function weekLabel(w: number): string | null {
+    if (weeks.length === 1) return null;
+    if (pattern.thisCycleWeek) return w === pattern.thisCycleWeek ? 'This week' : 'Next week';
+    return w === 1 ? 'First week' : 'Second week';
+  }
+  // This week first, then next.
+  const ordered = pattern.thisCycleWeek === 2 ? [2, 1] : weeks;
+  return (
+    <div className={`mt-3 grid gap-4 ${weeks.length === 2 ? 'sm:grid-cols-2' : ''}`}>
+      {ordered.map(w => (
+        <div key={w}>
+          {weekLabel(w) && <div className="text-xs font-medium text-gray-500 mb-1">{weekLabel(w)}</div>}
+          <dl className="text-sm divide-y divide-gray-100">
+            {WEEKDAY_NAMES.map((name, i) => {
+              const d = pattern.days.find(x => x.cycleWeek === w && x.weekday === i);
+              return (
+                <div key={i} className="flex justify-between py-1.5">
+                  <dt className={d ? 'text-gray-900' : 'text-gray-400'}>{name}</dt>
+                  <dd className={`tabular-nums ${d ? 'text-gray-900' : 'text-gray-400'}`}>
+                    {d ? `${d.startTime?.slice(0, 5) ?? '?'}–${d.endTime?.slice(0, 5) ?? '?'}` : 'Not working'}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * "Add to your phone's calendar" — a read-only iCal feed of your OWN time off,
+ * home days and company days (spec §10; contents decided by
+ * services/staff-ical.ts). Collapsed until asked for: the link is only
+ * fetched — and so only created — when somebody opens this.
+ */
+function CalendarFeedCard() {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open || url) return;
+    api.get<{ data: { url: string } }>('/staff-calendar/me/calendar-feed')
+      .then(r => setUrl(r.data.url))
+      .catch(e => setErr(e instanceof Error ? e.message : 'Could not get your link'));
+  }, [open, url]);
+
+  async function copy() {
+    if (!url) return;
+    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+    catch { setErr('Could not copy — press and hold the link to copy it instead.'); }
+  }
+
+  async function reset() {
+    if (!confirm('Make a new link? Any calendar using the old one stops updating, and you will need to add the new one.')) return;
+    setBusy(true);
+    try {
+      const r = await api.post<{ data: { url: string } }>('/staff-calendar/me/calendar-feed/reset', {});
+      setUrl(r.data.url); setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not reset the link');
+    } finally { setBusy(false); }
+  }
+
+  const webcal = url ? url.replace(/^https?:/, 'webcal:') : null;
+  const google = webcal ? `https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}` : null;
+
+  return (
+    <section className="mt-4 bg-white border border-gray-200 rounded-2xl sm:rounded-xl p-5">
+      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between text-left">
+        <span>
+          <span className="block text-[15px] font-semibold text-gray-900">Add your time to your phone&apos;s calendar</span>
+          <span className="block text-[13px] text-gray-500">Your holiday, requests, home days and company days — nobody else&apos;s.</span>
+        </span>
+        <span className="text-gray-400 text-sm ml-3">{open ? 'Hide' : 'Show'}</span>
+      </button>
+
+      {open && (
+        <div className="mt-4 text-sm text-gray-700 space-y-3">
+          {err && <div className="p-2.5 rounded bg-red-50 border border-red-200 text-red-700">{err}</div>}
+          {!url && !err && <p className="text-gray-500">Getting your link…</p>}
+          {url && (
+            <>
+              <div className="flex gap-2">
+                <input readOnly value={url} onFocus={e => e.currentTarget.select()}
+                  className="flex-1 min-w-0 px-2 py-1.5 border border-gray-300 rounded text-xs font-mono bg-gray-50" />
+                <button onClick={() => void copy()}
+                  className="px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50 text-sm shrink-0">
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <a href={webcal!} className="px-3 py-1.5 rounded bg-ooosh-600 hover:bg-ooosh-700 text-white text-sm font-medium">
+                  iPhone / Mac: add it
+                </a>
+                <a href={google!} target="_blank" rel="noreferrer"
+                  className="px-3 py-1.5 rounded border border-ooosh-300 text-ooosh-700 hover:bg-ooosh-50 text-sm font-medium">
+                  Android / Google: add it
+                </a>
+              </div>
+              <ul className="text-[13px] text-gray-600 list-disc pl-5 space-y-1">
+                <li><strong>iPhone:</strong> tap the first button, then Subscribe. Or Settings › Calendar › Accounts › Add Account › Other › Add Subscribed Calendar, and paste the link.</li>
+                <li><strong>Android:</strong> the second button opens Google Calendar on the web — choose Add. If it doesn&apos;t, open calendar.google.com, then Other calendars › + › From URL, and paste the link. It then appears in the Calendar app on your phone (check it is ticked in the app&apos;s menu).</li>
+                <li>It is read-only and updates itself — iPhone every few hours, Google sometimes only once a day. To change anything, use this page.</li>
+                <li>Treat the link like a password: anyone with it can see your time off.{' '}
+                  <button onClick={() => void reset()} disabled={busy} className="text-red-600 underline disabled:opacity-50">
+                    Make a new link
+                  </button>{' '}if it has gone somewhere it shouldn&apos;t.</li>
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Ask to work from home — whole days only (jon, Oct 2026). Costs nothing and
+ * touches no balance, so there is no impact panel: the approver sees the
+ * calendar. A REGULAR home day is not asked for here; it goes on the working
+ * pattern, set by an admin.
+ */
+function WfhForm({ seedDate, onClose, onDone, onError }: {
+  seedDate: string; onClose: () => void; onDone: () => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [startDate, setStartDate] = useState(seedDate);
+  const [endDate, setEndDate] = useState(seedDate);
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (endDate < startDate) setEndDate(startDate); }, [startDate, endDate]);
+
+  async function submit() {
+    setSaving(true);
+    try {
+      await api.post('/staff-calendar/wfh', { startDate, endDate, note: note.trim() || null });
+      await onDone();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not send that');
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="p-5 rounded-2xl sm:rounded-xl border border-teal-200 bg-white">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-[17px] font-semibold text-gray-900">Work from home</h2>
+        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+      <p className="text-[13px] text-gray-500 mb-3">
+        Whole days. You are still working — this just says you won&apos;t be in the building.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">From</span>
+          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">To</span>
+          <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm" />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Note (optional)</span>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. waiting in for a delivery"
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm" />
+        </label>
+      </div>
+      <button onClick={() => void submit()} disabled={saving}
+        className="px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-white text-sm font-semibold disabled:opacity-50">
+        {saving ? 'Sending…' : 'Ask to work from home'}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Ask to swap a day (spec §8.2): have a day you normally work off, and work a
+ * day you normally don't instead. Approved like holiday and touches no
+ * balance — nothing changes on the calendar until it is approved.
+ *
+ * The hours for the day worked instead are filled in from the day given up
+ * and can be changed (jon, Oct 2026 — a Friday and a Saturday don't always run
+ * the same hours). The unpaid break is the day given up's, so it is not asked
+ * for: breaks aren't shown on My Time. The server checks the days as they are
+ * picked, and the same rules again when the request is sent.
+ */
+function SwapForm({ onClose, onDone, onError }: {
+  onClose: () => void; onDone: () => Promise<void>; onError: (msg: string) => void;
+}) {
+  const [offDate, setOffDate] = useState('');
+  const [workDate, setWorkDate] = useState('');
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
+  const [note, setNote] = useState('');
+  const [check, setCheck] = useState<SwapCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // Opens below the logger, which on a phone is off-screen — bring it into view.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, []);
+
+  // Ask about the days as they are picked. A reply for days since changed is
+  // dropped, so a slow answer cannot overwrite a newer one.
+  useEffect(() => {
+    if (!offDate && !workDate) { setCheck(null); return; }
+    let live = true;
+    setChecking(true);
+    const qs = new URLSearchParams();
+    if (offDate) qs.set('offDate', offDate);
+    if (workDate) qs.set('workDate', workDate);
+    api.get<{ data: SwapCheck }>(`/staff-calendar/swaps/preview?${qs.toString()}`)
+      .then(r => { if (live) setCheck(r.data); })
+      .catch(err => {
+        if (live) setCheck({ problems: [err instanceof Error ? err.message : 'Could not check those days'], usual: null });
+      })
+      .finally(() => { if (live) setChecking(false); });
+    return () => { live = false; };
+  }, [offDate, workDate]);
+
+  // Fill the hours in from the day being given up, whenever that day changes.
+  const usualStart = check?.usual?.startTime ?? null;
+  const usualEnd = check?.usual?.endTime ?? null;
+  useEffect(() => {
+    if (usualStart && usualEnd) { setStartTime(usualStart); setEndTime(usualEnd); }
+  }, [offDate, usualStart, usualEnd]);
+
+  const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+  const usual = check?.usual ?? null;
+  const paid = usual && startTime && endTime ? toMin(endTime) - toMin(startTime) - usual.breakMinutes : null;
+  const timesBad = !!(startTime && endTime && toMin(endTime) <= toMin(startTime));
+  // Forward-looking only (jon, Oct 2026). `min` stops the picker going back,
+  // but a date typed by hand can still land before it, so say so here too.
+  // The server deliberately allows past dates: approving a swap whose day
+  // has just gone by must still work.
+  const today = ukToday();
+  const pastDate = [offDate, workDate].some(d => d && d < today);
+  const problems = [...(pastDate ? ['Pick today or a later date'] : []), ...(check?.problems ?? [])];
+  const diff = paid !== null && usual ? paid - usual.minutes : 0;
+  const ready = !!(offDate && workDate && usual && paid !== null && paid > 0 && !timesBad
+    && problems.length === 0 && !checking);
+
+  async function submit() {
+    setSaving(true);
+    try {
+      await api.post('/staff-calendar/swaps', { offDate, workDate, startTime, endTime, note: note.trim() || null });
+      await onDone();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Could not send that');
+    } finally { setSaving(false); }
+  }
+
+  const input = 'w-full px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm bg-white';
+  return (
+    // Two-thirds width on a desktop (jon, Oct 2026) — the same three-column
+    // grid as the cards above, so its edge lines up with the overtime card.
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    <div ref={panelRef} className="lg:col-span-2 p-5 rounded-2xl sm:rounded-xl border border-indigo-200 bg-white">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-[17px] font-semibold text-gray-900">Swap a day</h2>
+        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+      <p className="text-[13px] text-gray-500 mb-3">
+        Have one of your usual days off and work a different day instead. It costs no holiday —
+        it just changes which day you&apos;re in. The calendar updates once it&apos;s approved.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Day you&apos;ll have off <span className="text-gray-400">— one you normally work</span></span>
+          <input type="date" value={offDate} min={today} onChange={e => setOffDate(e.target.value)} className={input} />
+        </label>
+        <label className="text-sm">
+          <span className="block text-xs text-gray-600 mb-1">Day you&apos;ll work instead <span className="text-gray-400">— one you normally don&apos;t</span></span>
+          <input type="date" value={workDate} min={today} onChange={e => setWorkDate(e.target.value)} className={input} />
+        </label>
+      </div>
+
+      {/* Hours only once there is a day to take them from — an empty select
+          would show its first option and look like a real time. */}
+      {usual ? (
+        <div className="mb-3">
+          <span className="block text-xs text-gray-600 mb-1">
+            Your hours on {workDate ? fmtDate(workDate) : 'the day you work instead'}
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <QuarterHourSelect value={startTime} onChange={setStartTime} aria-label="Start time"
+              className="px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm bg-white" />
+            <span className="text-gray-500">to</span>
+            <QuarterHourSelect value={endTime} onChange={setEndTime} aria-label="Finish time"
+              className="px-2 py-1.5 border border-gray-300 rounded text-base sm:text-sm bg-white" />
+            <span className={`text-sm ${timesBad || (paid !== null && paid <= 0) ? 'text-red-600' : 'text-gray-700'}`}>
+              {timesBad ? 'The finish needs to be after the start'
+                : paid === null ? ''
+                : paid <= 0 ? 'That leaves no working time after your usual break'
+                : `${fmtH(paid)}${offDate ? (diff === 0
+                    ? ` — the same as ${fmtDate(offDate)}`
+                    : ` — ${fmtH(Math.abs(diff))} ${diff > 0 ? 'longer' : 'shorter'} than ${fmtDate(offDate)}`) : ''}`}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-gray-500">
+            Filled in from the day you&apos;re giving up — change them if that day runs differently.
+          </p>
+        </div>
+      ) : null}
+
+      {problems.length > 0 && (
+        <ul className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700 list-disc list-inside">
+          {problems.map(p => <li key={p}>{p}</li>)}
+        </ul>
+      )}
+
+      <label className="block text-sm mb-3">
+        <span className="block text-xs text-gray-600 mb-1">Note (optional)</span>
+        <input value={note} onChange={e => setNote(e.target.value)} maxLength={500}
+          placeholder="e.g. gig on the Saturday" className={input} />
+      </label>
+      <button onClick={() => void submit()} disabled={saving || !ready}
+        className="px-4 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-sm font-semibold disabled:opacity-50">
+        {saving ? 'Sending…' : checking ? 'Checking…' : 'Ask to swap'}
+      </button>
+    </div>
+    </div>
+  );
+}
+
+/**
+ * An approved booking's days as the form's day settings, so a change opens on
+ * the booking exactly as it stands. A date in the range with no day is "not
+ * off" — a weekend (which the server ignores) or a day taken out before.
+ */
+function prefillDayParts(r: LeaveRequest): Record<string, DaySpec> {
+  const out: Record<string, DaySpec> = {};
+  const rows = new Map(r.days.map(d => [d.date, d]));
+  for (let date = r.startDate; date <= r.endDate; date = addDaysIso(date, 1)) {
+    const d = rows.get(date);
+    if (!d) out[date] = { portion: 'none' };
+    else if (d.portion === 'hours') {
+      out[date] = { portion: 'hours', startTime: (d.startTime ?? '15:00').slice(0, 5), endTime: (d.endTime ?? '17:00').slice(0, 5) };
+    } else if (d.portion !== 'full') out[date] = { portion: d.portion };
+  }
+  return out;
+}
+
+function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onBooked, onError, replacing, personId, adminDirect = false }: {
   balances: MyBalances | null;
   /** The date the form opens on — today, or 1 January of the year being viewed. */
   seedDate: string;
@@ -463,16 +1175,34 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
   initialType?: LeaveType;
   onClose: () => void;
   onBooked: (msg: string) => Promise<void>; onError: (msg: string) => void;
+  /**
+   * Set when changing or cancelling this APPROVED booking (spec §5.4). The
+   * person asks and an admin approves; nothing moves until then.
+   */
+  replacing?: LeaveRequest;
+  /** Whose booking — set on the Staff page's view of somebody. */
+  personId?: string;
+  /** An admin acting on somebody's booking: done in the same press, and they are told. */
+  adminDirect?: boolean;
 }) {
   const [leaveType, setLeaveType] = useState<LeaveType>(initialType);
   // Opens below the logger, which on a phone is off-screen — bring it into view.
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => { panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, []);
   const [spanMode, setSpanMode] = useState<'days' | 'part'>('days');
-  const [startDate, setStartDate] = useState(seedDate);
-  const [endDate, setEndDate] = useState(seedDate);
+  const [startDate, setStartDate] = useState(replacing?.startDate ?? seedDate);
+  const [endDate, setEndDate] = useState(replacing?.endDate ?? seedDate);
   // A day can be whole, a half, or an actual period ("leaving at 15:00").
-  const [dayParts, setDayParts] = useState<Record<string, DaySpec>>({});
+  const [dayParts, setDayParts] = useState<Record<string, DaySpec>>(
+    () => (replacing ? prefillDayParts(replacing) : {}));
+  // Changing a booking: alter its days, or give the whole booking back.
+  const [mode, setMode] = useState<'change' | 'cancel'>('change');
+  // Days before today have gone and stay exactly as they were (jon, Oct 2026):
+  // a holiday under way can be shortened, never rewritten or cancelled.
+  const gone = useMemo(
+    () => new Set((replacing?.days ?? []).filter(d => d.date < TODAY).map(d => d.date)), [replacing]);
+  const lastGone = useMemo(() => [...gone].sort().pop() ?? null, [gone]);
+  const started = gone.size > 0;
   const [note, setNote] = useState('');
   const [impact, setImpact] = useState<Impact | null>(null);
   const [impactError, setImpactError] = useState<string | null>(null);
@@ -514,7 +1244,8 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
   }, [spanMode, dayParts]);
 
   useEffect(() => {
-    if (localTimeError) { setChecking(false); return; }
+    // Nothing to price when the whole booking is being given back.
+    if (localTimeError || mode === 'cancel') { setChecking(false); return; }
     let cancelled = false;
     setChecking(true);
     const t = setTimeout(async () => {
@@ -522,6 +1253,9 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
         const qs = new URLSearchParams({
           from: startDate, to: endDate, type: leaveType, halfDays: dayPartsKey,
         });
+        // A change is priced against the booking it replaces.
+        if (replacing) qs.set('replaces', replacing.id);
+        if (personId) qs.set('personId', personId);
         const res = await api.get<{ data: Impact }>(`/staff-calendar/leave/impact?${qs}`);
         if (!cancelled) { setImpact(res.data); setImpactError(null); }
       } catch (err) {
@@ -537,35 +1271,111 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [startDate, endDate, leaveType, dayPartsKey, localTimeError]);
+  }, [startDate, endDate, leaveType, dayPartsKey, localTimeError, mode, replacing, personId]);
 
   async function submit() {
     setSaving(true);
     try {
+      if (replacing && mode === 'cancel') {
+        // The person asks; an admin on their Time off tab just does it.
+        if (adminDirect) {
+          await api.post(`/staff-calendar/leave/${replacing.id}/cancel`, { reason: note.trim() });
+          await onBooked('Cancelled — the time is back on their balance, and they’ve been told.');
+        } else {
+          await api.post(`/staff-calendar/leave/${replacing.id}/cancel-request`, { note: note.trim() });
+          await onBooked('Asked — your booking stands until it’s approved. You’ll hear either way.');
+        }
+        return;
+      }
       await api.post('/staff-calendar/leave', {
         leaveType, startDate, endDate,
         halfDays: Object.keys(dayParts).length ? dayParts : undefined,
-        note: note || null,
+        note: replacing ? note.trim() : (note || null),
+        ...(replacing ? { replacesRequestId: replacing.id } : {}),
+        ...(replacing && adminDirect ? { personId, approveNow: true } : {}),
       });
       setNote(''); setDayParts({}); setImpact(null);
-      await onBooked('Request submitted — you’ll hear when it’s been looked at.');
+      await onBooked(replacing
+        ? adminDirect
+          ? 'Changed — they’ve been told.'
+          : 'Change asked for — nothing moves until it’s approved. You’ll hear either way.'
+        : 'Request submitted — you’ll hear when it’s been looked at.');
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to submit the request');
     } finally { setSaving(false); }
   }
 
-
-  const blocked = localTimeError !== null
+  // The written reason is the point of asking through OP (jon, Oct 2026).
+  const noteMissing = !!replacing && !note.trim();
+  const unchanged = mode === 'change' && impact?.change?.unchanged === true;
+  const blocked = noteMissing || unchanged || (mode === 'change' && (localTimeError !== null
     || (impact?.ownClashes.length ?? 0) > 0
-    || (impact?.workingDays ?? 0) === 0;
+    || (impact?.workingDays ?? 0) === 0));
+
+  // Every contracted day in the range, including any marked "not off", so a
+  // day taken out can be put back.
+  const chipDays = useMemo(() => impact
+    ? [...impact.days, ...(impact.notOff ?? []).map(date => ({ date, minutes: 0, portion: 'none' }))]
+        .sort((a, b) => a.date.localeCompare(b.date))
+    : [], [impact]);
+  const bookedNow = replacing
+    ? `${fmtRange(replacing.startDate, replacing.endDate)} · ${replacing.days.length} day${replacing.days.length === 1 ? '' : 's'} · ${fmtH(replacing.totalMinutes)}`
+    : null;
 
   return (
     <div ref={panelRef} className="p-5 rounded-2xl sm:rounded-xl border border-gray-200 bg-white scroll-mt-4">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-[17px] font-semibold text-gray-900">Book time off</h2>
-        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+        <h2 className="text-[17px] font-semibold text-gray-900">
+          {replacing ? (adminDirect ? 'Change or cancel this booking' : 'Change or cancel your booking') : 'Book time off'}
+        </h2>
+        {/* "Close", not "Cancel", beside a "Cancel it altogether" button. */}
+        <button onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">{replacing ? 'Close' : 'Cancel'}</button>
       </div>
 
+      {replacing && (
+        <div className="mb-3">
+          <p className="text-sm text-gray-700">Booked now: <strong className="font-medium text-gray-900">{bookedNow}</strong></p>
+          <div className="mt-2 flex rounded border border-gray-300 overflow-hidden text-xs w-fit">
+            {([['change', 'Change the days'], ['cancel', 'Cancel it altogether']] as const).map(([m, label]) => (
+              <button key={m} onClick={() => setMode(m)}
+                // A holiday under way can only be shortened — the days already
+                // taken were taken.
+                disabled={m === 'cancel' && started}
+                className={`px-3 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${mode === m ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-gray-500">
+            {started
+              ? 'It’s already started, so it can only be shortened — the days already gone stay as they were.'
+              : adminDirect
+                ? 'This happens straight away, and they’re told.'
+                : 'Nothing changes until it’s approved — your booking stands until then.'}
+          </p>
+        </div>
+      )}
+
+      {replacing && mode === 'cancel' ? (
+        <>
+          <p className="mb-3 text-sm text-gray-700">
+            {replacing.leaveType === 'unpaid'
+              ? 'It’s unpaid, so no balance changes — the days are simply no longer booked off.'
+              : `${adminDirect ? 'All' : 'Once approved, all'} ${fmtH(replacing.totalMinutes)} goes back to ${adminDirect ? 'their' : 'your'} ${replacing.leaveType === 'toil' ? 'overtime bank' : 'holiday balance'}.`}
+          </p>
+          <label className="block text-sm mb-3">
+            <span className="block text-xs text-gray-600 mb-1">Why? (required)</span>
+            <input value={note} onChange={e => setNote(e.target.value)}
+              placeholder={adminDirect ? 'They’ll see this' : 'e.g. the trip’s been called off'}
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+          </label>
+          <button onClick={() => void submit()} disabled={saving || noteMissing}
+            className="px-3 py-2 text-sm rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
+            {saving ? 'Sending…' : adminDirect ? 'Cancel the booking' : 'Ask to cancel'}
+          </button>
+        </>
+      ) : (<>
+      {!replacing && (
       <div className="mb-3">
         <span className="block text-xs text-gray-600 mb-1">How much time?</span>
         <div className="flex rounded border border-gray-300 overflow-hidden text-xs w-fit">
@@ -591,16 +1401,22 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
           </p>
         )}
       </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">Type</span>
+          {/* A holiday under way keeps its type — the days taken were taken as it. */}
           <select value={leaveType} onChange={e => setLeaveType(e.target.value as LeaveType)}
-            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm">
+            disabled={started}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm disabled:bg-gray-50 disabled:text-gray-500">
             {/* The balance is in the label so the choice between holiday and
-                overtime is made with both figures visible, not from memory. */}
+                overtime is made with both figures visible, not from memory.
+                Holiday in days, as on the stat card — "61h 13m" means nothing
+                to anybody deciding whether they can take a week off. */}
             <option value="holiday">
-              Holiday{balances ? ` — ${fmtH(balances.holiday.availableMinutes)} left` : ''}
+              Holiday{balances ? ` — ${asDays(balances.holiday.availableMinutes, balances.holiday.nominalDayMinutes)
+                ?? fmtH(balances.holiday.availableMinutes)}${balances.holiday.nominalDayMinutes ? ' days' : ''} left` : ''}
             </option>
             <option value="toil">
               Overtime as time off{balances ? ` — ${fmtH(balances.overtime.availableMinutes)} banked` : ''}
@@ -610,17 +1426,28 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
         </label>
         <label className="text-sm">
           <span className="block text-xs text-gray-600 mb-1">From</span>
+          {/* A holiday under way keeps its start: that day has gone. */}
           <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
-            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
+            disabled={started}
+            className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm disabled:bg-gray-50 disabled:text-gray-500" />
         </label>
         {spanMode === 'days' && (
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">To</span>
-            <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)}
+            <input type="date" value={endDate} min={lastGone ?? startDate} onChange={e => setEndDate(e.target.value)}
               className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
           </label>
         )}
       </div>
+      {/* Absence is recorded FOR staff, never booked by them (spec §7) — so
+          the form has to say where the rest goes, or it gets booked here as
+          holiday. The first paternity leave did exactly that (Oct 2026). */}
+      {!replacing && (
+      <p className="-mt-1 mb-3 text-xs text-gray-500">
+        Paternity, maternity, jury service or anything else that isn’t holiday? Don’t book it
+        here — ask an admin, who will record it for you without touching your allowance.
+      </p>
+      )}
 
       {spanMode === 'part' && (
         <div className="mb-3 flex flex-wrap items-end gap-2">
@@ -648,19 +1475,27 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
         </div>
       )}
 
-      {spanMode === 'days' && impact && impact.days.length > 0 && impact.days.length <= 14 && (
+      {spanMode === 'days' && impact && chipDays.length > 0 && chipDays.length <= (replacing ? 31 : 14) && (
         <div className="mb-3">
           <span className="block text-xs text-gray-600 mb-1">
-            Days — click to switch between a whole day, a half, or set times
+            {replacing
+              ? 'Days — click to switch between a whole day, a half, set times, or not off'
+              : 'Days — click to switch between a whole day, a half, or set times'}
           </span>
           <div className="space-y-1.5">
-            {impact.days.map(d => {
+            {chipDays.map(d => {
               const spec = dayParts[d.date] ?? { portion: 'full' as const };
-              const cycle: DaySpec['portion'][] = ['full', 'am', 'pm', 'hours'];
+              // "Not off" only when changing a booking — it is how one day comes
+              // out of the middle, so it is one click away. A new booking is
+              // unchanged.
+              const cycle: DaySpec['portion'][] = replacing
+                ? ['full', 'none', 'am', 'pm', 'hours'] : ['full', 'am', 'pm', 'hours'];
               const next = cycle[(cycle.indexOf(spec.portion) + 1) % cycle.length];
+              const locked = gone.has(d.date);
               return (
                 <div key={d.date} className="flex flex-wrap items-center gap-2">
-                  <button
+                  <button disabled={locked}
+                    title={locked ? 'Already taken — days already gone can’t be changed' : undefined}
                     onClick={() => setDayParts(prev => {
                       const n = { ...prev };
                       if (next === 'full') delete n[d.date];
@@ -668,31 +1503,35 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
                       else n[d.date] = { portion: next };
                       return n;
                     })}
-                    className={`px-2 py-1 rounded border text-xs min-w-[8.5rem] text-left ${
+                    className={`px-2 py-1 rounded border text-xs min-w-[8.5rem] text-left disabled:cursor-not-allowed disabled:opacity-60 ${
                       spec.portion === 'full'
                         ? 'border-gray-300 bg-white text-gray-700'
-                        : 'border-ooosh-300 bg-ooosh-50 text-ooosh-800'}`}>
+                        : spec.portion === 'none'
+                          ? 'border-dashed border-gray-300 bg-gray-50 text-gray-500'
+                          : 'border-ooosh-300 bg-ooosh-50 text-ooosh-800'}`}>
                     {fmtDate(d.date)}
                     <span className="ml-1 font-medium">
                       {spec.portion === 'full' ? 'whole day'
                         : spec.portion === 'am' ? 'morning'
-                        : spec.portion === 'pm' ? 'afternoon' : 'set times'}
+                        : spec.portion === 'pm' ? 'afternoon'
+                        : spec.portion === 'none' ? 'not off' : 'set times'}
                     </span>
+                    {locked && <span className="ml-1 text-gray-400">· already taken</span>}
                   </button>
 
                   {spec.portion === 'hours' && (
                     <span className="flex items-center gap-1 text-xs">
-                      <input type="time" step={300} value={spec.startTime ?? '15:00'}
+                      <input type="time" step={300} value={spec.startTime ?? '15:00'} disabled={locked}
                         onChange={e => setDayParts(p => ({ ...p, [d.date]: { ...spec, startTime: e.target.value } }))}
                         className="px-1.5 py-1 border border-gray-300 rounded text-xs" />
                       <span className="text-gray-400">to</span>
-                      <input type="time" step={300} value={spec.endTime ?? '17:00'}
+                      <input type="time" step={300} value={spec.endTime ?? '17:00'} disabled={locked}
                         onChange={e => setDayParts(p => ({ ...p, [d.date]: { ...spec, endTime: e.target.value } }))}
                         className="px-1.5 py-1 border border-gray-300 rounded text-xs" />
                     </span>
                   )}
 
-                  <span className="text-xs text-gray-500">{fmtH(d.minutes)}</span>
+                  <span className="text-xs text-gray-500">{spec.portion === 'none' ? '—' : fmtH(d.minutes)}</span>
                 </div>
               );
             })}
@@ -701,9 +1540,9 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
       )}
 
       <label className="block text-sm mb-3">
-        <span className="block text-xs text-gray-600 mb-1">Note (optional)</span>
+        <span className="block text-xs text-gray-600 mb-1">{replacing ? 'Why the change? (required)' : 'Note (optional)'}</span>
         <input value={note} onChange={e => setNote(e.target.value)}
-          placeholder="Anything worth saying?"
+          placeholder={replacing ? (adminDirect ? 'They’ll see this' : 'e.g. moving it a day later') : 'Anything worth saying?'}
           className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm" />
       </label>
 
@@ -712,15 +1551,24 @@ function BookTimeOff({ balances, seedDate, initialType = 'holiday', onClose, onB
 
       <button onClick={() => void submit()} disabled={saving || checking || blocked}
         className="mt-3 px-3 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
-        {saving ? 'Submitting…' : 'Submit request'}
+        {saving ? 'Submitting…' : replacing ? (adminDirect ? 'Save the change' : 'Ask for this change') : 'Submit request'}
       </button>
       {blocked && impact && (
-        <p className="mt-1.5 text-xs text-red-600">
+        <p className={`mt-1.5 text-xs ${(noteMissing || unchanged) && (impact.ownClashes.length === 0 && impact.workingDays > 0) ? 'text-gray-500' : 'text-red-600'}`}>
           {impact.ownClashes.length > 0
             ? 'Pick dates you haven’t already booked.'
-            : 'None of those dates are days you’re contracted to work.'}
+            : impact.workingDays === 0
+              ? replacing
+                ? 'That leaves no days off — to give the whole booking back, choose “Cancel it altogether”.'
+                : 'None of those dates are days you’re contracted to work.'
+              : unchanged
+                ? 'Change the days first — this is the booking as it already is.'
+                : noteMissing
+                  ? 'Say why first — it’s what the approver reads.'
+                  : 'None of those dates are days you’re contracted to work.'}
         </p>
       )}
+      </>)}
     </div>
   );
 }
@@ -753,11 +1601,26 @@ export function ImpactPanel({ impact, checking, leaveType, error }: {
   return (
     <div className="p-3 rounded border border-gray-200 bg-gray-50/70">
       <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm">
-        <span>
-          <span className="text-gray-600">This costs:</span>{' '}
-          <span className="font-medium text-gray-900">{fmtH(impact.totalMinutes)}</span>
-          {days && <span className="text-gray-500"> ({days} days)</span>}
-        </span>
+        {impact.change ? (
+          // A change (spec §5.4) is the difference it makes, not the cost of
+          // the new booking — "This costs 37h" reads as 37h MORE.
+          <span>
+            <span className="text-gray-600">This change:</span>{' '}
+            <span className="font-medium text-gray-900">
+              {impact.change.unchanged ? 'nothing yet — pick the days you want instead'
+                : impact.change.minutes > 0 ? `uses ${fmtH(impact.change.minutes)} more`
+                : impact.change.minutes < 0 ? `gives back ${fmtH(-impact.change.minutes)}`
+                : 'no difference to the balance'}
+            </span>
+            <span className="text-gray-500"> · {fmtH(impact.totalMinutes)} booked in all</span>
+          </span>
+        ) : (
+          <span>
+            <span className="text-gray-600">This costs:</span>{' '}
+            <span className="font-medium text-gray-900">{fmtH(impact.totalMinutes)}</span>
+            {days && <span className="text-gray-500"> ({days} days)</span>}
+          </span>
+        )}
         {leaveType === 'unpaid' ? (
           <span className="text-gray-500">Unpaid — nothing comes off your allowance.</span>
         ) : impact.balanceBefore !== null && (
@@ -1114,6 +1977,9 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
   const [touched, setTouched] = useState(false);
   const [finishes, setFinishes] = useState<Record<string, number>>({});
   const [starts, setStarts] = useState<Record<string, number>>({});
+  // Contracted hours on the days you were actually down to work — a day off,
+  // a day on leave or a part day is not in here, so nothing is blocked on it.
+  const [workingHours, setWorkingHours] = useState<Record<string, { start: number; end: number }>>({});
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
   const [lastLogged, setLastLogged] = useState<{ id: string; text: string } | null>(null);
@@ -1125,18 +1991,26 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
   // silent: the form simply starts at 17:00.
   useEffect(() => {
     let cancelled = false;
-    api.get<{ data: { days: { date: string; startTime: string | null; endTime: string | null }[] } | null }>(
+    api.get<{ data: { days: { date: string; status: string; startTime: string | null; endTime: string | null }[] } | null }>(
       `/staff-calendar/me?from=${earliest}&to=${today}`)
       .then(res => {
         if (cancelled || !res.data) return;
         const ends: Record<string, number> = {};
         const begins: Record<string, number> = {};
+        const hours: Record<string, { start: number; end: number }> = {};
         for (const d of res.data.days) {
           if (d.endTime) ends[d.date] = toMin(d.endTime);
           if (d.startTime) begins[d.date] = toMin(d.startTime);
+          // Only a plain working day. 'partial' (a half day or a few hours
+          // off) is left alone: we know they were in for SOME of it, not
+          // which part, and blocking real overtime there is the worse error.
+          if (d.status === 'working' && d.startTime && d.endTime) {
+            hours[d.date] = { start: toMin(d.startTime), end: toMin(d.endTime) };
+          }
         }
         setFinishes(ends);
         setStarts(begins);
+        setWorkingHours(hours);
       })
       .catch(() => { /* no staff record or no pattern — keep the default */ });
     return () => { cancelled = true; };
@@ -1171,7 +2045,11 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
     setEndMin(Math.min(LAST_SLOT, start + 60));
   }, [workDate, finishes, starts, usualFinish, touched]);
 
-  const duration = endMin - startMin;
+  // To at or before From means the shift ran past midnight (22:00–02:00 is
+  // 4h, logged on the day it STARTED). One entry, not two halves: the selects
+  // stop at 23:55, so "until midnight" could not be entered at all.
+  const overnight = endMin <= startMin;
+  const duration = overnight ? endMin + 1440 - startMin : endMin - startMin;
   // Both ends are on the grid now, so this is a no-op — kept as a guard.
   const snapped = duration > 0 ? Math.ceil(duration / 5) * 5 : 0;
 
@@ -1179,12 +2057,26 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
   const now = new Date();
   const nowMin = now.getHours() * 60 + now.getMinutes();
   const isToday = workDate === localIso(now);
+  // Overtime is time OUTSIDE your contracted hours. Anything overlapping them
+  // is refused — including the unpaid break: working through lunch is not
+  // overtime here (jon, Sep 2026). If the calendar could not be read there is
+  // nothing to check against, and nothing is blocked.
+  const contracted = workingHours[workDate];
+  // Only the part on the day itself is checked against that day's hours.
+  const inHours = !!contracted && startMin < contracted.end
+    && (overnight ? 1440 : endMin) > contracted.start;
+  // An overnight entry finishes the NEXT day — still to come if it started
+  // today; if it started yesterday, it finished today at endMin.
+  const endsInFuture = overnight
+    ? (isToday || (workDate === addDaysIso(localIso(now), -1) && endMin > nowMin + FUTURE_GRACE_MIN))
+    : isToday && endMin > nowMin + FUTURE_GRACE_MIN;
   const timeError =
     duration <= 0 ? 'end before start'
     : snapped > 960 ? 'more than 16 hours'
     // Overtime that has not happened yet is a mistake, not a judgement call —
     // so unlike the leave warnings, this one blocks.
-    : isToday && endMin > nowMin + FUTURE_GRACE_MIN ? 'that’s still to come'
+    : endsInFuture ? 'that’s still to come'
+    : inHours ? 'that’s in your working hours'
     : null;
   const valid = timeError === null && reason.trim() !== '';
 
@@ -1245,7 +2137,6 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
       </div>
 
       <div>
-        <span className="block text-xs text-gray-600 mb-1">Day</span>
         <div className="flex items-stretch gap-1.5">
           {/* ‹ goes back toward Today; › further into the past. */}
           <button type="button" aria-label="Towards today" className={arrow}
@@ -1301,7 +2192,7 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
             </button>
           ))}
           <span className={`ml-auto sm:ml-2 whitespace-nowrap text-[15px] font-semibold ${timeError ? 'text-red-600' : 'text-gray-900'}`}>
-            {timeError ?? `= ${fmtH(snapped)}`}
+            {timeError ?? `= ${fmtH(snapped)}${overnight ? ' (past midnight)' : ''}`}
           </span>
         </div>
       </div>
@@ -1320,6 +2211,13 @@ export function LogOvertime({ onLogged, onUndone, onError }: {
             : `Log ${fmtH(snapped)} for ${dayWord}`}
         </button>
       </div>
+
+      {inHours && contracted && timeError === 'that’s in your working hours' && (
+        <p className="-mt-1.5 text-xs text-red-600">
+          You&apos;re down to work {hhmm(contracted.start)}–{hhmm(contracted.end)} that day —
+          overtime is time before or after that.
+        </p>
+      )}
 
       {timeError === 'that’s still to come' && (
         <p className="-mt-1.5 text-xs text-red-600">
@@ -1356,7 +2254,7 @@ interface TimeRow {
   statusClass: string;
   dot: string;
   fresh?: boolean;
-  action?: { label: string; onClick: () => void; className: string };
+  actions?: { label: string; onClick: () => void; className: string }[];
 }
 
 const statusWord = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -1368,12 +2266,82 @@ const DEAD = new Set(['declined', 'cancelled', 'withdrawn']);
  * IS time off — they just did not have to ask for it and it cost nothing — so
  * it sits in the same list as their own bookings.
  */
-function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook }: {
+type DecideKind = 'leave' | 'overtime' | 'wfh' | 'swaps';
+type Decide = (kind: DecideKind, id: string, action: 'approve' | 'decline' | 'cancel') => void;
+
+/** What a pending row offers: the person withdraws it; an admin decides it. */
+function pendingActions(kind: DecideKind, id: string, onWithdraw: () => void, onDecide?: Decide) {
+  return onDecide
+    ? [
+        { label: 'Approve', onClick: () => onDecide(kind, id, 'approve'), className: 'text-emerald-700 font-semibold' },
+        { label: 'Decline', onClick: () => onDecide(kind, id, 'decline'), className: 'text-red-600' },
+      ]
+    : [{ label: 'Withdraw', onClick: onWithdraw, className: 'text-red-600' }];
+}
+
+function buildRows({ requests, overtime, wfh = [], onWithdrawWfh, swaps = [], onWithdrawSwap, adjustments = [], absences = [], companyDays, bankHolidaysToBook, freshIds, onWithdraw, onCancelOvertime, onBook, onDecide, onChange, onWithdrawCancelAsk, onDecideCancelAsk }: {
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
+  wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
+  swaps?: DaySwap[]; onWithdrawSwap?: (id: string) => void;
+  adjustments?: Adjustment[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
+  onDecide?: Decide;
+  /** Open the change / cancel form on an approved booking (spec §5.4). */
+  onChange?: (r: LeaveRequest) => void;
+  onWithdrawCancelAsk?: (id: string) => void;
+  /** Admin only — answer an ask to cancel. */
+  onDecideCancelAsk?: (id: string, action: 'approve' | 'decline') => void;
 }): TimeRow[] {
   const rows: TimeRow[] = [];
+
+  // Hours an admin added or took off by hand — the note says why, in words
+  // the person will recognise ("brought across from BrightHR").
+  for (const a of adjustments) {
+    const plus = a.minutes > 0;
+    const lieu = a.sourceType === 'company_day_lieu';
+    rows.push({
+      key: `adj:${a.id}`, date: a.effectiveDate, until: a.effectiveDate,
+      title: a.note || 'Adjustment',
+      meta: lieu
+        ? 'Added to your holiday — book it whenever you like'
+        : `Adjustment to your ${a.account === 'holiday' ? 'holiday' : 'overtime bank'}`,
+      extra: !lieu && a.createdByName ? `Added by ${a.createdByName}` : null,
+      amount: `${plus ? '+' : '−'}${fmtH(Math.abs(a.minutes))}`,
+      amountClass: plus ? 'text-emerald-700' : 'text-gray-900',
+      pill: lieu ? 'Day in lieu' : 'Adjustment',
+      pillClass: lieu ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-700',
+      statusClass: lieu ? 'text-emerald-700' : 'text-gray-600',
+      dot: lieu ? 'bg-emerald-500' : 'bg-gray-400',
+    });
+  }
+
+  // Absence an admin recorded — sickness, parental leave and the rest. "Absent"
+  // and nothing more (jon, Oct 2026): the API does not send the type. The
+  // hours show only when it came out of their holiday, which explains a
+  // figure on the card the list would otherwise leave unaccounted for.
+  for (const a of absences) {
+    const n = a.days.length;
+    const mins = a.days.reduce((t, d) => t + d.minutes, 0);
+    const half = n === 1 && a.days[0]!.portion !== 'full'
+      ? ` · ${a.days[0]!.portion === 'am' ? 'morning' : 'afternoon'}` : '';
+    const span = a.isOpen
+      ? `Since ${fmtDate(a.startDate)} · still off`
+      : fmtRange(a.startDate, a.endDate ?? a.startDate);
+    rows.push({
+      key: `abs:${a.id}`, date: a.startDate,
+      until: a.isOpen ? TODAY : (a.endDate ?? a.startDate),
+      title: 'Absent',
+      meta: `${span}${n > 0 ? ` · ${n} day${n === 1 ? '' : 's'}` : ''}${half}`,
+      amount: a.deductsAllowance ? `−${fmtH(mins)}` : '',
+      amountClass: 'text-gray-600',
+      pill: a.deductsAllowance ? 'From your holiday' : 'Doesn’t use your holiday',
+      pillClass: 'bg-violet-100 text-violet-800',
+      statusClass: 'text-violet-700',
+      dot: 'bg-violet-500',
+    });
+  }
 
   for (const c of companyDays) {
     rows.push({
@@ -1392,7 +2360,7 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
       amount: '', amountClass: '',
       pill: 'Not booked', pillClass: 'bg-amber-100 text-amber-800', statusClass: 'text-amber-800',
       dot: 'bg-amber-500',
-      action: onBook ? { label: 'Book it', onClick: () => onBook(d), className: 'text-ooosh-600 font-semibold' } : undefined,
+      actions: onBook ? [{ label: 'Book it', onClick: () => onBook(d), className: 'text-ooosh-600 font-semibold' }] : undefined,
     });
   }
 
@@ -1410,8 +2378,8 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
       statusClass: e.status === 'pending' ? 'text-amber-800' : e.status === 'approved' ? 'text-emerald-700' : 'text-gray-500',
       dot: dead ? 'bg-gray-300' : e.status === 'pending' ? 'bg-amber-500' : 'bg-ooosh-600',
       fresh: freshIds.includes(e.id),
-      action: e.status === 'pending'
-        ? { label: 'Withdraw', onClick: () => onCancelOvertime(e.id), className: 'text-red-600' } : undefined,
+      actions: e.status === 'pending'
+        ? pendingActions('overtime', e.id, () => onCancelOvertime(e.id), onDecide) : undefined,
     });
   }
 
@@ -1420,10 +2388,42 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
     const n = r.days.length;
     const span = r.startDate === r.endDate ? '' : `${fmtRange(r.startDate, r.endDate)} · `;
     const isToil = r.leaveType === 'toil';
+    // Changing / cancelling approved time off (spec §5.4).
+    const was = r.replaces ? fmtRange(r.replaces.startDate, r.replaces.endDate) : null;
+    const askWaiting = r.status === 'approved' && !!r.cancelAsk && !r.cancelAsk.declinedAt;
+    const askDeclined = r.status === 'approved' && !!r.cancelAsk?.declinedAt;
+    const changedAway = r.status === 'cancelled' && !!r.replacedById;
+    // Still has a day today or later — the only bookings worth changing.
+    const open = r.status === 'approved' && r.days.some(d => d.date >= TODAY);
     const extras = [
       r.decisionNote ? `${r.status === 'declined' ? 'Declined' : 'Approved'}${r.decidedByName ? ` by ${r.decidedByName}` : ''}: ${r.decisionNote}` : null,
-      r.cancellationReason ? `Cancelled: ${r.cancellationReason}` : null,
+      // A change says what it replaces; the booking it replaced says so too
+      // (its reason already reads "Changed to …").
+      was ? (r.status === 'pending'
+        ? `A change to your ${was} booking — that one stands until this is approved`
+        : `Changed from ${was}`) : null,
+      r.cancellationReason ? (changedAway ? r.cancellationReason : `Cancelled: ${r.cancellationReason}`) : null,
+      r.pendingChangeId && r.status === 'approved' ? 'A change to this is waiting for approval' : null,
+      askWaiting ? `Asked to cancel${r.cancelAsk?.note ? `: “${r.cancelAsk.note}”` : ''} — waiting for approval` : null,
+      askDeclined ? `Not cancelled${r.cancelAsk?.declineNote ? `: ${r.cancelAsk.declineNote}` : ''}` : null,
     ].filter(Boolean).join(' · ');
+    // What an approved booking offers. The person asks; an admin (the Staff
+    // page's view of them) answers a waiting ask, or changes it outright.
+    let approvedActions: TimeRow['actions'];
+    if (open && !r.pendingChangeId) {
+      if (askWaiting) {
+        approvedActions = onDecideCancelAsk
+          ? [
+              { label: 'Approve cancel', onClick: () => onDecideCancelAsk(r.id, 'approve'), className: 'text-emerald-700 font-semibold' },
+              { label: 'Decline', onClick: () => onDecideCancelAsk(r.id, 'decline'), className: 'text-red-600' },
+            ]
+          : onWithdrawCancelAsk
+            ? [{ label: 'Withdraw ask', onClick: () => onWithdrawCancelAsk(r.id), className: 'text-red-600' }]
+            : undefined;
+      } else if (onChange) {
+        approvedActions = [{ label: 'Change or cancel', onClick: () => onChange(r), className: 'text-ooosh-600' }];
+      }
+    }
     rows.push({
       key: `lr:${r.id}`, date: r.startDate, until: r.endDate,
       title: isToil ? (r.requestNote || 'Time off') : TYPE_LABELS[r.leaveType],
@@ -1433,12 +2433,67 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
       extra: extras || null,
       amount: `−${fmtH(r.totalMinutes)}`,
       amountClass: dead ? 'text-gray-500 line-through' : 'text-gray-600',
-      pill: statusWord(r.status), pillClass: STATUS_STYLE[r.status],
+      pill: changedAway ? 'Changed' : r.status === 'pending' && was ? 'Change waiting' : statusWord(r.status),
+      pillClass: STATUS_STYLE[r.status],
       statusClass: r.status === 'pending' ? 'text-amber-800' : r.status === 'approved' ? 'text-emerald-700'
         : r.status === 'declined' ? 'text-red-700' : 'text-gray-500',
       dot: dead ? 'bg-gray-300' : isToil ? 'bg-slate-400' : 'bg-ooosh-600',
-      action: r.status === 'pending'
-        ? { label: 'Withdraw', onClick: () => onWithdraw(r.id), className: 'text-red-600' } : undefined,
+      actions: r.status === 'pending'
+        ? pendingActions('leave', r.id, () => onWithdraw(r.id), onDecide) : approvedActions,
+    });
+  }
+
+  // Working from home: not time off and costs nothing, but it belongs on the
+  // same timeline — "where was I working?" is the same kind of question.
+  for (const w of wfh) {
+    const dead = DEAD.has(w.status);
+    rows.push({
+      key: `wfh:${w.id}`, date: w.startDate, until: w.endDate,
+      title: 'Working from home',
+      meta: `${w.startDate === w.endDate ? fmtDate(w.startDate) : fmtRange(w.startDate, w.endDate)}${w.requestNote ? ` · “${w.requestNote}”` : ''}`,
+      extra: w.decisionNote ? `${w.decidedByName ? `${w.decidedByName}: ` : ''}${w.decisionNote}` : null,
+      amount: '', amountClass: '',
+      pill: w.status === 'pending' ? 'Waiting for approval' : statusWord(w.status),
+      pillClass: w.status === 'approved' ? 'bg-teal-100 text-teal-800' : STATUS_STYLE[w.status as LeaveStatus] ?? 'bg-gray-100 text-gray-600',
+      statusClass: w.status === 'pending' ? 'text-amber-800' : w.status === 'approved' ? 'text-teal-700' : 'text-gray-500',
+      dot: dead ? 'bg-gray-300' : w.status === 'pending' ? 'bg-amber-500' : 'bg-teal-500',
+      actions: w.status === 'pending'
+        ? pendingActions('wfh', w.id, () => onWithdrawWfh?.(w.id), onDecide)
+        // An admin can call off an approved home day that has not finished yet.
+        : w.status === 'approved' && onDecide && w.endDate >= localIso(new Date())
+          ? [{ label: 'Call off', onClick: () => onDecide('wfh', w.id, 'cancel'), className: 'text-red-600' }]
+          : undefined,
+    });
+  }
+
+  // Day swaps (spec §8.2): costs nothing, but "which days was I in?" is the
+  // same kind of question. One row, dated by whichever day comes first.
+  for (const sw of swaps) {
+    const dead = DEAD.has(sw.status);
+    const first = sw.offDate < sw.workDate ? sw.offDate : sw.workDate;
+    const last = sw.offDate < sw.workDate ? sw.workDate : sw.offDate;
+    const extras = [
+      sw.usualMinutes !== null && sw.minutes !== sw.usualMinutes
+        ? `${fmtH(sw.minutes)} — ${fmtH(Math.abs(sw.minutes - sw.usualMinutes))} ${sw.minutes > sw.usualMinutes ? 'longer' : 'shorter'} than the day given up`
+        : null,
+      sw.decisionNote ? `${sw.decidedByName ? `${sw.decidedByName}: ` : ''}${sw.decisionNote}` : null,
+    ].filter(Boolean).join(' · ');
+    rows.push({
+      key: `swap:${sw.id}`, date: first, until: last,
+      title: 'Day swap',
+      meta: `Off ${fmtDate(sw.offDate)} · working ${fmtDate(sw.workDate)} ${sw.startTime}–${sw.endTime}${sw.requestNote ? ` · “${sw.requestNote}”` : ''}`,
+      extra: extras || null,
+      amount: '', amountClass: '',
+      pill: sw.status === 'pending' ? 'Waiting for approval' : statusWord(sw.status),
+      pillClass: sw.status === 'approved' ? 'bg-indigo-100 text-indigo-800' : STATUS_STYLE[sw.status as LeaveStatus] ?? 'bg-gray-100 text-gray-600',
+      statusClass: sw.status === 'pending' ? 'text-amber-800' : sw.status === 'approved' ? 'text-indigo-700' : 'text-gray-500',
+      dot: dead ? 'bg-gray-300' : sw.status === 'pending' ? 'bg-amber-500' : 'bg-indigo-500',
+      actions: sw.status === 'pending'
+        ? pendingActions('swaps', sw.id, () => onWithdrawSwap?.(sw.id), onDecide)
+        // An admin can call off an approved swap until both days have passed.
+        : sw.status === 'approved' && onDecide && last >= localIso(new Date())
+          ? [{ label: 'Call off', onClick: () => onDecide('swaps', sw.id, 'cancel'), className: 'text-red-600' }]
+          : undefined,
     });
   }
   return rows;
@@ -1446,8 +2501,16 @@ function buildRows({ requests, overtime, companyDays, bankHolidaysToBook, freshI
 
 function TimeList(props: {
   year: number; requests: LeaveRequest[]; overtime: OvertimeEntry[];
+  wfh?: WfhRequest[]; onWithdrawWfh?: (id: string) => void;
+  swaps?: DaySwap[]; onWithdrawSwap?: (id: string) => void;
+  adjustments?: Adjustment[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[]; bankHolidaysToBook: string[]; freshIds: string[];
   onWithdraw: (id: string) => void; onCancelOvertime: (id: string) => void; onBook?: (date: string) => void;
+  onDecide?: Decide;
+  onChange?: (r: LeaveRequest) => void;
+  onWithdrawCancelAsk?: (id: string) => void;
+  onDecideCancelAsk?: (id: string, action: 'approve' | 'decline') => void;
 }) {
   const rows = buildRows(props);
   const upcoming = rows.filter(r => r.until >= TODAY).sort((a, b) => a.date.localeCompare(b.date));
@@ -1482,11 +2545,11 @@ function TimeList(props: {
             <span className={`hidden sm:inline-flex text-xs px-[9px] py-[3px] rounded-full whitespace-nowrap ${r.pillClass}`}>
               {r.pill}
             </span>
-            {r.action && (
-              <button onClick={r.action.onClick} className={`text-xs sm:text-sm hover:underline ${r.action.className}`}>
-                {r.action.label}
+            {r.actions?.map(a => (
+              <button key={a.label} onClick={a.onClick} className={`text-xs sm:text-sm hover:underline ${a.className}`}>
+                {a.label}
               </button>
-            )}
+            ))}
           </div>
         </div>
       ))}
@@ -1507,11 +2570,14 @@ interface CalEvent { label: string; cls: string; dot: string; onClick?: () => vo
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 /** A month grid, Monday first, of the same facts the list shows. */
-function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
+function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, wfh = [], swaps = [], absences = [], companyDays, bankHolidays, bankHolidaysToBook, onBook }: {
   month: { y: number; m: number };
   onMonth: (next: { y: number; m: number }) => void;
   onThisMonth: () => void;
   requests: LeaveRequest[]; overtime: OvertimeEntry[];
+  wfh?: WfhRequest[];
+  swaps?: DaySwap[];
+  absences?: MyAbsence[];
   companyDays: { date: string; label: string }[];
   bankHolidays: string[]; bankHolidaysToBook: string[];
   onBook?: (date: string) => void;
@@ -1542,13 +2608,36 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, company
         } else {
           const what = r.leaveType === 'unpaid' ? 'Unpaid leave' : 'Holiday';
           add(d.date, waiting
-            ? { label: `${what} — waiting`, cls: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' }
+            ? { label: `${what} — ${r.replacesRequestId ? 'change waiting' : 'waiting'}`, cls: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' }
             : { label: what, cls: 'bg-ooosh-600 text-white', dot: 'bg-ooosh-600' });
         }
       }
     }
+    for (const w of wfh) {
+      if (w.status !== 'pending' && w.status !== 'approved') continue;
+      for (let d = w.startDate; d <= w.endDate; d = addDaysIso(d, 1)) {
+        add(d, w.status === 'approved'
+          ? { label: '⌂ Home', cls: 'bg-teal-50 text-teal-800', dot: 'bg-teal-500' }
+          : { label: '⌂ Home — waiting', cls: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' });
+      }
+    }
+    for (const sw of swaps) {
+      if (sw.status !== 'pending' && sw.status !== 'approved') continue;
+      const waiting = sw.status === 'pending' ? ' — waiting' : '';
+      const cls = waiting ? 'bg-amber-100 text-amber-800' : 'bg-indigo-50 text-indigo-800';
+      const dot = waiting ? 'bg-amber-500' : 'bg-indigo-500';
+      add(sw.offDate, { label: `⇄ Off (swap)${waiting}`, cls, dot });
+      add(sw.workDate, { label: `⇄ In ${sw.startTime}–${sw.endTime}${waiting}`, cls, dot });
+    }
+    // "Absent" only — never the type (spec §7.2).
+    for (const a of absences) {
+      for (const d of a.days) {
+        add(d.date, { label: d.portion === 'full' ? 'Absent' : `Absent (${d.portion.toUpperCase()})`,
+          cls: 'bg-violet-100 text-violet-800', dot: 'bg-violet-500' });
+      }
+    }
     return map;
-  }, [requests, overtime, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
+  }, [requests, overtime, wfh, swaps, absences, companyDays, bankHolidays, bankHolidaysToBook, onBook]);
 
   const { y, m } = month;
   const first = new Date(Date.UTC(y, m, 1));
@@ -1632,6 +2721,9 @@ function TimeCalendar({ month, onMonth, onThisMonth, requests, overtime, company
           ['bg-gray-100 border border-gray-200', 'Time off'],
           ['bg-ooosh-600', 'Holiday'],
           ['bg-emerald-100', 'Company day'],
+          ['bg-teal-50 border border-teal-300', 'Home'],
+          ['bg-indigo-50 border border-indigo-300', 'Swapped day'],
+          ['bg-violet-100', 'Absent'],
         ].map(([cls, text]) => (
           <span key={text} className="flex items-center gap-1.5">
             <i className={`w-2.5 h-2.5 rounded-[3px] ${cls}`} />{text}

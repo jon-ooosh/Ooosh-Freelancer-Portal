@@ -6,19 +6,32 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../services/api';
+import { api, isNoReply } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { describePreauth, paymentMethodLabel } from '../lib/preauth';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
-import { hasOutstanding, isNonZero } from '../lib/money';
+import { hasOutstanding, isNonZero, cancellationBalance } from '../lib/money';
 import ExcessPaymentModal, { statusLabel, statusColor, computeHireDays } from './ExcessPaymentModal';
 import CostCaptureModal from './CostCaptureModal';
-import CostAllocationModal from './CostAllocationModal';
-import RechargeResolveModal, { RechargeStatusPill } from './RechargeResolveModal';
+import RechargeResolveModal, { RechargeSlot, type RechargeCost } from './RechargeResolveModal';
 import ResendConfirmationModal from './ResendConfirmationModal';
+import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
+import RecipientPicker, { type PickedRecipient } from './RecipientPicker';
+import { newPaymentMethodAllowed } from '../lib/paymentMethods';
+import CloseOutMoneyPanel from './CloseOutMoneyPanel';
+import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
-import type { JobExcess, Cost } from '../../../shared/types';
+import type { JobExcess } from '../../../shared/types';
+
+/** The Stripe line on a refund, in the words the money came in by: the reader, a PayPal
+ *  payment through the portal (the portal tags the HireHop deposit "(PayPal)"), or a card
+ *  on the portal. A label only — every one refunds through Stripe. */
+function stripeRefundLabel(dep: { op_source?: string | null; description?: string | null; memo?: string | null } | null | undefined): string {
+  if (dep?.op_source === 'stripe_terminal') return 'Stripe - Card reader';
+  if (/\(PayPal\)/.test(`${dep?.description || ''} ${dep?.memo || ''}`)) return 'Stripe (PayPal)';
+  return 'Stripe (Online)';
+}
 
 // HireHop bank accounts (id → label) for the cross-job apply bank field.
 const HH_BANKS: Array<{ id: number; label: string }> = [
@@ -35,6 +48,8 @@ interface MoneyTabProps {
   jobId: string;
   job: any; // Job object from parent
   onJobChanged?: () => void; // Notify parent to refresh job data (e.g. after status change)
+  /** The close-out panel's "Complete the job": opens the page's status modal at Completed. */
+  onRequestComplete?: () => void;
 }
 
 interface FinancialData {
@@ -88,6 +103,8 @@ interface FinancialData {
       stripe_payment_intent?: string | null;
       /** Original OP-side payment method (when matched). Drives the modal's default. */
       op_payment_method?: string | null;
+      /** job_payments.source — 'stripe_terminal' when taken on the card reader. */
+      op_source?: string | null;
     }>;
     /** OP-only pending refund IOUs (e.g. cancellation refunds) awaiting processing. */
     pending_refunds?: Array<{
@@ -96,6 +113,12 @@ interface FinancialData {
        *  the real string through regardless. */
       id: string; amount: number; method: string | null; notes: string | null; date: string;
     }>;
+    /** A cancelled job only: it owes its cancellation fee, not the hire (CANCELLATION-SPEC.md).
+     *  `charge_inc_vat` is the fee invoice once raised, else the fee recorded at cancellation. */
+    cancellation?: {
+      fee_ex_vat: number; fee_inc_vat: number; charge_inc_vat: number; invoiced: boolean;
+      invoice_numbers: string[]; hire_invoiced: boolean; balance: number;
+    } | null;
   };
   vat_adjustment: {
     applies: boolean;
@@ -127,12 +150,16 @@ interface FinancialData {
   };
 }
 
+// Record Payment's methods, in the order staff should reach for them. The card reader
+// goes in front when it's switched on; everything after Till (Cash) is admin only for new
+// money (lib/paymentMethods.ts, STRIPE-TERMINAL-SPEC §15). Refund lists are separate and
+// keep every method.
 const PAYMENT_METHODS_BASE = [
+  { value: 'wise_bacs', label: 'Wise (Bank Transfer)' },
+  { value: 'till_cash', label: 'Till (Cash)' },
+  { value: 'stripe_gbp', label: 'Stripe (Online)' },
   { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
   { value: 'amex', label: 'Amex' },
-  { value: 'stripe_gbp', label: 'Stripe GBP' },
-  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
-  { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'paypal', label: 'Paypal' },
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
 ];
@@ -169,9 +196,15 @@ interface JobCostLite {
   recharge_status: string | null;
   // Allocation-aware read: a row split IN from a cost captured on another job.
   // amount_gross is this job's share; full_amount_gross is the cost's total.
+  // On such a row, cost_intent and the recharge_* fields are THIS job's share's
+  // own (migration 318); share_net is the share before VAT.
   is_allocation?: boolean;
   full_amount_gross?: number | null;
   allocation_id?: string | null;
+  share_net?: number | null;
+  // A split cost recharged as a whole (the old way, on its own job): its shares
+  // can't be recharged separately as well.
+  recharged_as_whole?: boolean;
   // Capture job — where the cost was actually entered (differs from this job on
   // split-in rows; the full invoice + recharge live there).
   job_id?: string | null;
@@ -332,19 +365,40 @@ function ReleaseConsentPanel({ plan, refundAmount, depositAmount, viaStripe }: {
  * precisely so the exception can be caught. The label says the assumption out
  * loud rather than leaving it implicit.
  */
-function RefundNotifyControl({ viaStripe, checked, onChange }: {
+function RefundNotifyControl({ viaStripe, checked, onChange, jobId, onRecipients }: {
   viaStripe: boolean;
   checked: boolean;
   onChange: (v: boolean) => void;
+  jobId: string;
+  /** Who the confirmation goes to — the usual people pre-ticked, editable (jon, 16 Oct 2026). */
+  onRecipients: (r: PickedRecipient[]) => void;
 }) {
+  const emailing = viaStripe || checked;
+  const [defaults, setDefaults] = useState<string[] | null | undefined>(undefined);
+  useEffect(() => {
+    if (!emailing || defaults !== undefined) return;
+    api.get<{ data: { emails: string[] } }>(`/money/${jobId}/email-default?template=hire_refund_processed`)
+      .then((r) => setDefaults(r.data.emails))
+      .catch(() => setDefaults(null));
+  }, [emailing, jobId, defaults]);
+  const picker = emailing && (
+    <div className="mt-2">
+      <p className="text-[11px] text-gray-600 mb-1">Send the confirmation to:</p>
+      <RecipientPicker jobId={jobId} preselect={defaults} onChange={onRecipients} />
+    </div>
+  );
   if (viaStripe) {
     return (
-      <p className="text-[11px] text-gray-500">
-        The client will be emailed confirmation of this refund.
-      </p>
+      <div>
+        <p className="text-[11px] text-gray-500">
+          The client will be emailed confirmation of this refund.
+        </p>
+        {picker}
+      </div>
     );
   }
   return (
+    <div>
     <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
       <input
         type="checkbox"
@@ -359,16 +413,56 @@ function RefundNotifyControl({ viaStripe, checked, onChange }: {
         </span>
       </span>
     </label>
+    {picker}
+    </div>
   );
 }
 
+/** How long to wait before asking again when the server never replied — a deploy
+ *  restart is back in a couple of seconds, a slow one in ten. */
+const NO_REPLY_RETRY_MS = [3000, 10000];
 
-export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
+/**
+ * A GET that is asked again (twice) when no reply came back (`isNoReply`), before
+ * the caller says anything. Reads only — a write that got no reply may well have
+ * happened, so it is never repeated blind. Job 16169, 21 Oct 2026: the Money tab's
+ * reload straight after a card receipt hit a deploy restart, and the whole tab
+ * turned into a red error box until somebody refreshed the page.
+ */
+async function getAskingAgainIfNoReply<T>(path: string): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api.get<T>(path);
+    } catch (e) {
+      if (!isNoReply(e) || attempt >= NO_REPLY_RETRY_MS.length) throw e;
+      await new Promise((resolve) => setTimeout(resolve, NO_REPLY_RETRY_MS[attempt]));
+    }
+  }
+}
+
+export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The client's payment portal link - computed live from HireHop by the backend so it
+  // always matches the quote document (the hash changes when the hire dates change).
+  const [portalLink, setPortalLink] = useState<{ url: string; hash: string } | null>(null);
+  // Charge invoices raised after completion (HIRE-CLOSE-OUT-SPEC.md §4.6) are not on the
+  // HireHop job, so the balance below can't see them — read them off the shared close-out
+  // plan (the panel's own read; no second HireHop call).
+  const [chargeInvoices, setChargeInvoices] = useState<CloseOutInvoice[]>([]);
+  useEffect(() => {
+    if (job?.is_internal || !job?.hh_job_number) return;
+    const take = (p: { invoices: CloseOutInvoice[] }) => setChargeInvoices(p.invoices.filter(i => i.chargeOnly && i.owing >= 0.005));
+    const unsub = subscribeCloseOutPlan(jobId, take);
+    loadCloseOutPlan(jobId).then(take).catch(() => undefined);
+    return unsub;
+  }, [jobId, job?.is_internal, job?.hh_job_number]);
+  const [portalLinkCopied, setPortalLinkCopied] = useState(false);
   const role = useAuthStore((s) => s.user?.role);
   const isAdmin = role === 'admin';
+  // Once the hire is back the close-out panel takes over; the pre-hire deposit prompts go.
+  const hireIsBack = ['returned', 'returned_incomplete', 'completed'].includes(job?.pipeline_status);
   const canManage = hasManagerRole(role);
   const [showResolveBalance, setShowResolveBalance] = useState(false);
   const [balReason, setBalReason] = useState('xero_settled');
@@ -384,7 +478,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [showPaymentForm, setShowPaymentForm] = useState(false);
   const [payType] = useState('deposit');
   const [payAmount, setPayAmount] = useState('');
-  const [payMethod, setPayMethod] = useState('worldpay');
+  const [payMethod, setPayMethod] = useState(''); // set to the first allowed method when the form opens
   const [payRef, setPayRef] = useState('');
   const [payNotes, setPayNotes] = useState('');
   const [payExcessId, setPayExcessId] = useState('');
@@ -392,6 +486,13 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [payLoading, setPayLoading] = useState(false);
   const [payError, setPayError] = useState('');
   const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
+  // Card reader (STRIPE-TERMINAL-SPEC): whether this login may use it (asked once,
+  // when the form first opens), whether a payment is on the reader right now (locks
+  // amount + method, and the form can't be closed by accident), and whether one was
+  // recorded (the tab refreshes on close, never mid-flow).
+  const [readerAccess, setReaderAccess] = useState<CardReaderAccess | null>(null);
+  const [readerActive, setReaderActive] = useState(false);
+  const [readerRecorded, setReaderRecorded] = useState(false);
 
   // Excess action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
@@ -433,6 +534,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   // has normally gone — but it's a checkbox precisely so the exception is
   // catchable. Ignored on the Stripe path, which always emails.
   const [refundNotifyClient, setRefundNotifyClient] = useState(true);
+  const [refundRecipients, setRefundRecipients] = useState<PickedRecipient[]>([]);
   // Set when the backend answered 409 `release_required`: this deposit is fully
   // applied to an invoice, so HireHop has nothing to refund from it until some
   // is released back off that invoice. We never do that silently — the panel
@@ -499,7 +601,6 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
   const [jobQuotes, setJobQuotes] = useState<JobQuoteLite[]>([]);
   const [showAddCost, setShowAddCost] = useState(false);
-  const [splittingCost, setSplittingCost] = useState<Cost | null>(null);
 
   const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
     setRefundingDep(dep);
@@ -511,6 +612,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundResult(null);
     setRefundRelease(null);
     setRefundNotifyClient(true);
+    setRefundRecipients([]);
   };
 
   const closeRefundModal = () => {
@@ -576,6 +678,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           // Sent regardless of method; the backend ignores it on the Stripe
           // path, which always emails.
           notify_client: refundNotifyClient,
+          ...(refundRecipients.length > 0 ? { recipients: refundRecipients } : {}),
         }
       );
       setRefundRelease(null);
@@ -620,7 +723,13 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   const openPendingRefundModal = (pr: NonNullable<FinancialData['financial']['pending_refunds']>[number]) => {
     setPendingRefund(pr);
-    const firstDep = refundableDeposits[0] || null;
+    // Default to a payment that still HOLDS the refund — not simply the first. After a
+    // cancellation's fee is allocated, the first payment is often fully applied to the fee
+    // invoice, and refunding from it would offer to release money off that invoice (job 16739).
+    const free = (d: typeof refundableDeposits[number]) => d.available_to_refund ?? d.amount;
+    const firstDep = refundableDeposits.find(d => free(d) >= pr.amount - 0.005)
+      || [...refundableDeposits].sort((a, b) => free(b) - free(a))[0]
+      || null;
     setPendingDepositId(firstDep ? firstDep.id : null);
     setRefundAmount(String(pr.amount));
     setRefundMethod(firstDep?.stripe_payment_intent ? 'stripe_gbp' : (firstDep?.op_payment_method as typeof refundMethod) || 'worldpay');
@@ -630,6 +739,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     setRefundResult(null);
     setRefundRelease(null);
     setRefundNotifyClient(true);
+    setRefundRecipients([]);
   };
 
   const closePendingRefundModal = () => {
@@ -722,6 +832,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           // Sent regardless of method; the backend ignores it on the Stripe
           // path, which always emails.
           notify_client: refundNotifyClient,
+          ...(refundRecipients.length > 0 ? { recipients: refundRecipients } : {}),
         }
       );
       setRefundRelease(null);
@@ -750,10 +861,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   const loadData = useCallback(async () => {
     setLoading(true);
-    setError('');
     try {
-      const result = await api.get<{ data: FinancialData }>(`/money/${jobId}/summary`);
+      const result = await getAskingAgainIfNoReply<{ data: FinancialData }>(`/money/${jobId}/summary`);
       setData(result.data);
+      // Cleared on success, not before asking — so a "Couldn't refresh" line stays up
+      // (reading "Refreshing...") until the figures it warns about are replaced.
+      setError('');
     } catch (err: any) {
       setError(err.message || 'Failed to load financial data');
     } finally {
@@ -785,6 +898,25 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   };
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ data: { url: string; hash: string } | null }>(`/money/${jobId}/payment-link`)
+      .then(r => { if (!cancelled) setPortalLink(r.data || null); })
+      .catch(() => { if (!cancelled) setPortalLink(null); });
+    return () => { cancelled = true; };
+  }, [jobId]);
+
+  const copyPortalLink = async () => {
+    if (!portalLink) return;
+    try {
+      await navigator.clipboard.writeText(portalLink.url);
+      setPortalLinkCopied(true);
+      setTimeout(() => setPortalLinkCopied(false), 1600);
+    } catch {
+      window.prompt('Copy the payment portal link:', portalLink.url);
+    }
+  };
 
   // Fetch rollover chains for any record that's part of one (rolled over, or
   // came in via rollover). Lazy + best-effort; only records that need the thread.
@@ -820,18 +952,54 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   useEffect(() => { loadJobCosts(); }, [loadJobCosts]);
 
-  // Escape key closes payment modal
+  // Close the Record Payment form. After a card-reader payment, reset the form and
+  // refresh the tab — the reader flow defers that to here so it can't unmount itself.
+  function closePaymentForm() {
+    setShowPaymentForm(false);
+    setPayError('');
+    setPayHHPushError(null);
+    if (readerRecorded) {
+      setReaderRecorded(false);
+      setPayAmount('');
+      setPayNotes('');
+      setPayMethod('');
+      loadData();
+      onJobChanged?.();
+    }
+  }
+
+  // What this login may record new money by: the reader first (when on), then Stripe,
+  // Wise, cash — and, for an admin only, the old ones.
+  const methodOptions = [
+    ...(readerAccess?.enabled
+      ? [{ value: 'card_reader', label: readerAccess.mode === 'test' ? 'Card reader (TEST MODE)' : 'Card reader' }]
+      : []),
+    ...PAYMENT_METHODS_BASE.filter(m => newPaymentMethodAllowed(m.value, role)),
+  ];
+  // Default to the first of them, and never leave the form on one this login can't use.
+  const methodKeys = methodOptions.map(m => m.value).join(',');
+  useEffect(() => {
+    if (!showPaymentForm || !readerAccess) return;
+    if (!methodOptions.some(m => m.value === payMethod)) setPayMethod(methodOptions[0]?.value || 'stripe_gbp');
+  }, [showPaymentForm, readerAccess, methodKeys]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Ask once whether this login may use the card reader (admin-only while testing).
+  useEffect(() => {
+    if (!showPaymentForm || readerAccess) return;
+    api.get<{ data: CardReaderAccess }>('/terminal/access')
+      .then((r) => setReaderAccess(r.data))
+      .catch(() => setReaderAccess({ enabled: false, mode: 'test' }));
+  }, [showPaymentForm, readerAccess]);
+
+  // Escape key closes payment modal — but not while a payment is on the reader.
   useEffect(() => {
     if (!showPaymentForm) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setShowPaymentForm(false);
-        setPayHHPushError(null);
-      }
+      if (e.key === 'Escape' && !readerActive) closePaymentForm();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [showPaymentForm]);
+  }, [showPaymentForm, readerActive, readerRecorded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleRecordPayment(typeOverride?: string) {
     if (!payAmount || parseFloat(payAmount) <= 0) {
@@ -999,7 +1167,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     }
   }
 
-  if (loading) {
+  // Spinner on the FIRST load only. A refresh (e.g. the close-out panel's onChanged)
+  // keeps the tab mounted — swapping it for a spinner threw the panel away and, with it,
+  // the message saying what had just happened (16849, 13 Oct 2026).
+  if (loading && !data) {
     return (
       <div className="flex justify-center py-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
@@ -1007,7 +1178,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     );
   }
 
-  if (error || !data) {
+  // The red box only when there is nothing to show. A REFRESH that fails keeps the
+  // figures on screen under an amber line instead (below) — replacing the whole tab
+  // made a successful card payment look like it had failed (job 16169).
+  if (!data) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
         {error || 'Failed to load financial data'}
@@ -1016,6 +1190,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   }
 
   const { financial, excess, client_balance_on_account } = data;
+  // A cancelled job whose fee invoice isn't raised yet (a hire invoiced before cancelling is its own case).
+  const feeNotInvoiced = !!financial.cancellation && !financial.cancellation.invoiced && !financial.cancellation.hire_invoiced;
   const depositPercent = financial.hire_value_inc_vat > 0
     ? Math.min(100, ((financial.total_hire_deposits + (financial.credit_note_write_off || 0)) / financial.hire_value_inc_vat) * 100)
     : 0;
@@ -1051,6 +1227,26 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
   return (
     <div className="space-y-6">
+      {/* A refresh failed: these are the figures from before it. Never shown quietly —
+          straight after a payment they won't include it, and that invites taking it twice. */}
+      {error && (
+        <div className="flex items-start gap-3 px-4 py-3 text-sm bg-amber-50 border border-amber-300 rounded-lg text-amber-900">
+          <div className="flex-1">
+            <div className="font-semibold">Couldn&rsquo;t refresh - these figures may be out of date</div>
+            <div className="text-xs mt-0.5">
+              Anything you just did may well have gone through: check before doing it again. ({error})
+            </div>
+          </div>
+          <button
+            onClick={() => { void loadData(); }}
+            disabled={loading}
+            className="px-3 py-1.5 text-xs font-medium text-amber-900 border border-amber-400 rounded-md hover:bg-amber-100 disabled:opacity-50"
+          >
+            {loading ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </div>
+      )}
+
       {/* Financial Summary */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <div className="flex items-center justify-between mb-4">
@@ -1063,7 +1259,69 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           </button>
         </div>
 
-        {financial.hire_value_ex_vat > 0 ? (
+        {/* Payment portal link - send this to the client (card, PayPal or bank transfer) */}
+        {portalLink && (
+          <div className="mb-4 flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+            <span className="text-gray-500 whitespace-nowrap">Payment portal link</span>
+            <a
+              href={portalLink.url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex-1 min-w-0 truncate text-ooosh-700 hover:underline"
+              title={portalLink.url}
+            >
+              {portalLink.url}
+            </a>
+            <button
+              type="button"
+              onClick={copyPortalLink}
+              className={`px-2 py-1 text-xs font-medium rounded border bg-white hover:bg-gray-100 ${portalLinkCopied ? 'border-green-300 text-green-700' : 'border-gray-300 text-gray-700'}`}
+            >
+              {portalLinkCopied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        )}
+
+        {financial.cancellation ? (() => {
+          // A cancelled job: the fee, not the hire. HireHop keeps the hire's lines on the
+          // job, so "hire value minus payments" would show the whole hire as owed.
+          const c = financial.cancellation;
+          const b = cancellationBalance(c.charge_inc_vat, financial.total_hire_deposits);
+          return (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-3">
+                <div>
+                  <p className="text-xs text-gray-500">Cancellation fee (ex VAT)</p>
+                  <p className="text-lg font-bold text-gray-900">£{c.fee_ex_vat.toFixed(2)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">Fee (inc VAT)</p>
+                  <p className="text-lg font-bold text-gray-900">£{c.charge_inc_vat.toFixed(2)}</p>
+                  <p className="text-xs text-gray-500">{c.invoiced ? c.invoice_numbers.join(', ') : 'not invoiced yet'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">Paid towards the hire</p>
+                  <p className="text-lg font-bold text-green-700">£{financial.total_hire_deposits.toFixed(2)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">{b.refundDue ? 'Refund due to client' : b.feeOwing ? 'Fee still owing' : 'Balance'}</p>
+                  <p className={`text-lg font-bold ${b.refundDue ? 'text-amber-700' : b.feeOwing ? 'text-red-600' : 'text-green-700'}`}>
+                    {b.square ? 'All square' : `£${(b.refundDue || b.feeOwing).toFixed(2)}`}
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500">
+                Cancelled — the hire (£{financial.hire_value_inc_vat.toFixed(2)} inc VAT) is no longer charged; the client owes the cancellation fee only.
+                {!c.invoiced && ' The fee invoice is raised from the panel below.'}
+              </p>
+              {c.hire_invoiced && (
+                <p className="mt-2 p-3 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-900">
+                  The hire was invoiced before it was cancelled. That invoice needs a credit note in HireHop before these figures are right.
+                </p>
+              )}
+            </>
+          );
+        })() : financial.hire_value_ex_vat > 0 ? (
           <>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
               <div>
@@ -1122,9 +1380,15 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               </div>
             </div>
 
+            {/* The balance, once — the close-out panel below doesn't repeat it (Oct 2026).
+                Shown only when something is owed (or the client is in credit, or a
+                business override needs explaining); a settled £0.00 is just noise. */}
+            {(financial.balance_override || isNonZero(financial.balance_outstanding)) && (
             <div className="flex items-center justify-between">
-              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : hasOutstanding(financial.balance_outstanding) ? 'text-red-600' : 'text-green-600'}`}>
-                Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}
+              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : hasOutstanding(financial.balance_outstanding) ? 'text-red-600' : 'text-amber-700'}`}>
+                {!financial.balance_override && !hasOutstanding(financial.balance_outstanding)
+                  ? <>In credit: £{Math.abs(financial.balance_outstanding).toFixed(2)}</>
+                  : <>Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}</>}
               </p>
               {/* Admin: resolve a stray HH balance the business considers settled
                   (Xero source of truth). Only when there's a balance + not already
@@ -1136,6 +1400,14 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 >Resolve balance…</button>
               )}
             </div>
+            )}
+
+            {chargeInvoices.length > 0 && (
+              <p className="text-sm font-semibold text-red-600 mt-0.5">
+                + £{chargeInvoices.reduce((s, i) => s + i.owing, 0).toFixed(2)} owing on {chargeInvoices.length === 1 ? 'a charge' : 'charges'} raised after completion
+                <span className="font-normal text-gray-500"> ({chargeInvoices.map(i => i.number).join(', ')})</span>
+              </p>
+            )}
 
             {/* Credit notes, ALWAYS shown when there are any. Previously this
                 line was keyed on `credit_note_write_off`, which clamps to zero
@@ -1190,8 +1462,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             )}
             {balError && <p className="text-xs text-red-600 mt-1">{balError}</p>}
 
-            {/* Deposit to Secure info */}
-            {financial.hire_value_inc_vat > 0 && !financial.deposit_paid && (
+            {/* Deposit to Secure info — a pre-hire prompt; noise once the hire is back. */}
+            {!hireIsBack && financial.hire_value_inc_vat > 0 && !financial.deposit_paid && (
               <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                 <p className="text-xs font-semibold text-blue-800 uppercase tracking-wider mb-1">Deposit to Secure</p>
                 <p className="text-sm text-blue-700">
@@ -1206,7 +1478,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 </p>
               </div>
             )}
-            {financial.deposit_paid && hasOutstanding(financial.balance_outstanding) && (
+            {!hireIsBack && financial.deposit_paid && hasOutstanding(financial.balance_outstanding) && (
               <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
                 <p className="text-xs text-green-700">
                   Deposit secured. Remaining balance: <span className="font-semibold">£{financial.balance_outstanding.toFixed(2)}</span>
@@ -1222,6 +1494,18 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           </p>
         )}
       </div>
+
+      {/* The hire close-out — invoice, allocate, send, paid (HIRE-CLOSE-OUT-SPEC.md §3).
+          Shows itself only once the hire is back (or an invoice exists). */}
+      {!job?.is_internal && job?.hh_job_number && (
+        <CloseOutMoneyPanel
+          jobId={jobId}
+          portalUrl={portalLink?.url ?? null}
+          onRecordPayment={() => setShowPaymentForm(true)}
+          onRequestComplete={onRequestComplete}
+          onChanged={loadData}
+        />
+      )}
 
       {/* VAT Adjustment (international hires) */}
       {data.vat_adjustment && (
@@ -1830,7 +2114,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
                       {dep.is_refund ? '-' : ''}£{Number(dep.amount).toFixed(2)}
                     </p>
-                    {!dep.is_refund && (
+                    {/* Only a real HireHop payment (a deposit) can be refunded. The other
+                        rows — "Excess applied to hire invoice", credit moved between jobs,
+                        a payment typed straight onto an invoice — aren't money the client
+                        sent us here, and the refund route can't act on them (job 16491). */}
+                    {!dep.is_refund && dep.is_deposit && (
                       <button
                         onClick={() => openRefundModal(dep)}
                         className="text-xs text-ooosh-600 hover:text-ooosh-700 underline"
@@ -1867,11 +2155,17 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">Awaiting refund</span>
                     </p>
                     {pr.notes && <p className="text-xs text-amber-700 mt-0.5">{pr.notes}</p>}
+                    {feeNotInvoiced && <p className="text-xs text-amber-800 mt-0.5 font-medium">Raise the fee invoice first (panel above) — the refund is what's left after it.</p>}
                   </div>
                   <div className="flex items-center gap-3">
                     <p className="text-sm font-semibold text-amber-900">£{Number(pr.amount).toFixed(2)}</p>
                     <button
-                      onClick={() => openPendingRefundModal(pr)}
+                      onClick={() => {
+                        // A cancellation's refund is what is left AFTER the fee — refunding first can
+                        // send back money the fee invoice then needs. A warning, not a gate.
+                        if (feeNotInvoiced && !window.confirm('The cancellation fee hasn\'t been invoiced yet. The usual order is: raise the fee invoice (it allocates the payments), then refund what is left.\n\nRefund anyway?')) return;
+                        openPendingRefundModal(pr);
+                      }}
                       disabled={refundableDeposits.length === 0}
                       title={refundableDeposits.length === 0 ? 'No deposit on this job to refund against' : 'Process this refund'}
                       className="text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md px-2.5 py-1 disabled:opacity-50"
@@ -1903,14 +2197,6 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           presetJobId={jobId}
           onClose={() => setShowAddCost(false)}
           onSaved={() => { setShowAddCost(false); loadJobCosts(); }}
-          onSavedAndSplit={(c) => { setShowAddCost(false); loadJobCosts(); setSplittingCost(c); }}
-        />
-      )}
-      {splittingCost && (
-        <CostAllocationModal
-          cost={splittingCost}
-          onClose={() => setSplittingCost(null)}
-          onSaved={() => { setSplittingCost(null); loadJobCosts(); }}
         />
       )}
 
@@ -1941,8 +2227,21 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
         // Auto-detect type: if deposit not yet paid, it's a deposit; otherwise balance
         const autoType = !financial.deposit_paid ? 'deposit' : 'balance';
 
+        const isReader = payMethod === 'card_reader';
+        // An amount that isn't one of the buttons needs a reason (spec §1.11). The
+        // Notes box only says so once such an amount is in the box (jon, 16 Oct).
+        const enteredAmt = parseFloat(payAmount);
+        const isCustomAmount = !!payAmount && !isNaN(enteredAmt)
+          && !quickAmounts.some((qa) => qa.amount.toFixed(2) === enteredAmt.toFixed(2));
+        const reasonRequired = isReader && isCustomAmount;
+        const validateReader = (): string | null => {
+          if (!payAmount || isNaN(enteredAmt) || enteredAmt < 1) return 'Enter an amount of at least £1.00';
+          if (isCustomAmount && !payNotes.trim()) return 'Add a reason for a custom amount (in Notes)';
+          return null;
+        };
+
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowPaymentForm(false)}>
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { if (!readerActive) closePaymentForm(); }}>
             <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Record Payment</h3>
 
@@ -1960,6 +2259,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       {quickAmounts.map((qa) => (
                         <button
                           key={qa.label}
+                          disabled={readerActive}
                           onClick={() => setPayAmount(qa.amount.toFixed(2))}
                           className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
                             payAmount === qa.amount.toFixed(2)
@@ -1977,6 +2277,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         type="number"
                         step="0.01"
                         value={payAmount}
+                        disabled={readerActive}
                         onChange={(e) => setPayAmount(e.target.value)}
                         className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
                         placeholder="Or enter custom amount"
@@ -1995,6 +2296,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                         type="number"
                         step="0.01"
                         value={payAmount}
+                        disabled={readerActive}
                         onChange={(e) => setPayAmount(e.target.value)}
                         className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
                         placeholder="0.00"
@@ -2007,15 +2309,17 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   <label className="block text-xs font-medium text-gray-600 mb-1">Method</label>
                   <select
                     value={payMethod}
+                    disabled={readerActive}
                     onChange={(e) => setPayMethod(e.target.value)}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   >
-                    {PAYMENT_METHODS_BASE.map((m) => (
+                    {methodOptions.map((m) => (
                       <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
                   </select>
                 </div>
 
+                {!isReader && (
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Reference (optional)</label>
                   <input
@@ -2026,18 +2330,39 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
+                )}
 
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    {reasonRequired
+                      ? <>Reason for this amount <span className="text-red-600">*</span></>
+                      : 'Notes (optional)'}
+                  </label>
                   <input
                     type="text"
                     value={payNotes}
+                    disabled={readerActive}
                     onChange={(e) => setPayNotes(e.target.value)}
-                    placeholder="Any additional details"
+                    placeholder={reasonRequired ? 'Why this amount, not one of the buttons above' : 'Any additional details'}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
 
+                {isReader && readerAccess?.enabled && (
+                  <CardReaderPayment
+                    jobId={jobId}
+                    access={readerAccess}
+                    amount={parseFloat(payAmount) || 0}
+                    paymentType={autoType}
+                    notes={payNotes.trim()}
+                    validate={validateReader}
+                    onRecorded={() => setReaderRecorded(true)}
+                    onActiveChange={setReaderActive}
+                    onClose={closePaymentForm}
+                  />
+                )}
+
+                {!isReader && (<>
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
@@ -2075,6 +2400,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {payHHPushError ? 'Close' : 'Cancel'}
                   </button>
                 </div>
+                </>)}
               </div>
             </div>
           </div>
@@ -2354,16 +2680,20 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                     disabled={!!refundingDep.stripe_payment_intent}
                   >
-                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="stripe_gbp">{stripeRefundLabel(refundingDep)}</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
-                    <option value="wise_bacs">Wise (BACS)</option>
+                    <option value="wise_bacs">Wise (Bank Transfer)</option>
                     <option value="lloyds_bank">Lloyds Bank</option>
-                    <option value="till_cash">Cash</option>
+                    <option value="till_cash">Till (Cash)</option>
                     <option value="paypal">PayPal</option>
                   </select>
                   {refundingDep.stripe_payment_intent && (
-                    <p className="text-[11px] text-gray-500 mt-1">Locked to Stripe — original payment was made via Stripe.</p>
+                    <p className="text-[11px] text-gray-500 mt-1">
+                      {refundingDep.op_source === 'stripe_terminal'
+                        ? 'Locked - goes back to the card used on the reader.'
+                        : 'Locked to Stripe — original payment was made via Stripe.'}
+                    </p>
                   )}
                 </div>
                 <div>
@@ -2390,6 +2720,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   viaStripe={!!refundingDep.stripe_payment_intent}
                   checked={refundNotifyClient}
                   onChange={setRefundNotifyClient}
+                  jobId={jobId}
+                  onRecipients={setRefundRecipients}
                 />
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
@@ -2576,12 +2908,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                     disabled={!!selectedDeposit?.stripe_payment_intent}
                   >
-                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="stripe_gbp">{stripeRefundLabel(selectedDeposit)}</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
-                    <option value="wise_bacs">Wise (BACS)</option>
+                    <option value="wise_bacs">Wise (Bank Transfer)</option>
                     <option value="lloyds_bank">Lloyds Bank</option>
-                    <option value="till_cash">Cash</option>
+                    <option value="till_cash">Till (Cash)</option>
                     <option value="paypal">PayPal</option>
                   </select>
                 </div>
@@ -2613,6 +2945,8 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   viaStripe={!!selectedDeposit?.stripe_payment_intent}
                   checked={refundNotifyClient}
                   onChange={setRefundNotifyClient}
+                  jobId={jobId}
+                  onRecipients={setRefundRecipients}
                 />
                 {refundError && (
                   <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
@@ -2682,7 +3016,11 @@ function CostReceiptCell({ cost, onPreview }: { cost: JobCostLite; onPreview: (c
 function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn, onJobChanged }: { costs: JobCostLite[]; quotes: JobQuoteLite[]; onAddCost: () => void; onChanged: () => void; jobId: string; rechargeOn: boolean; onJobChanged?: () => void }) {
   const m = (n: number) => `£${n.toFixed(2)}`;
   const num = (n: number | null | undefined) => Number(n || 0);
-  const [resolving, setResolving] = useState<JobCostLite | null>(null);
+  const [resolving, setResolving] = useState<RechargeCost | null>(null);
+  // A split-in row is this job's SHARE of the cost: its recharge is the share's.
+  const rechargeTargetOf = (c: JobCostLite): RechargeCost => (c.is_allocation && c.allocation_id
+    ? { ...c, allocation_id: c.allocation_id, share_gross: c.amount_gross, share_net: c.share_net ?? null, full_amount_gross: c.full_amount_gross ?? null }
+    : c);
   const [rechargeBusy, setRechargeBusy] = useState(false);
   const [receiptPreview, setReceiptPreview] = useState<JobCostLite | null>(null);
 
@@ -2890,8 +3228,10 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                       {c.supplier_name || c.description || c.category || 'Cost'}
                       {c.invoice_number && <span className="ml-1.5 text-xs text-gray-400">#{c.invoice_number}</span>}
                     </a>
+                    {/* The cost's own job is the one with the biggest share, so it
+                        can be THIS job: then it's a part, not "split from" here. */}
                     {isSplit && (
-                      captureJobId ? (
+                      captureJobId && captureJobId !== jobId ? (
                         <a href={`/jobs/${captureJobId}`} className="ml-1 text-xs text-purple-600 hover:underline"
                           title={`This job's share of a ${m(num(c.full_amount_gross))} cost captured on ${c.capture_hh_job_number ? `job #${c.capture_hh_job_number}` : 'another job'}`}>
                           · split from {c.capture_hh_job_number ? `#${c.capture_hh_job_number}` : 'another job'}
@@ -2922,11 +3262,11 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
           </div>
           <ul className="space-y-1">
             {extraCosts.map((c) => {
-              // Allocation-in rows are a share of a cost captured on ANOTHER
-              // job — recharge (and its resolution) belongs to that capture job,
-              // so we show them read-only here, tagged as a split.
+              // Allocation-in rows are this job's share of a cost split across
+              // jobs. The share carries its own recharge, billed to THIS job
+              // (migration 318) — unless the cost is recharged as a whole the
+              // old way, on its own job, in which case the share has none.
               const isSplit = !!c.is_allocation;
-              const pending = !isSplit && c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending';
               return (
                 <li key={isSplit ? `a-${c.allocation_id || c.id}` : `c-${c.id}`} className="flex items-center justify-between text-sm gap-2">
                   <span className="text-gray-600 truncate">
@@ -2939,12 +3279,8 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-gray-900">{m(num(c.amount_gross))}</span>
                     <CostReceiptCell cost={c} onPreview={setReceiptPreview} />
-                    {!isSplit && c.recharge_mode !== 'none' && <RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} />}
-                    {pending && (
-                      <button onClick={() => setResolving(c)}
-                        className="px-2 py-0.5 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
-                        Resolve
-                      </button>
+                    {!(isSplit && c.recharged_as_whole) && (
+                      <RechargeSlot cost={{ ...c, job_id: isSplit ? jobId : (c.job_id ?? jobId) }} onResolve={() => setResolving(rechargeTargetOf(c))} />
                     )}
                   </span>
                 </li>
@@ -2957,7 +3293,9 @@ function JobCostsPanel({ costs, quotes, onAddCost, onChanged, jobId, rechargeOn,
       {resolving && (
         <RechargeResolveModal
           cost={resolving}
-          onClose={() => setResolving(null)}
+          // A failed push from "Recharge…" has still marked the cost for recharge
+          // (it's now pending), so refresh on close too or the row reads stale.
+          onClose={() => { if (resolving.recharge_mode === 'none') onChanged(); setResolving(null); }}
           onResolved={() => { setResolving(null); onChanged(); }}
         />
       )}

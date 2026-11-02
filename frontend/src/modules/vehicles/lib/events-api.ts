@@ -8,6 +8,7 @@
 
 import type { EventType, FuelLevel } from '../types/vehicle-event'
 import { apiFetch } from '../config/api-config'
+import { ukToday } from '../../../lib/ukDate'
 
 /**
  * Create a vehicle event in R2.
@@ -58,7 +59,7 @@ export async function createVehicleEvent(params: {
    */
   hasDamage?: boolean | null
 }): Promise<{ id: string; error?: string }> {
-  const dateStr = params.eventDate || new Date().toISOString().split('T')[0]!
+  const dateStr = params.eventDate || ukToday()
   const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
   const event = {

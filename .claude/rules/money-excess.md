@@ -1,10 +1,11 @@
 ---
 paths:
-  - "backend/src/routes/{money,excess,costs,cancellations,warehouse}.ts"
-  - "backend/src/services/{excess-*,hh-deposit,hh-deposit-release,hh-xero-sync,shop-close,hh-billing-deposits,money-emails,vat-adjustment,stripe-*,cost-*,supplier-terms,job-financials-backfill,job-value-sync,cancellation-calculator,remittance}.ts"
+  - "backend/src/routes/{money,excess,costs,cancellations,warehouse,hire-close-out}.ts"
+  - "backend/src/services/{excess-*,hh-deposit,hh-deposit-release,hh-xero-sync,shop-close,hh-invoice-close,hire-close-out,close-out-xero-sweep,hh-billing-deposits,money-emails,vat-adjustment,stripe-*,cost-*,supplier-terms,job-financials-backfill,job-value-sync,cancellation-calculator,remittance}.ts"
   - "backend/src/config/{stripe,xero}.ts"
-  - "frontend/src/components/{MoneyTab,ExcessPaymentModal,ExcessGateBanner,ExcessHistorySection,CostCaptureModal,CostAllocationModal,CancellationModal,CombineBookingsModal}.tsx"
-  - "frontend/src/pages/{ExcessLedgerPage,MoneyOverviewPage,CostsPage}.tsx"
+  - "frontend/src/components/{MoneyTab,ExcessPaymentModal,ExcessGateBanner,ExcessHistorySection,CostCaptureModal,CancellationModal,CombineBookingsModal}.tsx"
+  - "frontend/src/components/costs/*"
+  - "frontend/src/pages/{ExcessLedgerPage,MoneyOverviewPage,CostsPage,ReceiptCapturePage}.tsx"
   - "frontend/src/lib/{money,preauth}.ts"
 ---
 
@@ -27,8 +28,11 @@ writing any new billing call).
 | How do we describe a pre-auth? | `frontend/src/lib/preauth.ts` `describePreauth()` |
 | Resolve a stuck pre-auth hold | `services/excess-preauth.ts` `reconcileExcessPreauth` |
 | Push a deposit to HireHop | `services/hh-deposit.ts` `pushDepositToHH` |
+| Draft/approve an invoice, allocate in HH, apply credits in Xero | `services/hh-invoice-close.ts` — THE recipe; shop close and hire close-out both sit on it |
+| Finish a hire's money from the Invoice card | `services/hire-close-out.ts` — never excess, never a refund; `job_closeout_log` is its record |
 | When is this bill due? | `services/supplier-terms.ts` `resolveDueDate()` |
 | A job's costs (allocation-aware) | `GET /costs/by-job/:jobId` |
+| Which recharges, on which job, still pending? | `v_cost_recharges` (view) + `services/cost-recharges.ts` |
 | A refund / credit from a supplier | `services/cost-credit.ts` |
 
 - **Never re-sum `excess_amount_taken` to answer "how much do we hold"** — read `v_excess_held`. Every surface that re-derived it drifted (phantom balances from double-counting `rolled_over` money that had moved forward).
@@ -39,7 +43,9 @@ writing any new billing call).
 
 - **`pre_auth` holds its value in `amount_held`, NOT `excess_amount_taken`** (0 until capture). Coverage = `excess_amount_taken + amount_held`.
 - **`released` is terminal.** Exclude it from every "find an existing non-terminal record to reuse / absorb / re-arm" lookup, alongside `reimbursed` / `fully_claimed` / `rolled_over` / `not_required` / `waived`. Missing it lets a late duplicate event resurrect a released hold and re-surface stale money in Total Held.
-- **`waived` must be excluded from EVERY absorb lookup too** — one query that missed it silently un-waived a stub back to £1,200 when the driver's hire form landed.
+- **`waived` must be excluded from EVERY absorb lookup too** — one query that missed it silently un-waived a stub back to £1,200 when the driver's hire form landed. **One exception:** a stub waived by account auto-cover (`[Auto-covered by account]` in notes) IS absorbed — auto-cover re-covers it straight after. Skipping it left the stub beside a new driver record and doubled the job's excess (job 16833, Oct 2026).
+- **Any total of a job's excess must skip `not_required` and `waived` — a Covered record can still carry an amount.** A referral approval writes the insurer's figure onto a Covered sibling, and account auto-cover keeps its amount for reference. The pre-hire review summed both and asked a one-van client for £3,000 instead of £1,500 (job 16564, Oct 2026). Count `amount_held` as collected too (pre-auths).
+- **A job with NO vehicle on HireHop has its uncollected excess records SUSPENDED by the sync** (`[Suspended: No vehicle]`, waived, restored when a van returns) — the same mechanism as Van & Driver / Internal, in `hh-requirement-derivation.ts`. Records with money taken or held are flagged, never waived. Don't add a surface that asks for excess without checking `hh_derived_flags.has_vehicle`, and don't "fix" a `[Suspended:` waiver by hand — put the van back on HH.
 - **"Held on account" is an ATTRIBUTE (`held_on_account`), not a status.** The record stays `taken`. `rolled_over` is set ONLY by a genuine apply-forward to a child hire — it is excluded from `v_excess_held` on the assumption the cash moved.
 - **A rolled-over record's `payment_date` is when the rollover was applied, not when cash arrived.** Render "Carried over" and name the origin hire.
 
@@ -49,6 +55,7 @@ writing any new billing call).
 - **NEVER LOWER A DELIBERATELY-SET AMOUNT.** Rank and price on `effective = max(drivers.calculated_excess_amount, job_excess.excess_amount_required)`. An insurer surcharge or staff edit lives on the job record and must not be re-priced back to the £1,200 floor.
 - **Terminal records still OCCUPY slots** and count against `vanCount`. Filtering them out of the candidate query makes their slot look empty and promotes a covered sibling onto a settled hire (produced 71 false positives when it was got wrong).
 - `dryRun: true` is read-only by construction, not by BEGIN/ROLLBACK — the pool has been saturated before.
+- **Top-N runs after every write that changes a driver's excess**: hire-form POST, quick-assign, and `POST /drivers/:id/resolve-referral` with `adjusted_excess` (Oct 2026). The referral path runs it only when a dry run reports nothing `blocked` — a real run would zero the Covered record and erase the insurer's figure that the Money tab's shortfall warning reads.
 
 ## HireHop money mechanics
 
@@ -68,9 +75,19 @@ writing any new billing call).
 
 ## Refunds
 
+- **Ask HireHop what the deposit has free BEFORE any card is refunded.** The hire Refund does it (Phase 1, job 15628) and so does excess Reimburse (Step 1b, job 16491 — `findDepositAvailability()` + `excessRefundShortfall()`). A new refund path does the same; HireHop's 370 after Stripe has paid out leaves real money recorded nowhere.
 - **One refund id = one leg.** `refund_legs` dedup is by `ref` ALONE (`isDuplicateLeg()` in `excess-refund.ts`) — the same refund arrives as `manual` (our reimburse endpoint), `stripe_webhook` and `hh_reconcile`. Keying on `(source, ref)` meant they never matched each other and the same £900 was applied twice (job 15187).
 - **Claim the leg the moment the money moves, not after the response.** Stripe's `charge.refunded` lands ~300ms after `refunds.create`; the HH push + Xero sync take seconds. Any new refund path must write its leg BEFORE that work, or the webhook re-applies the amount.
 - **Never unwind `charge.amount_refunded`** — it's the CUMULATIVE refunded total on the charge. Use the individual refund's amount, or a second partial refund re-applies the first.
+
+## Incoming money (Wise matcher, record-payment)
+
+- **Any payment OP records itself goes through `services/record-payment.ts` `recordPayment()`** — the staff route, the Wise matcher and the card reader (`services/stripe-terminal.ts`). It is the one chain (OP row, HH deposit, excess update, Booked push, client email, hooks). Never re-implement a step of it inline.
+- **A Wise transfer's amount is what the client SENT ("Amount received"), never the fee-netted "paid into account".** Xero owns the fee. Matching compares that figure against deposit / half / remaining / excess-outstanding within `AMOUNT_TOLERANCE` (2p).
+- **`incoming_bank_payments` is keyed on the Gmail Message-ID.** A re-ingest can never record a transfer twice; a row is `unmatched` → `recorded` or `ignored`, never deleted. A Xero-only invoice (OT-nnnn) is recorded IN XERO against `xero_bank_wise`, with no job.
+- **The Wise detector runs BEFORE the ingestion loop's automated-mail skip and accepts only DKIM-passed mail from wise.com.** Moving it after the skip silently drops every Wise email (they carry bulk headers); loosening the DKIM gate turns "send info@ an email" into "mark a job paid".
+- **Portal money is `stripe_gbp` even when the client paid with PayPal.** The money is in Stripe and the refund path keys on the method; PayPal is a `(PayPal)` tag on the HireHop deposit description, nothing more. `paypal` as a method is for money that actually arrived in the PayPal account.
+- **Card-reader money is `stripe_gbp` too** (`source = 'stripe_terminal'`, "Card reader" in the HireHop memo), for the same reason. A new `stripe_terminal` method would miss every refund path that keys on `stripe_gbp`.
 
 ## Stripe
 
@@ -81,6 +98,10 @@ writing any new billing call).
 ## Costs & Xero
 
 - **`GET /costs/by-job/:jobId` is THE allocation-aware read.** Never `SELECT … FROM costs WHERE job_id = $1` alone — that ignores splits, so a split invoice shows its full value on the capture job and nothing on the others.
+- **A recharge lives on the whole cost (`costs.recharge_*`) OR on each job's share of a split cost (`cost_allocations.recharge_*`, migration 318), never both** — every write path refuses the second kind while the first exists, so nothing is billed twice. A share is billed to ITS job. **Read recharges from `v_cost_recharges`, never `costs.recharge_mode` alone** — that misses every per-job recharge (the Recharges tab, dashboard, the job's `cost_resolve` card and the vehicle/Problem "outstanding" all read the view). Load or write one through `services/cost-recharges.ts` (`loadRecharge` / `updateRecharge`); the column names are the same on both tables.
+- **A share whose recharge is done (pushed, billed externally, absorbed) stays in the split.** `services/cost-allocations.ts` (behind `PUT /costs/:id/allocations` AND the create/update routes) keeps a share sent with its `id` and refuses to drop, move or re-flag a done one; a client that re-sends the split without ids would delete and re-make every share, losing their recharges. A recharge on the WHOLE cost that is done can't be taken off by an edit either (409).
+- **The capture form saves the job split WITH the cost** (`allocations` on `POST`/`PATCH /costs`, Oct 2026), planned against the cost as it will be before anything is written, so a refusal leaves nothing half-saved. Whole-vs-split is decided in one place, `frontend/src/components/costs/costJobs.ts` `planSplit()`: one job holding the whole cost saves on the cost (`job_id` + its who pays), anything else is a split whose shares each carry who pays and the cost itself is never recharged too. A freelancer's ticked work fills the split (studio evenings and yard days stay with overheads). The separate split modal is retired; ⑂ opens the form at its Jobs table.
+- **The phone receipt page (`/receipt`, `pages/ReceiptCapturePage.tsx`) never re-sends a save blind.** Reads, the AI read and uploads are asked again when no reply came (`costs/receiptRead.ts` `retryOnNoReply()`, only on `isNoReply`); the `POST /costs` is sent once, and on a lost reply the page looks for its own photo (`GET /costs/check-duplicate?receipt_r2_key=`) before offering "Try again". A blind retry would capture a receipt twice, and a paid one goes to Xero on save. Photos go up through `receiptRead.ts` `preparePhoto()` (THE photo helper, `lib/imageNormalise.ts`) on the phone AND the laptop form.
 - **"Is it already in Xero?" is `xero_object_id` ALONE — never the sync state** (`existsInXero()`). `xero_object_id` says the object EXISTS; `xero_sync_state` says the last OPERATION succeeded. `recordError()` sets state `error` and leaves the id, so guards reading `id && state IN (pushed)` treated a live bill whose attach step 429'd as "not in Xero" and **created a duplicate**. Re-sync was worst: it fell through to the create path on any non-pushed state. Eleven live costs were primed when this was found (Sep 2026).
 - **`xero_object_type` says which Xero entity `xero_object_id` is** (migration 209). Re-sync used to re-derive Invoice-vs-BankTransaction from the CURRENT `payment_method`, so changing the method after a push sent an Invoice id to the BankTransactions endpoint — the live "specified BankTransactionID does not match a known bank transaction" errors.
 - **Paying many bills at once goes through `services/cost-batch-pay.ts` and creates a Xero BATCH PAYMENT**, never a loop of `payInvoice`. Twenty individual payments are each correct in the ledger but leave twenty rows to tick against one bank line — the tedium bulk pay exists to remove, moved into Xero. Two rules: **every bill is validated before anything is sent** (one ineligible bill refuses the whole batch BY NAME — a run that paid 19 of 20 with no record of the skip is worse than one that paid none), and **Xero first, then us** (if the batch is rejected nothing in OP has moved; the reverse order leaves bills marked paid with no money recorded anywhere). No silent fallback to individual payments — it would work, and quietly deliver the mess the user picked a batch to avoid.
@@ -109,11 +130,12 @@ writing any new billing call).
 - **`resolveLineTaxType` takes `{amount_vat, amount_net}`, not a whole cost** — the rate is DERIVED, so a header spanning mixed rates yields a blend that is not a real rate (£250 no-VAT + £60 fuel w/ £10 VAT + £15 zero-rated implies 3%, matches nothing, and falls through to the account default). Only a homogeneous LINE gives a true rate.
 - **AI-proposed cost lines are discarded, never adjusted, when they don't reconcile** (`reconcileLines`). The totals are what we pay; a split is a convenience. Bending one to fit the other puts a plausible wrong number in the accounts.
 - **Bucket a job's actuals per LINE where a cost has them**, and only on whole-cost rows — a split-in row is a share of another job's payable, so its lines describe a total this job doesn't carry. `crew_fronted` beats the line's category (that's what "fronted" means on a quote).
-- **A cost row returned to the UI must go through `withJobLabels()`** (`routes/costs.ts`) — `RETURNING *` omits `hh_job_number`/`job_name`/`vehicle_reg`, so the capture + split modals had nothing to print and fell back to a bracketed "(linked job)" where staff needed the number.
+- **A cost row returned to the UI must go through `withJobLabels()`** (`routes/costs.ts`) — `RETURNING *` omits `hh_job_number`/`job_name`/`vehicle_reg`, so the capture form had nothing to print and fell back to a bracketed "(linked job)" where staff needed the number.
 
 ## Card-machine receipts
 
 - **Every path that moves excess money through the physical card machine raises `receipt_required`** — payment, record-preauth, capture, and the excess branch of Money-tab record-payment. `worldpay`/`amex` only, excess only. A new excess-money surface that skips this makes the prompt a lottery.
+- **Stripe (Online) / Worldpay / Amex / PayPal / Lloyds are admin-only for NEW money** (staff: card reader, Wise, cash) (`services/payment-methods.ts` `newPaymentMethodAllowed()`, mirrored in `frontend/src/lib/paymentMethods.ts`; STRIPE-TERMINAL-SPEC §15–16). Refund and reimburse paths keep every method for everyone — never gate them with it. Record Pre-Auth is admin-only.
 - **The flag and `receipt_uploaded_at` move together** — raising the flag on a record with an earlier scan yields flag-set-but-to-do-invisible.
 
 ## Postgres
@@ -133,4 +155,6 @@ writing any new billing call).
 - Excess is a **warning, not a hard gate** — dispatch is non-blocking, and the dispatch gate is lifecycle-bound (suppressed once the hire is finished).
 - **Never silently move money.** Surface a recomputed figure and let staff decide.
 - Balance overrides, "mark externally resolved" and refund-dismissal are **pure OP annotations** — they touch neither HireHop nor Xero.
+- **A cancelled job owes its FEE, not the hire** (`services/cancellation-close.ts`, CANCELLATION-SPEC.md final section). HireHop keeps the hire's lines on a cancelled job, so any surface computing "hire value − payments" for one shows a phantom balance: read `financial.cancellation` / `CloseOutPlan.cancellation` instead. Never zero or delete the job's lines to make HireHop agree — Re-open duplicates them.
+- **Allocate a cancelled job's payments up to the fee only, then refund the rest** — never the other way round (a fully-applied deposit cannot be refunded, error 370), and never by moving more than the fee invoice owes.
 - `MIN_CANCELLATION_FEE` is the **ex-VAT** figure `25` (£30 inc-VAT). The whole calculator works ex-VAT; callers add 20%. Setting it to `30` double-counts VAT.

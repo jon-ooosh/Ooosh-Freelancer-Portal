@@ -16,7 +16,7 @@
  * must not drift from the router.
  */
 
-import { computeDriverValidity, todayYmd, toYmd, type DocWindow } from './driver-validity';
+import { computeDriverValidity, isNiLicence, todayYmd, toYmd, type DocWindow } from './driver-validity';
 import { isIdentityAuthorised } from './identity-review';
 import { documentPresence, type DocumentSlot } from './driver-documents';
 
@@ -43,7 +43,14 @@ export interface VerificationAction {
    * survives so the message can name that remedy; the cockpit renders it as a
    * plain line with no button (Sep 2026).
    */
-  kind: 'compare_identity' | 'set_date' | 'replace_document' | 'upload_document' | 'send_hire_form' | 'resolve_referral' | 'none';
+  /**
+   * `run_dva_check` is the Northern Ireland case. A DVA licence has no GB share
+   * code, so none of the other remedies fit: the driver cannot upload anything,
+   * and re-sending the hire form just returns them to the same screen. The only
+   * thing that moves it is a member of staff running the nidirect lookup, so
+   * the button goes to the DVLA group where the record-check panel lives.
+   */
+  kind: 'compare_identity' | 'set_date' | 'replace_document' | 'upload_document' | 'send_hire_form' | 'resolve_referral' | 'run_dva_check' | 'none';
   slot?: string;
   /**
    * HH job number named in `message`. Set only where the line refers to a
@@ -74,6 +81,8 @@ export interface VerificationStateInput {
   idenfy_doc_result?: unknown;
   idenfy_overall?: unknown;
   licence_issued_by?: unknown;
+  /** Read for the NI path only — whether a nidirect code is waiting on staff. */
+  dvla_check_code?: unknown;
   /**
    * HH job the driver has started a hire form for but NOT signed for — from
    * `unsignedJobNumberSql()` in driver-hire-progress.ts. A signature never
@@ -170,13 +179,28 @@ export function computeVerificationState(
   stages.push({ key: 'poa2', label: 'POA 2', ...poa2Stage });
 
   // ── 6. DVLA (UK) or passport (non-UK) ───────────────────────────────────
-  const dvlaStage = windowStage(v.dvla, 'DVLA check', today);
+  //
+  // Northern Ireland is UK, so a DVA driver needs this check like any other UK
+  // driver — they just cannot run it themselves (see isNiLicence). The stage
+  // says so rather than reading as an ordinary missing document, because "no
+  // DVLA check on record" sends staff looking for something the driver was
+  // never able to produce.
+  const isNi = isNiLicence(driver);
+  const dvaCode = str(driver.dvla_check_code);
+  const dvlaLabel = isNi ? 'DVA check' : 'DVLA check';
+  const dvlaStage = windowStage(v.dvla, dvlaLabel, today);
   const passportStage = windowStage(v.passport, 'passport check', today);
   stages.push({
     key: 'dvla',
-    label: 'DVLA',
+    label: isNi ? 'DVA' : 'DVLA',
     state: v.isUkDriver ? dvlaStage.state : 'not_required',
-    detail: v.isUkDriver ? dvlaStage.detail : 'UK licence holders only',
+    detail: v.isUkDriver
+      ? (isNi && !v.dvla.valid
+          ? (dvaCode
+              ? `NI licence — code ${dvaCode} supplied, awaiting the nidirect lookup`
+              : 'NI licence — needs a check code from the driver')
+          : dvlaStage.detail)
+      : 'UK licence holders only',
   });
   stages.push({
     key: 'passport',
@@ -253,13 +277,34 @@ export function computeVerificationState(
   // services/driver-documents.ts for why it is read there and not here.
   const onFile = documentPresence(driver.files);
   const docs: Array<{ slot: DocumentSlot; label: string; win: DocWindow; applies: boolean }> = [
-    { slot: 'dvla', label: 'DVLA check', win: v.dvla, applies: v.isUkDriver },
+    { slot: 'dvla', label: dvlaLabel, win: v.dvla, applies: v.isUkDriver },
     { slot: 'poa1', label: 'Proof of address 1', win: v.poa1, applies: true },
     { slot: 'poa2', label: 'Proof of address 2', win: v.poa2, applies: true },
     { slot: 'passport', label: 'Passport check', win: v.passport, applies: !v.isUkDriver },
   ];
   for (const doc of docs) {
     if (!doc.applies) continue;
+
+    // Northern Ireland, before the three standard remedies — none of which are
+    // true for a DVA driver. There is nothing for them to upload and nothing a
+    // fresh hire form would unblock; the check exists only once a member of
+    // staff has run it. Intercepting on `!valid` covers both missing and
+    // expired; a VALID window with no document behind it falls through to the
+    // generic "evidence is missing" line below, which is the right remedy
+    // (somebody ran the check and didn't attach the summary).
+    if (doc.slot === 'dvla' && isNi && !doc.win.valid) {
+      actions.push({
+        severity: 'amber', kind: 'run_dva_check', slot: 'dvla',
+        message: dvaCode
+          ? `Northern Ireland licence — the driver has supplied check code ${dvaCode}.`
+            + ` Run the lookup at nidirect and record the result; they cannot do it themselves`
+            + ` and their hire form is parked until you do.`
+          : `Northern Ireland licence — there is no GOV.UK share code for one.`
+            + ` Ask the driver for a nidirect check code, run the lookup, then record the result.`,
+      });
+      continue;
+    }
+
     if (doc.win.until && !doc.win.valid) {
       // Expired. A new document is needed either way, so the file makes no
       // difference to the remedy.

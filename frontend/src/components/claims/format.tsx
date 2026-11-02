@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
+import { ukToday, ukDatePlus } from '../../lib/ukDate';
 
 export type ClaimStage = 'open' | 'form_out' | 'submitted' | 'reviewed' | 'with_broker' | 'closed';
 
@@ -33,6 +34,8 @@ export interface ClaimListRow {
   owner_user_id: string | null;
   owner_name: string | null;
   next_check_on: string | null;
+  chase_level?: number;
+  chase_paused_at?: string | null;
   job_name: string | null;
   client_name: string | null;
   driver_name: string | null;
@@ -85,22 +88,20 @@ export function fmtClaimDate(v: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB');
 }
 
-/** Today in UK terms as YYYY-MM-DD. */
-export function ukToday(): string {
-  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' }));
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-}
+/** Today / today + n, in UK terms — lib/ukDate.ts. */
+export { ukToday, ukDatePlus };
 
-/** YYYY-MM-DD `days` after today (UK). */
-export function ukDatePlus(days: number): string {
-  const [y, m, d] = ukToday().split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d + days));
-  return dt.toISOString().slice(0, 10);
-}
-
-/** Check-date cell: red when overdue or missing on a case that needs one. */
-export function NextCheckCell({ row }: { row: Pick<ClaimListRow, 'stage' | 'next_check_on'> }) {
+/**
+ * Check-date cell: red when overdue or missing on a case that needs one. A case
+ * with the form out chases the client itself (spec §9.1) unless it's paused.
+ */
+export function NextCheckCell({ row }: { row: Pick<ClaimListRow, 'stage' | 'next_check_on' | 'chase_level' | 'chase_paused_at'> }) {
   if (row.stage === 'closed') return <span className="text-slate-400">—</span>;
+  if (row.stage === 'form_out' && !row.chase_paused_at) {
+    return (row.chase_level || 0) > 4
+      ? <span className="text-red-600 font-medium">reminders ran out</span>
+      : <span className="text-slate-500">client reminders ({Math.min(row.chase_level || 0, 4)}/4)</span>;
+  }
   if (!row.next_check_on) return <span className="text-red-600 font-medium">not set</span>;
   const overdue = row.next_check_on < ukToday();
   const today = row.next_check_on === ukToday();
@@ -178,5 +179,57 @@ export function ClaimBadge({ claimId }: { claimId: string }) {
     >
       🛡️ Insurance claim
     </Link>
+  );
+}
+
+/**
+ * Open (not closed) cases a new Problem could belong to — on the same job, or,
+ * for a Problem with no job, on the same van with no job. Null while loading.
+ */
+export function useOpenClaimsFor(jobId: string | null | undefined, vehicleId: string | null | undefined, enabled = true) {
+  const [rows, setRows] = useState<ClaimListRow[] | null>(null);
+  useEffect(() => {
+    if (!enabled || (!jobId && !vehicleId)) { setRows([]); return; }
+    let alive = true;
+    setRows(null);
+    const url = jobId ? `/claims/by-job/${jobId}` : `/claims/by-vehicle/${vehicleId}`;
+    api.get<{ data: ClaimListRow[] }>(url)
+      .then((r) => { if (alive) setRows(r.data.filter((c) => c.stage !== 'closed' && (jobId ? true : !c.job_id))); })
+      .catch(() => { if (alive) setRows([]); });
+    return () => { alive = false; };
+  }, [jobId, vehicleId, enabled]);
+  return rows;
+}
+
+/**
+ * "This job already has an open case" — a flag, not a gate (jon, Sep 2026):
+ * two separate incidents on one hire can happen. `value` is a claim id to add
+ * the Problem to, or 'new' for a separate case.
+ */
+export function ExistingClaimChoice({ claims, value, onChange }: {
+  claims: ClaimListRow[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  if (!claims.length) return null;
+  return (
+    <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs text-slate-700 space-y-1">
+      <div className="font-medium text-amber-900">
+        {claims.length === 1 ? 'There is already an open possible claim here:' : `There are already ${claims.length} open possible claims here:`}
+      </div>
+      {claims.map((c) => (
+        <label key={c.id} className="flex items-center gap-2">
+          <input type="radio" checked={value === c.id} onChange={() => onChange(c.id)} />
+          <span>
+            Add this Problem to {c.vehicle_reg || 'no van'}{c.hh_job_number ? ` · #${c.hh_job_number}` : ''} ({CLAIM_STAGE_LABEL[c.stage]}, opened {fmtClaimDate(c.created_at)})
+          </span>
+          <Link to={`/vehicles/claims/${c.id}`} target="_blank" className="text-ooosh-600 hover:underline">view</Link>
+        </label>
+      ))}
+      <label className="flex items-center gap-2">
+        <input type="radio" checked={value === 'new'} onChange={() => onChange('new')} />
+        <span>It&apos;s a different incident — open a separate case</span>
+      </label>
+    </div>
   );
 }

@@ -25,6 +25,19 @@ interface PayrollRow {
   sicknessMinutes: number;
   sicknessDays: number;
   nominalDayMinutes: number | null;
+  /** Paternity, maternity, jury service… by type (Oct 2026). Optional: an
+   *  older backend does not send it. */
+  otherAbsenceMinutes?: number;
+  otherAbsence?: { type: string; label: string; minutes: number; days: number }[];
+}
+
+/** "Paternity 8 days" — the same wording as the email and the CSV. */
+function otherAbsenceText(r: PayrollRow): string {
+  return (r.otherAbsence ?? [])
+    .map(o => (o.days === 0 && o.minutes > 0
+      ? `${o.label} ${fmtH(o.minutes)}`
+      : `${o.label} ${o.days} day${o.days === 1 ? '' : 's'}`))
+    .join('; ');
 }
 
 function fmtH(mins: number): string {
@@ -36,6 +49,27 @@ function fmtH(mins: number): string {
 /** Jan 1 to Dec 31 of the given year — the default period for a year-end run. */
 function yearRange(year: number) {
   return { from: `${year}-01-01`, to: `${year}-12-31` };
+}
+
+/** YYYY-MM-DD in the browser's own time zone — toISOString() is UTC, and would
+ *  give yesterday's date in the small hours of a BST morning. */
+function localIso(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** First to last day of a calendar month. `offset` 0 is this month, -1 last. */
+function monthRange(offset: number) {
+  const now = new Date();
+  // Day 0 of the following month is the last day of this one.
+  const first = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+  const last = new Date(now.getFullYear(), now.getMonth() + offset + 1, 0);
+  return { from: localIso(first), to: localIso(last) };
+}
+
+/** 1 January to today — what has changed so far this year. */
+function yearSoFar() {
+  const now = new Date();
+  return { from: `${now.getFullYear()}-01-01`, to: localIso(now) };
 }
 
 export default function PayrollReportPanel() {
@@ -79,7 +113,17 @@ export default function PayrollReportPanel() {
     <div className="mb-5 p-4 rounded-lg border border-gray-200 bg-white">
       <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
         <h2 className="text-sm font-semibold text-gray-900">Payroll report</h2>
-        <div className="flex gap-2 text-xs">
+        <div className="flex flex-wrap gap-2 text-xs">
+          {/* Last month is the usual one: payroll changes go in before the 4th. */}
+          <button onClick={() => setRange(monthRange(0))} className="text-ooosh-600 hover:underline">
+            This month
+          </button>
+          <button onClick={() => setRange(monthRange(-1))} className="text-ooosh-600 hover:underline">
+            Last month
+          </button>
+          <button onClick={() => setRange(yearSoFar())} className="text-ooosh-600 hover:underline">
+            Year so far
+          </button>
           <button onClick={() => setRange(yearRange(thisYear))} className="text-ooosh-600 hover:underline">
             This year
           </button>
@@ -130,6 +174,7 @@ export default function PayrollReportPanel() {
                 <th className="py-1.5 pr-3 text-right">Overtime to pay</th>
                 <th className="py-1.5 pr-3 text-right">Unpaid leave</th>
                 <th className="py-1.5 pr-3 text-right">Sickness</th>
+                <th className="py-1.5 pr-3">Other absence</th>
               </tr>
             </thead>
             <tbody>
@@ -150,6 +195,9 @@ export default function PayrollReportPanel() {
                   <td className="py-1.5 pr-3 text-right tabular-nums">
                     {r.sicknessDays === 0 ? '—' : `${r.sicknessDays} days`}
                   </td>
+                  <td className="py-1.5 pr-3 text-gray-700">
+                    {(r.otherAbsenceMinutes ?? 0) === 0 ? '—' : otherAbsenceText(r)}
+                  </td>
                 </tr>
               ))}
               {/* The single figure to send payroll — the whole point of a
@@ -158,7 +206,7 @@ export default function PayrollReportPanel() {
               <tr className="border-t-2 border-gray-300 font-medium">
                 <td className="py-1.5 pr-3">Total overtime to pay</td>
                 <td className="py-1.5 pr-3 text-right tabular-nums">{fmtH(totalOvertime)}</td>
-                <td colSpan={2} />
+                <td colSpan={3} />
               </tr>
             </tbody>
           </table>

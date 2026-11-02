@@ -24,6 +24,7 @@
 
 import type { PrepHistorySession } from './prep-history'
 import { TYRE_TREAD_CAP_MM, TYRE_TREAD_RED_MM, TYRE_TREAD_AMBER_MM } from './tyre-sanity'
+import { ukToday } from '../../../lib/ukDate'
 
 /** A jump UP of more than this between consecutive preps = a new/swapped tyre. */
 const TREAD_RESET_JUMP_MM = 1.5
@@ -182,7 +183,7 @@ function projectTo(
     return {
       milesRemaining: 0,
       reachedAtMileage: currentMileage,
-      estimatedDate: new Date().toISOString().slice(0, 10),
+      estimatedDate: ukToday(),
     }
   }
   const milesRemaining = Math.round((currentTread - threshold) / ratePerMile)

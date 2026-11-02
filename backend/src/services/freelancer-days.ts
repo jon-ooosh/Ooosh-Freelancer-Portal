@@ -22,6 +22,8 @@
 
 import { query } from '../config/database';
 import { DATE_RE } from './staff-day-status';
+import { ukToday } from './uk-date';
+import { retireDoneBells } from './notification-resolve';
 
 export type DurationType = 'full_day' | 'half_day' | 'hours';
 export type RateType = 'day' | 'half_day' | 'hourly' | 'fixed';
@@ -300,6 +302,8 @@ export async function recordResponse(
       WHERE id = $1`,
     [id, response, note]
   );
+  // Out of Offered — the office's "has not confirmed" bell is done (bell-rules.ts).
+  await retireDoneBells('freelancer_unconfirmed', id);
   const out = await getBooking(id);
   if (!out) throw new Error('Booking not found after recording the response');
   return out;
@@ -315,6 +319,8 @@ export async function markCompleted(id: string): Promise<DayBooking> {
 
   await query(
     `UPDATE freelancer_day_bookings SET status = 'completed', updated_at = NOW() WHERE id = $1`, [id]);
+  // Out of Offered — the office's "has not confirmed" bell is done (bell-rules.ts).
+  await retireDoneBells('freelancer_unconfirmed', id);
   const out = await getBooking(id);
   if (!out) throw new Error('Booking not found after completing');
   return out;
@@ -332,6 +338,8 @@ export async function cancelBooking(id: string, reason: string, userId: string):
       WHERE id = $1`,
     [id, userId, reason]
   );
+  // Out of Offered — the office's "has not confirmed" bell is done (bell-rules.ts).
+  await retireDoneBells('freelancer_unconfirmed', id);
   const out = await getBooking(id);
   if (!out) throw new Error('Booking not found after cancelling');
   return out;
@@ -370,7 +378,7 @@ export async function closeOutBooking(
   // A future offer is not stale, it is pending. Closing one out would quietly
   // remove somebody from a day that has not happened, which is the exact
   // failure §9.4 decision 1 exists to prevent.
-  if (cur.bookingDate >= new Date().toISOString().slice(0, 10)) {
+  if (cur.bookingDate >= ukToday()) {
     throw new Error('That day has not happened yet — cancel it instead if it is off');
   }
 
@@ -380,6 +388,8 @@ export async function closeOutBooking(
       WHERE id = $1`,
     [id, outcome, userId]
   );
+  // Out of Offered — the office's "has not confirmed" bell is done (bell-rules.ts).
+  await retireDoneBells('freelancer_unconfirmed', id);
   const out = await getBooking(id);
   if (!out) throw new Error('Booking not found after closing out');
   return out;

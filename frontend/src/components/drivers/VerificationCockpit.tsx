@@ -155,4 +155,8 @@ const ACTION_LABEL: Record<string, string> = {
   replace_document: 'Replace document',
   upload_document: 'Upload it',
   resolve_referral: 'Resolve referral',
+  // Northern Ireland. Scrolls to the DVLA group, where the record-check panel
+  // is — a DVA driver cannot produce a GOV.UK share code, so the only thing
+  // that moves this is a member of staff running the nidirect lookup.
+  run_dva_check: 'Record the check',
 };

@@ -21,9 +21,11 @@ import {
 } from '../services/confirmation-hooks';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 import { cascadeJobClose, reactivateAutoCancelledQuotes } from '../services/job-close-cascade';
-import { closeJobRequirements } from '../services/requirement-close-sweep';
+import { closeJobRequirements, fireEventTriggeredReminders } from '../services/requirement-close-sweep';
+import { afterOptionConfirmed } from '../services/option-confirm';
+import { jobNameKeepingOptionSuffixSql } from '../services/job-groups';
 import { sendLastMinuteAlert } from '../services/money-emails';
-import { isUnwonTransition } from '../services/pipeline-stage';
+import { isUnwonTransition, isBookingWonTransition } from '../services/pipeline-stage';
 
 const router = Router();
 
@@ -148,7 +150,13 @@ router.post('/hirehop', async (req: Request, res: Response) => {
 
 // ── Job Status Change Handler ────────────────────────────────────────────
 
-async function handleJobStatusChange(
+/**
+ * Exported for the hire close-out: after it sets a job to Completed in HireHop
+ * (with `no_webhook: 1`, so HireHop won't call us), it applies the same
+ * transition here that HireHop's own webhook would — same cascades, same
+ * timeline note — so OP never lags its own write.
+ */
+export async function handleJobStatusChange(
   data: Record<string, unknown> | undefined,
   changes: Record<string, unknown> | undefined,
   topLevelJobId?: number | string,
@@ -374,6 +382,19 @@ async function handleJobStatusChange(
       sendLastMinuteAlert(job.id, job.pipeline_status).catch(e =>
         console.error('[HH webhook] Last-minute alert failed:', e),
       );
+
+      // Event-triggered reminders ("notify me if this job confirms"). Same
+      // gap the hire form email had: only the OP pipeline route fired these,
+      // so a job booked in HireHop fired nothing. Gated on the booking
+      // actually being WON — `isBookingWonTransition` keeps a `prepped →
+      // confirmed` correction in HH from re-firing every confirmation
+      // reminder, which the looser guard on this branch would allow.
+      if (isBookingWonTransition(job.pipeline_status)) {
+        void fireEventTriggeredReminders(job.id, 'confirmed', null);
+        // Quote options: confirmed in HireHop — bell the managers about the siblings.
+        void afterOptionConfirmed(job.id, { actorUserId: null, source: 'hirehop_webhook' });
+      }
+
       void (async () => {
         try {
           const hfResult = await triggerHireFormEmailOnConfirmation(job.id);
@@ -487,7 +508,10 @@ async function handleJobUpdate(
       const value = hhField === 'JOB_NAME' && typeof raw === 'string'
         ? stripProjectPrefix(raw)
         : (raw || null);
-      updates.push(`${dbField} = $${pIdx}`);
+      // Quote options: a rename in HireHop must not drop the "(Option N)" suffix.
+      updates.push(hhField === 'JOB_NAME'
+        ? `${dbField} = ${jobNameKeepingOptionSuffixSql(`$${pIdx}`)}`
+        : `${dbField} = $${pIdx}`);
       params.push(value);
       pIdx++;
     }
@@ -639,6 +663,16 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
         reason: newPipelineStatus as 'lost' | 'cancelled',
         actorUserId: null,
       });
+    }
+
+    // Confirmation triggers — the `lost` / `cancelled` half above has been
+    // here since this endpoint was written, but `confirmed` was never wired
+    // up, so a reminder set to fire "when this job confirms" did nothing when
+    // an external caller won the booking. Won-transition gated, as everywhere
+    // else, so a status correction doesn't re-fire it.
+    if (newPipelineStatus === 'confirmed' && isBookingWonTransition(job.pipeline_status)) {
+      await fireEventTriggeredReminders(job.id, 'confirmed', null);
+      void afterOptionConfirmed(job.id, { actorUserId: null, source: 'hirehop_webhook' });
     }
 
     // Resurrection: reverse the Lost / Cancelled requirement sweep when an

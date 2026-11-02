@@ -702,6 +702,20 @@ async function resyncCostToXeroLocked(costId: string): Promise<PushResult & { lo
   // at the wrong Xero endpoint.
   const isBill = xeroEntity(cost) === 'Invoices';
 
+  // Paid-now → pay-later after the push. Xero holds a Spend Money (already
+  // paid), and no update can turn that into a Bill — carrying on only fails
+  // with a baffling "No Xero bank account mapped for not_yet_paid". Say what's
+  // actually wrong. (The reverse switch is harmless: the bill updates in place
+  // and its payment is recorded the normal way.)
+  if (!isBill && cost.payment_method && (BILL_METHODS as readonly string[]).includes(cost.payment_method)) {
+    return {
+      pushed: false,
+      locked: true,
+      error: 'This cost is in Xero as a paid Spend Money, but is now marked pay-later — a re-sync can\'t turn it into a bill. '
+        + 'Delete the Spend Money in Xero, then ask an admin to point this cost at the bill.',
+    };
+  }
+
   try {
     if (isBill) {
       // Settled outside OP: whatever state our bill is in over there, OP is no

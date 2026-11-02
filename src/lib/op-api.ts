@@ -33,6 +33,7 @@ export interface PortalJob {
   time: string | null
   venueName: string | null
   venueId: string | null
+  venueCity?: string | null
   driverPay: number
   runGroup: string | null
   runOrder: number | null
@@ -40,7 +41,6 @@ export interface PortalJob {
   // When set, this is the combined fee the freelancer is offered for
   // the whole run (overrides summing individual driverPay values).
   runCombinedFreelancerFee: number | null
-  runCombinedClientFee: number | null
   runNotes: string | null
   hhRef: string | null
   status: string
@@ -53,6 +53,11 @@ export interface PortalJob {
   completionNotes: string | null
   isLocal: boolean
   isGrouped: false
+  // Crew and People work: YYYY-MM-DD the freelancer can complete it from (its
+  // last day — OP services/quote-schedule.ts). Null for ordinary D&C.
+  completeFrom?: string | null
+  // Job detail only: has the van leg really happened (booked out / collected)?
+  vanLegDone?: boolean
   // D&C specific
   whatIsIt?: string
   clientEmail?: string | null
@@ -89,6 +94,7 @@ export interface PortalJobDetailResponse {
     id: string
     name: string
     address?: string
+    loadInAddress?: string | null
     whatThreeWords?: string
     contact1?: string
     phone?: string | null
@@ -148,6 +154,13 @@ export interface SitterShift {
 export interface SitterShiftsResponse {
   success: boolean
   shifts: SitterShift[]
+  /** Only when asked with `since`: every night before tonight back to that date (the Completed page). */
+  past?: SitterShift[]
+}
+
+/** `?since=` for the three list calls (FREELANCER-PORTAL-SPEC §10). */
+function sinceQuery(since?: string): string {
+  return since ? `?since=${encodeURIComponent(since)}` : ''
 }
 
 export interface SitterShiftDetail {
@@ -158,6 +171,8 @@ export interface SitterShiftDetail {
   fee: number | null
   assignment_status: string | null
   jobs: SitterShiftJob[]
+  /** Tonight's tasks (STAFF-CALENDAR-SPEC §21). */
+  tasks?: PortalFreelancerTask[]
 }
 
 export interface SitterShiftDetailResponse extends SitterShiftDetail {
@@ -165,13 +180,48 @@ export interface SitterShiftDetailResponse extends SitterShiftDetail {
 }
 
 /** The sitter's own upcoming/recent rostered evenings. */
-export async function getSitterShiftsFromOP(sessionToken: string): Promise<SitterShiftsResponse> {
-  return opFetch<SitterShiftsResponse>('/studio-sitter/shifts', sessionToken)
+export async function getSitterShiftsFromOP(sessionToken: string, since?: string): Promise<SitterShiftsResponse> {
+  return opFetch<SitterShiftsResponse>(`/studio-sitter/shifts${sinceQuery(since)}`, sessionToken)
 }
 
 // =============================================================================
 // YARD DAYS (spec §9.3)
 // =============================================================================
+
+/** Something to do on a yard day or a sitter evening (STAFF-CALENDAR-SPEC §21).
+ *  `title` is the whole wording ("Prep RX21 ABC (Premium) for #16791"). */
+export interface PortalFreelancerTask {
+  id: string
+  taskType: 'van_prep' | 'other'
+  title: string
+  detail: string | null
+  vehicleReg: string | null
+  status: 'open' | 'done' | 'cancelled'
+  doneAt: string | null
+  /** True when THEY ticked it on the portal — the only kind they can un-tick. */
+  doneByMe?: boolean
+}
+
+/** Tick a task off (or back on, `done = false`). A van prep is ticked by saving the prep sheet, not here. */
+export async function markFreelancerTaskDoneFromOP(
+  sessionToken: string,
+  taskId: string,
+  done = true,
+): Promise<{ success: boolean; task?: PortalFreelancerTask; error?: string }> {
+  // NOT retried, per opFetch's rule for POSTs.
+  return opFetch(`/freelancer-tasks/${taskId}/done`, sessionToken, {
+    method: 'POST',
+    body: JSON.stringify({ done }),
+  })
+}
+
+/** A link into OP's prep page for a van-prep task (15-minute token). */
+export async function getFreelancerPrepLinkFromOP(
+  sessionToken: string,
+  taskId: string,
+): Promise<{ success: boolean; url?: string; error?: string }> {
+  return opFetch(`/freelancer-tasks/${taskId}/prep-link`, sessionToken, { method: 'POST', body: '{}' })
+}
 
 export interface PortalDayBooking {
   id: string
@@ -184,6 +234,8 @@ export interface PortalDayBooking {
   notes: string | null
   status: 'offered' | 'accepted' | 'declined' | 'cancelled' | 'completed' | 'lapsed' | 'withdrew'
   invoiceReceived: boolean
+  /** Upcoming days only — the live list of what they are doing. */
+  tasks?: PortalFreelancerTask[]
 }
 
 export interface DayBookingsResponse {
@@ -191,10 +243,12 @@ export interface DayBookingsResponse {
   awaitingReply: number
   upcoming: PortalDayBooking[]
   past: PortalDayBooking[]
+  /** Only when asked with `since`: days worked (accepted or completed, gone by) back to that date. */
+  done?: PortalDayBooking[]
 }
 
-export async function getDayBookingsFromOP(sessionToken: string): Promise<DayBookingsResponse> {
-  return opFetch<DayBookingsResponse>('/day-bookings', sessionToken)
+export async function getDayBookingsFromOP(sessionToken: string, since?: string): Promise<DayBookingsResponse> {
+  return opFetch<DayBookingsResponse>(`/day-bookings${sinceQuery(since)}`, sessionToken)
 }
 
 export async function respondToDayBookingFromOP(
@@ -452,6 +506,66 @@ export interface PortalResourceDetail {
   url?: string | null
 }
 
+// =============================================================================
+// EARNINGS (FREELANCER-PORTAL-SPEC §5.2)
+// =============================================================================
+
+/** Shapes from OP services/freelancer-earnings.ts. */
+export type EarningsPeriodKey = 'last_month' | 'this_month' | 'tax_year' | 'last_tax_year'
+
+export interface EarningsPeriod {
+  key: EarningsPeriodKey
+  label: string
+  tab: string
+  from: string
+  to: string
+}
+
+export interface EarningsInvoice {
+  id: string
+  invoiceNumber: string | null
+  date: string | null
+  amount: number
+  status: 'received' | 'queried' | 'approved' | 'scheduled' | 'paid'
+  statusDate: string | null
+  queryNote: string | null
+  work: { date: string; title: string; jobNumber: number | null }[]
+}
+
+export interface EarningsWork {
+  key: string
+  kind: 'booking' | 'run' | 'sitter' | 'yard'
+  date: string
+  title: string
+  detail: string | null
+  jobNumber: number | null
+  fee: number
+  label: 'to_invoice' | 'invoiced' | 'paid' | null
+  paidDate: string | null
+}
+
+export interface EarningsResponse {
+  success: boolean
+  /** The shared staff login: no invoices of its own, nothing else is sent. */
+  shared: boolean
+  period?: EarningsPeriod
+  periods?: EarningsPeriod[]
+  labelsFrom?: string
+  totals?: { paid: number; invoiced: number; toInvoice: number; total: number }
+  counts?: { paid: number; waiting: number }
+  toInvoiceCount?: number
+  nextPayment?: { date: string; amount: number } | null
+  invoices?: EarningsInvoice[]
+  earlierWaiting?: EarningsInvoice[]
+  work?: EarningsWork[]
+}
+
+/** Their invoices and finished work for a period (default this month). */
+export async function getEarningsFromOP(sessionToken: string, period?: string): Promise<EarningsResponse> {
+  const q = period ? `?period=${encodeURIComponent(period)}` : ''
+  return opFetch<EarningsResponse>(`/earnings${q}`, sessionToken)
+}
+
 /** List approved, freelancer-shareable staff documents. */
 export async function getResourcesFromOP(sessionToken: string): Promise<PortalResourcesResponse> {
   return opFetch<PortalResourcesResponse>('/resources', sessionToken)
@@ -528,6 +642,22 @@ async function fetchWithTimeout(
 }
 
 /**
+ * OP refused the session: the freelancer was removed or un-approved, or a
+ * password reset signed this device out (Oct 2026). Drop the cookie. Otherwise
+ * the pages' "401 → /login" meets the middleware's "valid cookie → /dashboard"
+ * (it can only check the signature) and the two bounce for ever.
+ * Only works inside a route handler, which is where opFetch runs.
+ */
+async function clearSessionCookie(): Promise<void> {
+  try {
+    const { cookies } = await import('next/headers')
+    cookies().delete('session')
+  } catch {
+    // Not in a route handler: nothing to set the cookie on.
+  }
+}
+
+/**
  * Make an authenticated request to the OP backend portal API.
  * Forwards the session cookie from the incoming request.
  *
@@ -572,6 +702,7 @@ async function opFetch<T>(
           await new Promise((r) => setTimeout(r, 300))
           continue
         }
+        if (response.status === 401) await clearSessionCookie()
         throw err
       }
 
@@ -596,8 +727,8 @@ async function opFetch<T>(
  * Fetch all jobs for the logged-in freelancer from OP backend.
  * Returns data in the same shape the dashboard page expects.
  */
-export async function getJobsFromOP(sessionToken: string): Promise<PortalJobsResponse> {
-  return opFetch<PortalJobsResponse>('/jobs', sessionToken)
+export async function getJobsFromOP(sessionToken: string, since?: string): Promise<PortalJobsResponse> {
+  return opFetch<PortalJobsResponse>(`/jobs${sinceQuery(since)}`, sessionToken)
 }
 
 /**
@@ -618,6 +749,17 @@ export async function getEquipmentFromOP(
   quoteId: string
 ): Promise<PortalEquipmentResponse> {
   return opFetch<PortalEquipmentResponse>(`/jobs/${quoteId}/equipment`, sessionToken)
+}
+
+/**
+ * The HireHop job number behind one of the freelancer's jobs, or a 404 if the
+ * job isn't theirs. The kit-list route asks this before it reads HireHop.
+ */
+export async function getHireHopRefFromOP(
+  sessionToken: string,
+  quoteId: string
+): Promise<{ success: boolean; hhRef: string | null }> {
+  return opFetch(`/jobs/${encodeURIComponent(quoteId)}/hirehop-ref`, sessionToken)
 }
 
 /**
@@ -676,7 +818,10 @@ export async function submitCompletionToOP(
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
-    throw new Error(body.error || `Completion failed: ${response.status}`)
+    // An OpApiError, so the route can tell OP's own refusal (a 4xx: "the van
+    // hasn't been booked out yet") from an outage — a plain Error made every
+    // refusal read "Unable to submit completion" (Oct 2026).
+    throw new OpApiError(body.error || `Completion failed: ${response.status}`, response.status, body)
   }
 
   return response.json()
@@ -701,17 +846,25 @@ export async function declareLegsOP(
 
 /**
  * Login to OP portal (create session).
+ *
+ * Two-step sign-in (FREELANCER-PORTAL-SPEC §7): once it is switched on, a
+ * phone OP doesn't remember gets `success: false` with `pending` (and a code
+ * emailed) instead of a user. The code goes to loginCodeOP().
  */
 export async function loginToOP(
   email: string,
-  password: string
-): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; error?: string; status?: number }> {
+  password: string,
+  device: { deviceToken?: string; userAgent?: string } = {},
+): Promise<{
+  success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; error?: string; status?: number
+  pending?: string; emailHint?: string; codeSent?: boolean; codeError?: string | null
+}> {
   const url = `${getOpUrl()}/api/portal/auth/login`
 
   const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, deviceToken: device.deviceToken, userAgent: device.userAgent }),
   })
 
   const data = await response.json()
@@ -728,7 +881,26 @@ export async function loginToOP(
     if (match) sessionToken = match[1]
   }
 
+  if (data.pending) {
+    return { success: false, pending: data.pending, emailHint: data.emailHint, codeSent: !!data.codeSent, codeError: data.codeError ?? null }
+  }
+
   return { success: true, user: data.user, sessionToken }
+}
+
+/** The second step: the emailed code (or one the office read out). */
+export async function loginCodeOP(
+  pending: string,
+  code: string,
+  trustDevice: boolean,
+  userAgent: string | undefined,
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; deviceToken?: string }> {
+  return opPostJson('/auth/login/code', { pending, code, trustDevice, userAgent })
+}
+
+/** "Send a new code". */
+export async function loginSendCodeOP(pending: string, userAgent: string | undefined): Promise<{ success: boolean }> {
+  return opPostJson('/auth/login/send-code', { pending, userAgent })
 }
 
 // =============================================================================
@@ -764,13 +936,14 @@ export async function registerVerifyOP(email: string, code: string): Promise<{ s
 export async function registerCompleteOP(
   email: string,
   code: string,
-  password: string
-): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string }> {
+  password: string,
+  device: { trustDevice?: boolean; userAgent?: string } = {},
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; deviceToken?: string }> {
   const url = `${getOpUrl()}/api/portal/auth/register/complete`
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, code, password }),
+    body: JSON.stringify({ email, code, password, trustDevice: device.trustDevice, userAgent: device.userAgent }),
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -786,7 +959,7 @@ export async function registerCompleteOP(
     const m = setCookie.match(/session=([^;]+)/)
     if (m) sessionToken = m[1]
   }
-  return { success: true, user: data.user, sessionToken }
+  return { success: true, user: data.user, sessionToken, deviceToken: data.deviceToken }
 }
 
 export async function forgotPasswordOP(email: string): Promise<{ success: boolean; message?: string }> {
@@ -809,13 +982,14 @@ export async function verifyResetTokenOP(token: string): Promise<{ valid: boolea
 
 export async function resetPasswordOP(
   token: string,
-  password: string
-): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string }> {
+  password: string,
+  device: { trustDevice?: boolean; userAgent?: string } = {},
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; deviceToken?: string }> {
   const url = `${getOpUrl()}/api/portal/auth/reset-password`
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, password }),
+    body: JSON.stringify({ token, password, trustDevice: device.trustDevice, userAgent: device.userAgent }),
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -831,5 +1005,5 @@ export async function resetPasswordOP(
     const m = setCookie.match(/session=([^;]+)/)
     if (m) sessionToken = m[1]
   }
-  return { success: true, user: data.user, sessionToken }
+  return { success: true, user: data.user, sessionToken, deviceToken: data.deviceToken }
 }

@@ -36,6 +36,44 @@ export async function stampQuoteLeg(quoteId: string, leg: QuoteLeg): Promise<voi
   );
 }
 
+/**
+ * Has this quote's VAN leg actually happened? THE check — maybeCloseQuote and
+ * the portal's van-only "All Done" both ask it.
+ *
+ * Yes when the freelancer's own book-out / collection stamped van_leg_done_at,
+ * or (belt-and-braces for a van booked out or checked in by staff at the desk,
+ * which never stamps it) when the van's record on the job shows it. What counts
+ * depends on the DIRECTION:
+ *   - a delivery: a van on the job has gone out (booked_out / active / returned);
+ *   - a collection: a van on the job has been collected (soft check-in) or
+ *     checked back in. "Out on hire" is NOT evidence of a collection — the van
+ *     is out before anyone collects it. Counting it let a van-only collection
+ *     close on "All Done" with nothing collected (Oct 2026).
+ * Job-wide, not per van: a multi-van job is satisfied by any one van.
+ */
+export async function isVanLegDone(row: {
+  van_leg_done_at?: unknown;
+  job_type?: unknown;
+  job_id?: unknown;
+  hh_job_number?: unknown;
+}): Promise<boolean> {
+  if (row.van_leg_done_at != null) return true;
+  if (!row.job_id && !row.hh_job_number) return false;
+  const evidence = row.job_type === 'collection'
+    ? `(vha.soft_checked_in_at IS NOT NULL OR vha.checked_in_at IS NOT NULL OR vha.status = 'returned')`
+    : `vha.status IN ('booked_out', 'active', 'returned')`;
+  const found = await query(
+    `SELECT 1
+       FROM vehicle_hire_assignments vha
+      WHERE (($1::uuid IS NOT NULL AND vha.job_id = $1)
+             OR ($2::int IS NOT NULL AND vha.hirehop_job_id = $2))
+        AND ${evidence}
+      LIMIT 1`,
+    [row.job_id ?? null, row.hh_job_number ?? null]
+  );
+  return found.rows.length > 0;
+}
+
 interface MaybeCloseOpts {
   /**
    * Which leg's completion triggered this call. Only used for LEGACY quotes
@@ -92,24 +130,9 @@ export async function maybeCloseQuote(quoteId: string, opts: MaybeCloseOpts): Pr
     }
     shouldClose = true;
   } else {
-    // Van leg is satisfied if it isn't required, OR it was stamped, OR the van
-    // is physically out on this job (belt-and-braces for the uncommon case
-    // where the van was booked out by staff on the desk rather than through the
-    // freelancer's own session, so van_leg_done_at never stamped — we don't
-    // want to nag a freelancer who's done their equipment part).
-    let vanOk = vanDeclared !== true || row.van_leg_done_at != null;
-    if (!vanOk && (row.job_id || row.hh_job_number)) {
-      const out = await query(
-        `SELECT 1
-           FROM vehicle_hire_assignments vha
-          WHERE (($1::uuid IS NOT NULL AND vha.job_id = $1)
-                 OR ($2::int IS NOT NULL AND vha.hirehop_job_id = $2))
-            AND vha.status IN ('booked_out', 'active', 'returned')
-          LIMIT 1`,
-        [row.job_id ?? null, row.hh_job_number ?? null]
-      );
-      if (out.rows.length > 0) vanOk = true;
-    }
+    // Van leg is satisfied if it isn't required, or isVanLegDone() finds the
+    // stamp or the van's own record (see there for why direction matters).
+    const vanOk = vanDeclared !== true || await isVanLegDone(row);
     const equipOk = equipDeclared !== true || row.equipment_leg_done_at != null;
     shouldClose = vanOk && equipOk;
   }

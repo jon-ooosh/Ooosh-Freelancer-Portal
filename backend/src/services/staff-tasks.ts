@@ -24,6 +24,21 @@
 
 import { query } from '../config/database';
 import { STAFF_ADMIN_ROLES } from './staff-employment';
+import { ukToday } from './uk-date';
+import { retireDoneBells } from './notification-resolve';
+
+/**
+ * A write that can settle a to-do's bells — closed, reassigned, handed back,
+ * taken off a list, put back, follow-up moved. bell-rules.ts decides for each
+ * bell (per person: whoever is no longer its owner is done with it). Exported
+ * for staff-task-series.ts, which closes occurrences with its own SQL.
+ * Never throws.
+ */
+export async function retireTaskBells(taskId: string): Promise<void> {
+  await retireDoneBells('task_owner', taskId);
+  await retireDoneBells('task_list_item', taskId);
+  await retireDoneBells('task_follow_up', taskId);
+}
 
 export const TASK_STATUSES = ['open', 'done', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -75,7 +90,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Today in the UK, as YYYY-MM-DD — the day staff are actually living in. */
 export function todayLondon(): string {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  return ukToday();
 }
 
 /**
@@ -96,6 +111,16 @@ const SELECT_TASKS = `
          t.due_date::text AS due_date, t.status,
          t.next_chase_date::text AS next_chase_date,
          t.source_type, t.source_id,
+         -- Where the badge links back to, for sources that live elsewhere
+         -- (a van sale's follow-up → its sale page; VEHICLE-SALES-SPEC §7.2).
+         CASE WHEN t.source_type = 'vehicle_sale' THEN (
+           SELECT '/vehicles/fleet/' || vs.vehicle_id || '/sale'
+             FROM vehicle_sales vs WHERE vs.id = t.source_id
+         )
+         -- An option confirmed with nobody on the page → the job, with the
+         -- Confirm panel open (services/option-confirm.ts).
+         WHEN t.source_type = 'quote_option' THEN '/jobs/' || t.source_id || '?group_prompt=1'
+         END AS source_link,
          t.created_at, t.completed_at,
          t.created_by, t.is_private,
          t.follow_up_on::text AS follow_up_on,
@@ -439,6 +464,7 @@ export async function updateTask(
     const { onOccurrenceClosed } = await import('./staff-task-series');
     await onOccurrenceClosed(taskId).catch(e => console.error('[staff-tasks] next occurrence failed:', e));
   }
+  await retireTaskBells(taskId);
   return row;
 }
 
@@ -486,6 +512,7 @@ export async function handBackTask(taskId: string, reason: string, userId: strin
   } catch (e) {
     console.error('[staff-tasks] handed-back bell failed:', e);
   }
+  await retireTaskBells(taskId);
   return row;
 }
 
@@ -521,6 +548,7 @@ export async function takeTask(taskId: string, userId: string) {
     [taskId, mine]
   );
   if (!r.rows.length) throw new Error('Somebody’s already on it — or it’s gone');
+  await retireTaskBells(taskId);
   return taskFacts(taskId);
 }
 
@@ -534,6 +562,7 @@ export async function releaseTask(taskId: string, userId: string, role: string |
       WHERE id = $1 AND status = 'open'`,
     [taskId]
   );
+  await retireTaskBells(taskId);
   return taskFacts(taskId);
 }
 
@@ -583,21 +612,13 @@ export async function listEveryone(userId: string, role: string | undefined) {
  * behind it. A person with no login would get no bell and could never see it.
  */
 export async function listAssignablePeople() {
-  const { STAFF_ROLES } = await import('../middleware/auth');
-  const r = await query(
-    `SELECT DISTINCT p.id AS person_id,
-            NULLIF(TRIM(COALESCE(p.preferred_name, p.first_name, '') || ' ' ||
-                        COALESCE(p.last_name, '')), '') AS name
-       FROM users u JOIN people p ON p.id = u.person_id
-      WHERE u.is_active = true AND u.role = ANY($1::text[])
-        -- The platform's own service account (same id as in
-        -- carnet-auto-email.ts / gmail-ingestion.ts) is an admin with a
-        -- person row, and would otherwise be offered as somebody to ask.
-        AND u.id <> '00000000-0000-0000-0000-000000000000'
-      ORDER BY name`,
-    [STAFF_ROLES as readonly string[]]
-  );
-  return r.rows as { person_id: string; name: string | null }[];
+  // Moved to services/assignable-staff.ts so the To Do "For" picker and the
+  // job reminder picker cannot drift. The role test and the service-account
+  // guard that lived here are both still in it; it ALSO requires a current
+  // employment record, which is what drops the shared Front Desk login, the
+  // TEST account and anyone who has left but whose login is still active.
+  const { listAssignablePeople: shared } = await import('./assignable-staff');
+  return shared();
 }
 
 /** Cancel, never delete — CLAUDE.md. A dropped review action is a fact. */
@@ -613,6 +634,7 @@ export async function cancelTask(taskId: string, userId: string, role: string | 
     const { onOccurrenceClosed } = await import('./staff-task-series');
     await onOccurrenceClosed(taskId).catch(e => console.error('[staff-tasks] next occurrence failed:', e));
   }
+  await retireTaskBells(taskId);
   return { id: taskId };
 }
 

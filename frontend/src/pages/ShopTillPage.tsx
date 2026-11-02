@@ -17,17 +17,32 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
+import { getWarehouseToken, clearWarehouseToken } from '../services/warehouseSession';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { newPaymentMethodAllowed } from '../lib/paymentMethods';
 import { hasManagerRole } from '../lib/roles';
 import { jobDisplayOrgName } from '../lib/jobOrgName';
 import ShopWeekPanel from '../components/shop/ShopWeekPanel';
 import { TENDERS } from '../lib/shopTenders';
+import CardReaderPayment, { type CardReaderAccess, type Session as ReaderSession } from '../components/CardReaderPayment';
 
 type BottomTab = 'recent' | 'attention' | 'review' | 'week' | 'used' | 'reorder';
 const BOTTOM_TABS: BottomTab[] = ['recent', 'attention', 'review', 'week', 'used', 'reorder'];
 const TAB_KEY = 'shopTill.tab';
+// The kiosk till remembers who is selling for 30 minutes (STAFF-LOGIN-SECURITY-SPEC §4.3).
+const KIOSK_SELLER_KEY = 'kioskTill.seller';
+const KIOSK_SELLER_MINUTES = 30;
+interface Seller { person_id: string; name: string | null }
+function rememberedSeller(): string {
+  try {
+    const raw = sessionStorage.getItem(KIOSK_SELLER_KEY);
+    if (!raw) return '';
+    const { id, at } = JSON.parse(raw) as { id: string; at: number };
+    return Date.now() - at < KIOSK_SELLER_MINUTES * 60_000 ? id : '';
+  } catch { return ''; }
+}
 
 interface StockItem {
   hhStockId: number;
@@ -152,6 +167,22 @@ interface Totals {
 
 const money = (n: number) => `£${n.toFixed(2)}`;
 
+/** Coins and notes a customer is likely to hand over for cash (same as the sitter till). */
+const CASH_DENOMINATIONS = [2, 5, 10, 20, 50];
+
+/** The next three above the total: £1.50 → £2, £5, £10; £18 → £20, £50; over £50 → none (Other). */
+function likelyTendered(total: number): number[] {
+  return CASH_DENOMINATIONS.filter(d => d > total).slice(0, 3);
+}
+
+/** A typed amount ("25", "£25.50", "1,000") as pounds, or null if it isn't one. */
+function parseCashAmount(v: string): number | null {
+  const cleaned = v.replace(/[£,\s]/g, '');
+  if (cleaned === '') return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+}
+
 /** How the money physically goes back — OP can't do this part until Stripe. */
 function refundHow(tender: string | null, amount: number): string {
   const a = money(Math.abs(amount));
@@ -160,6 +191,8 @@ function refundHow(tender: string | null, amount: number): string {
     case 'worldpay':
     case 'amex': return `Refund ${a} on the card terminal`;
     case 'stripe_gbp': return `Refund ${a} in Stripe`;
+    // OP refunds it to the card through Stripe when the refund is made.
+    case 'card_reader': return `${a} goes back to their card automatically`;
     case 'paypal': return `Refund ${a} in PayPal`;
     case 'wise_bacs': return `Send ${a} back by bank transfer`;
     // It was never paid — it simply comes off the job, and their invoice.
@@ -180,8 +213,30 @@ function ago(iso: string | null): string {
   return `${Math.floor(mins / 60)}h ago`;
 }
 
-export default function ShopTillPage() {
+/**
+ * `kiosk`: the warehouse iPad's till (/warehouse/till) — the PIN session, no
+ * login. Sales only, cash or the reader, each naming a person from the dropdown;
+ * no refunds, no cancel, no week, no reorder (STAFF-LOGIN-SECURITY-SPEC §4). The
+ * server holds the same line (KIOSK_TILL_ALLOW); this just hides what it refuses.
+ */
+export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}) {
   const { user } = useAuthStore();
+  const navigate = useNavigate();
+  const [sellers, setSellers] = useState<Seller[]>([]);
+  const [sellerId, setSellerIdState] = useState<string>(() => (kiosk ? rememberedSeller() : ''));
+  const setSellerId = (id: string) => {
+    setSellerIdState(id);
+    try { sessionStorage.setItem(KIOSK_SELLER_KEY, JSON.stringify({ id, at: Date.now() })); } catch { /* a convenience */ }
+  };
+  // No PIN session → the PIN page. A session that has expired shows up as a 401
+  // on the first load below and goes the same way.
+  useEffect(() => {
+    if (!kiosk) return;
+    if (!getWarehouseToken() && !useAuthStore.getState().accessToken) navigate('/warehouse', { replace: true });
+    api.get<{ data: Seller[] }>('/shop/sellers')
+      .then(r => setSellers(r.data))
+      .catch((e: any) => { if (e?.status === 401) { clearWarehouseToken(); navigate('/warehouse', { replace: true }); } });
+  }, [kiosk, navigate]);
 
   const [mode, setMode] = useState<'sale' | 'consumption'>('sale');
   const [term, setTerm] = useState('');
@@ -189,15 +244,29 @@ export default function ShopTillPage() {
   const [searching, setSearching] = useState(false);
   const [basket, setBasket] = useState<BasketLine[]>([]);
   // Card is what almost every walk-in pays with, so it is the default.
-  const [tender, setTender] = useState('worldpay');
+  // Without the reader: Worldpay for an admin, Cash for everyone else — Worldpay,
+  // Amex and PayPal are admin only for new sales (STRIPE-TERMINAL-SPEC §15).
+  const noReaderTender = user?.role === 'admin' ? 'worldpay' : 'till_cash';
+  const [tender, setTender] = useState(noReaderTender);
+  // Cash change helper (as on the sitter till): what the customer handed over, so
+  // the till can work out the change. Optional and display only (never sent or
+  // saved). 'exact' follows the total if the basket or a price changes.
+  const [cashGiven, setCashGiven] = useState<'exact' | 'other' | number | null>(null);
+  const [cashOther, setCashOther] = useState('');
   const [notes, setNotes] = useState('');
+  // The card reader (STRIPE-TERMINAL-SPEC §14): offered as a payment method only
+  // when switched on for this login; picking it sends the sale to the reader, and
+  // the sale is created once the card is approved.
+  const [readerAccess, setReaderAccess] = useState<CardReaderAccess | null>(null);
+  const [readerOpen, setReaderOpen] = useState(false);
+  const [readerActive, setReaderActive] = useState(false);
   const [maxDiscountPct, setMaxDiscountPct] = useState(0);
   const [cacheAge, setCacheAge] = useState<string | null>(null);
   const [availability, setAvailability] = useState<Record<string, number | null>>({});
   const [availChecked, setAvailChecked] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<{ gross: number; id: string; kind: string; receipt?: string } | null>(null);
+  const [saved, setSaved] = useState<{ gross: number; id: string; kind: string; receipt?: string; change?: number } | null>(null);
   // Receipts (step 11). The checkout's optional box, the one Recent Sales row
   // whose receipt form is open, and the refund form's refund-receipt box.
   const [receiptTo, setReceiptTo] = useState('');
@@ -237,7 +306,7 @@ export default function ShopTillPage() {
   const [refundFor, setRefundFor] = useState<string | null>(null);
   const [refundReason, setRefundReason] = useState('');
   const [refundBusy, setRefundBusy] = useState(false);
-  const canRefund = hasManagerRole(user?.role);
+  const canRefund = !kiosk && hasManagerRole(user?.role);
 
   // Who the sale is for: null = walk-in (the week's shop job), or a real job.
   // Editable right up to payment — "oh, can it go on the band's bill?" is the
@@ -248,6 +317,11 @@ export default function ShopTillPage() {
   const [jobResults, setJobResults] = useState<SellableJob[]>([]);
   const [jobSearchOpen, setJobSearchOpen] = useState(false);
 
+  // Where every sale starts: the card reader when it's on for this login (almost
+  // every sale is card, jon Oct 2026), else noReaderTender. A wrong card-reader
+  // default shows itself (the reader waits for a card); a wrong Cash one records.
+  const defaultTender = readerAccess?.enabled ? 'card_reader' : noReaderTender;
+
   /** Change route, and re-check the tender: "their bill" needs a job (§4.1). */
   const chooseRoute = (j: SellableJob | null) => {
     // A receipt address belongs to whoever the sale was for. Switching who it's
@@ -257,8 +331,24 @@ export default function ShopTillPage() {
     setJobSearchOpen(false);
     setJobTerm('');
     setJobResults([]);
-    if (!j && tender === 'invoice_later') setTender('worldpay');
+    if (!j && tender === 'invoice_later') setTender(defaultTender);
   };
+
+  // Is the card reader switched on for this login? If so it is the default card.
+  useEffect(() => {
+    api.get<{ data: CardReaderAccess }>('/terminal/access')
+      .then(r => {
+        setReaderAccess(r.data);
+        if (r.data.enabled) setTender(t => (t === noReaderTender ? 'card_reader' : t));
+      })
+      .catch(() => setReaderAccess({ enabled: false, mode: 'test' }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const tenderOptions = TENDERS.filter(t => (!t.needsJob || route)
+    && (t.key !== 'card_reader' || readerAccess?.enabled)
+    // The kiosk takes cash or the reader — never "their bill" (§4.2).
+    && (!kiosk || t.key === 'till_cash' || t.key === 'card_reader')
+    && newPaymentMethodAllowed(t.key, user?.role));
 
   // A band's job: offer its contacts in the receipt box (THE contact pool, server-side).
   useEffect(() => {
@@ -321,7 +411,10 @@ export default function ShopTillPage() {
     if (addrProblem) { setError(addrProblem); return; }
     setRefundBusy(true);
     try {
-      const r = await api.post<{ data: { reversalId: string } }>(`/shop/sales/${id}/reverse`, { reason: refundReason.trim() });
+      const r = await api.post<{ data: { reversalId: string; cardRefund?: { ok: boolean; error?: string } } }>(`/shop/sales/${id}/reverse`, { reason: refundReason.trim() });
+      if (r.data.cardRefund && !r.data.cardRefund.ok) {
+        setError(`Refund recorded, but Stripe didn't refund the card (${r.data.cardRefund.error || 'no reason given'}). Refund it in the Stripe dashboard, then press Done on the outstanding refund.`);
+      }
       if (refundReceiptTo.trim()) {
         const err = await sendReceipt(r.data.reversalId, refundReceiptTo);
         if (err) setError(`Refund recorded, but the refund receipt didn't send: ${err}`);
@@ -380,13 +473,14 @@ export default function ShopTillPage() {
     api.get<{ data: RecentSale[] }>('/shop/sales?limit=10')
       .then(r => setRecent(r.data))
       .catch(() => setRecent([]));
+    if (kiosk) return;   // the kiosk sees its own last five; the rest is a staff login's
     api.get<{ data: RecentSale[] }>('/shop/sales?attention=1&limit=50')
       .then(r => setAttention(r.data))
       .catch(() => setAttention([]));
     api.get<{ data: RecentSale[] }>('/shop/sales?review=1&limit=200')
       .then(r => setToReview(r.data))
       .catch(() => setToReview([]));
-  }, []);
+  }, [kiosk]);
 
   /** Tick off sitter sales — one, or the whole list. */
   const markReviewed = useCallback(async (ids: string[]) => {
@@ -530,12 +624,49 @@ export default function ShopTillPage() {
 
   const overDiscountCap = totals.discount > 0 && totals.discountPct > maxDiscountPct + 0.001;
 
+  // A different payment method or mode, or an emptied basket, starts the cash helper afresh.
+  const basketEmpty = basket.length === 0;
+  useEffect(() => { setCashGiven(null); setCashOther(''); }, [tender, mode, basketEmpty]);
+  const cashGivenAmount = mode !== 'sale' || tender !== 'till_cash' || cashGiven === null
+    ? null
+    : cashGiven === 'exact' ? totals.gross
+    : cashGiven === 'other' ? parseCashAmount(cashOther)
+    : cashGiven;
+  /** Positive = change to give; negative = they've handed over too little. */
+  const cashChange = cashGivenAmount === null ? null : Math.round((cashGivenAmount - totals.gross) * 100) / 100;
+
+  /** The till's basket as the backend takes it. */
+  const basketLines = () => basket.map(l => ({
+    hhStockId: l.stock.hhStockId,
+    qty: l.qty,
+    unitPriceCharged: num(l.priceText),
+  }));
+
+  /** After a sale is recorded (by Save, or by the reader once the card went through). */
+  async function afterSaleRecorded(saleId: string, gross: number) {
+    let receipt: string | undefined;
+    if (receiptTo.trim()) {
+      const err = await sendReceipt(saleId, receiptTo);
+      receipt = err ? undefined : receiptTo.trim();
+      if (err) setError(`Sale recorded, but the receipt didn't send: ${err}`);
+    }
+    setSaved({ gross, id: saleId, kind: 'sale', receipt });
+    setBasket([]);
+    setNotes('');
+    setReceiptTo('');
+    chooseRoute(null);
+    setTender(defaultTender);   // the next customer starts on the default, not on this one's method
+    loadRecent();
+  }
+
   async function submit() {
     setError(null);
     // Check the receipt address first, so a typo never leaves "sale recorded,
     // but…" — nothing is taken until the address is right or the box is empty.
     const addrProblem = mode === 'sale' && tender !== 'invoice_later' ? receiptAddressProblem(receiptTo) : null;
     if (addrProblem) { setError(addrProblem); return; }
+    // The card reader: the sale is made once the card is approved, not here.
+    if (mode === 'sale' && tender === 'card_reader') { setReaderOpen(true); return; }
     setSaving(true);
     try {
       const body = {
@@ -548,6 +679,8 @@ export default function ShopTillPage() {
         tender: mode === 'sale' ? tender : null,
         soldToJobId: mode === 'sale' && route ? route.id : null,
         notes: notes.trim() || null,
+        // The kiosk names the person; a staff login is the person.
+        ...(kiosk ? { soldByPersonId: sellerId } : {}),
       };
       const r = await api.post<{ data: { id: string; kind: string; totals: Totals } }>('/shop/sales', body);
       // The sale is recorded whatever happens to the email — a receipt that
@@ -559,11 +692,14 @@ export default function ShopTillPage() {
         receipt = err ? undefined : receiptTo.trim();
         if (err) setError(`Sale recorded, but the receipt didn't send: ${err}`);
       }
-      setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind, receipt });
+      // Repeat the change, in case they pressed Take before counting it out.
+      const change = mode === 'sale' && tender === 'till_cash' && cashChange !== null && cashChange > 0 ? cashChange : undefined;
+      setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind, receipt, change });
       setBasket([]);
       setNotes('');
       setReceiptTo('');
       chooseRoute(null);
+      setTender(defaultTender);   // the next customer starts on the default, not on this one's method
       loadRecent();
       searchRef.current?.focus();
     } catch (e: any) {
@@ -574,7 +710,8 @@ export default function ShopTillPage() {
   }
 
   const canSubmit = basket.length > 0 && !saving && !overDiscountCap
-    && (mode === 'consumption' ? notes.trim().length > 0 : true);
+    && (mode === 'consumption' ? notes.trim().length > 0 : true)
+    && (!kiosk || !!sellerId);
 
   /** One Recent Sales / Needs attention row — the same row in both lists. */
   const renderSaleRow = (r: RecentSale) => {
@@ -646,7 +783,7 @@ export default function ShopTillPage() {
                 queued means not yet, pushed means it did. */}
             <span className={`w-20 rounded px-2 py-0.5 text-center text-xs ${chip.cls}`}>{chip.label}</span>
             <span className="ml-auto flex justify-end gap-2 sm:ml-0 sm:w-36">
-              {(r.status === 'queued' || r.status === 'failed') && (
+              {!kiosk && (r.status === 'queued' || r.status === 'failed') && (
                 <button
                   onClick={() => cancelSale(r.id)}
                   className="text-xs font-medium text-gray-500 hover:text-red-600"
@@ -654,7 +791,7 @@ export default function ShopTillPage() {
                   Cancel
                 </button>
               )}
-              {r.status === 'failed' && (
+              {!kiosk && r.status === 'failed' && (
                 <button
                   onClick={() => retrySale(r.id)}
                   className="text-xs font-medium text-ooosh-600 hover:underline"
@@ -673,7 +810,7 @@ export default function ShopTillPage() {
                   Receipt
                 </button>
               )}
-              {r.needs_review && !r.reviewed_at && r.status !== 'cancelled' && (
+              {!kiosk && r.needs_review && !r.reviewed_at && r.status !== 'cancelled' && (
                 <button
                   onClick={() => markReviewed([r.id])}
                   className="text-xs font-medium text-green-700 hover:underline"
@@ -698,7 +835,8 @@ export default function ShopTillPage() {
         {refundOwed && (
           <span className="mt-1 flex w-full flex-wrap items-center gap-2 text-xs sm:pl-[3.75rem]">
             <span className="font-medium text-amber-700">
-              Refund outstanding — {refundHow(r.tender, gross)}.
+              {/* A card-reader refund is only outstanding when Stripe refused it — so it's a dashboard job. */}
+              Refund outstanding — {refundHow(r.tender === 'card_reader' ? 'stripe_gbp' : r.tender, gross)}.
             </span>
             <button
               onClick={() => settleRefund(r.id)}
@@ -764,6 +902,8 @@ export default function ShopTillPage() {
             <p className="mb-2 font-medium text-amber-900">
               {r.tender === 'invoice_later'
                 ? `${refundHow(r.tender, gross)}.`
+                : r.tender === 'card_reader'
+                ? `${refundHow(r.tender, gross)} when you confirm (through Stripe).`
                 : r.refund_at_counter
                 ? `${refundHow(r.tender, gross)}, then confirm.`
                 : `${refundHow(r.tender, gross)} afterwards — it stays on the list as outstanding until you tick it off.`}
@@ -799,14 +939,62 @@ export default function ShopTillPage() {
   };
 
   return (
+    <div className={kiosk ? 'min-h-screen bg-gray-100' : ''}>
+    {/* The kiosk page sits outside the staff Layout, so it brings its own bar:
+        back to Collections, and the same logout as the collections page. */}
+    {kiosk && (
+      <header className="bg-white shadow-sm sticky top-0 z-10">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <img src="/ooosh-logo-full.jpg" alt="Ooosh Tours" className="h-10 w-auto" />
+            <div>
+              <h1 className="text-lg font-bold text-gray-800">Shop Till</h1>
+              <p className="text-xs text-gray-500">Warehouse kiosk</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => navigate('/warehouse/collections')}
+              className="px-3 py-1.5 rounded-lg bg-purple-600 text-white text-sm font-medium hover:bg-purple-700">
+              Collections
+            </button>
+            <button onClick={() => { clearWarehouseToken(); navigate('/warehouse', { replace: true }); }}
+              className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg" title="Logout">
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </header>
+    )}
     <div className="max-w-6xl mx-auto px-4 py-6">
+      {!kiosk && (
       <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
         <h1 className="text-2xl font-bold text-gray-900">Shop Till</h1>
         <span className="text-xs text-gray-500">Stock as of {ago(cacheAge)}</span>
       </div>
+      )}
+
+      {/* The kiosk: who is selling, before anything else (§4.3). Remembered for
+          30 minutes so a run of sales by one person is one tap each. */}
+      {kiosk && (
+        <div className={`mb-4 rounded-lg border px-4 py-3 ${sellerId ? 'border-gray-200 bg-white' : 'border-amber-300 bg-amber-50'}`}>
+          <label className="block text-sm font-medium text-gray-800 mb-1">Who's selling?</label>
+          <select
+            value={sellerId}
+            onChange={e => setSellerId(e.target.value)}
+            className="w-full max-w-sm rounded border border-gray-300 px-3 py-2 text-base"
+          >
+            <option value="">Pick your name…</option>
+            {sellers.map(p => <option key={p.person_id} value={p.person_id}>{p.name || p.person_id}</option>)}
+          </select>
+          {!sellerId && <p className="mt-1 text-xs text-amber-800">Every sale on the kiosk is recorded against a name.</p>}
+        </div>
+      )}
 
       {/* Sale vs internal use. Deliberately different-looking: consumption is a
           stock event with no money, not a 100%-discounted sale. */}
+      {!kiosk && (
       <div className="flex gap-2 mb-4">
         {(['sale', 'consumption'] as const).map(m => (
           <button
@@ -820,6 +1008,7 @@ export default function ShopTillPage() {
           </button>
         ))}
       </div>
+      )}
 
       {/* No "this week's HireHop job" banner (jon, Sep 2026): the first sale
           creates the job on its own, so a warning asking staff to act only
@@ -830,7 +1019,7 @@ export default function ShopTillPage() {
         <div className="mb-4 rounded border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900">
           {saved.kind === 'consumption'
             ? 'Stock use recorded. Next one?'
-            : `Recorded — ${money(saved.gross)}${saved.receipt ? `, receipt sent to ${saved.receipt}` : ''}. Next one?`}
+            : `Recorded — ${money(saved.gross)}${saved.receipt ? `, receipt sent to ${saved.receipt}` : ''}.${saved.change ? ` Give ${money(saved.change)} change.` : ''} Next one?`}
         </div>
       )}
       {error && (
@@ -1103,14 +1292,69 @@ export default function ShopTillPage() {
                 {/* "Their bill" only exists once there is a job to bill: the
                     weekly shop job pools every customer, so its invoice can
                     never go to one of them (spec §9). */}
-                {TENDERS.filter(t => !t.needsJob || route).map(t => (
-                  <option key={t.key} value={t.key}>{t.label}</option>
+                {tenderOptions.map(t => (
+                  <option key={t.key} value={t.key}>
+                    {t.key === 'card_reader' && readerAccess?.mode === 'test' ? `${t.label} (TEST MODE)` : t.label}
+                  </option>
                 ))}
               </select>
               {route && tender === 'invoice_later' && (
                 <p className="mb-3 text-xs text-gray-600">
                   Nothing taken now — it goes on job #{route.hhJobNumber} and onto their invoice.
                 </p>
+              )}
+
+              {/* Cash: pick what they handed over and the till works out the change.
+                  Optional (Take works without it) and display only. */}
+              {tender === 'till_cash' && (
+                <div className="mb-3">
+                  <label className="mb-1 block text-xs font-medium text-gray-700">They gave you (optional)</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {([
+                      ['exact', 'Exact'],
+                      ...likelyTendered(totals.gross).map(d => [d, `£${d}`] as [number, string]),
+                      ['other', 'Other'],
+                    ] as ['exact' | 'other' | number, string][]).map(([value, label]) => (
+                      <button
+                        key={String(value)}
+                        type="button"
+                        onClick={() => setCashGiven(value)}
+                        className={`rounded border-2 px-3 py-1.5 text-xs font-medium ${
+                          cashGiven === value ? 'border-ooosh-600 bg-ooosh-50 text-ooosh-800' : 'border-transparent bg-gray-100 text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        {cashGiven === value ? '✓ ' : ''}{label}
+                      </button>
+                    ))}
+                  </div>
+                  {cashGiven === 'other' && (
+                    <input
+                      autoFocus
+                      inputMode="decimal"
+                      autoComplete="off"
+                      value={cashOther}
+                      onChange={e => setCashOther(e.target.value)}
+                      placeholder="How much did they give you? e.g. 25"
+                      className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                    />
+                  )}
+                  {cashChange !== null && cashChange > 0 && (
+                    <div className="mt-2 flex items-baseline justify-between rounded border-2 border-gray-900 px-3 py-2">
+                      <span className="text-sm font-semibold text-gray-900">Change to give</span>
+                      <span className="text-xl font-bold tabular-nums text-gray-900">{money(cashChange)}</span>
+                    </div>
+                  )}
+                  {cashChange === 0 && (
+                    <p className="mt-2 rounded border-2 border-gray-900 px-3 py-2 text-sm font-semibold text-gray-900">
+                      No change to give.
+                    </p>
+                  )}
+                  {cashChange !== null && cashChange < 0 && (
+                    <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      That&rsquo;s {money(-cashChange)} short of the {money(totals.gross)} total.
+                    </p>
+                  )}
+                </div>
               )}
             </>
           )}
@@ -1153,7 +1397,9 @@ export default function ShopTillPage() {
                 ? 'Record use'
                 : tender === 'invoice_later'
                   ? `Put ${money(totals.gross)} on their bill`
-                  : `Take ${money(totals.gross)}`}
+                  : tender === 'card_reader'
+                    ? `Take ${money(totals.gross)} on card reader`
+                    : `Take ${money(totals.gross)}`}
           </button>
         </div>
       )}
@@ -1166,7 +1412,7 @@ export default function ShopTillPage() {
           per browser; clicking the open tab folds it away. */}
       <div className="mt-24 border-t border-gray-200 pt-3">
         <div className="flex flex-wrap gap-1">
-          {([
+          {(kiosk ? ([['recent', 'Last few sales']] as [BottomTab, string][]) : [
             ['recent', 'Recent sales'],
             ['attention', attention.length ? `Needs attention (${attention.length})` : 'Needs attention'],
             ['review', toReview.length ? `Sitter sales to review (${toReview.length})` : 'Sitter sales'],
@@ -1327,6 +1573,41 @@ export default function ShopTillPage() {
           </div>
         )}
       </div>
+
+      {/* The card reader: the basket goes to the reader; the sale is created when the
+          card is approved. Can't be closed while the card is on the reader. */}
+      {readerOpen && readerAccess?.enabled && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { if (!readerActive) setReaderOpen(false); }}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Card reader</h3>
+            <p className="text-xs text-gray-500 mb-4">{basket.length} item{basket.length === 1 ? '' : 's'}{route ? ` · on job #${route.hhJobNumber}` : ' · walk-in'}</p>
+            <CardReaderPayment
+              jobId=""
+              access={readerAccess}
+              amount={totals.gross}
+              paymentType="shop"
+              notes={notes.trim()}
+              validate={() => null}
+              startPayment={(readerId) => api.post<{ data: ReaderSession }>('/terminal/shop/pay', {
+                lines: basketLines(),
+                sold_to_job_id: route ? route.id : null,
+                notes: notes.trim() || null,
+                reader_id: readerId,
+                ...(kiosk ? { sold_by_person_id: sellerId } : {}),
+              })}
+              onRecorded={(sess) => {
+                if (sess.status === 'succeeded' && sess.shop_sale_id) {
+                  void afterSaleRecorded(sess.shop_sale_id, Number(sess.amount));
+                  if (!sess.warning) setReaderOpen(false);
+                }
+              }}
+              onActiveChange={setReaderActive}
+              onClose={() => { setReaderActive(false); setReaderOpen(false); loadRecent(); }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
     </div>
   );
 }

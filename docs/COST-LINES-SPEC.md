@@ -232,6 +232,12 @@ hand-made allocations and then gains lines must have the lines reconciled agains
 the safe move is to refuse to add lines to a cost with manual allocations until they're
 cleared, and say so. *(Open question — see §11.)*
 
+> **Superseded, Oct 2026 (capture form redesign).** Lines and the job split now stand
+> together and the "manual split" refusal is gone from `PATCH /costs/:id`: lines say how the
+> invoice breaks down by category and VAT (the Xero line items), the split says which jobs
+> carry it, and no line sets a job. The split modal is retired; the capture form's Jobs table
+> writes the split in the same request as the cost. The derivation below stays parked.
+
 Under-allocation stays legal, as it is today: allocations summing to less than the header is
 "the rest is ours", not an error.
 
@@ -371,7 +377,7 @@ can't drift between two callers.
    `job_id`, so every line inherits the cost's, every cost resolves to one job, and the
    derivation would be dead code on every real cost. It needs a per-line job picker first
    — a search-autocomplete in a ~500px pane, which is a design problem of its own — and
-   the existing split modal already covers multi-job attribution meanwhile. Build the
+   the capture form's Jobs table already covers multi-job attribution meanwhile. Build the
    picker and the derivation together, or not at all.
 
 **Reminder:** the migration runner has a hardcoded file list in

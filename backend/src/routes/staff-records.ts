@@ -37,6 +37,7 @@ import { validate } from '../middleware/validate';
 import { uploadToR2, deleteFromR2, isR2Configured } from '../config/r2';
 import { query } from '../config/database';
 import { STAFF_ADMIN_ROLES } from '../services/staff-employment';
+import { retireDoneBells } from '../services/notification-resolve';
 
 /** R2 prefix for everything this module stores. Imported by routes/files.ts. */
 export const STAFF_RECORDS_PREFIX = 'staff-records/';
@@ -255,6 +256,11 @@ router.post('/:personId/files', adminOnly, upload.single('file'), async (req: Au
       throw dbErr;
     }
 
+    // A newer passport / contract / … replaces the older one: its "needs
+    // looking at" bell is done (bell-rules.ts record_action). Whole key — the
+    // older record's id isn't to hand. Never throws.
+    await retireDoneBells('record_action');
+
     const row = await query(`${SELECT_FILES} AND f.id = $1`, [inserted.rows[0].id]);
     res.status(201).json({ data: row.rows[0] as FileRow });
   } catch (err) {
@@ -341,6 +347,10 @@ router.patch('/files/:id', adminOnly, validate(updateFileSchema), async (req: Au
       return;
     }
 
+    // A new date or kind re-arms the reminder: the old bell is done (bell-rules.ts).
+    await retireDoneBells('record_action', id);
+    await retireDoneBells('record_delete', id);
+
     const row = await query(`${SELECT_FILES} AND f.id = $1`, [id]);
     res.json({ data: row.rows[0] as FileRow });
   } catch (err) {
@@ -381,6 +391,10 @@ router.delete('/files/:id', adminOnly, async (req: AuthRequest, res: Response) =
       // cleanup job, not a failed request the admin should retry.
       console.error('[staff-records] R2 delete failed for', removed.rows[0].r2_key, r2Err);
     }
+
+    // Gone — its "needs looking at" / "due for deletion" bells are done.
+    await retireDoneBells('record_action', id);
+    await retireDoneBells('record_delete', id);
 
     res.json({ data: { id } });
   } catch (err) {

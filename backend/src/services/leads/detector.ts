@@ -11,12 +11,24 @@
  *     earliest date of ~today → dropped. This is the "already running / too
  *     imminent to sell" fix jon asked for.
  *
- * Qualifying tours are upserted into `leads` (deduped on lower(name)+first date);
- * lifecycle + score on an existing lead are preserved on re-detection.
+ * The window is staff-choosable per run ("tours starting between X and Y");
+ * the default is [today + minLeadWeeks, today + maxWeeks] from the settings. A
+ * tour qualifies on its FIRST UK date falling inside the window.
+ *
+ * Acts staff marked "Not a fit — don't show again" (`lead_suppressions`) are
+ * skipped before any Ticketmaster call is spent on them.
+ *
+ * Qualifying tours are upserted into `leads`. A re-detected tour is the same
+ * lead if its dates OVERLAP an existing lead for the act — not only if the first
+ * date is identical — so Ticketmaster adding or dropping an opening date
+ * doesn't resurface a tour staff already dismissed. Lifecycle + score on an
+ * existing lead are preserved on re-detection.
  */
 import { query } from '../../config/database';
 import { tmGet, tmDateTime } from './ticketmaster';
 import { EXCLUDE_CLASSIFICATIONS, EXCLUDE_EVENT_PATTERNS } from './venues';
+import { normaliseArtist } from './normalise';
+import { logLeadEvent } from './events';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -61,10 +73,10 @@ function qualifiesAsTour(dates: string[], windowWeeks: number, minDates: number)
 
 interface UkDate { date: string; venue: string; city: string; tmEventId: string; }
 
-async function findAllUkDates(tmArtistId: string, maxWeeks: number): Promise<UkDate[]> {
+/** All the act's UK dates from TODAY (so the true first date is known) to `end`. */
+async function findAllUkDates(tmArtistId: string, end: Date): Promise<UkDate[]> {
   if (!tmArtistId) return [];
   const now = new Date();
-  const end = new Date(now.getTime() + maxWeeks * 7 * 24 * 60 * 60 * 1000);
   const all: UkDate[] = [];
   let page = 0;
   let totalPages = 1;
@@ -116,31 +128,39 @@ async function upsertLead(
     allDates: string[];
   },
 ): Promise<'inserted' | 'updated'> {
+  // Same act (by name, or by Ticketmaster id) with overlapping dates = the
+  // same tour. An identical first date wins if there's a choice — it's the row
+  // the unique (lower(name), first_date) index would otherwise collide with.
   const existing = await query(
-    `SELECT id FROM leads WHERE lower(artist_name) = lower($1) AND first_date = $2::date`,
-    [tour.artistName, tour.firstDate],
+    `SELECT id FROM leads
+      WHERE (lower(artist_name) = lower($1) OR (COALESCE($2, '') <> '' AND tm_artist_id = $2))
+        AND first_date <= $4::date AND COALESCE(last_date, first_date) >= $3::date
+      ORDER BY (first_date = $3::date) DESC, first_date ASC
+      LIMIT 1`,
+    [tour.artistName, tour.tmArtistId, tour.firstDate, tour.lastDate],
   );
   if (existing.rows[0]) {
     await query(
-      `UPDATE leads SET uk_date_count=$2, last_date=$3::date, venues=$4, all_dates=$5,
-         tm_artist_id=$6, last_run_id=$7, updated_at=NOW()
+      `UPDATE leads SET uk_date_count=$2, first_date=$3::date, last_date=$4::date, venues=$5, all_dates=$6,
+         tm_artist_id=$7, last_run_id=$8, updated_at=NOW()
        WHERE id=$1`,
       [
-        existing.rows[0].id, tour.ukDateCount, tour.lastDate,
+        existing.rows[0].id, tour.ukDateCount, tour.firstDate, tour.lastDate,
         JSON.stringify(tour.venues), JSON.stringify(tour.allDates),
         tour.tmArtistId, runId,
       ],
     );
     return 'updated';
   }
-  await query(
-    `INSERT INTO leads (artist_name, tm_artist_id, uk_date_count, first_date, last_date, venues, all_dates, last_run_id)
-     VALUES ($1,$2,$3,$4::date,$5::date,$6,$7,$8)`,
+  const ins = await query(
+    `INSERT INTO leads (artist_name, tm_artist_id, uk_date_count, first_date, last_date, venues, all_dates, last_run_id, first_run_id)
+     VALUES ($1,$2,$3,$4::date,$5::date,$6,$7,$8,$8) RETURNING id`,
     [
       tour.artistName, tour.tmArtistId, tour.ukDateCount, tour.firstDate, tour.lastDate,
       JSON.stringify(tour.venues), JSON.stringify(tour.allDates), runId,
     ],
   );
+  await logLeadEvent(ins.rows[0].id, 'found', { runId, detail: `${tour.ukDateCount} UK date(s)` });
   return 'inserted';
 }
 
@@ -148,14 +168,25 @@ export interface DetectSummary {
   artistsProcessed: number;
   toursCreated: number;
   toursUpdated: number;
+  /** First UK date before the window start (already running / too imminent). */
   droppedTooImminent: number;
+  /** First UK date after the window end. */
+  droppedAfterWindow: number;
   droppedNotTour: number;
   skippedExcluded: number;
+  skippedSuppressed: number;
+}
+
+export interface SearchWindow {
+  /** Tours must START on or after this date (YYYY-MM-DD). */
+  from: string;
+  /** …and on or before this one (YYYY-MM-DD). */
+  to: string;
 }
 
 export async function detectTours(
   runId: string,
-  opts: { minLeadWeeks: number; maxWeeks: number; tourMinDates: number; tourWindowWeeks: number },
+  opts: { window: SearchWindow; tourMinDates: number; tourWindowWeeks: number },
 ): Promise<DetectSummary> {
   const artists = await query(
     `SELECT tm_artist_id, MAX(artist_name) AS artist_name
@@ -164,17 +195,31 @@ export async function detectTours(
       GROUP BY tm_artist_id`,
   );
 
-  const minLeadCutoff = new Date(Date.now() + opts.minLeadWeeks * 7 * 24 * 60 * 60 * 1000);
+  // Look past the window end by one tour-window, so a tour that starts inside
+  // the window is seen whole (its date count and last date are right).
+  const lookupEnd = new Date(`${opts.window.to}T23:59:59Z`);
+  lookupEnd.setUTCDate(lookupEnd.getUTCDate() + opts.tourWindowWeeks * 7);
+
+  const supp = await query(`SELECT artist_key, tm_artist_id FROM lead_suppressions`);
+  const suppressedKeys = new Set(supp.rows.map((r) => r.artist_key as string));
+  const suppressedTmIds = new Set(supp.rows.map((r) => r.tm_artist_id as string | null).filter(Boolean) as string[]);
 
   const s: DetectSummary = {
     artistsProcessed: 0, toursCreated: 0, toursUpdated: 0,
-    droppedTooImminent: 0, droppedNotTour: 0, skippedExcluded: 0,
+    droppedTooImminent: 0, droppedAfterWindow: 0, droppedNotTour: 0,
+    skippedExcluded: 0, skippedSuppressed: 0,
   };
 
   for (const artist of artists.rows) {
     const tmArtistId = artist.tm_artist_id as string;
     const artistName = artist.artist_name as string;
     s.artistsProcessed += 1;
+
+    if (suppressedTmIds.has(tmArtistId) || suppressedKeys.has(normaliseArtist(artistName))) {
+      s.skippedSuppressed += 1;
+      await query(`UPDATE tf_events SET processed = TRUE WHERE tm_artist_id = $1`, [tmArtistId]);
+      continue;
+    }
 
     const stored = await query(
       `SELECT tm_event_id, event_name, genre, subgenre, venue_name, venue_city, event_date
@@ -190,7 +235,7 @@ export async function detectTours(
       continue;
     }
 
-    let ukDates = await findAllUkDates(tmArtistId, opts.maxWeeks);
+    let ukDates = await findAllUkDates(tmArtistId, lookupEnd);
     if (ukDates.length === 0) {
       // Fall back to what we collected directly at monitored venues.
       ukDates = events
@@ -214,9 +259,15 @@ export async function detectTours(
     const firstDate = dates[0];
     const lastDate = dates[dates.length - 1];
 
-    // The fix: drop tours whose earliest visible UK date is too soon to sell into.
-    if (new Date(firstDate) < minLeadCutoff) {
+    // The fix: drop tours whose earliest visible UK date is too soon to sell
+    // into (before the window) — or, on a targeted search, after it. Dates are
+    // TM local YYYY-MM-DD strings, so compare as strings (no timezone drift).
+    if (firstDate < opts.window.from) {
       s.droppedTooImminent += 1;
+      continue;
+    }
+    if (firstDate > opts.window.to) {
+      s.droppedAfterWindow += 1;
       continue;
     }
     if (!qualifiesAsTour(dates, opts.tourWindowWeeks, opts.tourMinDates)) {

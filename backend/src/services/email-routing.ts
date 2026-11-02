@@ -24,6 +24,7 @@
  *     resolution is used (primary job_contact, etc.).
  */
 import { query } from '../config/database';
+import { greetingName } from './display-name';
 
 export type EmailBucket =
   | 'bookings_payments'
@@ -124,6 +125,7 @@ export const TEMPLATE_BUCKETS: Readonly<Record<string, EmailBucket>> = {
   // Delivery / on-the-day
   delivery_note: 'delivery_on_day',
   collection_confirmation: 'delivery_on_day',
+  equipment_on_hire_note: 'delivery_on_day',
   vehicle_checked_in: 'delivery_on_day',
   vehicle_swapped: 'delivery_on_day',
 
@@ -147,6 +149,8 @@ export async function resolveRoutingOverride(
   primaryEmail: string;
   primaryFirstName: string | null;
   ccEmails: string[];
+  /** Greeting name per recipient, primary first ('' = no usable name). */
+  recipientNames: string[];
 } | null> {
   const bucket = TEMPLATE_BUCKETS[templateId];
   if (!bucket) return null;
@@ -164,7 +168,7 @@ export async function resolveRoutingOverride(
   // Look up the configured people, preserving the picker's order.
   // Skip emailless / deleted rows silently.
   const peopleRows = await query(
-    `SELECT id, first_name, email
+    `SELECT id, first_name, preferred_name, email
      FROM people
      WHERE id = ANY($1::uuid[])
        AND is_deleted = false
@@ -174,16 +178,18 @@ export async function resolveRoutingOverride(
   if (peopleRows.rows.length === 0) return null;
 
   // Restore picker order (Postgres ANY doesn't preserve it).
-  const byId = new Map<string, { first_name: string | null; email: string }>(
-    peopleRows.rows.map((r: any) => [r.id, { first_name: r.first_name, email: r.email }])
+  type Routed = { first_name: string | null; preferred_name: string | null; email: string };
+  const byId = new Map<string, Routed>(
+    peopleRows.rows.map((r: any) => [r.id, { first_name: r.first_name, preferred_name: r.preferred_name, email: r.email }])
   );
-  const ordered = personIds.map(id => byId.get(id)).filter((x): x is { first_name: string | null; email: string } => !!x);
+  const ordered = personIds.map(id => byId.get(id)).filter((x): x is Routed => !!x);
   if (ordered.length === 0) return null;
 
   const primary = ordered[0];
   return {
     primaryEmail: primary.email,
-    primaryFirstName: primary.first_name || primary.email.split('@')[0] || null,
+    primaryFirstName: greetingName(primary, '') || primary.email.split('@')[0] || null,
     ccEmails: ordered.slice(1).map(p => p.email),
+    recipientNames: ordered.map(p => greetingName(p, '')),
   };
 }

@@ -14,15 +14,15 @@
  * already in the database, and emails already in people's inboxes link to them.
  * Removing them would break links we have already sent.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { displayFirstName, displayInitials } from '../lib/displayName';
 import MyTimePage from './MyTimePage';
-import MyTasksPage from './MyTasksPage';
+import MyTasksPage, { countDueNow } from './MyTasksPage';
 import MyReviewPage from './MyReviewPage';
-import StaffDocumentsPage from './StaffDocumentsPage';
+import StaffDocumentsPage, { countDocsWaiting } from './StaffDocumentsPage';
 import ProfilePage from './ProfilePage';
 
 // To Do first and the default (jon, Sep 2026): it's the daily one. Every old
@@ -41,6 +41,13 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]['id'];
 
+/** Today in the person's own timezone — see localIso() in MyTimePage. */
+function localToday(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 export default function MePage() {
   const [params, setParams] = useSearchParams();
   const raw = params.get('tab');
@@ -57,6 +64,48 @@ export default function MePage() {
       .catch(() => { /* no review, or no staff record — either way, no tab */ });
     return () => { cancelled = true; };
   }, []);
+
+  // Counts on the tabs: to-dos due today or overdue, and documents waiting to
+  // be signed or confirmed. Refetched when the tab changes, so ticking things
+  // off and moving on leaves the badge right. Decoration only — a failure
+  // hides the badge rather than showing a wrong number. The rules for what
+  // counts live beside each page (countDueNow / countDocsWaiting) so the badge
+  // and the page cannot disagree.
+  const [badges, setBadges] = useState<{ todo: number; documents: number }>({ todo: 0, documents: 0 });
+  useEffect(() => {
+    let cancelled = false;
+    const today = localToday();
+    api.get<{ data: Parameters<typeof countDueNow>[0] }>('/staff-tasks/mine')
+      .then(res => { if (!cancelled) setBadges(b => ({ ...b, todo: countDueNow(res.data ?? [], today) })); })
+      .catch(() => { if (!cancelled) setBadges(b => ({ ...b, todo: 0 })); });
+    api.get<{ data: Parameters<typeof countDocsWaiting>[0] }>('/staff-documents/mine')
+      .then(res => { if (!cancelled) setBadges(b => ({ ...b, documents: countDocsWaiting(res.data) })); })
+      .catch(() => { if (!cancelled) setBadges(b => ({ ...b, documents: 0 })); });
+    return () => { cancelled = true; };
+  }, [active]);
+
+  // On a phone the tab strip scrolls sideways; keep the active tab in view.
+  // Set scrollLeft directly rather than scrollIntoView, which also scrolls the
+  // PAGE, and only when the active tab or the strip's width changes, so it
+  // never fights somebody scrolling the strip themselves.
+  const navRef = useRef<HTMLElement>(null);
+  const [navWidth, setNavWidth] = useState(0);
+  useEffect(() => {
+    const nav = navRef.current;
+    if (!nav || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setNavWidth(nav.clientWidth));
+    ro.observe(nav);
+    return () => ro.disconnect();
+  }, []);
+  useLayoutEffect(() => {
+    const nav = navRef.current;
+    const btn = nav?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!nav || !btn || nav.scrollWidth <= nav.clientWidth) return;
+    // The nav is `relative`, so offsetLeft is already measured from its edge.
+    nav.scrollLeft = Math.max(0, btn.offsetLeft - 8);
+    // hasReview and the badges too: the review tab and the counts arrive a
+    // moment after mount and widen the strip, pushing the active tab out of view.
+  }, [active, navWidth, hasReview, badges.todo, badges.documents]);
 
   // Always show it when it is the tab being asked for, so the notification's
   // deep link cannot land on a tab that has been hidden.
@@ -84,7 +133,7 @@ export default function MePage() {
             {displayInitials(user)}
           </div>
           <div className="min-w-0">
-            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 tracking-[-0.01em]">
+            <h1 className="text-[21px] sm:text-2xl font-semibold text-gray-900 tracking-[-0.01em]">
               {greeting}, {displayFirstName(user)}
             </h1>
             <p className="mt-0.5 text-sm text-gray-500">{today} · your time, documents and profile</p>
@@ -93,8 +142,8 @@ export default function MePage() {
 
         {/* A segmented control on a desktop; on a phone the same buttons become
             a strip of pills that scrolls sideways rather than wrapping. */}
-        <nav aria-label="Me"
-          className="w-full sm:w-auto flex gap-1.5 sm:gap-1 overflow-x-auto scrollbar-hide sm:bg-white sm:border sm:border-gray-200 sm:rounded-[10px] sm:p-1">
+        <nav aria-label="Me" ref={navRef}
+          className="relative w-full sm:w-auto flex gap-1.5 sm:gap-1 overflow-x-auto scrollbar-hide sm:bg-white sm:border sm:border-gray-200 sm:rounded-[10px] sm:p-1">
           {tabs.map(t => (
             <button
               key={t.id}
@@ -107,6 +156,12 @@ export default function MePage() {
               }`}
             >
               {t.label}
+              {(t.id === 'todo' || t.id === 'documents') && badges[t.id] > 0 && (
+                <span className={`ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[11px] font-bold ${
+                  active === t.id ? 'bg-white text-ooosh-600' : 'bg-amber-100 text-amber-800'}`}>
+                  {badges[t.id]}
+                </span>
+              )}
             </button>
           ))}
         </nav>

@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { apiFetch } from '../config/api-config'
 import { getOpAuthState } from '../adapters/auth-adapter'
+import { safeReturnUrl } from '../lib/safe-url'
 
 type SessionScope = 'staff' | 'freelancer'
 
@@ -217,7 +218,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // 1. Check for freelancerToken in URL (from freelancer portal)
       const freelancerToken = params.get('freelancerToken')
       if (freelancerToken) {
-        const returnUrl = params.get('returnUrl')
+        const returnUrl = safeReturnUrl(params.get('returnUrl'))
 
         const result = await exchangeFreelancerToken(freelancerToken)
         if ('error' in result) {

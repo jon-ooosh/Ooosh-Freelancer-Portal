@@ -6,6 +6,7 @@ import { displayFirstName, displayFullName, displayInitials } from '../lib/displ
 import { api } from '../services/api';
 import GlobalSearch from './GlobalSearch';
 import NotificationBell from './NotificationBell';
+import LoginSecurityModal from './LoginSecurityModal';
 
 interface NavItem {
   path: string;
@@ -43,6 +44,7 @@ const navItems: NavItem[] = [
       { path: '/quick', label: '⚡ Quick Log (mobile)' },
       { path: '/operations/transport', label: 'Crew & Transport' },
       { path: '/operations/backline', label: 'Backline' },
+      { path: '/operations/endorsements', label: 'Backline – Endorsements' },
       { path: '/operations/backline-matcher', label: 'Backline Matcher' },
       { path: '/storage', label: 'Storage' },
       { path: '/holding', label: 'Holding' },
@@ -75,7 +77,9 @@ const navItems: NavItem[] = [
     children: [
       { path: '/money/overview', label: 'Overview', roles: ['admin', 'manager'] },
       { path: '/money/excess', label: 'Excess', roles: ['admin', 'manager'] },
-      { path: '/money/costs', label: 'Costs', roles: ['admin', 'manager', 'staff'] },
+      // Every staff role (jon, Oct 2026): general assistants hold company cards
+      // and are chased for receipts too. Approving and paying stay role-gated server-side.
+      { path: '/money/costs', label: 'Costs' },
       { path: '/money/shop', label: 'Shop Till' },
     ],
   },
@@ -301,6 +305,22 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const logout = useAuthStore((s) => s.logout);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  // Login security (STAFF-LOGIN-SECURITY-SPEC §6): the banner's "Set up now"
+  // opens the flow right here; an admin without a passkey gets it unasked and
+  // cannot close it (§1.2). The stored user was written at login, so a session
+  // that predates this code learns its security state from /auth/me once.
+  const [securityOpen, setSecurityOpen] = useState(false);
+  const updateUser = useAuthStore((s) => s.updateUser);
+  useEffect(() => {
+    api.get<{ mfa_enrolled?: boolean; mfa_enforced_from?: string | null; passkeys?: number; passkey_required?: boolean }>('/auth/me')
+      .then((me) => updateUser({
+        mfa_enrolled: me.mfa_enrolled, mfa_enforced_from: me.mfa_enforced_from,
+        passkeys: me.passkeys, passkey_required: me.passkey_required,
+      }))
+      .catch(() => { /* the banner simply waits for the next login */ });
+  }, [updateUser]);
+  const passkeyRequired = user?.passkey_required === true;
+
   function isItemActive(item: NavItem): boolean {
     if (item.children) {
       return item.children.some((child) => {
@@ -453,6 +473,28 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
         )}
       </header>
+
+      {/* Login security not set up yet (STAFF-LOGIN-SECURITY-SPEC §6): a banner
+          until the enforcement date, then the login itself insists. */}
+      {user && user.mfa_enrolled === false && user.mfa_enforced_from && (
+        <div className="bg-amber-50 border-b border-amber-200">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 text-sm text-amber-900 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span>
+              Set up your login security before{' '}
+              {new Date(user.mfa_enforced_from).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })}
+              {' '}— a passkey or one email code, then your own devices are remembered.
+            </span>
+            <button type="button" onClick={() => setSecurityOpen(true)} className="font-medium underline">Set up now</button>
+          </div>
+        </div>
+      )}
+      {(securityOpen || passkeyRequired) && (
+        <LoginSecurityModal
+          required={passkeyRequired}
+          enforcedFrom={user?.mfa_enforced_from}
+          onClose={() => setSecurityOpen(false)}
+        />
+      )}
 
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

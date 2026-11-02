@@ -5,6 +5,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { HeldItemsSection } from '../components/HeldItemsSection';
 import { openR2Key } from '../lib/openAuthedFile';
+import { ukToday } from '../lib/ukDate';
 
 // ── Types ───────────────────────────────────────────────────────────────
 type SizeCat = 'small' | 'medium' | 'large' | 'xl';
@@ -76,7 +77,7 @@ function addToIso(iso: string, cadence: string, customValue?: number | null, cus
   } else return iso; // custom with no interval → nothing to add
   return d.toISOString().slice(0, 10);
 }
-const todayIso = () => new Date().toISOString().slice(0, 10);
+const todayIso = () => ukToday();
 const ROOM_STATUS_COLOUR: Record<string, string> = {
   available: 'bg-green-100 text-green-800', occupied: 'bg-blue-100 text-blue-800',
   reserved: 'bg-amber-100 text-amber-800', out_of_use: 'bg-slate-200 text-slate-600',
@@ -526,7 +527,7 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
 
 function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [f, setF] = useState({ room_id: '', organisation_id: null as string | null, org_name: '', lead_contact_person_id: null as string | null, contact_name: '', weekly_rate: '', access_type: 'door_code', access_code: '', key_location: '', billing_mode: 'manual', billing_cadence: 'monthly', custom_interval_value: '', custom_interval_unit: 'month', next_bill_date: '', next_rate_review_date: '', move_in_date: new Date().toISOString().slice(0, 10), notes: '' });
+  const [f, setF] = useState({ room_id: '', organisation_id: null as string | null, org_name: '', lead_contact_person_id: null as string | null, contact_name: '', weekly_rate: '', access_type: 'door_code', access_code: '', key_location: '', billing_mode: 'manual', billing_cadence: 'monthly', custom_interval_value: '', custom_interval_unit: 'month', next_bill_date: '', next_rate_review_date: '', move_in_date: ukToday(), notes: '' });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   useEffect(() => { api.get<{ data: Room[] }>('/storage/rooms?status=available').then((r) => setRooms(r.data)); }, []);

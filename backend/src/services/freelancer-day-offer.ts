@@ -24,6 +24,7 @@ import emailService from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 import { greetingName } from './display-name';
 import { getBooking, recordResponse, type DayBooking } from './freelancer-days';
+import { ukToday } from './uk-date';
 
 /** Long, URL-safe, and the same shape the OOH parking token uses. */
 function newToken(): string {
@@ -31,7 +32,7 @@ function newToken(): string {
 }
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return ukToday();
 }
 
 /** "Thursday 8 October 2026" — a date somebody can check against their diary. */

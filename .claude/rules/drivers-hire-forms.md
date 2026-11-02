@@ -56,8 +56,52 @@ Every Claude gets this wrong on first pass. A hire can have multiple drivers on 
 
 - **`services/referral-alert.ts` `sendReferralAlert` is the single sender** — fired from three paths, deduped by an atomic claim on `referral_alert_sent_at` (released on failure). **Do NOT add a local referral-alert sender** anywhere else.
 - **⚠️ `POST /api/driver-verification/update` must NEVER write `referral_status` / `referral_date`.** The hire-form app sends `referralStatus: 'pending'` unconditionally; whitelisting those columns leaked a false amber "Referred & Waiting" when nobody had referred anything. Same reason `identity_check_status` is stripped.
+- **The hire form may RAISE a referral, never LOWER one.** `/update` drops `requires_referral`
+  of anything but `true` and blank `referral_notes` (`isReferralDowngrade()`). The questionnaire
+  sends `false` whenever every answer is "no", and `isDriverAuthorisedForAgreement` passes any
+  driver with `requires_referral = false` — so until Oct 2026 a driver the insurer had DECLINED
+  could clear their own referral on the next hire form, and a points referral vanished on the next
+  hire while the DVLA check was still in date. Only a staff `resolve-referral` clears one.
+- **Declaring is not referring (migration 298, Oct 2026).** The Markerstudy guide wants every
+  driver's convictions and claims from the last 5 years on record, but most are fine without a
+  referral (two 3-pointers; one fault claim). So each is two questions: `has_recent_convictions` /
+  `has_accidents` RECORD it and never refer; `has_convictions` (ever DD/BA/UT, or a single 6+ point
+  offence other than SP30/SP50/CU80) / `has_fault_claims` (more than one at fault or still open)
+  are the referral ones. UK points are still priced by the DVLA check (`licence-excess.ts`). **NULL
+  on the two new columns = the driver last answered the old question set**: referral reasons then
+  read `has_accidents` the old way (a referral), and the hire form doesn't pre-fill old answers
+  under the new wording.
 - Status hierarchy: `requires_referral=true` + `referral_status NULL` = red **to-do** (nobody has acted). `'pending'` = amber, staff emailed the insurer. `'approved'`/`'waived'` = green. `'declined'` = red.
 - **`'waived'` counts as authorised everywhere** — same operational effect as approved, distinct only for audit ("we saw the flag, here's why we cleared it without contacting the insurer").
+
+## Address differs from licence → passport (UK)
+
+- **Agreed with the broker:** a UK licence holder whose two proofs of address show a different
+  address from their licence also supplies a passport. No referral.
+- **The driver's choice is stored, `drivers.address_mismatch` (migration 298).** It used to live
+  only in the browser tab, so a driver who came back from the email link after their POAs went
+  straight past the passport. `next-step` ORs the stored flag with the request's, and **every
+  `calculateNextStep` branch that can reach DVLA or signature checks it** (four didn't). Order:
+  POA1 → POA2 → passport → DVLA → signature.
+
+## Northern Ireland (DVA) licences
+
+- **A DVA licence is a UK licence.** `isUkLicence()` returns true for it, so the driver needs a licence **record check**, not a passport. That is correct and must not be "fixed" by moving NI to the passport regime — doing so drops the points check that prices their excess.
+- **What they cannot do is produce one.** `viewdrivingrecord.service.gov.uk` holds GB licences only. DVA run their own service at nidirect where the **driver creates a single-use check code and a THIRD PARTY runs the lookup**. So an NI check only exists once a member of staff has gone and got it.
+- **`isNiLicence()` (`services/driver-validity.ts`) is THE test**, and it lives beside `isUkLicence()` sharing one `DVA_ISSUER` token **on purpose**. The two must agree about the same driver: NI-but-not-UK would route to the passport regime while also offering the NI panel — a contradiction with no way out. Deliberately NOT broadened to spellings like "DRIVER & VEHICLE AGENCY", because `isUkLicence` doesn't recognise those either and widening one side splits them.
+- **No router step was added, and none should be.** `dvla-check` is already the right destination and all six `calculateNextStep` branches already send a DVA driver there. The dead end was the PAGE: it hardcoded the gov.uk link, so every route out led back to a service that would never hold the driver's licence (Declan Haughian / 16286, Sep 2026 — everything else done, parked indefinitely). The hire-form app branches **within** the step (`App.js` → `DVACheckPage` vs `DVLAPreviewPage`, on `isNiIssuer`), which keeps it clear of the `stepMapping[nextStep] || 'poa1'` trap.
+- **The hire-form app may write `dvla_check_code` and NEVER `dvla_check_date`.** `POST /driver-verification/dva-check-code` exists precisely so that is structurally impossible — the general `/update` whitelists both. The date opens the 30-day window, satisfies the router and releases the driver to signature, so a driver who could set it would walk themselves to a signed agreement on a check nobody ran, with 0 points and a floor excess assumed. Same principle as `identity_check_status` and `referral_status`.
+- **The staff alert is load-bearing, not a nicety.** The NI driver is parked on a terminal screen they cannot leave. `services/dva-check-alert.ts` (email + bell) is the only reason the form is allowed to stop them. It fires **only on a CHANGED code** — a refresh must not re-mail, but a genuinely new code must, because codes are single use and expire 21 days after the driver created one.
+- **Check codes are stored EXACTLY as given — never upper-cased.** A DVA code is mixed case (`BML1s646`) and the nidirect lookup is case-sensitive. `autoCapitalize="none"` on every input that collects one.
+
+## Recording a licence record check from the staff side
+
+- **`POST /api/drivers/:id/licence-record-check` is the way in** — one endpoint for DVLA and DVA, because they are the same check with different plumbing. It writes the date, code, points and endorsements **together**, and derives the excess.
+- **A date on its own is the bug, not the shortcut.** `PATCH /:id/document-dates` can still set `dvla_check_date`, and doing so opens the window, satisfies the router and releases the driver — while `licence_points` stays 0 and the excess stays at the £1,200 floor. The driver gets insured on an assumed clean licence. Use the record-check endpoint for anything that isn't purely a date correction.
+- **`services/licence-excess.ts` is THE definition of what a licence record attracts** (Markerstudy tiers: £1,200 floor; single 6-pt SP30/SP50/CU80 → £2,400; 9 pts as three 3-pointers → £1,800; serious codes, bans, 7–8 and 10+ → referral). A **referral returns `amount: null`, never the floor** — we do not quote a figure on a record the insurer hasn't seen.
+- ⚠️ **It is a PORT, not a move.** The hire-form app still computes its own copy during the GB DVLA flow (`functions/document-processor.js` `calculateInsuranceDecision` + the `* 1.2` in `src/DVLAProcessingPage.js`). **Any change to the tiers must be mirrored there** until that copy is deleted. `excess_rules` (migration 017) is a THIRD, dead schema that no endpoint reads — don't revive it.
+- **RBAC: the panel is `STAFF_ROLES`, and the excess is DERIVED, never typed.** Whoever has the document in front of them must be able to finish the job — the manager-tier split on `PUT /:id` is exactly what left dates unrecorded for someone else to do later. The figure comes back from `POST /drivers/licence-excess-preview`, which runs the same service the save runs, so the browser holds no copy of the rule. `PATCH /:id/calculated-excess` stays admin/manager as the override.
+- **A clean check never clears an existing referral**, and a referral verdict never overwrites the stored excess. The flag may be up for something the check cannot see (declared accident, medical condition); only `resolve-referral` clears it, and only the insurer's `adjusted_excess` re-prices it.
 
 ## Per-driver referral gate at book-out
 
@@ -72,6 +116,18 @@ Every Claude gets this wrong on first pass. A hire can have multiple drivers on 
 - **NEVER derive a driver's email from the iDenfy clientId.** The encoding is lossy (strips anything outside `[a-z0-9_]`), so a hyphenated domain decoded to a different address and find-or-created a phantom driver record, looping the real driver back into iDenfy forever. Resolve via `GET /driver-verification/driver-by-scan-ref`.
 - **iDenfy return URLs must be same-origin with the driver's browser** — the session token lives in per-origin sessionStorage, and the app serves on two origins.
 - **`isUkLicence()` (`services/driver-validity.ts`) is THE "is this a DVLA driver?" test** — it decides which document regime applies (DVLA check vs passport), so never re-derive it inline. It accepts the country as a **code or a name**: the webhook writes `licence_issue_country` through `getCountryName()`, i.e. `"United Kingdom"`, while every consumer compared it to `"GB"` — so that half of the test never once matched and UK detection rested entirely on `licence_issued_by === 'DVLA'`. That mattered the day an expired PASSPORT session leaked into the licence path and overwrote `licence_issued_by` with `HMPO` (Charlie McWilliams / 15727): nothing was left to recognise him by, his passed DVLA check stopped counting, and OP demanded a passport he didn't need.
+
+## Errors the hire form reports
+
+- **`services/hire-form-errors.ts` is where they land** (`POST /driver-verification/telemetry/client-error`,
+  from the app's `log-client-error` function and its session check). Every report is stored in
+  `hire_form_error_events`; a CRITICAL one emails info@ — the email is the action point, and there is
+  deliberately no screen (jon, Oct 2026). Until then they went to a Google Apps Script whose `doPost`
+  never handled `log-error`: nothing was ever logged or emailed, and a failed DVLA upload is invisible
+  to the driver.
+- **The limits are per driver, not per page.** One email per (driver, page) per hour, so a retry
+  doesn't repeat it but a second driver failing the same way still alerts; and at most 10 an hour in
+  all, because `log-client-error` is open to the internet. Over-limit reports are still stored.
 
 ## Data handling
 

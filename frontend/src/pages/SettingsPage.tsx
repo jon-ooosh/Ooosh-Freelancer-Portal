@@ -96,6 +96,12 @@ function SettingsContent() {
       {/* Shop till settings — admin only (discount ceilings are money policy) */}
       {currentUser?.role === 'admin' && <ShopSettingsSection />}
 
+      {/* Card reader (Stripe Terminal S700) — test/live switch + who may use it, admin only */}
+      {currentUser?.role === 'admin' && <CardReaderSettingsSection />}
+
+      {/* Login security & the warehouse kiosk (STAFF-LOGIN-SECURITY-SPEC) — admin only */}
+      {currentUser?.role === 'admin' && <LoginAndKioskSettingsSection />}
+
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
 
@@ -1185,12 +1191,6 @@ function ChaseVoiceSettingsSection() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  // Example-driven voice tuning (§9.3): paste real emails → distil into guidance.
-  const [showLearn, setShowLearn] = useState(false);
-  const [examples, setExamples] = useState('');
-  const [learning, setLearning] = useState(false);
-  const [proposed, setProposed] = useState('');
-  const [learnError, setLearnError] = useState('');
   // Master auto-send switch (§10). Off = jobs set to Auto-send only create drafts.
   const [sendEnabled, setSendEnabled] = useState(false);
   const [sendSaving, setSendSaving] = useState(false);
@@ -1220,19 +1220,6 @@ function ChaseVoiceSettingsSection() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not update the auto-send switch');
     } finally { setSendSaving(false); }
-  }
-
-  async function learnFromExamples() {
-    setLearning(true); setLearnError(''); setProposed('');
-    try {
-      const res = await api.post<{ data: { proposed: string } }>(
-        '/auto-chase/voice/learn',
-        { examples, current: val },
-      );
-      setProposed(res.data.proposed);
-    } catch (e) {
-      setLearnError(e instanceof Error ? e.message : 'Could not learn from these examples');
-    } finally { setLearning(false); }
   }
 
   async function load() {
@@ -1267,7 +1254,7 @@ function ChaseVoiceSettingsSection() {
       <h2 className="text-lg font-semibold text-gray-900 mb-1">Auto-Chase — draft voice</h2>
       <p className="text-sm text-gray-500 mb-4">
         Extra tone guidance appended to the AI chase-draft prompt (the “Draft chase” button on enquiries).
-        Your steer on “more of this / less of that” — takes effect on the next draft, no deploy needed.
+        The house voice is built in; this box is your steer on top of it (“more of this / less of that”) — takes effect on the next draft, no deploy needed.
         The hard rules (checking-in not renegotiating, never fabricate, urgency matched to the hire date) can’t be overridden here.
       </p>
       {error && <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</div>}
@@ -1325,7 +1312,7 @@ function ChaseVoiceSettingsSection() {
         value={val}
         onChange={(e) => { setVal(e.target.value); setSuccess(''); }}
         rows={6}
-        placeholder={'e.g. Keep it really casual and friendly — we\'re a small team, not a corporate. Avoid exclamation marks. Sign off as "Cheers, the Ooosh team". Never mention the exact price.'}
+        placeholder={'Small adjustments on top of the house voice, e.g. Second chases even shorter. Never mention the exact price.'}
         className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[120px]"
       />
       <div className="flex items-center gap-3 mt-3">
@@ -1333,60 +1320,6 @@ function ChaseVoiceSettingsSection() {
           {saving ? 'Saving…' : 'Save voice'}
         </button>
         {val !== orig && <button onClick={() => setVal(orig)} className="text-sm text-gray-500 hover:text-gray-700">Reset</button>}
-      </div>
-
-      {/* Example-driven voice tuning (§9.3) — teach the voice by showing real
-          emails instead of hand-writing the guidance above. */}
-      <div className="mt-5 border-t border-gray-100 pt-4">
-        <button
-          type="button"
-          onClick={() => setShowLearn((v) => !v)}
-          className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700"
-        >
-          {showLearn ? '▾' : '▸'} Teach the voice from real examples
-        </button>
-        {showLearn && (
-          <div className="mt-3">
-            <p className="text-xs text-gray-500 mb-2">
-              Paste a few real examples — client emails and the actual replies your team sent are ideal.
-              We’ll distil the tone/style into a proposed guidance note, which you can review and drop into
-              the box above before saving. Style only — client names, prices and job details are never baked in.
-            </p>
-            <textarea
-              value={examples}
-              onChange={(e) => setExamples(e.target.value)}
-              rows={7}
-              placeholder={'Paste example emails here, e.g.\n\nCLIENT: Hi, any update on the quote for the two vans?\nOOOSH: Hey! Yep all good to go whenever you are — just give us a shout and we\'ll get it locked in. Cheers, the Ooosh team'}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[120px]"
-            />
-            {learnError && <div className="mt-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{learnError}</div>}
-            <div className="flex items-center gap-3 mt-2">
-              <button
-                onClick={learnFromExamples}
-                disabled={learning || examples.trim() === ''}
-                className="px-3 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50"
-              >
-                {learning ? 'Learning…' : '✨ Suggest guidance from these'}
-              </button>
-            </div>
-            {proposed && (
-              <div className="mt-3 rounded-lg border border-purple-200 bg-purple-50/60 p-3">
-                <div className="text-xs font-semibold text-purple-700 mb-1">Proposed voice guidance</div>
-                <p className="text-sm text-gray-700 whitespace-pre-line">{proposed}</p>
-                <div className="flex items-center gap-3 mt-3">
-                  <button
-                    onClick={() => { setVal(proposed); setSuccess(''); setProposed(''); }}
-                    className="px-3 py-1.5 bg-ooosh-600 text-white rounded text-sm"
-                  >
-                    Use this ↑
-                  </button>
-                  <button onClick={() => setProposed('')} className="text-sm text-gray-500 hover:text-gray-700">Discard</button>
-                </div>
-                <p className="mt-2 text-[11px] text-gray-400">“Use this” drops it into the box above — review, tweak, then <strong>Save voice</strong> to apply.</p>
-              </div>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -2033,6 +1966,389 @@ function ShopSettingsSection() {
  * insured block printed on every broker PDF, and the four numbers behind the
  * estimated vehicle value (§6.6). Plain text boxes — each is one value.
  */
+/**
+ * Card reader (docs/STRIPE-TERMINAL-SPEC.md §11): test or live, and which roles see
+ * "Card reader" on Record Payment. Admin only — it decides whether real cards are charged.
+ */
+function CardReaderSettingsSection() {
+  const [mode, setMode] = useState<'test' | 'live'>('test');
+  const [roles, setRoles] = useState('admin');
+  const [orig, setOrig] = useState<{ mode: string; roles: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=money');
+      const get = (k: string) => res.data.find(r => r.key === k)?.value ?? '';
+      const m = get('stripe_terminal_mode') === 'live' ? 'live' : 'test';
+      const r = get('stripe_terminal_roles') || 'admin';
+      setMode(m); setRoles(r); setOrig({ mode: m, roles: r });
+    } catch {
+      setError('Could not load the card reader settings (has migration 291 run?).');
+    }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const cleanRoles = roles.split(',').map(x => x.trim()).filter(Boolean).join(',') || 'admin';
+      await api.put('/system-settings', { settings: { stripe_terminal_mode: mode, stripe_terminal_roles: cleanRoles } });
+      setSuccess('Saved. Reload any open job page to pick it up.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (!orig) return error ? <div className="mb-6 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div> : null;
+  const changed = mode !== orig.mode || roles !== orig.roles;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Card reader</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        The Stripe S700 on Record Payment. Test uses Stripe&apos;s simulated reader and no card is charged;
+        live sends the payment to the real reader.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+          <label htmlFor="stripe_terminal_mode" className="text-sm text-gray-700">
+            Mode
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_mode</span>
+          </label>
+          <select id="stripe_terminal_mode" value={mode} onChange={e => setMode(e.target.value === 'live' ? 'live' : 'test')}
+            className="px-2 py-1.5 rounded border border-gray-300 text-sm max-w-xs">
+            <option value="test">Test (simulated reader)</option>
+            <option value="live">Live (real S700, real cards)</option>
+          </select>
+        </div>
+        <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+          <label htmlFor="stripe_terminal_roles" className="text-sm text-gray-700">
+            Who can use it (comma-separated roles)
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_roles</span>
+          </label>
+          <input id="stripe_terminal_roles" value={roles} onChange={e => setRoles(e.target.value)}
+            placeholder="admin" className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+        </div>
+        <p className="text-xs text-gray-500">
+          Roles: admin, manager, staff, general_assistant (weekend managers follow manager). Leave as admin while testing.
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving || !changed}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Login security & the warehouse kiosk (docs/STAFF-LOGIN-SECURITY-SPEC.md §6, §4.4–4.5):
+ * the date from which every login needs a second factor, the addresses the kiosk
+ * PIN is accepted from, the reader on the kiosk till, and when the PIN was last
+ * changed (the quarterly reminder counts from it). Admin only.
+ * Also the freelancer portal's switch-on date for its emailed code
+ * (docs/FREELANCER-PORTAL-SPEC.md §7; empty = off).
+ */
+function LoginAndKioskSettingsSection() {
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [orig, setOrig] = useState<Record<string, string> | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const KEYS = ['staff_2fa_enforced_from', 'portal_2fa_enforced_from', 'kiosk_device_required', 'kiosk_allowed_ips', 'stripe_terminal_kiosk', 'kiosk_pin_rotated_at'];
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const [sec, money] = await Promise.all([
+        api.get<{ data: SystemSetting[] }>('/system-settings?category=security'),
+        api.get<{ data: SystemSetting[] }>('/system-settings?category=money'),
+      ]);
+      const all = [...sec.data, ...money.data];
+      const next: Record<string, string> = {};
+      for (const k of KEYS) next[k] = all.find(r => r.key === k)?.value ?? '';
+      setVals(next); setOrig(next);
+    } catch {
+      setError('Could not load the login security settings (has migration 297 run?).');
+    }
+  }
+
+  async function save(patch?: Record<string, string>) {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const settings = { ...vals, ...(patch || {}) };
+      settings.kiosk_allowed_ips = settings.kiosk_allowed_ips.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean).join(', ');
+      await api.put('/system-settings', { settings });
+      setSuccess('Saved.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (!orig) return error ? <div className="mb-6 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div> : null;
+  const changed = KEYS.some(k => vals[k] !== orig[k]);
+  const today = new Date().toLocaleDateString('en-CA');
+  const row = 'grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center';
+  const input = 'px-2 py-1.5 rounded border border-gray-300 text-sm';
+  // Same rule as the server (kiosk-devices.ts): only an explicit 'false' is off.
+  const deviceLockOn = vals.kiosk_device_required !== 'false';
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Login security &amp; kiosk</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Every staff login has a second step (passkey or email code, remembered per device). The warehouse iPad keeps its PIN
+        and now has a till; the PIN only works on the tablets set up below.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        <div className={row}>
+          <label htmlFor="staff_2fa_enforced_from" className="text-sm text-gray-700">
+            Second factor required from
+            <span className="block text-xs text-gray-400 font-mono">staff_2fa_enforced_from</span>
+          </label>
+          <input id="staff_2fa_enforced_from" type="date" value={vals.staff_2fa_enforced_from}
+            onChange={e => setVals(v => ({ ...v, staff_2fa_enforced_from: e.target.value }))} className={`${input} max-w-xs`} />
+        </div>
+        <p className="text-xs text-gray-500">Before this date a person with no second factor sees a banner; from it the login insists.</p>
+
+        {/* Freelancer portal two-step sign-in (FREELANCER-PORTAL-SPEC §7). Ships off. */}
+        <div className={row}>
+          <label htmlFor="portal_2fa_enforced_from" className="text-sm text-gray-700">
+            Freelancer portal: code required from
+            <span className="block text-xs text-gray-400 font-mono">portal_2fa_enforced_from</span>
+          </label>
+          <span className="flex items-center gap-3">
+            <input id="portal_2fa_enforced_from" type="date" value={vals.portal_2fa_enforced_from}
+              onChange={e => setVals(v => ({ ...v, portal_2fa_enforced_from: e.target.value }))} className={`${input} max-w-xs`} />
+            {vals.portal_2fa_enforced_from && (
+              <button type="button" onClick={() => setVals(v => ({ ...v, portal_2fa_enforced_from: '' }))}
+                className="px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50">
+                Clear (off)
+              </button>
+            )}
+          </span>
+        </div>
+        <p className="text-xs text-gray-500">
+          {vals.portal_2fa_enforced_from
+            ? 'From this date, a freelancer signing in on a phone the portal doesn\'t remember gets a 6-digit code by email. Signing up or resetting a password counts as the code. Tell freelancers first; there is no banner.'
+            : 'Empty, so off: the portal asks for a password only. Pick a date to switch the emailed code on.'}
+          {' '}Help for one freelancer is on their Freelancer tab (Portal sign-in).
+        </p>
+
+        {/* The tablet lock (STAFF-LOGIN-SECURITY-SPEC §9, services/kiosk-devices.ts). */}
+        <div className={row}>
+          <label htmlFor="kiosk_device_required" className="text-sm text-gray-700">
+            Kiosk PIN works on
+            <span className="block text-xs text-gray-400 font-mono">kiosk_device_required</span>
+          </label>
+          <select id="kiosk_device_required" value={deviceLockOn ? 'true' : 'false'}
+            onChange={e => setVals(v => ({ ...v, kiosk_device_required: e.target.value }))} className={`${input} max-w-xs`}>
+            <option value="true">Only the tablets set up below</option>
+            <option value="false">Any device (not recommended)</option>
+          </select>
+        </div>
+        <KioskTablets lockOn={deviceLockOn} />
+
+        <div className={row}>
+          <label htmlFor="kiosk_allowed_ips" className="text-sm text-gray-700">
+            Kiosk PIN accepted from (public IPs)
+            <span className="block text-xs text-gray-400 font-mono">kiosk_allowed_ips</span>
+          </label>
+          <input id="kiosk_allowed_ips" value={vals.kiosk_allowed_ips}
+            onChange={e => setVals(v => ({ ...v, kiosk_allowed_ips: e.target.value }))} placeholder="Optional — leave empty" className={input} />
+        </div>
+        {!vals.kiosk_allowed_ips.trim() && (deviceLockOn ? (
+          <p className="text-xs text-gray-500">Optional. The tablet lock above holds the PIN to the warehouse; add addresses only if the yard has a fixed one (the broadband&apos;s address can change).</p>
+        ) : (
+          <p className="text-xs text-amber-700">Empty, and the tablet lock is off — the kiosk PIN is accepted from anywhere on the internet.</p>
+        ))}
+
+        <div className={row}>
+          <label htmlFor="stripe_terminal_kiosk" className="text-sm text-gray-700">
+            Card reader on the kiosk till
+            <span className="block text-xs text-gray-400 font-mono">stripe_terminal_kiosk</span>
+          </label>
+          <select id="stripe_terminal_kiosk" value={vals.stripe_terminal_kiosk === 'true' ? 'true' : 'false'}
+            onChange={e => setVals(v => ({ ...v, stripe_terminal_kiosk: e.target.value }))} className={`${input} max-w-xs`}>
+            <option value="false">Off — cash only on the kiosk</option>
+            <option value="true">On — the reader, the sale still names a person</option>
+          </select>
+        </div>
+
+        <div className={row}>
+          <span className="text-sm text-gray-700">
+            Warehouse PIN last changed
+            <span className="block text-xs text-gray-400 font-mono">kiosk_pin_rotated_at</span>
+          </span>
+          <span className="flex items-center gap-3 text-sm">
+            <span>{vals.kiosk_pin_rotated_at || '—'}</span>
+            <button type="button" onClick={() => void save({ kiosk_pin_rotated_at: today })} disabled={saving}
+              className="px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+              PIN changed today
+            </button>
+          </span>
+        </div>
+        <p className="text-xs text-gray-500">
+          The PIN itself is <code>WAREHOUSE_PIN</code> in the server&apos;s .env. Admins are reminded three months after this date.
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving || !changed}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface KioskTablet {
+  id: string;
+  label: string;
+  status: 'active' | 'waiting';
+  created_at: string;
+  created_by_name: string | null;
+  setup_expires_at: string | null;
+  activated_at: string | null;
+  last_used_at: string | null;
+  last_used_ip: string | null;
+}
+
+/**
+ * The warehouse kiosk tablets (docs/STAFF-LOGIN-SECURITY-SPEC.md §9,
+ * services/kiosk-devices.ts): the tablets set up, codes still waiting to be
+ * typed, "Set up a tablet" (a one-time code, 10 minutes) and "Forget". These
+ * act at once — they are not part of the section's Save.
+ */
+function KioskTablets({ lockOn }: { lockOn: boolean }) {
+  const [rows, setRows] = useState<KioskTablet[] | null>(null);
+  const [label, setLabel] = useState('Warehouse iPad');
+  const [shown, setShown] = useState<{ id: string; code: string; label: string; expires_at: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ data: KioskTablet[] }>('/warehouse/devices');
+      setRows(res.data);
+    } catch {
+      setError('Could not load the kiosk tablets (has migration 323 run?).');
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function setUp() {
+    setBusy(true); setError('');
+    try {
+      const res = await api.post<{ data: { id: string; code: string; label: string; expires_at: string } }>(
+        '/warehouse/devices', { label });
+      setShown(res.data);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not make a set-up code');
+    } finally { setBusy(false); }
+  }
+
+  async function forget(t: KioskTablet) {
+    const question = t.status === 'active'
+      ? `Forget "${t.label}"? The PIN stops working on it straight away (a session already open on it ends within 12 hours).`
+      : `Cancel the set-up code for "${t.label}"?`;
+    if (!window.confirm(question)) return;
+    setBusy(true); setError('');
+    try {
+      await api.delete(`/warehouse/devices/${t.id}`);
+      if (shown?.id === t.id) setShown(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not forget the tablet');
+    } finally { setBusy(false); }
+  }
+
+  const when = (iso: string | null) => iso
+    ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '—';
+  const clock = (iso: string | null) => iso
+    ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+    : '—';
+  const active = (rows ?? []).filter(r => r.status === 'active');
+  const button = 'px-3 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50';
+
+  return (
+    <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-start">
+      <span className="text-sm text-gray-700">
+        Kiosk tablets
+        <span className="block text-xs text-gray-400 font-mono">kiosk_devices</span>
+      </span>
+      <div className="space-y-2">
+        {error && <p className="text-xs text-red-700">{error}</p>}
+        {rows === null && !error && <p className="text-xs text-gray-500">Loading…</p>}
+
+        {(rows ?? []).map(t => (
+          <div key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-200 px-3 py-2 text-sm">
+            <span>
+              <span className="font-medium text-gray-900">{t.label}</span>
+              {t.status === 'active' ? (
+                <span className="block text-xs text-gray-500">
+                  Set up {when(t.activated_at)}{t.created_by_name ? ` (code from ${t.created_by_name})` : ''}
+                  {' · '}last used {when(t.last_used_at)}{t.last_used_ip ? ` from ${t.last_used_ip}` : ''}
+                </span>
+              ) : (
+                <span className="block text-xs text-amber-700">Waiting for its code to be typed on the tablet (until {clock(t.setup_expires_at)})</span>
+              )}
+            </span>
+            <button type="button" onClick={() => void forget(t)} disabled={busy} className={button}>
+              {t.status === 'active' ? 'Forget' : 'Cancel code'}
+            </button>
+          </div>
+        ))}
+
+        {rows !== null && active.length === 0 && lockOn && (
+          <p className="text-xs text-amber-700">No tablet is set up, so the kiosk PIN works nowhere until one is.</p>
+        )}
+
+        {shown && (
+          <div className="rounded border border-purple-200 bg-purple-50 p-3 text-sm space-y-1">
+            <p className="text-gray-700">Set-up code for <strong>{shown.label}</strong>, valid until {clock(shown.expires_at)}:</p>
+            <p className="text-2xl font-mono tracking-widest text-gray-900">{shown.code}</p>
+            <p className="text-xs text-gray-600">
+              On the tablet, tap &quot;Set up this tablet&quot; under the PIN box and type this code. It works once.
+            </p>
+            <button type="button" onClick={() => { setShown(null); void load(); }} className={button}>Done</button>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={label} onChange={e => setLabel(e.target.value)} maxLength={60} aria-label="Tablet name"
+            className="px-2 py-1.5 rounded border border-gray-300 text-sm w-48" />
+          <button type="button" onClick={() => void setUp()} disabled={busy || !label.trim()} className={button}>
+            Set up a tablet
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ClaimsSettingsSection() {
   const [settings, setSettings] = useState<SystemSetting[]>([]);
   const [vals, setVals] = useState<Record<string, string>>({});

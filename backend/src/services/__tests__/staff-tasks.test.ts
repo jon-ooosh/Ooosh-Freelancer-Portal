@@ -22,6 +22,9 @@ jest.mock('../staff-notifications', () => ({
   notifyTaskHandedBack: jest.fn(async () => undefined),
   notifyTaskDone: jest.fn(async () => undefined),
 }));
+// Retiring the to-do's bells is a side effect too (bell-rules.ts); its own
+// test is bell-rules.test.ts. Mocked so the query counts here stay this module's.
+jest.mock('../notification-resolve', () => ({ retireDoneBells: jest.fn(async () => 0) }));
 
 import { query } from '../../config/database';
 import { createTask, updateTask, cancelTask, handBackTask, listEveryone, takeTask } from '../staff-tasks';

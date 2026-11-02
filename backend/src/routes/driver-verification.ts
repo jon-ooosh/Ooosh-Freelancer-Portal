@@ -10,25 +10,28 @@
  *   GET  /api/driver-verification/status         — Get driver status + document validity
  *   POST /api/driver-verification/next-step      — Routing engine (determine next step)
  *   POST /api/driver-verification/update         — Update driver fields (partial)
+ *   POST /api/driver-verification/dva-check-code — NI driver supplies a nidirect check code
  *   GET  /api/driver-verification/check-hire-form — Check if hire form exists for job
  */
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import multer from 'multer';
+import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
 import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates, hasAllRequiredDocuments } from '../services/driver-validity';
 import { idenfyNeedsReview, sendIdentityReviewAlert } from '../services/identity-review';
+import { sendDvaCheckAlert } from '../services/dva-check-alert';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
+import { signFor, verifyFor } from '../services/tokens';
+import { recordHireFormError } from '../services/hire-form-errors';
 
 const router = Router();
 
-const JWT_SECRET: string = process.env.JWT_SECRET!;
 const HIRE_FORM_TOKEN_EXPIRY = '40m'; // Match existing 40-minute session timeout
 
 // ============================================================================
@@ -76,15 +79,12 @@ function authenticateHireForm(req: HireFormRequest, res: Response, next: NextFun
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET) as HireFormUser & { exp: number };
-      if (decoded.type === 'hire_form_session') {
-        req.hireFormUser = { email: decoded.email, type: 'hire_form_session' };
-        next();
-        return;
-      }
-    } catch {
-      // Token invalid or expired
+    // Only a token minted for the hire-form audience verifies here (services/tokens.ts).
+    const decoded = verifyFor<HireFormUser>('hire_form', token);
+    if (decoded && decoded.type === 'hire_form_session') {
+      req.hireFormUser = { email: decoded.email, type: 'hire_form_session' };
+      next();
+      return;
     }
   }
 
@@ -103,7 +103,18 @@ const verifySchema = z.object({
   verification_secret: z.string(),
 });
 
-router.post('/auth/verify', async (req: Request, res: Response) => {
+// Called by the hire-form Netlify function, so every request arrives from a
+// handful of Netlify egress IPs — the limit is per IP and must leave room for
+// a busy morning of sign-ins, while still capping abuse of the shared secret.
+const sessionIssueLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  message: { error: 'Too many requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post('/auth/verify', sessionIssueLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = verifySchema.parse(req.body);
     const email = parsed.email.trim().toLowerCase();
@@ -130,11 +141,7 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
     }
 
     // Issue a short-lived JWT for this driver's session
-    const token = jwt.sign(
-      { email, type: 'hire_form_session' },
-      JWT_SECRET,
-      { expiresIn: HIRE_FORM_TOKEN_EXPIRY }
-    );
+    const token = signFor('hire_form', { email, type: 'hire_form_session' }, HIRE_FORM_TOKEN_EXPIRY);
 
     res.json({
       success: true,
@@ -385,6 +392,8 @@ router.post('/send-confirmation', authenticateApiKey, async (req: Request, res: 
         hasAccidents: formatYesNo(iq.hasAccidents),
         hasInsuranceIssues: formatYesNo(iq.hasInsuranceIssues),
         hasDrivingBan: formatYesNo(iq.hasDrivingBan),
+        hasRecentConvictions: formatYesNo(iq.hasRecentConvictions),
+        hasFaultClaims: formatYesNo(iq.hasFaultClaims),
         additionalDetails: (iq.additionalDetails as string) || '',
         docLicence: docStatus(docs.license),
         docPoa1: docStatus(docs.poa1),
@@ -531,7 +540,12 @@ router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res
       return;
     }
 
-    const nextStep = calculateNextStep(analysis, currentStep, addressMismatch);
+    // The request's flag is what THIS browser tab knows; the stored one is
+    // what the driver told us, even in another tab or on another device
+    // (migration 298). Until it was stored, a UK driver who came back from
+    // the email link after their POAs was routed straight past the passport.
+    const effectiveMismatch = addressMismatch || driver?.address_mismatch === true;
+    const nextStep = calculateNextStep(analysis, currentStep, effectiveMismatch);
 
     res.json({
       success: true,
@@ -548,6 +562,99 @@ router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res
     }
     console.error('[driver-verification] Next-step error:', error);
     res.status(500).json({ error: 'Failed to determine next step' });
+  }
+});
+
+// ============================================================================
+// POST /api/driver-verification/dva-check-code
+// The Northern Ireland branch of the licence record check.
+// ============================================================================
+//
+// A DVA licence is a UK licence — `isUkLicence()` is true and the driver
+// correctly needs a licence record check rather than a passport. What they
+// cannot do is produce one: viewdrivingrecord.service.gov.uk holds GB licences
+// only. Before this existed, every route out of the hire form led back to
+// `dvla-check` and a gov.uk link that would never work for them, forever
+// (Declan Haughian / 16286).
+//
+// So the driver hands us the one thing they CAN get — a check code from
+// nidirect — and a member of staff runs the lookup.
+//
+// WHY THIS IS ITS OWN ENDPOINT RATHER THAN `/update`
+// --------------------------------------------------
+// `/update` whitelists BOTH `dvla_check_code` and `dvla_check_date`. A code
+// submission must never set the date: the date is what opens the 30-day window,
+// satisfies the router and releases the driver to signature. Writing it here
+// would mean a driver could walk themselves through to a signed hire agreement
+// on a check nobody had run, with 0 points and a floor excess assumed.
+//
+// Keeping it separate makes that structurally impossible rather than a rule
+// somebody has to remember — the same reason the app cannot write
+// `identity_check_status` or `referral_status`. The date arrives from exactly
+// one place: POST /api/drivers/:id/licence-record-check, by a member of staff,
+// with the points.
+const dvaCheckCodeSchema = z.object({
+  email: z.string().email(),
+  // Mixed case is REAL — Declan's was "BML1s646". Stored exactly as given;
+  // upper-casing it would make the recorded code useless for the lookup.
+  checkCode: z.string().trim().min(4).max(50),
+  jobNumber: z.coerce.number().int().positive().nullable().optional(),
+});
+
+router.post('/dva-check-code', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
+  try {
+    const parsed = dvaCheckCodeSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+
+    const existing = await query(
+      `SELECT id, dvla_check_code, licence_issued_by, current_job_number
+         FROM drivers WHERE email = $1 AND is_active = true
+        ORDER BY updated_at DESC LIMIT 1`,
+      [email],
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Driver not found' });
+      return;
+    }
+    const driver = existing.rows[0];
+
+    // `current_job_number` is best-effort and only ever moves forward to a job
+    // we've been told about — it is what makes OP's "started but not signed
+    // for #N" derivation work for a driver with no assignment row yet
+    // (services/driver-hire-progress.ts).
+    const jobNumber = parsed.jobNumber ?? null;
+
+    await query(
+      `UPDATE drivers
+          SET dvla_check_code = $1,
+              current_job_number = COALESCE($2, current_job_number),
+              updated_at = NOW()
+        WHERE id = $3`,
+      [parsed.checkCode, jobNumber, driver.id],
+    );
+
+    // Alert only on a CHANGED code. A driver refreshing the parked screen, or
+    // the page re-submitting, must not re-mail the team; a genuinely new code
+    // must, because the previous one is spent (single use, 21-day expiry).
+    const isNewCode = (driver.dvla_check_code || '') !== parsed.checkCode;
+    if (isNewCode) {
+      sendDvaCheckAlert(driver.id as string)
+        .catch(err => console.error('[driver-verification] DVA alert failed:', err));
+    }
+
+    console.log(
+      `[driver-verification] DVA check code ${isNewCode ? 'recorded' : 're-submitted'} for ${email}`
+      + `${jobNumber ? ` (job #${jobNumber})` : ''}`,
+    );
+
+    res.json({ success: true, alerted: isNewCode });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('[driver-verification] DVA check code error:', error);
+    res.status(500).json({ error: 'Failed to record check code' });
   }
 });
 
@@ -611,6 +718,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       hasAccidents: 'has_accidents',
       hasInsuranceIssues: 'has_insurance_issues',
       hasDrivingBan: 'has_driving_ban',
+      // Migration 298 — declarations that don't refer, and the address choice.
+      hasRecentConvictions: 'has_recent_convictions',
+      hasFaultClaims: 'has_fault_claims',
+      addressMismatch: 'address_mismatch',
       additionalDetails: 'additional_details',
       insuranceStatus: 'insurance_status',
       overallStatus: 'overall_status',
@@ -650,6 +761,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'dvla_check_code', 'dvla_check_date',
       'has_disability', 'has_convictions', 'has_prosecution', 'has_accidents',
       'has_insurance_issues', 'has_driving_ban', 'additional_details',
+      'has_recent_convictions', 'has_fault_claims', 'address_mismatch',
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
       'idenfy_overall', 'idenfy_face_result', 'idenfy_doc_result',
@@ -721,6 +833,9 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       // Normalise: accept both camelCase and snake_case
       const dbField = camelToSnake[key] || key;
       if (!allowedFields.has(dbField)) continue;
+      // The hire form may RAISE a referral, never lower one — see
+      // isReferralDowngrade() below.
+      if (isReferralDowngrade(dbField, value)) continue;
       let coerced: unknown = value ?? null;
       if (DATE_FIELDS.has(dbField)) {
         coerced = normaliseDate(coerced);
@@ -829,14 +944,21 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
     // Check if requires_referral is being set to true (for notification trigger)
     const referralBeingSet = updates.requiresReferral === true || updates.requires_referral === true;
 
-    // If referral is being set, check if it's a *change* (was previously false/null)
+    // If referral is being set, check if it's a *change* (was previously false/null).
+    // An approved/waived referral counts as already referred: an approval is
+    // STANDING for the driver (jon, Oct 2026), but resolving it clears
+    // requires_referral, so every later form re-declaring the same issue
+    // raised a fresh high-priority "Referral needed" bell (Tyler Meadham).
     let wasAlreadyReferred = false;
     if (referralBeingSet && existing.rows.length > 0) {
       const currentDriver = await query(
-        `SELECT requires_referral FROM drivers WHERE id = $1`,
+        `SELECT requires_referral, referral_status FROM drivers WHERE id = $1`,
         [existing.rows[0].id]
       );
-      wasAlreadyReferred = currentDriver.rows[0]?.requires_referral === true;
+      const cur = currentDriver.rows[0];
+      wasAlreadyReferred = cur?.requires_referral === true
+        || cur?.referral_status === 'approved'
+        || cur?.referral_status === 'waived';
     }
 
     if (existing.rows.length > 0) {
@@ -1251,10 +1373,14 @@ async function fireReferralNotification(
     // signature step below, from POST /api/hire-forms, or from the daily
     // safety-net scanner (whichever completes first; idempotent).
     for (const userId of targets.bellUserIds) {
+      // Filed under the driver, with its key, so it retires once the referral
+      // has an outcome (bell-rules.ts referral_needed). It had no entity
+      // before Oct 2026; migration 311 back-fills the old ones from the link.
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, action_url, priority, email_sent_at)
-         VALUES ($1, 'referral', $2, $3, $4, 'high', NOW())`,
-        [userId, `Referral needed: ${driverName}`, notificationContent, `/drivers/${driverId}`]
+        `INSERT INTO notifications (user_id, type, title, content, action_url, priority, email_sent_at,
+                                    entity_type, entity_id, resolve_key)
+         VALUES ($1, 'referral', $2, $3, $4, 'high', NOW(), 'drivers', $5, 'referral_needed')`,
+        [userId, `Referral needed: ${driverName}`, notificationContent, `/drivers/${driverId}`, driverId]
       );
     }
 
@@ -1333,11 +1459,19 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
  * Routing engine — ported from get-next-step.js v2.6
  * Determines the next step a driver should complete based on document validity.
  */
-function calculateNextStep(
+export function calculateNextStep(
   analysis: DocumentAnalysis,
   currentStep: string,
   addressMismatch: boolean
 ): { step: string; reason: string } {
+  // A UK driver whose proofs of address show a different address from their
+  // licence also supplies a passport (agreed with the broker). Order is
+  // POA1 → POA2 → passport → DVLA. Every branch that can reach DVLA or
+  // signature checks this — until Oct 2026 four of them didn't, and sent a
+  // mismatch driver to signature with no passport.
+  const mismatchNeedsPassport = analysis.isUkDriver && addressMismatch && !analysis.passport.valid;
+  const mismatchPassport = { step: 'passport-upload', reason: 'Address differs from licence - passport required' };
+
   // 1. All valid → signature (but UK mismatch needs passport too)
   if (analysis.allValid) {
     if (analysis.isUkDriver && addressMismatch && !analysis.passport.valid) {
@@ -1355,6 +1489,7 @@ function calculateNextStep(
     if (!analysis.poa1.valid || !analysis.poa2.valid) {
       return { step: 'poa-instructions', reason: 'Proof of address documents required' };
     }
+    if (mismatchNeedsPassport) return mismatchPassport;
     if (analysis.isUkDriver && !analysis.dvla.valid) {
       return { step: 'dvla-check', reason: 'DVLA check required' };
     }
@@ -1369,6 +1504,7 @@ function calculateNextStep(
     if (!analysis.poa1.valid || !analysis.poa2.valid) {
       return { step: 'poa-instructions', reason: 'Licence verified - proof of address required' };
     }
+    if (mismatchNeedsPassport) return mismatchPassport;
     if (analysis.isUkDriver && !analysis.dvla.valid) {
       return { step: 'dvla-check', reason: 'POAs verified - DVLA check required' };
     }
@@ -1414,6 +1550,7 @@ function calculateNextStep(
   // 6. DVLA in progress
   if (currentStep === 'dvla-processing' || currentStep === 'dvla-check') {
     if (analysis.dvla.valid) {
+      if (mismatchNeedsPassport) return mismatchPassport;
       return { step: 'signature', reason: 'DVLA check complete' };
     }
     return { step: 'dvla-check', reason: 'DVLA check in progress' };
@@ -1421,6 +1558,7 @@ function calculateNextStep(
 
   // 7. DVLA complete
   if (currentStep === 'dvla-complete') {
+    if (mismatchNeedsPassport) return mismatchPassport;
     return { step: 'signature', reason: 'DVLA check verified - ready for signature' };
   }
 
@@ -1454,6 +1592,33 @@ function calculateNextStep(
 // ============================================================================
 // Response builders
 // ============================================================================
+
+/**
+ * True when a hire-form write would LOWER a referral — `requires_referral` set
+ * to anything but true, or `referral_notes` blanked. `/update` drops these.
+ *
+ * The insurance questionnaire sends `requiresReferral: false` and
+ * `referralReasons: null` whenever every answer is "no". Applied as-is, that
+ * cleared a referral the driver already had — from a previous hire's answers,
+ * a DVLA points check, or one the insurer DECLINED — and
+ * `isDriverAuthorisedForAgreement` passes any driver with
+ * `requires_referral = false`. So a declined driver could clear their own
+ * referral by filling in the next hire form with clean answers, and a points
+ * referral vanished on the next hire if the DVLA check was still in date (no
+ * new check runs to raise it again).
+ *
+ * Same rule as the staff licence-record check: a clean answer never clears an
+ * existing referral; only a staff `resolve-referral` does.
+ */
+export function isReferralDowngrade(dbField: string, value: unknown): boolean {
+  if (dbField === 'requires_referral') return value !== true;
+  if (dbField === 'referral_notes') {
+    if (value === null || value === undefined) return true;
+    if (typeof value === 'string') return value.trim() === '';
+    if (Array.isArray(value)) return value.length === 0;
+  }
+  return false;
+}
 
 export function buildDriverStatusResponse(driver: Record<string, unknown>) {
   const analysis = analyzeDocuments(driver);
@@ -1564,6 +1729,11 @@ export function buildDriverStatusResponse(driver: Record<string, unknown>) {
       hasAccidents: (driver.has_accidents as boolean) || false,
       hasInsuranceIssues: (driver.has_insurance_issues as boolean) || false,
       hasDrivingBan: (driver.has_driving_ban as boolean) || false,
+      // NULL-preserving, unlike the six above: null means the driver last
+      // answered the OLD question set (migration 298), and the hire form uses
+      // that to avoid pre-filling old answers under the new wording.
+      hasRecentConvictions: typeof driver.has_recent_convictions === 'boolean' ? driver.has_recent_convictions : null,
+      hasFaultClaims: typeof driver.has_fault_claims === 'boolean' ? driver.has_fault_claims : null,
       additionalDetails: (driver.additional_details as string) || '',
     },
     boardAId: driver.id || null,
@@ -1582,6 +1752,19 @@ export function buildDriverStatusResponse(driver: Record<string, unknown>) {
     dvlaPoints: (driver.licence_points as number) || 0,
     dvlaEndorsements: endorsementsDisplay,
     dvlaCalculatedExcess: excessDisplay,
+    // The NI parked screen reads this to know we already hold a code, so a
+    // driver who reloads sees "we're checking this" rather than being asked
+    // for the code again. Their own code, inside their own session.
+    dvlaCheckCode: (driver.dvla_check_code as string) || null,
+    // The driver said their proofs of address differ from their licence
+    // (true), match it (false), or was never asked (null). Migration 298.
+    addressMismatch: typeof driver.address_mismatch === 'boolean' ? driver.address_mismatch : null,
+    // An insurer referral is open: raised, and not yet approved or waived.
+    // Same test as isDriverAuthorisedForAgreement (hire-forms.ts). The hire
+    // form's finish screen says "one more check on our side" instead of
+    // "approved" — the driver's own status, read-only, inside their session.
+    referralOpen: driver.requires_referral === true
+      && driver.referral_status !== 'approved' && driver.referral_status !== 'waived',
   };
 }
 
@@ -1620,6 +1803,9 @@ function buildNewDriverStatus(email: string) {
     dvlaPoints: 0,
     dvlaEndorsements: null,
     dvlaCalculatedExcess: null,
+    dvlaCheckCode: null,
+    addressMismatch: null,
+    referralOpen: false,
   };
 }
 
@@ -1707,6 +1893,50 @@ router.post('/telemetry/monday-fallback', authenticateApiKey, async (req: Reques
   } catch (error) {
     console.error('[driver-verification] Fallback telemetry error:', error);
     res.status(500).json({ error: 'Failed to record fallback event' });
+  }
+});
+
+
+// ============================================================================
+// POST /api/driver-verification/telemetry/client-error
+// The hire form app's error reports (its log-client-error function, and the
+// session check's "would reject" lines). Every report is stored; a CRITICAL
+// one emails info@. See services/hire-form-errors.ts.
+// ============================================================================
+
+const clientErrorSchema = z.object({
+  severity: z.enum(['critical', 'warning', 'info']).catch('warning'),
+  page: z.string().min(1).max(2000),
+  error: z.string().min(1).max(10000),
+  email: z.string().max(2000).nullish(),
+  url: z.string().max(4000).nullish(),
+  userAgent: z.string().max(4000).nullish(),
+  additionalInfo: z.string().max(10000).nullish(),
+  timestamp: z.string().max(100).nullish(),
+});
+
+router.post('/telemetry/client-error', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = clientErrorSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid payload' });
+      return;
+    }
+    const b = parsed.data;
+    const result = await recordHireFormError({
+      severity: b.severity,
+      page: b.page.slice(0, 100),
+      error: b.error.slice(0, 2000),
+      email: b.email ? b.email.slice(0, 255) : null,
+      url: b.url ? b.url.slice(0, 500) : null,
+      userAgent: b.userAgent ? b.userAgent.slice(0, 500) : null,
+      additionalInfo: b.additionalInfo ? b.additionalInfo.slice(0, 2000) : null,
+      timestamp: b.timestamp || null,
+    });
+    res.json({ data: { logged: true, alerted: result.alerted } });
+  } catch (error) {
+    console.error('[driver-verification] client-error telemetry failed:', error);
+    res.status(500).json({ error: 'Failed to record error' });
   }
 });
 

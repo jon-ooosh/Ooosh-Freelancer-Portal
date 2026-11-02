@@ -5,11 +5,15 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
 import { apiFetch } from '../config/api-config'
-import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrackerAssignments'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
+import { VehicleTrackerRow } from '../components/tracking/VehicleTrackerRow'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import { ForecastTab } from '../components/forecast/ForecastTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
+import { MotHistoryTab, MotDvsaNote } from '../components/mot/MotHistoryTab'
+import { ForSalePill } from '../components/sales/ForSalePill'
+import GiveToFreelancer from '../../../components/GiveToFreelancer'
+import { useOpenSalesByVehicle } from '../lib/vehicle-sales'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
 import { Pcn, PcnStatusPill, pcnTrafficLight, PCN_LIGHT_DOT, FINE_TYPE_LABEL, fmtPcnDate, fmtPcnMoney } from '../../../components/pcn/format'
 import { ClaimListRow, ClaimStagePill, fmtClaimDate } from '../../../components/claims/format'
@@ -233,8 +237,6 @@ function CurrentMileageRow({
 export function VehicleDetailPage() {
   const { id } = useParams()
   const { data: vehicle, isLoading, isError } = useVehicle(id)
-  const { trackerNumber } = useVehicleTracker(vehicle?.reg)
-  const { assign: assignTracker, isSaving: isAssigningTracker } = useUpdateTrackerAssignment()
   const { data: complianceSettings } = useQuery({
     queryKey: ['compliance-settings'],
     queryFn: fetchComplianceSettings,
@@ -242,13 +244,13 @@ export function VehicleDetailPage() {
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [searchParams] = useSearchParams()
-  // Top-level tabs. Service / Events / Preps / Issues / PCNs are grouped under
+  // Top-level tabs. Service / MOT / Events / Preps / Issues / PCNs are grouped under
   // a single "History" parent with its own sub-tab bar; Details + Location
   // stay top-level. `?tab=` deep-links still accept the child names (and the
   // legacy `history` = Events alias) and resolve to History + the right sub-tab.
   const TOP_TABS = ['details', 'history', 'forecast', 'location'] as const
   type TopTab = typeof TOP_TABS[number]
-  const HISTORY_SUBS = ['service', 'events', 'preps', 'issues', 'pcns', 'claims'] as const
+  const HISTORY_SUBS = ['service', 'mot', 'events', 'preps', 'issues', 'pcns', 'claims'] as const
   type HistorySub = typeof HISTORY_SUBS[number]
 
   function parseTabParam(raw: string | null): { top: TopTab; sub?: HistorySub } {
@@ -276,8 +278,6 @@ export function VehicleDetailPage() {
     setFocusPrepEventId(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
-  const [editingTracker, setEditingTracker] = useState(false)
-  const [trackerInput, setTrackerInput] = useState('')
   const [washing, setWashing] = useState(false)
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
@@ -285,6 +285,9 @@ export function VehicleDetailPage() {
   const canEditMileage = isAdmin || opAuth?.userRole === 'weekend_manager'
   // Finance is stricter than the page's admin/manager gate — admin only.
   const isStrictAdmin = opAuth?.userRole === 'admin'
+  // Open sale (if any) — the header pill links to the sale page.
+  const openSales = useOpenSalesByVehicle()
+  const openSale = vehicle ? openSales.get(vehicle.id) : undefined
 
   const saveField = async (field: string, value: string | number | boolean | null) => {
     if (!vehicle) return
@@ -360,6 +363,13 @@ export function VehicleDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-2xl font-bold text-ooosh-navy">{vehicle.reg}</h2>
+            {/* Only once a sale exists (jon, 1 Oct 2026) — starting one lives in
+                Vehicle Settings, away from an accidental click. */}
+            {openSale && (
+              <Link to={vmPath(`/vehicles/${vehicle.id}/sale`)} className="inline-block hover:opacity-80">
+                <ForSalePill sale={openSale} />
+              </Link>
+            )}
             <p className="mt-0.5 text-sm text-gray-500">{vehicle.model || vehicle.vehicleType}</p>
             <p className="text-sm text-gray-400">{vehicle.make} · {vehicle.colour}</p>
           </div>
@@ -370,6 +380,8 @@ export function VehicleDetailPage() {
             {vehicle.seats && (
               <span className="text-xs text-gray-400">{vehicle.seats} seats</span>
             )}
+            {/* Only appears when a freelancer or sitter is in today/tomorrow (§21.4). */}
+            {!vehicle.isOldSold && <GiveToFreelancer vehicleId={vehicle.id} reg={vehicle.reg} />}
           </div>
         </div>
 
@@ -504,7 +516,7 @@ export function VehicleDetailPage() {
         <VehicleLocationTab reg={vehicle.reg} />
       )}
 
-      {/* History tab — sub-tab bar (Service / Events / Preps / Issues / PCNs) */}
+      {/* History tab — sub-tab bar (Service / MOT / Events / Preps / Issues / PCNs) */}
       {activeTab === 'history' && (
         <div className="space-y-4">
           <div className="flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 scrollbar-hide">
@@ -519,13 +531,17 @@ export function VehicleDetailPage() {
                     : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                {sub === 'service' ? 'Service' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : sub === 'pcns' ? 'PCNs' : 'Claims'}
+                {sub === 'service' ? 'Service' : sub === 'mot' ? 'MOT' : sub === 'events' ? 'Events' : sub === 'preps' ? 'Preps' : sub === 'issues' ? 'Issues' : sub === 'pcns' ? 'PCNs' : 'Claims'}
               </button>
             ))}
           </div>
 
           {historySub === 'service' && (
             <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
+          )}
+          {/* DVSA MOT history — every test, advisories, refresh from DVSA */}
+          {historySub === 'mot' && (
+            <MotHistoryTab vehicleId={vehicle.id} />
           )}
           {/* Events — book-outs, check-ins, preps. Rows link through to the
               full "life of a hire" comparison page. */}
@@ -586,6 +602,7 @@ export function VehicleDetailPage() {
           onSaveDate={v => saveField('mot_due', v)}
           onSaveBooked={v => saveField('mot_booked_in_date', v)}
         />
+        <MotDvsaNote vehicle={vehicle} />
         <ComplianceDateRow
           label="Tax Due" date={vehicle.taxDue} warningDays={cs.tax_warning_days}
           bookedIn={vehicle.taxBookedInDate}
@@ -718,58 +735,8 @@ export function VehicleDetailPage() {
       {/* Other Info */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Other Info</h3>
-        {/* Tracker number — inline editable */}
-        <div className="flex items-center justify-between py-2 border-b border-gray-100">
-          <span className="text-sm text-gray-500">GPS Tracker</span>
-          {editingTracker ? (
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={trackerInput}
-                onChange={e => setTrackerInput(e.target.value)}
-                placeholder="Tracker #"
-                className="w-20 rounded border border-gray-200 px-2 py-1 text-sm text-right focus:border-blue-300 focus:outline-none"
-                autoFocus
-              />
-              <button
-                type="button"
-                disabled={isAssigningTracker}
-                onClick={async () => {
-                  if (vehicle) {
-                    await assignTracker(vehicle.reg, trackerInput.trim() || null)
-                    setEditingTracker(false)
-                  }
-                }}
-                className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
-              >
-                {isAssigningTracker ? '...' : 'Save'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setEditingTracker(false)}
-                className="rounded px-2 py-1 text-xs text-gray-400 hover:text-gray-600"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-gray-900">
-                {trackerNumber ? `#${trackerNumber}` : 'Not fitted'}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setTrackerInput(trackerNumber || '')
-                  setEditingTracker(true)
-                }}
-                className="rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-              >
-                Edit
-              </button>
-            </div>
-          )}
-        </div>
+        {/* Tracker — from the register (Fleet Map › Trackers) */}
+        <VehicleTrackerRow vehicleId={vehicle.id} />
         <EditableRow label="Wifi Network" value={vehicle.wifiNetwork} type="text" onSave={v => saveField('wifi_network', v)} />
         {/* Finance With moved to the admin-only Finance & Lifecycle section */}
         <EditableRow label="ULEZ Compliant" value={vehicle.ulezCompliant} type="toggle" onSave={v => saveField('ulez_compliant', v)} />

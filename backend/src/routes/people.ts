@@ -1,10 +1,16 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
+import { recentlyViewedOrderSql, recordAddressBookView } from '../services/address-book-views';
+import { phoneDigitsForSearch } from '../services/address-book-search';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { redactPrivateFields, redactPrivateFieldsAll } from '../services/people-private-fields';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { getSitterJobsByDate, type ShiftJobRef } from '../services/studio-sitter';
+import { ukToday } from '../services/uk-date';
+import { notAltQuoteLossSql, optionCountSql } from '../services/job-groups';
+import { portalSignInStatus, issuePortalCodeForStaff, portalSignOutEverywhere } from '../services/portal-login-security';
 
 const router = Router();
 
@@ -140,15 +146,31 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const params: unknown[] = [];
     let paramIndex = 1;
 
+    // Search: name / email, plus the name of an org they're CURRENTLY at, plus
+    // phone numbers when the search looks like one (digits only, so "07700 900123"
+    // finds "+44 7700 900123"). Name/email matches sort first — see ORDER BY below.
+    let searchParam: string | null = null;
     if (search) {
+      searchParam = `$${paramIndex}`;
+      const phone = phoneDigitsForSearch(String(search));
       sql += ` AND (
         p.first_name ILIKE $${paramIndex} OR
         p.last_name ILIKE $${paramIndex} OR
         p.email ILIKE $${paramIndex} OR
-        CONCAT(p.first_name, ' ', p.last_name) ILIKE $${paramIndex}
+        CONCAT(p.first_name, ' ', p.last_name) ILIKE $${paramIndex} OR
+        EXISTS (
+          SELECT 1 FROM person_organisation_roles sr
+          JOIN organisations so ON so.id = sr.organisation_id AND so.is_deleted = false
+          WHERE sr.person_id = p.id AND sr.status = 'active' AND so.name ILIKE $${paramIndex}
+        )${phone ? ` OR
+        regexp_replace(CONCAT_WS(' ', p.mobile, p.phone, p.international_phone), '\\D', '', 'g') LIKE $${paramIndex + 1}` : ''}
       )`;
-      params.push(`%${search}%`);
+      params.push(`%${String(search).trim()}%`);
       paramIndex++;
+      if (phone) {
+        params.push(`%${phone}%`);
+        paramIndex++;
+      }
     }
 
     if (tag) {
@@ -240,7 +262,16 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       'last_contacted': `${lastContactSubquery} DESC NULLS LAST`,
       'review_due': 'p.freelancer_next_review_date ASC NULLS LAST',
     };
-    const orderBy = sortMap[sort as string] || 'p.last_name, p.first_name';
+    let orderBy = sortMap[sort as string] || 'p.last_name, p.first_name';
+    if (sort === 'recently_viewed') {
+      params.push(req.user!.id);
+      orderBy = `${recentlyViewedOrderSql('person', 'p.id', `$${paramIndex}`)}, p.last_name, p.first_name`;
+      paramIndex++;
+    } else if (searchParam && orderBy === 'p.last_name, p.first_name') {
+      // Name order with a search: people whose own name/email matched come before
+      // people only found via their org or phone (keeps short pickers useful).
+      orderBy = `CASE WHEN CONCAT(p.first_name, ' ', p.last_name) ILIKE ${searchParam} OR p.email ILIKE ${searchParam} THEN 0 ELSE 1 END, ${orderBy}`;
+    }
 
     sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
@@ -350,6 +381,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       res.status(404).json({ error: 'Person not found' });
       return;
     }
+
+    // Only the Person page passes this — pickers/forms reading this GET don't count as a view.
+    if (req.query.track_view === '1') void recordAddressBookView(req.user?.id, 'person', String(req.params.id));
 
     // Same `SELECT p.*` redaction as the list above.
     res.json(redactPrivateFields(result.rows[0]));
@@ -701,6 +735,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
                j.job_date, j.job_end, j.return_date, j.job_value,
                j.client_name, j.company_name, j.lost_reason, j.lost_detail,
+               j.option_no, j.group_id,
                jo.role AS link_role, o.name AS link_org_name,
                'organisation' AS link_type
         FROM person_organisation_roles por
@@ -715,6 +750,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
                j.job_date, j.job_end, j.return_date, j.job_value,
                j.client_name, j.company_name, j.lost_reason, j.lost_detail,
+               j.option_no, j.group_id,
                qa.role AS link_role, NULL AS link_org_name,
                'crew' AS link_type
         FROM quote_assignments qa
@@ -729,6 +765,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const jobsResult = await query(
       `${personJobsCTE}
        SELECT pj.*,
+              ${optionCountSql('pj')} AS option_count,
               (SELECT i.content FROM interactions i
                WHERE i.job_id = pj.id AND i.content LIKE 'Job retro:%'
                ORDER BY i.created_at DESC LIMIT 1
@@ -753,10 +790,10 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const statsResult = await query(
       `${personJobsCTE}
        SELECT
-         COUNT(*) AS total_jobs,
+         COUNT(*) FILTER (WHERE ${notAltQuoteLossSql('pj')}) AS total_jobs,
          COUNT(*) FILTER (WHERE pj.pipeline_status = 'completed' OR pj.status = 11) AS completed_jobs,
          COUNT(*) FILTER (WHERE pj.pipeline_status = 'confirmed' OR pj.status = 2) AS confirmed_jobs,
-         COUNT(*) FILTER (WHERE pj.pipeline_status = 'lost') AS lost_jobs,
+         COUNT(*) FILTER (WHERE pj.pipeline_status = 'lost' AND ${notAltQuoteLossSql('pj')}) AS lost_jobs,
          COALESCE(SUM(pj.job_value), 0) AS total_value
        FROM person_jobs pj${filterSql}`,
       [id, ...filterParams]
@@ -933,9 +970,22 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
       client_name: string | null;
       vehicle_reg: string | null;
       run_combined_fee: number | null;
+      // Sitter rows only: every job that needed a sitter that evening (a
+      // shift is per evening, so it can belong to more than one job).
+      jobs?: ShiftJobRef[];
     }
 
     const items: FreelancerHistoryItem[] = [];
+
+    // Non-fatal: a failure here only costs the sitter rows their job links.
+    let sitterJobs = new Map<string, ShiftJobRef[]>();
+    try {
+      sitterJobs = await getSitterJobsByDate(
+        sitterRes.rows.map((r: any) => r.shift_date).filter(Boolean),
+      );
+    } catch (err) {
+      console.error('[people] sitter job lookup failed (non-fatal):', err);
+    }
 
     for (const r of crewRes.rows) {
       // Fee for display: person's agreed rate wins, else quote-level fee.
@@ -984,6 +1034,7 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
         client_name: null,
         vehicle_reg: null,
         run_combined_fee: null,
+        jobs: sitterJobs.get(r.shift_date) ?? [],
       });
     }
 
@@ -1056,7 +1107,7 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
     // date_start falls in the current calendar year — past AND booked-ahead
     // within this year both count (deliberately simple).
     const DEAD = new Set(['cancelled', 'declined']);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = ukToday();
     const yearPrefix = today.slice(0, 4);
 
     let totalGigs = 0;
@@ -1088,6 +1139,63 @@ router.get('/:id/freelancer-history', async (req: AuthRequest, res: Response) =>
     });
   } catch (error) {
     console.error('Freelancer history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Portal sign-in (FREELANCER-PORTAL-SPEC §7): the Freelancer tab's card ──
+// Anyone on the staff team (jon, Oct 2026). Both actions are audit-logged;
+// the code itself never is.
+
+async function portalPerson(id: string) {
+  const r = await query(
+    `SELECT id, is_freelancer, portal_password_hash IS NOT NULL AS has_password
+       FROM people WHERE id = $1 AND is_deleted = false`,
+    [id]
+  );
+  return r.rows[0] as { id: string; is_freelancer: boolean; has_password: boolean } | undefined;
+}
+
+router.get('/:id/portal-sign-in', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    res.json({ data: await portalSignInStatus(person.id) });
+  } catch (error) {
+    console.error('Portal sign-in status error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// "Give them a sign-in code": for a freelancer whose code email isn't arriving.
+// Read it out on the phone; they still need their password.
+router.post('/:id/portal-sign-in/code', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    if (!person.has_password) {
+      res.status(400).json({ error: "They haven't set up a portal login yet, so a code won't help. They need to register first." });
+      return;
+    }
+    const issued = await issuePortalCodeForStaff(person.id, req.user!.id);
+    await logAudit(req.user!.id, 'people', person.id, 'portal_sign_in_code', null, { expires_minutes: issued.expiresMinutes });
+    res.json({ data: issued });
+  } catch (error) {
+    console.error('Portal sign-in code error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// "Sign them out everywhere": forgets every remembered phone and ends every portal session.
+router.post('/:id/portal-sign-in/sign-out', async (req: AuthRequest, res: Response) => {
+  try {
+    const person = await portalPerson(req.params.id as string);
+    if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+    await portalSignOutEverywhere(person.id);
+    await logAudit(req.user!.id, 'people', person.id, 'portal_sign_out_everywhere', null, {});
+    res.json({ data: { ok: true } });
+  } catch (error) {
+    console.error('Portal sign-out everywhere error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

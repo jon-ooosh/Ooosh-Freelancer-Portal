@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#ebe7e3;font-family:'DM Sans',system-ui,sans-serif;color:#1d1a1c;-webkit-font-smoothing:antialiased}
+a{color:#8c3f77;text-decoration:none}a:hover{color:#6e2f5d}
+*{box-sizing:border-box}
+</style>
+</helmet>
+<section id="3" style="padding:64px 64px 24px;display:flex;flex-direction:column;gap:40px;border-bottom:1px solid #d9d2cc">
+<div style="display:flex;flex-direction:column;gap:8px;max-width:840px">
+<div style="font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#8c3f77">Round 3 · van book-out &amp; collection (freelancer view)</div>
+<div style="font-size:34px;font-weight:700;letter-spacing:-.02em;line-height:1.15">After "Van only" or "Both"</div>
+<div style="font-size:17px;line-height:1.5;color:#3d373a;text-wrap:pretty">These screens live in the Ooosh vehicles app, which freelancers enter through a secure link. Restyling only the freelancer view lets this flow match the portal without touching the staff screens. The steps are unchanged: confirm van → fuel &amp; mileage → walk-around photos → briefing → sign. A collection is the same minus the briefing.</div>
+</div>
+<div style="display:flex;gap:48px;align-items:flex-start;flex-wrap:wrap">
+
+<!-- 3a CONFIRM VAN -->
+<div id="3a" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">3a</span><span style="font-size:15px;font-weight:600">Is this the van?</span></div>
+<div data-screen-label="Book-out confirm van" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 8px 0;height:103px;display:flex;align-items:center"><div style="height:44px;padding:0 10px;display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Portal</div></div>
+<div style="padding:8px 16px;display:flex;flex-direction:column;gap:18px">
+<div style="padding:0 4px;display:flex;flex-direction:column;gap:6px"><div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#2f5573">Van delivery · Fontaines D.C.</div><div style="font-size:26px;font-weight:700;letter-spacing:-.02em;line-height:1.2">Is this the van in front of you?</div></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:18px;padding:22px 20px;display:flex;flex-direction:column;align-items:center;gap:14px">
+<div style="background:#f7d11e;border:2px solid #1d1a1c;border-radius:8px;padding:8px 18px;font-size:30px;font-weight:700;letter-spacing:.06em;color:#1d1a1c;font-family:'DM Sans',sans-serif">RX24 KHV</div>
+<div style="display:flex;flex-direction:column;align-items:center;gap:2px"><div style="font-size:17px;font-weight:600">Premium LWB splitter</div><div style="font-size:15px;color:#6f6569">Auto gearbox · 9 seats</div></div>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="height:56px;border-radius:14px;background:#A75390;color:#fff;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center">Yes, that's the van</div>
+<div style="height:52px;border-radius:14px;background:#fff;border:1.5px solid #e3ddd8;color:#3d373a;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center">No — call the office</div>
+</div>
+<div style="font-size:14px;color:#6f6569;line-height:1.45;padding:0 4px">If more than one van is on this job, you'll pick the reg here first.</div>
+</div>
+</div>
+</div>
+
+<!-- 3b FUEL & MILEAGE -->
+<div id="3b" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">3b</span><span style="font-size:15px;font-weight:600">Step 1 — fuel &amp; mileage</span></div>
+<div data-screen-label="Book-out state" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 16px 0;display:flex;flex-direction:column;gap:10px">
+<div style="height:44px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Exit</div><div style="font-size:15px;font-weight:600">Book out · RX24 KHV</div><div style="font-size:14px;color:#6f6569">1 of 4</div></div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px"><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#e3ddd8"></div><div style="height:4px;border-radius:999px;background:#e3ddd8"></div><div style="height:4px;border-radius:999px;background:#e3ddd8"></div></div>
+</div>
+<div style="padding:20px 16px;display:flex;flex-direction:column;gap:16px">
+<div style="padding:0 4px;font-size:26px;font-weight:700;letter-spacing:-.02em">Fuel &amp; mileage</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:6px">
+<div style="font-size:14px;font-weight:600;color:#3d373a">Mileage</div>
+<div style="height:60px;border:1.5px solid #A75390;box-shadow:0 0 0 4px #f6eaf2;border-radius:12px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;font-size:26px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:.02em"><span>48,213</span><span style="font-size:16px;font-weight:500;color:#6f6569">mi</span></div>
+<div style="font-size:14px;color:#6f6569">Read it off the dashboard display</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px">
+<div style="display:flex;justify-content:space-between;align-items:baseline"><span style="font-size:14px;font-weight:600;color:#3d373a">Fuel</span><span style="font-size:20px;font-weight:700">6/8</span></div>
+<div style="height:10px;border-radius:999px;background:#f3f0ed;overflow:hidden"><div style="width:75%;height:100%;background:#3f9b6b"></div></div>
+<div style="display:grid;grid-template-columns:repeat(9,1fr);gap:4px">
+<div style="height:44px;border-radius:9px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600">E</div>
+<div style="height:44px;border-radius:9px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">1</div>
+<div style="height:44px;border-radius:9px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">2</div>
+<div style="height:44px;border-radius:9px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">3</div>
+<div style="height:44px;border-radius:9px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">4</div>
+<div style="height:44px;border-radius:9px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">5</div>
+<div style="height:44px;border-radius:9px;background:#1d1a1c;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">6</div>
+<div style="height:44px;border-radius:9px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">7</div>
+<div style="height:44px;border-radius:9px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600">F</div>
+</div>
+<div style="font-size:14px;color:#6f6569">Eighths, as on the gauge</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:12px 16px 32px;background:#fff;border-top:1px solid #e8e3df;display:grid;grid-template-columns:1fr 2fr;gap:10px">
+<div style="height:54px;border-radius:14px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#3d373a">Back</div>
+<div style="height:54px;border-radius:14px;background:#A75390;color:#fff;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:600">Next: photos</div>
+</div>
+</div>
+</div>
+
+<!-- 3c PHOTOS -->
+<div id="3c" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">3c</span><span style="font-size:15px;font-weight:600">Step 2 — walk-around photos</span></div>
+<div data-screen-label="Book-out photos" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 16px 0;display:flex;flex-direction:column;gap:10px">
+<div style="height:44px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Exit</div><div style="font-size:15px;font-weight:600">Book out · RX24 KHV</div><div style="font-size:14px;color:#6f6569">2 of 4</div></div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px"><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#e3ddd8"></div><div style="height:4px;border-radius:999px;background:#e3ddd8"></div></div>
+</div>
+<div style="padding:18px 16px;display:flex;flex-direction:column;gap:14px">
+<div style="padding:0 4px;display:flex;justify-content:space-between;align-items:baseline"><span style="font-size:26px;font-weight:700;letter-spacing:-.02em">Photos</span><span style="font-size:15px;font-weight:600;color:#2a7049">6 of 18</span></div>
+<div style="background:#1d1a1c;border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:12px">
+<div style="display:flex;justify-content:space-between;align-items:center"><div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:13px;font-weight:600;color:#cdbfc8">Next up · 7 of 18</span><span style="font-size:19px;font-weight:700;color:#fff">Right panel</span></div><span style="font-size:13px;font-weight:600;color:#cdbfc8">Walk clockwise</span></div>
+<div style="height:104px;border-radius:12px;border:1.5px dashed #6f6569;display:flex;align-items:center;justify-content:center;font-size:14px;color:#cdbfc8">Framing guide for this angle</div>
+<div style="height:54px;border-radius:14px;background:#fff;color:#1d1a1c;display:flex;align-items:center;justify-content:center;gap:8px;font-size:17px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="14" rx="2"></rect><circle cx="12" cy="13" r="3.5"></circle><path d="M8 6l1.5-2h5L16 6"></path></svg>Take photo</div>
+</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+<div style="aspect-ratio:1;border-radius:10px;background:#d9d2cc;position:relative;display:flex;align-items:flex-end;padding:5px"><span style="font-size:10px;font-weight:700;color:#fff;background:rgba(29,26,28,.6);border-radius:4px;padding:1px 4px">Front</span><span style="position:absolute;top:5px;right:5px;width:16px;height:16px;border-radius:999px;background:#3f9b6b"></span></div>
+<div style="aspect-ratio:1;border-radius:10px;background:#d9d2cc;position:relative;display:flex;align-items:flex-end;padding:5px"><span style="font-size:10px;font-weight:700;color:#fff;background:rgba(29,26,28,.6);border-radius:4px;padding:1px 4px">Front R</span><span style="position:absolute;top:5px;right:5px;width:16px;height:16px;border-radius:999px;background:#3f9b6b"></span></div>
+<div style="aspect-ratio:1;border-radius:10px;background:#d9d2cc;position:relative;display:flex;align-items:flex-end;padding:5px"><span style="font-size:10px;font-weight:700;color:#fff;background:rgba(29,26,28,.6);border-radius:4px;padding:1px 4px">Pass door</span><span style="position:absolute;top:5px;right:5px;width:16px;height:16px;border-radius:999px;background:#3f9b6b"></span></div>
+<div style="aspect-ratio:1;border-radius:10px;background:#d9d2cc;position:relative;display:flex;align-items:flex-end;padding:5px"><span style="font-size:10px;font-weight:700;color:#fff;background:rgba(29,26,28,.6);border-radius:4px;padding:1px 4px">Int front</span><span style="position:absolute;top:5px;right:5px;width:16px;height:16px;border-radius:999px;background:#3f9b6b"></span></div>
+<div style="aspect-ratio:1;border-radius:10px;background:#d9d2cc;position:relative;display:flex;align-items:flex-end;padding:5px"><span style="font-size:10px;font-weight:700;color:#fff;background:rgba(29,26,28,.6);border-radius:4px;padding:1px 4px">Sliding</span><span style="position:absolute;top:5px;right:5px;width:16px;height:16px;border-radius:999px;background:#3f9b6b"></span></div>
+<div style="aspect-ratio:1;border-radius:10px;background:#d9d2cc;position:relative;display:flex;align-items:flex-end;padding:5px"><span style="font-size:10px;font-weight:700;color:#fff;background:rgba(29,26,28,.6);border-radius:4px;padding:1px 4px">Int rear</span><span style="position:absolute;top:5px;right:5px;width:16px;height:16px;border-radius:999px;background:#3f9b6b"></span></div>
+<div style="aspect-ratio:1;border-radius:10px;border:2px solid #A75390;background:#f6eaf2;display:flex;align-items:flex-end;padding:5px"><span style="font-size:10px;font-weight:700;color:#7d3569">Right panel</span></div>
+<div style="aspect-ratio:1;border-radius:10px;border:1.5px dashed #cfc6c0;display:flex;align-items:flex-end;padding:5px"><span style="font-size:10px;font-weight:600;color:#6f6569">Rear R</span></div>
+</div>
+<div style="font-size:14px;color:#6f6569;padding:0 4px">+ 10 more · rear doors, left side, windscreen, dashboard. Tap any tile to retake.</div>
+<div style="height:44px;border-radius:12px;border:1.5px solid #e3ddd8;background:#fff;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;color:#3d373a">+ Add an extra photo</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:12px 16px 32px;background:#fff;border-top:1px solid #e8e3df;display:grid;grid-template-columns:1fr 2fr;gap:10px">
+<div style="height:54px;border-radius:14px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#3d373a">Back</div>
+<div style="height:54px;border-radius:14px;background:#cdbfc8;color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600">12 photos to go</div>
+</div>
+</div>
+</div>
+
+<!-- 3d BRIEFING -->
+<div id="3d" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">3d</span><span style="font-size:15px;font-weight:600">Step 3 — customer briefing</span></div>
+<div data-screen-label="Book-out briefing" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 16px 0;display:flex;flex-direction:column;gap:10px">
+<div style="height:44px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Exit</div><div style="font-size:15px;font-weight:600">Book out · RX24 KHV</div><div style="font-size:14px;color:#6f6569">3 of 4</div></div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px"><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#e3ddd8"></div></div>
+</div>
+<div style="padding:18px 16px;display:flex;flex-direction:column;gap:14px">
+<div style="padding:0 4px;display:flex;flex-direction:column;gap:4px"><div style="font-size:26px;font-weight:700;letter-spacing:-.02em">Show the driver</div><div style="font-size:15px;color:#6f6569">Premium van · tick each one as you go</div></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;gap:12px"><div style="width:26px;height:26px;flex:none;border-radius:8px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div><span style="font-size:16px">Power &amp; reversing horn switches</span></div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;flex:none;border-radius:8px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div><span style="font-size:16px">Where the wifi password is</span></div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;flex:none;border-radius:8px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div><span style="font-size:16px">TV / Apple TV</span></div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;flex:none;border-radius:8px;border:2px solid #cfc6c0"></div><span style="font-size:16px">Deadlocks</span></div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;flex:none;border-radius:8px;border:2px solid #cfc6c0"></div><span style="font-size:16px">Boot lights</span></div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;flex:none;border-radius:8px;border:2px solid #cfc6c0"></div><span style="font-size:16px">QR codes for manuals &amp; help</span></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:6px"><div style="font-size:14px;font-weight:600;color:#3d373a">Notes (optional)</div><div style="min-height:60px;border:1.5px solid #e3ddd8;border-radius:12px;padding:10px 12px;font-size:15px;color:#9a9094">Anything you noticed about the van…</div></div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:12px 16px 32px;background:#fff;border-top:1px solid #e8e3df;display:grid;grid-template-columns:1fr 2fr;gap:10px">
+<div style="height:54px;border-radius:14px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#3d373a">Back</div>
+<div style="height:54px;border-radius:14px;background:#A75390;color:#fff;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:600">Next: sign</div>
+</div>
+</div>
+</div>
+
+<!-- 3e CONFIRM & SIGN -->
+<div id="3e" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">3e</span><span style="font-size:15px;font-weight:600">Step 4 — check &amp; sign</span></div>
+<div data-screen-label="Book-out confirm" style="width:390px;min-height:844px;padding-bottom:110px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 16px 0;display:flex;flex-direction:column;gap:10px">
+<div style="height:44px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Exit</div><div style="font-size:15px;font-weight:600">Book out · RX24 KHV</div><div style="font-size:14px;color:#6f6569">4 of 4</div></div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px"><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#A75390"></div></div>
+</div>
+<div style="padding:18px 16px;display:flex;flex-direction:column;gap:14px">
+<div style="padding:0 4px;font-size:26px;font-weight:700;letter-spacing:-.02em">Check &amp; sign</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="height:48px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:15px;color:#6f6569">Driver</span><span style="font-size:16px;font-weight:600">Grian Chatten</span></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="height:48px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:15px;color:#6f6569">Mileage</span><span style="font-size:16px;font-weight:600">48,213 mi</span></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="height:48px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:15px;color:#6f6569">Fuel</span><span style="font-size:16px;font-weight:600">6/8</span></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="height:48px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:15px;color:#6f6569">Photos</span><span style="font-size:16px;font-weight:600">18 taken</span></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="height:48px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:15px;color:#6f6569">Hire ends</span><span style="font-size:16px;font-weight:600">Sun 26 Oct, 6pm</span></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px">
+<div style="display:flex;justify-content:space-between"><span style="font-size:14px;font-weight:600;color:#3d373a">Driver's signature</span><span style="font-size:14px;font-weight:600;color:#8c3f77">Clear</span></div>
+<div style="height:195px;border:1.5px dashed #cfc6c0;border-radius:12px;background:#f8f6f4;display:flex;align-items:flex-end;justify-content:center;padding-bottom:12px;font-size:14px;color:#6f6569">Hand the phone to the driver</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:12px 16px 32px;background:#fff;border-top:1px solid #e8e3df;display:grid;grid-template-columns:1fr 2fr;gap:10px">
+<div style="height:54px;border-radius:14px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#3d373a">Back</div>
+<div style="height:54px;border-radius:14px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:600">Book out van</div>
+</div>
+</div>
+</div>
+
+<!-- 3f DONE -->
+<div id="3f" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">3f</span><span style="font-size:15px;font-weight:600">Done → back to portal</span></div>
+<div data-screen-label="Book-out done" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8;display:flex;flex-direction:column">
+<div style="flex:1;padding:47px 20px 32px;display:flex;flex-direction:column;justify-content:center;gap:24px">
+<div style="display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center">
+<div style="width:72px;height:72px;border-radius:999px;background:#e4f3ea;color:#2a7049;display:flex;align-items:center;justify-content:center"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div>
+<div style="font-size:26px;font-weight:700;letter-spacing:-.02em">Van booked out</div>
+<div style="font-size:16px;color:#3d373a;line-height:1.5;max-width:300px">RX24 KHV is with Fontaines D.C. The condition report has been emailed to the customer.</div>
+</div>
+<div style="background:#f6eaf2;border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;font-weight:700;color:#5e2a50">Doing "Both"?</span><span style="font-size:15px;color:#5e2a50;line-height:1.45">Next is the equipment checklist — the button below takes you straight there.</span></div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="height:56px;border-radius:14px;background:#A75390;color:#fff;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center">Back to the portal</div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- 3g COLLECTION -->
+<div id="3g" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">3g</span><span style="font-size:15px;font-weight:600">Van collection — last step</span></div>
+<div data-screen-label="Collection confirm" style="width:390px;min-height:844px;padding-bottom:110px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 16px 0;display:flex;flex-direction:column;gap:10px">
+<div style="height:44px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Exit</div><div style="font-size:15px;font-weight:600">Collect · RX24 KHV</div><div style="font-size:14px;color:#6f6569">3 of 3</div></div>
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px"><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#A75390"></div><div style="height:4px;border-radius:999px;background:#A75390"></div></div>
+</div>
+<div style="padding:18px 16px;display:flex;flex-direction:column;gap:14px">
+<div style="padding:0 4px;font-size:26px;font-weight:700;letter-spacing:-.02em">Notes &amp; sign</div>
+<div style="background:#fff8e6;border:1px solid #f2dca6;border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;font-weight:700;color:#8a5a10">Less fuel than it went out with</span><span style="font-size:15px;color:#8a5a10">Out at 6/8 · now 3/8</span></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="height:48px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:15px;color:#6f6569">Mileage</span><span style="font-size:16px;font-weight:600">49,027 mi <span style="font-weight:500;color:#6f6569">(+814)</span></span></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="height:48px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:15px;color:#6f6569">Photos</span><span style="font-size:16px;font-weight:600">18 taken</span></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:6px"><div style="font-size:14px;font-weight:600;color:#3d373a">Any damage or problems?</div><div style="min-height:52px;border:1.5px solid #e3ddd8;border-radius:12px;padding:10px 12px;font-size:15px;color:#3d373a">Driver says a small scuff on the rear bumper — photo added.</div></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px">
+<div style="display:flex;justify-content:space-between"><span style="font-size:14px;font-weight:600;color:#3d373a">Your signature</span><span style="font-size:14px;font-weight:600;color:#8c3f77">Clear</span></div>
+<div style="height:144px;border:1.5px dashed #cfc6c0;border-radius:12px;background:#f8f6f4;display:flex;align-items:flex-end;justify-content:center;padding-bottom:10px;font-size:14px;color:#6f6569">Sign with your finger</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:12px 16px 32px;background:#fff;border-top:1px solid #e8e3df;display:grid;grid-template-columns:1fr 2fr;gap:10px">
+<div style="height:54px;border-radius:14px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#3d373a">Back</div>
+<div style="height:54px;border-radius:14px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:600">Van collected</div>
+</div>
+</div>
+</div>
+
+<sc-if value="{{ showNotes }}" hint-placeholder-val="{{ true }}">
+<div style="width:340px;display:flex;flex-direction:column;gap:18px;padding-top:34px">
+<div style="font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6f6569">Notes on round 3</div>
+<div style="display:flex;flex-direction:column;gap:14px;font-size:15px;line-height:1.5;color:#3d373a">
+<div><strong style="color:#1d1a1c">Where it lives.</strong> Same pages staff use (BookOutPage / CollectionPage), opened through the freelancer link. Restyle only when the user is a freelancer, or make it a separate freelancer theme — the staff navy look stays.</div>
+<div><strong style="color:#1d1a1c">Steps.</strong> Freelancers already skip "Select vehicle" and "Driver &amp; hire", so they see 4 steps: Fuel &amp; mileage · Photos · Briefing · Confirm. Collection has 3.</div>
+<div><strong style="color:#1d1a1c">Fuel.</strong> The 9 eighths stay, as one row of 44px buttons and a gauge bar, instead of a dropdown.</div>
+<div><strong style="color:#1d1a1c">Photos.</strong> The 18 angles in walk-around order. The "next up" card prompts one angle at a time and the grid below shows progress. The Next button tells you how many photos are left rather than just being greyed out.</div>
+<div><strong style="color:#1d1a1c">Briefing.</strong> The list comes from the van type's settings (Premium shown). Copy is shortened to the thing being shown.</div>
+<div><strong style="color:#1d1a1c">Collection.</strong> The existing fuel-drop warning stays, now as an amber banner.</div>
+</div>
+</div>
+</sc-if>
+</div>
+</section>
+<section id="2" style="padding:64px 64px 24px;display:flex;flex-direction:column;gap:40px;border-bottom:1px solid #d9d2cc">
+<div style="display:flex;flex-direction:column;gap:8px;max-width:820px">
+<div style="font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#8c3f77">Round 2 · jobs by date + the rest of the portal</div>
+<div style="font-size:34px;font-weight:700;letter-spacing:-.02em;line-height:1.15">Say what the job is, and how you get home</div>
+<div style="font-size:17px;line-height:1.5;color:#3d373a;text-wrap:pretty">Each card now says what's moving (Backline / Van) and the travel that implies. Jobs list sorts by date by default with a By type toggle (tap it in <a href="#2a">2a</a>). Flows are unchanged — same steps, same rules, same routes.</div>
+</div>
+<div style="display:flex;gap:48px;align-items:flex-start;flex-wrap:wrap">
+
+<!-- 2a JOBS BY DATE -->
+<div id="2a" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">2a</span><span style="font-size:15px;font-weight:600">Jobs — tap the toggle</span></div>
+<div data-screen-label="Jobs v2" style="width:390px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 20px 0">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 0 6px">
+<div style="display:flex;align-items:center;gap:12px">
+<img src="public/ooosh-tours-logo-small.png" alt="Ooosh Tours" style="width:40px;height:40px;object-fit:contain">
+<div style="display:flex;flex-direction:column"><div style="font-size:22px;font-weight:700;letter-spacing:-.02em;line-height:1.2">Morning, Sam</div><div style="font-size:13px;color:#6f6569">Updated just now</div></div>
+</div>
+<div style="display:flex;gap:4px">
+<div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:#3d373a"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 00-14.9-3.5M4 4v4h4M4 13a8 8 0 0014.9 3.5M20 20v-4h-4"></path></svg></div>
+<div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;color:#3d373a"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3M10 16l-4-4 4-4M6 12h10"></path></svg></div>
+</div>
+</div>
+<div style="margin-top:10px;background:#ece8e4;border-radius:12px;padding:4px;display:grid;grid-template-columns:1fr 1fr;gap:4px">
+<sc-if value="{{ byDate }}" hint-placeholder-val="{{ true }}">
+<div style="height:38px;border-radius:9px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.08);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;cursor:pointer">By date</div>
+<div onClick="{{ setType }}" style="height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;color:#6f6569;cursor:pointer">By type</div>
+</sc-if>
+<sc-if value="{{ byType }}" hint-placeholder-val="{{ false }}">
+<div onClick="{{ setDate }}" style="height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;color:#6f6569;cursor:pointer">By date</div>
+<div style="height:38px;border-radius:9px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.08);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;cursor:pointer">By type</div>
+</sc-if>
+</div>
+</div>
+
+<div style="padding:20px 16px 112px;display:flex;flex-direction:column;gap:26px">
+<!-- pinned offer -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:8px;padding:0 4px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#8a5a10">Needs your answer</span></div>
+<div style="background:#fff;border:1.5px solid #f2dca6;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px">
+<div style="display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f3f0ed;color:#3d373a;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 005 5L13 18a2.1 2.1 0 01-3-3l6.7-6.7M14.7 6.3L17 4a4 4 0 00-5 5"></path></svg></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#3d373a">Ooosh yard day</div><div style="font-size:16px;font-weight:600">Thursday 23 Oct · Full day</div></div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600">£140</div></sc-if>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+<div style="height:50px;border-radius:12px;background:#3f9b6b;color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center">Yes, I can do it</div>
+<div style="height:50px;border-radius:12px;background:#fff;border:1.5px solid #e3ddd8;color:#3d373a;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center">Sorry, I can't</div>
+</div>
+</div>
+</div>
+
+<sc-if value="{{ byDate }}" hint-placeholder-val="{{ true }}">
+<!-- TODAY -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:baseline;gap:8px;padding:0 4px"><span style="font-size:17px;font-weight:700">Today</span><span style="font-size:15px;color:#6f6569">Tue 21 Oct</span></div>
+
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;overflow:hidden">
+<div style="padding:16px;display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"></rect><circle cx="12" cy="14" r="4"></circle><circle cx="12" cy="14" r="1"></circle><path d="M8 7h.01M12 7h4"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8c3f77">Backline delivery</div>
+<div style="font-size:17px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">The Lexington</div>
+<div style="font-size:14px;color:#6f6569">10:00 AM · Islington, N1</div>
+<div style="display:flex;margin-top:5px"><span style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#3d373a;background:#f3f0ed;border-radius:999px;padding:3px 10px 3px 8px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h16M14 6l6 6-6 6M10 18l-6-6"></path></svg>Driving there &amp; back</span></div>
+</div>
+<div style="display:flex;align-items:center;gap:6px">
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600">£85</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+<div style="padding:0 16px 16px"><div style="height:52px;border-radius:12px;background:#A75390;color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"></path></svg>Start delivery</div></div>
+</div>
+
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;overflow:hidden">
+<div style="padding:16px;display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#e7eef4;color:#2f5573;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16V7a1 1 0 011-1h11l5 4h1a2 2 0 012 2v4h-2M2 16h2m4 0h8"></path><circle cx="6" cy="17" r="2"></circle><circle cx="18" cy="17" r="2"></circle><path d="M14 6v4h5"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#2f5573">Van delivery</div>
+<div style="font-size:17px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">Fontaines D.C. · hotel drop</div>
+<div style="font-size:14px;color:#6f6569">1:30 PM · Hoxton, E1</div>
+<div style="display:flex;margin-top:5px"><span style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#2f5573;background:#e7eef4;border-radius:999px;padding:3px 10px 3px 8px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="14" rx="3"></rect><path d="M6 11h12M9 21l-1.5-4M15 21l1.5-4"></path></svg>One way · train back</span></div>
+</div>
+<div style="display:flex;align-items:center;gap:6px">
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600">£60</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+<div style="padding:0 16px 16px"><div style="height:52px;border-radius:12px;background:#A75390;color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"></path></svg>Start delivery</div></div>
+</div>
+
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;overflow:hidden">
+<div style="padding:16px;display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#ecebf6;color:#4b4790;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#4b4790">Studio sitter</span><span style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;background:#1d1a1c;color:#fff;border-radius:6px;padding:2px 6px">Tonight</span></div>
+<div style="font-size:17px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">6:00pm – 11:30pm</div>
+<div style="font-size:14px;color:#6f6569">Sorry Kids · Studio 2 &nbsp;·&nbsp; Wet Leg · Studio 1</div>
+</div>
+<div style="display:flex;align-items:center;gap:6px">
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600">£90</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+<div style="padding:0 16px 16px"><div style="height:52px;border-radius:12px;background:#1d1a1c;color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 018 0v3"></path></svg>Lock up</div></div>
+</div>
+</div>
+
+<!-- TOMORROW -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:baseline;gap:8px;padding:0 4px"><span style="font-size:17px;font-weight:700">Tomorrow</span><span style="font-size:15px;color:#6f6569">Wed 22 Oct</span></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#e7eef4;color:#2f5573;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16V7a1 1 0 011-1h11l5 4h1a2 2 0 012 2v4h-2M2 16h2m4 0h8"></path><circle cx="6" cy="17" r="2"></circle><circle cx="18" cy="17" r="2"></circle><path d="M14 6v4h5"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#2f5573">Van collection</div>
+<div style="font-size:16px;font-weight:600">O2 Forum Kentish Town</div>
+<div style="font-size:14px;color:#6f6569">9:00 AM</div>
+<div style="display:flex;margin-top:5px"><span style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#2f5573;background:#e7eef4;border-radius:999px;padding:3px 10px 3px 8px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="14" rx="3"></rect><path d="M6 11h12M9 21l-1.5-4M15 21l1.5-4"></path></svg>Train there · drive back</span></div>
+</div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600">£55</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+
+<!-- LATER -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:baseline;gap:8px;padding:0 4px"><span style="font-size:17px;font-weight:700">Later</span><span style="font-size:15px;color:#6f6569">next 30 days</span></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center">
+<div style="width:44px;flex:none;display:flex;flex-direction:column;align-items:center;line-height:1.1"><span style="font-size:12px;font-weight:700;text-transform:uppercase;color:#6f6569">Fri</span><span style="font-size:20px;font-weight:700">24</span></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#2a7049">Crew · Backline tech</div>
+<div style="font-size:16px;font-weight:600">Roundhouse</div>
+<div style="font-size:14px;color:#6f6569">to Sun 26 · 3 days · Driving + crew</div>
+</div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600">£540</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+<div style="height:1px;background:#f0ece9;margin-left:72px"></div>
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center">
+<div style="width:44px;flex:none;display:flex;flex-direction:column;align-items:center;line-height:1.1"><span style="font-size:12px;font-weight:700;text-transform:uppercase;color:#6f6569">Sat</span><span style="font-size:20px;font-weight:700">25</span></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#4b4790">Studio sitter</div>
+<div style="font-size:16px;font-weight:600">5:00pm – 11:00pm</div>
+<div style="display:flex"><span style="font-size:12px;font-weight:600;background:#fff8e6;color:#8a5a10;border-radius:999px;padding:1px 8px">Assigned</span></div>
+</div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600">£90</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+<div style="height:1px;background:#f0ece9;margin-left:72px"></div>
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center">
+<div style="width:44px;flex:none;display:flex;flex-direction:column;align-items:center;line-height:1.1"><span style="font-size:12px;font-weight:700;text-transform:uppercase;color:#6f6569">Mon</span><span style="font-size:20px;font-weight:700">27</span></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8c3f77">Backline run · 3 stops</div>
+<div style="font-size:16px;font-weight:600">Camden collections</div>
+<div style="font-size:14px;color:#6f6569">2:30 PM · driving there &amp; back</div>
+</div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600">£150</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ byType }}" hint-placeholder-val="{{ false }}">
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:8px;padding:0 4px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Deliveries &amp; collections</span><span style="font-size:12px;font-weight:700;background:#f6eaf2;color:#7d3569;border-radius:999px;padding:2px 8px">4</span></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"></rect><circle cx="12" cy="14" r="4"></circle><path d="M8 7h.01M12 7h4"></path></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Backline delivery · The Lexington</div><div style="font-size:14px;color:#6f6569">Today 10:00 AM · there &amp; back</div></div></div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#e7eef4;color:#2f5573;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16V7a1 1 0 011-1h11l5 4h1a2 2 0 012 2v4h-2M2 16h2m4 0h8"></path><circle cx="6" cy="17" r="2"></circle><circle cx="18" cy="17" r="2"></circle></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Van delivery · Fontaines D.C.</div><div style="font-size:14px;color:#6f6569">Today 1:30 PM · train back</div></div></div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#e7eef4;color:#2f5573;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16V7a1 1 0 011-1h11l5 4h1a2 2 0 012 2v4h-2M2 16h2m4 0h8"></path><circle cx="6" cy="17" r="2"></circle><circle cx="18" cy="17" r="2"></circle></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Van collection · O2 Forum</div><div style="font-size:14px;color:#6f6569">Wed 22 · train there</div></div></div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"></circle><circle cx="18" cy="19" r="2"></circle><path d="M8 5h8a3.5 3.5 0 010 7H8a3.5 3.5 0 000 7h8"></path></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Backline run · 3 stops</div><div style="font-size:14px;color:#6f6569">Mon 27 · there &amp; back</div></div></div>
+</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:8px;padding:0 4px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Studio shifts</span><span style="font-size:12px;font-weight:700;background:#f6eaf2;color:#7d3569;border-radius:999px;padding:2px 8px">2</span></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#ecebf6;color:#4b4790;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"></path></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Tonight · 6:00pm – 11:30pm</div><div style="font-size:14px;color:#6f6569">2 bands in</div></div></div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#ecebf6;color:#4b4790;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"></path></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Sat 25 · 5:00pm – 11:00pm</div><div style="font-size:14px;color:#6f6569">Assigned</div></div></div>
+</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:8px;padding:0 4px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Crew</span><span style="font-size:12px;font-weight:700;background:#f6eaf2;color:#7d3569;border-radius:999px;padding:2px 8px">1</span></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;gap:12px;align-items:center"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#e4f3ea;color:#2a7049;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"></circle><path d="M5 20c1-4 3.8-6 7-6s6 2 7 6"></path></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Backline tech · Roundhouse</div><div style="font-size:14px;color:#6f6569">Fri 24 – Sun 26 · Driving + crew</div></div></div>
+</div>
+</sc-if>
+
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="height:56px;padding:0 16px;display:flex;align-items:center;gap:12px"><div style="width:28px;height:28px;border-radius:999px;background:#e4f3ea;color:#2a7049;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div><div style="flex:1;font-size:16px;font-weight:500">Completed</div><div style="font-size:15px;color:#6f6569">12</div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+<div style="height:1px;background:#f0ece9;margin-left:56px"></div>
+<div style="height:56px;padding:0 16px;display:flex;align-items:center;gap:12px"><div style="width:28px;height:28px;border-radius:999px;background:#f3f0ed;color:#6f6569;display:flex;align-items:center;justify-content:center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg></div><div style="flex:1;font-size:16px;font-weight:500">Cancelled</div><div style="font-size:15px;color:#6f6569">1</div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+</div>
+</div>
+
+<div style="position:absolute;left:0;right:0;bottom:0;background:rgba(255,255,255,.94);border-top:1px solid #e8e3df;padding:8px 12px 26px;display:grid;grid-template-columns:repeat(4,1fr)">
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#8c3f77"><div style="width:52px;height:30px;border-radius:999px;background:#f6eaf2;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"></rect><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M3 13h18"></path></svg></div><span style="font-size:12px;font-weight:700">Jobs</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 6.5A4 4 0 009 9v3H7m2 0v4c0 1.5-1 2.5-2 3h11M9 12h5"></path></svg></div><span style="font-size:12px;font-weight:500">Earnings</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a1 1 0 011-1h5a2 2 0 012 2v14a2 2 0 00-2-2H4zM20 5a1 1 0 00-1-1h-5a2 2 0 00-2 2v14a2 2 0 012-2h6z"></path></svg></div><span style="font-size:12px;font-weight:500">Resources</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg></div><span style="font-size:12px;font-weight:500">Settings</span></div>
+</div>
+</div>
+</div>
+
+<!-- 2b START -->
+<div id="2b" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">2b</span><span style="font-size:15px;font-weight:600">Start — what are you delivering?</span></div>
+<div data-screen-label="Start" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 8px 0;height:103px;display:flex;align-items:center"><div style="height:44px;padding:0 10px;display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>The Lexington</div></div>
+<div style="padding:8px 16px;display:flex;flex-direction:column;gap:16px">
+<div style="padding:0 4px;display:flex;flex-direction:column;gap:6px"><div style="font-size:26px;font-weight:700;letter-spacing:-.02em;line-height:1.2">What are you delivering today?</div></div>
+<div style="background:#f6eaf2;border-radius:14px;padding:12px 14px;font-size:15px;line-height:1.45;color:#5e2a50"><strong>This job is booked as backline.</strong> Only pick a van option if you're also delivering an Ooosh hire van.</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="background:#fff;border:2px solid #A75390;border-radius:16px;padding:16px;display:flex;gap:14px;align-items:center;min-height:80px">
+<div style="width:44px;height:44px;flex:none;border-radius:12px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"></rect><circle cx="12" cy="14" r="4"></circle><path d="M8 7h.01M12 7h4"></path></svg></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="display:flex;align-items:center;gap:8px"><span style="font-size:17px;font-weight:600">Backline only</span><span style="font-size:12px;font-weight:700;background:#A75390;color:#fff;border-radius:999px;padding:2px 8px">Expected</span></div><div style="font-size:14px;color:#6f6569">Equipment checklist &amp; sign-off</div></div>
+</div>
+<div style="background:#fff;border:1.5px solid #e3ddd8;border-radius:16px;padding:16px;display:flex;gap:14px;align-items:center;min-height:80px">
+<div style="width:44px;height:44px;flex:none;border-radius:12px;background:#e7eef4;color:#2f5573;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16V7a1 1 0 011-1h11l5 4h1a2 2 0 012 2v4h-2M2 16h2m4 0h8"></path><circle cx="6" cy="17" r="2"></circle><circle cx="18" cy="17" r="2"></circle><path d="M14 6v4h5"></path></svg></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:17px;font-weight:600">Van only</div><div style="font-size:14px;color:#6f6569">Vehicle book-out</div></div>
+</div>
+<div style="background:#fff;border:1.5px solid #e3ddd8;border-radius:16px;padding:16px;display:flex;gap:14px;align-items:center;min-height:80px">
+<div style="width:44px;height:44px;flex:none;border-radius:12px;background:#f3f0ed;color:#3d373a;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"></rect><rect x="13" y="13" width="8" height="8" rx="2"></rect><path d="M15 7h4M17 5v4M5 17h4"></path></svg></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:17px;font-weight:600">Both</div><div style="font-size:14px;color:#6f6569">Vehicle book-out, then equipment checklist</div></div>
+</div>
+</div>
+<div style="height:48px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#6f6569">Cancel</div>
+</div>
+</div>
+</div>
+
+<!-- 2c COMPLETE -->
+<div id="2c" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">2c</span><span style="font-size:15px;font-weight:600">Complete delivery — full scroll length</span></div>
+<div data-screen-label="Complete" style="width:390px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 8px 0;height:103px;display:flex;align-items:center;justify-content:space-between"><div style="height:44px;padding:0 10px;display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Back</div><div style="font-size:16px;font-weight:600;padding-right:16px">Complete delivery</div></div>
+<div style="padding:8px 16px 130px;display:flex;flex-direction:column;gap:14px">
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="padding:14px 16px 10px;display:flex;justify-content:space-between;align-items:baseline"><span style="font-size:16px;font-weight:600">Equipment checklist</span><span style="font-size:14px;font-weight:600;color:#2a7049">3 of 4 ticked</span></div>
+<div style="padding:0 16px 10px;font-size:14px;line-height:1.4;color:#6f6569">Tick every item you've handed over — or leave them all unticked if you didn't check.</div>
+<div style="height:6px;margin:0 16px 6px;border-radius:999px;background:#f3f0ed;overflow:hidden"><div style="width:75%;height:100%;background:#3f9b6b"></div></div>
+<div style="min-height:52px;padding:0 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;border-radius:8px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div><span style="flex:1;font-size:16px">Marshall JCM800 head</span><span style="font-size:15px;color:#6f6569">×1</span></div>
+<div style="min-height:52px;padding:0 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;border-radius:8px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div><span style="flex:1;font-size:16px">Marshall 1960A 4×12 cab</span><span style="font-size:15px;color:#6f6569">×2</span></div>
+<div style="min-height:52px;padding:0 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;border-radius:8px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div><span style="flex:1;font-size:16px">Ampeg SVT-CL + 8×10</span><span style="font-size:15px;color:#6f6569">×1</span></div>
+<div style="min-height:52px;padding:0 16px;display:flex;align-items:center;gap:12px;border-top:1px solid #f0ece9"><div style="width:26px;height:26px;border-radius:8px;border:2px solid #cfc6c0;background:#fff"></div><span style="flex:1;font-size:16px">DW Collector's kit (5pc)</span><span style="font-size:15px;color:#6f6569">×1</span></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;flex-direction:column;gap:6px"><div style="font-size:14px;font-weight:600;color:#3d373a">Who signed for it?</div><div style="height:52px;border:1.5px solid #e3ddd8;border-radius:12px;padding:0 14px;display:flex;align-items:center;font-size:17px">Maya Okafor</div></div>
+<div style="display:flex;flex-direction:column;gap:6px"><div style="display:flex;justify-content:space-between"><div style="font-size:14px;font-weight:600;color:#3d373a">Signature</div><div style="font-size:14px;font-weight:600;color:#8c3f77">Clear</div></div><div style="height:210px;border:1.5px dashed #cfc6c0;border-radius:12px;background:#f8f6f4;display:flex;align-items:flex-end;justify-content:center;padding-bottom:12px;font-size:14px;color:#6f6569">Sign with your finger</div></div>
+<div style="min-height:56px;border-radius:12px;background:#f8f6f4;padding:10px 14px;display:flex;align-items:center;gap:12px"><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Customer not here</div><div style="font-size:14px;color:#6f6569">Take a photo instead of a signature</div></div><div style="width:46px;height:28px;border-radius:999px;background:#d9d2cc;position:relative"><div style="position:absolute;left:3px;top:3px;width:22px;height:22px;border-radius:999px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)"></div></div></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:10px">
+<div style="font-size:16px;font-weight:600">Send the delivery note to</div>
+<div style="display:flex;flex-wrap:wrap;gap:8px"><span style="height:40px;padding:0 14px;border-radius:999px;background:#f6eaf2;border:1.5px solid #A75390;color:#7d3569;font-size:15px;font-weight:600;display:flex;align-items:center;gap:6px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>Maya Okafor · lead</span><span style="height:40px;padding:0 14px;border-radius:999px;background:#fff;border:1.5px solid #e3ddd8;color:#3d373a;font-size:15px;font-weight:500;display:flex;align-items:center">Tour manager</span></div>
+<div style="height:48px;border:1.5px solid #e3ddd8;border-radius:12px;padding:0 14px;display:flex;align-items:center;font-size:16px;color:#9a9094">Another email (optional)</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:6px">
+<div style="font-size:14px;font-weight:600;color:#3d373a">Your name</div><div style="height:52px;border:1.5px solid #e3ddd8;border-radius:12px;padding:0 14px;display:flex;align-items:center;font-size:17px">Sam Driver</div>
+<div style="font-size:14px;font-weight:600;color:#3d373a;margin-top:8px">Notes</div><div style="height:88px;border:1.5px solid #e3ddd8;border-radius:12px;padding:12px 14px;font-size:16px;color:#9a9094;line-height:1.4">Missing items, access issues, anything the office should know…</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:14px 16px 32px;background:linear-gradient(to top,#f6f4f2 70%,rgba(246,244,242,0))"><div style="height:56px;border-radius:14px;background:#3f9b6b;color:#fff;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>Complete delivery</div></div>
+</div>
+</div>
+
+<!-- 2d SHIFT -->
+<div id="2d" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">2d</span><span style="font-size:15px;font-weight:600">Studio shift — full scroll length</span></div>
+<div data-screen-label="Studio shift" style="width:390px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 8px 0;height:103px;display:flex;align-items:center"><div style="height:44px;padding:0 10px;display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Jobs</div></div>
+<div style="padding:0 16px 130px;display:flex;flex-direction:column;gap:16px">
+<div style="padding:0 4px 4px;display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#4b4790">Studio sitter</span><span style="font-size:12px;font-weight:600;background:#e4f3ea;color:#2a7049;border-radius:999px;padding:1px 8px">Confirmed</span></div>
+<div style="font-size:28px;font-weight:700;letter-spacing:-.02em;line-height:1.15">Tonight, 6:00pm – 11:30pm</div>
+<div style="font-size:16px;color:#3d373a">Tuesday 21 October<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><span> · £90</span></sc-if></div>
+<div style="font-size:15px;color:#6f6569;line-height:1.45;margin-top:2px">Look after the bands below, then lock up the whole building.</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;min-height:64px;padding:12px 16px;display:flex;align-items:center;gap:12px">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f3f0ed;color:#3d373a;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h2l2.4 11.2a1 1 0 001 .8h9.2a1 1 0 001-.8L20 8H6"></path><circle cx="9" cy="20" r="1.5"></circle><circle cx="17" cy="20" r="1.5"></circle></svg></div>
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Shop till</div><div style="font-size:14px;color:#6f6569">Look up a price, or sell strings, leads, gaffa…</div></div>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="padding:0 4px;font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Who's in tonight</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;justify-content:space-between;align-items:baseline"><span style="font-size:16px;font-weight:600">Sorry Kids</span><span style="font-size:13px;color:#6f6569">#15520</span></div>
+<div style="display:flex;gap:6px"><span style="font-size:13px;font-weight:600;background:#ecebf6;color:#4b4790;border-radius:999px;padding:2px 10px">Studio 2</span></div>
+<div style="border-top:1px solid #f0ece9;padding-top:10px;display:flex;flex-direction:column;gap:4px">
+<div style="min-height:40px;display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;color:#8c3f77"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 00-1 1v16a1 1 0 001 1h12a1 1 0 001-1V8z"></path><path d="M14 3v5h5"></path></svg>Stage plot.pdf</div>
+<div style="min-height:40px;display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;color:#8c3f77"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 00-1 1v16a1 1 0 001 1h12a1 1 0 001-1V8z"></path><path d="M14 3v5h5"></path></svg>Backline spec.pdf</div>
+</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;justify-content:space-between;align-items:baseline"><span style="font-size:16px;font-weight:600">Wet Leg</span><span style="font-size:13px;color:#6f6569">#15531</span></div>
+<div style="display:flex;gap:6px"><span style="font-size:13px;font-weight:600;background:#ecebf6;color:#4b4790;border-radius:999px;padding:2px 10px">Studio 1</span><span style="font-size:13px;font-weight:600;background:#ecebf6;color:#4b4790;border-radius:999px;padding:2px 10px">Storage A</span></div>
+</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;height:56px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:16px;font-weight:600">Recent handover</span><span style="display:flex;align-items:center;gap:6px;font-size:15px;color:#6f6569">Last 3 nights<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg></span></div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="padding:0 4px;display:flex;flex-direction:column;gap:2px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Handover notes</span><span style="font-size:14px;color:#6f6569">For the next sitter or the office — money owed, things left undone.</span></div>
+<div style="background:#f6eaf2;border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px">
+<div style="display:flex;justify-content:space-between;align-items:center"><span style="display:flex;align-items:center;gap:6px;font-size:14px;font-weight:600">Jon<span style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;background:#A75390;color:#fff;border-radius:6px;padding:1px 6px">Office</span></span><span style="font-size:13px;color:#6f6569">4:12pm</span></div>
+<div style="font-size:15px;line-height:1.45;color:#3d373a">Sorry Kids still owe £20 for the snare hire — please collect before they leave.</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:10px">
+<div style="min-height:72px;border:1.5px solid #e3ddd8;border-radius:12px;padding:12px 14px;font-size:16px;color:#9a9094">Add a note…</div>
+<div style="display:flex;justify-content:space-between;gap:10px"><div style="height:44px;padding:0 14px;border-radius:12px;border:1.5px solid #e3ddd8;display:flex;align-items:center;gap:6px;font-size:15px;font-weight:600;color:#3d373a"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.5l-8.5 8.5a5 5 0 01-7-7L14 5.5a3.3 3.3 0 014.7 4.7l-8.5 8.5a1.7 1.7 0 01-2.4-2.4L15.5 8.5"></path></svg>Attach</div><div style="height:44px;padding:0 18px;border-radius:12px;background:#cdbfc8;color:#fff;display:flex;align-items:center;font-size:15px;font-weight:600">Post note</div></div>
+</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:14px 16px 32px;background:linear-gradient(to top,#f6f4f2 70%,rgba(246,244,242,0))"><div style="height:56px;border-radius:14px;background:#1d1a1c;color:#fff;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 018 0v3"></path></svg>Finish for the night</div></div>
+</div>
+</div>
+
+<!-- 2e LOCKUP -->
+<div id="2e" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">2e</span><span style="font-size:15px;font-weight:600">Lock-up checklist</span></div>
+<div data-screen-label="Lock-up" style="width:390px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 8px 0;height:103px;display:flex;align-items:center;justify-content:space-between"><div style="height:44px;padding:0 10px;display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Shift</div><div style="font-size:14px;color:#6f6569;padding-right:18px">7 of 9 answered</div></div>
+<div style="padding:0 16px 180px;display:flex;flex-direction:column;gap:14px">
+<div style="padding:0 4px;display:flex;flex-direction:column;gap:4px"><div style="font-size:28px;font-weight:700;letter-spacing:-.02em">Finish for the night</div><div style="font-size:16px;color:#6f6569">Tuesday 21 October</div></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:2px"><div style="font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#6f6569">Shop till tonight</div><div style="font-size:17px;font-weight:600">3 sales · £27.50 taken</div><div style="font-size:14px;color:#6f6569">Card £15.00 · Cash £12.50</div></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Is the studio in use again tomorrow?</div><div style="font-size:14px;color:#6f6569;line-height:1.4">Looks like there's a session booked — deep-clean items are hidden.</div></div>
+<div style="background:#f3f0ed;border-radius:12px;padding:4px;display:grid;grid-template-columns:1fr 1fr;gap:4px"><div style="height:42px;border-radius:9px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.08);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600">Yes, back tomorrow</div><div style="height:42px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;color:#6f6569">No, all done</div></div>
+</div>
+<div style="padding:8px 4px 0;font-size:20px;font-weight:700">Upstairs</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+<div style="font-size:16px;line-height:1.35">All amps and PA switched off at the wall?</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px"><div style="height:46px;border-radius:11px;background:#3f9b6b;color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600">Yes</div><div style="height:46px;border-radius:11px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500">No</div><div style="height:46px;border-radius:11px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500">N/A</div></div>
+</div>
+<div style="background:#fff;border:1.5px solid #f2dca6;border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+<div style="font-size:16px;line-height:1.35">Studio 2 cleared — no gear left on the floor?</div>
+<div style="display:flex;align-items:center;gap:6px;font-size:14px;font-weight:600;color:#8c3f77"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="14" rx="2"></rect><circle cx="12" cy="13" r="3.5"></circle><path d="M8 6l1.5-2h5L16 6"></path></svg>What it should look like</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px"><div style="height:46px;border-radius:11px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500">Yes</div><div style="height:46px;border-radius:11px;background:#a2341f;color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600">No</div><div style="height:46px;border-radius:11px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500">N/A</div></div>
+<div style="background:#fff8e6;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px"><div style="font-size:14px;font-weight:600;color:#8a5a10">Why? Optional, but it helps</div><div style="min-height:52px;background:#fff;border:1.5px solid #f2dca6;border-radius:10px;padding:10px 12px;font-size:15px;color:#3d373a">Band left their drum kit set up — back at 11am</div><div style="display:flex"><div style="height:40px;padding:0 12px;border-radius:10px;background:#fff;border:1.5px solid #f2dca6;display:flex;align-items:center;gap:6px;font-size:14px;font-weight:600;color:#8a5a10">+ Add photo</div></div></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+<div style="font-size:16px;line-height:1.35">Fire exits clear and front door locked?</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px"><div style="height:46px;border-radius:11px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500">Yes</div><div style="height:46px;border-radius:11px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500">No</div><div style="height:46px;border-radius:11px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500">N/A</div></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;min-height:60px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:16px;font-weight:600">Lost property</span><span style="height:40px;padding:0 14px;border-radius:10px;border:1.5px solid #e3ddd8;display:flex;align-items:center;font-size:14px;font-weight:600;color:#8c3f77">+ Log an item</span></div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:12px 16px 32px;background:#fff;border-top:1px solid #e8e3df;display:flex;flex-direction:column;gap:8px">
+<div style="font-size:14px;color:#8a5a10;background:#fff8e6;border:1px solid #f2dca6;border-radius:10px;padding:8px 12px">2 items still unanswered. Tap again to submit anyway.</div>
+<div style="height:56px;border-radius:14px;background:#1d1a1c;color:#fff;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 018 0v3"></path></svg>Submit anyway (2 left)</div>
+</div>
+</div>
+</div>
+
+<!-- 2f TILL -->
+<div id="2f" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">2f</span><span style="font-size:15px;font-weight:600">Shop till — token swap only</span></div>
+<div data-screen-label="Till" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 8px 0;height:103px;display:flex;align-items:center;justify-content:space-between"><div style="height:44px;padding:0 10px;display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Shift</div><div style="font-size:16px;font-weight:600;padding-right:18px">Shop till</div></div>
+<div style="padding:0 16px;display:flex;flex-direction:column;gap:14px">
+<div style="height:52px;border:1.5px solid #A75390;box-shadow:0 0 0 4px #f6eaf2;border-radius:12px;background:#fff;padding:0 14px;display:flex;align-items:center;gap:10px;font-size:17px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6f6569" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>strings</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="min-height:58px;padding:8px 16px;display:flex;align-items:center;gap:12px"><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:16px;font-weight:600">Ernie Ball 10–46</span><span style="font-size:13px;color:#8c3f77;font-weight:600">tap to add</span></div><span style="font-size:16px;font-weight:600">£7.50</span></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="min-height:58px;padding:8px 16px;display:flex;align-items:center;gap:12px"><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:16px;font-weight:600">Ernie Ball bass 45–105</span><span style="font-size:13px;color:#8c3f77;font-weight:600">tap to add</span></div><span style="font-size:16px;font-weight:600">£22.00</span></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px">
+<div style="display:flex;justify-content:space-between;font-size:16px"><span>2 × Ernie Ball 10–46</span><span style="font-weight:600">£15.00</span></div>
+<div style="font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#6f6569;margin-top:4px">Who's it for?</div>
+<div style="display:flex;flex-wrap:wrap;gap:8px"><span style="height:40px;padding:0 14px;border-radius:999px;background:#f6eaf2;border:1.5px solid #A75390;color:#7d3569;font-size:15px;font-weight:600;display:flex;align-items:center">Sorry Kids</span><span style="height:40px;padding:0 14px;border-radius:999px;border:1.5px solid #e3ddd8;font-size:15px;display:flex;align-items:center">Wet Leg</span><span style="height:40px;padding:0 14px;border-radius:999px;border:1.5px solid #e3ddd8;font-size:15px;display:flex;align-items:center">Someone else</span></div>
+<div style="font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#6f6569;margin-top:4px">How did they pay?</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px"><div style="height:48px;border-radius:12px;background:#1d1a1c;color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600">Card</div><div style="height:48px;border-radius:12px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500">Cash</div><div style="height:48px;border-radius:12px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;text-align:center;line-height:1.1">On their bill</div></div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:14px 16px 32px"><div style="height:56px;border-radius:14px;background:#3f9b6b;color:#fff;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center">Take £15.00 on card</div></div>
+</div>
+</div>
+
+<!-- 2g RESOURCES -->
+<div id="2g" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">2g</span><span style="font-size:15px;font-weight:600">Resources</span></div>
+<div data-screen-label="Resources" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:61px 20px 8px;display:flex;flex-direction:column;gap:2px"><div style="font-size:28px;font-weight:700;letter-spacing:-.02em">Resources</div><div style="font-size:16px;color:#6f6569">Guides &amp; documents</div></div>
+<div style="padding:12px 16px;display:flex;flex-direction:column;gap:20px">
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="padding:0 4px;font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Guides</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="min-height:64px;padding:10px 16px;display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a1 1 0 011-1h5a2 2 0 012 2v14a2 2 0 00-2-2H4zM20 5a1 1 0 00-1-1h-5a2 2 0 00-2 2v14a2 2 0 012-2h6z"></path></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:16px;font-weight:600">Van book-out walkthrough</span><span style="font-size:14px;color:#6f6569">Training · read</span></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="min-height:64px;padding:10px 16px;display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a1 1 0 011-1h5a2 2 0 012 2v14a2 2 0 00-2-2H4zM20 5a1 1 0 00-1-1h-5a2 2 0 00-2 2v14a2 2 0 012-2h6z"></path></svg></div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:16px;font-weight:600">Studio lock-up guide</span><span style="font-size:14px;color:#6f6569">Guide · read</span></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="padding:0 4px;font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Policies &amp; agreements</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="min-height:64px;padding:10px 16px;display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f3f0ed;color:#3d373a;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;letter-spacing:.04em">PDF</div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:16px;font-weight:600">Freelancer agreement 2026</span><span style="font-size:14px;color:#6f6569">Agreement</span></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"></path></svg></div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="min-height:64px;padding:10px 16px;display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f3f0ed;color:#3d373a;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;letter-spacing:.04em">PDF</div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:16px;font-weight:600">Driving &amp; vehicle policy</span><span style="font-size:14px;color:#6f6569">Policy</span></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"></path></svg></div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="min-height:64px;padding:10px 16px;display:flex;align-items:center;gap:12px;opacity:.6"><div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f3f0ed;color:#3d373a;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;letter-spacing:.04em">DOC</div><div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:16px;font-weight:600">Health &amp; safety</span><span style="font-size:14px;color:#6f6569">Policy · temporarily unavailable</span></div></div>
+</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;background:rgba(255,255,255,.94);border-top:1px solid #e8e3df;padding:8px 12px 26px;display:grid;grid-template-columns:repeat(4,1fr)">
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"></rect><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M3 13h18"></path></svg></div><span style="font-size:12px;font-weight:500">Jobs</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 6.5A4 4 0 009 9v3H7m2 0v4c0 1.5-1 2.5-2 3h11M9 12h5"></path></svg></div><span style="font-size:12px;font-weight:500">Earnings</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#8c3f77"><div style="width:52px;height:30px;border-radius:999px;background:#f6eaf2;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a1 1 0 011-1h5a2 2 0 012 2v14a2 2 0 00-2-2H4zM20 5a1 1 0 00-1-1h-5a2 2 0 00-2 2v14a2 2 0 012-2h6z"></path></svg></div><span style="font-size:12px;font-weight:700">Resources</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg></div><span style="font-size:12px;font-weight:500">Settings</span></div>
+</div>
+</div>
+</div>
+
+<!-- 2h SETTINGS -->
+<div id="2h" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">2h</span><span style="font-size:15px;font-weight:600">Settings</span></div>
+<div data-screen-label="Settings" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:61px 20px 8px"><div style="font-size:28px;font-weight:700;letter-spacing:-.02em">Settings</div></div>
+<div style="padding:12px 16px;display:flex;flex-direction:column;gap:18px">
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;align-items:center;gap:14px">
+<div style="width:48px;height:48px;border-radius:999px;background:#f6eaf2;color:#7d3569;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700">SD</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:17px;font-weight:600">Sam Driver</span><span style="font-size:15px;color:#6f6569">sam.driver@gmail.com</span></div>
+</div>
+<div style="font-size:14px;color:#6f6569;padding:0 4px;margin-top:-10px">Need to change these? Get in touch with Ooosh.</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="padding:14px 16px;display:flex;align-items:flex-start;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:17px;font-weight:600">Job emails</span><span style="font-size:14px;color:#6f6569">New jobs, changes and cancellations</span></div>
+<span style="display:flex;align-items:center;gap:5px;font-size:14px;font-weight:700;background:#e4f3ea;color:#2a7049;border-radius:999px;padding:4px 10px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>On</span>
+</div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="padding:12px 16px 4px;font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#6f6569">Pause job emails</div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;flex-direction:column"><span style="font-size:16px;font-weight:500">Until end of today</span><span style="font-size:14px;color:#6f6569">Back on tomorrow morning</span></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;flex-direction:column"><span style="font-size:16px;font-weight:500">For 7 days</span><span style="font-size:14px;color:#6f6569">Good for a week off</span></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;flex-direction:column"><span style="font-size:16px;font-weight:500">Until a date</span><span style="font-size:14px;color:#6f6569">Pick when to switch back on</span></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="min-height:56px;padding:8px 16px;display:flex;align-items:center;justify-content:space-between"><div style="display:flex;flex-direction:column"><span style="font-size:16px;font-weight:500;color:#a2341f">Until I turn them back on</span><span style="font-size:14px;color:#6f6569">You could miss urgent job changes</span></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></div>
+</div>
+</div>
+<div style="height:54px;border-radius:14px;background:#fff;border:1px solid #e8e3df;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;color:#a2341f">Log out</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;background:rgba(255,255,255,.94);border-top:1px solid #e8e3df;padding:8px 12px 26px;display:grid;grid-template-columns:repeat(4,1fr)">
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"></rect><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M3 13h18"></path></svg></div><span style="font-size:12px;font-weight:500">Jobs</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 6.5A4 4 0 009 9v3H7m2 0v4c0 1.5-1 2.5-2 3h11M9 12h5"></path></svg></div><span style="font-size:12px;font-weight:500">Earnings</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a1 1 0 011-1h5a2 2 0 012 2v14a2 2 0 00-2-2H4zM20 5a1 1 0 00-1-1h-5a2 2 0 00-2 2v14a2 2 0 012-2h6z"></path></svg></div><span style="font-size:12px;font-weight:500">Resources</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#8c3f77"><div style="width:52px;height:30px;border-radius:999px;background:#f6eaf2;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg></div><span style="font-size:12px;font-weight:700">Settings</span></div>
+</div>
+</div>
+</div>
+
+<sc-if value="{{ showNotes }}" hint-placeholder-val="{{ true }}">
+<div style="width:340px;display:flex;flex-direction:column;gap:18px;padding-top:34px">
+<div style="font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6f6569">Notes on round 2</div>
+<div style="display:flex;flex-direction:column;gap:14px;font-size:15px;line-height:1.5;color:#3d373a">
+<div><strong style="color:#1d1a1c">Job kind.</strong> Label = what's moving + direction, from the job's existing what_is_it field: equipment → Backline, vehicle → Van. If what_is_it is blank (about a third of jobs) the label just says Delivery / Collection and no travel chip.</div>
+<div><strong style="color:#1d1a1c">Travel chip.</strong> Backline: "Driving there &amp; back". Van delivery: "One way · train back". Van collection: "Train there · drive back". A rule of thumb, not data — staff could override it later if needed.</div>
+<div><strong style="color:#1d1a1c">By date.</strong> Default. Yard-day offers stay pinned on top in both views — they're the only thing that needs an answer. The choice should be remembered on the device.</div>
+<div><strong style="color:#1d1a1c">Start.</strong> The "Expected" steer and its ordering logic are kept exactly as they are.</div>
+<div><strong style="color:#1d1a1c">Lock-up / Complete.</strong> Same fields, same soft "submit anyway" rule. Yes/No/N/A buttons go from ~36px to 46px.</div>
+<div><strong style="color:#1d1a1c">Till.</strong> Layout untouched: just the new colours, type and button heights.</div>
+</div>
+</div>
+</sc-if>
+</div>
+</section>
+<section id="1" style="padding:64px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:8px;max-width:760px">
+<div style="font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#8c3f77">Freelancer portal · visual refresh · mobile</div>
+<div style="font-size:34px;font-weight:700;letter-spacing:-.02em;line-height:1.15">Same portal, same flows — new clothes</div>
+<div style="font-size:17px;line-height:1.5;color:#3d373a;text-wrap:pretty">Payment / hire-form tokens (DM Sans, plum #A75390, warm neutrals), tightened for daily use. Routes, section order and bottom nav are unchanged. Whole cards tap through; the one action that matters today gets a full-width button.</div>
+</div>
+<div style="display:flex;gap:48px;align-items:flex-start;flex-wrap:wrap">
+
+<!-- 1a LOGIN -->
+<div id="1a" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">1a</span><span style="font-size:15px;font-weight:600">Login</span></div>
+<div data-screen-label="Login" style="width:390px;height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8;display:flex;flex-direction:column">
+<div style="height:47px"></div>
+<div style="flex:1;display:flex;flex-direction:column;padding:40px 20px 28px;gap:28px">
+<div style="display:flex;flex-direction:column;align-items:center;gap:16px;padding-top:24px">
+<img src="public/ooosh-tours-logo-small.png" alt="Ooosh Tours" style="width:64px;height:64px;object-fit:contain">
+<div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+<div style="font-size:26px;font-weight:700;letter-spacing:-.02em">Freelancer portal</div>
+
+</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:18px;padding:20px;display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;flex-direction:column;gap:6px">
+<div style="font-size:14px;font-weight:600;color:#3d373a">Email</div>
+<div style="height:52px;border:1.5px solid #A75390;border-radius:12px;padding:0 14px;display:flex;align-items:center;font-size:17px;box-shadow:0 0 0 4px #f6eaf2">sam.driver@gmail.com</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;justify-content:space-between;align-items:baseline"><div style="font-size:14px;font-weight:600;color:#3d373a">Password</div><a href="#" style="font-size:14px;font-weight:600">Forgotten it?</a></div>
+<div style="height:52px;border:1.5px solid #e3ddd8;border-radius:12px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;font-size:17px;letter-spacing:.2em"><span>••••••••••</span><span style="font-size:14px;letter-spacing:0;font-weight:600;color:#6f6569">Show</span></div>
+</div>
+<div style="height:54px;border-radius:14px;background:#A75390;color:#fff;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center;margin-top:4px">Sign in</div>
+</div>
+<div style="flex:1"></div>
+<div style="text-align:center;font-size:15px;color:#6f6569">New to Ooosh? <a href="#" style="font-weight:600">Create an account</a></div>
+</div>
+</div>
+</div>
+
+<!-- 1b DASHBOARD -->
+<div id="1b" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">1b</span><span style="font-size:15px;font-weight:600">Jobs — full scroll length</span></div>
+<div data-screen-label="Jobs" style="width:390px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="background:#f6f4f2;padding:47px 20px 0">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 0 6px">
+<div style="display:flex;align-items:center;gap:12px">
+<img src="public/ooosh-tours-logo-small.png" alt="Ooosh Tours" style="width:40px;height:40px;object-fit:contain">
+<div style="display:flex;flex-direction:column">
+<div style="font-size:22px;font-weight:700;letter-spacing:-.02em;line-height:1.2">Morning, Sam</div>
+<div style="font-size:13px;color:#6f6569">Updated just now</div>
+</div>
+</div>
+<div style="display:flex;gap:4px">
+<div style="width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#3d373a"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 00-14.9-3.5M4 4v4h4M4 13a8 8 0 0014.9 3.5M20 20v-4h-4"></path></svg></div>
+<div style="width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#3d373a"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3M10 16l-4-4 4-4M6 12h10"></path></svg></div>
+</div>
+</div>
+</div>
+
+<div style="padding:16px 16px 112px;display:flex;flex-direction:column;gap:28px">
+
+<!-- Ooosh work -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:8px;padding:0 4px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Ooosh work</span><span style="font-size:12px;font-weight:700;background:#fff8e6;color:#8a5a10;border:1px solid #f2dca6;border-radius:999px;padding:1px 8px">1 to answer</span></div>
+<div style="background:#fff;border:1.5px solid #f2dca6;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f3f0ed;color:#3d373a;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 005 5L13 18a2.1 2.1 0 01-3-3l6.7-6.7M14.7 6.3L17 4a4 4 0 00-5 5"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+<div style="font-size:16px;font-weight:600">Thursday 23 Oct</div>
+<div style="font-size:14px;color:#6f6569">Full day · yard</div>
+</div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£140</div></sc-if>
+</div>
+<div style="font-size:15px;color:#3d373a;line-height:1.45;background:#f8f6f4;border-radius:10px;padding:10px 12px">Prepping two Sprinters for the Fontaines run, then backline check-in.</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+<div style="height:50px;border-radius:12px;background:#3f9b6b;color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center">Yes, I can do it</div>
+<div style="height:50px;border-radius:12px;background:#fff;border:1.5px solid #e3ddd8;color:#3d373a;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center">Sorry, I can't</div>
+</div>
+</div>
+</div>
+
+<!-- Today -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:8px;padding:0 4px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Today</span><span style="font-size:12px;font-weight:700;background:#f6eaf2;color:#7d3569;border-radius:999px;padding:2px 8px">2</span></div>
+
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;overflow:hidden">
+<div style="padding:16px;display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14V3M8 7l4-4 4 4M4 14v5a1 1 0 001 1h14a1 1 0 001-1v-5"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8c3f77">Delivery</div>
+<div style="font-size:17px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">The Lexington</div>
+<div style="font-size:14px;color:#6f6569">10:00 AM · Islington, N1</div>
+</div>
+<div style="display:flex;align-items:center;gap:6px">
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£85</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+<div style="padding:0 16px 16px"><div style="height:52px;border-radius:12px;background:#A75390;color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"></path></svg>Start delivery</div></div>
+</div>
+
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;overflow:hidden">
+<div style="padding:16px;display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"></circle><circle cx="18" cy="19" r="2"></circle><path d="M8 5h8a3.5 3.5 0 010 7H8a3.5 3.5 0 000 7h8"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8c3f77">Multi-drop run · 3 stops</div>
+<div style="font-size:17px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">Camden collections</div>
+<div style="font-size:14px;color:#6f6569">2:30 PM</div>
+</div>
+<div style="display:flex;align-items:center;gap:6px">
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="display:flex;flex-direction:column;align-items:flex-end"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£150</div><div style="font-size:12px;color:#b9b0ab;text-decoration:line-through">£180</div></div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+<div style="margin:0 16px;padding:10px 0;border-top:1px solid #f0ece9;display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;gap:10px;font-size:14px;color:#3d373a"><span style="width:18px;height:18px;border-radius:999px;background:#f3f0ed;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">1</span>Electric Ballroom</div>
+<div style="display:flex;gap:10px;font-size:14px;color:#3d373a"><span style="width:18px;height:18px;border-radius:999px;background:#f3f0ed;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">2</span>Jazz Cafe</div>
+<div style="display:flex;gap:10px;font-size:14px;color:#3d373a"><span style="width:18px;height:18px;border-radius:999px;background:#f3f0ed;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">3</span>KOKO</div>
+</div>
+<div style="padding:4px 16px 16px"><div style="height:52px;border-radius:12px;background:#A75390;color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"></path></svg>Start run</div></div>
+</div>
+</div>
+
+<!-- Studio shifts -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:8px;padding:0 4px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Studio shifts</span><span style="font-size:12px;font-weight:700;background:#f6eaf2;color:#7d3569;border-radius:999px;padding:2px 8px">2</span></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;overflow:hidden">
+<div style="padding:16px;display:flex;gap:12px;align-items:flex-start">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#ecebf6;color:#4b4790;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#4b4790">Studio sitter</span><span style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;background:#1d1a1c;color:#fff;border-radius:6px;padding:2px 6px">Tonight</span></div>
+<div style="font-size:17px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">6:00pm – 11:30pm</div>
+<div style="font-size:14px;color:#6f6569">Sorry Kids · Studio 2 &nbsp;·&nbsp; Wet Leg · Studio 1</div>
+</div>
+<div style="display:flex;align-items:center;gap:6px">
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£90</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+<div style="padding:0 16px 16px"><div style="height:52px;border-radius:12px;background:#1d1a1c;color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 018 0v3"></path></svg>Lock up</div></div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;gap:12px;align-items:center">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#ecebf6;color:#4b4790;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+<div style="font-size:16px;font-weight:600">Saturday 25 Oct</div>
+<div style="display:flex;align-items:center;gap:8px;font-size:14px;color:#6f6569">5:00pm – 11:00pm<span style="font-size:12px;font-weight:600;background:#fff8e6;color:#8a5a10;border-radius:999px;padding:1px 8px">Assigned</span></div>
+</div>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+
+<!-- Upcoming -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:8px;padding:0 4px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Upcoming</span><span style="font-size:12px;font-weight:700;background:#f6eaf2;color:#7d3569;border-radius:999px;padding:2px 8px">3</span></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#fff4dc;color:#8a5a10;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M8 10l4 4 4-4M4 14v5a1 1 0 001 1h14a1 1 0 001-1v-5"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+<div style="font-size:16px;font-weight:600">Collection · O2 Forum</div>
+<div style="font-size:14px;color:#6f6569">Wed 22 Oct · 9:00 AM</div>
+</div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£70</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#e4f3ea;color:#2a7049;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"></circle><path d="M5 20c1-4 3.8-6 7-6s6 2 7 6"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+<div style="font-size:16px;font-weight:600">Backline tech · Roundhouse</div>
+<div style="font-size:14px;color:#6f6569">Fri 24 – Sun 26 Oct · 3 days</div>
+<div style="display:flex;margin-top:4px"><span style="font-size:12px;font-weight:600;background:#f3f0ed;color:#3d373a;border-radius:999px;padding:2px 8px">Driving + Crew</span></div>
+</div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£540</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+<div style="height:1px;background:#f0ece9;margin-left:68px"></div>
+<div style="padding:14px 16px;display:flex;gap:12px;align-items:center">
+<div style="width:40px;height:40px;flex:none;border-radius:11px;background:#f6eaf2;color:#8c3f77;display:flex;align-items:center;justify-content:center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14V3M8 7l4-4 4 4M4 14v5a1 1 0 001 1h14a1 1 0 001-1v-5"></path></svg></div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+<div style="font-size:16px;font-weight:600">Delivery · Brixton Academy</div>
+<div style="font-size:14px;color:#6f6569">Mon 27 Oct · 8:00 AM</div>
+</div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£95</div></sc-if>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+</div>
+
+<!-- Completed / cancelled -->
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px"><div style="display:flex;align-items:center;gap:8px"><span style="font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">Done</span></div></div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="height:56px;padding:0 16px;display:flex;align-items:center;gap:12px">
+<div style="width:28px;height:28px;border-radius:999px;background:#e4f3ea;color:#2a7049;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></div>
+<div style="flex:1;font-size:16px;font-weight:500">Completed</div>
+<div style="font-size:15px;color:#6f6569">12 in last 30 days</div>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+<div style="height:1px;background:#f0ece9;margin-left:56px"></div>
+<div style="height:56px;padding:0 16px;display:flex;align-items:center;gap:12px">
+<div style="width:28px;height:28px;border-radius:999px;background:#f3f0ed;color:#6f6569;display:flex;align-items:center;justify-content:center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg></div>
+<div style="flex:1;font-size:16px;font-weight:500">Cancelled</div>
+<div style="font-size:15px;color:#6f6569">1</div>
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Bottom nav -->
+<div style="position:absolute;left:0;right:0;bottom:0;background:rgba(255,255,255,.94);border-top:1px solid #e8e3df;padding:8px 12px 26px;display:grid;grid-template-columns:repeat(4,1fr)">
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#8c3f77"><div style="width:52px;height:30px;border-radius:999px;background:#f6eaf2;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"></rect><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M3 13h18"></path></svg></div><span style="font-size:12px;font-weight:700">Jobs</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 6.5A4 4 0 009 9v3H7m2 0v4c0 1.5-1 2.5-2 3h11M9 12h5"></path></svg></div><span style="font-size:12px;font-weight:500">Earnings</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a1 1 0 011-1h5a2 2 0 012 2v14a2 2 0 00-2-2H4zM20 5a1 1 0 00-1-1h-5a2 2 0 00-2 2v14a2 2 0 012-2h6z"></path></svg></div><span style="font-size:12px;font-weight:500">Resources</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"></path></svg></div><span style="font-size:12px;font-weight:500">Settings</span></div>
+</div>
+</div>
+</div>
+
+<!-- 1c JOB DETAIL -->
+<div id="1c" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">1c</span><span style="font-size:15px;font-weight:600">Job detail — delivery</span></div>
+<div data-screen-label="Job detail" style="width:390px;min-height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:47px 8px 0;display:flex;align-items:center;height:103px">
+<div style="height:44px;padding:0 10px;display:flex;align-items:center;gap:4px;color:#8c3f77;font-size:16px;font-weight:600"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>Jobs</div>
+</div>
+<div style="padding:0 16px 120px;display:flex;flex-direction:column;gap:14px">
+<div style="padding:0 4px 6px;display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8c3f77">Delivery</span><span style="font-size:13px;color:#6f6569">· HH 14822</span></div>
+<div style="font-size:28px;font-weight:700;letter-spacing:-.02em;line-height:1.15">The Lexington</div>
+<div style="font-size:16px;color:#3d373a">Today, Tue 21 Oct · 10:00 AM</div>
+</div>
+<div style="background:#fff8e6;border:1px solid #f2dca6;border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:4px">
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8a5a10">Key notes</div>
+<div style="font-size:15px;line-height:1.45;color:#3d373a">Load in via Penton St side door. Venue closed till 10 — don't arrive early.</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;gap:12px">
+<div style="width:36px;height:36px;flex:none;border-radius:10px;background:#f3f0ed;display:flex;align-items:center;justify-content:center;color:#3d373a"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0114 0C19 14.8 12 21 12 21z"></path><circle cx="12" cy="9.5" r="2.5"></circle></svg></div>
+<div style="display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">96–98 Pentonville Rd</div><div style="font-size:15px;color:#6f6569">London N1 9JB</div></div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+<div style="height:48px;border-radius:12px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;gap:8px;font-size:15px;font-weight:600;color:#1d1a1c"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-8-8 18-2-8z"></path></svg>Directions</div>
+<div style="height:48px;border-radius:12px;border:1.5px solid #e3ddd8;display:flex;align-items:center;justify-content:center;gap:8px;font-size:15px;font-weight:600;color:#1d1a1c"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="8" height="5" rx="1"></rect><path d="M8 5H6a1 1 0 00-1 1v14a1 1 0 001 1h12a1 1 0 001-1V6a1 1 0 00-1-1h-2"></path></svg>Copy</div>
+</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="padding:14px 16px 4px;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#6f6569">Who to contact</div>
+<div style="padding:10px 16px;display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Maya Okafor</div><div style="font-size:14px;color:#6f6569">Production manager</div></div>
+<div style="width:44px;height:44px;border-radius:999px;background:#e4f3ea;color:#2a7049;display:flex;align-items:center;justify-content:center"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 005 5L15 13l5 2v4a2 2 0 01-2 2A16 16 0 013 6a2 2 0 012-2"></path></svg></div>
+</div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="padding:10px 16px 14px;display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Venue box office</div><div style="font-size:14px;color:#6f6569">020 7837 5371</div></div>
+<div style="width:44px;height:44px;border-radius:999px;background:#e4f3ea;color:#2a7049;display:flex;align-items:center;justify-content:center"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 005 5L15 13l5 2v4a2 2 0 01-2 2A16 16 0 013 6a2 2 0 012-2"></path></svg></div>
+</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="height:54px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:16px;font-weight:600">Equipment list</span><span style="display:flex;align-items:center;gap:6px;font-size:15px;color:#6f6569">14 items<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b9b0ab" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></span></div>
+<sc-if value="{{ showFees }}" hint-placeholder-val="{{ true }}">
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="height:54px;padding:0 16px;display:flex;align-items:center;justify-content:space-between"><span style="font-size:16px;font-weight:600">Your fee</span><span style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£85</span></div>
+</sc-if>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:14px 16px 32px;background:linear-gradient(to top,#f6f4f2 70%,rgba(246,244,242,0))">
+<div style="height:56px;border-radius:14px;background:#A75390;color:#fff;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 8px 20px -8px rgba(167,83,144,.6)"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"></path></svg>Start delivery</div>
+</div>
+</div>
+</div>
+
+<!-- 1d EARNINGS -->
+<div id="1d" style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;font-weight:700;background:#1d1a1c;color:#fff;padding:3px 8px;border-radius:6px">1d</span><span style="font-size:15px;font-weight:600">Earnings — style mockup (not built yet)</span></div>
+<div data-screen-label="Earnings" style="width:390px;min-height:844px;border-radius:40px;overflow:hidden;background:#f6f4f2;position:relative;box-shadow:0 30px 60px -20px rgba(29,26,28,.25),0 0 0 1px #e3ddd8">
+<div style="padding:61px 20px 8px"><div style="font-size:28px;font-weight:700;letter-spacing:-.02em">Earnings</div></div>
+<div style="padding:8px 16px 120px;display:flex;flex-direction:column;gap:20px">
+<div style="background:#f3f0ed;border-radius:12px;padding:4px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px">
+<div style="height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;color:#6f6569">September</div>
+<div style="height:38px;border-radius:9px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.08);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600">October</div>
+<div style="height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:500;color:#6f6569">Tax year</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:18px;padding:20px;display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;flex-direction:column;gap:4px">
+<div style="font-size:14px;font-weight:600;color:#6f6569">Earned in October</div>
+<div style="font-size:40px;font-weight:700;letter-spacing:-.03em;font-variant-numeric:tabular-nums;line-height:1.1">£1,840</div>
+<div style="font-size:14px;color:#6f6569">14 jobs · 3 studio shifts</div>
+</div>
+<div style="height:8px;border-radius:999px;background:#f3f0ed;display:flex;overflow:hidden"><div style="width:62%;background:#3f9b6b"></div><div style="width:24%;background:#f2dca6"></div></div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+<div style="display:flex;flex-direction:column;gap:2px"><div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#6f6569"><span style="width:8px;height:8px;border-radius:2px;background:#3f9b6b"></span>Paid</div><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£1,140</div></div>
+<div style="display:flex;flex-direction:column;gap:2px"><div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#6f6569"><span style="width:8px;height:8px;border-radius:2px;background:#f2dca6"></span>Invoiced</div><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£440</div></div>
+<div style="display:flex;flex-direction:column;gap:2px"><div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#6f6569"><span style="width:8px;height:8px;border-radius:2px;background:#e3ddd8"></span>To invoice</div><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£260</div></div>
+</div>
+</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;padding:14px 16px;display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">3 jobs need an invoice</div><div style="font-size:14px;color:#6f6569">£260 waiting on you</div></div>
+<div style="height:44px;padding:0 16px;border-radius:12px;background:#A75390;color:#fff;font-size:15px;font-weight:600;display:flex;align-items:center">Send invoice</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="padding:0 4px;font-size:13px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#6f6569">This month</div>
+<div style="background:#fff;border:1px solid #e8e3df;border-radius:16px;display:flex;flex-direction:column">
+<div style="padding:13px 16px;display:flex;align-items:center;gap:12px"><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Delivery · The Lexington</div><div style="font-size:14px;color:#6f6569">Tue 21 Oct</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£85</div><span style="font-size:12px;font-weight:600;background:#f3f0ed;color:#3d373a;border-radius:999px;padding:1px 8px">To invoice</span></div></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="padding:13px 16px;display:flex;align-items:center;gap:12px"><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Studio sitter</div><div style="font-size:14px;color:#6f6569">Sat 18 Oct</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£90</div><span style="font-size:12px;font-weight:600;background:#fff8e6;color:#8a5a10;border-radius:999px;padding:1px 8px">Invoiced</span></div></div>
+<div style="height:1px;background:#f0ece9;margin:0 16px"></div>
+<div style="padding:13px 16px;display:flex;align-items:center;gap:12px"><div style="flex:1;display:flex;flex-direction:column;gap:2px"><div style="font-size:16px;font-weight:600">Backline tech · Roundhouse</div><div style="font-size:14px;color:#6f6569">10 – 12 Oct</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px"><div style="font-size:16px;font-weight:600;font-variant-numeric:tabular-nums">£540</div><span style="font-size:12px;font-weight:600;background:#e4f3ea;color:#2a7049;border-radius:999px;padding:1px 8px">Paid 17 Oct</span></div></div>
+</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;background:rgba(255,255,255,.94);border-top:1px solid #e8e3df;padding:8px 12px 26px;display:grid;grid-template-columns:repeat(4,1fr)">
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"></rect><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M3 13h18"></path></svg></div><span style="font-size:12px;font-weight:500">Jobs</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#8c3f77"><div style="width:52px;height:30px;border-radius:999px;background:#f6eaf2;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 6.5A4 4 0 009 9v3H7m2 0v4c0 1.5-1 2.5-2 3h11M9 12h5"></path></svg></div><span style="font-size:12px;font-weight:700">Earnings</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a1 1 0 011-1h5a2 2 0 012 2v14a2 2 0 00-2-2H4zM20 5a1 1 0 00-1-1h-5a2 2 0 00-2 2v14a2 2 0 012-2h6z"></path></svg></div><span style="font-size:12px;font-weight:500">Resources</span></div>
+<div style="height:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#6f6569"><div style="width:52px;height:30px;display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg></div><span style="font-size:12px;font-weight:500">Settings</span></div>
+</div>
+</div>
+</div>
+
+<!-- NOTES -->
+<sc-if value="{{ showNotes }}" hint-placeholder-val="{{ true }}">
+<div style="width:340px;display:flex;flex-direction:column;gap:18px;padding-top:34px">
+<div style="font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6f6569">What changed</div>
+<div style="display:flex;flex-direction:column;gap:14px;font-size:15px;line-height:1.5;color:#3d373a">
+<div><strong style="color:#1d1a1c">Tokens.</strong> Sky blue + Inter → plum #A75390, DM Sans, warm neutrals from hireform.css. Radius 16 (vs 20 on hire form) and 16–17px body for a denser daily tool.</div>
+<div><strong style="color:#1d1a1c">Actions.</strong> "View details →" links go; the whole card taps through (chevron). Start / Lock up become 52px full-width buttons, today only.</div>
+<div><strong style="color:#1d1a1c">Icons.</strong> Emoji → line icons in tinted tiles; one hue per kind of work (delivery/collection, crew, studio, yard), plus a small type label so colour isn't the only cue.</div>
+<div><strong style="color:#1d1a1c">Lists.</strong> Upcoming collapses into one grouped card; Completed + Cancelled become two tappable rows.</div>
+<div><strong style="color:#1d1a1c">Unchanged.</strong> Section order (Ooosh work above Today), routes, bottom nav order, yard-day accept/decline rules.</div>
+</div>
+</div>
+</sc-if>
+
+</div>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;showFees&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;},&quot;defaultSort&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;date&quot;,&quot;type&quot;],&quot;default&quot;:&quot;date&quot;,&quot;tsType&quot;:&quot;'date' | 'type'&quot;},&quot;showNotes&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Canvas&quot;}}">
+class Component extends DCLogic {
+  state = { sort: null };
+  renderVals() {
+    const sort = this.state.sort ?? this.props.defaultSort ?? 'date';
+    return {
+      showFees: this.props.showFees ?? true,
+      showNotes: this.props.showNotes ?? true,
+      byDate: sort === 'date',
+      byType: sort === 'type',
+      setDate: () => this.setState({ sort: 'date' }),
+      setType: () => this.setState({ sort: 'type' }),
+    };
+  }
+}
+</script>
+</body>
+</html>

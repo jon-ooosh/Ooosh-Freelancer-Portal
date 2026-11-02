@@ -12,17 +12,36 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { hasManagerRole } from '../lib/roles';
 import { ReceiptThumb, ReceiptPreview } from '../components/costs/CostReceipt';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import CostCaptureModal from '../components/CostCaptureModal';
-import CostAllocationModal from '../components/CostAllocationModal';
-import RechargeResolveModal, { RechargeStatusPill } from '../components/RechargeResolveModal';
+import { UNMATCHED_REASONS } from '../components/costs/FreelancerInvoiceLinks';
+import RechargeResolveModal, { RechargeSlot, type RechargeCost } from '../components/RechargeResolveModal';
 import RecordRefundModal from '../components/RecordRefundModal';
 import { PAID_NOW_METHODS } from '../lib/costOptions';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
+import { ukToday } from '../lib/ukDate';
 
 type ViewMode = 'all' | 'payable' | 'recharge' | 'reconcile';
+
+/**
+ * On the Recharges tab, the recharge a row is about: the whole cost, or one
+ * job's share of a split cost (migration 318). The row's own columns are the
+ * cost as it is, because the edit button hands the row to the capture form.
+ */
+interface RechargeRef {
+  allocation_id: string | null;
+  job_id: string | null;
+  hh_job_number: number | null;
+  job_name: string | null;
+  cost_intent: 'quote_actual' | 'extra' | null;
+  recharge_mode: 'none' | 'full' | 'partial';
+  recharge_amount: number | null;
+  recharge_status: string | null;
+  share_gross: number | null;
+  share_net: number | null;
+}
 
 interface CostRow extends Cost {
   uploaded_by_name?: string | null;
@@ -30,7 +49,12 @@ interface CostRow extends Cost {
   job_name?: string | null;
   vehicle_reg?: string | null;
   allocation_count?: number;
-  allocation_jobs?: Array<{ job_id: string | null; hh_job_number: number | null; job_name: string | null; amount: number }>;
+  allocation_jobs?: Array<{
+    job_id: string | null; hh_job_number: number | null; job_name: string | null; amount: number;
+    recharge_mode?: 'none' | 'full' | 'partial'; recharge_status?: string | null;
+  }>;
+  /** Recharges tab only. */
+  recharge?: RechargeRef;
   due_date?: string | null;
   /** Money that has come back against THIS purchase (positive £). */
   refunded_total?: number | null;
@@ -48,6 +72,44 @@ interface Stats {
 }
 
 const gbp = (n: number | null | undefined) => `£${Number(n || 0).toFixed(2)}`;
+
+/** A Recharges-tab row about one job's share (not the whole cost). */
+const isShareRow = (c: CostRow) => !!c.recharge?.allocation_id;
+
+/**
+ * What a freelancer invoice's ticked work is, for its row: "1 job · 3 nights".
+ * Counts HireHop jobs (a run's stops on one job once), studio evenings and yard
+ * days, not work items, which read as "5 jobs" for five days on one job.
+ */
+function workLabel(c: { work_item_count?: number; work_summary?: { jobs: number; nights: number; days: number } | null }): string {
+  const w = c.work_summary;
+  if (!w) return `${c.work_item_count} item${c.work_item_count === 1 ? '' : 's'}`;
+  const bits = [
+    w.jobs ? `${w.jobs} job${w.jobs === 1 ? '' : 's'}` : '',
+    w.nights ? `${w.nights} night${w.nights === 1 ? '' : 's'}` : '',
+    w.days ? `${w.days} yard day${w.days === 1 ? '' : 's'}` : '',
+  ].filter(Boolean);
+  return bits.join(' · ') || `${c.work_item_count} item${c.work_item_count === 1 ? '' : 's'}`;
+}
+
+/** A phone-sized screen, where capturing opens the phone receipt page (/receipt). */
+const isPhoneWidth = () => typeof window !== 'undefined' && window.innerWidth < 640;
+
+/** What the resolve modal needs for this row's recharge. */
+function rechargeTarget(c: CostRow): RechargeCost {
+  const rc = c.recharge;
+  if (!rc?.allocation_id) return c;
+  return {
+    ...c,
+    recharge_mode: rc.recharge_mode,
+    recharge_amount: rc.recharge_amount,
+    hh_job_number: rc.hh_job_number,
+    allocation_id: rc.allocation_id,
+    share_gross: rc.share_gross,
+    share_net: rc.share_net,
+    full_amount_gross: c.amount_gross,
+  };
+}
 
 // cost_date is a DATE; pg/JSON returns it as an ISO timestamp. Take the date
 // part only (avoids timezone day-shift) and show UK format.
@@ -103,7 +165,7 @@ function dueInfo(c: { due_date?: string | null; cost_date: string | null }) {
 // Human description of a supplier's terms for the Due cell tooltip.
 function termsLabel(t?: SupplierPaymentTerms): string {
   if (!t || t.source === 'default') return `invoice + ${DEFAULT_TERMS_DAYS}d (default)`;
-  if (t.source === 'freelancer') return 'freelancer — first Friday +1wk after approval';
+  if (t.source === 'freelancer') return 'freelancer — first Friday a week after approval (8 to 14 days)';
   const base = t.basis === 'end_of_invoice_month' ? 'end of invoice month' : 'invoice date';
   return `${base} + ${t.days}d${t.source === 'xero' ? ' · from Xero' : ''}`;
 }
@@ -130,19 +192,21 @@ const PERIOD_LABELS: [PeriodFilter, string][] = [
   ['ytd', 'Year to date'],
   ['last_year', 'Last year'],
 ];
-const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string }) => string | number> = {
+const SORT_VALUE: Record<SortKey, (c: { cost_date: string | null; due_date?: string | null; supplier_name: string | null; description: string | null; amount_gross: number | null; category: string | null; cost_type: string; approval_state: string | null; payment_status: string; recharge?: { allocation_id: string | null; share_gross: number | null } }) => string | number> = {
   date: (c) => c.cost_date || '',
   // Undated bills sort last under ascending (the common "what's due soonest" view).
   due: (c) => c.due_date || '9999-12-31',
   supplier: (c) => (c.supplier_name || '').toLowerCase(),
   description: (c) => (c.description || '').toLowerCase(),
-  gross: (c) => Number(c.amount_gross || 0),
+  // A share row on the Recharges tab sorts by the share it shows.
+  gross: (c) => Number((c.recharge?.allocation_id ? c.recharge.share_gross : c.amount_gross) || 0),
   type: (c) => (c.category || c.cost_type || '').toLowerCase(),
   status: (c) => c.approval_state || c.payment_status || '',
 };
 
 export default function CostsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const { user } = useAuthStore();
   const role = user?.role || '';
   const isManager = hasManagerRole(role);
@@ -167,8 +231,11 @@ export default function CostsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [showCapture, setShowCapture] = useState(false);
   const [editing, setEditing] = useState<CostRow | null>(null);
-  const [allocating, setAllocating] = useState<CostRow | null>(null);
+  // ⑂ opens the edit form at its Jobs section (the split modal it used to open is retired).
+  const [editingJobs, setEditingJobs] = useState(false);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
+  // "Query" on a freelancer invoice: a question for them instead of approving (FREELANCER-PORTAL-SPEC §5).
+  const [queryTarget, setQueryTarget] = useState<CostRow | null>(null);
   // Recording money coming BACK. `null` target with the flag on = opened from
   // capture, where the purchase hasn't been picked yet.
   const [refundTarget, setRefundTarget] = useState<CostRow | null>(null);
@@ -176,7 +243,7 @@ export default function CostsPage() {
   const [refundFile, setRefundFile] = useState<File | null>(null);
   const [termsTarget, setTermsTarget] = useState<CostRow | null>(null);
   const [preview, setPreview] = useState<CostRow | null>(null);
-  const [resolving, setResolving] = useState<CostRow | null>(null);
+  const [resolving, setResolving] = useState<RechargeCost | null>(null);
   // Recharge view slice: '' = pending (default), or a terminal state / 'all' for the audit view.
   const [rechargeStatusFilter, setRechargeStatusFilter] = useState<string>('');
   const [actionBusy, setActionBusy] = useState<string | null>(null);
@@ -322,9 +389,11 @@ export default function CostsPage() {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, [focusCostId, loading, rows]);
 
-  // Deep-link from /quick "Upload receipt" → open the capture modal directly.
+  // Deep-link "?capture=1" → open the capture modal directly (on a phone, the
+  // phone receipt page instead: one question per screen).
   useEffect(() => {
     if (searchParams.get('capture') === '1') {
+      if (isPhoneWidth()) { navigate('/receipt'); return; }
       setShowCapture(true);
       searchParams.delete('capture');
       setSearchParams(searchParams, { replace: true });
@@ -365,7 +434,8 @@ export default function CostsPage() {
   // from the stat card's figure, which is the global "what do we owe" number:
   // a card that quietly changes meaning when a filter is on is how someone
   // quotes a filtered total as the total.
-  const shownTotal = sortedRows.reduce((t, c) => t + (Number(c.amount_gross) || 0), 0);
+  // A share row on the Recharges tab counts its share, not the whole cost again.
+  const shownTotal = sortedRows.reduce((t, c) => t + (Number(isShareRow(c) ? c.recharge?.share_gross : c.amount_gross) || 0), 0);
   // The server caps the list. Where it did, the filtered total covers what was
   // sent, not everything that matches — say so rather than under-reporting money.
   const truncated = totalMatching !== null && rows.length < totalMatching;
@@ -520,7 +590,7 @@ export default function CostsPage() {
     <div className="p-4 sm:p-6 max-w-7xl mx-auto">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Costs</h1>
-        <button onClick={() => setShowCapture(true)}
+        <button onClick={() => (isPhoneWidth() ? navigate('/receipt') : setShowCapture(true))}
           className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md">
           + Capture cost
         </button>
@@ -629,11 +699,13 @@ export default function CostsPage() {
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2 text-sm text-gray-600">
           <span>
             Showing <strong className="text-gray-900">{sortedRows.length}</strong>
-            {sortedRows.length === 1 ? ' cost' : ' costs'} ·{' '}
+            {view === 'recharge'
+              ? (sortedRows.length === 1 ? ' recharge' : ' recharges')
+              : (sortedRows.length === 1 ? ' cost' : ' costs')} ·{' '}
             <strong className="text-gray-900">{gbp(shownTotal)}</strong>
             {truncated && (
               <span className="text-amber-700">
-                {' '}— only the first {rows.length} of {totalMatching} matching costs are loaded,
+                {' '}— only the first {rows.length} of {totalMatching} matching {view === 'recharge' ? 'recharges' : 'costs'} are loaded,
                 so this total covers what's on screen, not the whole filter.
               </span>
             )}
@@ -679,7 +751,8 @@ export default function CostsPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {sortedRows.map((c) => (
-                <tr key={c.id} id={`cost-row-${c.id}`}
+                <tr key={isShareRow(c) ? `${c.id}:${c.recharge?.allocation_id}` : c.id}
+                  id={isShareRow(c) ? undefined : `cost-row-${c.id}`}
                   className={focusCostId === c.id ? 'bg-purple-50 ring-2 ring-inset ring-purple-300' : 'hover:bg-gray-50'}>
                   {selectableRows.length > 0 && (
                     <td className="px-2 py-2">
@@ -715,6 +788,22 @@ export default function CostsPage() {
                       <div className="min-w-0">
                         <div className="truncate max-w-[150px]">{c.supplier_name || '—'}</div>
                         {c.invoice_number && <div className="text-xs text-gray-400 truncate max-w-[150px]">#{c.invoice_number}</div>}
+                        {/* A freelancer invoice's freelancer + how much of their work it
+                            covers (FREELANCER-PORTAL-SPEC §5): what their Earnings reads. */}
+                        {c.person_name && (
+                          <div className="text-xs text-purple-700 truncate max-w-[150px]"
+                            title={`${c.person_name}'s invoice${c.work_item_count ? `, covering ${workLabel(c)}` : ', no work ticked yet'}`}>
+                            {/* Their own name is usually the letterhead already: don't say it twice. */}
+                            {(c.person_name || '').trim().toLowerCase() === (c.supplier_name || '').trim().toLowerCase() ? 'Linked' : c.person_name}
+                            {c.work_item_count ? ` · ${workLabel(c)}` : ''}
+                          </div>
+                        )}
+                        {/* Saved with no work ticked, and why (the save asks). */}
+                        {c.cost_type === 'freelancer_invoice' && !c.work_item_count && c.work_unmatched_reason && (
+                          <div className="text-xs text-amber-700 truncate max-w-[150px]" title="Saved without ticking the work it covers">
+                            {UNMATCHED_REASONS.find((r) => r.code === c.work_unmatched_reason)?.short || 'Not matched'}
+                          </div>
+                        )}
                         {/* "Uploaded by" used to be its own column on the All costs tab,
                             which pushed the row actions off-screen. It rides here instead;
                             the other tabs keep it as the Type tooltip, as before. */}
@@ -737,7 +826,12 @@ export default function CostsPage() {
                     )}
                   </td>
                   <td className="px-2 py-2 text-right font-medium text-gray-900">
-                    {c.is_credit ? (
+                    {isShareRow(c) ? (
+                      <span title={`This job's share of a ${gbp(c.amount_gross)} cost`}>
+                        {gbp(c.recharge?.share_gross)}
+                        <span className="block text-[11px] text-gray-500 font-normal">of {gbp(c.amount_gross)}</span>
+                      </span>
+                    ) : c.is_credit ? (
                       <span className="text-emerald-700" title="Money back from the supplier">
                         −{gbp(Math.abs(Number(c.amount_gross) || 0))}
                       </span>
@@ -756,13 +850,18 @@ export default function CostsPage() {
                     {c.category || c.cost_type.replace('_', ' ')}
                   </td>
                   <td className="px-2 py-2 text-gray-600 whitespace-nowrap">
-                    {c.hh_job_number && c.job_id ? (
+                    {isShareRow(c) ? (
+                      /* The job this share is recharged to, not the cost's own. */
+                      c.recharge?.job_id && c.recharge.hh_job_number ? (
+                        <Link to={`/jobs/${c.recharge.job_id}`} title={c.recharge.job_name || undefined} className="text-purple-700 hover:underline">#{c.recharge.hh_job_number}</Link>
+                      ) : <span className="text-purple-700">{c.recharge?.job_name || '(job)'}</span>
+                    ) : c.hh_job_number && c.job_id ? (
                       <Link to={`/jobs/${c.job_id}`} title={c.job_name || undefined} className="text-purple-700 hover:underline">#{c.hh_job_number}</Link>
                     ) : c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
                       : c.vehicle_reg && c.vehicle_id ? (
                         <Link to={`/vehicles/fleet/${c.vehicle_id}`} className="text-purple-700 hover:underline">{c.vehicle_reg}</Link>
                       ) : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
-                    {c.allocation_jobs && c.allocation_jobs.length > 0 && (
+                    {!isShareRow(c) && c.allocation_jobs && c.allocation_jobs.length > 0 && (
                       /* One job per line, not a single inline run. Inline, a three-way
                          split was ~250px wide and set the whole column's width, which is
                          what pushed the row actions off the right edge. Stacked, the
@@ -796,8 +895,15 @@ export default function CostsPage() {
                     ) : (
                       <span className="text-xs text-gray-500">{c.payment_status.replace('_', ' ')}</span>
                     )}
-                    {c.recharge_mode !== 'none' && (
-                      <span className="ml-1"><RechargeStatusPill status={c.recharge_status} mode={c.recharge_mode} /></span>
+                    {/* The recharge slot — status, or the action that moves it on. It
+                        replaced the separate Resolve button in Actions, which kept
+                        that column wide on every recharge row. */}
+                    {!c.is_credit && (
+                      <span className="ml-1"><RechargeCell c={c} onResolve={() => setResolving(rechargeTarget(c))}
+                        onShowRecharges={() => setView('recharge')} /></span>
+                    )}
+                    {c.queried_at && c.approval_state !== 'approved' && c.approval_state !== 'paid' && (
+                      <span className="ml-1 px-2 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800" title={c.query_note || 'Queried'}>Queried</span>
                     )}
                     {c.remittance_sent_at && (
                       <span className="ml-1 text-xs text-gray-400" title={`Remittance advice sent${c.remittance_email ? ` to ${c.remittance_email}` : ''}`}>✉︎</span>
@@ -813,13 +919,7 @@ export default function CostsPage() {
                   <td className="px-2 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
-                        <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
-                      )}
-                      {c.recharge_mode !== 'none' && (c.recharge_status ?? 'pending') === 'pending' && (
-                        <button onClick={() => setResolving(c)}
-                          className="px-2 py-1 text-xs text-white bg-blue-600 hover:bg-blue-700 rounded">
-                          Resolve
-                        </button>
+                        <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} onQuery={() => setQueryTarget(c)} />
                       )}
                       {/* Money back. Not offered on a credit (you can't refund a
                           refund) or on a £0 row, which is what the server says too. */}
@@ -830,11 +930,11 @@ export default function CostsPage() {
                           ↩
                         </button>
                       )}
-                      <button onClick={() => setAllocating(c)} title="Split across jobs"
+                      <button onClick={() => { setEditingJobs(true); setEditing(c); }} title="Split across jobs"
                         className={`px-1.5 py-1 text-sm rounded hover:bg-gray-100 ${c.allocation_count ? 'text-purple-700' : 'text-gray-500 hover:text-gray-800'}`}>
                         ⑂{c.allocation_count ? <span className="text-[10px] align-top">{c.allocation_count}</span> : ''}
                       </button>
-                      <button onClick={() => setEditing(c)} title="Edit"
+                      <button onClick={() => { setEditingJobs(false); setEditing(c); }} title="Edit"
                         className="px-1.5 py-1 text-sm text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
                         ✎
                       </button>
@@ -857,7 +957,6 @@ export default function CostsPage() {
         <CostCaptureModal
           onClose={() => setShowCapture(false)}
           onSaved={() => { setShowCapture(false); load(); }}
-          onSavedAndSplit={(c) => { setShowCapture(false); load(); setAllocating(c as CostRow); }}
           // Someone photographed a refund slip and came here out of habit. Hand
           // the file over rather than letting it be captured as spend — a refund
           // booked as a cost inflates the figure by twice the amount.
@@ -882,15 +981,9 @@ export default function CostsPage() {
       {editing && (
         <CostCaptureModal
           existing={editing}
+          focusJobs={editingJobs}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }}
-        />
-      )}
-      {allocating && (
-        <CostAllocationModal
-          cost={allocating}
-          onClose={() => setAllocating(null)}
-          onSaved={() => { setAllocating(null); load(true); }}
         />
       )}
       {/* Batch-pay bar. Sticks to the bottom so the total stays visible while
@@ -929,6 +1022,11 @@ export default function CostsPage() {
         />
       )}
 
+      {queryTarget && (
+        <QueryInvoiceModal cost={queryTarget} onClose={() => setQueryTarget(null)}
+          onSaved={() => { setQueryTarget(null); void load(true); }} />
+      )}
+
       {payTarget && (
         <PayModal
           cost={payTarget}
@@ -941,7 +1039,9 @@ export default function CostsPage() {
       {resolving && (
         <RechargeResolveModal
           cost={resolving}
-          onClose={() => setResolving(null)}
+          // A failed push from "Recharge…" has still marked the cost for recharge
+          // (it's now pending), so refresh on close too or the row reads stale.
+          onClose={() => { if (resolving.recharge_mode === 'none') load(true); setResolving(null); }}
           onResolved={() => { setResolving(null); load(true); }}
         />
       )}
@@ -1080,7 +1180,7 @@ function BatchPayModal({ count, total, supplierCount, busy, onClose, onSubmit }:
   onClose: () => void;
   onSubmit: (paidDate: string, paidMethod: string, reference: string) => void;
 }) {
-  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidDate, setPaidDate] = useState(() => ukToday());
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   const [reference, setReference] = useState('');
 
@@ -1141,7 +1241,7 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
   onSubmit: (paidDate: string, paidMethod: string, remittanceEmail?: string) => void;
   onSettleExternal: (settledDate: string, note: string) => void;
 }) {
-  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidDate, setPaidDate] = useState(() => ukToday());
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   // "It's already been paid — I'm recording that, not asking you to pay it."
   // The two jobs live in one modal because they start from the same thought;
@@ -1199,7 +1299,7 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
     return () => { cancelled = true; };
   }, [cost.id]);
 
-  const isFutureDate = paidDate > new Date().toISOString().slice(0, 10);
+  const isFutureDate = paidDate > ukToday();
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(remittanceEmail.trim());
   // Due date from the supplier's resolved terms (server-computed), falling back
   // to flat invoice + 30 for an older API response.
@@ -1314,7 +1414,7 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
                 {remittanceEmail && emailValid && contactSource === 'reimbursement_staff' && (
                   <p className="text-xs text-gray-400 mt-1">From their staff profile.</p>
                 )}
-                {remittanceEmail && emailValid && (contactSource === 'freelancer_assignment' || contactSource === 'person_match') && (
+                {remittanceEmail && emailValid && (contactSource === 'freelancer_linked' || contactSource === 'freelancer_assignment' || contactSource === 'person_match') && (
                   <p className="text-xs text-gray-400 mt-1">From their OP contact record.</p>
                 )}
                 {remittanceEmail && emailValid && contactSource === 'remembered' && (
@@ -1376,16 +1476,35 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
   );
 }
 
-function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay }: {
+function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay, onQuery }: {
   cost: Cost;
   isManager: boolean;
   isAdmin: boolean;
   busy: string | null;
   onAction: (id: string, a: 'verify' | 'approve') => void;
   onPay: () => void;
+  onQuery?: () => void;
 }) {
   const s = cost.approval_state;
   if (s === 'paid') return <span className="text-xs text-green-600">Paid</span>;
+  // A freelancer invoice not yet approved: "why is that so expensive?" sits
+  // beside Verify / Approve, as the other answer (jon, Oct 2026).
+  const queryBtn = isManager && onQuery && cost.cost_type === 'freelancer_invoice' && s !== 'approved' ? (
+    <button onClick={onQuery} title={cost.queried_at ? `Queried: ${cost.query_note || ''}` : 'Ask the freelancer about this invoice'}
+      className="px-2 py-1 text-xs rounded border border-amber-300 text-amber-800 hover:bg-amber-50">
+      {cost.queried_at ? 'Edit query' : 'Query'}
+    </button>
+  ) : null;
+  if (queryBtn && isManager && (!s || s === 'submitted' || s === 'verified')) {
+    const verify = !s || s === 'submitted';
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        {queryBtn}
+        <ActionBtn busy={busy === cost.id + (verify ? 'verify' : 'approve')}
+          onClick={() => onAction(cost.id, verify ? 'verify' : 'approve')} label={verify ? 'Verify' : 'Approve'} />
+      </span>
+    );
+  }
   if ((!s || s === 'submitted') && isManager) {
     return <ActionBtn busy={busy === cost.id + 'verify'} onClick={() => onAction(cost.id, 'verify')} label="Verify" />;
   }
@@ -1409,6 +1528,41 @@ function SortableTh({ label, k, sortKey, sortDir, onSort, align }: {
       {sortKey === k && <span className="ml-1">{sortDir === 'asc' ? '▲' : '▼'}</span>}
     </th>
   );
+}
+
+/**
+ * The recharge slot on a Costs-page row. A Recharges-tab row is ONE recharge
+ * (the whole cost, or one job's share) and gets the usual slot. Elsewhere, a
+ * split cost recharged job by job shows a summary instead, because each share is
+ * resolved on its own (the Recharges tab, or that job's Money tab). A split cost
+ * with no recharge offers nothing here: a share is recharged from its own job,
+ * so the whole invoice can't be billed to one job by mistake (migration 318).
+ */
+function RechargeCell({ c, onResolve, onShowRecharges }: { c: CostRow; onResolve: () => void; onShowRecharges: () => void }) {
+  const rc = c.recharge;
+  if (rc) {
+    return (
+      <RechargeSlot
+        cost={{ recharge_mode: rc.recharge_mode, recharge_status: rc.recharge_status, cost_intent: rc.cost_intent, amount_gross: rc.share_gross, job_id: rc.job_id }}
+        onResolve={onResolve} />
+    );
+  }
+  const split = Number(c.allocation_count || 0) > 0;
+  if (split && (!c.recharge_mode || c.recharge_mode === 'none')) {
+    const perJob = (c.allocation_jobs || []).filter((a) => a.recharge_mode && a.recharge_mode !== 'none');
+    if (!perJob.length) return null;
+    const pending = perJob.filter((a) => (a.recharge_status ?? 'pending') === 'pending').length;
+    return (
+      <button type="button" onClick={onShowRecharges}
+        title="Recharged job by job. Resolve each job's share on the Recharges tab or that job's Money tab."
+        className={`px-2 py-0.5 text-xs rounded-full whitespace-nowrap border ${pending
+          ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+          : 'bg-green-50 text-green-700 border-green-200'}`}>
+        {perJob.length} job recharge{perJob.length === 1 ? '' : 's'}{pending ? ` · ${pending} pending` : ' ✓'}
+      </button>
+    );
+  }
+  return <RechargeSlot cost={c} onResolve={onResolve} />;
 }
 
 function ActionBtn({ busy, onClick, label }: { busy: boolean; onClick: () => void; label: string }) {
@@ -1654,6 +1808,56 @@ function XeroCotProbe() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Query a freelancer invoice: a question for them instead of approving it
+ * (FREELANCER-PORTAL-SPEC §5). Shown as Queried here and, soon, in their
+ * portal. No email: the office contacts them itself (jon). Approving clears it.
+ */
+function QueryInvoiceModal({ cost, onClose, onSaved }: { cost: Cost; onClose: () => void; onSaved: () => void }) {
+  const [note, setNote] = useState(cost.queried_at ? cost.query_note || '' : '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function save(clear: boolean) {
+    setBusy(true); setError('');
+    try {
+      if (clear) await api.delete(`/costs/${cost.id}/query`);
+      else await api.post(`/costs/${cost.id}/query`, { note: note.trim() });
+      onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the query');
+    } finally { setBusy(false); }
+  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-semibold text-gray-900">Query this invoice</h2>
+        <p className="mt-1 text-sm text-gray-600">
+          {cost.person_name || cost.supplier_name || 'Freelancer'}{cost.invoice_number ? ` · #${cost.invoice_number}` : ''}
+          {cost.amount_gross != null ? ` · £${Number(cost.amount_gross).toFixed(2)}` : ''}
+        </p>
+        <label className="mt-4 block text-sm font-medium text-gray-700 mb-1">What do you need to ask them?</label>
+        <textarea className="w-full min-h-[90px] rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+          value={note} onChange={(e) => setNote(e.target.value)} maxLength={2000} autoFocus
+          placeholder="e.g. The £80 train looks high. Can you send the ticket?" />
+        <p className="mt-1 text-xs text-gray-400">They&apos;ll see this in their portal (Earnings). It stays Queried until it&apos;s approved or you remove the query. No email is sent: contact them yourself.</p>
+        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+        <div className="mt-4 flex items-center justify-between gap-2">
+          {cost.queried_at ? (
+            <button onClick={() => void save(true)} disabled={busy} className="text-sm text-red-600 hover:underline disabled:opacity-50">Remove the query</button>
+          ) : <span />}
+          <span className="flex gap-2">
+            <button onClick={onClose} className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50">Cancel</button>
+            <button onClick={() => void save(false)} disabled={busy || !note.trim()}
+              className="px-3 py-1.5 text-sm rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+              {busy ? 'Saving…' : cost.queried_at ? 'Update the query' : 'Mark as queried'}
+            </button>
+          </span>
+        </div>
+      </div>
     </div>
   );
 }

@@ -12,14 +12,22 @@
  * The well-tuned domain prompt (FT/RT/BD abbreviations, "different model number
  * ≠ variant" precision rules) is ported verbatim — it's the matcher's value.
  *
- * Model: Claude Sonnet 4.6 — the original used Sonnet; the matching is
- * knowledge-heavy over a big stock list, where Sonnet is the right balance.
+ * Model: Claude Sonnet (CLAUDE_SONNET_MODEL) — the original used Sonnet; the
+ * matching is knowledge-heavy over a big stock list, where Sonnet is the right
+ * balance.
  */
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
+import {
+  getAnthropicClient,
+  isAnthropicConfigured,
+  readStructuredJson,
+  CLAUDE_SONNET_MODEL,
+} from '../config/anthropic';
 import type { BacklineStockItem } from './backline-stock';
 
-const MODEL_ID = 'claude-sonnet-4-6';
-const MAX_TOKENS = 1500;
+const MODEL_ID = CLAUDE_SONNET_MODEL;
+// Headroom for thinking as well as the JSON — thinking counts towards max_tokens
+// on Sonnet 5.5, and at effort 'low' it's usually short or skipped.
+const MAX_TOKENS = 8000;
 
 const SYSTEM_PROMPT = `You are an equipment specialist for Ooosh Tours, a music and event equipment hire company. Your job is to help staff find alternatives when clients request items that may not be in stock.
 
@@ -137,9 +145,8 @@ ${stockList}
 Decide whether we have the exact item (or a close variant), give a punchy top recommendation, briefly describe what the requested item is, and list 2-4 alternatives with the stock_id of each from the list above.${hasAvailability ? ' Prioritise items marked available over UNAVAILABLE ones.' : ''}`;
 
   const client = getAnthropicClient();
-  // Forced tool-use for structured output. This is the universally-supported
-  // method (works on every model incl. sonnet-4-6) — unlike `output_config`
-  // json_schema, which is model-gated and 400s on models that don't support it.
+  // Structured outputs (json_schema): the reply is JSON matching SCHEMA. This
+  // replaced forced tool-use, which Sonnet 5.5 rejects with a 400.
   const response = await client.messages.create({
     model: MODEL_ID,
     max_tokens: MAX_TOKENS,
@@ -147,37 +154,9 @@ Decide whether we have the exact item (or a close variant), give a punchy top re
       { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
     ],
     messages: [{ role: 'user', content: userPrompt }],
-    tools: [
-      {
-        name: 'report_match',
-        description: 'Report the equipment match result — verdict, recommendation, and alternatives.',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input_schema: SCHEMA as any,
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'report_match' },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA as any } } as any,
   });
 
-  const toolBlock = response.content.find((b) => b.type === 'tool_use');
-  if (toolBlock && toolBlock.type === 'tool_use') {
-    if (response.usage?.cache_read_input_tokens) {
-      console.log(`[Backline matcher] cache read: ${response.usage.cache_read_input_tokens} tokens`);
-    }
-    return toolBlock.input as MatcherResult;
-  }
-
-  // Fallback: dig JSON out of a text block if the model ignored the tool (rare).
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('Claude returned no structured result');
-  }
-  let parsed: MatcherResult;
-  try {
-    parsed = JSON.parse(textBlock.text);
-  } catch {
-    const m = textBlock.text.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('Claude returned unparseable response');
-    parsed = JSON.parse(m[0]);
-  }
-  return parsed;
+  return readStructuredJson<MatcherResult>(response, 'Backline matcher');
 }

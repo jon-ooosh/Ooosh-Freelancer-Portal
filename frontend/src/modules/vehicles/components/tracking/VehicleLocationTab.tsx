@@ -3,7 +3,7 @@ import { useTraccarDevice, useTraccarPosition, useTraccarTrips } from '../../hoo
 import { knotsToMph, metresToMiles, timeSince } from '../../types/traccar'
 import type { TraccarTrip } from '../../types/traccar'
 import { VehicleLocationMap } from './VehicleLocationMap'
-import { format, subDays } from 'date-fns'
+import { format, subDays, startOfDay, endOfDay } from 'date-fns'
 
 interface VehicleLocationTabProps {
   reg: string
@@ -13,11 +13,18 @@ export function VehicleLocationTab({ reg }: VehicleLocationTabProps) {
   const { data: device, isLoading: deviceLoading } = useTraccarDevice(reg)
   const { data: position, isLoading: positionLoading } = useTraccarPosition(device?.id)
 
-  // Trip history — default to last 7 days
+  // Trip history — default to last 7 days.
+  // Whole days, so the window (and the query key) only changes at midnight.
+  // It used to end at "now" to the second: every re-render made a new query,
+  // which restarted the fetch before Traccar could answer, so trips never
+  // loaded. toISOString() also gets the UK offset right (the old
+  // format(…'Z') stamped local time as UTC — an hour out in summer).
   const [tripDays, setTripDays] = useState(7)
+  // Newest first by default; clicking the "Recent Trips" heading flips it.
+  const [newestFirst, setNewestFirst] = useState(true)
   const now = new Date()
-  const from = format(subDays(now, tripDays), "yyyy-MM-dd'T'00:00:00'Z'")
-  const to = format(now, "yyyy-MM-dd'T'HH:mm:ss'Z'")
+  const from = startOfDay(subDays(now, tripDays)).toISOString()
+  const to = endOfDay(now).toISOString()
   const { data: trips, isLoading: tripsLoading } = useTraccarTrips(device?.id, from, to)
 
   // No tracker fitted
@@ -81,15 +88,10 @@ export function VehicleLocationTab({ reg }: VehicleLocationTabProps) {
               </div>
             </div>
 
-            {position.attributes.totalDistance != null && (
-              <div className="mt-2 text-center text-xs text-gray-400">
-                Total tracked: {metresToMiles(position.attributes.totalDistance).toLocaleString()} miles
-              </div>
-            )}
           </>
         ) : (
           <p className="text-sm text-gray-400 text-center py-6">
-            No position data available yet.
+            No usable GPS position right now — the tracker hasn't reported a satellite fix.
           </p>
         )}
       </div>
@@ -97,7 +99,17 @@ export function VehicleLocationTab({ reg }: VehicleLocationTabProps) {
       {/* Trip History */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Recent Trips</h3>
+          <button
+            type="button"
+            onClick={() => setNewestFirst(v => !v)}
+            title="Change the order"
+            className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-700"
+          >
+            Recent Trips
+            <span className="text-[11px] font-normal normal-case tracking-normal text-gray-400">
+              {newestFirst ? '↓ newest first' : '↑ oldest first'}
+            </span>
+          </button>
           <select
             value={tripDays}
             onChange={e => setTripDays(Number(e.target.value))}
@@ -120,7 +132,12 @@ export function VehicleLocationTab({ reg }: VehicleLocationTabProps) {
           </p>
         ) : (
           <div className="space-y-2">
-            {trips.map((trip, i) => (
+            {[...trips]
+              .sort((a, b) => {
+                const diff = new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+                return newestFirst ? -diff : diff
+              })
+              .map((trip, i) => (
               <TripRow key={i} trip={trip} />
             ))}
           </div>

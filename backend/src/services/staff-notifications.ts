@@ -23,6 +23,9 @@
 
 import { query } from '../config/database';
 import { emailService } from './email-service';
+import { ukToday } from './uk-date';
+import { resolveActionBells } from './notification-resolve';
+import type { BellKey } from './bell-rules';
 
 const STAFF_URL = '/staff/admin';
 const ABSENCE_URL = '/staff/absence';
@@ -57,6 +60,17 @@ function esc(s: string): string {
  * unseen and silently, which is exactly the problem this exists to solve. The
  * fallback logs why so the cause is visible rather than mysterious.
  */
+/**
+ * A request waiting for a decision links to the BARE Staff page, where the
+ * "Waiting for you" panel (LeaveApprovals) lists every pending request with
+ * Approve / Decline and the impact preview. Not the person's Time off tab:
+ * that opens in whichever view the approver last used on their own My Time
+ * (the Calendar view has no buttons), only loads the current leave year, and
+ * buries the decision in a year-long timeline. Deliberate one-off departure
+ * from CLAUDE.md's "deep-link the tab" (jon, Oct 2026).
+ */
+const APPROVALS_URL = STAFF_URL;
+
 async function approverUserIds(): Promise<{ id: string; email: string }[]> {
   const employed = await query(
     `SELECT u.id, u.email
@@ -88,12 +102,31 @@ async function notify(
    */
   entityId: string | null,
   actionUrl: string,
-  priority: 'low' | 'normal' | 'high' = 'normal'
+  priority: 'low' | 'normal' | 'high' = 'normal',
+  /**
+   * True when the caller ALSO emails this straight away (emailApprovers, or
+   * a decision email). The bell is then stamped `email_sent_at` so the
+   * 15-minute escalator does not email it a second time four hours later —
+   * which is exactly what happened with every TOIL request (jon, Oct 2026):
+   * requested → emailed → approved → the still-unread bell escalated as
+   * "X has requested TOIL" again. Deciding a leave request now retires its
+   * bell (`retireLeaveRequestBells`, Oct 2026), but a request can sit unread
+   * for hours before anyone decides, so the stamp is still what stops it
+   * (email-and-notifications rules). Bells WITHOUT a direct email (the task
+   * and review chases) leave this false so the escalator still does its job
+   * for them.
+   */
+  emailedDirectly = false,
+  /**
+   * What this bell ASKS for — its rule in bell-rules.ts retires it once that
+   * is done. Leave null for an FYI bell (done when read).
+   */
+  resolveKey: BellKey | null = null,
 ) {
   await query(
-    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [userId, type, title, content, entityType, entityId, actionUrl, priority]
+    `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, CASE WHEN $9::boolean THEN NOW() END, $10)`,
+    [userId, type, title, content, entityType, entityId, actionUrl, priority, emailedDirectly, resolveKey]
   ).catch(e => console.error(`[staff-notifications] notify failed (${type}, ${entityType}):`, e));
 }
 
@@ -102,7 +135,53 @@ async function notify(
 export async function notifyLeaveRequested(requestId: string) {
   try {
     const r = await query(
-      `SELECT r.id, r.leave_type, r.total_minutes, r.request_note,
+      `SELECT r.id, r.person_id, r.leave_type, r.total_minutes, r.request_note,
+              r.start_date::text AS start_date, r.end_date::text AS end_date,
+              o.start_date::text AS was_start, o.end_date::text AS was_end,
+              o.total_minutes AS was_minutes,
+              (p.first_name || ' ' || p.last_name) AS name
+         FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
+         LEFT JOIN staff_leave_requests o ON o.id = r.replaces_request_id
+        WHERE r.id = $1`, [requestId]);
+    const q = r.rows[0];
+    if (!q) return;
+    const link = APPROVALS_URL;
+    const rangeOf = (a: string, b: string) => a === b ? fmtDate(a) : `${fmtDate(a)} – ${fmtDate(b)}`;
+    const range = rangeOf(q.start_date, q.end_date);
+    const what = q.leave_type === 'holiday' ? 'holiday' : q.leave_type === 'toil' ? 'TOIL' : 'unpaid leave';
+    // A CHANGE to approved time off (spec §5.4) says what it was as well as
+    // what it would be — "has requested holiday" would read as a new booking.
+    const was = q.was_start ? rangeOf(q.was_start, q.was_end) : null;
+    const title = was ? `${q.name} asks to change their time off` : `${q.name} has requested ${what}`;
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        title,
+        was
+          ? `Was ${was} (${fmtH(Number(q.was_minutes))}) · now ${range} (${fmtH(Number(q.total_minutes))})`
+          : `${range} · ${fmtH(Number(q.total_minutes))}`,
+        'staff_leave_request', q.id, link, 'normal', true);
+    }
+    await emailApprovers(
+      title,
+      esc(title),
+      [
+        ...(was ? [`Was <strong>${esc(was)}</strong> — ${fmtH(Number(q.was_minutes))}`] : []),
+        `${was ? 'Now ' : ''}<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))}${was ? ` of ${esc(what)}` : ''}`,
+        ...(q.request_note ? [`<span style="color:#64748b;">“${esc(q.request_note)}”</span>`] : []),
+      ],
+      link);
+  } catch (e) { console.error('[staff-notifications] leave requested:', e); }
+}
+
+/**
+ * Somebody asked, in writing, to cancel approved time off (spec §5.4). Same
+ * bell and email as a new request, on the booking itself — answered (approved,
+ * declined or withdrawn) it is retired by `retireLeaveRequestBells`.
+ */
+export async function notifyLeaveCancelAsked(requestId: string) {
+  try {
+    const r = await query(
+      `SELECT r.id, r.leave_type, r.total_minutes, r.cancel_request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
@@ -112,37 +191,48 @@ export async function notifyLeaveRequested(requestId: string) {
     const range = q.start_date === q.end_date
       ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
     const what = q.leave_type === 'holiday' ? 'holiday' : q.leave_type === 'toil' ? 'TOIL' : 'unpaid leave';
+    const title = `${q.name} asks to cancel their ${what}`;
     for (const u of await approverUserIds()) {
-      await notify(u.id, 'follow_up',
-        `${q.name} has requested ${what}`,
-        `${range} · ${fmtH(Number(q.total_minutes))}`,
-        'staff_leave_request', q.id, STAFF_URL);
+      await notify(u.id, 'follow_up', title, `${range} · ${fmtH(Number(q.total_minutes))}`,
+        'staff_leave_request', q.id, APPROVALS_URL, 'normal', true);
     }
     await emailApprovers(
-      `${q.name} has requested ${what}`,
-      `${esc(q.name)} has requested ${esc(what)}`,
+      title,
+      esc(title),
       [
-        `<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))}`,
-        ...(q.request_note ? [`<span style="color:#64748b;">“${esc(q.request_note)}”</span>`] : []),
+        `<strong>${esc(range)}</strong> — ${fmtH(Number(q.total_minutes))} would go back to their balance`,
+        ...(q.cancel_request_note ? [`<span style="color:#64748b;">“${esc(q.cancel_request_note)}”</span>`] : []),
       ],
-      STAFF_URL);
-  } catch (e) { console.error('[staff-notifications] leave requested:', e); }
+      APPROVALS_URL);
+  } catch (e) { console.error('[staff-notifications] leave cancel asked:', e); }
+}
+
+/**
+ * The request is no longer waiting (approved, declined or withdrawn), so the
+ * approvers' "X has requested holiday" bells above are done with — for every
+ * approver, not just the one who acted. Only the `follow_up` bells: the
+ * requester's "Time off approved" bell is `system` on the same request and
+ * must survive. Called by staff-leave.ts; never throws (notification-resolve.ts).
+ */
+export async function retireLeaveRequestBells(requestId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_leave_request', entityId: requestId, type: 'follow_up' });
 }
 
 export async function notifyOvertimeLogged(entryId: string) {
   try {
     const r = await query(
-      `SELECT e.id, e.minutes, e.reason, e.work_date::text AS work_date,
+      `SELECT e.id, e.person_id, e.minutes, e.reason, e.work_date::text AS work_date,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_overtime_entries e JOIN people p ON p.id = e.person_id
         WHERE e.id = $1`, [entryId]);
     const q = r.rows[0];
     if (!q) return;
+    const link = APPROVALS_URL;
     for (const u of await approverUserIds()) {
       await notify(u.id, 'follow_up',
         `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
         `${fmtDate(q.work_date)} — ${q.reason}`,
-        'staff_overtime_entry', q.id, STAFF_URL);
+        'staff_overtime_entry', q.id, link, 'normal', true);
     }
     await emailApprovers(
       `${q.name} logged ${fmtH(Number(q.minutes))} overtime`,
@@ -151,8 +241,104 @@ export async function notifyOvertimeLogged(entryId: string) {
         `<strong>${esc(fmtDate(q.work_date))}</strong> — ${fmtH(Number(q.minutes))}`,
         `<span style="color:#64748b;">${esc(q.reason)}</span>`,
       ],
-      STAFF_URL);
+      link);
   } catch (e) { console.error('[staff-notifications] overtime logged:', e); }
+}
+
+/**
+ * The entry is no longer waiting (approved, declined or withdrawn) — every
+ * approver's "X logged overtime" bell is done with. `follow_up` only; the
+ * person's "Overtime approved" bell is `system` on the same entry. Called by
+ * staff-overtime.ts; never throws. Same rule as retireLeaveRequestBells.
+ */
+export async function retireOvertimeBells(entryId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_overtime_entry', entityId: entryId, type: 'follow_up' });
+}
+
+/** Somebody asked to work from home — same route to the approver as leave. */
+export async function notifyWfhRequested(requestId: string) {
+  try {
+    const r = await query(
+      `SELECT w.id, w.person_id, w.request_note,
+              w.start_date::text AS start_date, w.end_date::text AS end_date,
+              (p.first_name || ' ' || p.last_name) AS name
+         FROM staff_wfh_requests w JOIN people p ON p.id = w.person_id
+        WHERE w.id = $1`, [requestId]);
+    const q = r.rows[0];
+    if (!q) return;
+    const range = q.start_date === q.end_date
+      ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
+    const link = APPROVALS_URL;
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        `${q.name} has asked to work from home`, range,
+        'staff_wfh_request', q.id, link, 'normal', true);
+    }
+    await emailApprovers(
+      `${q.name} has asked to work from home`,
+      `${esc(q.name)} has asked to work from home`,
+      [
+        `<strong>${esc(range)}</strong>`,
+        ...(q.request_note ? [`<span style="color:#64748b;">“${esc(q.request_note)}”</span>`] : []),
+      ],
+      link);
+  } catch (e) { console.error('[staff-notifications] wfh requested:', e); }
+}
+
+/** "Paid hours on the new day, against the day given up" — for the approver. */
+function swapHoursLine(minutes: number, usualMinutes: number | null): string {
+  if (usualMinutes === null) return fmtH(minutes);
+  const diff = minutes - usualMinutes;
+  if (diff === 0) return `${fmtH(minutes)} — the same as the day given up`;
+  return `${fmtH(minutes)} — ${fmtH(Math.abs(diff))} ${diff > 0 ? 'longer' : 'shorter'} than the day given up`;
+}
+
+/** Somebody asked to swap a day (services/staff-swaps.ts) — same route to the approver as leave. */
+export async function notifySwapRequested(swapId: string) {
+  try {
+    // Dynamic: staff-swaps.ts imports this module for retireSwapRequestBells.
+    const { getSwap } = await import('./staff-swaps');
+    const q = await getSwap(swapId);
+    if (!q) return;
+    const link = APPROVALS_URL;
+    const what = `Off ${fmtDate(q.offDate)}, working ${fmtDate(q.workDate)} ${q.startTime}–${q.endTime} instead`;
+    for (const u of await approverUserIds()) {
+      await notify(u.id, 'follow_up',
+        `${q.personName} has asked to swap a day`, what,
+        'staff_pattern_swap', q.id, link, 'normal', true);
+    }
+    await emailApprovers(
+      `${q.personName} has asked to swap a day`,
+      `${esc(q.personName)} has asked to swap a day`,
+      [
+        `Off <strong>${esc(fmtDate(q.offDate))}</strong>, working <strong>${esc(fmtDate(q.workDate))}</strong> ` +
+          `${esc(q.startTime)}–${esc(q.endTime)} instead`,
+        esc(swapHoursLine(q.minutes, q.usualMinutes)),
+        ...(q.requestNote ? [`<span style="color:#64748b;">“${esc(q.requestNote)}”</span>`] : []),
+      ],
+      link);
+  } catch (e) { console.error('[staff-notifications] swap requested:', e); }
+}
+
+/**
+ * The swap is no longer waiting (approved, declined or withdrawn), so every
+ * approver's "X has asked to swap a day" bell is done with. Only `follow_up`:
+ * the person's own "Day swap approved" bell is `system` on the same id and
+ * must survive. Called by staff-swaps.ts; never throws (notification-resolve.ts).
+ */
+export async function retireSwapRequestBells(swapId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_pattern_swap', entityId: swapId, type: 'follow_up' });
+}
+
+/**
+ * The request is no longer waiting (approved, declined or withdrawn) — every
+ * approver's "X has asked to work from home" bell is done with. `follow_up`
+ * only; the person's "Working from home approved" bell is `system` on the
+ * same request. Called by staff-wfh.ts; never throws. Same rule as
+ * retireLeaveRequestBells.
+ */
+export async function retireWfhBells(requestId: string): Promise<number> {
+  return resolveActionBells({ entityType: 'staff_wfh_request', entityId: requestId, type: 'follow_up' });
 }
 
 /**
@@ -202,24 +388,59 @@ async function emailApprovers(
  */
 export async function notifyDecision(opts: {
   personId: string;
-  kind: 'leave' | 'overtime';
+  kind: 'leave' | 'overtime' | 'wfh' | 'swap';
   outcome: 'approved' | 'declined' | 'cancelled';
   summary: string;
   note?: string | null;
   entityId: string;
+  /**
+   * Overrides "Time off declined" / "Your time off has been declined" where
+   * that would mislead — declining an ask to CANCEL leaves the time off
+   * booked, and the person must not read it as their holiday refused (§5.4).
+   */
+  heading?: string;
 }) {
   try {
     const u = await query(
-      `SELECT id FROM users WHERE person_id = $1 AND is_active = true LIMIT 1`, [opts.personId]);
+      `SELECT id, email FROM users WHERE person_id = $1 AND is_active = true LIMIT 1`, [opts.personId]);
     const userId = u.rows[0]?.id;
     if (!userId) return;   // no login — nothing to notify to
-    const what = opts.kind === 'leave' ? 'Time off' : 'Overtime';
+    const what = opts.kind === 'leave' ? 'Time off' : opts.kind === 'wfh' ? 'Working from home'
+      : opts.kind === 'swap' ? 'Day swap' : 'Overtime';
+    // The routes pass ISO dates and raw minutes; say them the way people do.
+    const summary = opts.summary
+      .replace(/\d{4}-\d{2}-\d{2}/g, d => fmtDate(d))
+      .replace(/(\d+) min\b/g, (_m, n: string) => fmtH(Number(n)));
+    const MY_TIME = '/me?tab=time';
     await notify(userId, 'system',
-      `${what} ${opts.outcome}: ${opts.summary}`,
+      opts.heading ? `${opts.heading}: ${summary}` : `${what} ${opts.outcome}: ${summary}`,
       opts.note ?? '',
-      opts.kind === 'leave' ? 'staff_leave_request' : 'staff_overtime_entry',
-      opts.entityId, '/staff/me',
-      opts.outcome === 'declined' ? 'high' : 'normal');
+      opts.kind === 'leave' ? 'staff_leave_request' : opts.kind === 'wfh' ? 'staff_wfh_request'
+        : opts.kind === 'swap' ? 'staff_pattern_swap' : 'staff_overtime_entry',
+      opts.entityId, MY_TIME,
+      opts.outcome === 'declined' ? 'high' : 'normal', true);
+
+    // And by email. The approvers have been emailed about every request since
+    // Phase B; the person who ASKED only ever got a bell, so a decision made
+    // while they were out of the app reached nobody (jon, Oct 2026). Same
+    // rule as everywhere else in this module: a bell alone is not an alert.
+    const to = u.rows[0]?.email as string | undefined;
+    if (to) {
+      const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
+      const word = opts.outcome === 'approved' ? 'approved' : opts.outcome === 'declined' ? 'declined' : 'cancelled';
+      const heading = opts.heading ?? `Your ${opts.kind === 'leave' ? 'time off' : opts.kind === 'wfh' ? 'working-from-home request'
+        : opts.kind === 'swap' ? 'day swap' : 'overtime'} has been ${word}`;
+      const body =
+        `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">${esc(heading)}</h2>` +
+        `<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;"><strong>${esc(summary)}</strong></p>` +
+        (opts.note ? `<p style="margin:0 0 8px;font-size:15px;color:#64748b;line-height:1.6;">“${esc(opts.note)}”</p>` : '') +
+        `<p style="margin:24px 0 0;"><a href="${base}${MY_TIME}" ` +
+        `style="display:inline-block;padding:10px 18px;background:#0074c6;color:#fff;` +
+        `border-radius:6px;text-decoration:none;font-size:15px;">Open My Time</a></p>`;
+      await emailService.send('staff_time_decision', {
+        to, subjectOverride: heading, bodyHtmlOverride: body,
+      }).catch(e => console.error('[staff-notifications] decision email failed:', e));
+    }
   } catch (e) { console.error('[staff-notifications] decision:', e); }
 }
 
@@ -245,7 +466,7 @@ export async function notifyRtwDue(absenceId: string) {
       await notify(u.id, 'follow_up',
         `Return-to-work due for ${q.name}`,
         `Back on ${fmtDate(q.end_date)} — record the conversation`,
-        'staff_absence', q.id, ABSENCE_URL);
+        'staff_absence', q.id, ABSENCE_URL, 'normal', true, 'rtw_due');
     }
     await emailApprovers(
       `Return-to-work due for ${q.name}`,
@@ -281,7 +502,7 @@ export async function runRtwChase(chaseDays?: number): Promise<RtwChaseResult> {
       await notify(u.id, 'follow_up',
         `Return-to-work still outstanding for ${a.personName}`,
         `Back on ${fmtDate(a.endDate)} — ${a.daysWaiting} days ago`,
-        'staff_absence', a.id, ABSENCE_URL, 'high');
+        'staff_absence', a.id, ABSENCE_URL, 'high', true, 'rtw_due');
     }
     await emailApprovers(
       `Return-to-work still outstanding for ${a.personName}`,
@@ -373,7 +594,7 @@ export async function runFreelancerOfferChase(chaseDays?: number): Promise<Offer
       await notify(u.id, 'follow_up',
         `${who} has not confirmed for tomorrow`,
         `Offered a yard day on ${fmtDate(row.booking_date)} and has not replied`,
-        'freelancer_day_booking', row.id as string, CALENDAR_URL, 'high');
+        'freelancer_day_booking', row.id as string, CALENDAR_URL, 'high', true, 'freelancer_unconfirmed');
     }
     await emailApprovers(
       `${who} has not confirmed for tomorrow`,
@@ -404,6 +625,8 @@ export async function runFreelancerOfferChase(chaseDays?: number): Promise<Offer
 export interface DigestResult {
   pendingLeave: number;
   pendingOvertime: number;
+  pendingWfh?: number;
+  pendingSwaps?: number;
   emailed: boolean;
   skippedReason?: string;
 }
@@ -415,14 +638,22 @@ export interface DigestResult {
  * quiet — "nothing pending" is a result, not a failure.
  */
 export async function runStaffTimeDigest(): Promise<DigestResult> {
-  const [leave, overtime] = await Promise.all([
+  const { listSwaps } = await import('./staff-swaps');
+  const [leave, overtime, wfh, swaps] = await Promise.all([
+    // New requests, changes to approved ones, and asks to cancel (spec §5.4) —
+    // all three wait on the same person.
     query(
-      `SELECT r.id, r.leave_type, r.total_minutes, r.request_note,
+      `SELECT r.id, r.leave_type, r.total_minutes,
+              CASE WHEN r.status = 'approved' THEN r.cancel_request_note ELSE r.request_note END AS request_note,
               r.start_date::text AS start_date, r.end_date::text AS end_date,
               r.requested_at,
+              (r.status = 'approved') AS is_cancel_ask,
+              o.start_date::text AS was_start, o.end_date::text AS was_end,
               (p.first_name || ' ' || p.last_name) AS name
          FROM staff_leave_requests r JOIN people p ON p.id = r.person_id
+         LEFT JOIN staff_leave_requests o ON o.id = r.replaces_request_id
         WHERE r.status = 'pending'
+           OR (r.status = 'approved' AND r.cancel_requested_at IS NOT NULL AND r.cancel_declined_at IS NULL)
         ORDER BY r.start_date`),
     query(
       `SELECT e.id, e.minutes, e.reason, e.work_date::text AS work_date,
@@ -430,14 +661,27 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
          FROM staff_overtime_entries e JOIN people p ON p.id = e.person_id
         WHERE e.status = 'pending'
         ORDER BY e.work_date`),
+    query(
+      `SELECT w.id, w.request_note, w.start_date::text AS start_date, w.end_date::text AS end_date,
+              (p.first_name || ' ' || p.last_name) AS name
+         FROM staff_wfh_requests w JOIN people p ON p.id = w.person_id
+        WHERE w.status = 'pending'
+        ORDER BY w.start_date`),
+    // A failure here must not cost the morning its leave and overtime list.
+    listSwaps({ status: 'pending' }).catch(e => {
+      console.error('[staff-notifications] digest: swaps unreadable:', e);
+      return [];
+    }),
   ]);
 
   const result: DigestResult = {
     pendingLeave: leave.rows.length,
     pendingOvertime: overtime.rows.length,
+    pendingWfh: wfh.rows.length,
+    pendingSwaps: swaps.length,
     emailed: false,
   };
-  if (result.pendingLeave === 0 && result.pendingOvertime === 0) {
+  if (result.pendingLeave === 0 && result.pendingOvertime === 0 && wfh.rows.length === 0 && swaps.length === 0) {
     result.skippedReason = 'nothing pending';
     return result;
   }
@@ -452,11 +696,13 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
   if (leave.rows.length > 0) {
     rows.push(`<h3 style="margin:20px 0 8px;font-size:15px;color:#1e293b;">Time off (${leave.rows.length})</h3>`);
     for (const q of leave.rows) {
-      const range = q.start_date === q.end_date
-        ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
+      const rangeOf = (a: string, b: string) => a === b ? fmtDate(a) : `${fmtDate(a)} – ${fmtDate(b)}`;
+      const range = rangeOf(q.start_date, q.end_date);
+      const ask = q.is_cancel_ask ? 'asks to cancel · '
+        : q.was_start ? `asks to change · was ${rangeOf(q.was_start, q.was_end)}, now ` : '';
       rows.push(
         `<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">` +
-        `<strong>${esc(q.name)}</strong> — ${esc(q.leave_type)} · ${esc(range)} · ${fmtH(Number(q.total_minutes))}` +
+        `<strong>${esc(q.name)}</strong> — ${esc(q.leave_type)} · ${esc(ask)}${esc(range)} · ${fmtH(Number(q.total_minutes))}` +
         (q.request_note ? `<br><span style="color:#64748b;">“${esc(q.request_note)}”</span>` : '') +
         `</p>`
       );
@@ -472,8 +718,34 @@ export async function runStaffTimeDigest(): Promise<DigestResult> {
       );
     }
   }
+  if (wfh.rows.length > 0) {
+    rows.push(`<h3 style="margin:20px 0 8px;font-size:15px;color:#1e293b;">Working from home (${wfh.rows.length})</h3>`);
+    for (const q of wfh.rows) {
+      const range = q.start_date === q.end_date
+        ? fmtDate(q.start_date) : `${fmtDate(q.start_date)} – ${fmtDate(q.end_date)}`;
+      rows.push(
+        `<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">` +
+        `<strong>${esc(q.name)}</strong> — ${esc(range)}` +
+        (q.request_note ? `<br><span style="color:#64748b;">“${esc(q.request_note)}”</span>` : '') +
+        `</p>`
+      );
+    }
+  }
 
-  const total = result.pendingLeave + result.pendingOvertime;
+  if (swaps.length > 0) {
+    rows.push(`<h3 style="margin:20px 0 8px;font-size:15px;color:#1e293b;">Day swaps (${swaps.length})</h3>`);
+    for (const q of swaps) {
+      rows.push(
+        `<p style="margin:0 0 8px;font-size:14px;color:#334155;line-height:1.5;">` +
+        `<strong>${esc(q.personName)}</strong> — off ${esc(fmtDate(q.offDate))}, ` +
+        `working ${esc(fmtDate(q.workDate))} ${esc(q.startTime)}–${esc(q.endTime)} instead` +
+        (q.requestNote ? `<br><span style="color:#64748b;">“${esc(q.requestNote)}”</span>` : '') +
+        `</p>`
+      );
+    }
+  }
+
+  const total = result.pendingLeave + result.pendingOvertime + wfh.rows.length + swaps.length;
   const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
   const body =
     `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">` +
@@ -537,6 +809,9 @@ export interface CashOutReminderResult {
  * once it sends, which is what stops it going out every morning until New Year
  * — the same lesson as rtw_chased_at.
  */
+/** The day in January the year-end overtime figures go out (§17.2). */
+const JANUARY_PAYROLL_DAY = 2;
+
 export async function runCashOutReminder(today = new Date()): Promise<CashOutReminderResult> {
   const year = today.getUTCFullYear();
   const empty: CashOutReminderResult = { sent: false, year, people: [], totalMinutes: 0 };
@@ -560,23 +835,25 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
   const target = month === 11 ? year : year - 1;
   const stampKey = 'staff.overtime_cashout_reminded_year';
 
-  if (month === 11) {
-    const fromDay = await getCashOutReminderDay();
-    if (today.getUTCDate() < fromDay) {
-      return { ...empty, year: target, skippedReason: `before ${fromDay} December` };
-    }
-  } else if (month === 0) {
-    // A few days' grace in January before nagging about a year just ended.
-    if (today.getUTCDate() < 5) {
-      return { ...empty, year: target, skippedReason: 'early January grace period' };
-    }
-  } else {
-    return { ...empty, year: target, skippedReason: 'not December or January' };
+  // ONE reminder, on 2 January (spec §17.2, settled 21 Sep 2026): whatever is
+  // still banked at 31 December goes into JANUARY payroll, which must be in
+  // before the 5th for the 10th pay run — so jon needs one figure per person
+  // on the 2nd, after the last December overtime is logged. The December
+  // leg (from `staff.overtime_cashout_reminder_day`, the 8th) predated that
+  // decision and was removed in Oct 2026: it asked for a pay-out before the
+  // year's overtime was finished. The old "grace until the 5th" would have
+  // landed the reminder AFTER the payroll deadline. The setting is now unused.
+  void getCashOutReminderDay;
+  if (month !== 0) {
+    return { ...empty, year: target, skippedReason: 'only runs in January' };
+  }
+  if (today.getUTCDate() < JANUARY_PAYROLL_DAY) {
+    return { ...empty, year: target, skippedReason: `before ${JANUARY_PAYROLL_DAY} January` };
   }
 
-  // The stamp records year AND phase, so December's send does not silence
-  // January's follow-up on the same leave year.
-  const phase = month === 11 ? 'dec' : 'jan';
+  // Phase kept in the stamp ("2026:jan") so stamps written before Oct 2026,
+  // when there was also a December send, still mean what they meant.
+  const phase = 'jan';
   const stamp = `${target}:${phase}`;
   if ((await getSystemSetting(stampKey)) === stamp) {
     return { ...empty, year: target, skippedReason: 'already sent for this year and phase' };
@@ -615,21 +892,17 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
 
   const totalMinutes = people.reduce((s, p) => s + p.minutes, 0);
 
-  const title = phase === 'dec'
-    ? `Banked overtime to pay out before ${target} closes`
-    : `${target} still has banked overtime left over`;
+  const title = `Overtime to pay in January payroll — ${target} banked hours`;
 
   for (const u of await approverUserIds()) {
     await notify(u.id, 'follow_up', title,
       `${people.length} ${people.length === 1 ? 'person has' : 'people have'} ${fmtH(totalMinutes)} between them`,
-      'staff_overtime_entry', null, STAFF_URL, 'high');
+      'staff_overtime_entry', null, STAFF_URL, 'high', true, 'overtime_cashout');
   }
 
   await emailApprovers(title, title,
     [
-      phase === 'dec'
-        ? `Hours already worked cannot be forfeited, so the bank is <strong>paid out</strong> rather than expired. This wants to land in <strong>December's payroll</strong>, so it needs doing before that closes — though anyone who would rather take the time off over a quiet Christmas still can.`
-        : `This is what is left in the ${target} bank after the sweep — most likely overtime worked between the cash-out and New Year, which accrues to ${target} and would otherwise sit there unseen. Run the sweep again for ${target}; it is idempotent and picks up exactly this.`,
+      `This is what is still banked from ${target}. Hours already worked cannot be forfeited, so it is <strong>paid out</strong> rather than expired — in <strong>January's payroll</strong>, which needs to be in before the 5th. These are the figures to send.`,
       ...people.map(p => `<strong>${esc(p.name)}</strong> — ${fmtH(p.minutes)}`),
       `<strong>Total: ${fmtH(totalMinutes)}</strong>`,
       `Nothing has been posted. Run the year-end cash-out on the Staff page when you are happy with the figures.`,
@@ -638,6 +911,178 @@ export async function runCashOutReminder(today = new Date()): Promise<CashOutRem
 
   await setSystemSetting(stampKey, stamp);
   return { sent: true, year: target, people, totalMinutes };
+}
+
+// ── Monthly payroll report (spec §12.1) ─────────────────────────────────────
+
+export interface PayrollReportEmailResult {
+  sent: boolean;
+  /** The month reported on, as YYYY-MM. */
+  month: string;
+  from: string;
+  to: string;
+  people: number;
+  skippedReason?: string;
+}
+
+/** The stamp that stops the payroll report going out every morning. */
+const PAYROLL_SENT_KEY = 'staff.payroll_report_sent_month';
+
+/**
+ * Email last month's payroll changes to the staff admins, with the CSV.
+ *
+ * jon has to submit payroll changes to the payroll company before the 4th, so
+ * this is a prompt AND the figure sheet: the same numbers, in the same
+ * columns, as the Payroll report panel on the Staff page. It is built from
+ * getPayrollReport() / payrollCsv() and nothing else — never a SUM of the
+ * ledger here, because two places deriving the same figure is how two screens
+ * end up disagreeing.
+ *
+ * WHY IT CHECKS DAILY rather than running on the 1st: same reasoning as the
+ * cash-out reminder and runEntitlementSync. A server down on the 1st would
+ * otherwise skip the month entirely, so the test is "last month not sent
+ * yet", not "today is the 1st". `staff.payroll_report_sent_month` holds the
+ * month last reported (`2026-10`) and is stamped ONLY when a send actually
+ * succeeded — emailService.send() resolves { success: false } rather than
+ * throwing, and a stamp on a failed send would say jon had the figures when
+ * he never got them.
+ *
+ * It posts nothing and records no payroll batch. Downloading the CSV from the
+ * panel is still what records a batch against a person.
+ */
+export async function runPayrollReportEmail(today = new Date()): Promise<PayrollReportEmailResult> {
+  // The calendar date in London, not UTC — the cron fires at 08:20 London, and
+  // "last month" is a London question. en-CA formats as YYYY-MM-DD.
+  const londonToday = today.toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  const [y, m] = londonToday.split('-').map(Number);
+  // Day 0 of this month is the last day of the previous one.
+  const lastOfPrev = new Date(Date.UTC(y, m - 1, 0));
+  const py = lastOfPrev.getUTCFullYear();
+  const pm = lastOfPrev.getUTCMonth() + 1;
+  const month = `${py}-${String(pm).padStart(2, '0')}`;
+  const from = `${month}-01`;
+  const to = `${month}-${String(lastOfPrev.getUTCDate()).padStart(2, '0')}`;
+  const empty: PayrollReportEmailResult = { sent: false, month, from, to, people: 0 };
+
+  const { getSystemSetting, upsertSystemSetting } = await import('../routes/system-settings');
+  if ((await getSystemSetting(PAYROLL_SENT_KEY)) === month) {
+    return { ...empty, skippedReason: 'already sent for this month' };
+  }
+
+  // Nobody employed means there is no payroll to change. Quiet, and NOT
+  // stamped, so a first employment record set up later in the month still
+  // gets its report.
+  const employed = await query(
+    `SELECT COUNT(*)::int AS n
+       FROM staff_employment se JOIN people p ON p.id = se.person_id
+      WHERE se.employment_status = 'employed' AND p.is_deleted = false`);
+  if (Number(employed.rows[0]?.n ?? 0) === 0) {
+    return { ...empty, skippedReason: 'nobody employed' };
+  }
+
+  const approvers = await approverUserIds();
+  if (approvers.length === 0) {
+    return { ...empty, skippedReason: 'no active admin to send to' };
+  }
+
+  // THE definition of every figure here — staff-overtime.ts, not a second SUM.
+  const { getPayrollReport, payrollCsv, otherAbsenceText } = await import('./staff-overtime');
+  const rows = await getPayrollReport(from, to);
+  const csv = payrollCsv(rows, from, to);
+
+  const monthName = lastOfPrev.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  // The 4th of the month we are in — the payroll company's deadline.
+  const deadline = new Date(Date.UTC(y, m - 1, 4)).toLocaleDateString('en-GB', {
+    weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC',
+  });
+  const title = `Payroll changes for ${monthName}`;
+
+  const days = (d: number) => (Math.round(d * 100) / 100).toString();
+  const th = (label: string, align = 'right') =>
+    `<th style="padding:6px 8px;border-bottom:2px solid #e2e8f0;text-align:${align};font-size:13px;color:#475569;">${label}</th>`;
+  const td = (v: string, align = 'right', zero = false) =>
+    `<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:${align};font-size:14px;color:${zero ? '#94a3b8' : '#334155'};">${v}</td>`;
+  // A person with no working pattern on file reads 0 days whatever they took,
+  // because a "day" is their weekly minutes ÷ working days. Flag it rather than
+  // let a zero pass for a real figure.
+  const noPattern = rows.filter(r => r.nominalDayMinutes == null);
+
+  const table =
+    `<table style="border-collapse:collapse;width:100%;margin:8px 0 16px;">` +
+    `<tr>${th('Name', 'left')}${th('Overtime to pay')}${th('Unpaid leave (days)')}${th('Unpaid leave (hours)')}${th('Sickness (days)')}${th('Sickness (hours)')}${th('Other absence', 'left')}</tr>` +
+    rows.map(r =>
+      `<tr>` +
+      td(`<strong>${esc(r.name)}</strong>${r.nominalDayMinutes == null ? ' *' : ''}`, 'left') +
+      td(fmtH(r.paidOvertimeMinutes), 'right', r.paidOvertimeMinutes === 0) +
+      td(days(r.unpaidLeaveDays), 'right', r.unpaidLeaveMinutes === 0) +
+      td(fmtH(r.unpaidLeaveMinutes), 'right', r.unpaidLeaveMinutes === 0) +
+      td(days(r.sicknessDays), 'right', r.sicknessMinutes === 0) +
+      td(fmtH(r.sicknessMinutes), 'right', r.sicknessMinutes === 0) +
+      td(r.otherAbsenceMinutes === 0 ? '—' : esc(otherAbsenceText(r)), 'left', r.otherAbsenceMinutes === 0) +
+      `</tr>`).join('') +
+    `</table>`;
+
+  const base = process.env.APP_BASE_URL || 'https://staff.oooshtours.co.uk';
+  const p = (s: string) => `<p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;">${s}</p>`;
+  const body =
+    `<h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">${esc(title)}</h2>` +
+    p(`Here are the figures for <strong>${esc(fmtDate(from))} – ${esc(fmtDate(to))}</strong>, ready to send to the payroll company before <strong>${esc(deadline)}</strong>. The same sheet is attached as a CSV.`) +
+    table +
+    (noPattern.length > 0
+      ? p(`<span style="color:#b45309;">* No working pattern on file, so days read 0 — check the hours instead.</span>`)
+      : '') +
+    p(`<span style="color:#64748b;">Overtime to pay is what was cashed out of the overtime bank in the month. Statutory sick pay is not worked out here — the payroll company does that from the days.</span>`) +
+    (rows.some(r => r.otherAbsenceMinutes > 0)
+      ? p(`<span style="color:#64748b;">Other absence is everything that isn’t sickness — paternity, maternity, jury service and so on. Statutory parental pay is the payroll company’s to work out from the days, too.</span>`)
+      : '') +
+    `<p style="margin:24px 0 0;"><a href="${base}${STAFF_URL}" ` +
+    `style="display:inline-block;padding:10px 18px;background:#7B5EA7;color:#fff;` +
+    `border-radius:6px;text-decoration:none;font-size:15px;">Open the Payroll report</a></p>`;
+
+  let sent = 0;
+  for (const a of approvers) {
+    const r = await emailService.send('staff_payroll_report', {
+      to: a.email,
+      subjectOverride: `${title} — submit before ${deadline}`,
+      bodyHtmlOverride: body,
+      attachments: [{
+        filename: `ooosh-payroll-${from}-to-${to}.csv`,
+        content: Buffer.from(csv, 'utf8'),
+        contentType: 'text/csv; charset=utf-8',
+      }],
+    }).catch(e => {
+      console.error('[staff-notifications] payroll report email failed:', e);
+      return null;
+    });
+    if (r?.success) sent++;
+  }
+
+  if (sent === 0) {
+    // Not stamped, so tomorrow's run tries again. No bell either: a bell
+    // saying "the figures are in your inbox" would be the lie.
+    return { ...empty, people: rows.length, skippedReason: 'every send failed — see the email log' };
+  }
+
+  for (const u of approvers) {
+    await notify(u.id, 'follow_up', title,
+      `Figures for ${rows.length} ${rows.length === 1 ? 'person' : 'people'} emailed — submit to payroll before ${deadline}`,
+      'staff_payroll_report', null, STAFF_URL);
+  }
+  // The email above IS this bell's email, so the escalator must not send a
+  // second one (email-and-notifications rules).
+  await query(
+    `UPDATE notifications SET email_sent_at = NOW()
+      WHERE entity_type = 'staff_payroll_report' AND title = $1
+        AND email_sent_at IS NULL AND created_at > NOW() - INTERVAL '10 minutes'`,
+    [title]
+  ).catch(e => console.error('[staff-notifications] payroll bell stamp failed:', e));
+
+  await upsertSystemSetting(PAYROLL_SENT_KEY, month, {
+    label: 'Internal — the last month the payroll report was emailed (YYYY-MM). Clear it to make it send again',
+    category: 'staff_time',
+    sortOrder: 301,
+  });
+  return { sent: true, month, from, to, people: rows.length };
 }
 
 /**
@@ -672,7 +1117,7 @@ export async function notifyEntitlementPosted(result: {
         headline,
         `${result.changed.length} updated${result.failed.length > 0 ? `, ${result.failed.length} failed` : ''}`,
         'staff_employment', null, STAFF_URL,
-        result.failed.length > 0 ? 'high' : 'normal');
+        result.failed.length > 0 ? 'high' : 'normal', true);
     }
     await emailApprovers(headline, headline, lines, STAFF_URL);
   } catch (e) { console.error('[staff-notifications] entitlement posted:', e); }
@@ -729,7 +1174,7 @@ export async function runCompanyDaysReview(today = new Date()): Promise<CompanyD
       recurring.length > 0
         ? `${recurring.length} recurring day${recurring.length === 1 ? '' : 's'} carry over automatically — add any one-offs`
         : 'Nothing is set up yet for next year',
-      'staff_employment', null, SETTINGS_URL);
+      'staff_employment', null, SETTINGS_URL, 'normal', true);
   }
 
   await emailApprovers(
@@ -738,7 +1183,7 @@ export async function runCompanyDaysReview(today = new Date()): Promise<CompanyD
     [
       'A yearly check, so nobody turns up to a building that is shut.',
       recurring.length > 0
-        ? `These recur and need <strong>no action</strong>: ${recurring.map(r => `${esc(r.label)} (${esc(fmt(r.dayDate).replace(/ \\d{4}$/, ''))})`).join(', ')}.`
+        ? `These recur and need <strong>no action</strong>: ${recurring.map(r => `${esc(r.label)} (${esc(fmt(r.dayDate).replace(/ \d{4}$/, ''))})`).join(', ')}.`
         : 'No recurring company days are set up.',
       oneOffs > 0
         ? `${oneOffs} one-off day${oneOffs === 1 ? ' is' : 's are'} already set for ${nextYear}.`
@@ -795,7 +1240,7 @@ export async function runTaskChase(): Promise<{ chased: number }> {
       [row.id, String(intervalDays)]
     );
     const when = row.due_date
-      ? (row.due_date < new Date().toISOString().slice(0, 10)
+      ? (row.due_date < ukToday()
           ? `was due ${fmtDate(row.due_date)}`
           : `is due ${fmtDate(row.due_date)}`)
       : 'has no date on it';
@@ -807,7 +1252,9 @@ export async function runTaskChase(): Promise<{ chased: number }> {
       'staff_tasks',
       row.id,
       '/me?tab=todo',
-      'normal'
+      'normal',
+      false,
+      'task_owner',
     );
     chased++;
   }
@@ -850,13 +1297,13 @@ export async function runListItemChase(): Promise<{ chased: number }> {
       [row.list_id]
     );
     const when = row.due_date
-      ? (row.due_date < new Date().toISOString().slice(0, 10) ? `was due ${fmtDate(row.due_date)}` : `is due ${fmtDate(row.due_date)}`)
+      ? (row.due_date < ukToday() ? `was due ${fmtDate(row.due_date)}` : `is due ${fmtDate(row.due_date)}`)
       : 'is still on the list';
     for (const w of watchers.rows) {
       await notify(
         w.id, 'staff_list_item_due', `On ${esc(row.list_name)}: something needs doing`,
         `“${esc(row.title)}” ${when} — nobody has taken it yet.`,
-        'staff_tasks', row.id, `/me?tab=todo&view=lists&list=${row.list_id}`, 'normal'
+        'staff_tasks', row.id, `/me?tab=todo&view=lists&list=${row.list_id}`, 'normal', false, 'task_list_item'
       );
     }
     chased++;
@@ -890,7 +1337,7 @@ export async function notifyTaskAssigned(
   await notify(
     userId, 'staff_task_assigned', 'You’ve been given a to-do',
     `${esc(byName || 'Somebody')} gave you “${esc(title)}”${dueDate ? `, due ${fmtDate(dueDate)}` : ''}.`,
-    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal'
+    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal', false, 'task_owner'
   );
 }
 
@@ -901,7 +1348,7 @@ export async function notifyTaskHandedBack(
   await notify(
     setterUserId, 'staff_task_handed_back', 'A to-do was handed back to you',
     `${esc(byName || 'Somebody')} handed back “${esc(title)}”: ${esc(reason)}. It’s on your list now.`,
-    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal'
+    'staff_tasks', taskId, `${TODO_URL}&view=mine`, 'normal', false, 'task_owner'
   );
 }
 
@@ -930,7 +1377,7 @@ export async function notifySeriesProposed(
     `${esc(byName || 'Somebody')} wants to give you “${esc(title)}” — ` +
     `${esc(ruleText.charAt(0).toLowerCase() + ruleText.slice(1))}. ` +
     'Accept or decline it on your To Do.',
-    'staff_task_series', seriesId, `${TODO_URL}&view=mine`, 'normal'
+    'staff_task_series', seriesId, `${TODO_URL}&view=mine`, 'normal', false, 'series_proposed'
   );
 }
 
@@ -992,7 +1439,7 @@ export async function runTaskFollowUpChase(): Promise<{ chased: number }> {
       row.created_by, 'staff_task_follow_up', 'A to-do you set is still open',
       `${esc(row.owner_name || 'Somebody')}’s “${esc(row.title)}” is still open` +
       `${row.due_date ? ` (due ${fmtDate(row.due_date)})` : ''}.`,
-      'staff_tasks', row.id, `${TODO_URL}&view=assigned`, 'normal'
+      'staff_tasks', row.id, `${TODO_URL}&view=assigned`, 'normal', false, 'task_follow_up'
     );
     chased++;
   }
@@ -1045,7 +1492,9 @@ export async function runReviewDueScan(): Promise<{ flagged: number }> {
         'people',
         row.person_id,
         `${STAFF_URL}?person=${row.person_id}&tab=reviews`,
-        'normal'
+        'normal',
+        false,
+        'review_due',
       );
     }
     flagged++;
@@ -1138,7 +1587,7 @@ export async function runRecordActionChase(): Promise<{ chased: number }> {
     const isDelete = rec.action_kind === 'delete';
     const title = isDelete ? 'A staff record is due for deletion' : 'A staff record needs looking at';
     const expiry = rec.expires_on
-      ? ` ${rec.expires_on < new Date().toISOString().slice(0, 10) ? 'It expired' : 'It expires'} ${fmtDate(rec.expires_on)}.`
+      ? ` ${rec.expires_on < ukToday() ? 'It expired' : 'It expires'} ${fmtDate(rec.expires_on)}.`
       : '';
     const content = isDelete
       ? `${who}\u2019s ${what} is due for deletion. Open it and delete it if you agree \u2014 nothing is removed automatically.`
@@ -1151,10 +1600,11 @@ export async function runRecordActionChase(): Promise<{ chased: number }> {
     for (const admin of recipients) {
       await query(
         `INSERT INTO notifications
-           (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-         VALUES ($1, $2, $3, $4, 'staff_record_files', $5, $6, $7, $8)`,
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+         VALUES ($1, $2, $3, $4, 'staff_record_files', $5, $6, $7, $8, $9)`,
         [admin.id, isDelete ? 'staff_record_delete_due' : 'staff_record_action_due',
-         title, fullContent, rec.id, url, priority, emailNow ? new Date() : null]
+         title, fullContent, rec.id, url, priority, emailNow ? new Date() : null,
+         isDelete ? 'record_delete' : 'record_action']
       ).catch(e => console.error('[staff-notifications] record action bell failed:', e));
 
       if (emailNow && admin.email) {

@@ -213,6 +213,22 @@ export async function getPatternPeriods(personId: string, year: number): Promise
 }
 
 /**
+ * SQL boolean: somebody still employed has overtime banked in the leave year
+ * that the SQL expression `yearExpr` gives. For the cash-out reminder's bell
+ * rule (bell-rules.ts overtime_cashout) — written here because this module is
+ * the only reader of v_staff_balances. Same set as runCashOutReminder's.
+ */
+export function overtimeStillBankedSql(yearExpr: string): string {
+  return `EXISTS (SELECT 1 FROM staff_employment se
+                    JOIN people p ON p.id = se.person_id
+                    JOIN v_staff_balances b ON b.person_id = se.person_id
+                  WHERE se.employment_status = 'employed' AND p.is_deleted = false
+                    AND b.account = 'overtime'
+                    AND b.leave_year = ${yearExpr}
+                    AND b.balance_minutes > 0)`;
+}
+
+/**
  * The balance, with the entries that produced it.
  *
  * `entries` is the explainability payload — the whole reason a derived balance
@@ -418,8 +434,23 @@ export async function syncEntitlement(
   const alreadyGranted = Number(granted.rows[0].total);
   const delta = Math.round(totalMinutes) - alreadyGranted;
 
+  // Company days that fall on this person's days off (spec §20.5b) — credited
+  // here so the same daily sync and the same "Update entitlement" button keep
+  // them right. Its own source_type, so it never touches the sum above. A
+  // failure must not stop the entitlement itself.
+  let lieuMinutes = 0;
+  try {
+    const { syncCompanyDayLieu } = await import('./staff-company-days');
+    lieuMinutes = await syncCompanyDayLieu(personId, year, userId);
+  } catch (err) {
+    console.error(`[staff-balance] day-in-lieu sync for ${personId} ${year} failed:`, err);
+  }
+
   if (delta === 0) {
-    return { targetMinutes: Math.round(totalMinutes), postedMinutes: 0, segments, reason: 'Already up to date' };
+    return {
+      targetMinutes: Math.round(totalMinutes), postedMinutes: lieuMinutes, segments,
+      reason: lieuMinutes !== 0 ? 'Days in lieu for company days updated' : 'Already up to date',
+    };
   }
 
   // An entitlement row cannot be negative (DB constraint), so a claw-back —
@@ -442,7 +473,7 @@ export async function syncEntitlement(
 
   return {
     targetMinutes: Math.round(totalMinutes),
-    postedMinutes: delta,
+    postedMinutes: delta + lieuMinutes,
     segments,
     reason: alreadyGranted === 0 ? 'Initial grant' : 'Recalculated',
   };

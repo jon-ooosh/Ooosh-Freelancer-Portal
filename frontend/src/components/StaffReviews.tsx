@@ -33,6 +33,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
 import { ymdFromToday } from './ForwardDateInput';
+import { Card, btnPrimary, btnSecondary, btnQuiet } from './StaffCard';
 
 interface Answer { q: string; a: string }
 
@@ -174,19 +175,9 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
     .sort((a, b) => (b.completed_at ?? b.scheduled_for).localeCompare(a.completed_at ?? a.scheduled_for))[0];
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <h3 className="text-sm font-medium text-gray-900">Reviews</h3>
-        {!booking && (
-          <button onClick={() => setBooking(true)} className="text-xs text-ooosh-600 hover:underline">
-            Book one
-          </button>
-        )}
-      </div>
-      <p className="text-xs text-gray-500 mb-3">
-        Agree a date with {personName.split(' ')[0]} however you like, then record it here.
-        Pay is settled after the meeting, not in it.
-      </p>
+    <Card title="Reviews"
+      subtitle={`Agree a date with ${personName.split(' ')[0]} however you like, then record it here. Pay is settled after the meeting, not in it.`}
+      action={!booking && <button onClick={() => setBooking(true)} className={btnSecondary}>Book a review</button>}>
 
       {loadError && (
         <p className="text-sm text-red-700 rounded border border-red-200 bg-red-50 px-3 py-2 mb-3">
@@ -195,7 +186,7 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
       )}
 
       {booking && (
-        <div className="flex flex-wrap items-end gap-3 mb-3 p-3 rounded bg-gray-50 border border-gray-200">
+        <div className="flex flex-wrap items-end gap-3 mb-4 p-4 rounded-xl border border-ooosh-200 bg-ooosh-50/40">
           <label className="text-sm">
             <span className="block text-xs text-gray-600 mb-1">Date agreed</span>
             <input type="date" value={scheduledFor} onChange={e => setScheduledFor(e.target.value)}
@@ -213,11 +204,10 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
               className="w-3.5 h-3.5 rounded border-gray-300" />
             Already happened
           </label>
-          <button onClick={() => void book()} disabled={!scheduledFor || saving}
-            className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
+          <button onClick={() => void book()} disabled={!scheduledFor || saving} className={btnPrimary}>
             {saving ? 'Saving…' : backdating ? 'Record it' : 'Book'}
           </button>
-          <button onClick={() => setBooking(false)} className="text-sm text-gray-500 hover:text-gray-700">
+          <button onClick={() => setBooking(false)} className={btnQuiet}>
             Cancel
           </button>
         </div>
@@ -238,7 +228,7 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
       ) : reviews.length === 0 ? (
         <p className="text-sm text-gray-400">No reviews recorded yet.</p>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           {[...upcoming, ...past].map(r => (
             <ReviewRow
               key={r.id}
@@ -254,7 +244,7 @@ export default function StaffReviews({ personId, personName, people, onSaved, on
           ))}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -351,32 +341,32 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
   }
 
   return (
-    <div className="rounded border border-gray-200">
-      <button onClick={onToggle} className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-50">
-        <span className={`text-[11px] px-1.5 py-0.5 rounded ${STATUS_STYLE[review.status]}`}>
+    <div className="rounded-xl border border-gray-200 overflow-hidden">
+      <button onClick={onToggle} className="w-full flex flex-wrap items-center gap-x-2.5 gap-y-1 px-4 py-3 text-left hover:bg-gray-50">
+        <span className="text-[15px] font-medium text-gray-900">{fmtDate(review.scheduled_for)}</span>
+        <span className={`text-xs px-[9px] py-[3px] rounded-full capitalize ${STATUS_STYLE[review.status]}`}>
           {review.status}
         </span>
-        <span className="text-sm text-gray-900">{fmtDate(review.scheduled_for)}</span>
-        <span className="text-xs text-gray-500">
+        <span className="text-[13px] text-gray-500">
           {TYPES.find(t => t.value === review.review_type)?.label ?? review.review_type}
         </span>
         {review.salary_history_id && (
-          <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">
+          <span className="text-xs px-[9px] py-[3px] rounded-full bg-emerald-50 text-emerald-700">
             pay change
           </span>
         )}
         {!done && review.self_assessment_submitted_at && (
-          <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">
+          <span className="text-xs px-[9px] py-[3px] rounded-full bg-emerald-50 text-emerald-700">
             they’ve answered
           </span>
         )}
         {!done && !review.invited_at && (
-          <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">
+          <span className="text-xs px-[9px] py-[3px] rounded-full bg-amber-50 text-amber-700">
             not told yet
           </span>
         )}
         {done && review.follow_up_sent_at && (
-          <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">
+          <span className="text-xs px-[9px] py-[3px] rounded-full bg-emerald-50 text-emerald-700">
             write-up sent
           </span>
         )}
@@ -387,7 +377,7 @@ function ReviewRow({ review, personId, personName, people, open, onToggle, onCha
       </button>
 
       {open && (
-        <div className="border-t border-gray-100 p-3 space-y-3">
+        <div className="border-t border-gray-100 p-4 space-y-3 bg-gray-50/40">
           {review.self_assessment && review.self_assessment.length > 0 && (
             <div className="rounded border border-ooosh-200 bg-ooosh-50 p-3">
               <h4 className="text-xs font-semibold text-gray-900 mb-2">

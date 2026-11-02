@@ -19,6 +19,8 @@
 import { query, getClient } from '../config/database';
 import { DATE_RE } from './staff-day-status';
 import { getBalance, postEntry } from './staff-balance';
+import { retireOvertimeBells } from './staff-notifications';
+import { retireDoneBells } from './notification-resolve';
 
 export type OvertimeStatus = 'pending' | 'approved' | 'declined' | 'cancelled';
 
@@ -92,12 +94,17 @@ export async function approveEntry(entryId: string, note: string | null, userId:
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const upd = await client.query(
       `UPDATE staff_overtime_entries
           SET status='approved', decided_by=$2, decided_at=NOW(), decision_note=$3, updated_at=NOW()
-        WHERE id=$1 AND status='pending'`,
+        WHERE id=$1 AND status='pending'
+        RETURNING id`,
       [entryId, userId, note]
     );
+    // The status check above ran before the transaction. Two presses at once
+    // both pass it; only the one that flips the row may credit the bank, or
+    // the hours are banked twice (Oct 2026). Throwing rolls it back.
+    if (upd.rows.length === 0) throw new Error('That entry has already been decided');
     await client.query(
       `INSERT INTO staff_ledger_entries
          (person_id, account, leave_year, entry_type, minutes, effective_date,
@@ -112,6 +119,8 @@ export async function approveEntry(entryId: string, note: string | null, userId:
   } finally {
     client.release();
   }
+  // No longer waiting — every approver's bell for it is done with.
+  await retireOvertimeBells(entryId);
 }
 
 export async function declineEntry(entryId: string, note: string, userId: string) {
@@ -122,6 +131,7 @@ export async function declineEntry(entryId: string, note: string, userId: string
     [entryId, userId, note]
   );
   if (r.rows.length === 0) throw new Error('That entry is no longer pending');
+  await retireOvertimeBells(entryId);
 }
 
 /** Withdraw your own entry before it has been looked at. */
@@ -133,6 +143,7 @@ export async function cancelEntry(entryId: string, personId: string) {
     [entryId, personId]
   );
   if (r.rows.length === 0) throw new Error('That entry is no longer pending');
+  await retireOvertimeBells(entryId);
 }
 
 // ── Cash-out ────────────────────────────────────────────────────────────────
@@ -195,6 +206,9 @@ export async function yearEndCashOut(year: number, userId: string | null) {
     }, userId);
     results.push({ personId: row.person_id, name: row.name, minutes: bal.balanceMinutes });
   }
+  // Paid out: "Overtime to pay in January payroll" is done once nothing is
+  // left banked for the year (bell-rules.ts overtime_cashout). Never throws.
+  await retireDoneBells('overtime_cashout');
   return results;
 }
 
@@ -271,6 +285,14 @@ export interface PayrollRow {
   sicknessMinutes: number;
   sicknessDays: number;
   nominalDayMinutes: number | null;
+  /**
+   * Every absence that is not sickness (paternity, maternity, jury service…),
+   * by type, plus the total. Appended Oct 2026 (spec §12.1's "Other absence",
+   * missed first time round) — statutory parental pay goes through payroll.
+   */
+  otherAbsenceMinutes: number;
+  otherAbsenceDays: number;
+  otherAbsence: { type: string; label: string; minutes: number; days: number }[];
 }
 
 /**
@@ -314,8 +336,9 @@ export async function getPayrollReport(from: string, to: string): Promise<Payrol
 
   const { getContractedWeek } = await import('./staff-balance');
   // THE definition of sickness minutes — staff-absence.ts, not a second SUM here.
-  const { getSicknessMinutes } = await import('./staff-absence');
+  const { getSicknessMinutes, getOtherAbsenceMinutes, ABSENCE_TYPE_LABELS } = await import('./staff-absence');
   const sickness = await getSicknessMinutes(from, to);
+  const otherAbsence = await getOtherAbsenceMinutes(from, to);
 
   return Promise.all(r.rows.map(async (row: Record<string, unknown>) => {
     const week = await getContractedWeek(row.person_id as string, to);
@@ -323,6 +346,13 @@ export async function getPayrollReport(from: string, to: string): Promise<Payrol
     const sick = sickness.get(row.person_id as string) ?? 0;
     const asDays = (min: number) => week?.nominalDayMinutes
       ? Math.round((min / week.nominalDayMinutes) * 100) / 100 : 0;
+    const other = (otherAbsence.get(row.person_id as string) ?? []).map(o => ({
+      type: o.type,
+      label: ABSENCE_TYPE_LABELS[o.type] ?? o.type,
+      minutes: o.minutes,
+      days: asDays(o.minutes),
+    }));
+    const otherMinutes = other.reduce((s, o) => s + o.minutes, 0);
     return {
       personId: row.person_id as string,
       name: row.name as string,
@@ -332,8 +362,24 @@ export async function getPayrollReport(from: string, to: string): Promise<Payrol
       sicknessMinutes: sick,
       sicknessDays: asDays(sick),
       nominalDayMinutes: week?.nominalDayMinutes ?? null,
+      otherAbsenceMinutes: otherMinutes,
+      otherAbsenceDays: asDays(otherMinutes),
+      otherAbsence: other,
     };
   }));
+}
+
+/**
+ * "Paternity 8 days" — or, for more than one type, each joined by "; ".
+ * Hours instead when there is no working pattern to turn minutes into days,
+ * so a real absence never reads "0 days".
+ */
+export function otherAbsenceText(r: PayrollRow): string {
+  return r.otherAbsence
+    .map(o => (o.days === 0 && o.minutes > 0
+      ? `${o.label} ${(o.minutes / 60).toFixed(2)}h`
+      : `${o.label} ${o.days} day${o.days === 1 ? '' : 's'}`))
+    .join('; ');
 }
 
 export function payrollCsv(rows: PayrollRow[], from: string, to: string): string {
@@ -344,7 +390,8 @@ export function payrollCsv(rows: PayrollRow[], from: string, to: string): string
   const lines = [
     `Ooosh Tours payroll changes,${from} to ${to}`,
     '',
-    'Name,Paid overtime (hours),Paid overtime (h:mm),Unpaid leave (days),Unpaid leave (hours),Sickness (days),Sickness (hours)',
+    // Columns are only ever APPENDED: the accountants read them by position.
+    'Name,Paid overtime (hours),Paid overtime (h:mm),Unpaid leave (days),Unpaid leave (hours),Sickness (days),Sickness (hours),Other absence (days),Other absence (hours),Other absence (type)',
     ...rows.map(r => [
       esc(r.name),
       (r.paidOvertimeMinutes / 60).toFixed(2),
@@ -353,6 +400,9 @@ export function payrollCsv(rows: PayrollRow[], from: string, to: string): string
       (r.unpaidLeaveMinutes / 60).toFixed(2),
       r.sicknessDays.toFixed(2),
       (r.sicknessMinutes / 60).toFixed(2),
+      r.otherAbsenceDays.toFixed(2),
+      (r.otherAbsenceMinutes / 60).toFixed(2),
+      esc(otherAbsenceText(r)),
     ].join(',')),
   ];
   return lines.join('\n');

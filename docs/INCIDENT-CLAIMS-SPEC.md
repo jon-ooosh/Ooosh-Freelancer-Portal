@@ -1,8 +1,9 @@
 # INCIDENT & POSSIBLE-CLAIMS SPEC — replacing the broker's Word/PDF claim form
 
-**Status:** ✅ PHASES 1–2 BUILT (Sep 2026) — the case file and the client form (§12 rows 1–2).
-Phases 3 (client chasing) and 4 not started. See §18 (Phase 1) and §19 (Phase 2) for what actually
-shipped and where it differs from the plan below.
+**Status:** ✅ CLOSED (Oct 2026) — all four phases built and live: the case file, the client form,
+client chasing, GPS trace and SMS. Video and retention flagging deliberately not built (§21). §18–21
+are what actually shipped and where it differs from the plan below; **§22 is the troubleshooting
+guide** — start there when something goes wrong.
 **Shaped:** Sep 2026 — jon + Claude, revising a spec drafted months earlier in a non-code session
 against the codebase as it actually is. Where this document and that draft disagree, this wins.
 
@@ -572,10 +573,10 @@ and a map image as case files. Needs a backend `getRouteForReg(reg, from, to)` a
 ## 16. Open items
 
 1. **Broker:** preferred subject line / file naming (ask before Phase 1's send button goes live).
-2. **Van outline artwork** — Claude draws them at the start of Phase 2; jon judges whether they're good
-   enough.
-3. **Depreciation rate** (§6.6) — jon to pick the starting figure.
-4. **Retention enforcement** — part of the wider driver-data retention discussion, not this module.
+2. **Retention enforcement** — part of the wider driver-data retention discussion, not this module.
+
+**Resolved since:** van artwork (jon's shaded outline sheets, §19.2); depreciation curve (§6.6, built
+in Phase 1).
 
 **Resolved:** privacy notice approved (hyphens, not dashes); injury and declaration answers visible to
 all `STAFF_ROLES`; broker address SelfDriveHire@alanboswell.com; photos as thumbnails + full-size links.
@@ -702,3 +703,128 @@ Exercised against a real Postgres and a phone-sized browser with touch input: se
 filling it in, forward, send-to-driver, the code (wrong code, reuse), every section save and its
 sanitising, photo upload (and refusal of non-images), marks, sketch, signature, submit (missing list,
 then success, then writes refused), and the broker PDF with all of it in.
+
+### 19.1 Follow-up after first live test (Sep 2026 — jon)
+- **Send first.** On an open case the top bar's main button is "Send form to driver / client", which
+  opens the recipient picker right there (drivers on the van, job contacts, and a clear "Someone else"
+  name + email row). "Taken by phone — ready for review" is the secondary route. Once the form is out
+  the bar shows **progress** — "N of 8 done", each part done / started / not yet, and the client's
+  latest activity.
+- **Staff and client edit the same answers.** Anything staff type into a client section pre-fills the
+  client's link; a section only ticks when the client saves it complete (their confirmation). The staff
+  form now saves **only the sections staff edited** (`form_data || patch`), so a client saving through
+  their link at the same time keeps their answers; while the form is out the staff form says so. No lock.
+- **Required answers** (catalogue: `required`, `requiredWhenAnyYes`, `minLength`, section `oneOf`,
+  list gates): a section always saves, but only counts as done — and the form can only be sent — once
+  its core answers are in (`sectionMissing()`). When and where: date + place. Police: informed; if so a
+  reference or station. People involved: new "Was anyone else there?" gate; if yes, a name per person.
+  Other vehicles: the gate; if yes, make/model or reg per row. Damage: a description ("none" is fine).
+  Your version of events: a description (≥ 20 characters) + at fault. Driver declaration: title,
+  occupation, (a)–(c), details if any is yes, and the signature. Staff "mark complete" is not gated.
+- **Validation** (`fieldFormatError()`): emails need `x@y.z`; phones are loose (any country) — digits,
+  spaces, `+ ( ) - .`, 7–15 digits. Refused on the client form (page and server); shown as a warning
+  on the staff form.
+- **People consolidated.** "Witness type" and the "Someone injured" chip are gone: a witness gets
+  "Do they know you or the driver?", and the PDF derives the broker's witness type (Passenger /
+  Connected / Independent; an old `witness_type` still prints). Injured stays a yes/no.
+- **Renamed:** "What happened" → **When and where**; "Your account" → **Your version of events**.
+- **Submitted = action.** Bell (high) to owner + watchers, an **email to the owner** (or the default
+  claim watchers when there's no owner), and a Needs Attention bucket **"Claim forms to review"**
+  (stage `submitted`) — those cases are left out of the overdue-check bucket.
+- **Second case on the same job — a flag, not a gate.** Ticking "Possible insurance claim" (Log Problem
+  form or the Problem page) when the job (or, for a jobless Problem, the van) already has an open case
+  offers "Add this Problem to that case" or "open a separate case".
+- **Driver not on a hire** (one of us or a freelancer — garage runs, non-HireHop jobs): a staff-only
+  section `non_hire_driver` (name, DOB, address, mobile, licence) that the broker PDF prints in the
+  driver block when the case has no hire driver. Staff fill the declaration from the staff form.
+- Not done, deliberately: changing the van on a case (jon — it comes from the Problem; a jobless
+  Problem on the van already covers non-job claims).
+
+### 19.2 Outline artwork (Oct 2026)
+The Vito, Sprinter MWB and Sprinter LWB now use jon's original shaded outline sheets
+(`frontend/src/components/claims/outlines/*.svg`, from the "Ooosh Vehicle Outlines" design handoff —
+drawn to scale in mm, roof / offside + front / nearside + rear). Use them as they are; the handoff's
+generator (not committed) is where edits belong. The C2PA provenance metadata was stripped from the
+copies. They're inlined into the marking sheet, so marks (still % of the sheet) sit on the artwork and
+the saved PNG for the broker PDF includes it. 'generic' vans keep the simple generated drawing.
+Marks saved before the swap were placed on the old layout and will sit in the wrong place on these
+sheets — only test cases had any.
+
+## 20. Phase 3 as built (Oct 2026) — client chasing
+
+- `services/claim-chase.ts` `runClaimClientChase()`, daily **09:21** Europe/London, weekends included.
+  No migration — the `chase_*` columns came with 259.
+- Every case in `form_out` with chasing not paused: stamp-first on `chase_sent_for` (UK date), then
+  email every live link (`sent` / `opened`) a reminder — same link, "N of 8 parts done"
+  (`formProgress()`, the count the form and case page show), van + job number only, no personal or
+  injury details. The 4th says it's the last and to call us. `chase_level` counts them (1–4).
+- The day after the 4th with no form: `chase_escalated` event, a high bell to owner + watchers, and
+  the Needs Attention bucket **"Claim forms not coming back"**; `chase_level` = 5 marks it flagged.
+- **Quiet days** (added in the build, not in §9.1): a day is skipped, not counted, when the form went
+  out or the client did anything on it in the last 20 hours — someone half-way through doesn't get a
+  "please finish". A day where no email could be sent is also not counted.
+- **Pause** (reason required) and **Restart** (back to reminder 1, clears a pause) on the case page's
+  top bar, both on the timeline. A paused case goes back on the owner's check date (one is set, 7 days
+  out, if missing) and into the overdue-check bucket; an actively chased case is left out of the
+  check-date bells and that bucket (`SELF_CHASING` = `form_out`).
+- Staff sending the form to someone **new** restarts the count, so the new person gets the full run.
+- The claims list's check-date column shows "client reminders (n/4)" or "reminders ran out" for a
+  case being chased.
+- Not done: a separate chase for the driver's part (the driver's link is chased like any other).
+
+## 21. Phase 4 as built (Oct 2026) — GPS trace and SMS
+
+Decided with jon before the build: GPS and SMS yes; **video and retention flagging not built**.
+
+**GPS trace** (migration `268_claim_gps.sql`: file type `gps_trace`, `incident_claims.gps_auto_captured_at`)
+- `traccar-server.ts` `getRouteForReg(reg, from, to)` — Traccar `/positions` for the device named after
+  the reg (null = no tracker; [] = nothing then). `services/claim-gps.ts` does the rest.
+- Case page "GPS trace" card, loaded only when asked: the route ±30 min of the incident time (parsed
+  from the free-text time — "about 3pm", "15:30", "midday"; else the whole UK day), Wider / Narrower /
+  any window up to 48 h, and **Attach to case**, which saves the points as a CSV case file (UK and UTC
+  times, speed, address) — not shared with insurers unless ticked. Saved traces redraw from their own
+  file ("Show on map"), so the record doesn't depend on Traccar keeping the history.
+- **No map image** (a change from §14): capturing map tiles in a browser is fragile and the points
+  are the evidence.
+- **Automatic capture** (added — Traccar's history period wasn't known): in the 09:22 job, every case
+  with a van and an incident date that's over gets one trace saved on its own — ±1 h when the time is
+  known, else the whole day. Tried once (stamp first); a Traccar error un-stamps it so tomorrow retries.
+- GPS times are shown in the browser's time zone (UK for staff); file captions are UK time.
+
+**SMS** (jon: the first send and the 3rd reminder only — texts are more intrusive than email)
+- Templates `claim_form_link` and `claim_form_reminder` in `sms-templates.ts` — one 160-character
+  segment with the link. Production runs `SMS_MODE=live`, so they went live on deploy (Oct 2026). In
+  `SMS_MODE=test` they'd go to the test number unless listed in `SMS_LIVE_TEMPLATES`.
+- Only to people we have a mobile for: a driver's from their hire form, a job contact's from the
+  address book (mobile, else international, else phone). Someone a client forwarded the form to has
+  only an email, so gets emails only. A resend is email-only.
+- Each text goes on the case timeline ("Form link texted to …").
+- Twilio must allow sending to the country (Geo Permissions) — EU numbers need enabling there.
+
+**Video links:** no upload. Paste the link (WeTransfer, Dropbox…) into a case update — links in the
+timeline are now clickable (`components/LinkifiedText.tsx`, shared with the studio shift notes).
+
+**Retention:** deferred to the wider driver-data retention discussion (§16 item 4).
+
+## 22. Troubleshooting (where to look)
+
+| Symptom | Look at |
+|---|---|
+| Client says the link doesn't work | `incident_claim_links` row for their email: `status = 'revoked'` → switched off; case stage past `form_out` → the form is closed to edits (409 by design). |
+| Client's answers "not in OP" | Check you're on the right case: `SELECT id, stage, vehicle_reg, hh_job_number FROM incident_claims ORDER BY created_at DESC` — the link belongs to one case (the Sep 2026 "missing answers" was a second case on the same job). |
+| A section won't tick | It saves but only ticks when its required answers are in — `sectionMissing()` in `claim-form-fields.ts`; the page lists what's still needed. |
+| Driver code email not arriving | Code goes to the address on the DRIVER record (`drivers.email`), not the link's. 30 s resend throttle, 10 min expiry, 5 tries. `journalctl -u ooosh-portal \| grep -i "incident form"`. |
+| No reminders going out | `runClaimClientChase()` 09:21 daily. Case must be `form_out`, not paused, `chase_level` < 5. Skipped (not counted) within 20 h of the form going out or client activity. `chase_sent_for` = last run date. `journalctl … \| grep "claim client chase"`. |
+| Reminders stopped | `chase_level = 5` = four sent, flagged ("Claim forms not coming back"). Restart on the case page. |
+| No texts | Texts only on first send + reminder 3, and only with a mobile on file (driver: hire form; contact: address book). Production runs `SMS_MODE=live` (Oct 2026), so every template sends for real; `SMS_LIVE_TEMPLATES` only matters if the mode is put back to `test`. Every attempt is in `sms_log`. EU numbers need Twilio Geo Permissions. |
+| GPS card says no tracker | The Traccar device must be named exactly the van's reg (spaces ignored). |
+| GPS card shows nothing | Van parked, or Traccar no longer has that day — check the automatically saved trace in Files (saved the day after the incident date was set; `gps_auto_captured_at`). |
+| Owner not told about a submit | Bell + email go to the case owner (or `claims_default_watchers` when none). Needs Attention › "Claim forms to review" lists every submitted case regardless. |
+| Broker PDF missing photos | Only files ticked "Share with insurers" go in. |
+| Marks in the wrong place on an old case | Marks saved before the Oct 2026 artwork swap were placed on the old drawing (§19.2). |
+
+Key files: `services/incident-claims.ts` (cases, reminders, attention), `claim-form-fields.ts` (the form),
+`claim-links.ts` + `routes/claim-form.ts` (public form), `claim-chase.ts` (reminders), `claim-gps.ts`
+(GPS), `claim-pdf.ts` (broker PDF), `routes/incident-claims.ts` (staff API); frontend
+`pages/ClaimDetailPage.tsx`, `pages/ClaimFormPage.tsx`, `components/claims/*`.
+

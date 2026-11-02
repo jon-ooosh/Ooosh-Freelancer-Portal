@@ -139,6 +139,13 @@ export interface StaffDay {
   /** True when a pattern exception (incl. a swap leg) applies to this date. */
   isException: boolean;
   /**
+   * Set on both days of an approved day swap (services/staff-swaps.ts): the
+   * OTHER date. The day given up reads `not_scheduled` like any day off, and
+   * this is what lets the calendar draw it as "Swap" rather than a blank that
+   * looks like a no-show. Not special-category; reaches every viewer.
+   */
+  swapWith?: string;
+  /**
    * Set when the company has granted this day to everyone (spec §20).
    *
    * The day reads as `not_scheduled` — nobody is contracted — so leave cannot
@@ -147,6 +154,23 @@ export interface StaffDay {
    * blank the same shape as a weekend.
    */
   companyDay?: string;
+  /**
+   * Set when the leave on this day is REQUESTED, not yet approved. The status
+   * stays 'partial' — until somebody says yes they are still expected in, so
+   * coverage counts them — but the calendar must not call a whole requested
+   * week "Part": it reads as half a day in. Not special-category (a request
+   * for holiday says nothing about health), so it reaches every viewer.
+   */
+  pending?: boolean;
+  /**
+   * Where a working day is worked (spec §19). Set ONLY to 'home' and only on a
+   * working or part day — absent means "in the building", the default. From
+   * the pattern's `at_home` (a regular agreed day) or an approved request
+   * (services/staff-wfh.ts). Not special-category; reaches every viewer.
+   */
+  location?: 'home';
+  /** A working-from-home request for this day is waiting for a decision. */
+  homePending?: boolean;
   /** ADMIN ONLY. Stripped by maskForViewer() for everyone else. */
   detail?: DayDetail;
 }
@@ -175,6 +199,8 @@ interface PatternDayRow {
   start_time: string | null;
   end_time: string | null;
   minutes: number;
+  /** A regular agreed home day (mig 269). */
+  at_home?: boolean;
 }
 interface ExceptionRow {
   person_id: string;
@@ -183,6 +209,8 @@ interface ExceptionRow {
   start_time: string | null;
   end_time: string | null;
   minutes: number;
+  /** The other day of an approved swap, when this row is one leg of one. */
+  swap_with?: string | null;
 }
 
 // ── The resolver (pure — exported for tests) ────────────────────────────────
@@ -207,6 +235,7 @@ export function resolveScheduledDay(
       startTime: exception.start_time,
       endTime: exception.end_time,
       isException: true,
+      ...(exception.swap_with ? { swapWith: exception.swap_with } : {}),
     };
   }
 
@@ -234,7 +263,33 @@ export function resolveScheduledDay(
     startTime: day.start_time,
     endTime: day.end_time,
     isException: false,
+    ...(day.at_home ? { location: 'home' as const } : {}),
   };
+}
+
+/**
+ * Overlay working-from-home requests (spec §19). Runs LAST, after company
+ * days, leave and absence have decided whether the day is worked at all —
+ * a location on a day off means nothing, so it is stripped there.
+ *
+ * Approved → home. Pending → still expected in, flagged as asked-for.
+ */
+export function mergeWfhLayer(
+  days: StaffDay[],
+  requests: { start: string; end: string; status: 'pending' | 'approved' }[] = []
+): StaffDay[] {
+  return days.map(d => {
+    const worked = d.status === 'working' || d.status === 'partial';
+    if (!worked) {
+      if (!d.location && !d.homePending) return d;
+      const { location: _l, homePending: _h, ...rest } = d;
+      return rest;
+    }
+    const covering = requests.filter(r => r.start <= d.date && r.end >= d.date);
+    if (covering.some(r => r.status === 'approved')) return { ...d, location: 'home' };
+    if (d.location !== 'home' && covering.some(r => r.status === 'pending')) return { ...d, homePending: true };
+    return d;
+  });
 }
 
 /**
@@ -361,6 +416,7 @@ export function mergeAbsenceLayer(
     return {
       ...d,
       status: approved ? (wholeDay ? 'leave' : 'partial') : 'partial',
+      ...(approved ? {} : { pending: true }),
       portion: l!.portion,
       ...(win ? { window: win, windows: [win] } : {}),
       detail: leaveDetail,
@@ -546,7 +602,7 @@ export async function getStaffCalendar(
       `SELECT pattern_id, cycle_week, weekday, is_working,
               start_time::text AS start_time,
               end_time::text   AS end_time,
-              minutes
+              minutes, at_home
          FROM staff_working_pattern_days
         WHERE pattern_id = ANY($1::uuid[])`,
       [patterns.map(p => p.id)]
@@ -558,15 +614,29 @@ export async function getStaffCalendar(
     }
   }
 
+  // A swap leg also carries the OTHER leg's date (swapWith), which may fall
+  // outside the range being read — hence the join is not range-limited.
   const excRes = await query(
-    `SELECT person_id, exception_date::text AS exception_date, is_working,
-            start_time::text AS start_time,
-            end_time::text   AS end_time,
-            minutes
-       FROM staff_pattern_exceptions
-      WHERE person_id = ANY($1::uuid[])
-        AND status = 'approved'
-        AND exception_date BETWEEN $2::date AND $3::date`,
+    `SELECT e.person_id, e.exception_date::text AS exception_date, e.is_working,
+            e.start_time::text AS start_time,
+            e.end_time::text   AS end_time,
+            e.minutes,
+            o.exception_date::text AS swap_with
+       FROM staff_pattern_exceptions e
+       LEFT JOIN LATERAL (
+         SELECT x.exception_date
+           FROM staff_pattern_exceptions x
+          WHERE e.swap_group_id IS NOT NULL
+            AND x.swap_group_id = e.swap_group_id
+            AND x.person_id = e.person_id
+            AND x.id <> e.id
+            AND x.status = 'approved'
+          ORDER BY x.exception_date
+          LIMIT 1
+       ) o ON true
+      WHERE e.person_id = ANY($1::uuid[])
+        AND e.status = 'approved'
+        AND e.exception_date BETWEEN $2::date AND $3::date`,
     [ids, from, to]
   );
   const exceptions = new Map<string, ExceptionRow>();
@@ -583,6 +653,9 @@ export async function getStaffCalendar(
   const companyDays = opts.includeCompanyDays === false
     ? new Map<string, { label: string }>()
     : await (await import('./staff-company-days')).getCompanyDayOverlay(from, to);
+  // Dynamic, like company days: staff-wfh.ts reads the calendar to validate a
+  // request, so a static import both ways would be a cycle.
+  const wfhByPerson = await (await import('./staff-wfh')).getWfhOverlay(ids, from, to);
   const dates = dateRange(from, to);
 
   return people.map(p => {
@@ -600,15 +673,43 @@ export async function getStaffCalendar(
       jobTitle: p.job_title,
       department: p.department,
       days: maskForViewer(
-        mergeAbsenceLayer(
-          days,
-          leaveByPerson.get(p.person_id) ?? [],
-          absenceByPerson.get(p.person_id) ?? []
+        mergeWfhLayer(
+          mergeAbsenceLayer(
+            days,
+            leaveByPerson.get(p.person_id) ?? [],
+            absenceByPerson.get(p.person_id) ?? []
+          ),
+          wfhByPerson.get(p.person_id) ?? []
         ),
         opts.isAdmin
       ),
     };
   });
+}
+
+/**
+ * Which of these dates is this person contracted to work?
+ *
+ * Their RAW contract: the pattern in force on each date plus approved swaps,
+ * with company days applied — leave and absence ignored, because "would they
+ * be working it?" is the question, not "are they in?".
+ *
+ * My Time asks it about bank holidays (Oct 2026). Under `use_allowance` a bank
+ * holiday is only worth booking off if you would otherwise be working it:
+ * somebody who never works Mondays was being told to book Monday 28 Dec, and
+ * the booking form then refused the date as not a contracted day.
+ */
+export async function contractedDatesAmong(personId: string, dates: string[]): Promise<string[]> {
+  const valid = dates.filter(d => DATE_RE.test(d)).sort();
+  if (valid.length === 0) return [];
+  const [person] = await getStaffCalendar(valid[0]!, valid[valid.length - 1]!, {
+    isAdmin: true, personId, includeLeave: false, includeAbsence: false,
+  });
+  if (!person) return [];
+  const wanted = new Set(valid);
+  return person.days
+    .filter(d => wanted.has(d.date) && d.status === 'working' && d.scheduledMinutes > 0)
+    .map(d => d.date);
 }
 
 /** Single person, single date. Thin wrapper so callers never hand-roll it. */
@@ -635,6 +736,8 @@ export async function getTodaySummary(date: string, isAdmin: boolean) {
       scheduledMinutes: d.scheduledMinutes,
       window: d.window,
       detail: d.detail,
+      location: d.location,
+      pending: d.pending,
     };
   });
   const rank = (s: DayStatus) => (s === 'working' ? 0 : s === 'partial' ? 1 : 2);
@@ -642,6 +745,8 @@ export async function getTodaySummary(date: string, isAdmin: boolean) {
   return {
     date,
     in: rows.filter(r => r.status === 'working' || r.status === 'partial').length,
+    // In the BUILDING — "in" minus anyone working from home (spec §19).
+    onSite: rows.filter(r => (r.status === 'working' || r.status === 'partial') && r.location !== 'home').length,
     total: rows.length,
     people: rows,
   };

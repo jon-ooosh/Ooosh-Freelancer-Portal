@@ -25,6 +25,7 @@ import { getSystemSetting } from '../routes/system-settings';
 import { emailService } from './email-service';
 import { getPresignedDownloadUrl } from '../config/r2';
 import { greetingName, fullDisplayName } from './display-name';
+import { retireDoneBells } from './notification-resolve';
 
 // ── Template types ──────────────────────────────────────────────────────────
 
@@ -505,11 +506,18 @@ export async function submitLockupReport(
       lines.push(`🛒 Shop: ${describeShiftShop(shop)}${shop.toReview ? ` (${shop.toReview} to review on the Shop Till page)` : ''}`);
     }
 
-    await client.query(
-      `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
-       VALUES ('note', $1, $2, NULL, $3, $4::jsonb)`,
-      [lines.join('\n'), shiftId, sitterName, JSON.stringify(allPhotos)]
-    );
+    // A bare "all clear" with nothing else to say is noise on the thread — the
+    // roster's Lock-up ✓ pill already says it, and it made every night read
+    // "Notes (1)". Post only when there is something to read: a flagged item,
+    // a note, a photo or shop takings. (The office bell + email still go.)
+    const worthPosting = exceptions.length > 0 || lines.length > 1 || allPhotos.length > 0;
+    if (worthPosting) {
+      await client.query(
+        `INSERT INTO interactions (type, content, shift_id, created_by, author_name, files)
+         VALUES ('note', $1, $2, NULL, $3, $4::jsonb)`,
+        [lines.join('\n'), shiftId, sitterName, JSON.stringify(allPhotos)]
+      );
+    }
 
     await client.query('COMMIT');
   } catch (e) {
@@ -518,6 +526,10 @@ export async function submitLockupReport(
   } finally {
     client.release();
   }
+
+  // A late report: the office's "Lock-up not submitted" bells are done
+  // (bell-rules.ts lockup_missing). After COMMIT; never throws.
+  await retireDoneBells('lockup_missing', shiftId);
 
   notifyStaffOfLockup(date, shiftId, sitterName, exceptions, notesText).catch((err) =>
     console.error('[studio-lockup] staff notify failed (non-fatal):', err)
@@ -554,6 +566,9 @@ async function notifyStaffOfLockup(
     ...(shopReviewText ? [`🛒 ${shopReviewText}`] : []),
   ].join('\n').slice(0, 400) || 'No issues flagged.';
 
+  const { shiftLinkPath } = await import('./studio-sitter');
+  const link = await shiftLinkPath(shiftId);
+
   try {
     const staff = await query(
       `SELECT id FROM users WHERE is_active = true AND role IN ('admin','manager','weekend_manager')`
@@ -561,8 +576,8 @@ async function notifyStaffOfLockup(
     for (const row of staff.rows) {
       await query(
         `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-         VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, '/studio-sitters', $5, NOW())`,
-        [row.id, title, content, shiftId, flagged ? 'high' : 'low']
+         VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, $5, $6, NOW())`,
+        [row.id, title, content, shiftId, link.path, flagged ? 'high' : 'low']
       );
     }
   } catch (err) {
@@ -580,7 +595,8 @@ async function notifyStaffOfLockup(
           : 'All clear — nothing flagged',
         exceptionsText: exceptions.map((e) => `${e.label}: ${e.answer}`).join('\n'),
         notes: notes || '',
-        rosterUrl: 'https://staff.oooshtours.co.uk/studio-sitters',
+        rosterUrl: `https://staff.oooshtours.co.uk${link.path}`,
+        linkLabel: link.isJob ? 'Open the job' : 'Open the Rehearsals roster',
         shopLine,
         shopReviewText,
         shopReviewUrl: 'https://staff.oooshtours.co.uk/money/shop?tab=review',
@@ -620,6 +636,8 @@ export async function runLockupChase(): Promise<number> {
     const sitterName = fullDisplayName(row) || 'Studio sitter';
     // Stamp first (dedup): a send failure must not re-fire on the next pass.
     await query(`UPDATE studio_sitter_shifts SET lockup_chase_sent_at = NOW() WHERE id = $1`, [row.shift_id]);
+    const { shiftLinkPath } = await import('./studio-sitter');
+    const link = await shiftLinkPath(row.shift_id);
 
     // Office bell (admins/managers).
     try {
@@ -628,12 +646,12 @@ export async function runLockupChase(): Promise<number> {
       );
       for (const u of staff.rows) {
         await query(
-          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at)
-           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, '/studio-sitters', 'normal', NOW())`,
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, email_sent_at, resolve_key)
+           VALUES ($1, 'system', $2, $3, 'studio_sitter_shifts', $4, $5, 'normal', NOW(), 'lockup_missing')`,
           [u.id,
            `🔒 Lock-up not submitted — ${formatLongDate(dateIso)} (${sitterName})`,
            `${sitterName} hasn't submitted a lock-up report for ${formatLongDate(dateIso)}. A reminder has been sent.`,
-           row.shift_id]
+           row.shift_id, link.path]
         );
       }
     } catch (err) { console.error('[studio-lockup-chase] bell insert failed:', err); }
@@ -642,7 +660,11 @@ export async function runLockupChase(): Promise<number> {
     try {
       await emailService.send('studio_lockup_missing', {
         to: 'info@oooshtours.co.uk',
-        variables: { sitterName, date: formatLongDate(dateIso), rosterUrl: 'https://staff.oooshtours.co.uk/studio-sitters' },
+        variables: {
+          sitterName, date: formatLongDate(dateIso),
+          rosterUrl: `https://staff.oooshtours.co.uk${link.path}`,
+          linkLabel: link.isJob ? 'Open the job' : 'Open the Rehearsals roster',
+        },
       });
     } catch (err) { console.error('[studio-lockup-chase] office email failed:', err); }
 

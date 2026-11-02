@@ -1,10 +1,11 @@
 /**
  * Damage marking on a van outline (docs/INCIDENT-CLAIMS-SPEC.md §10.1).
  *
- * Simplified line drawings, drawn fresh for OP (not traced from any stock
- * artwork), five views on one sheet: top, nearside, offside, front, rear.
- * The shape comes from a handful of proportions per van type, so a new type
- * is one entry in SHAPES — no new artwork files.
+ * The Vito and both Sprinters use the original shaded outline sheets drawn for
+ * Ooosh (outlines/*.svg — roof, offside + front, nearside + rear, drawn to
+ * scale in mm; jon, Oct 2026). Use them as they are — don't restyle them.
+ * Anything else ('generic') falls back to the simple drawing generated below
+ * from a handful of proportions.
  *
  * Tap anywhere to drop a cross (damage) or an arrow (point / angle of impact),
  * with an optional note. No zones (D11) — photos carry the detail. Marks are
@@ -13,9 +14,34 @@
  */
 import { useRef, useState } from 'react';
 import type { DamageMark, OutlineType } from '@claimform';
+import vitoSvg from './outlines/vito.svg?raw';
+import sprinterMwbSvg from './outlines/sprinter-mwb.svg?raw';
+import sprinterLwbSvg from './outlines/sprinter-lwb.svg?raw';
 
+/** The generated fallback sheet's size. */
 const W = 1000;
 const H = 640;
+
+interface Art { w: number; h: number; inner: string }
+
+/** Split an artwork file into its viewBox size and its drawing (inlined into our own <svg>). */
+function parseArt(raw: string): Art {
+  const vb = /viewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"/.exec(raw);
+  const inner = raw.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
+  return { w: Number(vb?.[1] || W), h: Number(vb?.[2] || H), inner };
+}
+
+const ART: Partial<Record<OutlineType, Art>> = {
+  vito: parseArt(vitoSvg),
+  sprinter_mwb: parseArt(sprinterMwbSvg),
+  sprinter_lwb: parseArt(sprinterLwbSvg),
+};
+
+/** The sheet's coordinate size for a type — marks are stored as % of it. */
+function sheetSize(type: OutlineType): { w: number; h: number } {
+  const a = ART[type];
+  return a ? { w: a.w, h: a.h } : { w: W, h: H };
+}
 
 interface Shape { length: number; height: number; nose: number; slope: number; frontWidth: number; label: string }
 
@@ -145,23 +171,25 @@ function EndView({ x, y, w, h, s, rear, label }: { x: number; y: number; w: numb
   );
 }
 
-function Mark({ m, selected }: { m: DamageMark; selected: boolean }) {
-  const px = (m.x / 100) * W;
-  const py = (m.y / 100) * H;
+/** A mark, sized relative to the sheet (k = 1 on the 1000-wide fallback sheet). */
+function Mark({ m, selected, w, h }: { m: DamageMark; selected: boolean; w: number; h: number }) {
+  const px = (m.x / 100) * w;
+  const py = (m.y / 100) * h;
+  const k = w / 1000;
   const red = '#dc2626';
   return (
     <g>
-      {selected && <circle data-ui="1" cx={px} cy={py} r="22" fill="none" stroke="#2563eb" strokeWidth="2" strokeDasharray="4 3" />}
+      {selected && <circle data-ui="1" cx={px} cy={py} r={22 * k} fill="none" stroke="#2563eb" strokeWidth={2 * k} strokeDasharray={`${4 * k} ${3 * k}`} />}
       {m.kind === 'cross' ? (
-        <g stroke={red} strokeWidth="5" strokeLinecap="round">
-          <line x1={px - 11} y1={py - 11} x2={px + 11} y2={py + 11} />
-          <line x1={px - 11} y1={py + 11} x2={px + 11} y2={py - 11} />
+        <g stroke={red} strokeWidth={5 * k} strokeLinecap="round">
+          <line x1={px - 11 * k} y1={py - 11 * k} x2={px + 11 * k} y2={py + 11 * k} />
+          <line x1={px - 11 * k} y1={py + 11 * k} x2={px + 11 * k} y2={py - 11 * k} />
         </g>
       ) : (
         // Arrow whose TIP is the tapped point, pointing along `angle`.
-        <g transform={`rotate(${m.angle || 0} ${px} ${py})`} stroke={red} strokeWidth="5" strokeLinecap="round" fill={red}>
-          <line x1={px - 50} y1={py} x2={px - 12} y2={py} />
-          <path d={`M ${px} ${py} L ${px - 16} ${py - 10} L ${px - 16} ${py + 10} Z`} strokeWidth="1" />
+        <g transform={`rotate(${m.angle || 0} ${px} ${py})`} stroke={red} strokeWidth={5 * k} strokeLinecap="round" fill={red}>
+          <line x1={px - 50 * k} y1={py} x2={px - 12 * k} y2={py} />
+          <path d={`M ${px} ${py} L ${px - 16 * k} ${py - 10 * k} L ${px - 16 * k} ${py + 10 * k} Z`} strokeWidth={k} />
         </g>
       )}
     </g>
@@ -177,13 +205,15 @@ export function OutlineSheet({ type, marks, selected, svgRef, onTap }: {
   onTap?: (xPct: number, yPct: number) => void;
 }) {
   const s = SHAPES[type] || SHAPES.generic;
+  const art = ART[type];
+  const { w, h } = sheetSize(type);
   return (
     <svg
       ref={svgRef}
       xmlns="http://www.w3.org/2000/svg"
-      viewBox={`0 0 ${W} ${H}`}
-      width={W}
-      height={H}
+      viewBox={`0 0 ${w} ${h}`}
+      width={w}
+      height={h}
       className="w-full h-auto select-none touch-manipulation bg-white"
       style={{ cursor: onTap ? 'crosshair' : 'default' }}
       onClick={(e) => {
@@ -192,14 +222,21 @@ export function OutlineSheet({ type, marks, selected, svgRef, onTap }: {
         onTap(((e.clientX - rect.left) / rect.width) * 100, ((e.clientY - rect.top) / rect.height) * 100);
       }}
     >
-      <rect x="0" y="0" width={W} height={H} fill="#fff" />
-      <TopView x={40} y={35} w={620} h={150} s={s} />
-      <SideView x={40} y={225} w={620} h={185} s={s} mirror label="Nearside (passenger side)" />
-      <SideView x={40} y={445} w={620} h={185} s={s} label="Offside (driver's side)" />
-      <EndView x={720} y={225} w={240} h={185} s={s} label="Front" />
-      <EndView x={720} y={445} w={240} h={185} s={s} rear label="Rear" />
-      <text x={W - 20} y={28} fontSize="14" textAnchor="end" fill={LIGHT} fontFamily="sans-serif">{s.label}</text>
-      {marks.map((m, i) => <Mark key={i} m={m} selected={selected === i} />)}
+      {art ? (
+        // Our own artwork file, bundled at build time — not user content.
+        <g dangerouslySetInnerHTML={{ __html: art.inner }} />
+      ) : (
+        <>
+          <rect x="0" y="0" width={W} height={H} fill="#fff" />
+          <TopView x={40} y={35} w={620} h={150} s={s} />
+          <SideView x={40} y={225} w={620} h={185} s={s} mirror label="Nearside (passenger side)" />
+          <SideView x={40} y={445} w={620} h={185} s={s} label="Offside (driver's side)" />
+          <EndView x={720} y={225} w={240} h={185} s={s} label="Front" />
+          <EndView x={720} y={445} w={240} h={185} s={s} rear label="Rear" />
+          <text x={W - 20} y={28} fontSize="14" textAnchor="end" fill={LIGHT} fontFamily="sans-serif">{s.label}</text>
+        </>
+      )}
+      {marks.map((m, i) => <Mark key={i} m={m} selected={selected === i} w={w} h={h} />)}
     </svg>
   );
 }
@@ -209,19 +246,25 @@ export async function outlineToPng(svg: SVGSVGElement): Promise<string> {
   const clone = svg.cloneNode(true) as SVGSVGElement;
   clone.querySelectorAll('[data-ui]').forEach((n) => n.remove());
   clone.removeAttribute('class');
+  // Render at 1400px wide whatever the sheet's own units (the artwork is in mm).
+  const vb = svg.viewBox.baseVal;
+  const outW = 1400;
+  const outH = Math.round(outW * ((vb?.height || H) / (vb?.width || W)));
+  clone.setAttribute('width', String(outW));
+  clone.setAttribute('height', String(outH));
   const text = new XMLSerializer().serializeToString(clone);
   const url = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
   try {
     const img = new Image();
     await new Promise<void>((resolve, reject) => { img.onload = () => resolve(); img.onerror = () => reject(new Error('render failed')); img.src = url; });
     const canvas = document.createElement('canvas');
-    canvas.width = W;
-    canvas.height = H;
+    canvas.width = outW;
+    canvas.height = outH;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('no canvas');
     ctx.fillStyle = '#fff';
-    ctx.fillRect(0, 0, W, H);
-    ctx.drawImage(img, 0, 0, W, H);
+    ctx.fillRect(0, 0, outW, outH);
+    ctx.drawImage(img, 0, 0, outW, outH);
     return canvas.toDataURL('image/png');
   } finally {
     URL.revokeObjectURL(url);
@@ -246,8 +289,10 @@ export function DamageOutlineEditor({ type, initial, onSave, large }: {
   const change = (next: DamageMark[]) => { setMarks(next); setDirty(true); };
 
   const tap = (x: number, y: number) => {
-    // Tapping near an existing mark selects it rather than adding another.
-    const near = marks.findIndex((m) => Math.hypot((m.x - x) * (W / 100), (m.y - y) * (H / 100)) < 24);
+    // Tapping near an existing mark selects it rather than adding another
+    // (about 2.4% of the sheet's width, whatever its units).
+    const { w, h } = sheetSize(type);
+    const near = marks.findIndex((m) => Math.hypot((m.x - x) * (w / 100), (m.y - y) * (h / 100)) < 24 * (w / 1000));
     if (near >= 0) { setSelected(near); return; }
     const m: DamageMark = tool === 'arrow' ? { x, y, kind: 'arrow', angle: 0 } : { x, y, kind: 'cross' };
     change([...marks, m]);

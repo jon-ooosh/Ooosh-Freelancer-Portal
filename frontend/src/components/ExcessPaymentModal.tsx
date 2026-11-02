@@ -6,7 +6,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { api } from '../services/api';
+import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
 import { describePreauth } from '../lib/preauth';
+import { useAuthStore } from '../hooks/useAuthStore';
+import { newPaymentMethodAllowed } from '../lib/paymentMethods';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
 interface OutstandingInvoice {
@@ -51,7 +54,14 @@ export function computeHireDays(job: { job_date?: string | null; out_date?: stri
   return Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24)));
 }
 
-type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release' | 'record_preauth' | 'upload_receipt' | 'mark_externally_resolved';
+type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release' | 'record_preauth' | 'upload_receipt' | 'mark_externally_resolved' | 'reader_payment' | 'reader_preauth';
+
+/** What the card reader may do on this record (GET /terminal/excess/:id/options). */
+interface ReaderOptions {
+  outstanding: number;
+  payment: { allowed: boolean; reason: string };
+  preauth: { allowed: boolean; reason: string; code: string };
+}
 
 // Methods that put the transaction through the physical card terminal and so
 // produce a paper slip we need scanned for audit. Mirrors the backend rule in
@@ -92,27 +102,28 @@ interface ExcessPaymentModalProps {
   onClose: () => void;
   onUpdated: () => void;
   initialAction?: ModalAction;
-  /** Hire length in days — when short (< 4), a pre-auth hold is recommended
-   *  over a captured payment, so we surface it first + badge it. */
+  /** Hire length in days — when short (4 days or fewer, the payment portal's rule), a
+   *  pre-auth is recommended over a captured payment, so we surface it first + badge it. */
   hireDays?: number;
 }
 
 const PAYMENT_METHODS = [
+  { value: 'wise_bacs', label: 'Wise (Bank Transfer)' },
+  { value: 'till_cash', label: 'Till (Cash)' },
+  { value: 'rolled_over', label: 'Rolled Over from Previous Hire' },
+  // Admin only for new money (STRIPE-TERMINAL-SPEC §15) — filtered by newPaymentMethodAllowed().
+  { value: 'stripe_gbp', label: 'Stripe (Online)' },
   { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
   { value: 'amex', label: 'Amex' },
-  { value: 'stripe_gbp', label: 'Stripe GBP' },
-  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
-  { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'paypal', label: 'Paypal' },
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
-  { value: 'rolled_over', label: 'Rolled Over from Previous Hire' },
 ];
 
 const REIMBURSE_METHODS = [
   { value: 'worldpay', label: 'Worldpay (Card Refund)' },
   { value: 'amex', label: 'Amex (Card Refund)' },
-  { value: 'stripe_gbp', label: 'Stripe GBP (Online Card Refund)' },
-  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
+  { value: 'stripe_gbp', label: 'Stripe (Online)' },
+  { value: 'wise_bacs', label: 'Wise (Bank Transfer)' },
   { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'paypal', label: 'PayPal' },
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
@@ -215,9 +226,10 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
     setExcess((prev) => ({ ...prev, ...(row as Partial<JobExcess>) }));
   }
 
-  // Short hires (< 4 days) are typically covered by a pre-auth HOLD rather than
+  // Short hires (4 days or fewer — the payment portal's rule, preauthEligibility() on the
+  // backend; this was < 4 until Oct 2026) are typically covered by a pre-auth rather than
   // a captured payment — surface pre-auth first + badge it as recommended.
-  const isShortHire = hireDays != null && hireDays > 0 && hireDays < 4;
+  const isShortHire = hireDays != null && hireDays > 0 && hireDays <= 4;
   const [action, setAction] = useState<ModalAction | null>(initialAction || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -234,7 +246,39 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   // disappear"). Close affordances run handleClose, which fires onUpdated once.
   const [madeChange, setMadeChange] = useState(false);
 
+  // Card reader (STRIPE-TERMINAL-SPEC §13): whether this login may use it, what it may do
+  // on this record, the amount being sent, and whether a payment is on the reader now
+  // (the modal can't be closed or left while it is).
+  const [readerAccess, setReaderAccess] = useState<CardReaderAccess | null>(null);
+  const [readerOptions, setReaderOptions] = useState<ReaderOptions | null>(null);
+  const [readerAmount, setReaderAmount] = useState<string | null>(null); // null = not edited yet
+  const [readerNotes, setReaderNotes] = useState('');
+  const [readerActive, setReaderActive] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api.get<{ data: CardReaderAccess }>('/terminal/access')
+      .then((r) => {
+        if (!alive) return;
+        setReaderAccess(r.data);
+        if (r.data.enabled && excess.job_id) {
+          api.get<{ data: ReaderOptions }>(`/terminal/excess/${excess.id}/options`)
+            .then((o) => { if (alive) setReaderOptions(o.data); })
+            .catch(() => { /* no reader options — the normal forms still work */ });
+        }
+      })
+      .catch(() => { if (alive) setReaderAccess({ enabled: false, mode: 'test' }); });
+    return () => { alive = false; };
+  }, [excess.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The reader panel's own Done / auto-close: readerActive is already false by then, but
+  // its state update may not have landed, so close without the guard.
+  function handleCloseAfterReader() {
+    onUpdated();
+    onClose();
+  }
+
   function handleClose() {
+    if (readerActive) return; // a payment is on the reader — finish or cancel it first
     if (madeChange) onUpdated();
     onClose();
   }
@@ -282,7 +326,11 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   const [payTotalCollected, setPayTotalCollected] = useState(
     requiredAmount > 0 ? requiredAmount.toFixed(2) : previousTaken.toFixed(2)
   );
-  const [payMethod, setPayMethod] = useState('worldpay');
+  // Worldpay, Amex, PayPal and Lloyds are admin only for new money (§15).
+  const userRole = useAuthStore((s) => s.user?.role);
+  const isAdminUser = userRole === 'admin';
+  const paymentMethodOptions = PAYMENT_METHODS.filter((m) => newPaymentMethodAllowed(m.value, userRole));
+  const [payMethod, setPayMethod] = useState(isAdminUser ? 'worldpay' : 'wise_bacs');
   const [payReference, setPayReference] = useState('');
   const [payPushToHH, setPayPushToHH] = useState(true);
   const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
@@ -815,6 +863,10 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
             method: 'rolled_over',
             reference: null,
             push_to_hirehop: false, // No HH push — no money moves; backend handles linkage + HH note
+            // Name the hop the money is coming from — the one available-rollover
+            // showed — so the backend flips exactly that record to rolled_over
+            // (Oct 2026: guessing by updated_at re-flipped the wrong hop).
+            source_excess_id: rolloverInfo?.source_excess_id ?? null,
           });
           break;
         }
@@ -940,28 +992,50 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
   }
 
   // Available actions based on current status
-  const availableActions: { action: ModalAction; label: string; icon: string; recommended?: boolean }[] = [];
+  // `recommended` is the badge text — set it to surface the option first, in
+  // green (pre-auth on a short hire; applying excess the client already has).
+  const availableActions: { action: ModalAction; label: string; icon: string; recommended?: string }[] = [];
   const s = excess.excess_status;
 
   // Rollover-apply lands at the TOP when available — most natural action when
   // staff have just confirmed a hire and the client already has rolled-over
   // money on file. No money moves; we just apply that balance to this record.
+  // Badged green like the short-hire pre-auth, so it isn't mistaken for just
+  // another option next to "Record Excess Payment" (which would take the
+  // money a second time).
   if (needsCollection && rolloverInfo?.available) {
-    availableActions.push({ action: 'rollover_apply', label: 'Apply Rolled Over Excess', icon: '↻' });
+    availableActions.push({ action: 'rollover_apply', label: 'Apply Rolled Over Excess', icon: '↻', recommended: 'Recommended · excess on account' });
   }
   // Pre-auth hold available from a clean "needed" state with no money/hold yet.
   // For SHORT hires it's the recommended route, so push it FIRST + badge it.
   const preAuthAvailable = (s === 'needed' || s === 'pending') && preAuthHeld === 0 && Number(excess.excess_amount_taken || 0) === 0;
-  if (preAuthAvailable && isShortHire) {
-    availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth Hold', icon: '◫', recommended: true });
+  // Card reader first when it can do the job: a pre-auth only inside the portal's window
+  // (the backend decides — readerOptions), a payment whenever the record needs money.
+  const readerMode = readerAccess?.mode === 'test' ? ' (TEST MODE)' : '';
+  if (readerAccess?.enabled && readerOptions?.preauth.allowed) {
+    availableActions.push({ action: 'reader_preauth', label: `Pre-auth on card reader${readerMode}`, icon: '◫', recommended: 'Recommended · short hire' });
+  }
+  if (readerAccess?.enabled && readerOptions?.payment.allowed) {
+    availableActions.push({ action: 'reader_payment', label: `Excess payment on card reader${readerMode}`, icon: '£' });
+  }
+  // The manual "Record Pre-Auth" (admin only) is hidden once we KNOW the hire is over
+  // 4 days — no pre-auth counts there (jon, 21 Oct 2026). Known from the page's job
+  // dates, or from the reader's own check, which reads the job's current dates on the
+  // server (some screens — driver page, excess ledger — don't pass the hire length).
+  // Unknown length keeps the old behaviour.
+  const knownLongHire = (hireDays != null && hireDays > 4) || readerOptions?.preauth.code === 'long_hire';
+  if (preAuthAvailable && isShortHire && !knownLongHire && isAdminUser) {
+    // Badged only when the reader isn't answering for the record: if it is, it either
+    // carries the badge itself or has said the pre-auth window isn't open yet.
+    availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth', icon: '◫', recommended: readerAccess?.enabled && readerOptions ? undefined : 'Recommended · short hire' });
   }
   if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
     availableActions.push({ action: 'payment', label: 'Record Excess Payment', icon: '£' });
   }
-  // Non-short hires (or when it wasn't surfaced first): the pre-auth option
-  // still appears here in its usual position.
-  if (preAuthAvailable && !isShortHire) {
-    availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth Hold', icon: '◫' });
+  // Hire length unknown here (or it wasn't surfaced first): the pre-auth option
+  // still appears in its usual position — but never on a known long hire.
+  if (preAuthAvailable && !isShortHire && !knownLongHire && isAdminUser) {
+    availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth', icon: '◫' });
   }
   // Pre-auth holds: capture (→ taken). For held money you can't claim/reimburse,
   // you capture it first (migration 087). Capture supports atomic
@@ -974,7 +1048,9 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
     // release them, they auto-void on the card company's clock. Showing a
     // "Release" button there is misleading, so hide it for those.
     if (excess.payment_method === 'stripe_gbp') {
-      availableActions.push({ action: 'release', label: 'Release Hold (Stripe)', icon: '○' });
+      // Worded as the counterpart to Capture: a reader hold lasts up to 30 days, so
+      // "let it expire" is no longer the habit to keep (jon, 21 Oct 2026).
+      availableActions.push({ action: 'release', label: 'Release hold (no claim - frees the client\'s card)', icon: '○' });
     }
   }
   if ((s === 'taken' || s === 'partially_paid') && amountHeld > 0) {
@@ -1203,7 +1279,13 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
               {availableActions.map((a) => (
                 <button
                   key={a.action}
-                  onClick={() => { setAction(a.action); setActionDone(false); setCaptureWarning(null); setPayHHPushError(null); }}
+                  onClick={() => {
+                    // Failsafe (jon, 21 Oct 2026, after job 16564): a payment on the reader
+                    // when a pre-auth would do asks first. A prompt, never a block.
+                    if (a.action === 'reader_payment' && readerOptions?.preauth.allowed
+                      && !window.confirm('This hire can take a pre-auth on the card reader instead (recommended for hires of 4 days or fewer): the money is held on the card, not taken.\n\nTake it as a payment anyway?')) return;
+                    setAction(a.action); setActionDone(false); setCaptureWarning(null); setPayHHPushError(null); setReaderAmount(null); setReaderNotes('');
+                  }}
                   className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
                     a.recommended
                       ? 'border-emerald-300 bg-emerald-50 hover:border-emerald-400 hover:bg-emerald-100'
@@ -1214,19 +1296,25 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                   <span className="text-sm font-medium text-gray-900">{a.label}</span>
                   {a.recommended && (
                     <span className="ml-2 inline-block text-[10px] font-semibold uppercase tracking-wide text-emerald-700 bg-emerald-100 border border-emerald-200 rounded-full px-2 py-0.5">
-                      Recommended · short hire
+                      {a.recommended}
                     </span>
                   )}
                 </button>
               ))}
             </div>
+            {/* Why the reader isn't offering a pre-auth on a record that could take one —
+                the portal's rule (4 days or fewer, within 5 days of the end). */}
+            {readerAccess?.enabled && readerOptions && !readerOptions.preauth.allowed
+              && readerOptions.preauth.code !== 'not_clean' && (
+              <p className="mt-3 text-xs text-gray-500">Card reader pre-auth: {readerOptions.preauth.reason}</p>
+            )}
           </div>
         )}
 
         {/* Action forms */}
         {action && (
           <div className="px-6 py-4">
-            <button
+            {!readerActive && <button
               onClick={() => { setAction(null); setActionDone(false); setError(''); setCaptureWarning(null); setPayHHPushError(null); setReceiptMode('choose'); setQrToken(null); setQrUrl(null); setChainBreakWarning(null); setAcknowledgeChainBreak(false); }}
               className="text-xs text-gray-500 hover:text-gray-700 mb-3 flex items-center gap-1"
             >
@@ -1234,7 +1322,69 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
               </svg>
               Back to actions
-            </button>
+            </button>}
+
+            {(action === 'reader_payment' || action === 'reader_preauth') && excess.job_id && readerAccess?.enabled && (() => {
+              const isPre = action === 'reader_preauth';
+              const required = Number(excess.excess_amount_required || 0);
+              const defaultAmt = isPre ? required : (readerOptions?.outstanding ?? required);
+              const amountText = readerAmount === null ? (defaultAmt > 0 ? defaultAmt.toFixed(2) : '') : readerAmount;
+              const amt = parseFloat(amountText) || 0;
+              // Not one of the figures OP worked out — ask why (spec §1.11, as on Record Payment).
+              const isCustom = amountText !== '' && Math.abs(amt - defaultAmt) >= 0.005;
+              return (
+                <div className="space-y-3">
+                  <h3 className="text-sm font-semibold text-gray-900">
+                    {isPre ? 'Pre-auth on card reader' : 'Excess payment on card reader'}
+                  </h3>
+                  {isPre && (
+                    <div className="px-3 py-2 bg-sky-50 border border-sky-200 rounded-md text-xs text-sky-800">
+                      The amount is <strong>held on the client&apos;s card, not taken</strong>. Capture or release it later from this record,
+                      as with an online pre-auth.
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">{isPre ? 'Pre-auth amount' : 'Amount to take now'}</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+                      <input type="number" step="0.01" value={amountText} disabled={readerActive}
+                        onChange={(e) => setReaderAmount(e.target.value)}
+                        className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md" />
+                    </div>
+                    <p className="mt-1 text-xs text-gray-500">
+                      {isPre
+                        ? `Required: £${required.toFixed(2)}.`
+                        : `Required £${required.toFixed(2)}, already collected £${Number(excess.excess_amount_taken || 0).toFixed(2)}.`}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      {isCustom ? <>Reason for this amount <span className="text-red-600">*</span></> : 'Notes (optional)'}
+                    </label>
+                    <input type="text" value={readerNotes} disabled={readerActive}
+                      onChange={(e) => setReaderNotes(e.target.value)}
+                      placeholder={isCustom ? 'Why this amount' : 'Any additional details'}
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2" />
+                  </div>
+                  <CardReaderPayment
+                    jobId={excess.job_id}
+                    access={readerAccess}
+                    amount={amt}
+                    paymentType={isPre ? 'excess_preauth' : 'excess'}
+                    excessId={excess.id}
+                    notes={readerNotes.trim()}
+                    validate={() => {
+                      if (amt < 1) return 'Enter an amount of at least £1.00';
+                      if (isCustom && !readerNotes.trim()) return 'Add a reason for a custom amount';
+                      return null;
+                    }}
+                    onRecorded={() => setMadeChange(true)}
+                    onActiveChange={setReaderActive}
+                    onClose={() => { setReaderActive(false); handleCloseAfterReader(); }}
+                  />
+                </div>
+              );
+            })()}
 
             {action === 'payment' && (
               <div className="space-y-3">
@@ -1297,7 +1447,7 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                     onChange={(e) => setPayMethod(e.target.value)}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   >
-                    {PAYMENT_METHODS.map((m) => (
+                    {paymentMethodOptions.map((m) => (
                       <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
                   </select>
@@ -1778,12 +1928,12 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                     onChange={(e) => setExtResolvedMethod(e.target.value as typeof extResolvedMethod)}
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
                   >
-                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="stripe_gbp">Stripe (Online)</option>
                     <option value="worldpay">Worldpay</option>
                     <option value="amex">Amex</option>
-                    <option value="wise_bacs">Wise (BACS)</option>
+                    <option value="wise_bacs">Wise (Bank Transfer)</option>
                     <option value="lloyds_bank">Lloyds Bank</option>
-                    <option value="till_cash">Cash</option>
+                    <option value="till_cash">Till (Cash)</option>
                     <option value="paypal">PayPal</option>
                   </select>
                 </div>
@@ -2151,7 +2301,7 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
 
             {action === 'record_preauth' && (
               <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-gray-900">Record Pre-Auth Hold</h3>
+                <h3 className="text-sm font-semibold text-gray-900">Record Pre-Auth</h3>
                 <div className="px-3 py-2 bg-sky-50 border border-sky-200 rounded-md text-xs text-sky-800">
                   Logs a pre-authorisation <strong>hold</strong> — money on hold, not in our account.
                   No HireHop deposit is created now; that happens when you capture the hold.
@@ -2337,7 +2487,8 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
               <p className="mt-3 text-xs text-red-600">{error}</p>
             )}
 
-            <div className="mt-4 flex gap-2">
+            {/* The card reader panel has its own buttons (Send / Cancel / Done). */}
+            <div className={`mt-4 flex gap-2 ${action === 'reader_payment' || action === 'reader_preauth' ? 'hidden' : ''}`}>
               {/* Confirm is hidden on the receipt step unless a file is staged on
                   this device — the QR path completes via the phone + poll, and the
                   choose screen has nothing to confirm yet. It's also hidden once

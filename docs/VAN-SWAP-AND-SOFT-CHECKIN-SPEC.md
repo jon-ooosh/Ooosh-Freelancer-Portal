@@ -313,6 +313,8 @@ Recommended PR shape: §2 + §4 + §5 in one PR (foundation + cleanup), §1 + §
 
 **Immediate follow-on (next work after this spec lands):** Freelancer-led interim check-in UI. The soft check-in primitive (§2) is the bulk of the work — the freelancer case just needs a different entry point (not the swap modal): a freelancer-facing surface where someone collecting a van from a customer on Ooosh's behalf records its state. Reuses the soft check-in event type, the interim PDF, the `Not Ready` fleet transition, and (optionally) a Job Issue if there's damage. Slots onto the existing freelancer-bookout JWT flow (CLAUDE.md "Freelancer book-out Round 5+"). Capturing it here so it doesn't fall off the radar — jon's steer (May 2026): tackle straight after the swap work, since we're laying 90% of it now.
 
+**Status (Oct 2026): BUILT.** The freelancer collection flow (`/freelancer-checkin/resolve` → CollectionPage, `interim-check-in` event, client-only collection report) is that entry point. Since 14 Oct the resolver also offers a `swapped` row with no `checked_in_at` / `soft_checked_in_at`, so the old van of a swap can be collected by the freelancer bringing the replacement; the final check-in at base then takes the client's end reading from that collection. A planned swap with readings typed into the modal now writes the swap's soft-check-in event too (breakdowns always did), so the final check-in has a client end reading either way.
+
 ## 7. Schema changes
 
 Minimal — most fields already exist.
@@ -354,7 +356,7 @@ All four open questions resolved — locked in:
 
 - **Who owns the swap?** `admin`, `manager`, AND `weekend_manager`. No override flow for other roles — genuinely-stuck weekend cases escalate by phone. (See §1 RBAC note — must explicitly include `weekend_manager`, don't use bare `authorize('admin', 'manager')`.)
 - **Multi-driver swap** — auto-cascade. If 4 drivers share van A, all 4 move to van B on a single submit. Read-only display of affected drivers in the modal, no per-driver confirmation. (See §1 Section B.)
-- **Soft check-in via freelancer-led handover** — soft check-in primitive (§2) is built here; the freelancer-handover entry point is **the very next piece of work after this lands** (see §6 — we're laying ~90% of it). Not deferred indefinitely.
+- **Soft check-in via freelancer-led handover** — soft check-in primitive (§2) is built here; the freelancer-handover entry point is **the very next piece of work after this lands** (see §6 — we're laying ~90% of it). Not deferred indefinitely. **Built — see the §6 status note.**
 - **HH job memo note on swap** — YES. Push a `job_note` to HireHop on swap: "Mid-hire swap on DD/MM/YYYY: RX73TBZ → RO23HLU". Best-effort (logged warning if it fails, doesn't block the swap), gives HH-only staff operational visibility.
 
 ## 10. Cross-references

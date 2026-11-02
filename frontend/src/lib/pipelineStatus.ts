@@ -44,3 +44,12 @@ export function jobStatusDisplay(
     colour: 'bg-gray-100 text-gray-600',
   };
 }
+
+/**
+ * The stages at which a chase date still means something. Logging a call,
+ * email or meeting on a job pushes `next_chase_date` forward ONLY while the job
+ * is one of these (backend: routes/interactions.ts auto-bump, routes/pipeline.ts
+ * `is_chasing`) — so this is also the only time the "don't update chase date"
+ * opt-out is worth showing. Provisional counts: it is not confirmed (jon, Oct 2026).
+ */
+export const CHASE_STAGES = ['new_enquiry', 'quoting', 'paused', 'provisional'] as const;

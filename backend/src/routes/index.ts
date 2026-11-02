@@ -12,8 +12,10 @@ import usersRouter from './users';
 import notificationsRouter from './notifications';
 import dashboardRouter from './dashboard';
 import duplicatesRouter from './duplicates';
+import endorsementsRouter from './endorsements';
 import hirehopRouter from './hirehop';
 import pipelineRouter from './pipeline';
+import jobProjectsRouter from './job-projects';
 import quotesRouter from './quotes';
 import vehiclesRouter from './vehicles';
 import emailRouter from './email';
@@ -33,8 +35,11 @@ import cancellationsRouter from './cancellations';
 import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
 import shopRouter from './shop';
+import hireCloseOutRouter from './hire-close-out';
+import stripeTerminalRouter from './stripe-terminal';
 import systemSettingsRouter from './system-settings';
 import freelancerDaysPublicRouter from './freelancer-days';
+import staffCalendarFeedRouter from './staff-calendar-feed';
 import oohReturnRouter from './ooh-return';
 import mobileUploadRouter from './mobile-upload';
 import preHireBriefingRouter from './pre-hire-briefing';
@@ -44,6 +49,7 @@ import storageRouter from './storage';
 import holdingRouter from './holding';
 import pcnsRouter from './pcns';
 import incidentClaimsRouter from './incident-claims';
+import vehicleSalesRouter from './vehicle-sales';
 import claimFormRouter from './claim-form';
 import rackPlansRouter from './rack-plans';
 import stagingRouter from './staging';
@@ -58,8 +64,10 @@ import staffDocumentsRouter from './staff-documents';
 import staffCalendarRouter from './staff-calendar';
 import staffRecordsRouter from './staff-records';
 import staffTasksRouter from './staff-tasks';
+import freelancerTasksRouter from './freelancer-tasks';
 import freelancersRouter from './freelancers';
 import enquiryIntakeRouter from './enquiry-intake';
+import cspReportRouter from './csp-report';
 
 const router = Router();
 
@@ -77,8 +85,10 @@ router.use('/users', usersRouter);
 router.use('/notifications', notificationsRouter);
 router.use('/dashboard', dashboardRouter);
 router.use('/duplicates', duplicatesRouter);
+router.use('/endorsements', endorsementsRouter);
 router.use('/hirehop', hirehopRouter);
 router.use('/pipeline', pipelineRouter);
+router.use('/job-projects', jobProjectsRouter);  // festival-style "these jobs belong together" (docs/JOB-PROJECTS-SPEC.md)
 router.use('/quotes', quotesRouter);
 router.use('/vehicles', vehiclesRouter);
 router.use('/email', emailRouter);
@@ -98,6 +108,7 @@ router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/ac
 router.use('/holding', holdingRouter);  // Holding — Held for Clients / Lost Property / temp storage (held_items engine)
 router.use('/claim-form', claimFormRouter);  // PUBLIC token-authenticated client claim form (Phase 2)
 router.use('/claims', incidentClaimsRouter);  // Possible insurance claims (Vehicles › Claims) — docs/INCIDENT-CLAIMS-SPEC.md
+router.use('/vehicle-sales', vehicleSalesRouter);  // Selling a van — docs/VEHICLE-SALES-SPEC.md
 router.use('/pcns', pcnsRouter);  // PCN module — Penalty Charge Notice management (Vehicles), replaces Monday PCN boards
 router.use('/rack-plans', rackPlansRouter);  // Rack Planner — how a rack/system is supplied (pull-only from HireHop) + public view-token
 router.use('/staging', stagingRouter);  // Staging Calculator — stock/availability/push + 3D plan short-links (embedded vanilla-JS tool)
@@ -110,12 +121,16 @@ router.use('/staff-documents', staffDocumentsRouter);  // Staff Documents & Trai
 router.use('/staff-calendar', staffCalendarRouter);  // Staff Calendar & Time — working patterns, who's-in calendar (Phase A)
 router.use('/staff-records', staffRecordsRouter);
 router.use('/staff-tasks', staffTasksRouter);  // My To Do — general task list, owned per person. NOT admin-only.  // Staff Records — private files held ABOUT staff (admin only). NOT staff-documents, which publishes TO staff.
+router.use('/freelancer-tasks', freelancerTasksRouter);  // Freelancer tasks — things to do on a day booking or a sitter evening (STAFF-CALENDAR-SPEC §21). NOT To Do.
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
 router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
 router.use('/shop', shopRouter);  // Shop till — ad-hoc sales, internal stock consumption, sale-stock lookup
+router.use('/close-out', hireCloseOutRouter);  // Hire close-out — allocate deposits in HireHop + Xero, complete (HIRE-CLOSE-OUT-SPEC.md)
+router.use('/terminal', stripeTerminalRouter);  // Card reader (Stripe Terminal S700) — in-person card payments (STRIPE-TERMINAL-SPEC.md)
 router.use('/system-settings', systemSettingsRouter);
+router.use('/staff-calendar-feed', staffCalendarFeedRouter);  // PUBLIC personal iCal feed (token auth, no JWT) — services/staff-ical.ts decides what is in it
 router.use('/freelancer-days', freelancerDaysPublicRouter);  // PUBLIC accept/decline for a yard-day offer (token auth, no JWT)
 router.use('/ooh-return', oohReturnRouter);  // Public parking-form (token auth) + staff endpoints
 router.use('/mobile-upload', mobileUploadRouter);  // Public token-auth file capture (phone QR handoff)
@@ -124,6 +139,7 @@ router.use('/pre-hire-briefing', preHireBriefingRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
 router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
 router.use('/enquiry-intake', enquiryIntakeRouter);  // Website enquiry form → OP enquiry (API-key auth, service='enquiry_form')
+router.use('/csp-report', cspReportRouter);  // PUBLIC — browser CSP violation reports (no auth, rate-limited, log only)
 
 // Alias: /api/jobs/:jobNumber → /api/driver-verification/validate-job/:jobNumber
 // Needed because Netlify validate-job.js calls opFetch('/jobs/{jobId}')

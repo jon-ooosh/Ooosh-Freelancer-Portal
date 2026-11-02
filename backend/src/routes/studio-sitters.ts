@@ -17,6 +17,7 @@ import {
   getDefaultSitterFee, setDefaultSitterFee,
 } from '../services/studio-sitter';
 import { getShiftReport } from '../services/studio-sitter-lockup';
+import { ukToday } from '../services/uk-date';
 
 const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
@@ -34,7 +35,7 @@ function addDaysIso(iso: string, days: number): string {
 // GET /api/studio-sitters/roster?from=&to= — one row per evening in range
 router.get('/roster', async (req: AuthRequest, res: Response) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = ukToday();
     const from = DATE_RE.test(String(req.query.from)) ? String(req.query.from) : today;
     const to = DATE_RE.test(String(req.query.to)) ? String(req.query.to) : addDaysIso(from, 14);
     if (to < from) { res.status(400).json({ error: 'to must be on or after from' }); return; }

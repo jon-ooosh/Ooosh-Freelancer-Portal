@@ -7,6 +7,9 @@ import { logAudit } from '../middleware/audit';
 import emailService from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
+import { shiftLinkPath } from '../services/studio-sitter';
+import { bumpSiblingChaseDates } from '../services/job-groups';
+import { resolveMyThreadMentions, retireDoneBells } from '../services/notification-resolve';
 
 const router = Router();
 router.use(authenticate);
@@ -431,6 +434,9 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $2`,
         [chaseDate, job_id, chase_alert_user_id || null, chase_alert_delivery || null]
       );
+      // Quote options: one call covers the whole enquiry — the live siblings
+      // move too, never shortening a sibling's deliberately later date.
+      bumpSiblingChaseDates(job_id, chaseDate).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
     }
 
     // Auto-bump chase on contact-type interactions (call / email / meeting).
@@ -468,6 +474,14 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $1`,
         [job_id]
       );
+      // Quote options: the same bump for the enquiry's other live options.
+      bumpSiblingChaseDates(job_id, null).catch((e) => console.error('[interactions] sibling chase bump failed:', e));
+    }
+
+    // A logged chase (or contact) moves the chase date on: its "Chase due"
+    // bells are done (bell-rules.ts chase_due). Siblings' go on the sweep.
+    if (job_id && (type === 'chase' || CONTACT_BUMP_TYPES.has(type))) {
+      await retireDoneBells('chase_due', job_id);
     }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
@@ -510,7 +524,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     // default to the entity's timeline tab.
     const actionUrl = issue_id ? `/operations/problems/${issue_id}`
       : heldItemUrl ? heldItemUrl
-      : shift_id ? `/studio-sitters`
+      : shift_id ? (await shiftLinkPath(shift_id)).path
       : job_id ? `/jobs/${job_id}?tab=timeline`
       : person_id ? `/people/${person_id}`
       : organisation_id ? `/organisations/${organisation_id}`
@@ -701,6 +715,13 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       }
     }
 
+    // 3) Replying answers whatever the thread asked of YOU — your own mention
+    //    bells on it are done (jon, Oct 2026; notification-resolve.ts). Only
+    //    yours: everyone else's stay until they answer. Never throws.
+    if (parent_interaction_id) {
+      await resolveMyThreadMentions(req.user!.id, result.rows[0].id);
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('Create interaction error:', error);
@@ -804,7 +825,9 @@ router.put('/:id/move', validate(moveInteractionSchema), async (req: AuthRequest
 // the surface tidy and avoid arbitrary emoji proliferation.
 //
 // No notifications fire on reactions — this is intentionally the
-// lightweight "I saw it, no follow-up needed" pattern.
+// lightweight "I saw it, no follow-up needed" pattern. For the same reason,
+// ADDING a reaction marks the reactor's own mention bells on that thread done
+// (jon, Oct 2026); taking one off changes nothing.
 
 const REACTION_PALETTE = ['👍', '❤️', '✅', '😂', '🎉', '👀'] as const;
 
@@ -829,7 +852,8 @@ router.post('/:id/reactions', validate(reactionSchema), async (req: AuthRequest,
     }
     const reactions = (current.rows[0].reactions || {}) as Record<string, string[]>;
     const existing = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
-    if (existing.includes(userId)) {
+    const added = !existing.includes(userId);
+    if (!added) {
       reactions[emoji] = existing.filter((u) => u !== userId);
       // Drop the key entirely when the last reactor removes themselves —
       // keeps the JSONB clean instead of accumulating empty arrays.
@@ -842,6 +866,9 @@ router.post('/:id/reactions', validate(reactionSchema), async (req: AuthRequest,
       `UPDATE interactions SET reactions = $1::jsonb WHERE id = $2 RETURNING reactions`,
       [JSON.stringify(reactions), req.params.id]
     );
+
+    // "I saw it" — the reactor's own mention bells on this thread are done.
+    if (added) await resolveMyThreadMentions(userId, req.params.id as string);
 
     res.json({ reactions: result.rows[0].reactions });
   } catch (error) {

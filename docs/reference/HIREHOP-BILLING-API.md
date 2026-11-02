@@ -92,6 +92,15 @@ POST /php_functions/billing_save.php
   job           = 16757
 ```
 
+✅ **`all: 1` bills only the lines NOT YET invoiced** (proven 9 Oct 2026, scratch job
+15745): three lines → draft 12927 held all three; a fourth line added, `all: 1` again →
+draft 12928 held ONLY the fourth. So a second invoice for charges added after the main
+invoice is just another `all: 1` call. HireHop tracks this per line as `invoiced_so_far`
+(§10). **`all: 0` creates an EMPTY draft** (`debit: 0`, `items: []`) to which lines are
+then assigned by hand — §10 is that path.
+✅ Used by `completed-charges.ts` (Oct 2026): an empty draft + custom lines (§10.3b) is how OP
+charges a client after the job is Completed, when HireHop takes no new job lines.
+
 ⚠️ **`all` defaults to ticked in the UI, but that default is a HireHop user setting**
 (jon). Never rely on it — always send `all: 1`.
 
@@ -226,8 +235,15 @@ Interested (10) releases it** (`SHOP-SALES-SPEC.md` §2.1).
 ## 7. Not yet captured ❓
 
 - Creating a **credit note** (approving one is documented in `MONEY-AND-EXCESS.md`).
-- What `upto`, `aggregated`, `novat` do on invoice create.
+- What `upto`, `aggregated`, `novat` do on invoice create (`all` is now known — §3, §10).
+- Deleting a payment application (jon deleted 16015's stray refund by hand on 9 Oct
+  without the network tab open — next time).
 - Voiding / deleting an approved invoice (and what it does in Xero).
+- Telling HireHop an invoice IS in Xero. When HireHop's push reached Xero but HireHop never
+  recorded it (`ACC_ID: ""`, `exported: 0` — OT-INV-12000, job 15812, Jul 2026), a re-push
+  (`billing_save.php` then `tasks.php post_invoice_credit`) fails "Can't create invoice number
+  OT-INV-12000 — Xero error: Invoice # must be unique", even in administrator mode. OP works
+  round it by finding the Xero invoice by number and total (`adoptLostXeroInvoices()`).
 - VAT rounding across several odd-pence lines (§3).
 
 ---
@@ -318,3 +334,185 @@ Captured 28 Sep 2026 (Sales stock → edit an item → Save).
   and occasionally answers with a 502 error PAGE; that one is not retried (a POST
   may have landed), so the script stops and a re-run carries on.
 
+---
+
+## 10. Invoice LINES — assign, edit, VAT per line ✅ captured 9 Oct 2026 (scratch job 15745)
+
+HireHop's invoice editor works on the INVOICE's copy of each line, not the job's
+item. **VAT is set per invoice line, never on the job item** (the item grid has no VAT
+field; `items_save.php`'s `vat_rate: 0` means "derive from the stock's tax rules" —
+§9). So an invoice can carry a zero-rated line without the job's supply list, status
+or availability being touched. Not built anywhere in OP yet; this is the capture.
+
+### 10.1 What is left to invoice — `billing_assign_list.php` (GET)
+
+```
+GET /php_functions/billing_assign_list.php
+  pq_datatype=json  job=15745  tz=Europe/London  zero=0  kind=1234  upto=  bill_id=12929  head=  title=
+```
+
+`rows[].cell.data` per job line: `item_id` (the JOB line id, e.g. 168521), `KIND` (2
+stock, 4 charge), `main_id` (stock / charge-list id), `TITLE`, `QUANTITY`,
+`UNIT_PRICE`, `PRICE`, `VAT_RATE` 20, `VAT_ACC_ID` 20 (= tax code id, §10.4),
+`NOMINAL_ID` (0 = none set → the invoice falls back to the DEFAULT nominal, 175
+Backline hire — seen on two drum-hardware lines), `charge_from` / `date_upto`,
+`charge_days`, **`invoiced_so_far`** (0 until invoiced — this is how `all: 1` knows what
+is left), `BASE_UNIT_PRICE`, `MULTIPLIER`.
+
+### 10.2 Put chosen lines on a draft — `billing_save_items.php` (POST)
+
+```
+POST /php_functions/billing_save_items.php
+  main_id=15745  type=1  bill=12929
+  data[0][checked]=1  data[0][item_id]=168520  data[0][equip]=1162  data[0][qty]=1
+  data[0][unit_price]=1  data[0][discount]=0  data[0][price]=1
+  data[0][vat]=20  data[0][vat_acc_id]=20  data[0][nominal_id]=0
+  data[0][title]=(Pearl DR503) - PCX100 rack clamp  data[0][memo]=  data[0][kind]=2
+  data[0][from]=2026-10-29 09:00:00  data[0][upto]=2026-10-30 09:00:00
+  data[0][base_unit_price]=1  data[0][multiplier]=1
+  selected=
+```
+
+Response = the invoice row (§3 shape) with `items[]` now holding the line as invoice
+line `ID` 104283, `MAIN_ID` 168520 (the job line), `ACC_NOMINAL_ID` 175,
+`ACC_TAX_RATE_ID` 20. `price`, `discount`, `vat`, `vat_acc_id`, `nominal_id` and
+`title` are all per row and all ours to set — this is the call that can build an
+invoice line by line. **A job line goes on an invoice once only** (jon, 9 Oct) — a second
+row for the same `item_id` is not an option. ❓ Untested: a row with no job line (§7).
+
+### 10.2b ⚠️ `billing_save_items.php` ADDS a line — it never edits one
+
+The capture of 12 Oct 2026 (scratch job 15745, draft 12946: one row, `discount=100`,
+`price=0`, no invoice-line id, `selected=` empty) was the line being ADDED to an empty
+draft. Sent for a line already on a draft it puts a **second copy** of the job line on the
+invoice — so "a job line goes on an invoice once only" is a rule for PEOPLE, not one HireHop
+enforces (live on 15745, 12 Oct: the PCX100 clamp twice, once at £3 and once at £0; OP's
+read-back stopped the run at the draft). **Edit a line already on an invoice with §10.3.**
+
+### 10.3 Change one invoice line IN PLACE — `billing_save_item.php` (POST, singular) ✅
+
+```
+POST /php_functions/billing_save_item.php
+  id=104283  bill=12929  kind=2  total=1
+  desc=(Pearl DR503) - PCX100 rack clamp  memo=
+  vat_rate=0  vat_id=33  nominal_id=175  unit=0  main_id=15745  type=1  selected=104283
+```
+
+Response: the invoice row with that line at `VAT_RATE: 0`, `ACC_TAX_RATE_ID: 33`,
+`VAT: 0`, and the invoice's `TAX` and `owing` recomputed (£1.20 → £1.00). `total` is
+the line's net; `nominal_id` can be changed in the same call.
+
+Captured again 12 Oct 2026 (15745, draft 12948) taking a line to **£0**: `id=104557 bill=12948
+kind=2 total=0 desc=… memo= vat_rate=20 vat_id=20 nominal_id=175 unit=0 main_id=15745 type=1
+selected=104557` → the SAME line id at `PRICE: 0`, `VAT: 0`, `UNIT_PRICE` 3 kept; no other line
+touched. The UI sends no discount field for this. This is how the EU split zeroes a line and
+zero-rates a 31+ day vehicle line (`hh-invoice-close.ts` `postInvoiceLineEdit()`).
+
+### 10.3b Add a CUSTOM line to a draft — `billing_save_item.php` with `id=0`, `kind=3` ✅
+
+HireHop's "New custom item" on a draft invoice (9 Oct 2026). Same endpoint as §10.3,
+new row, no job item behind it:
+
+```
+POST /php_functions/billing_save_item.php
+  id=0  bill=12929  kind=3  qty=1
+  note=This is a custom item for testing at 0%     ← becomes the line's DESCRIPTION
+  unit=10  total=10  memo=
+  vat_rate=0  vat_id=33  nominal_id=175
+  main_id=15745  type=1  selected=104336           ← `selected` = the line it was inserted after
+```
+
+Response: the invoice row with a new line `KIND: 3`, `MAIN_ID: 0`, `EQUIP_ID: 0`,
+`ITEM: ""`, `DESCRIPTION` = the note, `PRICE` 10, `ACC_TAX_RATE_ID` 33,
+`ACC_NOMINAL_ID` 175, and the invoice's NET/TAX/owing recomputed. **This is the EU
+split's zero-rated line** (`HIRE-CLOSE-OUT-SPEC.md` §10.1): the job's supply list is
+never touched. A job line can be put on an invoice once only (jon, 9 Oct), so this, not
+"the same line twice", is how a 0% share is expressed.
+
+**⚠️ A custom line's text is cut at 80 characters, silently** (job 16739, 14 Oct 2026: "…— cancelled 8 Oct
+2026" landed as "…— cancelled 8"). The save reports success and the price, tax and nominal read back fine.
+`raiseCustomLineInvoice()` refuses anything over `CUSTOM_LINE_MAX` (80) before writing.
+
+### 10.4 Tax codes (the Xero mapping, from `tax_codes[]` on every billing response)
+
+| HireHop id | Rate | Description | Xero tax type |
+|---|---|---|---|
+| **20** | 20 | 20% (VAT on Income) — DEFAULT | OUTPUT2 |
+| 22 | 5 | 5% (VAT on Income) | RROUTPUT |
+| 26 | 0 | Exempt Income | EXEMPTOUTPUT |
+| 27 | 0 | No VAT | NONE |
+| 30 | 0 | Zero Rated EC Goods Income | ECZROUTPUT |
+| 31 | 0 | Zero Rated EC Services | ECZROUTPUTSERVICES |
+| **33** | 0 | Zero Rated Income (the one the UI offers, `assigned: 1`) | ZERORATEDOUTPUT |
+
+The EU split uses **33** (Zero Rated Income) — confirmed by jon, 10 Oct 2026
+(`HIRE-CLOSE-OUT-SPEC.md` §1.13, §10.1).
+
+### 10.5 Job lines, for completeness — `items_batch_save.php` / `items_save.php`
+
+Adding a line to a job (any kind, even one) is `items_batch_save.php`:
+`parent=0 flag=0 sid=168527 skind=2 job=15745 data={"c89":1} no_availability=0` —
+`data` maps `c<charge-list id>` (or the stock equivalent) to a quantity; `sid`/`skind`
+is the line it is inserted after. Response `itms[]` carries the new job line (`ID`
+7964, `kind` 4, `UNIT_PRICE`, `PRICE`, `ACC_NOMINAL`, `CATEGORY_ID` 500 "Charges").
+Editing it is `items_save.php` with `id=7964 … unit_price=50 price=20 vat_rate=0
+acc_nominal=24 …` (the `acc_nominal` here is a LIST-level id, not the §10.4 nominal
+id — the invoice resolves it; the assign list showed `NOMINAL_ID: 190` Misc income for
+this line). A kind-4 charge line is not stock: no availability, no scan, no prep.
+
+### 10.7 Paste the supply list onto a draft — `billing_paste.php` (POST) ✅ captured 13 Oct 2026 (job 16598)
+
+What staff do by hand to get an invoice laid out like the quote: select the supply list →
+Menu → Copy → a BLANK draft (`all: 0`) → right-click → Paste. **Copy never reaches the
+server** (nothing in Network); Paste sends the grid's rows:
+
+```
+POST /php_functions/billing_paste.php
+  selected=  bill=12966
+  data[0][ID]=8818    data[0][kind]=0  data[0][title]=Fuel  data[0][LFT]=1 data[0][RGT]=4 data[0][PRICE]=0 …
+  data[1][ID]=169041  data[1][kind]=2  data[1][qty]=1  data[1][title]=▶ Cost / fee / recharge
+      data[1][UNIT_PRICE]=10 data[1][PRICE]=10 data[1][MULTIPLIER]=5 data[1][VAT_RATE]=0
+      data[1][ACC_NOMINAL]=22 data[1][LIST_ID]=1796 data[1][LFT]=2 data[1][RGT]=3
+      data[1][inv_UNIT_PRICE]=10 data[1][inv_PRICE]=10  …(every scalar field of the supply-list row)
+  data[5][ID]=18340   data[5][kind]=3  data[5][title]=↑ Rear seats arranged around a table …
+  origin_type=1  origin_id=16598
+```
+
+The rows are the `items_to_supply_list.php` rows (same keys: `ID`, `kind`, `title`, `LFT`/`RGT`,
+`LIST_ID`, `AUTOPULL`…) plus `inv_UNIT_PRICE` / `inv_PRICE` — **with one difference that matters:
+the feed's `UNIT_PRICE` / `PRICE` are per charge PERIOD and `MULTIPLIER` is the number of
+periods; the grid sends them MULTIPLIED OUT** (16849, 13 Oct 2026: feed horizontal bar
+`UNIT_PRICE 4 PRICE 4 MULTIPLIER 2` (per Day, 2 days) → grid `UNIT_PRICE 8 PRICE 8 inv_* 8`;
+per-Week lines `MULTIPLIER 1`, unchanged). HireHop prices the pasted line from what it is sent,
+so the feed's figures put every per-Day line on at half price — OP's first live paste stopped at
+the penny check (£73.26 vs £90.76). The grid also sends a null `ACC_NOMINAL` / `DURATION` as 0.
+Response = the invoice row (§3 shape) with `items[]` in supply-list order, nesting kept
+(`LFT`/`RGT`): a header comes over as `KIND 0`, `MAIN_ID 0`, `DESCRIPTION` = its title; every
+other line has `MAIN_ID` = the job line `ID`. **HireHop resolves VAT and nominal itself** — the
+payload's `VAT_RATE: 0` / `ACC_NOMINAL: 22` (a list-level id) came back as 20% / nominal 190; the
+van as 185 Premium Splitter hire; £0 lines with `ACC_NOMINAL_ID: null`. `NET` 1210 = the job.
+
+`all: 1` ("include all owing items") puts only the priced lines on, flattened, in an order
+nobody chose — fine for two lines, unreadable for forty (16491's two pro-formas, 13 Oct).
+
+✅ Used by `hire-close-out.ts` for a job's FIRST invoice (`hh-invoice-close.ts`
+`readSupplyList()` + `postPasteSupplyLines()`), read back line by line. A top-up invoice stays
+`all: 1` — pasting the whole list again would put already-invoiced lines on a second time.
+❓ Not yet seen: whether a pasted line counts as invoiced for `billing_assign_list.php`'s
+`invoiced_so_far` (it must — staff have invoiced this way for years — but unproven by capture).
+
+⚠️ **Supplying and Billing can price the same line differently** (job 16724, 20 Oct 2026). A
+per-Hour line with £45 typed as its unit price showed "per Hour @ £1.88" (seemingly £45 ÷ 24) in the edit
+dialog: the Supplying grid totalled it £45, while Billing's accrued (kind 0, its own "Quoted net
+total") priced it 3 hours × £1.875 = £5.63. A paste carries the Supplying figure; `all: 1` and
+the kind 0 accrued carry Billing's, as do the portal and the Money tab. The penny check is what
+catches it. Once the line was re-entered, both tabs said £197.50 and the invoice raised cleanly.
+First seen in 5+ years.
+
+### 10.6 Xero today (checked 9 Oct 2026)
+
+Every OP-pushed deposit sits in Xero as an **unapplied Overpayment** and every
+HireHop invoice as **Awaiting payment** until the bookkeeper applies the credit by hand
+(OT-INV-12252 awaiting; OT-INV-11574 paid, by hand in April). HireHop never pushes
+an allocation. The shop close's `applyCreditsInXero` is the only thing in the business
+that does it automatically — the hire close-out generalises it.

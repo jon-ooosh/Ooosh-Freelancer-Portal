@@ -21,6 +21,7 @@ import { api } from '../services/api';
 import { COST_CATEGORIES } from './CostCaptureModal';
 import { PAID_NOW_METHODS } from '../lib/costOptions';
 import type { Cost } from '../../../shared/types';
+import { ukToday } from '../lib/ukDate';
 
 interface ParentCost {
   id: string;
@@ -36,7 +37,7 @@ interface ParentCost {
 interface Refundable { gross: number; refunded: number; remaining: number }
 
 const gbp = (n: number | null | undefined) => `£${Number(n || 0).toFixed(2)}`;
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => ukToday();
 
 export default function RecordRefundModal({ cost, initialFile, onClose, onSaved }: {
   /** The purchase being refunded. Null = came from capture; pick it here. */

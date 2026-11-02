@@ -18,6 +18,9 @@ import { getSystemSetting } from '../routes/system-settings';
 import { logIssueEvent } from './job-issues';
 import { defaultFormData } from './claim-form-fields';
 import { estimateVehicleValue } from './vehicle-value';
+import { ukDatePlus } from './uk-date';
+import type { BellKey } from './bell-rules';
+import { retireDoneBells } from './notification-resolve';
 
 type DbClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
@@ -37,11 +40,12 @@ export const CLAIM_OUTCOMES = ['not_claimed', 'settled', 'denied', 'defended', '
 export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
 
 /**
- * Stages that chase themselves and so need no check date. Empty until the
- * Phase 3 client chase exists — until then a case with the form out stays on
- * the owner's check date like any other, so it can't go quiet.
+ * Stages that chase themselves and so need no check date: the client chase
+ * (services/claim-chase.ts) runs a case with the form out. A PAUSED chase is
+ * back on the owner's check date, and a chase that has run out is flagged in
+ * Needs Attention instead.
  */
-const SELF_CHASING: ReadonlySet<string> = new Set<string>();
+const SELF_CHASING: ReadonlySet<string> = new Set<string>(['form_out']);
 
 export async function logClaimEvent(
   claimId: string,
@@ -71,15 +75,8 @@ export async function getDefaultClaimWatchers(): Promise<string[]> {
   }
 }
 
-/** YYYY-MM-DD for "today + n days" in UK terms. */
-export function ukDatePlus(days: number): string {
-  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/London' }));
-  now.setDate(now.getDate() + days);
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
+/** YYYY-MM-DD for "today + n days" in UK terms — services/uk-date.ts. */
+export { ukDatePlus };
 
 /** Next Mon–Fri after today (bank holidays not considered — a bell a day early is harmless). */
 export function nextWorkingDay(): string {
@@ -89,6 +86,18 @@ export function nextWorkingDay(): string {
     if (dow !== 0 && dow !== 6) return s;
   }
   return ukDatePlus(1);
+}
+
+/**
+ * A claim's bells that ask for something — "Claim form submitted", "Check in
+ * on claim", "Client form not coming back" — retired once their thing is done
+ * (bell-rules.ts). Call it after anything that moves the stage, the check
+ * date or the client chase; the 5-minute sweep catches any path that doesn't.
+ */
+export async function retireClaimBells(claimId: string): Promise<void> {
+  await retireDoneBells('claim_review', claimId);
+  await retireDoneBells('claim_check_in', claimId);
+  await retireDoneBells('claim_form_chase', claimId);
 }
 
 /**
@@ -102,7 +111,12 @@ export async function notifyClaimFollowers(
   actorUserId: string | null,
   title: string,
   content: string,
-  opts: { priority?: 'low' | 'normal' | 'high' | 'urgent'; onlyUserIds?: string[] } = {},
+  opts: {
+    priority?: 'low' | 'normal' | 'high' | 'urgent';
+    onlyUserIds?: string[];
+    /** Set on a bell that ASKS for something — bell-rules.ts retires it once done. */
+    resolveKey?: BellKey;
+  } = {},
 ): Promise<void> {
   try {
     let recipients: Set<string>;
@@ -119,9 +133,10 @@ export async function notifyClaimFollowers(
     for (const userId of recipients) {
       await query(
         `INSERT INTO notifications
-           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-         VALUES ($1, 'system', $2, $3, 'incident_claims', $4, $5, $6, $7)`,
-        [userId, title, content, claimId, `/vehicles/claims/${claimId}`, opts.priority || 'normal', actorUserId],
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id, resolve_key)
+         VALUES ($1, 'system', $2, $3, 'incident_claims', $4, $5, $6, $7, $8)`,
+        [userId, title, content, claimId, `/vehicles/claims/${claimId}`, opts.priority || 'normal', actorUserId,
+         opts.resolveKey ?? null],
       );
     }
   } catch (err) {
@@ -291,6 +306,7 @@ export async function runClaimCheckReminders(): Promise<{ belled: number }> {
         SET next_check_sent_for = next_check_on
       WHERE is_deleted = false
         AND stage <> 'closed'
+        AND NOT (stage = 'form_out' AND chase_paused_at IS NULL)   -- the client chase has it
         AND next_check_on IS NOT NULL
         AND next_check_on <= CURRENT_DATE
         AND next_check_sent_for IS DISTINCT FROM next_check_on
@@ -307,7 +323,8 @@ export async function runClaimCheckReminders(): Promise<{ belled: number }> {
       c.id, null,
       `Check in on claim — ${claimLabel(c)}`,
       `${STAGE_LABEL[c.stage as ClaimStage] || c.stage}; last update ${days === 0 ? 'today' : `${days} day${days === 1 ? '' : 's'} ago`}.`,
-      { onlyUserIds: recipients },
+      // Retires once the check date moves or the claim closes (bell-rules.ts).
+      { onlyUserIds: recipients, resolveKey: 'claim_check_in' },
     );
     belled++;
   }
@@ -337,7 +354,39 @@ export interface ClaimAttentionRow {
  * missing. (The client-chase bucket arrives with Phase 3.) Full total plus a
  * capped item list — never bucket a LIMIT-ed set client-side.
  */
-export async function getClaimAttentionBuckets(): Promise<{ check_overdue: ClaimAttentionRow[]; check_overdue_total: number }> {
+export async function getClaimAttentionBuckets(): Promise<{
+  check_overdue: ClaimAttentionRow[];
+  check_overdue_total: number;
+  to_review: ClaimAttentionRow[];
+  chase_exhausted: ClaimAttentionRow[];
+}> {
+  // Four reminders and no form (services/claim-chase.ts) — needs a phone call.
+  // next_check_on carries the date the last reminder went.
+  const exhausted = await query(
+    `SELECT c.id, c.stage, c.vehicle_reg, c.hh_job_number,
+            c.chase_sent_for AS next_check_on,
+            NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), '') AS owner_name
+     FROM incident_claims c
+     LEFT JOIN users u ON u.id = c.owner_user_id
+     LEFT JOIN people p ON p.id = u.person_id
+     WHERE c.is_deleted = false AND c.stage = 'form_out'
+       AND c.chase_paused_at IS NULL AND c.chase_level >= 5
+     ORDER BY c.updated_at
+     LIMIT 20`,
+  );
+  // A submitted form is its own bucket (it needs a manager's review, whatever
+  // the check date says), so it's left out of the overdue-check one.
+  const review = await query(
+    `SELECT c.id, c.stage, c.vehicle_reg, c.hh_job_number,
+            to_char(c.submitted_at, 'YYYY-MM-DD') AS next_check_on,
+            NULLIF(TRIM(CONCAT(p.first_name, ' ', p.last_name)), '') AS owner_name
+     FROM incident_claims c
+     LEFT JOIN users u ON u.id = c.owner_user_id
+     LEFT JOIN people p ON p.id = u.person_id
+     WHERE c.is_deleted = false AND c.stage = 'submitted'
+     ORDER BY c.submitted_at NULLS LAST, c.updated_at
+     LIMIT 20`,
+  );
   const r = await query(
     `SELECT c.id, c.stage, c.vehicle_reg, c.hh_job_number,
             to_char(c.next_check_on, 'YYYY-MM-DD') AS next_check_on,
@@ -347,7 +396,8 @@ export async function getClaimAttentionBuckets(): Promise<{ check_overdue: Claim
      LEFT JOIN users u ON u.id = c.owner_user_id
      LEFT JOIN people p ON p.id = u.person_id
      WHERE c.is_deleted = false
-       AND c.stage <> 'closed'
+       AND c.stage NOT IN ('closed', 'submitted')
+       AND NOT (c.stage = 'form_out' AND c.chase_paused_at IS NULL)   -- chased, or in chase_exhausted
        AND (c.next_check_on IS NULL OR c.next_check_on < CURRENT_DATE)
      ORDER BY c.next_check_on NULLS FIRST
      LIMIT 10`,
@@ -356,12 +406,68 @@ export async function getClaimAttentionBuckets(): Promise<{ check_overdue: Claim
   return {
     check_overdue: r.rows.map(({ total: _t, ...row }) => row as ClaimAttentionRow),
     check_overdue_total: total,
+    to_review: review.rows as ClaimAttentionRow[],
+    chase_exhausted: exhausted.rows as ClaimAttentionRow[],
   };
 }
 
 /** Whether a stage needs a next-check date (everything but self-chasing and closed). */
 export function stageNeedsCheckDate(stage: string): boolean {
   return stage !== 'closed' && !SELF_CHASING.has(stage);
+}
+
+/**
+ * The client submitted the form: a bell for the owner and watchers, and an
+ * email to the owner (or, with no owner, the default claim watchers) — it
+ * needs a manager to review it, and a bell alone is easy to miss. The case
+ * also sits in Needs Attention until it's moved on. Best-effort: never throws.
+ */
+export async function notifyClaimSubmitted(claimId: string, byName: string): Promise<void> {
+  try {
+    const c = await query(`SELECT vehicle_reg, hh_job_number, owner_user_id FROM incident_claims WHERE id = $1`, [claimId]);
+    if (!c.rows[0]) return;
+    const label = claimLabel(c.rows[0]);
+    const title = `Claim form submitted — ${label}`;
+    const content = `${byName} has submitted the incident form. It needs a manager to review it.`;
+    await notifyClaimFollowers(claimId, null, title, content, { priority: 'high', resolveKey: 'claim_review' });
+    const to = c.rows[0].owner_user_id ? [c.rows[0].owner_user_id as string] : await getDefaultClaimWatchers();
+    if (!to.length) return;
+    const users = await query(
+      `SELECT u.id, u.email, COALESCE(NULLIF(p.preferred_name, ''), p.first_name) AS first_name
+       FROM users u LEFT JOIN people p ON p.id = u.person_id
+       WHERE u.id = ANY($1::uuid[]) AND u.is_active = true AND u.email IS NOT NULL`,
+      [to],
+    );
+    const { emailService } = await import('./email-service');
+    const { frontendLink } = await import('../config/app-urls');
+    const esc = (s: string) => s.replace(/[<>&]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[ch] as string));
+    const emailed: string[] = [];
+    for (const u of users.rows) {
+      const result = await emailService.sendRaw({
+        to: u.email,
+        subject: title,
+        html: `
+          <p>Hi ${esc(u.first_name || 'there')},</p>
+          <p style="font-size: 15px; margin: 16px 0;"><strong>${esc(content)}</strong></p>
+          <p><a href="${frontendLink(`/vehicles/claims/${claimId}`)}" style="color: #7B5EA7; text-decoration: underline;">Open the case in Ooosh</a></p>
+          <p style="color: #999; font-size: 12px; margin-top: 24px;">The broker has not been told — that only happens when a manager sends it.</p>`,
+        variant: 'internal',
+      });
+      if (result.success) emailed.push(u.id);
+      else console.error(`[claims] submitted email to ${u.email} failed:`, result.error);
+    }
+    // Those people's bells are the same news — don't let the escalator email it again.
+    if (emailed.length) {
+      await query(
+        `UPDATE notifications SET email_sent_at = NOW()
+         WHERE entity_type = 'incident_claims' AND entity_id = $1 AND title = $2
+           AND user_id = ANY($3::uuid[]) AND email_sent_at IS NULL`,
+        [claimId, title, emailed],
+      );
+    }
+  } catch (err) {
+    console.error('Claim submitted notify failed (non-fatal):', err);
+  }
 }
 
 /**

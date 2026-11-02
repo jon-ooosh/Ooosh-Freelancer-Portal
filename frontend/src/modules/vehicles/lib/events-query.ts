@@ -161,6 +161,13 @@ export interface CheckInStatus {
    * context ("this van was swapped out on …").
    */
   swapped?: boolean
+  /**
+   * Swapped-out van only: the swap's soft check-in reading — where the client
+   * handed the van over. Mileage / fuel are null when staff couldn't record
+   * them (common for a breakdown); then there's no client comparison at all,
+   * never a fall-back to the base reading.
+   */
+  swapReading?: { mileage: number | null; fuelLevel: string | null; at: string | null } | null
 }
 
 /**
@@ -186,10 +193,16 @@ export async function checkAlreadyCheckedIn(
       checkInDate: string | null
       hirehopJob: number | null
       swapped?: boolean
+      swapReading?: { mileage: number | null; fuelLevel: string | null; at: string | null } | null
     }
 
     if (data.eligible) {
-      return { alreadyCheckedIn: false, hirehopJob: data.hirehopJob, swapped: data.swapped === true }
+      return {
+        alreadyCheckedIn: false,
+        hirehopJob: data.hirehopJob,
+        swapped: data.swapped === true,
+        swapReading: data.swapped === true ? (data.swapReading ?? null) : null,
+      }
     }
 
     return {

@@ -164,9 +164,13 @@ async function buildAndSend(
   if (referralReason) reasons.push(referralReason);
   if (driver.referral_notes && driver.referral_notes !== referralReason) reasons.push(driver.referral_notes);
   if (driver.has_disability) reasons.push('Declared disability/medical condition');
-  if (driver.has_convictions) reasons.push('Declared motoring convictions');
+  if (driver.has_convictions) reasons.push('Declared a serious motoring conviction');
   if (driver.has_prosecution) reasons.push('Declared pending prosecution');
-  if (driver.has_accidents) reasons.push('Declared previous accidents');
+  // Since migration 298 an accident or claim is only a DECLARATION; the
+  // referral is "more than one at fault or still open" (has_fault_claims).
+  // Answers from before then (has_fault_claims NULL) keep the old reading.
+  if (driver.has_fault_claims) reasons.push('Declared more than one at-fault or open claim (5 years)');
+  else if (driver.has_accidents && driver.has_fault_claims == null) reasons.push('Declared previous accidents');
   if (driver.has_insurance_issues) reasons.push('Declared insurance issues');
   if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
   if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
@@ -213,6 +217,8 @@ async function buildAndSend(
       hasAccidents: driver.has_accidents || false,
       hasInsuranceIssues: driver.has_insurance_issues || false,
       hasDrivingBan: driver.has_driving_ban || false,
+      hasRecentConvictions: driver.has_recent_convictions ?? null,
+      hasFaultClaims: driver.has_fault_claims ?? null,
       additionalDetails: driver.additional_details || '',
       jobId: hirehopJobId ? String(hirehopJobId) : 'N/A',
       documents,

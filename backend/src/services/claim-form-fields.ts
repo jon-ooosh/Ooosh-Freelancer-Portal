@@ -26,11 +26,22 @@ export interface ClaimFieldDef {
   label: string;
   kind: ClaimFieldKind;
   options?: readonly string[];
-  /** Only shown (and only printed) when another field in the SAME section/row has this value. */
+  /**
+   * Only shown (and only printed) when another field in the SAME section/row has
+   * this value — or, for a multi-choice field, includes it.
+   */
   showIf?: { key: string; equals: string | boolean };
   placeholder?: string;
   /** Pre-filled value for a brand-new case. */
   defaultValue?: string | boolean;
+  /** Needed (while shown) before the client form counts the section as done. */
+  required?: boolean;
+  /** Needed when any of these yes/no fields in the same section is Yes. */
+  requiredWhenAnyYes?: readonly string[];
+  /** Shortest acceptable text when required. */
+  minLength?: number;
+  /** Checked whenever filled in: a bad email / phone number can't be saved from the client form. */
+  format?: 'email' | 'phone';
 }
 
 export interface ClaimSectionDef {
@@ -44,6 +55,8 @@ export interface ClaimSectionDef {
   gate?: { label: string };
   fields: readonly ClaimFieldDef[];
   hint?: string;
+  /** At least one of these fields (per row, for a list) must be filled in, while shown. */
+  oneOf?: { keys: readonly string[]; label: string };
 }
 
 export const DRIVER_TYPE_OPTIONS = [
@@ -71,23 +84,20 @@ export const PERSON_ROLE_OPTIONS = [
   'Witness',
   'Other driver',
   'Owner of other vehicle/property',
-  'Someone injured',
   'Other',
 ] as const;
-
-export const WITNESS_TYPE_OPTIONS = ['Passenger', 'Employee', 'Independent'] as const;
 
 export const TITLE_OPTIONS = ['Mr', 'Mrs', 'Ms', 'Miss', 'Mx', 'Dr', 'Other'] as const;
 
 export const CLAIM_SECTIONS: readonly ClaimSectionDef[] = [
   {
     key: 'incident',
-    title: 'What happened',
+    title: 'When and where',
     who: 'client',
     fields: [
-      { key: 'date', label: 'Date', kind: 'date' },
+      { key: 'date', label: 'Date', kind: 'date', required: true },
       { key: 'time', label: 'Time (approx.)', kind: 'text', placeholder: 'e.g. about 3pm' },
-      { key: 'place', label: 'Place (junction name and town)', kind: 'textarea' },
+      { key: 'place', label: 'Place (junction name and town)', kind: 'textarea', required: true },
       { key: 'purpose', label: 'Purpose of journey', kind: 'text' },
       { key: 'goods', label: 'Goods being carried at the time', kind: 'text', placeholder: 'e.g. band equipment' },
       { key: 'our_speed', label: 'Speed of our vehicle', kind: 'text' },
@@ -99,7 +109,7 @@ export const CLAIM_SECTIONS: readonly ClaimSectionDef[] = [
       { key: 'road_conditions', label: 'Road conditions', kind: 'text' },
       { key: 'warning_devices', label: 'Were warning lights / horn used?', kind: 'text' },
       { key: 'concerns', label: 'Any concerns about the incident?', kind: 'yesno' },
-      { key: 'concerns_detail', label: 'Describe the concerns', kind: 'textarea', showIf: { key: 'concerns', equals: true } },
+      { key: 'concerns_detail', label: 'Describe the concerns', kind: 'textarea', showIf: { key: 'concerns', equals: true }, required: true },
     ],
   },
   {
@@ -107,28 +117,31 @@ export const CLAIM_SECTIONS: readonly ClaimSectionDef[] = [
     title: 'Police',
     who: 'client',
     fields: [
-      { key: 'informed', label: 'Were the police informed?', kind: 'yesno' },
+      { key: 'informed', label: 'Were the police informed?', kind: 'yesno', required: true },
       { key: 'reference', label: 'Police reference number', kind: 'text', showIf: { key: 'informed', equals: true } },
       { key: 'officer_name', label: "Officer's name", kind: 'text', showIf: { key: 'informed', equals: true } },
       { key: 'officer_number', label: "Officer's number", kind: 'text', showIf: { key: 'informed', equals: true } },
       { key: 'station', label: 'Which station?', kind: 'text', showIf: { key: 'informed', equals: true } },
       { key: 'potential_prosecution', label: 'Potential prosecution?', kind: 'yesno', showIf: { key: 'informed', equals: true } },
     ],
+    oneOf: { keys: ['reference', 'station'], label: 'Police reference number or station' },
   },
   {
     key: 'people',
     title: 'People involved',
     who: 'client',
-    hint: 'Anyone who was there: passengers, witnesses, the other driver, anyone hurt. Every detail is optional - a name and a phone number beat nothing.',
+    hint: 'Anyone who was there: passengers, witnesses, the other driver, anyone hurt. Only a name is needed - add a phone number or email if you have one.',
+    gate: { label: 'Was anyone else there, or did anyone see it happen?' },
     list: { itemLabel: 'Person', addLabel: 'Add a person' },
     fields: [
       { key: 'roles', label: 'Who are they?', kind: 'multi', options: PERSON_ROLE_OPTIONS },
-      { key: 'name', label: 'Name', kind: 'text' },
-      { key: 'phone', label: 'Phone', kind: 'text' },
-      { key: 'email', label: 'Email', kind: 'text' },
+      // The broker's "witness type" (Passenger / Employee / Independent) is derived from this in the PDF.
+      { key: 'knows_us', label: 'Do they know you or the driver (band, crew, colleague)?', kind: 'yesno', showIf: { key: 'roles', equals: 'Witness' } },
+      { key: 'name', label: 'Name', kind: 'text', required: true },
+      { key: 'phone', label: 'Phone', kind: 'text', format: 'phone' },
+      { key: 'email', label: 'Email', kind: 'text', format: 'email' },
       { key: 'address', label: 'Address', kind: 'textarea' },
       { key: 'injured', label: 'Injured?', kind: 'yesno' },
-      { key: 'witness_type', label: 'Witness type', kind: 'choice', options: WITNESS_TYPE_OPTIONS },
       { key: 'notes', label: 'Notes', kind: 'textarea' },
     ],
   },
@@ -143,26 +156,27 @@ export const CLAIM_SECTIONS: readonly ClaimSectionDef[] = [
       { key: 'reg', label: 'Registration number', kind: 'text' },
       { key: 'owner_name', label: "Owner's name", kind: 'text' },
       { key: 'owner_address', label: "Owner's address (with postcode)", kind: 'textarea' },
-      { key: 'phone_day', label: 'Daytime phone', kind: 'text' },
-      { key: 'phone_mobile', label: 'Mobile', kind: 'text' },
+      { key: 'phone_day', label: 'Daytime phone', kind: 'text', format: 'phone' },
+      { key: 'phone_mobile', label: 'Mobile', kind: 'text', format: 'phone' },
       { key: 'insurer', label: 'Insurance company and policy number', kind: 'text' },
       { key: 'driver_name', label: "Driver's name", kind: 'text' },
       { key: 'damage', label: 'Details of damage', kind: 'textarea' },
       { key: 'passengers', label: 'Number of passengers', kind: 'text' },
     ],
+    oneOf: { keys: ['make_model', 'reg'], label: 'Make and model, or registration' },
   },
   {
     key: 'damage',
     title: 'Damage to our van',
     who: 'client',
     fields: [
-      { key: 'description', label: 'Description of the damage', kind: 'textarea' },
+      { key: 'description', label: 'Description of the damage', kind: 'textarea', required: true, placeholder: 'Write "none" if our van wasn\'t damaged.' },
       { key: 'airbags', label: 'Did airbags deploy?', kind: 'yesno' },
     ],
   },
   {
     key: 'account',
-    title: 'Your account',
+    title: 'Your version of events',
     who: 'client',
     fields: [
       {
@@ -170,9 +184,11 @@ export const CLAIM_SECTIONS: readonly ClaimSectionDef[] = [
         label: 'What happened, in detail',
         kind: 'textarea',
         placeholder: 'Include the direction of the vehicles and your approximate speed before and at the point of impact.',
+        required: true,
+        minLength: 20,
       },
-      { key: 'at_fault', label: 'Does the driver consider themselves at fault?', kind: 'yesno' },
-      { key: 'not_at_fault_why', label: 'If not, why not?', kind: 'textarea', showIf: { key: 'at_fault', equals: false } },
+      { key: 'at_fault', label: 'Does the driver consider themselves at fault?', kind: 'yesno', required: true },
+      { key: 'not_at_fault_why', label: 'If not, why not?', kind: 'textarea', showIf: { key: 'at_fault', equals: false }, required: true },
       { key: 'attend_court', label: 'Is the driver prepared to attend court if required?', kind: 'yesno' },
       { key: 'driver_injured', label: 'Was the driver injured?', kind: 'yesno' },
     ],
@@ -183,14 +199,17 @@ export const CLAIM_SECTIONS: readonly ClaimSectionDef[] = [
     who: 'driver',
     hint: 'Name, date of birth, address and licence come from the hire form and are added to the broker PDF only.',
     fields: [
-      { key: 'title', label: 'Title', kind: 'choice', options: TITLE_OPTIONS },
-      { key: 'occupation', label: 'Occupation', kind: 'text' },
+      { key: 'title', label: 'Title', kind: 'choice', options: TITLE_OPTIONS, required: true },
+      { key: 'occupation', label: 'Occupation', kind: 'text', required: true },
       { key: 'details_changed', label: 'Has anything changed since the hire form (address, phone)?', kind: 'yesno' },
-      { key: 'changes', label: 'What has changed?', kind: 'textarea', showIf: { key: 'details_changed', equals: true } },
-      { key: 'decl_accidents', label: '(a) Accident or claim in the past 3 years?', kind: 'yesno' },
-      { key: 'decl_convictions', label: '(b) Driving conviction in the last 5 years, or prosecution pending?', kind: 'yesno' },
-      { key: 'decl_disability', label: '(c) Defect in vision or hearing, or any physical or mental disability?', kind: 'yesno' },
-      { key: 'decl_details', label: 'Full details if yes to any of the above', kind: 'textarea' },
+      { key: 'changes', label: 'What has changed?', kind: 'textarea', showIf: { key: 'details_changed', equals: true }, required: true },
+      { key: 'decl_accidents', label: '(a) Accident or claim in the past 3 years?', kind: 'yesno', required: true },
+      { key: 'decl_convictions', label: '(b) Driving conviction in the last 5 years, or prosecution pending?', kind: 'yesno', required: true },
+      { key: 'decl_disability', label: '(c) Defect in vision or hearing, or any physical or mental disability?', kind: 'yesno', required: true },
+      {
+        key: 'decl_details', label: 'Full details if yes to any of the above', kind: 'textarea',
+        requiredWhenAnyYes: ['decl_accidents', 'decl_convictions', 'decl_disability'],
+      },
     ],
   },
   {
@@ -202,6 +221,21 @@ export const CLAIM_SECTIONS: readonly ClaimSectionDef[] = [
       { key: 'use', label: 'Use', kind: 'choice', options: USE_OPTIONS, defaultValue: USE_OPTIONS[0] },
       { key: 'ownership', label: 'Ownership', kind: 'choice', options: OWNERSHIP_OPTIONS, defaultValue: 'Owned' },
       { key: 'owner_details', label: 'Owner / finance company contact details', kind: 'textarea', showIf: { key: 'ownership', equals: 'NOT:Owned' } },
+    ],
+  },
+  {
+    key: 'non_hire_driver',
+    title: 'Driver not on a hire',
+    who: 'staff',
+    hint: "Only when the driver isn't a hire client — one of us or a freelancer (to the garage, a non-HireHop job). "
+      + "A hire client's details come from their hire form instead. Printed in the broker PDF's driver block — "
+      + 'set "Driver type" under Policy details to match.',
+    fields: [
+      { key: 'name', label: 'Full name', kind: 'text' },
+      { key: 'date_of_birth', label: 'Date of birth', kind: 'date' },
+      { key: 'address', label: 'Address (with postcode)', kind: 'textarea' },
+      { key: 'phone', label: 'Mobile', kind: 'text', format: 'phone' },
+      { key: 'licence', label: 'Licence (type, categories, year passed)', kind: 'text', placeholder: 'e.g. Full UK, B + C1, passed 2009' },
     ],
   },
   {
@@ -245,7 +279,79 @@ export function isFieldShown(field: ClaimFieldDef, row: Row | null | undefined):
   if (typeof want === 'string' && want.startsWith('NOT:')) {
     return v != null && v !== '' && v !== want.slice(4);
   }
+  if (Array.isArray(v)) return v.includes(want);
   return v === want;
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * A filled-in email / phone that doesn't look right — the message, or null.
+ * Phones can be from anywhere, so the check is loose: digits, spaces and
+ * + ( ) - . only, with 7–15 digits.
+ */
+export function fieldFormatError(field: ClaimFieldDef, v: unknown): string | null {
+  if (!field.format || typeof v !== 'string' || !v.trim()) return null;
+  const t = v.trim();
+  if (field.format === 'email') return EMAIL_RE.test(t) ? null : "That email address doesn't look right";
+  const digits = t.replace(/\D/g, '').length;
+  return /^[+()\-.\s\d]+$/.test(t) && digits >= 7 && digits <= 15
+    ? null
+    : 'Use digits only (with + and the country code if abroad)';
+}
+
+/** Is this field needed, given the other answers in its row? */
+export function isFieldRequired(field: ClaimFieldDef, row: Row | null | undefined): boolean {
+  if (!isFieldShown(field, row)) return false;
+  if (field.required) return true;
+  return !!field.requiredWhenAnyYes?.some((k) => row?.[k] === true);
+}
+
+function rowMissing(def: ClaimSectionDef, row: Row, prefix: string): string[] {
+  const out: string[] = [];
+  for (const f of def.fields) {
+    if (!isFieldRequired(f, row)) continue;
+    const v = row[f.key];
+    const short = f.minLength && typeof v === 'string' && v.trim().length < f.minLength;
+    if (!hasValue(v) || short) out.push(`${prefix}${f.label}${short ? ' (a little more detail, please)' : ''}`);
+  }
+  if (def.oneOf) {
+    const shown = def.fields.filter((f) => def.oneOf!.keys.includes(f.key) && isFieldShown(f, row));
+    if (shown.length && !shown.some((f) => hasValue(row[f.key]))) out.push(`${prefix}${def.oneOf.label}`);
+  }
+  return out;
+}
+
+/**
+ * What the client form still needs before this section counts as done —
+ * labels, empty when complete. `form` is the whole form_data.
+ */
+export function sectionMissing(def: ClaimSectionDef, form: Record<string, unknown>): string[] {
+  const value = form[def.key];
+  if (def.list) {
+    const rows = Array.isArray(value) ? (value as Row[]) : [];
+    const gate = form[`${def.key}_involved`];
+    if (def.gate && rows.length === 0) {
+      if (gate === false) return [];
+      return [gate === true ? `At least one ${def.list.itemLabel.toLowerCase()}` : def.gate.label];
+    }
+    return rows.flatMap((r, i) => rowMissing(def, r || {}, `${def.list!.itemLabel} ${i + 1}: `));
+  }
+  const row = value && typeof value === 'object' && !Array.isArray(value) ? (value as Row) : {};
+  return rowMissing(def, row, '');
+}
+
+/** Emails / phone numbers that don't look right in what was sent for a section. */
+export function sectionFormatErrors(def: ClaimSectionDef, value: unknown): string[] {
+  const rows = def.list ? (Array.isArray(value) ? (value as Row[]) : []) : [value && typeof value === 'object' ? (value as Row) : {}];
+  const out: string[] = [];
+  rows.forEach((r, i) => {
+    for (const f of def.fields) {
+      const err = fieldFormatError(f, r?.[f.key]);
+      if (err) out.push(`${def.list ? `${def.list.itemLabel} ${i + 1}: ` : ''}${f.label} — ${err.toLowerCase()}`);
+    }
+  });
+  return out;
 }
 
 /** Has a value worth printing (empty strings, empty arrays and null don't count). */

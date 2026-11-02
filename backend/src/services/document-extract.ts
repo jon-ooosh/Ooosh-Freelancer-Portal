@@ -18,9 +18,9 @@
  * given consumer, so one cache_control breakpoint serves it at ~10% input cost
  * from request 2 onwards.
  */
-import { getAnthropicClient, isAnthropicConfigured } from '../config/anthropic';
+import { getAnthropicClient, isAnthropicConfigured, CLAUDE_HAIKU_MODEL } from '../config/anthropic';
 
-const DEFAULT_MODEL = 'claude-haiku-4-5';
+const DEFAULT_MODEL = CLAUDE_HAIKU_MODEL;
 const DEFAULT_MAX_TOKENS = 1024;
 
 const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);

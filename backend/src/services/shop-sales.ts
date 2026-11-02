@@ -65,9 +65,14 @@ export interface CreateShopSaleInput {
   soldToJobId?: string | null;
   soldToPersonId?: string | null;
   notes?: string | null;
-  recordedIn?: 'staff_till' | 'sitter_till';
+  /** Which till: the staff page, a sitter's phone, or the warehouse kiosk (STAFF-LOGIN-SECURITY-SPEC §4). */
+  recordedIn?: 'staff_till' | 'sitter_till' | 'kiosk_till';
   /** The sitter's evening (studio_sitter_shifts) — sitter till only. */
   shiftId?: string | null;
+  /** Set ONLY by the card reader (services/stripe-terminal.ts), once the card was
+   *  approved: tender 'card_reader' is refused without it, so a till can't record a
+   *  card-reader sale that nobody took. Stored so a Refund goes back to the card. */
+  stripePaymentIntent?: string | null;
 }
 
 /**
@@ -79,6 +84,9 @@ export interface ShopActor {
   id: string | null;
   personId?: string | null;
   role: string;
+  /** Set when the kiosk till (no login) names a person from its dropdown — a
+   *  reader session so marked is the only kind the kiosk may read back. */
+  via?: 'kiosk';
 }
 
 export interface ShopSaleTotals {
@@ -267,10 +275,16 @@ export interface CreateResult {
  * Record a transaction. Lines and totals land in ONE database transaction, so a
  * half-written sale cannot exist — which is the point of the whole module.
  */
-export async function createShopSale(
+/**
+ * Everything createShopSale checks before it writes — prices from the catalogue,
+ * the discount ceiling, the tender rules, a sellable job. The card reader runs it
+ * BEFORE taking the card (so the client is never charged for a sale that would then
+ * be refused) and createShopSale runs it again when it writes.
+ */
+export async function validateShopSale(
   input: CreateShopSaleInput,
   user: ShopActor,
-): Promise<CreateResult> {
+): Promise<{ priced: PricedLine[]; totals: ShopSaleTotals }> {
   if (!user.id && !user.personId) throw new Error('Who is recording this sale?');
   const priced = await priceLines(input.lines);
   const totals = totalsFor(priced);
@@ -297,6 +311,19 @@ export async function createShopSale(
     // rather than let the drain find out after they've gone (step 7).
     if (input.soldToJobId) await assertSellableJob(input.soldToJobId);
   }
+  return { priced, totals };
+}
+
+export async function createShopSale(
+  input: CreateShopSaleInput,
+  user: ShopActor,
+): Promise<CreateResult> {
+  // The card reader records its own sale once the card is approved — never a till
+  // that merely says "card reader" (spec §14).
+  if (input.tender === 'card_reader' && !input.stripePaymentIntent) {
+    throw new Error('A card reader sale is taken on the reader - choose Card reader and send it to the reader.');
+  }
+  const { priced, totals } = await validateShopSale(input, user);
 
   const holdSeconds = await getPushHoldSeconds();
 
@@ -311,10 +338,10 @@ export async function createShopSale(
          kind, status, tender, net_amount, vat_amount, gross_amount, discount_amount,
          recorded_by, recorded_in, sold_to_person_id, sold_to_job_id,
          needs_review, notes, push_after, sale_number,
-         recorded_by_person_id, shift_id
+         recorded_by_person_id, shift_id, stripe_payment_intent
        ) VALUES ($1,'queued',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW() + ($13 || ' seconds')::interval,
                  CASE WHEN $1::text = 'sale' THEN nextval('shop_sale_number_seq') END,
-                 $14, $15)
+                 $14, $15, $16)
        RETURNING id, push_after`,
       [
         input.kind,
@@ -332,6 +359,7 @@ export async function createShopSale(
         String(holdSeconds),
         user.personId || null,
         input.shiftId || null,
+        input.stripePaymentIntent || null,
       ],
     );
     const saleId = saleRes.rows[0].id as string;
@@ -403,6 +431,8 @@ export async function listShopSales(opts: {
   review?: boolean;
   /** One sitter's evening — the portal till's own list. */
   shiftId?: string;
+  /** Only sales rung up on one till — the kiosk sees its own last few, nothing else. */
+  recordedIn?: 'staff_till' | 'sitter_till' | 'kiosk_till';
 } = {}) {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const r = await query(
@@ -457,11 +487,12 @@ export async function listShopSales(opts: {
              OR (s.kind = 'reversal' AND s.status <> 'cancelled' AND s.refund_settled_at IS NULL))
         AND (NOT $4::boolean OR (s.needs_review AND s.reviewed_at IS NULL AND s.status <> 'cancelled'))
         AND ($5::uuid IS NULL OR s.shift_id = $5)
+        AND ($6::text IS NULL OR s.recorded_in = $6)
       GROUP BY s.id, p.preferred_name, p.first_name, p.last_name, o.sale_number,
                sj.id, sj.hh_job_number, sj.job_name, sj.company_name, sj.client_name, sjo.name
       ORDER BY s.created_at DESC
       LIMIT $2`,
-    [opts.since || null, limit, !!opts.attention, !!opts.review, opts.shiftId || null],
+    [opts.since || null, limit, !!opts.attention, !!opts.review, opts.shiftId || null, opts.recordedIn || null],
   );
   return r.rows.map((row: any) => ({
     ...row,
@@ -658,7 +689,7 @@ export async function reverseShopSale(
   saleId: string,
   user: { id: string },
   opts: { reason: string; moneyReturned: boolean },
-): Promise<{ reversalId: string }> {
+): Promise<{ reversalId: string; cardRefund?: { ok: boolean; error?: string } }> {
   const reason = (opts.reason || '').trim();
   if (!reason) throw new Error('Say why it is being refunded.');
 
@@ -670,7 +701,7 @@ export async function reverseShopSale(
     // second then finds the first one's reversal.
     const r = await client.query(
       `SELECT id, kind, status, tender, hh_job_number, hh_deposit_id,
-              net_amount, vat_amount, gross_amount, discount_amount
+              net_amount, vat_amount, gross_amount, discount_amount, stripe_payment_intent
          FROM shop_sales WHERE id = $1 FOR UPDATE`,
       [saleId],
     );
@@ -726,7 +757,30 @@ export async function reverseShopSale(
     );
 
     await client.query('COMMIT');
-    return { reversalId: ins.rows[0].id as string };
+    const reversalId = ins.rows[0].id as string;
+
+    // A card-reader sale goes back to the card through Stripe, now — so the refund is
+    // settled when Stripe accepts it, not when someone remembers to tick it. If Stripe
+    // refuses, the refund stays OUTSTANDING (the HireHop side still runs) and the
+    // operator is told to do it in the Stripe dashboard and press Done.
+    if (sale.tender === 'card_reader' && sale.stripe_payment_intent && !opts.moneyReturned) {
+      try {
+        const { stripeClientForPaymentIntent } = await import('./stripe-terminal');
+        const stripe = await stripeClientForPaymentIntent(sale.stripe_payment_intent);
+        await stripe.refunds.create(
+          { payment_intent: sale.stripe_payment_intent, amount: Math.round(Math.abs(Number(sale.gross_amount)) * 100) },
+          // One refund per reversal, however many times this runs.
+          { idempotencyKey: `shop-reversal-${reversalId}` },
+        );
+        await settleShopRefund(reversalId, user);
+        return { reversalId, cardRefund: { ok: true } };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[shop] Stripe refund failed for reversal ${reversalId}:`, msg);
+        return { reversalId, cardRefund: { ok: false, error: msg } };
+      }
+    }
+    return { reversalId };
   } catch (err) {
     await client.query('ROLLBACK');
     // The partial unique index is the backstop for a race the FOR UPDATE

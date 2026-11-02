@@ -11,11 +11,12 @@
  * own hire-form declaration answers.
  */
 import crypto from 'crypto';
-import jwt from 'jsonwebtoken';
+import { signFor, verifyFor } from './tokens';
 import { query } from '../config/database';
 import { uploadToR2 } from '../config/r2';
 import { frontendLink } from '../config/app-urls';
 import { logClaimEvent } from './incident-claims';
+import { smsService, normaliseMsisdn } from './sms-service';
 import { sanitiseDamageMarks, DamageMark } from './claim-form-fields';
 
 export const OPEN_STAGES: ReadonlySet<string> = new Set(['open', 'form_out']);
@@ -131,8 +132,69 @@ export async function createAndSendLink(opts: {
   const sent = await sendLinkEmail(opts.claimId, token, email, opts.name, opts.forwardedByName ?? null);
   if (sent.success) {
     await query(`UPDATE incident_claim_links SET sent_at = NOW() WHERE id = $1`, [linkId]);
+    // First send only (a resend is email-only): a text too, when we have their mobile (§21).
+    if (!reused) {
+      await sendLinkSms(opts.claimId, token, { driverId: opts.driverId ?? null, personId: opts.personId ?? null, name: opts.name }, 'claim_form_link');
+    }
   }
   return { linkId, reused, sent: sent.success, error: sent.error };
+}
+
+/**
+ * A link holder's mobile, as E.164: a driver's from their hire form, a contact's
+ * from the address book (mobile, else international, else phone). Someone a
+ * client forwarded the form to has only an email — null.
+ */
+export async function linkPhone(who: { driverId: string | null; personId: string | null }): Promise<string | null> {
+  if (who.driverId) {
+    const d = await query(`SELECT phone, phone_country FROM drivers WHERE id = $1`, [who.driverId]);
+    return normaliseMsisdn(d.rows[0]?.phone, d.rows[0]?.phone_country)?.e164 || null;
+  }
+  if (who.personId) {
+    const p = await query(`SELECT mobile, international_phone, phone FROM people WHERE id = $1`, [who.personId]);
+    const r = p.rows[0];
+    for (const n of [r?.mobile, r?.international_phone, r?.phone]) {
+      const ok = normaliseMsisdn(n, null);
+      if (ok) return ok.e164;
+    }
+  }
+  return null;
+}
+
+/**
+ * Text a link holder (best-effort: no number, SMS not set up, or a failed send
+ * just means no text — the email has gone). Logged on the case timeline.
+ */
+export async function sendLinkSms(
+  claimId: string,
+  token: string,
+  who: { driverId: string | null; personId: string | null; name: string | null },
+  template: 'claim_form_link' | 'claim_form_reminder',
+  extra: Record<string, string> = {},
+): Promise<boolean> {
+  try {
+    if (!smsService.isConfigured()) return false;
+    const to = await linkPhone(who);
+    if (!to) return false;
+    const c = await query(`SELECT vehicle_reg, hh_job_number FROM incident_claims WHERE id = $1`, [claimId]);
+    const r = await smsService.send(template, {
+      to,
+      variables: {
+        vehicleReg: c.rows[0]?.vehicle_reg || '',
+        jobRef: c.rows[0]?.hh_job_number ? ` (#${c.rows[0].hh_job_number})` : '',
+        formUrl: frontendLink(`/claim/${token}`),
+        ...extra,
+      },
+    });
+    if (r.success) {
+      await logClaimEvent(claimId, null, 'sms_sent',
+        `${template === 'claim_form_link' ? 'Form link' : 'Reminder'} texted to ${who.name || 'the recipient'}`);
+    }
+    return r.success;
+  } catch (err) {
+    console.error('[claim-links] SMS failed (non-fatal):', err);
+    return false;
+  }
 }
 
 export async function sendLinkEmail(
@@ -226,10 +288,10 @@ export async function verifyDriverCode(link: LinkRow, driverId: string, code: st
     return { ok: false, status: 400, error: "That code doesn't match — check the email and try again." };
   }
   await query(`UPDATE incident_claim_codes SET consumed_at = NOW() WHERE id = $1`, [row.id]);
-  const session = jwt.sign(
+  const session = signFor(
+    'claim_driver',
     { typ: 'claim_driver', link: link.id, claim: link.claim_id, driver: driverId },
-    process.env.JWT_SECRET!,
-    { expiresIn: `${DRIVER_SESSION_HOURS}h` },
+    `${DRIVER_SESSION_HOURS}h`,
   );
   return { ok: true, status: 200, session };
 }
@@ -237,13 +299,9 @@ export async function verifyDriverCode(link: LinkRow, driverId: string, code: st
 /** The driver id a session proves for THIS link, or null. */
 export function readDriverSession(link: LinkRow, header: string | undefined): string | null {
   if (!header) return null;
-  try {
-    const p = jwt.verify(header, process.env.JWT_SECRET!) as { typ?: string; link?: string; claim?: string; driver?: string };
-    if (p.typ !== 'claim_driver' || p.link !== link.id || p.claim !== link.claim_id || !p.driver) return null;
-    return p.driver;
-  } catch {
-    return null;
-  }
+  const p = verifyFor<{ typ?: string; link?: string; claim?: string; driver?: string }>('claim_driver', header);
+  if (!p || p.typ !== 'claim_driver' || p.link !== link.id || p.claim !== link.claim_id || !p.driver) return null;
+  return p.driver;
 }
 
 // ── Damage marks + sketch (shared by the client form and the staff page) ────
@@ -291,7 +349,7 @@ export async function saveSketch(
 /** Hire-form declaration answers for a driver, combined per spec §7.3. */
 export async function hireFormDeclarations(driverId: string) {
   const dr = await query(
-    `SELECT has_accidents, has_convictions, has_prosecution, has_disability, licence_points, licence_endorsements
+    `SELECT has_accidents, has_convictions, has_prosecution, has_recent_convictions, has_disability, licence_points, licence_endorsements
      FROM drivers WHERE id = $1`,
     [driverId],
   );
@@ -300,7 +358,7 @@ export async function hireFormDeclarations(driverId: string) {
   const endorsements = Array.isArray(x.licence_endorsements) ? x.licence_endorsements : [];
   return {
     accidents: !!x.has_accidents,
-    convictions: !!x.has_convictions || !!x.has_prosecution || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
+    convictions: !!x.has_convictions || !!x.has_prosecution || !!x.has_recent_convictions || Number(x.licence_points || 0) > 0 || endorsements.length > 0,
     disability: !!x.has_disability,
   };
 }

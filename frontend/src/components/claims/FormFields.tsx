@@ -3,7 +3,7 @@
  * the public client form (docs/INCIDENT-CLAIMS-SPEC.md). Rendered from the one
  * field catalogue (`@claimform`). `large` gives phone-sized touch targets.
  */
-import { ClaimFieldDef, ClaimSectionDef, isFieldShown } from '@claimform';
+import { ClaimFieldDef, ClaimSectionDef, isFieldShown, isFieldRequired, fieldFormatError } from '@claimform';
 
 type Row = Record<string, unknown>;
 
@@ -67,7 +67,16 @@ export function FieldInput({ def, value, onChange, large }: { def: ClaimFieldDef
       );
     }
     default:
-      return <input value={(value as string) || ''} placeholder={def.placeholder} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return (
+        <input
+          value={(value as string) || ''}
+          placeholder={def.placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          className={base}
+          inputMode={def.format === 'phone' ? 'tel' : def.format === 'email' ? 'email' : undefined}
+          type={def.format === 'email' ? 'email' : def.format === 'phone' ? 'tel' : 'text'}
+        />
+      );
   }
 }
 
@@ -80,13 +89,20 @@ export function FieldsGrid({ fields, row, onChange, hints, large }: {
 }) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-      {fields.filter((f) => isFieldShown(f, row)).map((f) => (
-        <label key={f.key} className={`block ${f.kind === 'textarea' || f.kind === 'multi' ? 'sm:col-span-2' : ''}`}>
-          <span className={large ? 'text-sm font-medium text-slate-700' : 'text-xs text-slate-600'}>{f.label}</span>
-          {hints?.[f.key] && <span className="ml-2 text-[11px] text-indigo-600">{hints[f.key]}</span>}
-          <div className="mt-1"><FieldInput def={f} value={row[f.key]} onChange={(v) => onChange(f.key, v)} large={large} /></div>
-        </label>
-      ))}
+      {fields.filter((f) => isFieldShown(f, row)).map((f) => {
+        const formatError = fieldFormatError(f, row[f.key]);
+        return (
+          <label key={f.key} className={`block ${f.kind === 'textarea' || f.kind === 'multi' ? 'sm:col-span-2' : ''}`}>
+            <span className={large ? 'text-sm font-medium text-slate-700' : 'text-xs text-slate-600'}>
+              {f.label}
+              {isFieldRequired(f, row) && <span className="text-red-600" title="Needed"> *</span>}
+            </span>
+            {hints?.[f.key] && <span className="ml-2 text-[11px] text-indigo-600">{hints[f.key]}</span>}
+            <div className="mt-1"><FieldInput def={f} value={row[f.key]} onChange={(v) => onChange(f.key, v)} large={large} /></div>
+            {formatError && <span className={`block mt-1 text-red-600 ${large ? 'text-sm' : 'text-xs'}`}>{formatError}</span>}
+          </label>
+        );
+      })}
     </div>
   );
 }
@@ -103,8 +119,10 @@ export function ListEditor({ section, rows, gate, onGate, onChange, large }: {
   return (
     <div className="space-y-3">
       {section.gate && (
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-slate-600">{section.gate.label}</span>
+        <div className={large ? 'space-y-2' : 'flex items-center gap-3'}>
+          <span className={large ? 'block text-sm font-medium text-slate-700' : 'text-xs text-slate-600'}>
+            {section.gate.label}{large && <span className="text-red-600"> *</span>}
+          </span>
           <FieldInput def={{ key: 'gate', label: '', kind: 'yesno' }} value={gate} onChange={onGate} large={large} />
         </div>
       )}

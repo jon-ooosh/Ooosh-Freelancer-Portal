@@ -3,7 +3,7 @@ import multer from 'multer';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, isManagerTier } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 import { query } from '../config/database';
@@ -13,6 +13,9 @@ import { CLAIMS_PREFIX } from './incident-claims';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 // 25MB limit, common file types for an operations platform
 const upload = multer({
@@ -114,6 +117,13 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
       return;
     }
 
+    // A driver's documents are the insurability evidence for a hire (B.2, Oct
+    // 2026): deleting one is a manager's call. Every other file is desk work.
+    if (entity_type === 'drivers' && !isManagerTier(req.user?.role)) {
+      res.status(403).json({ error: "Deleting a driver's document is a manager action." });
+      return;
+    }
+
     const ext = path.extname(req.file.originalname).toLowerCase();
     const fileId = uuid();
     const key = `files/${entity_type}/${entity_id}/${fileId}${ext}`;
@@ -167,7 +177,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
 });
 
 // GET /api/files/download?key=... — stream file from R2
-router.get('/download', async (req: AuthRequest, res: Response) => {
+router.get('/download', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const { key } = req.query;
     if (!key || typeof key !== 'string') {
@@ -178,14 +188,17 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
     // Validate key starts with known prefix to prevent path traversal.
     //
     // READ THIS BEFORE ADDING A PREFIX: everything in this list is served to
-    // ANY authenticated caller — this router only calls authenticate(), not
-    // authorize(), so a freelancer with a JWT can fetch any key here that they
-    // can name. That is fine for the prefixes below (job files, avatars,
-    // completion photos) and catastrophic for a passport scan. An unguessable
-    // key is not an access control: the key is handed to whoever can list it.
+    // EVERY staff login whatever their role — the route is gated to STAFF_ROLES
+    // (Oct 2026; before that to any authenticated caller, freelancer-role
+    // included) and no further. That is fine for the prefixes below (job files,
+    // avatars, completion photos) and catastrophic for a passport scan. An
+    // unguessable key is not an access control: the key is handed to whoever
+    // can list it.
     const allowedPrefixes = [
       'files/',
-      'backups/',
+      // NOT 'backups/': a database dump is admin-only and has its own gated
+      // route (GET /api/backups/download). It sat here until Oct 2026, which
+      // let any staff login fetch one by its date-based name.
       'avatars/',
       'completion/',     // portal completion photos + signatures
       'delivery-notes/', // completion delivery-note PDFs

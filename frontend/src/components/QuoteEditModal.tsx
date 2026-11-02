@@ -113,9 +113,27 @@ export function QuoteEditModal({
     setExpensesDirty(true);
     setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, amount: v } : e) : prev);
   };
+  // Every line can carry a note, stored the way the calculator saves it:
+  // description = "<label>: <note>" (e.g. "Tolls / Crossings: Mont Blanc",
+  // "Other: Flight"). The box edits just the note part; the label is kept.
+  const expNameFor = (type: string): string => EXP_TYPE_LABELS[type] || (type ? 'Other' : '');
+  const splitDesc = (e: ExpenseLine): { label: string; note: string } => {
+    const d = e.description || '';
+    const at = d.indexOf(': ');
+    return at >= 0 ? { label: d.slice(0, at), note: d.slice(at + 2) } : { label: d || expNameFor(e.type), note: '' };
+  };
+  const joinDesc = (label: string, note: string): string => (label && note ? `${label}: ${note}` : label || note);
+  const expNote = (e: ExpenseLine): string => splitDesc(e).note;
+  const setExpNote = (i: number, note: string) => {
+    setExpensesDirty(true);
+    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, description: joinDesc(splitDesc(e).label, note) } : e) : prev);
+  };
   const setExpType = (i: number, t: string) => {
     setExpensesDirty(true);
-    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i ? { ...e, type: t } : e) : prev);
+    // The line takes the new type's name; its note comes with it.
+    setExpenses((prev) => prev ? prev.map((e, idx) => idx === i
+      ? { ...e, type: t, description: joinDesc(expNameFor(t), splitDesc(e).note) }
+      : e) : prev);
   };
   const addExpense = () => {
     setExpensesDirty(true);
@@ -418,20 +436,32 @@ export function QuoteEditModal({
                       <div key={i} className="flex items-center gap-1 py-1.5 border-b border-gray-100 last:border-0">
                         <div className="flex-1 min-w-0">
                           {known ? (
-                            <span className={`truncate ${m === 'recharge' ? 'text-amber-700' : m === 'included' ? 'text-gray-800' : 'text-gray-400'}`}>{known}</span>
+                            <div className="flex items-center gap-1">
+                              <span className={`w-[4.5rem] shrink-0 truncate ${m === 'recharge' ? 'text-amber-700' : m === 'included' ? 'text-gray-800' : 'text-gray-400'}`}>{known}</span>
+                              <input type="text" value={expNote(e)} onChange={(ev) => setExpNote(i, ev.target.value)}
+                                placeholder="Note" title={expNote(e)}
+                                className="flex-1 min-w-0 border border-gray-200 rounded px-1 py-0.5 text-xs" />
+                            </div>
                           ) : (
-                            <select value={e.type} onChange={(ev) => setExpType(i, ev.target.value)}
-                              className="w-full border border-gray-200 rounded px-1 py-0.5 text-xs">
-                              <option value="">Type…</option>
-                              <option value="hotel">Hotel</option>
-                              <option value="fuel">Fuel</option>
-                              <option value="parking">Parking</option>
-                              <option value="tolls">Tolls</option>
-                              <option value="transport_out">Travel (out)</option>
-                              <option value="transport_back">Travel (back)</option>
-                              <option value="pd">Per Diem</option>
-                              <option value="other">Other</option>
-                            </select>
+                            <div className="flex items-center gap-1">
+                              <select value={e.type} onChange={(ev) => setExpType(i, ev.target.value)}
+                                className={`${e.type === 'other' ? 'w-[4.5rem] shrink-0' : 'w-full'} border border-gray-200 rounded px-1 py-0.5 text-xs`}>
+                                <option value="">Type…</option>
+                                <option value="hotel">Hotel</option>
+                                <option value="fuel">Fuel</option>
+                                <option value="parking">Parking</option>
+                                <option value="tolls">Tolls</option>
+                                <option value="transport_out">Travel (out)</option>
+                                <option value="transport_back">Travel (back)</option>
+                                <option value="pd">Per Diem</option>
+                                <option value="other">Other</option>
+                              </select>
+                              {e.type === 'other' && (
+                                <input type="text" value={expNote(e)} onChange={(ev) => setExpNote(i, ev.target.value)}
+                                  placeholder="What is it?" title={expNote(e)}
+                                  className="flex-1 min-w-0 border border-gray-200 rounded px-1 py-0.5 text-xs" />
+                              )}
+                            </div>
                           )}
                         </div>
                         <input type="number" min="0" value={e.amount || ''} onChange={(ev) => setExpAmount(i, parseFloat(ev.target.value) || 0)}

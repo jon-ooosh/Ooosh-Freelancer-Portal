@@ -12,7 +12,7 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { getGmailIngestionStatus, runIngestionForAllMailboxes, getAllGmailIngestionStatus } from '../services/gmail-ingestion';
 import { runEmailRetentionSweep } from '../services/email-retention';
-import { draftChaseEmail, learnChaseVoice } from '../services/chase-draft';
+import { draftChaseEmail } from '../services/chase-draft';
 import { createChaseDraftForJob } from '../services/gmail-draft';
 import { getJobCommsSummaryStatus, generateJobCommsSummary } from '../services/comms-summary';
 import { answerCommsQuery } from '../services/comms-query';
@@ -20,10 +20,14 @@ import { backfillOpenPipelineThreads, type BackfillScope, type BackfillSummary }
 import { getJobQuoteVersions, sweepQuoteVersions, type QuoteSweepSummary } from '../services/quote-versions';
 import { runDueAutoChases } from '../services/auto-chase-runner';
 import { isAnthropicConfigured } from '../config/anthropic';
+import { greetingName } from '../services/display-name';
 import { isGmailConfigured, getPrimaryMailbox } from '../config/gmail';
 
 const router = Router();
 router.use(authenticate);
+// Staff only — a no-op today (only staff hold a staff token) but it keeps this
+// router closed if a non-staff login shape is ever added (Oct 2026 audit).
+router.use(authorize(...STAFF_ROLES));
 
 /**
  * First name of the logged-in staff member, for personalising the chase
@@ -34,14 +38,15 @@ async function senderFirstName(userId?: string): Promise<string | null> {
   if (!userId) return null;
   try {
     const r = await query(
-      `SELECT p.first_name, p.last_name
+      `SELECT p.first_name, p.last_name, p.preferred_name
          FROM users u JOIN people p ON p.id = u.person_id
         WHERE u.id = $1`,
       [userId],
     );
     const row = r.rows[0];
     if (!row) return null;
-    const name = String(row.first_name || row.last_name || '').trim();
+    // Preferred name first ("Jon", not "Jonathan").
+    const name = greetingName(row, '') || String(row.last_name || '').trim();
     return name || null;
   } catch {
     return null;
@@ -280,8 +285,8 @@ router.post('/preview-draft/:jobId', authorize('admin', 'manager'), async (req: 
   }
   try {
     const signOffName = await senderFirstName(req.user?.id);
-    const { draft, context } = await draftChaseEmail(String(req.params.jobId), { signOffName });
-    res.json({ data: { draft, context } });
+    const { draft, context, guidesUsed } = await draftChaseEmail(String(req.params.jobId), { signOffName });
+    res.json({ data: { draft, context, guidesUsed } });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (/not found/i.test(message)) return res.status(404).json({ error: message });
@@ -523,27 +528,6 @@ router.get('/quote-versions-sweep', authorize('admin', 'manager'), (_req: AuthRe
       ...quoteSweepState.summary,
     },
   });
-});
-
-// POST /api/auto-chase/voice/learn — distil example client emails + our replies
-// into a PROPOSED chase_voice_instructions note (§9.3). Does NOT save — returns
-// the proposal for the human to review + save via the Settings PUT. Manager-tier
-// (this shapes every future client-facing chase). Needs Anthropic.
-router.post('/voice/learn', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
-  if (!isAnthropicConfigured()) {
-    return res.status(503).json({ error: 'Voice learning unavailable — ANTHROPIC_API_KEY not configured.' });
-  }
-  try {
-    const body = (req.body || {}) as { examples?: string; current?: string };
-    const examples = String(body.examples || '').trim();
-    if (!examples) return res.status(400).json({ error: 'Paste some example emails to learn from.' });
-    const proposed = await learnChaseVoice(examples, body.current ?? null);
-    res.json({ data: { proposed } });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[auto-chase] voice learn error:', error);
-    res.status(500).json({ error: message || 'Failed to learn chase voice' });
-  }
 });
 
 export default router;

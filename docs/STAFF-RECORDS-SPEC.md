@@ -1215,6 +1215,7 @@ All seven phases shipped 21–23 Sep 2026. This section is the handover.
 | Retention | `services/staff-retention.ts` |
 | "Needs attention" | `services/staff-attention.ts` — THE cross-person view |
 | The page | `/staff/admin`, `?person=<id>&tab=…` |
+| How every tab looks | `components/StaffCard.tsx` — Card, StatCard, InfoRow, Pill, buttons (Oct 2026 restyle in the Time off tab's style; presentation only) |
 | Daily reminders | one 09:45 cron in `config/scheduler.ts`, four independently-caught scans (to-dos, record actions, reviews due, absence purge) |
 
 Migrations: **231, 232, 233, 234, 237(*), 238, 239, 243, 244**.

@@ -22,6 +22,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { Search, Check, Minus, Plus } from 'lucide-react'
+import { cls, BackLink, Banner, SectionLabel } from '@/components/ui'
 
 interface Tender { key: string; label: string; needsJob?: boolean }
 interface TillJob { job_id: string; hh_job_number: number | null; label: string; rooms: string[] }
@@ -33,8 +35,22 @@ interface TillContext {
   locked_up?: boolean
   jobs: TillJob[]
   tenders: Tender[]
+  /** The card reader, when switched on for this sitter (STRIPE-TERMINAL-SPEC §14). */
+  card_reader?: { enabled: boolean; mode?: 'test' | 'live' }
   stock_as_of: string | null
   error?: string
+}
+/** A card-reader payment, as OP shows it to the phone. */
+interface ReaderSession {
+  id: string
+  status: 'pending' | 'failed' | 'recording' | 'succeeded' | 'record_failed' | 'cancelled'
+  amount: string
+  reader_label: string | null
+  failure_code: string | null
+  failure_message: string | null
+  livemode: boolean
+  shop_sale_id: string | null
+  warning: string | null
 }
 interface StockItem {
   hhStockId: number
@@ -72,7 +88,7 @@ const money = (n: number) => `£${n.toFixed(2)}`
 /** Blank = no receipt wanted. Anything else must look like an address BEFORE the sale is taken. */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const receiptAddressProblem = (v: string) =>
-  v.trim() === '' || EMAIL_RE.test(v.trim()) ? null : 'That receipt email doesn’t look right — fix it or clear the box.'
+  v.trim() === '' || EMAIL_RE.test(v.trim()) ? null : 'That receipt email doesn’t look right. Fix it or clear the box.'
 
 /** One band in → them; two or more → make the sitter choose; none → walk-in. */
 function defaultRoute(c: TillContext): string | null | undefined {
@@ -81,16 +97,52 @@ function defaultRoute(c: TillContext): string | null | undefined {
 }
 
 /**
+ * Where every sale starts: the card reader when it's on for this sitter (almost
+ * every sale is card, jon Oct 2026), else nothing, so they pick. A wrong card-reader
+ * default shows itself (the reader waits for a card); a wrong Cash one would record.
+ */
+function defaultTender(c: TillContext): string | null {
+  return c.tenders.some((t) => t.key === 'card_reader') ? 'card_reader' : null
+}
+
+/**
  * Colour roles, so the checkout reads at a glance on a small screen: the total
- * bar is dark, a CHOICE is an outlined ✓ (not a filled block), and the one
+ * bar is dark, a CHOICE is an outlined tick (not a filled block), and the one
  * button that records the sale is green. Filled-blue-everything made the
  * header, both choices and the final button look like the same thing.
+ * Oct 2026 refresh: choices are plum-outlined; the tender is the one choice the
+ * design fills (ink), since it decides which button comes next.
  */
 const choice = (on: boolean) =>
   on
-    ? 'border-2 border-ooosh-600 bg-ooosh-50 text-ooosh-800'
-    : 'border-2 border-transparent bg-gray-100 text-gray-800'
+    ? 'border-[1.5px] border-hf-accent bg-hf-tint text-hf-tint-text font-semibold'
+    : 'border-[1.5px] border-hf-control bg-white text-hf-ink'
+const tenderChoice = (on: boolean) =>
+  on
+    ? 'border-[1.5px] border-hf-ink bg-hf-ink text-white font-semibold'
+    : 'border-[1.5px] border-hf-control bg-white text-hf-ink'
+
+/** The tick shown inside a chosen option. */
+function Tick() {
+  return <Check size={15} strokeWidth={2.6} className="inline -mt-0.5 mr-1" aria-hidden />
+}
 const round2 = (n: number) => Math.round(n * 100) / 100
+
+/** Coins and notes a customer is likely to hand over for a cash sale. */
+const CASH_DENOMINATIONS = [2, 5, 10, 20, 50]
+
+/** The next three above the total: £1.50 → £2, £5, £10; £18 → £20, £50; over £50 → none (Other). */
+function likelyTendered(total: number): number[] {
+  return CASH_DENOMINATIONS.filter((d) => d > total).slice(0, 3)
+}
+
+/** A typed amount ("25", "£25.50", "1,000") as pounds, or null if it isn't one. */
+function parseAmount(v: string): number | null {
+  const cleaned = v.replace(/[£,\s]/g, '')
+  if (cleaned === '') return null
+  const n = Number(cleaned)
+  return Number.isFinite(n) && n > 0 ? round2(n) : null
+}
 
 /**
  * Mirrors the office till and the server: VAT per LINE, rounded per line — a
@@ -125,7 +177,18 @@ export default function SitterTillPage() {
   // the wrong band's bill.
   const [jobId, setJobId] = useState<string | null | undefined>(undefined)
   const [tender, setTender] = useState<string | null>(null)
+  // Cash change helper: what the customer handed over, so the till can work out
+  // the change. Optional and display only (never sent or saved). 'exact' follows
+  // the total if the basket changes.
+  const [cashGiven, setCashGiven] = useState<'exact' | 'other' | number | null>(null)
+  const [cashOther, setCashOther] = useState('')
   const [saving, setSaving] = useState(false)
+  // The card reader: the basket goes to the reader, and the sale is made once the
+  // card is approved — so a declined card leaves nothing behind.
+  const [reader, setReader] = useState<ReaderSession | null>(null)
+  const [readerBusy, setReaderBusy] = useState(false)
+  const readerReceipt = useRef('')
+  const readerTick = useRef(0)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
   const [sales, setSales] = useState<TonightSale[]>([])
@@ -149,6 +212,7 @@ export default function SitterTillPage() {
       if (!r.ok) { setLoadError(data.error || 'Could not open the till.'); return }
       setCtx(data)
       setJobId(defaultRoute(data))
+      setTender(defaultTender(data))
     } catch {
       setLoadError('Could not reach the till. Check your signal and try again.')
     }
@@ -221,18 +285,108 @@ export default function SitterTillPage() {
       .map((l) => (l.item.hhStockId === id ? { ...l, qty: l.qty + delta } : l))
       .filter((l) => l.qty > 0))
 
+  // An emptied basket (a sale taken, or everything removed) starts the cash helper afresh.
+  useEffect(() => {
+    if (basket.length === 0) { setCashGiven(null); setCashOther('') }
+  }, [basket.length])
+
+  const pickTender = (key: string) => {
+    if (key !== tender) { setCashGiven(null); setCashOther('') }
+    setTender(key)
+  }
+
   // "Their bill" only exists once a band is picked; going back to walk-in
-  // clears it rather than leaving an impossible choice selected.
+  // returns to the default rather than leaving an impossible choice selected.
   const pickJob = (id: string | null | undefined) => {
     // A receipt address belongs to whoever the sale is for — switching clears it.
     if (id !== jobId) setReceiptTo('')
     setJobId(id)
-    if (!id && ctx?.tenders.find((t) => t.key === tender)?.needsJob) setTender(null)
+    if (!id && ctx?.tenders.find((t) => t.key === tender)?.needsJob) setTender(defaultTender(ctx))
   }
 
   const total = round2(basket.reduce((s, l) => s + lineGross(l), 0))
+  const cashGivenAmount = tender !== 'till_cash' || cashGiven === null
+    ? null
+    : cashGiven === 'exact' ? total
+    : cashGiven === 'other' ? parseAmount(cashOther)
+    : cashGiven
+  /** Positive = change to give; negative = they've handed over too little. */
+  const cashChange = cashGivenAmount === null ? null : round2(cashGivenAmount - total)
   const tenderObj = ctx?.tenders.find((t) => t.key === tender)
   const canTake = !!ctx?.open && basket.length > 0 && !!tender && jobId !== undefined && !saving
+
+  // ── Card reader ────────────────────────────────────────────────────────
+  const readerUrl = (p: string) => `/api/studio-sitter/shifts/${date}/till/reader/${p}`
+  const readerOpen = !!reader && ['pending', 'failed', 'recording'].includes(reader.status)
+
+  async function readerCall(p: string, body?: unknown): Promise<ReaderSession | null> {
+    setReaderBusy(true)
+    try {
+      const r = await fetch(readerUrl(p), body === undefined
+        ? undefined
+        : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) { setError(data.error || 'The card reader didn’t answer.'); return null }
+      if (data.session) setReader(data.session)
+      return data.session ?? null
+    } catch {
+      setError('Couldn’t reach the office system. Check your signal.')
+      return null
+    } finally {
+      setReaderBusy(false)
+    }
+  }
+
+  async function takeOnReader() {
+    // Which reader: the first one that's online (there is one, at reception).
+    const rr = await fetch(readerUrl('readers')).then((r) => r.json()).catch(() => null)
+    const pick = rr?.readers?.find((x: { status: string }) => x.status === 'online') ?? rr?.readers?.[0]
+    if (!pick) { setError(rr?.error || 'No card reader is available.'); return }
+    readerReceipt.current = receiptTo
+    readerTick.current = 0
+    await readerCall('pay', {
+      lines: basket.map((l) => ({ hhStockId: l.item.hhStockId, qty: l.qty })),
+      jobId,
+      readerId: pick.id,
+    })
+  }
+
+  // Poll while the card is on the reader (every 5th poll asks Stripe directly).
+  useEffect(() => {
+    if (!reader || !readerOpen) return
+    const t = setInterval(async () => {
+      readerTick.current += 1
+      try {
+        const r = await fetch(readerUrl(`sessions/${reader.id}${readerTick.current % 5 === 0 ? '?check=1' : ''}`))
+        const data = await r.json()
+        if (r.ok && data.session) setReader(data.session)
+      } catch { /* a blip — keep polling */ }
+    }, 2000)
+    return () => clearInterval(t)
+  }, [reader?.id, readerOpen]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Approved: the sale is in — send the receipt, then clear the till as a cash sale does.
+  useEffect(() => {
+    if (reader?.status !== 'succeeded' || !reader.shop_sale_id) return
+    const saleId = reader.shop_sale_id
+    const paid = Number(reader.amount)
+    ;(async () => {
+      let receiptNote = ''
+      if (readerReceipt.current.trim()) {
+        const err = await postReceipt(saleId, readerReceipt.current)
+        if (err) setError(`Sale recorded, but the receipt didn’t send: ${err}`)
+        else receiptNote = ` Receipt sent to ${readerReceipt.current.trim()}.`
+      }
+      setDone(`Paid on the card reader: ${money(paid)}.${reader.warning ? ` ${reader.warning}` : ''}` + receiptNote)
+      readerReceipt.current = ''
+      setReceiptTo('')
+      setBasket([])
+      setTender(ctx ? defaultTender(ctx) : null)
+      setJobId(ctx ? defaultRoute(ctx) : undefined)
+      setReader(null)
+      loadSales()
+    })()
+  }, [reader?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function take() {
     if (!canTake) return
@@ -240,6 +394,7 @@ export default function SitterTillPage() {
     // A typo in the receipt box stops here, before anything is recorded.
     const addrProblem = !tenderObj?.needsJob ? receiptAddressProblem(receiptTo) : null
     if (addrProblem) { setError(addrProblem); return }
+    if (tender === 'card_reader') { await takeOnReader(); return }
     setSaving(true)
     try {
       const r = await fetch(`/api/studio-sitter/shifts/${date}/till/sales`, {
@@ -252,7 +407,7 @@ export default function SitterTillPage() {
         }),
       })
       const data = await r.json()
-      if (!r.ok) { setError(data.error || 'That didn’t go through — nothing was recorded.'); return }
+      if (!r.ok) { setError(data.error || 'That didn’t go through. Nothing was recorded.'); return }
       // The sale is in whatever happens to the email.
       let receiptNote = ''
       if (!tenderObj?.needsJob && receiptTo.trim() && data.id) {
@@ -260,15 +415,19 @@ export default function SitterTillPage() {
         if (err) setError(`Sale recorded, but the receipt didn’t send: ${err}`)
         else receiptNote = ` Receipt sent to ${receiptTo.trim()}.`
       }
-      setDone((tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken — ${money(total)}.`) + receiptNote)
+      // Repeat the change, in case they tapped Take before counting it out.
+      const changeNote = tender === 'till_cash' && cashChange !== null && cashChange > 0
+        ? ` Give ${money(cashChange)} change.`
+        : ''
+      setDone((tenderObj?.needsJob ? `${money(total)} put on their bill.` : `Taken: ${money(total)}.`) + changeNote + receiptNote)
       setReceiptTo('')
       setBasket([])
-      setTender(null)
+      setTender(ctx ? defaultTender(ctx) : null)
       setJobId(ctx ? defaultRoute(ctx) : undefined)
       loadSales()
       searchRef.current?.focus()
     } catch {
-      setError('Couldn’t reach the office system — check your signal. Nothing was recorded; try again.')
+      setError('Couldn’t reach the office system. Check your signal. Nothing was recorded; try again.')
     } finally {
       setSaving(false)
     }
@@ -286,7 +445,7 @@ export default function SitterTillPage() {
       const data = await r.json().catch(() => ({}))
       return data.error || 'The receipt didn’t send.'
     } catch {
-      return 'Couldn’t reach the office system — check your signal.'
+      return 'Couldn’t reach the office system. Check your signal.'
     }
   }
 
@@ -309,9 +468,9 @@ export default function SitterTillPage() {
     try {
       const r = await fetch(`/api/studio-sitter/shifts/${date}/till/sales/${id}/cancel`, { method: 'POST' })
       const data = await r.json().catch(() => ({}))
-      if (!r.ok) setError(data.error || 'Couldn’t cancel that — ask the office.')
+      if (!r.ok) setError(data.error || 'Couldn’t cancel that. Ask the office.')
     } catch {
-      setError('Couldn’t reach the office system — check your signal.')
+      setError('Couldn’t reach the office system. Check your signal.')
     }
     loadSales()
   }
@@ -319,139 +478,148 @@ export default function SitterTillPage() {
   const bandName = (hh: number | null) => ctx?.jobs.find((j) => j.hh_job_number === hh)?.label ?? (hh ? `#${hh}` : null)
 
   return (
-    <div className="min-h-screen bg-gray-50 safe-top safe-bottom pb-10 flex flex-col">
-      <header className="bg-white shadow-sm border-b border-gray-100 sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-4 flex items-center gap-3">
-          <Link
-            href={`/shift/${date}`}
-            className="p-2 -ml-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-            title="Back to the shift"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <div className="flex items-center gap-2">
-            <span className="text-xl">🛒</span>
-            <h1 className="text-lg font-semibold text-gray-900">Shop till</h1>
-          </div>
-        </div>
+    <div className="min-h-screen bg-hf-page safe-top safe-bottom pb-10 flex flex-col">
+      <header className="max-w-lg w-full mx-auto px-2 pt-2 flex items-center gap-2">
+        <div className="px-2.5"><BackLink href={`/shift/${date}`} label="Shift" /></div>
+        <h1 className="ml-auto text-[16px] font-semibold text-hf-ink">Shop till</h1>
+        {/* The how-to guide is a PDF in Resources (a Staff Document shared with
+            freelancers). A new tab, so reading it mid-sale doesn't lose the basket. */}
+        <Link
+          href="/resources"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mr-2 h-10 px-3 rounded-[10px] border-[1.5px] border-hf-control bg-white flex items-center text-[14px] font-semibold text-hf-link hover:bg-hf-inset"
+        >
+          How to use
+        </Link>
       </header>
 
-      <main className="max-w-lg w-full mx-auto px-4 py-5 flex flex-1 flex-col gap-5">
-        {loadError && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">{loadError}</div>
-        )}
+      <main className="max-w-lg w-full mx-auto px-4 pt-2 pb-5 flex flex-1 flex-col gap-3.5">
+        {loadError && <Banner tone="error">{loadError}</Banner>}
 
         {ctx && !ctx.open && (
-          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">
+          <Banner tone="warning">
             {ctx.locked_up
-              ? 'You’ve locked up, so the till has closed for the night. Price lookup still works — leave the office a note about anything else.'
-              : 'Price lookup only — the till takes sales on the night of your shift.'}
-          </div>
+              ? 'You’ve locked up, so the till has closed for the night. Price lookup still works. Leave the office a note about anything else.'
+              : 'Price lookup only. The till takes sales on the night of your shift.'}
+          </Banner>
         )}
 
         {done && (
-          <div className="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg text-sm font-medium">
-            ✓ {done}
+          <div role="status" className="rounded-[14px] bg-hf-green-tint text-hf-green-text px-4 py-3 text-[15px] font-semibold flex gap-2">
+            <Check size={18} strokeWidth={2.6} className="flex-none mt-0.5" /> <span>{done}</span>
           </div>
         )}
         {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+          <Banner tone="error">
             {error}
-            <button onClick={() => setError(null)} className="ml-2 underline">OK</button>
-          </div>
+            <button type="button" onClick={() => setError(null)} className="ml-2 underline font-semibold">OK</button>
+          </Banner>
         )}
 
         {/* Search — price lookup is the headline feature */}
-        <section>
-          <input
-            ref={searchRef}
-            value={term}
-            onChange={(e) => setTerm(e.target.value)}
-            placeholder="Look up an item — strings, jack lead, gaffa…"
-            className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3.5 text-base focus:border-ooosh-500 focus:outline-none"
-            inputMode="search"
-            autoComplete="off"
-          />
-          {searching && <p className="mt-1 text-xs text-gray-400">Searching…</p>}
+        <section className="flex flex-col gap-2">
+          <div className="relative">
+            <Search size={20} strokeWidth={1.8} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-hf-muted pointer-events-none" />
+            <input
+              ref={searchRef}
+              value={term}
+              onChange={(e) => setTerm(e.target.value)}
+              placeholder="Look up an item: strings, jack lead, gaffa…"
+              className={`${cls.input} h-[52px] !pl-11 !text-[17px]`}
+              inputMode="search"
+              autoComplete="off"
+            />
+          </div>
+          {searching && <p className="px-1 text-[13px] text-hf-muted">Searching…</p>}
           {results.length > 0 && (
-            <ul className="mt-2 rounded-xl border border-gray-200 bg-white divide-y overflow-hidden">
-              {results.map((it) => (
+            <ul className={`${cls.card} overflow-hidden`}>
+              {results.map((it, i) => (
                 <li key={it.hhStockId}>
+                  {i > 0 && <div className="h-px bg-hf-divider mx-4" />}
                   <button
+                    type="button"
                     onClick={() => ctx?.open && add(it)}
-                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left active:bg-gray-50"
+                    className="flex w-full min-h-[58px] items-center justify-between gap-3 px-4 py-2 text-left active:bg-hf-inset"
                   >
-                    <span className="min-w-0">
-                      <span className="block text-sm font-medium text-gray-900">{it.title}</span>
-                      <span className="block text-xs text-gray-500">
+                    <span className="min-w-0 flex flex-col">
+                      <span className="text-[16px] font-semibold text-hf-ink">{it.title}</span>
+                      <span className="text-[13px] text-hf-muted">
                         {it.quantity > 0 ? `${it.quantity} in stock` : 'none showing in stock'}
+                        {ctx?.open && <span className="font-semibold text-hf-link"> · tap to add</span>}
                       </span>
                     </span>
-                    <span className="shrink-0 text-right">
-                      <span className="block text-base font-semibold text-gray-900">{money(it.priceIncVat ?? 0)}</span>
-                      {ctx?.open && <span className="block text-[11px] text-ooosh-600">tap to add</span>}
-                    </span>
+                    <span className="shrink-0 text-[16px] font-semibold text-hf-ink tabular">{money(it.priceIncVat ?? 0)}</span>
                   </button>
                 </li>
               ))}
             </ul>
           )}
           {term.trim().length >= 2 && !searching && results.length === 0 && (
-            <p className="mt-2 text-sm text-gray-500">Nothing matches — try another word.</p>
+            <p className="px-1 text-[15px] text-hf-muted">Nothing matches. Try another word.</p>
           )}
         </section>
 
         {ctx?.open && basket.length > 0 && (
           <>
             {/* Basket */}
-            <section className="rounded-xl border border-gray-200 bg-white divide-y">
-              {basket.map((l) => (
-                <div key={l.item.hhStockId} className="flex items-center gap-3 px-4 py-3">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-gray-900">{l.item.title}</p>
-                    <p className="text-xs text-gray-500">{money(l.item.priceIncVat ?? 0)} each</p>
+            <section className={`${cls.card} overflow-hidden`}>
+              {basket.map((l, i) => (
+                <div key={l.item.hhStockId}>
+                  {i > 0 && <div className="h-px bg-hf-divider mx-4" />}
+                  <div className="flex items-center gap-3 px-4 py-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[16px] font-semibold text-hf-ink">{l.item.title}</p>
+                      <p className="text-[13px] text-hf-muted tabular">{money(l.item.priceIncVat ?? 0)} each</p>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button type="button" onClick={() => bump(l.item.hhStockId, -1)} aria-label="One fewer"
+                        className="h-10 w-10 rounded-[10px] border-[1.5px] border-hf-control text-hf-body flex items-center justify-center active:bg-hf-inset">
+                        <Minus size={18} strokeWidth={2} />
+                      </button>
+                      <span className="w-7 text-center text-[16px] font-semibold tabular">{l.qty}</span>
+                      <button type="button" onClick={() => bump(l.item.hhStockId, 1)} aria-label="One more"
+                        className="h-10 w-10 rounded-[10px] border-[1.5px] border-hf-control text-hf-body flex items-center justify-center active:bg-hf-inset">
+                        <Plus size={18} strokeWidth={2} />
+                      </button>
+                    </div>
+                    <span className="w-16 text-right text-[16px] font-semibold tabular">{money(lineGross(l))}</span>
                   </div>
-                  <div className="flex items-center gap-1">
-                    <button onClick={() => bump(l.item.hhStockId, -1)} aria-label="One fewer"
-                      className="h-10 w-10 rounded-lg border border-gray-300 text-lg text-gray-700 active:bg-gray-100">−</button>
-                    <span className="w-7 text-center text-base font-semibold tabular-nums">{l.qty}</span>
-                    <button onClick={() => bump(l.item.hhStockId, 1)} aria-label="One more"
-                      className="h-10 w-10 rounded-lg border border-gray-300 text-lg text-gray-700 active:bg-gray-100">+</button>
-                  </div>
-                  <span className="w-16 text-right text-sm font-semibold tabular-nums">{money(lineGross(l))}</span>
                 </div>
               ))}
             </section>
 
             {/* Checkout */}
-            <section className="rounded-xl border border-gray-300 bg-white overflow-hidden shadow-sm">
-              <div className="flex items-baseline justify-between bg-gray-900 px-4 py-3 text-white">
-                <span className="text-sm font-semibold">
-                  Total <span className="text-xs font-normal text-gray-300">(inc VAT)</span>
+            <section className={`${cls.card} overflow-hidden`}>
+              <div className="flex items-baseline justify-between bg-hf-ink px-4 py-3 text-white">
+                <span className="text-[15px] font-semibold">
+                  Total <span className="text-[13px] font-normal text-white/70">(inc VAT)</span>
                 </span>
-                <span className="text-2xl font-bold tabular-nums">{money(total)}</span>
+                <span className="text-[26px] font-bold tabular">{money(total)}</span>
               </div>
-              <div className="p-4 space-y-4">
+              <div className="p-4 flex flex-col gap-4">
                 <div>
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Who&apos;s it for?</p>
-                  <div className="space-y-2">
+                  <p className="mb-2 text-[13px] font-bold uppercase tracking-[0.06em] text-hf-muted">Who&apos;s it for?</p>
+                  <div className="flex flex-col gap-2">
                     <button
+                      type="button"
+                      aria-pressed={jobId === null}
                       onClick={() => pickJob(null)}
-                      className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${choice(jobId === null)}`}
+                      className={`w-full min-h-[48px] rounded-xl px-4 py-3 text-left text-[15px] ${choice(jobId === null)}`}
                     >
-                      {jobId === null ? '✓ ' : ''}Walk-in
+                      {jobId === null && <Tick />}Walk-in
                     </button>
                     {ctx.jobs.map((j) => (
                       <button
                         key={j.job_id}
+                        type="button"
+                        aria-pressed={jobId === j.job_id}
                         onClick={() => pickJob(j.job_id)}
-                        className={`w-full rounded-lg px-4 py-3 text-left text-sm font-medium ${choice(jobId === j.job_id)}`}
+                        className={`w-full min-h-[48px] rounded-xl px-4 py-3 text-left text-[15px] ${choice(jobId === j.job_id)}`}
                       >
-                        {jobId === j.job_id ? '✓ ' : ''}{j.label}
+                        {jobId === j.job_id && <Tick />}{j.label}
                         {j.rooms.length > 0 && (
-                          <span className="block text-xs font-normal text-gray-500">
+                          <span className="block text-[13px] font-normal text-hf-muted">
                             {j.rooms.join(', ')}
                           </span>
                         )}
@@ -461,27 +629,97 @@ export default function SitterTillPage() {
                 </div>
 
                 <div>
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">How did they pay?</p>
+                  <p className="mb-2 text-[13px] font-bold uppercase tracking-[0.06em] text-hf-muted">How did they pay?</p>
                   <div className="grid grid-cols-2 gap-2">
                     {ctx.tenders.filter((t) => !t.needsJob || jobId).map((t) => (
                       <button
                         key={t.key}
-                        onClick={() => setTender(t.key)}
-                        className={`rounded-lg px-3 py-3 text-sm font-medium ${choice(tender === t.key)} ${t.needsJob ? 'col-span-2' : ''}`}
+                        type="button"
+                        aria-pressed={tender === t.key}
+                        onClick={() => pickTender(t.key)}
+                        className={`min-h-[48px] rounded-xl px-3 py-3 text-[15px] ${tenderChoice(tender === t.key)} ${t.needsJob ? 'col-span-2' : ''}`}
                       >
-                        {tender === t.key ? '✓ ' : ''}{t.label}
+                        {tender === t.key && <Tick />}{t.label}
+                        {t.key === 'card_reader' && ctx.card_reader?.mode === 'test' ? ' (TEST)' : ''}
                       </button>
                     ))}
                   </div>
                 </div>
+
+                {/* Cash: tap what they handed over and the till works out the change.
+                    Optional (Take works without it) and display only. */}
+                {tender === 'till_cash' && (
+                  <div>
+                    <p className="mb-2 text-[13px] font-bold uppercase tracking-[0.06em] text-hf-muted">
+                      They gave you <span className="font-normal normal-case tracking-normal">(optional)</span>
+                    </p>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        aria-pressed={cashGiven === 'exact'}
+                        onClick={() => setCashGiven('exact')}
+                        className={`min-h-[46px] rounded-xl px-2 py-3 text-[15px] ${choice(cashGiven === 'exact')}`}
+                      >
+                        {cashGiven === 'exact' && <Tick />}Exact
+                      </button>
+                      {likelyTendered(total).map((d) => (
+                        <button
+                          key={d}
+                          type="button"
+                          aria-pressed={cashGiven === d}
+                          onClick={() => setCashGiven(d)}
+                          className={`min-h-[46px] rounded-xl px-2 py-3 text-[15px] tabular ${choice(cashGiven === d)}`}
+                        >
+                          {cashGiven === d && <Tick />}£{d}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        aria-pressed={cashGiven === 'other'}
+                        onClick={() => setCashGiven('other')}
+                        className={`min-h-[46px] rounded-xl px-2 py-3 text-[15px] ${choice(cashGiven === 'other')}`}
+                      >
+                        {cashGiven === 'other' && <Tick />}Other
+                      </button>
+                    </div>
+                    {cashGiven === 'other' && (
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        autoComplete="off"
+                        autoFocus
+                        value={cashOther}
+                        onChange={(e) => setCashOther(e.target.value)}
+                        placeholder="How much did they give you? e.g. 25"
+                        className={`${cls.input} mt-2`}
+                      />
+                    )}
+                    {cashChange !== null && cashChange > 0 && (
+                      <div className="mt-2 flex items-baseline justify-between rounded-xl border-2 border-hf-ink px-4 py-3">
+                        <span className="text-[15px] font-semibold text-hf-ink">Change to give</span>
+                        <span className="text-[26px] font-bold tabular text-hf-ink">{money(cashChange)}</span>
+                      </div>
+                    )}
+                    {cashChange === 0 && (
+                      <p className="mt-2 rounded-xl border-2 border-hf-ink px-4 py-3 text-[15px] font-semibold text-hf-ink">
+                        No change to give.
+                      </p>
+                    )}
+                    {cashChange !== null && cashChange < 0 && (
+                      <p className="mt-2 rounded-xl border border-hf-amber-border bg-hf-amber-bg px-4 py-3 text-[15px] text-hf-amber-text">
+                        That’s {money(-cashChange)} short of the {money(total)} total.
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {/* Optional receipt — typed only. Band contacts' addresses are
                     never sent to a sitter's phone. Not for "their bill": nothing
                     was paid, and their invoice is the document. */}
                 {!tenderObj?.needsJob && (
                   <div>
-                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      Email a receipt? <span className="font-normal normal-case">(optional)</span>
+                    <p className="mb-2 text-[13px] font-bold uppercase tracking-[0.06em] text-hf-muted">
+                      Email a receipt? <span className="font-normal normal-case tracking-normal">(optional)</span>
                     </p>
                     {bandContacts.length > 0 && (
                       <div className="mb-2 flex flex-wrap gap-2">
@@ -489,11 +727,12 @@ export default function SitterTillPage() {
                           <button
                             key={c.email}
                             type="button"
+                            aria-pressed={receiptTo === c.email}
                             onClick={() => setReceiptTo(c.email)}
-                            className={`rounded-lg px-3 py-2 text-left text-xs font-medium ${choice(receiptTo === c.email)}`}
+                            className={`rounded-xl px-3 py-2 text-left text-[13px] ${choice(receiptTo === c.email)}`}
                           >
-                            {receiptTo === c.email ? '✓ ' : ''}{c.label}
-                            <span className="block font-normal text-gray-500">{c.email}</span>
+                            {receiptTo === c.email && <Tick />}{c.label}
+                            <span className="block font-normal text-hf-muted">{c.email}</span>
                           </button>
                         ))}
                       </div>
@@ -505,15 +744,66 @@ export default function SitterTillPage() {
                       value={receiptTo}
                       onChange={(e) => setReceiptTo(e.target.value)}
                       placeholder={bandContacts.length ? 'or type another address' : 'their@email.com'}
-                      className="w-full rounded-lg border border-gray-300 px-4 py-3 text-base focus:border-ooosh-500 focus:outline-none"
+                      className={cls.input}
                     />
                   </div>
                 )}
 
-                <button
+                {/* The card on the reader — replaces the Take button until it's done. */}
+                {reader && reader.status !== 'succeeded' && (
+                  <div className="rounded-2xl border border-hf-border bg-hf-inset p-4">
+                    {reader.status === 'pending' && (
+                      <>
+                        <p className="text-[17px] font-semibold text-hf-ink">Waiting for card…</p>
+                        <p className="mt-1 text-[15px] text-hf-body">
+                          {money(Number(reader.amount))} is on {reader.reader_label || 'the reader'}. Ask them to tap their card.
+                        </p>
+                      </>
+                    )}
+                    {reader.status === 'recording' && <p className="text-[17px] font-semibold text-hf-ink">Card approved. Recording…</p>}
+                    {reader.status === 'failed' && (
+                      <>
+                        <p className="text-[17px] font-semibold text-hf-error">Not taken</p>
+                        <p className="mt-1 text-[15px] text-hf-error">{reader.failure_message || 'The card was declined.'}</p>
+                      </>
+                    )}
+                    {reader.status === 'record_failed' && (
+                      <p className="text-[15px] text-hf-error">
+                        The card was charged but the sale didn’t record ({reader.failure_message}). The office has been told. Don’t take it again.
+                      </p>
+                    )}
+                    {reader.status === 'cancelled' && <p className="text-[15px] text-hf-body">Cancelled. Nothing was taken.</p>}
+
+                    {!reader.livemode && reader.status === 'pending' && (
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <button type="button" disabled={readerBusy} onClick={() => readerCall(`sessions/${reader.id}/simulate`, { outcome: 'approve' })}
+                          className="min-h-[46px] rounded-xl border-[1.5px] border-hf-green bg-white px-3 py-3 text-[15px] font-semibold text-hf-green-text">Test: approve</button>
+                        <button type="button" disabled={readerBusy} onClick={() => readerCall(`sessions/${reader.id}/simulate`, { outcome: 'decline' })}
+                          className="min-h-[46px] rounded-xl border-[1.5px] border-red-300 bg-white px-3 py-3 text-[15px] font-semibold text-hf-error">Test: decline</button>
+                      </div>
+                    )}
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {reader.status === 'failed' && (
+                        <button type="button" disabled={readerBusy} onClick={() => readerCall(`sessions/${reader.id}/retry`, {})}
+                          className="min-h-[48px] rounded-xl bg-hf-green px-3 py-3 text-[15px] font-semibold text-white">Try again</button>
+                      )}
+                      {(reader.status === 'pending' || reader.status === 'failed') && (
+                        <button type="button" disabled={readerBusy} onClick={() => readerCall(`sessions/${reader.id}/cancel`, {})}
+                          className="min-h-[48px] rounded-xl border-[1.5px] border-hf-control bg-white px-3 py-3 text-[15px] font-semibold text-hf-body">Cancel payment</button>
+                      )}
+                      {(reader.status === 'cancelled' || reader.status === 'record_failed') && (
+                        <button type="button" onClick={() => setReader(null)}
+                          className="col-span-2 min-h-[48px] rounded-xl border-[1.5px] border-hf-control bg-white px-3 py-3 text-[15px] font-semibold text-hf-body">OK</button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {!reader && <button
+                  type="button"
                   onClick={take}
                   disabled={!canTake}
-                  className="w-full rounded-xl bg-green-600 px-4 py-4 text-base font-semibold text-white active:bg-green-700 disabled:bg-gray-300"
+                  className={`${cls.btnGreen} w-full !h-14`}
                 >
                   {saving
                     ? 'Recording…'
@@ -523,8 +813,10 @@ export default function SitterTillPage() {
                       ? 'Pick how they paid'
                       : tenderObj?.needsJob
                         ? `Put ${money(total)} on their bill`
-                        : `Take ${money(total)}`}
-                </button>
+                        : tender === 'card_reader'
+                          ? `Take ${money(total)} on card reader`
+                          : `Take ${money(total)}`}
+                </button>}
               </div>
             </section>
           </>
@@ -533,33 +825,33 @@ export default function SitterTillPage() {
         {/* Tonight — what this till has taken. Pushed to the foot of the
             screen (mt-auto) so it's out of the way while selling. */}
         {summary && summary.sales > 0 && (
-          <section className="mt-auto pt-6">
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Tonight</h2>
-            <div className="rounded-xl border border-gray-200 bg-white p-4">
-              <p className="text-base font-semibold text-gray-900">
+          <section className="mt-auto pt-6 flex flex-col gap-2.5">
+            <SectionLabel>Tonight</SectionLabel>
+            <div className={`${cls.card} p-4`}>
+              <p className="text-[17px] font-semibold text-hf-ink tabular">
                 {summary.sales} sale{summary.sales === 1 ? '' : 's'} · {money(summary.taken)} taken
               </p>
-              <p className="mt-0.5 text-xs text-gray-500">
+              <p className="mt-0.5 text-[14px] text-hf-muted tabular">
                 {summary.byTender.map((t) => `${t.label} ${money(t.amount)}`).join(' · ')}
                 {summary.onTheirBill > 0 ? `${summary.byTender.length ? ' · ' : ''}on bills ${money(summary.onTheirBill)}` : ''}
               </p>
-              <ul className="mt-3 divide-y text-sm">
+              <ul className="mt-3 divide-y divide-hf-divider text-[15px]">
                 {sales.map((s) => {
                   // Cancellable only until it goes to the office (the push hold).
                   const cancellable = s.mine && s.status === 'queued' && new Date(s.push_after).getTime() > Date.now()
                   return (
-                    <li key={s.id} className="flex items-start gap-3 py-2">
-                      <span className="w-11 shrink-0 text-xs tabular-nums text-gray-500">{timeOf(s.created_at)}</span>
+                    <li key={s.id} className="flex items-start gap-3 py-2.5">
+                      <span className="w-12 shrink-0 text-[13px] tabular text-hf-muted pt-px">{timeOf(s.created_at)}</span>
                       <span className="min-w-0 flex-1">
-                        <span className={`font-medium ${s.status === 'cancelled' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                        <span className={`font-semibold tabular ${s.status === 'cancelled' ? 'text-hf-placeholder line-through' : 'text-hf-ink'}`}>
                           {money(s.gross)}
                         </span>
                         {s.sold_to_hh_job_number && (
-                          <span className="text-xs text-gray-500"> → {bandName(s.sold_to_hh_job_number)}</span>
+                          <span className="text-[13px] text-hf-muted"> → {bandName(s.sold_to_hh_job_number)}</span>
                         )}
-                        <span className="block truncate text-xs text-gray-500">
+                        <span className="block truncate text-[13px] text-hf-muted">
                           {s.lines.map((l) => `${l.qty}× ${l.name}`).join(', ')}
-                          {s.last_receipt_to ? ` · ✉ ${s.last_receipt_to}` : ''}
+                          {s.last_receipt_to ? ` · receipt to ${s.last_receipt_to}` : ''}
                         </span>
                         {receiptFor === s.id && (
                           <span className="mt-2 flex gap-2">
@@ -570,12 +862,13 @@ export default function SitterTillPage() {
                               value={receiptFormTo}
                               onChange={(e) => setReceiptFormTo(e.target.value)}
                               placeholder="their@email.com"
-                              className="min-w-0 flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                              className={`${cls.input} min-w-0 flex-1 !py-2 !text-[15px]`}
                             />
                             <button
+                              type="button"
                               onClick={() => sendRowReceipt(s.id)}
                               disabled={receiptBusy || !receiptFormTo.trim()}
-                              className="rounded-lg bg-gray-800 px-3 py-2 text-sm font-medium text-white disabled:bg-gray-300"
+                              className="h-11 rounded-xl bg-hf-ink px-4 text-[15px] font-semibold text-white disabled:bg-hf-disabled"
                             >
                               {receiptBusy ? '…' : 'Send'}
                             </button>
@@ -584,17 +877,18 @@ export default function SitterTillPage() {
                       </span>
                       <span className="flex shrink-0 flex-col items-end gap-1">
                         {cancellable ? (
-                          <button onClick={() => cancel(s.id)} className="text-xs font-medium text-red-600">Cancel</button>
+                          <button type="button" onClick={() => cancel(s.id)} className="min-h-[32px] text-[13px] font-semibold text-hf-error">Cancel</button>
                         ) : s.status === 'cancelled' ? (
-                          <span className="text-xs text-gray-400">cancelled</span>
+                          <span className="text-[13px] text-hf-placeholder">cancelled</span>
                         ) : null}
                         {s.status !== 'cancelled' && s.tender !== 'invoice_later' && (
                           <button
+                            type="button"
                             onClick={() => {
                               setReceiptFor(receiptFor === s.id ? null : s.id)
                               setReceiptFormTo(s.last_receipt_to ?? '')
                             }}
-                            className="text-xs font-medium text-gray-600"
+                            className="min-h-[32px] text-[13px] font-semibold text-hf-link"
                           >
                             {receiptFor === s.id ? 'Close' : 'Receipt'}
                           </button>
@@ -608,8 +902,8 @@ export default function SitterTillPage() {
           </section>
         )}
 
-        <p className={`text-center text-xs text-gray-400 ${summary && summary.sales > 0 ? '' : 'mt-auto'}`}>
-          Prices include VAT. Made a mistake? Cancel it from the list straight away — after a couple of
+        <p className={`px-1 text-center text-[13px] text-hf-muted leading-[1.45] ${summary && summary.sales > 0 ? '' : 'mt-auto'}`}>
+          Prices include VAT. Made a mistake? Cancel it from the list straight away. After a couple of
           minutes it&apos;s gone to the office, so leave them a note instead.
         </p>
       </main>

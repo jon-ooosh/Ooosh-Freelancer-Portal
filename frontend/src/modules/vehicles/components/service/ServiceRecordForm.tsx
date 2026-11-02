@@ -9,6 +9,7 @@
 import { useState, useRef } from 'react'
 import type { ServiceType, CreateServiceLogParams, ServiceLogRecord } from '../../lib/service-log-api'
 import { checkMileagePlausibility } from '../../lib/mileage-sanity'
+import { ukToday } from '../../../../lib/ukDate'
 
 const SERVICE_TYPES: { value: ServiceType; label: string }[] = [
   { value: 'service', label: 'Service' },
@@ -39,7 +40,7 @@ interface Props {
 export default function ServiceRecordForm({ currentMileage, lastMileageUpdate, editing, onSave, onClose }: Props) {
   const [serviceType, setServiceType] = useState<ServiceType>(editing?.serviceType as ServiceType || 'service')
   const [name, setName] = useState(editing?.name || '')
-  const [serviceDate, setServiceDate] = useState(editing?.serviceDate || new Date().toISOString().split('T')[0]!)
+  const [serviceDate, setServiceDate] = useState(editing?.serviceDate || ukToday())
   const [mileage, setMileage] = useState(editing?.mileage?.toString() || '')
   const [cost, setCost] = useState(editing?.cost?.toString() || '')
   const [status, setStatus] = useState(editing?.status || 'Done')
