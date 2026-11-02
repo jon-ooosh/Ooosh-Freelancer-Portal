@@ -56,6 +56,7 @@ These are things that **will** need doing on a known schedule. Non-negotiable.
 | **Action** | Review and merge Dependabot PRs. Always `npm install && npm run build` in the affected dir before merging — a bump occasionally needs a code tweak. Never `npm audit fix --force` (breaking majors). |
 | **Accepted leave-alones** | `backend/` `xlsx` (high, no npm fix, trusted-input only) and `uuid` (moderate, fix is breaking v14) are deliberately not patched. The "critical" npm reports is dev-only `handlebars` via `ts-jest` (not shipped). See CLAUDE.md → Security → Dependency Security. |
 | **Status** | [x] Configured June 2026 — Dependabot live (security updates + weekly grouped version PRs) |
+| **Weekly report** | `deploy/weekly-maintenance.sh` lists the open PR queue AND (Nov 2026) the open security alerts — count by severity, every critical/high named with its fix. Its GitHub token (fine-grained, read-only) needs Pull requests, Checks, Metadata and **Dependabot alerts**. Added after 63 alerts, four critical, sat unseen in the Security tab. |
 
 ### 1.5 PostgreSQL Version Updates
 
