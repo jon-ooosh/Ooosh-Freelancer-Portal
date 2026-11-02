@@ -24,7 +24,7 @@ router.use(authorize(...STAFF_ROLES));
 // ── POST /generate — Generate a VE103B certificate ────────────────────
 
 const generateSchema = z.object({
-  assignment_id: z.string().uuid(),
+  assignment_id: z.string().guid(),
   certificate_number: z.string().min(1).max(20),
   // How the cert was generated, for audit/display. Defaults to the board's
   // "From Assignment" path; the book-out flow passes 'book_out'.
@@ -223,7 +223,7 @@ router.post('/generate', async (req: AuthRequest, res) => {
     });
   } catch (err) {
     if (err instanceof z.ZodError) {
-      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      res.status(400).json({ error: 'Validation failed', details: err.issues });
       return;
     }
     console.error('[VE103B] Generate error:', err);
@@ -293,7 +293,7 @@ router.post('/job/:hhJobId/ensure-cert-item', async (req: AuthRequest, res) => {
     res.json(result);
   } catch (err) {
     if (err instanceof z.ZodError) {
-      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      res.status(400).json({ error: 'Validation failed', details: err.issues });
       return;
     }
     console.error('[VE103B] Ensure cert item error:', err);
@@ -305,7 +305,7 @@ router.post('/job/:hhJobId/ensure-cert-item', async (req: AuthRequest, res) => {
 // Temporary endpoint for testing PDF output without needing a hire assignment.
 
 const testGenerateSchema = z.object({
-  vehicle_id: z.string().uuid(),
+  vehicle_id: z.string().guid(),
   driver_name: z.string().min(1).max(200),
   driver_address: z.string().max(500).optional().default(''),
   certificate_number: z.string().min(1).max(20),
@@ -421,7 +421,7 @@ router.post('/test-generate', authorize(...MANAGER_ROLES), async (req: AuthReque
     });
   } catch (err) {
     if (err instanceof z.ZodError) {
-      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      res.status(400).json({ error: 'Validation failed', details: err.issues });
       return;
     }
     console.error('[VE103B] Test generate error:', err);
@@ -457,7 +457,7 @@ router.post('/:id/void', authorize(...MANAGER_ROLES), async (req: AuthRequest, r
     res.json(result.rows[0]);
   } catch (err) {
     if (err instanceof z.ZodError) {
-      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      res.status(400).json({ error: 'Validation failed', details: err.issues });
       return;
     }
     console.error('[VE103B] Void error:', err);
@@ -543,7 +543,7 @@ router.post('/:id/reactivate', authorize(...MANAGER_ROLES), async (req: AuthRequ
     });
   } catch (err) {
     if (err instanceof z.ZodError) {
-      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      res.status(400).json({ error: 'Validation failed', details: err.issues });
       return;
     }
     console.error('[VE103B] Reactivate error:', err);

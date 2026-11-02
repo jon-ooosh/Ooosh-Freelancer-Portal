@@ -2140,7 +2140,7 @@ const muteSchema = z.object({
   action: z.enum(['mute_global', 'unmute_global', 'mute_job', 'unmute_job']),
   muteType: z.enum(['7_days', 'end_of_today', 'specific_date', 'indefinite']).optional(),
   muteUntilDate: z.string().optional(),
-  jobId: z.string().uuid().optional(),
+  jobId: z.string().guid().optional(),
 });
 
 router.post('/settings/notifications', async (req: PortalRequest, res: Response) => {

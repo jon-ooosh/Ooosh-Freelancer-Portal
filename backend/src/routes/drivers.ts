@@ -42,7 +42,7 @@ const endorsementSchema = z.object({
 });
 
 const createDriverSchema = z.object({
-  person_id: z.string().uuid().nullable().optional(),
+  person_id: z.string().guid().nullable().optional(),
   full_name: z.string().min(1).max(200),
   email: z.string().email().nullable().optional(),
   phone: z.string().max(50).nullable().optional(),

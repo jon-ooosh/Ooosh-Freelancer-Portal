@@ -69,17 +69,17 @@ const createSchema = z.object({
   // flags between hires — have no active job. Validation below enforces
   // "at least one of job_id or vehicle_id must be set" to match the
   // job_issues_anchor_check DB constraint.
-  job_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
   category: z.enum(VALID_CATEGORIES),
   source_module: z.enum(VALID_SOURCES).default('manual'),
   severity: z.enum(VALID_SEVERITY).default('normal'),
   summary: z.string().trim().min(2).max(255),
   description: z.string().trim().max(10000).optional().nullable(),
   // Anchors (all optional)
-  vehicle_id: z.string().uuid().optional().nullable(),
-  driver_id: z.string().uuid().optional().nullable(),
-  person_id: z.string().uuid().optional().nullable(),
-  client_organisation_id: z.string().uuid().optional().nullable(),
+  vehicle_id: z.string().guid().optional().nullable(),
+  driver_id: z.string().guid().optional().nullable(),
+  person_id: z.string().guid().optional().nullable(),
+  client_organisation_id: z.string().guid().optional().nullable(),
   hh_stock_item_id: z.number().int().optional().nullable(),
   hh_stock_item_name: z.string().max(255).optional().nullable(),
   barcode: z.string().max(100).optional().nullable(),
@@ -91,8 +91,8 @@ const createSchema = z.object({
   // Behaviour
   due_date: z.string().optional().nullable(),
   surface_on: z.enum(VALID_SURFACES).optional().nullable(),
-  watchers: z.array(z.string().uuid()).optional(),
-  assigned_to: z.string().uuid().optional().nullable(),
+  watchers: z.array(z.string().guid()).optional(),
+  assigned_to: z.string().guid().optional().nullable(),
 }).refine(
   (data) => Boolean(data.job_id) || Boolean(data.vehicle_id),
   { message: 'At least one of job_id or vehicle_id is required', path: ['job_id'] }
@@ -106,23 +106,23 @@ const updateSchema = z.object({
   description: z.string().trim().max(10000).optional().nullable(),
   // Anchors editable. job_id can be set on a vehicle-only issue when
   // a hire surfaces it (staff manually links from IssueDetailPage).
-  job_id: z.string().uuid().optional().nullable(),
-  vehicle_id: z.string().uuid().optional().nullable(),
-  driver_id: z.string().uuid().optional().nullable(),
-  person_id: z.string().uuid().optional().nullable(),
-  client_organisation_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
+  vehicle_id: z.string().guid().optional().nullable(),
+  driver_id: z.string().guid().optional().nullable(),
+  person_id: z.string().guid().optional().nullable(),
+  client_organisation_id: z.string().guid().optional().nullable(),
   hh_stock_item_id: z.number().int().optional().nullable(),
   hh_stock_item_name: z.string().max(255).optional().nullable(),
   barcode: z.string().max(100).optional().nullable(),
   component_key: z.string().max(100).optional().nullable(),
   // Workflow
-  assigned_to: z.string().uuid().optional().nullable(),
+  assigned_to: z.string().guid().optional().nullable(),
   due_date: z.string().optional().nullable(),
   surface_on: z.enum(VALID_SURFACES).optional().nullable(),
   resolution_path: z.enum(VALID_RESOLUTION).optional().nullable(),
   estimated_cost: z.number().nonnegative().optional().nullable(),
   actual_cost: z.number().nonnegative().optional().nullable(),
-  excess_id: z.string().uuid().optional().nullable(),
+  excess_id: z.string().guid().optional().nullable(),
 });
 
 const commentSchema = z.object({
@@ -529,7 +529,7 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
 
 const autoCreateSchema = z.object({
   // Required for dedup
-  vehicle_id: z.string().uuid(),
+  vehicle_id: z.string().guid(),
   component_key: z.string().min(1).max(100),
   // Classification
   category: z.enum(VALID_CATEGORIES),
@@ -538,12 +538,12 @@ const autoCreateSchema = z.object({
   summary: z.string().trim().min(2).max(255),
   description: z.string().trim().max(10000).optional().nullable(),
   // Optional anchor extras
-  job_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
   // HH job number alternative for callers that don't know the OP UUID
   // (the check-in flow carries the HireHop number from book-out). Resolved
   // to job_id server-side; ignored when job_id is supplied directly.
   hirehop_job_number: z.number().int().optional().nullable(),
-  driver_id: z.string().uuid().optional().nullable(),
+  driver_id: z.string().guid().optional().nullable(),
   hh_stock_item_id: z.number().int().optional().nullable(),
   hh_stock_item_name: z.string().max(255).optional().nullable(),
   barcode: z.string().max(100).optional().nullable(),
@@ -746,7 +746,7 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
 // status flips to `awaiting_quote`. See services/damage-repair-quote.ts.
 
 const repairQuoteSchema = z.object({
-  issue_ids: z.array(z.string().uuid()).min(1).max(20),
+  issue_ids: z.array(z.string().guid()).min(1).max(20),
   notes_override: z.string().trim().max(5000).optional().nullable(),
 });
 

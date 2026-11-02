@@ -520,6 +520,10 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
   physically happened and R2 events reference it. There is no `DELETE FROM
   vehicle_hire_assignments` in the codebase and there shouldn't be.
 - All SQL is parameterised. All IDs are UUIDs.
+- **Validate an id with `z.string().guid()`, never `.uuid()`** (zod 4, Nov 2026). Zod 4's
+  `.uuid()` only accepts RFC-variant UUIDs, and the "Ooosh Staff" person is
+  `00000000-0000-0000-0000-000000000001` (mig 036, used for crew in `quotes.ts`) — a
+  `.uuid()` check refuses any request naming them. `.guid()` is what zod 3's `.uuid()` was.
 - **JSONB columns must be `JSON.stringify`d on write** — node-postgres sends a JS array
   as a Postgres ARRAY literal, which JSONB rejects. An EMPTY array survives, so the bug
   only surfaces once the feature is genuinely used.

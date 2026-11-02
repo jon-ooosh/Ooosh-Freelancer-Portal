@@ -34,11 +34,11 @@ router.use(authorize(...STAFF_ROLES));
 // ── Schemas ──
 
 const createAssignmentSchema = z.object({
-  vehicle_id: z.string().uuid(),
-  job_id: z.string().uuid().nullable().optional(),
+  vehicle_id: z.string().guid(),
+  job_id: z.string().guid().nullable().optional(),
   hirehop_job_id: z.number().int().nullable().optional(),
   hirehop_job_name: z.string().max(500).nullable().optional(),
-  driver_id: z.string().uuid().nullable().optional(),
+  driver_id: z.string().guid().nullable().optional(),
   assignment_type: z.enum(['self_drive', 'driven', 'delivery', 'collection']).default('self_drive'),
   van_requirement_index: z.number().int().min(0).default(0),
   required_type: z.string().max(50).nullable().optional(),
@@ -49,7 +49,7 @@ const createAssignmentSchema = z.object({
   start_time: z.string().nullable().optional(),
   end_time: z.string().nullable().optional(),
   return_overnight: z.boolean().nullable().optional(),
-  freelancer_person_id: z.string().uuid().nullable().optional(),
+  freelancer_person_id: z.string().guid().nullable().optional(),
   notes: z.string().nullable().optional(),
   ve103b_ref: z.string().max(100).nullable().optional(),
   allocated_by_name: z.string().max(200).nullable().optional(),
@@ -70,7 +70,7 @@ const bookOutSchema = z.object({
   // taking the van is recorded via freelancer_person_id; the gate checks for
   // referral/excess are skipped (assignment_type='driven' branch).
   assignment_type: z.enum(['self_drive', 'driven', 'delivery', 'collection']).optional(),
-  freelancer_person_id: z.string().uuid().nullable().optional(),
+  freelancer_person_id: z.string().guid().nullable().optional(),
   hire_start: z.string().nullable().optional(),
   hire_end: z.string().nullable().optional(),
   start_time: z.string().nullable().optional(),
@@ -1429,7 +1429,7 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
 // Swap a vehicle on an existing assignment (e.g. breakdown → replacement).
 // Original assignment gets status 'swapped'; new assignment is created for the replacement vehicle.
 const swapSchema = z.object({
-  new_vehicle_id: z.string().uuid(),
+  new_vehicle_id: z.string().guid(),
   // 'breakdown' (default) = the van's out of service: fleet → Not Ready
   // (sticky), a Problems-register issue records why, an interim assessment is
   // the record. 'planned' = a deliberate change (e.g. client upgrading to a
@@ -1450,7 +1450,7 @@ const swapSchema = z.object({
   }).optional(),
   // Link this swap to a Problems-register issue, or create a new one.
   issue_link: z.union([
-    z.object({ existing_issue_id: z.string().uuid() }),
+    z.object({ existing_issue_id: z.string().guid() }),
     z.object({
       new_issue: z.object({
         category: z.enum(['damaged', 'missing', 'broken', 'dispute', 'breakdown', 'other']).default('breakdown'),

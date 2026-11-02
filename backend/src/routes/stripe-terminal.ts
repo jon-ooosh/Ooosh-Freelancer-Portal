@@ -84,7 +84,7 @@ const paySchema = z.object({
   reader_id: z.string().min(1).max(100),
   notes: z.string().max(1000).optional(),
   // Required for excess / excess_preauth — the record the money or pre-auth lands on.
-  excess_id: z.string().uuid().optional(),
+  excess_id: z.string().guid().optional(),
 });
 
 router.post('/jobs/:jobId/pay', requireTerminalAccess, validate(paySchema), async (req: AuthRequest, res: Response) => {
@@ -110,10 +110,10 @@ const shopPaySchema = z.object({
     qty: z.number().positive(),
     unitPriceCharged: z.number().min(0).optional(),
   })).min(1).max(100),
-  sold_to_job_id: z.string().uuid().nullable().optional(),
-  sold_to_person_id: z.string().uuid().nullable().optional(),
+  sold_to_job_id: z.string().guid().nullable().optional(),
+  sold_to_person_id: z.string().guid().nullable().optional(),
   /** The kiosk till only: the person from its dropdown (§4.3). */
-  sold_by_person_id: z.string().uuid().nullable().optional(),
+  sold_by_person_id: z.string().guid().nullable().optional(),
   notes: z.string().max(1000).nullable().optional(),
   reader_id: z.string().min(1).max(100),
 });

@@ -81,7 +81,7 @@ router.get('/job/:jobId/coverage', async (req: AuthRequest, res: Response) => {
 });
 
 // POST /api/studio-sitters/assign — assign or reassign a sitter to an evening
-const assignSchema = z.object({ date: dateStr, person_id: z.string().uuid() });
+const assignSchema = z.object({ date: dateStr, person_id: z.string().guid() });
 router.post('/assign', async (req: AuthRequest, res: Response) => {
   const parsed = assignSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' }); return; }
@@ -111,7 +111,7 @@ router.post('/unassign', async (req: AuthRequest, res: Response) => {
 // POST /api/studio-sitters/bulk-assign — one person over selected dates, or every
 // unassigned needed night in [from,to] when no explicit dates are given.
 const bulkSchema = z.object({
-  person_id: z.string().uuid(),
+  person_id: z.string().guid(),
   dates: z.array(dateStr).min(1).max(400).optional(),
   from: dateStr.optional(),
   to: dateStr.optional(),

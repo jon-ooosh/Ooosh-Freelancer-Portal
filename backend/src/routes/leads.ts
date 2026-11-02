@@ -325,7 +325,7 @@ router.get('/:id/events', authorize(...STAFF_ROLES), async (req: AuthRequest, re
 const patchSchema = z.object({
   status: z.enum(['new', 'reviewing', 'contacted', 'converted', 'dismissed', 'not_relevant']).optional(),
   status_reason: z.string().max(500).nullable().optional(),
-  assigned_to: z.string().uuid().nullable().optional(),
+  assigned_to: z.string().guid().nullable().optional(),
 });
 router.patch('/:id', authorize(...STAFF_ROLES), validate(patchSchema), async (req: AuthRequest, res: Response) => {
   try {
@@ -417,7 +417,7 @@ router.post('/:id/restore', authorize(...STAFF_ROLES), async (req: AuthRequest, 
 });
 
 // POST /api/leads/:id/confirm-match — link a suggested org as the match.
-const confirmSchema = z.object({ organisation_id: z.string().uuid() });
+const confirmSchema = z.object({ organisation_id: z.string().guid() });
 router.post('/:id/confirm-match', authorize(...STAFF_ROLES), validate(confirmSchema), async (req: AuthRequest, res: Response) => {
   try {
     const orgId = (req.body as z.infer<typeof confirmSchema>).organisation_id;
@@ -513,7 +513,7 @@ router.get('/:id/address-book-preview', authorize(...STAFF_ROLES), async (req: A
 // pick an existing org OR create the band org, then add the chosen researched
 // contacts (exact-email find-or-create, linked with their role).
 const addSchema = z.object({
-  organisation_id: z.string().uuid().optional(),
+  organisation_id: z.string().guid().optional(),
   create_name: z.string().trim().min(1).max(300).optional(),
   // Each chosen researched contact: add as a PERSON (with the name staff
   // typed — the research often has none, or just "info") or as the band's own
@@ -741,8 +741,8 @@ function sendLeadError(res: Response, error: unknown, fallback: string, label: s
 
 // POST /api/leads/:id/start-enquiry — they're interested: a real enquiry.
 const enquirySchema = z.object({
-  contact_person_ids: z.array(z.string().uuid()).default([]),
-  primary_contact_person_id: z.string().uuid().nullable().optional(),
+  contact_person_ids: z.array(z.string().guid()).default([]),
+  primary_contact_person_id: z.string().guid().nullable().optional(),
   details: z.string().max(5000).nullable().optional(),
 });
 router.post('/:id/start-enquiry', authorize(...STAFF_ROLES), validate(enquirySchema), async (req: AuthRequest, res: Response) => {
@@ -774,8 +774,8 @@ const outreachSchema = z.object({
   note: z.string().max(2000).nullable().optional(),
   create_enquiry: z.boolean().default(true),
   chase_in_days: z.number().int().min(1).max(90).default(7),
-  contact_person_ids: z.array(z.string().uuid()).default([]),
-  primary_contact_person_id: z.string().uuid().nullable().optional(),
+  contact_person_ids: z.array(z.string().guid()).default([]),
+  primary_contact_person_id: z.string().guid().nullable().optional(),
 });
 router.post('/:id/log-outreach', authorize(...STAFF_ROLES), validate(outreachSchema), async (req: AuthRequest, res: Response) => {
   try {
@@ -936,7 +936,7 @@ router.get('/:id/tour-jobs/candidates', authorize(...STAFF_ROLES), async (req: A
 
 // POST /api/leads/:id/tour-jobs — link a job to this tour by hand.
 const linkJobSchema = z.object({
-  job_id: z.string().uuid().optional(),
+  job_id: z.string().guid().optional(),
   hh_job_number: z.coerce.number().int().positive().optional(),
 }).refine((b) => Boolean(b.job_id) !== Boolean(b.hh_job_number), { message: 'Give a job or a HireHop job number' });
 router.post('/:id/tour-jobs', authorize(...STAFF_ROLES), validate(linkJobSchema), async (req: AuthRequest, res: Response) => {

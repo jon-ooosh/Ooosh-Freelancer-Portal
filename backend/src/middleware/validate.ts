@@ -12,7 +12,7 @@ export function validate(schema: ZodSchema, source: 'body' | 'params' | 'query' 
       next();
     } catch (error) {
       if (error instanceof ZodError) {
-        const details = error.errors.map((e) => ({
+        const details = error.issues.map((e) => ({
           field: e.path.join('.'),
           message: e.message,
         }));

@@ -487,7 +487,7 @@ const STAFF_ENTITY_TYPES = ['jobs', 'people', 'organisations', 'venues', 'driver
 
 const sendFileEmailSchema = z.object({
   entity_type: z.enum(STAFF_ENTITY_TYPES),
-  entity_id: z.string().uuid(),
+  entity_id: z.string().guid(),
   file_url: z.string().min(1),
   recipients: z.array(z.object({
     email: z.string().email('Invalid email address'),
@@ -495,7 +495,7 @@ const sendFileEmailSchema = z.object({
   })).min(1, 'At least one recipient required').max(10),
   message: z.string().max(2000).optional(),
   external_share_acknowledged: z.literal(true, {
-    errorMap: () => ({ message: 'Please confirm you intend to send this externally.' }),
+    error: 'Please confirm you intend to send this externally.',
   }),
 });
 
@@ -858,9 +858,9 @@ router.get('/for-org/:orgId', authorize(...STAFF_ROLES), async (req: AuthRequest
 const fileLinkSchema = z.object({
   r2_key: z.string().min(1),
   owner_entity_type: z.literal('jobs'),
-  owner_entity_id: z.string().uuid(),
+  owner_entity_id: z.string().guid(),
   linked_entity_type: z.literal('organisations'),
-  linked_entity_id: z.string().uuid(),
+  linked_entity_id: z.string().guid(),
 });
 
 // POST /api/files/link — surface an owned file on another entity.

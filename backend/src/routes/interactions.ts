@@ -37,22 +37,22 @@ const createInteractionSchema = z.object({
   type: z.enum(['note', 'email', 'call', 'meeting', 'mention', 'chase', 'status_transition']),
   content: z.string().min(1),
   // Polymorphic linking — at least one must be provided
-  person_id: z.string().uuid().optional().nullable(),
-  organisation_id: z.string().uuid().optional().nullable(),
-  job_id: z.string().uuid().optional().nullable(),
-  opportunity_id: z.string().uuid().optional().nullable(),
-  venue_id: z.string().uuid().optional().nullable(),
-  issue_id: z.string().uuid().optional().nullable(),
-  held_item_id: z.string().uuid().optional().nullable(),
+  person_id: z.string().guid().optional().nullable(),
+  organisation_id: z.string().guid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
+  opportunity_id: z.string().guid().optional().nullable(),
+  venue_id: z.string().guid().optional().nullable(),
+  issue_id: z.string().guid().optional().nullable(),
+  held_item_id: z.string().guid().optional().nullable(),
   // Studio-sitter shift handover thread anchor (Rehearsals slice 3).
-  shift_id: z.string().uuid().optional().nullable(),
+  shift_id: z.string().guid().optional().nullable(),
   // Threading: if set, this is a reply. Server flattens to thread root and
   // inherits the parent's anchor (job/person/org/venue/issue/held-item/shift/opportunity).
-  parent_interaction_id: z.string().uuid().optional().nullable(),
+  parent_interaction_id: z.string().guid().optional().nullable(),
   // Attachments — files already uploaded via attachment_only=true
   attachments: z.array(attachmentSchema).optional().default([]),
   // @mentions
-  mentioned_user_ids: z.array(z.string().uuid()).optional().default([]),
+  mentioned_user_ids: z.array(z.string().guid()).optional().default([]),
   mention_priority: z.enum(['normal', 'high', 'urgent']).optional().default('normal'),
   // Chase-specific fields
   chase_method: z.enum(['phone', 'email', 'text', 'whatsapp']).optional().nullable(),
@@ -60,7 +60,7 @@ const createInteractionSchema = z.object({
   // Optional: override next chase date (otherwise auto-calculated)
   next_chase_date: z.string().optional().nullable(),
   // Chase alert: notify a user when chase is due
-  chase_alert_user_id: z.string().uuid().optional().nullable(),
+  chase_alert_user_id: z.string().guid().optional().nullable(),
   chase_alert_delivery: z.enum(['bell', 'bell_email', 'none']).optional().nullable(),
   // Opt-out for the auto-chase-bump on call/email/meeting interactions.
   // Default false (= bump fires). Set true when logging a backdated or
@@ -302,7 +302,7 @@ router.post('/:id/mute', async (req: AuthRequest, res: Response) => {
     res.json({ is_muted: muted, root_interaction_id: rootId });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return res.status(400).json({ error: 'Invalid request', details: error.issues });
     }
     console.error('Toggle mute error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -784,7 +784,7 @@ router.patch('/:id', validate(editInteractionSchema), async (req: AuthRequest, r
 // PUT /api/interactions/:id/move — move an interaction to a different entity
 const moveInteractionSchema = z.object({
   target_type: z.enum(['person_id', 'organisation_id', 'venue_id']),
-  target_id: z.string().uuid(),
+  target_id: z.string().guid(),
 });
 
 router.put('/:id/move', validate(moveInteractionSchema), async (req: AuthRequest, res: Response) => {

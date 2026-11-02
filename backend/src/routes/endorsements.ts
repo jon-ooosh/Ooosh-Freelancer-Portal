@@ -16,7 +16,7 @@ const router = Router();
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const optText = z.string().max(2000).optional().nullable();
 
 const endorsementSchema = z.object({

@@ -403,9 +403,9 @@ router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {
 });
 
 const tenancySchema = z.object({
-  room_id: z.string().uuid(),
-  organisation_id: z.string().uuid().optional().nullable(),
-  lead_contact_person_id: z.string().uuid().optional().nullable(),
+  room_id: z.string().guid(),
+  organisation_id: z.string().guid().optional().nullable(),
+  lead_contact_person_id: z.string().guid().optional().nullable(),
   status: z.enum(['reserved', 'active', 'notice', 'ended']).default('active'),
   move_in_date: z.string().optional().nullable(),
   weekly_rate: z.number().nonnegative().default(0),
@@ -419,7 +419,7 @@ const tenancySchema = z.object({
   billing_custom_interval_value: z.number().int().positive().optional().nullable(),
   billing_custom_interval_unit: z.enum(['day', 'week', 'month', 'year']).optional().nullable(),
   next_bill_date: z.string().optional().nullable(),
-  bill_reminder_person_id: z.string().uuid().optional().nullable(),
+  bill_reminder_person_id: z.string().guid().optional().nullable(),
   bill_reminder_lead_days: z.number().int().optional(),
   bill_overdue_grace_days: z.number().int().optional(),
   rate_review_cadence: z.enum(['annual', 'biennial', 'custom']).default('annual'),
@@ -646,7 +646,7 @@ router.post('/tenancies/:id/send-tcs', async (req: AuthRequest, res: Response) =
 
 // ── Access list ───────────────────────────────────────────────────────────
 const accessListSchema = z.object({
-  person_id: z.string().uuid().optional().nullable(),
+  person_id: z.string().guid().optional().nullable(),
   name: z.string().max(200).optional().nullable(),
   phone: z.string().max(40).optional().nullable(),
   relationship: z.string().max(120).optional().nullable(),
@@ -691,15 +691,15 @@ router.get('/access-events', async (req: AuthRequest, res: Response) => {
 });
 
 const accessEventSchema = z.object({
-  tenancy_id: z.string().uuid().optional().nullable(),
-  room_id: z.string().uuid().optional().nullable(),
+  tenancy_id: z.string().guid().optional().nullable(),
+  room_id: z.string().guid().optional().nullable(),
   type: z.enum(['visit', 'retrieve', 'courier_out', 'deposit']).default('visit'),
   description: z.string().optional().nullable(),
-  attendee_person_id: z.string().uuid().optional().nullable(),
+  attendee_person_id: z.string().guid().optional().nullable(),
   attendee_name: z.string().max(200).optional().nullable(),
   method: z.enum(['in_person', 'courier']).default('in_person'),
   requested_date: z.string().optional().nullable(),
-  notify_user_ids: z.array(z.string().uuid()).optional().default([]),
+  notify_user_ids: z.array(z.string().guid()).optional().default([]),
   delivery_method: z.enum(['notification', 'email', 'both']).default('both'),
   notes: z.string().optional().nullable(),
 });
@@ -781,8 +781,8 @@ router.get('/waiting-list', async (req: AuthRequest, res: Response) => {
 });
 
 const waitingSchema = z.object({
-  organisation_id: z.string().uuid().optional().nullable(),
-  person_id: z.string().uuid().optional().nullable(),
+  organisation_id: z.string().guid().optional().nullable(),
+  person_id: z.string().guid().optional().nullable(),
   contact_name: z.string().max(200).optional().nullable(),
   contact_email: z.string().max(200).optional().nullable(),
   contact_phone: z.string().max(40).optional().nullable(),

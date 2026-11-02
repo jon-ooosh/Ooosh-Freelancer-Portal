@@ -21,8 +21,8 @@ const router = Router();
 router.use(authenticate, authorize(...STAFF_ROLES));
 
 const ownerSchema = z.union([
-  z.object({ bookingId: z.string().uuid(), shiftId: z.undefined().optional() }),
-  z.object({ shiftId: z.string().uuid(), bookingId: z.undefined().optional() }),
+  z.object({ bookingId: z.string().guid(), shiftId: z.undefined().optional() }),
+  z.object({ shiftId: z.string().guid(), bookingId: z.undefined().optional() }),
 ]);
 
 function readOwner(src: unknown): TaskOwner | null {
@@ -77,8 +77,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
 const taskBody = z.object({
   taskType: z.enum(['van_prep', 'other']),
-  vehicleId: z.string().uuid().nullish(),
-  jobId: z.string().uuid().nullish(),
+  vehicleId: z.string().guid().nullish(),
+  jobId: z.string().guid().nullish(),
   hhJobNumber: z.number().int().positive().nullish(),
   description: z.string().max(500).nullish(),
 });

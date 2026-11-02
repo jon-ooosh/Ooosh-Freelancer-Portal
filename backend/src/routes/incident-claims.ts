@@ -178,10 +178,10 @@ router.post('/from-problem/:issueId', validate(fromProblemSchema), async (req: A
 // `dispute` Problem on the van (and the hire, if staff picked one from the
 // /pcns/match lookup), then opens the case with third_party_claim set.
 const outOfTheBlueSchema = z.object({
-  vehicle_id: z.string().uuid(),
+  vehicle_id: z.string().guid(),
   alleged_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  job_id: z.string().uuid().optional().nullable(),
-  driver_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
+  driver_id: z.string().guid().optional().nullable(),
   summary: z.string().trim().min(2).max(255),
   description: z.string().trim().max(10000).optional().nullable(),
 });
@@ -461,8 +461,8 @@ const NOTIFIED_VIA_LABEL: Record<string, string> = {
 const ukd = (ymd: string) => ymd.split('-').reverse().join('/');
 
 const patchSchema = z.object({
-  vehicle_id: z.string().uuid().nullable().optional(),
-  driver_id: z.string().uuid().nullable().optional(),
+  vehicle_id: z.string().guid().nullable().optional(),
+  driver_id: z.string().guid().nullable().optional(),
   notified_on: dateStr.optional(),
   notified_via: z.enum(NOTIFIED_VIA).nullable().optional(),
   broker_ref: z.string().trim().max(100).nullable().optional(),
@@ -472,10 +472,10 @@ const patchSchema = z.object({
   third_party_claim_notes: z.string().trim().max(5000).nullable().optional(),
   liability_dispute: z.boolean().optional(),
   liability_dispute_notes: z.string().trim().max(5000).nullable().optional(),
-  owner_user_id: z.string().uuid().nullable().optional(),
+  owner_user_id: z.string().guid().nullable().optional(),
   next_check_on: dateStr.nullable().optional(),
   next_check_note: z.string().trim().max(2000).optional(),
-  form_data: z.record(z.unknown()).optional(),
+  form_data: z.record(z.string(), z.unknown()).optional(),
 });
 
 router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Response) => {
@@ -619,7 +619,7 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
 const updateSchema = z.object({
   note: z.string().trim().min(1).max(10000),
   next_check_on: dateStr.nullable().optional(),
-  mentioned_user_ids: z.array(z.string().uuid()).max(50).optional(),
+  mentioned_user_ids: z.array(z.string().guid()).max(50).optional(),
 });
 
 router.post('/:id/updates', validate(updateSchema), async (req: AuthRequest, res: Response) => {
@@ -770,7 +770,7 @@ router.post('/:id/stage', validate(stageSchema), async (req: AuthRequest, res: R
 // Problems on the case
 // ─────────────────────────────────────────────────────────────────────────
 
-router.post('/:id/problems', validate(z.object({ issue_id: z.string().uuid() })), async (req: AuthRequest, res: Response) => {
+router.post('/:id/problems', validate(z.object({ issue_id: z.string().guid() })), async (req: AuthRequest, res: Response) => {
   try {
     const id = String(req.params.id);
     const issueId = (req.body as { issue_id: string }).issue_id;
@@ -1167,8 +1167,8 @@ router.get('/:id/recipients', async (req: AuthRequest, res: Response) => {
 
 const sendLinksSchema = z.object({
   recipients: z.array(z.object({
-    driver_id: z.string().uuid().optional(),
-    person_id: z.string().uuid().optional(),
+    driver_id: z.string().guid().optional(),
+    person_id: z.string().guid().optional(),
     name: z.string().trim().max(120).optional(),
     email: z.string().trim().email().max(200).optional(),
   })).min(1).max(20),

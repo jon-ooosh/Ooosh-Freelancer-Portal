@@ -81,7 +81,7 @@ const paymentSchema = z.object({
   // Lime Garden / deposit 7767: the old "most recently updated" guess re-flipped
   // an already-rolled-over hop and left the live one 'taken', double-counting
   // the £1,200 everywhere). Optional for legacy callers.
-  source_excess_id: z.string().uuid().nullable().optional(),
+  source_excess_id: z.string().guid().nullable().optional(),
   // Soft-enforce reimburse-after-nibble: when staff tries to top up an excess
   // that already has a chain linkage (hh_deposit_id), the endpoint returns 409
   // with a chain-break warning. Setting this to true acknowledges the warning
@@ -234,17 +234,17 @@ const moveExcessSchema = z.object({
   xero_contact_id: z.string().max(100).optional().default(''),
   xero_contact_name: z.string().max(200),
   client_name: z.string().max(200).optional(),
-  person_id: z.string().uuid().nullable().optional().or(z.literal('')),
+  person_id: z.string().guid().nullable().optional().or(z.literal('')),
   reason: z.string().max(500).optional(),
 });
 
 const createExcessSchema = z.object({
-  job_id: z.string().uuid(),
+  job_id: z.string().guid(),
   hirehop_job_id: z.number().int().nullable().optional(),
   excess_amount_required: z.number().min(0).nullable().optional(),
   excess_calculation_basis: z.string().nullable().optional(),
   client_name: z.string().max(200).optional(),
-  assignment_id: z.string().uuid().nullable().optional(),
+  assignment_id: z.string().guid().nullable().optional(),
   notes: z.string().max(1000).optional(),
 });
 
@@ -305,7 +305,7 @@ router.post('/create', validate(createExcessSchema), async (req: AuthRequest, re
 // Creates the OP record with the HH deposit already linked (no push back to HH).
 
 const createFromHHSchema = z.object({
-  job_id: z.string().uuid(),
+  job_id: z.string().guid(),
   hh_deposit_id: z.number().int().min(1),
   amount: z.number().min(0.01),
   client_name: z.string().max(200).optional(),

@@ -81,7 +81,7 @@ router.patch('/reviews/:id', authorize('admin', 'manager'), async (req: AuthRequ
 router.post('/convert-person-to-org',
   authorize('admin', 'manager'),
   validate(z.object({
-    person_id: z.string().uuid(),
+    person_id: z.string().guid(),
     org_type: z.string().min(1).default('band'),
   })),
   async (req: AuthRequest, res: Response) => {
@@ -187,7 +187,7 @@ router.post('/convert-person-to-org',
 router.post('/bulk-type-update',
   authorize('admin', 'manager'),
   validate(z.object({
-    organisation_ids: z.array(z.string().uuid()).min(1).max(100),
+    organisation_ids: z.array(z.string().guid()).min(1).max(100),
     new_type: z.string().min(1),
   })),
   async (req: AuthRequest, res: Response) => {

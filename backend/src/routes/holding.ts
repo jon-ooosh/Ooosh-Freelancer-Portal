@@ -351,10 +351,10 @@ const createSchema = z.object({
     'collected', 'given_to_client', 'shipped_back', 'disposed', 'unclaimed', 'cancelled',
   ]).optional(),
   owner_unknown: z.boolean().optional(),
-  owner_person_id: z.string().uuid().optional().nullable(),
-  owner_organisation_id: z.string().uuid().optional().nullable(),
+  owner_person_id: z.string().guid().optional().nullable(),
+  owner_organisation_id: z.string().guid().optional().nullable(),
   client_name_text: z.string().optional().nullable(),
-  job_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
   hh_job_number: z.number().int().optional().nullable(),
   description: z.string().optional().nullable(),
   box_count: z.number().int().optional().nullable(),
@@ -362,11 +362,11 @@ const createSchema = z.object({
   condition_notes: z.string().optional().nullable(),
   photos: z.array(photoSchema).optional().default([]),
   found_in: z.enum(['van', 'rehearsal', 'backline', 'elsewhere']).optional().nullable(),
-  found_vehicle_id: z.string().uuid().optional().nullable(),
+  found_vehicle_id: z.string().guid().optional().nullable(),
   found_location_text: z.string().optional().nullable(),
-  storage_location_id: z.string().uuid().optional().nullable(),
+  storage_location_id: z.string().guid().optional().nullable(),
   storage_location_text: z.string().optional().nullable(),
-  storage_room_id: z.string().uuid().optional().nullable(),
+  storage_room_id: z.string().guid().optional().nullable(),
   expected_date: z.string().optional().nullable(),
   import_charge_flag: z.enum(['yes', 'no', 'unknown']).optional().nullable(),
   needed_by: z.string().optional().nullable(),
@@ -476,10 +476,10 @@ router.put('/:id', validate(createSchema.partial()), async (req: AuthRequest, re
 // ════════════════════════ LINK (owner / job) — the backfill cascade ════════════════════════
 
 const linkSchema = z.object({
-  owner_person_id: z.string().uuid().optional().nullable(),
-  owner_organisation_id: z.string().uuid().optional().nullable(),
+  owner_person_id: z.string().guid().optional().nullable(),
+  owner_organisation_id: z.string().guid().optional().nullable(),
   client_name_text: z.string().optional().nullable(),
-  job_id: z.string().uuid().optional().nullable(),
+  job_id: z.string().guid().optional().nullable(),
   hh_job_number: z.number().int().optional().nullable(),
   // edit=true: the caller is the authoritative owner/job editor — SET fields
   // directly (so values can be CHANGED or CLEARED), not COALESCE-backfilled.

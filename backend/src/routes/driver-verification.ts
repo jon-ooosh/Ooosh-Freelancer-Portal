@@ -150,7 +150,7 @@ router.post('/auth/verify', sessionIssueLimiter, async (req: Request, res: Respo
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      res.status(400).json({ error: 'Invalid request', details: error.issues });
       return;
     }
     console.error('[driver-verification] Auth error:', error);
@@ -222,7 +222,7 @@ router.post('/send-code', authenticateApiKey, async (req: Request, res: Response
     res.json({ success: true, message: 'Verification code sent' });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      res.status(400).json({ error: 'Invalid request', details: error.issues });
       return;
     }
     console.error('[driver-verification] send-code error:', error);
@@ -286,7 +286,7 @@ router.post('/verify-code', authenticateApiKey, async (req: Request, res: Respon
     res.json({ success: true });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ success: false, error: 'Invalid request', details: error.errors });
+      res.status(400).json({ success: false, error: 'Invalid request', details: error.issues });
       return;
     }
     console.error('[driver-verification] verify-code error:', error);
@@ -299,8 +299,8 @@ const sendConfirmationSchema = z.object({
   email: z.string().email(),
   jobId: z.union([z.string(), z.number()]).optional(),
   driverName: z.string().optional(),
-  summary: z.record(z.any()),
-  jobDetails: z.record(z.any()).optional().nullable(),
+  summary: z.record(z.string(), z.any()),
+  jobDetails: z.record(z.string(), z.any()).optional().nullable(),
   signatureDate: z.string().optional().nullable(),
 });
 
@@ -409,7 +409,7 @@ router.post('/send-confirmation', authenticateApiKey, async (req: Request, res: 
     res.json({ success: true, message: 'Confirmation email sent' });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      res.status(400).json({ error: 'Invalid request', details: error.issues });
       return;
     }
     console.error('[driver-verification] send-confirmation error:', error);
@@ -557,7 +557,7 @@ router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      res.status(400).json({ error: 'Invalid request', details: error.issues });
       return;
     }
     console.error('[driver-verification] Next-step error:', error);
@@ -650,7 +650,7 @@ router.post('/dva-check-code', authenticateHireForm, async (req: HireFormRequest
     res.json({ success: true, alerted: isNewCode });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      res.status(400).json({ error: 'Invalid request', details: error.issues });
       return;
     }
     console.error('[driver-verification] DVA check code error:', error);
@@ -664,7 +664,7 @@ router.post('/dva-check-code', authenticateHireForm, async (req: HireFormRequest
 
 const updateSchema = z.object({
   email: z.string().email(),
-  updates: z.record(z.unknown()),
+  updates: z.record(z.string(), z.unknown()),
 });
 
 router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
@@ -1059,7 +1059,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
     }
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      res.status(400).json({ error: 'Invalid request', details: error.issues });
       return;
     }
     console.error('[driver-verification] Update error:', error);

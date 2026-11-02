@@ -309,7 +309,7 @@ router.post('/', intakeLimiter, authenticateEnquiryIntake, async (req: Request, 
   try {
     payload = intakeSchema.parse(req.body);
   } catch (err) {
-    res.status(422).json({ error: 'Validation failed', details: err instanceof z.ZodError ? err.errors : undefined });
+    res.status(422).json({ error: 'Validation failed', details: err instanceof z.ZodError ? err.issues : undefined });
     return;
   }
 
