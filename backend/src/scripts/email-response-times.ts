@@ -49,9 +49,12 @@ const WEBSITE_FORM_SENDER = 'info@oooshtours.co.uk';
 const MACHINE_SENDER = /^(no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?|notifications?|alerts?|automated)([+._-].*)?$/i;
 // Waits that started in the last day are too fresh to judge — left out.
 const JUDGE_AFTER_HOURS = 24;
-// Parallel Gmail calls. threads.get costs 10 quota units; 4 at a time stays
-// well inside Gmail's per-mailbox limit, and 429s are retried anyway.
+// Parallel Gmail calls, and a pace limit across all of them. Gmail caps
+// requests per mailbox per MINUTE, and OP's live ingestion shares that cap for
+// info@ — the first run hit it at full speed (403 "Quota exceeded"). One call
+// every 250ms (~2,400 quota units a minute) leaves plenty of room for both.
 const CONCURRENCY = 4;
+const MIN_GAP_MS = 250;
 
 const MIN_MS = 60_000;
 const HOUR_MS = 60 * MIN_MS;
@@ -168,15 +171,32 @@ interface GmailThreadMessage {
 }
 interface GmailThread { id: string; messages?: GmailThreadMessage[] }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Shared pace limit: each call takes the next free slot, MIN_GAP_MS apart.
+let nextSlotAt = 0;
+async function paced(): Promise<void> {
+  const now = Date.now();
+  const slot = Math.max(now, nextSlotAt);
+  nextSlotAt = slot + MIN_GAP_MS;
+  if (slot > now) await sleep(slot - now);
+}
+
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
+    await paced();
     try {
       return await fn();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const transient = /Gmail API (429|5\d\d)|fetch failed|ECONNRESET|ETIMEDOUT/i.test(msg);
-      if (!transient || attempt >= 5) throw err;
-      await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
+      // Gmail reports its rate limits as 403 (not only 429). The limit is per
+      // minute, so wait the minute out rather than retrying straight away.
+      const quota = /Gmail API (403|429)/.test(msg) && /quota|rate ?limit/i.test(msg);
+      const transient = /Gmail API 5\d\d|fetch failed|ECONNRESET|ETIMEDOUT/i.test(msg);
+      if ((!quota && !transient) || attempt >= 8) throw err;
+      const waitMs = quota ? 65_000 : 2000 * 2 ** attempt;
+      console.log(`  ${quota ? 'Gmail asked us to slow down' : 'Gmail hiccup'}; waiting ${Math.round(waitMs / 1000)}s and carrying on…`);
+      await sleep(waitMs);
     }
   }
 }
