@@ -43,6 +43,7 @@
  */
 import { query } from '../config/database';
 import { hhBroker } from './hirehop-broker';
+import { findIndexedInvoices, indexJobInvoices, invoicesFromBillingRows } from './hh-invoice-index';
 import { emailService } from './email-service';
 import { frontendLink } from '../config/app-urls';
 import { getSystemSetting } from '../routes/system-settings';
@@ -57,8 +58,14 @@ export const AMOUNT_TOLERANCE = 0.02;
 const DEFAULT_IGNORE_PAYERS = ['J WOOD'];
 /** The account name Wise prints in its "This notification is for the business account of …" banner. Staff-editable: system_settings.wise_business_account_name. */
 const DEFAULT_BUSINESS_ACCOUNT_NAME = 'Ooosh! Tours Ltd';
-/** How many recent jobs the invoice-number tier may read billing for (one HH call each, cached). */
-const INVOICE_SEARCH_POOL = 80;
+/**
+ * The invoice-number tier looks the number up in OP's own list first
+ * (services/hh-invoice-index.ts — no HireHop call). Only when that misses does it
+ * read billing, for at most this many jobs the Money overview says still owe money
+ * (one HH call each, ~2s apart). It used to read the 80 jobs with the latest START
+ * dates — next year's enquiries — so job 16387's invoice was never reached (196th).
+ */
+const INVOICE_SEARCH_POOL = 150;
 
 export interface WiseEmailInput {
   mailbox: string;
@@ -91,7 +98,7 @@ export interface IncomingCandidate {
   /** How this job came up: job_number · hh_invoice · payer_name */
   via: string;
   /** Figures the amount was compared against (for the resolve UI / email). */
-  expected?: { deposit: number; half: number; remaining: number; excess: number; halfExact?: number };
+  expected?: { deposit: number; half: number; remaining: number; excess: number; halfExact?: number; invoice?: number };
 }
 
 // ── Detection ──────────────────────────────────────────────────────────────
@@ -263,6 +270,7 @@ async function getMoneyPosition(job: JobRow): Promise<MoneyPosition> {
     { priority: 'low', cacheTTL: 60 },
   );
   if (billing.success && billing.data && Array.isArray((billing.data as any).rows)) {
+    void indexJobInvoices(job, (billing.data as any).rows);
     for (const row of (billing.data as any).rows) {
       const kind = parseInt(row.kind ?? '0');
       const data = row.data || {};
@@ -320,15 +328,43 @@ async function jobsByHhNumbers(numbers: number[]): Promise<JobRow[]> {
   return r.rows as JobRow[];
 }
 
-/** Tier 2: find recent jobs whose HireHop billing carries one of these invoice numbers. */
-async function jobsByHhInvoiceNumbers(invoiceNumbers: number[]): Promise<JobRow[]> {
-  if (invoiceNumbers.length === 0) return [];
+/**
+ * Tier 2: the jobs whose HireHop invoices carry one of these numbers, with what each
+ * matching invoice still owed when last read (summed per job; null when unknown).
+ * OP's invoice list first; then, only on a miss, the billing of the jobs that still
+ * owe money (stalest Money figures first), indexing each as it is read.
+ */
+async function jobsByHhInvoiceNumbers(invoiceNumbers: number[]): Promise<{ jobs: JobRow[]; owing: Map<string, number | null>; via: 'index' | 'sweep' | null }> {
+  const owing = new Map<string, number | null>();
+  if (invoiceNumbers.length === 0) return { jobs: [], owing, via: null };
+  const addOwing = (jobId: string, o: number | null) => {
+    const prev = owing.get(jobId);
+    owing.set(jobId, o === null || prev === null ? null : (prev ?? 0) + o);
+  };
+
+  const indexed = await findIndexedInvoices(invoiceNumbers);
+  if (indexed.length > 0) {
+    for (const inv of indexed) addOwing(inv.job_id, inv.owing);
+    const r = await query(
+      `SELECT ${JOB_COLS} FROM jobs WHERE id = ANY($1::uuid[]) AND COALESCE(is_deleted, false) = false`,
+      [[...owing.keys()]],
+    );
+    return { jobs: r.rows as JobRow[], owing, via: 'index' };
+  }
+
+  // Not in the list yet (an invoice raised in HireHop since that job was last read).
   const pool = await query(
-    `SELECT ${JOB_COLS} FROM jobs
-      WHERE hh_job_number IS NOT NULL
-        AND (pipeline_status IS NULL OR pipeline_status NOT IN ('cancelled', 'lost'))
-        AND (job_end IS NULL OR job_end >= NOW() - INTERVAL '120 days')
-      ORDER BY job_date DESC NULLS LAST
+    `SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name, j.job_value, j.pipeline_status
+       FROM job_financials jf
+       JOIN jobs j ON j.id = jf.job_id
+       LEFT JOIN job_balance_overrides o ON o.job_id = jf.job_id
+      WHERE j.hh_job_number IS NOT NULL
+        AND jf.balance_outstanding > 0.01
+        AND o.job_id IS NULL
+        AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
+        AND COALESCE(j.is_internal, false) = false
+        AND COALESCE(j.is_deleted, false) = false
+      ORDER BY jf.last_synced_at ASC
       LIMIT $1`,
     [INVOICE_SEARCH_POOL],
   );
@@ -341,18 +377,19 @@ async function jobsByHhInvoiceNumbers(invoiceNumbers: number[]): Promise<JobRow[
         { main_id: job.hh_job_number, type: 1 },
         { priority: 'low', cacheTTL: 600 },
       );
-      const rows = billing.success ? ((billing.data as any)?.rows || []) : [];
-      for (const row of rows) {
-        if (parseInt(row.kind ?? '0') !== 1) continue;
-        const num = String(row.data?.NUMBER || row.number || '');
-        const digits = num.replace(/\D/g, '').replace(/^0+/, '');
-        if (digits && wanted.has(digits)) { hits.push(job); break; }
+      const rows = billing.success ? (billing.data as any)?.rows : undefined;
+      if (!Array.isArray(rows)) continue;
+      void indexJobInvoices(job, rows);
+      const matching = invoicesFromBillingRows(rows).filter(i => wanted.has(i.digits));
+      if (matching.length > 0) {
+        hits.push(job);
+        for (const m of matching) addOwing(job.id, m.owing);
       }
     } catch (err) {
       console.warn(`[wise-incoming] billing read failed for HH#${job.hh_job_number}:`, err);
     }
   }
-  return hits;
+  return { jobs: hits, owing, via: hits.length > 0 ? 'sweep' : null };
 }
 
 /** Tier 4 (evidence only): jobs with money outstanding whose client/company resembles the payer. */
@@ -510,12 +547,18 @@ export async function matchIncomingPayment(p: {
   if (byJobNumber.length > 0) notes.push(`job number in reference: ${byJobNumber.map(j => j.hh_job_number).join(', ')}`);
 
   // Tier 2 — HireHop invoice number (explicit OT-INV-…, or bare digits when nothing else hit)
+  let invoiceOwing = new Map<string, number | null>();
   if (candidates.length === 0) {
     const invTokens = invoiceTokens.length > 0 ? invoiceTokens : numberTokens;
     if (invTokens.length > 0) {
       const byInvoice = await jobsByHhInvoiceNumbers(invTokens);
-      add(byInvoice, 'hh_invoice');
-      if (byInvoice.length > 0) notes.push(`HireHop invoice number in reference`);
+      invoiceOwing = byInvoice.owing;
+      add(byInvoice.jobs, 'hh_invoice');
+      if (byInvoice.jobs.length > 0) {
+        notes.push(`HireHop invoice number in reference (job ${byInvoice.jobs.map(j => j.hh_job_number).join(', ')}${byInvoice.via === 'sweep' ? ', found by reading billing' : ''})`);
+      } else if (invoiceTokens.length > 0) {
+        notes.push(`invoice ${invoiceTokens.join(', ')} not found on any job OP knows about`);
+      }
     }
   }
 
@@ -567,6 +610,8 @@ export async function matchIncomingPayment(p: {
     try {
       const pos = await getMoneyPosition(job);
       c.expected = { deposit: round2(pos.requiredDeposit), half: round2(pos.half), remaining: round2(pos.remaining), excess: round2(pos.excessOutstanding), halfExact: round2(pos.halfExact) };
+      const owed = invoiceOwing.get(c.job_id);
+      if (owed !== undefined && owed !== null && owed > 0) c.expected.invoice = round2(owed);
       c.via += pos.depositPaid ? '' : '';
       (c as any)._depositPaid = pos.depositPaid;
     } catch (err) {
@@ -578,13 +623,21 @@ export async function matchIncomingPayment(p: {
   if (strongCandidates.length === 1 && strongCandidates[0].expected) {
     const c = strongCandidates[0];
     const e = c.expected!;
-    const hireHit = near(p.amount, e.deposit) || near(p.amount, e.half) || near(p.amount, e.halfExact ?? 0) || near(p.amount, e.remaining);
+    const hireHit = near(p.amount, e.deposit) || near(p.amount, e.half) || near(p.amount, e.halfExact ?? 0) || near(p.amount, e.remaining)
+      || (e.invoice !== undefined && near(p.amount, e.invoice));
     const excessHit = near(p.amount, e.excess);
     const hint = referenceHintsExcess(p.reference);
     let paymentType: RecordPaymentType | null = null;
     if (hireHit && excessHit) paymentType = hint ? 'excess' : null; // ambiguous unless the reference says excess
     else if (excessHit) paymentType = 'excess';
     else if (hireHit) paymentType = hint ? null : ((c as any)._depositPaid ? 'balance' : 'deposit');
+    // A cancelled job owes its FEE, not the hire (cancellation-close.ts) — the figures
+    // above are the hire's, so never record on one automatically.
+    const cancelled = jobById.get(c.job_id)?.pipeline_status === 'cancelled';
+    if (paymentType && cancelled) {
+      notes.push(`HH#${c.hh_job_number} is cancelled — it owes its fee, so record this by hand`);
+      paymentType = null;
+    }
     if (paymentType) {
       return {
         kind: 'confident',
@@ -595,10 +648,10 @@ export async function matchIncomingPayment(p: {
         paymentType,
       };
     }
-    notes.push(`amount £${p.amount.toFixed(2)} does not equal deposit £${e.deposit}, half £${e.half}, remaining £${e.remaining} or excess £${e.excess}`);
+    if (!cancelled) notes.push(`amount £${p.amount.toFixed(2)} does not equal deposit £${e.deposit}, half £${e.half}, remaining £${e.remaining}${e.invoice !== undefined ? `, invoice owing £${e.invoice}` : ''} or excess £${e.excess}`);
   } else if (strongCandidates.length > 1) {
     notes.push('more than one job referenced');
-  } else if (strongCandidates.length === 0) {
+  } else if (strongCandidates.length === 0 && invoiceTokens.length === 0) {
     notes.push('no job or invoice number in the reference');
   }
 
@@ -690,9 +743,108 @@ function wisePaymentReference(row: { transfer_number: string | null; reference: 
   return parts.join(' - ').slice(0, 255);
 }
 
+// ── Already recorded by hand? ──────────────────────────────────────────────
+
+/** The bank-transfer methods a hand-recorded Wise payment could have been entered as. */
+const BANK_METHODS = ['wise_bacs', 'lloyds_bank', 'bank_transfer'];
+
+export interface ExistingJobPayment {
+  id: string;
+  amount: number;
+  payment_type: string;
+  payment_method: string;
+  payment_date: string;
+  hirehop_deposit_id: number | null;
+  recorded_by_name: string | null;
+}
+
+/**
+ * A bank payment of the same amount (within 2p) already on this job, from two weeks
+ * before the transfer arrived to a month after, that no other queue row is linked
+ * to. Someone recorded it from the Money tab instead of the email link (job 16387,
+ * 2 Nov 2026) — recording it again would make a second HireHop deposit and a second
+ * Xero payment. A warning, not a gate: two equal instalments are possible, so a
+ * person can still record it anyway.
+ */
+export async function findAlreadyRecordedPayment(jobId: string, amount: number, receivedAt: Date | string): Promise<ExistingJobPayment | null> {
+  const r = await query(
+    `SELECT jp.id, jp.amount, jp.payment_type, jp.payment_method, jp.payment_date, jp.hirehop_deposit_id,
+            COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS recorded_by_name
+       FROM job_payments jp
+       LEFT JOIN users u ON u.id = jp.recorded_by
+       LEFT JOIN people pu ON pu.id = u.person_id
+      WHERE jp.job_id = $1
+        AND ABS(jp.amount - $2) <= $3
+        AND jp.payment_status = 'completed'
+        AND jp.payment_type IN ('deposit', 'balance', 'excess')
+        AND jp.payment_method = ANY($4::text[])
+        AND jp.payment_date BETWEEN $5::timestamptz - INTERVAL '14 days' AND $5::timestamptz + INTERVAL '30 days'
+        AND NOT EXISTS (SELECT 1 FROM incoming_bank_payments i WHERE i.job_payment_id = jp.id)
+      ORDER BY ABS(EXTRACT(EPOCH FROM (jp.payment_date - $5::timestamptz)))
+      LIMIT 1`,
+    [jobId, amount, AMOUNT_TOLERANCE, BANK_METHODS, receivedAt],
+  );
+  const x = r.rows[0];
+  if (!x) return null;
+  return {
+    id: x.id,
+    amount: parseFloat(x.amount),
+    payment_type: x.payment_type,
+    payment_method: x.payment_method,
+    payment_date: x.payment_date instanceof Date ? x.payment_date.toISOString() : String(x.payment_date),
+    hirehop_deposit_id: x.hirehop_deposit_id ?? null,
+    recorded_by_name: x.recorded_by_name ?? null,
+  };
+}
+
+function describeExisting(e: ExistingJobPayment): string {
+  const when = new Date(e.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'Europe/London' });
+  return `£${e.amount.toFixed(2)} (${e.payment_type}) is already recorded on this job${e.recorded_by_name ? ` by ${e.recorded_by_name}` : ''} on ${when}${e.hirehop_deposit_id ? `, HireHop deposit ${e.hirehop_deposit_id}` : ''}`;
+}
+
+/**
+ * Close a queue row against a payment someone already recorded by hand — nothing is
+ * recorded again. The row becomes 'recorded', pointing at that payment.
+ */
+export async function linkIncomingToExistingPayment(opts: {
+  incomingId: string;
+  jobPaymentId: string;
+  actorUserId: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const rowRes = await query(`SELECT * FROM incoming_bank_payments WHERE id = $1`, [opts.incomingId]);
+  const row = rowRes.rows[0];
+  if (!row) return { ok: false, error: 'Incoming payment not found' };
+  if (row.status !== 'unmatched') return { ok: false, error: `This payment is already ${row.status}` };
+
+  const pRes = await query(
+    `SELECT id, job_id, amount, payment_type, hirehop_deposit_id FROM job_payments WHERE id = $1`,
+    [opts.jobPaymentId],
+  );
+  const p = pRes.rows[0];
+  if (!p) return { ok: false, error: 'That job payment no longer exists' };
+  if (Math.abs(parseFloat(p.amount) - parseFloat(row.amount)) > AMOUNT_TOLERANCE) {
+    return { ok: false, error: `That payment is £${parseFloat(p.amount).toFixed(2)}, not £${parseFloat(row.amount).toFixed(2)}` };
+  }
+  const taken = await query(`SELECT 1 FROM incoming_bank_payments WHERE job_payment_id = $1 AND id <> $2`, [p.id, opts.incomingId]);
+  if (taken.rows.length > 0) return { ok: false, error: 'That job payment is already linked to another Wise transfer' };
+
+  await query(
+    `UPDATE incoming_bank_payments
+        SET status = 'recorded', matched_job_id = $2, payment_type = $3, job_payment_id = $4, hh_deposit_id = $5,
+            match_method = 'linked_existing',
+            match_notes = COALESCE(match_notes || '; ', '') || 'Already recorded by hand — linked to that payment, nothing recorded again',
+            resolved_by = $6, resolved_at = NOW()
+      WHERE id = $1 AND status = 'unmatched'`,
+    [opts.incomingId, p.job_id, p.payment_type, p.id, p.hirehop_deposit_id ?? null, opts.actorUserId],
+  );
+  return { ok: true };
+}
+
 /**
  * Record an incoming payment on a job through the shared record-payment path and
  * stamp the row. Used by the automatic matcher and by the resolve endpoint.
+ * Refuses when the same money already looks recorded on the job (returns
+ * `existing`) unless `allowDuplicate` — the automatic matcher never passes it.
  */
 export async function recordIncomingPaymentOnJob(opts: {
   incomingId: string;
@@ -702,13 +854,26 @@ export async function recordIncomingPaymentOnJob(opts: {
   actorUserId: string | null;
   matchMethod: string;
   matchNotes: string;
-}): Promise<{ ok: boolean; error?: string; hh_push_error?: string | null }> {
+  allowDuplicate?: boolean;
+}): Promise<{ ok: boolean; error?: string; hh_push_error?: string | null; existing?: ExistingJobPayment }> {
   const rowRes = await query(`SELECT * FROM incoming_bank_payments WHERE id = $1`, [opts.incomingId]);
   const row = rowRes.rows[0];
   if (!row) return { ok: false, error: 'Incoming payment not found' };
   if (row.status === 'recorded') return { ok: false, error: 'Already recorded' };
 
   const amount = opts.amount ?? parseFloat(row.amount);
+
+  if (!opts.allowDuplicate) {
+    const existing = await findAlreadyRecordedPayment(opts.jobId, amount, row.received_at);
+    if (existing) {
+      const msg = describeExisting(existing);
+      await query(
+        `UPDATE incoming_bank_payments SET matched_job_id = $2, match_method = $3, match_notes = $4 WHERE id = $1`,
+        [opts.incomingId, opts.jobId, opts.matchMethod, `${opts.matchNotes}; not recorded: ${msg} — link it, or record anyway if it is a second payment`],
+      );
+      return { ok: false, error: msg, existing };
+    }
+  }
   const result = await recordPayment(
     opts.jobId,
     {
@@ -757,13 +922,19 @@ export async function rematchIncomingPayment(incomingId: string): Promise<{ ok: 
     payerName: row.payer_name, amount: parseFloat(row.amount), currency: row.currency || 'GBP', reference: row.reference,
   });
   const xi = outcome.xeroInvoices || [];
+  let suffix = outcome.kind === 'confident' || outcome.kind === 'confident_xero'
+    ? ' (would match automatically now — press Record to confirm)' : '';
+  if (outcome.kind === 'confident' && outcome.job) {
+    const existing = await findAlreadyRecordedPayment(outcome.job.id, parseFloat(row.amount), row.received_at);
+    if (existing) suffix = ` — but ${describeExisting(existing)}: link it rather than recording it again`;
+  }
   await query(
     `UPDATE incoming_bank_payments
         SET status = 'unmatched', match_method = $2, match_notes = $3, candidates = $4,
             xero_invoice_id = $5, xero_invoice_number = $6, xero_invoices = $7,
             matched_job_id = CASE WHEN $8::uuid IS NULL THEN matched_job_id ELSE $8::uuid END
       WHERE id = $1`,
-    [incomingId, outcome.method, `${outcome.notes}${outcome.kind === 'confident' || outcome.kind === 'confident_xero' ? ' (would match automatically now — press Record to confirm)' : ''}`,
+    [incomingId, outcome.method, `${outcome.notes}${suffix}`,
      JSON.stringify(outcome.candidates), xi[0]?.invoice_id ?? null, xi.map(i => i.invoice_number).join(' + ') || null, JSON.stringify(xi),
      null],
   );
@@ -805,7 +976,7 @@ export async function sendUnmatchedIncomingAlert(incomingId: string): Promise<vo
   const candidateHtml = candidates.length
     ? `<p><strong>Possible jobs:</strong></p><ul>${candidates.map(c =>
         `<li>#${esc(c.hh_job_number)} ${esc(c.job_name || '')} — ${esc(c.client_name || '')} <em>(${esc(c.via.replace('_', ' '))})</em>${
-          c.expected ? ` — expects deposit £${c.expected.deposit.toFixed(2)}, half £${c.expected.half.toFixed(2)}, remaining £${c.expected.remaining.toFixed(2)}, excess £${c.expected.excess.toFixed(2)}` : ''
+          c.expected ? ` — expects deposit £${c.expected.deposit.toFixed(2)}, half £${c.expected.half.toFixed(2)}, remaining £${c.expected.remaining.toFixed(2)}${c.expected.invoice !== undefined ? `, invoice owing £${c.expected.invoice.toFixed(2)}` : ''}, excess £${c.expected.excess.toFixed(2)}` : ''
         }</li>`).join('')}</ul>`
     : `<p>No job could be found from the reference or the payer name.</p>`;
   const html = `

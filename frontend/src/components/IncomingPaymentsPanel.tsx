@@ -6,6 +6,10 @@
  * excess; the backend then records it through the same path as "Record Payment"
  * (OP row, HireHop deposit on the Wise bank, client email). "Not a job payment" marks
  * it ignored with a note - nothing is deleted. Deep link: /money/overview?incoming=<id>.
+ *
+ * If the same money is already on the job (someone recorded it from the Money tab),
+ * Record is refused with a 409 and the row offers "Link to that payment" (nothing is
+ * recorded again) or "Record anyway" for a genuine second payment of the same amount.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -17,7 +21,17 @@ interface Candidate {
   job_name: string | null;
   client_name: string | null;
   via: string;
-  expected?: { deposit: number; half: number; remaining: number; excess: number };
+  expected?: { deposit: number; half: number; remaining: number; excess: number; invoice?: number };
+}
+
+/** A payment already on the job that looks like this transfer (409 from Record). */
+interface ExistingPayment {
+  id: string;
+  amount: number;
+  payment_type: string;
+  payment_date: string;
+  hirehop_deposit_id: number | null;
+  recorded_by_name: string | null;
 }
 
 interface IncomingRow {
@@ -122,7 +136,7 @@ export default function IncomingPaymentsPanel() {
                     <td className="py-1 pr-2">
                       {r.status === 'recorded' && r.matched_job_id ? (
                         <Link to={`/jobs/${r.matched_job_id}`} className="text-ooosh-600 hover:underline">
-                          #{r.matched_hh_job_number} {r.payment_type === 'excess' ? 'excess' : 'hire'}
+                          #{r.matched_hh_job_number} {r.payment_type === 'excess' ? 'excess' : 'hire'}{r.match_method === 'linked_existing' ? ' (already recorded, linked)' : ''}
                         </Link>
                       ) : r.status === 'recorded' && r.xero_payment_id ? (
                         <span className="text-gray-700">Xero {r.xero_invoice_number}</span>
@@ -144,7 +158,9 @@ export default function IncomingPaymentsPanel() {
 }
 
 function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highlighted: boolean; onDone: () => void }) {
-  const [hhNumber, setHhNumber] = useState<string>('');
+  // Pre-filled when the matcher (or a refused record) already settled on a job
+  const [hhNumber, setHhNumber] = useState<string>(row.matched_hh_job_number ? String(row.matched_hh_job_number) : '');
+  const [existing, setExisting] = useState<{ message: string; payment: ExistingPayment } | null>(null);
   const [paymentType, setPaymentType] = useState<'deposit' | 'balance' | 'excess'>('deposit');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -152,14 +168,15 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
   const candidates = Array.isArray(row.candidates) ? row.candidates : [];
   const unparsed = row.match_method === 'unparsed';
 
-  const record = async () => {
+  const record = async (allowDuplicate = false) => {
     const n = parseInt(hhNumber, 10);
     if (!n) { setError('Enter the HireHop job number'); return; }
-    setBusy(true); setError(''); setNotice('');
+    if (allowDuplicate && !window.confirm(`Record ${money(row.amount)} on #${n} as a SECOND payment? This makes another HireHop deposit and another Xero payment.`)) return;
+    setBusy(true); setError(''); setNotice(''); setExisting(null);
     try {
       const r = await api.post<{ data: { ok: boolean }; hh_push_error: string | null }>(
         `/money/incoming-payments/${row.id}/record`,
-        { hh_job_number: n, payment_type: paymentType },
+        { hh_job_number: n, payment_type: paymentType, ...(allowDuplicate ? { allow_duplicate: true } : {}) },
       );
       if (r.hh_push_error) {
         setNotice(`Recorded in OP, but the HireHop push failed: ${r.hh_push_error}`);
@@ -168,7 +185,25 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
         onDone();
       }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to record');
+      const err = e as { status?: number; body?: { existing_payment?: ExistingPayment } };
+      if (err.status === 409 && err.body?.existing_payment) {
+        setExisting({ message: e instanceof Error ? e.message : 'Already recorded on this job', payment: err.body.existing_payment });
+      } else {
+        setError(e instanceof Error ? e.message : 'Failed to record');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const linkExisting = async () => {
+    if (!existing) return;
+    setBusy(true); setError('');
+    try {
+      await api.post(`/money/incoming-payments/${row.id}/link-existing`, { job_payment_id: existing.payment.id });
+      onDone();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to link');
     } finally {
       setBusy(false);
     }
@@ -244,7 +279,7 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
               type="button"
               onClick={() => setHhNumber(String(c.hh_job_number))}
               className={`text-xs px-2 py-1 rounded border ${hhNumber === String(c.hh_job_number) ? 'border-ooosh-500 bg-ooosh-50 text-ooosh-800' : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-gray-300'}`}
-              title={c.expected ? `Expects deposit ${money(c.expected.deposit)} · half ${money(c.expected.half)} · remaining ${money(c.expected.remaining)} · excess ${money(c.expected.excess)}` : ''}
+              title={c.expected ? `Expects deposit ${money(c.expected.deposit)} · half ${money(c.expected.half)} · remaining ${money(c.expected.remaining)}${c.expected.invoice !== undefined ? ` · invoice owing ${money(c.expected.invoice)}` : ''} · excess ${money(c.expected.excess)}` : ''}
             >
               #{c.hh_job_number} {c.job_name ? `${c.job_name} ` : ''}<span className="text-gray-400">({c.client_name || '-'}, {c.via.replace('_', ' ')})</span>
             </button>
@@ -273,7 +308,7 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
           </select>
           <button
             type="button"
-            onClick={record}
+            onClick={() => record()}
             disabled={busy}
             className="px-3 py-1.5 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded disabled:opacity-50"
           >
@@ -315,6 +350,30 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
         <div className="mt-2 flex items-center gap-2">
           <span className="text-xs text-gray-600">Open the email in jon@ and record the payment from the job's Money tab, then:</span>
           <button type="button" onClick={ignore} disabled={busy} className="text-sm text-gray-600 hover:text-gray-900 underline">Mark as handled</button>
+        </div>
+      )}
+      {existing && (
+        <div className="mt-2 p-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-900">
+          <div>Not recorded: {existing.message}.</div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={linkExisting}
+              disabled={busy}
+              className="px-2.5 py-1 text-xs font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded disabled:opacity-50"
+              title="Close this transfer against that payment - nothing is recorded again"
+            >
+              Link to that payment
+            </button>
+            <button
+              type="button"
+              onClick={() => record(true)}
+              disabled={busy}
+              className="px-2.5 py-1 text-xs text-amber-900 underline disabled:opacity-50"
+            >
+              Record anyway (a second payment)
+            </button>
+          </div>
         </div>
       )}
       {error && <div className="mt-1 text-xs text-red-600">{error}</div>}

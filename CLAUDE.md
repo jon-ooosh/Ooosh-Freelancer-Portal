@@ -479,7 +479,8 @@ existing definition:
 | A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
 | Which jobs belong to the same festival? Its value, lead, default dates | `services/job-projects.ts` (`getProject()` roll-ups; quote options inside count once) |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
-| A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee |
+| A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee. Record refuses (409) when the same money is already on the job by hand — "Link to that payment" or "Record anyway" |
+| Which job does a HireHop invoice number (`OT-INV-12345`) belong to? | `services/hh-invoice-index.ts` (`hh_invoice_index`, mig 326) — filled from the Money tab summary's own billing read, HireHop's `invoice.*` webhooks and the matcher; never a sweep across jobs to answer it |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
 `lib/jobOrgName.ts`, `lib/vehiclePrep.ts`, `lib/preauth.ts`, `lib/revisitDate.ts`,
