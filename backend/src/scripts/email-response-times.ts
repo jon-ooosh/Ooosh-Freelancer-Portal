@@ -16,7 +16,8 @@
  *
  * Counted as a client email: anything from an outside address that isn't
  * automated (Auto-Submitted, bulk/list mail, newsletters, no-reply senders),
- * plus website enquiry form emails (From info@, the client in Reply-To).
+ * plus website enquiry form emails (from one of our addresses, the client in
+ * Reply-To).
  * Our own system mail (notifications@) and internal mail are ignored.
  *
  * "Working time" = time inside the open hours only (--open/--close, every day,
@@ -43,8 +44,11 @@ import { gmailApiGet, getPrimaryMailbox, isGmailConfigured } from '../config/gma
 // ── Settings ───────────────────────────────────────────────────────────────
 
 const OWN_DOMAIN = 'oooshtours.co.uk';
-// The website enquiry form sends From info@ with the real client in Reply-To.
-const WEBSITE_FORM_SENDER = 'info@oooshtours.co.uk';
+// The website enquiry form is documented as sending From info@ with the real
+// client in Reply-To — but the first live run found none from info@, so any
+// address of ours (bar OP's own system sender) that arrives with a client in
+// Reply-To counts. Section 9 of the report lists what our addresses sent in.
+const OP_SYSTEM_SENDER = 'notifications@oooshtours.co.uk';
 // Senders that are machines, not people (local part before the @).
 const MACHINE_SENDER = /^(no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?|notifications?|alerts?|automated)([+._-].*)?$/i;
 // Waits that started in the last day are too fresh to judge — left out.
@@ -257,6 +261,9 @@ function decodeSnippet(s: string): string {
     .replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
 }
 
+/** Our own addresses that sent mail INTO info@ (not via Gmail) — report section 9. */
+const ownSenders = new Map<string, { count: number; withClientReplyTo: number; subject: string }>();
+
 function classify(m: GmailThreadMessage): Msg | null {
   const labels = m.labelIds || [];
   if (labels.includes('DRAFT') || !m.internalDate) return null;
@@ -281,11 +288,18 @@ function classify(m: GmailThreadMessage): Msg | null {
   const ignore: Msg = { ...base, kind: 'ignore', clientAddr: null, sentTo: [], fromWebsiteForm: false };
   if (!from) return ignore;
 
-  // Website enquiry form: From info@, the client in Reply-To.
-  if (from === WEBSITE_FORM_SENDER && replyTo && !isOwn(replyTo)) {
-    return { ...base, kind: 'client', clientAddr: replyTo, sentTo: [], fromWebsiteForm: true };
+  if (isOwn(from)) {
+    const externalReplyTo = replyTo != null && !isOwn(replyTo);
+    const seen = ownSenders.get(from) || { count: 0, withClientReplyTo: 0, subject: base.subject };
+    seen.count++;
+    if (externalReplyTo) seen.withClientReplyTo++;
+    ownSenders.set(from, seen);
+    // Website enquiry form: one of our addresses, the client in Reply-To.
+    if (externalReplyTo && from !== OP_SYSTEM_SENDER) {
+      return { ...base, kind: 'client', clientAddr: replyTo, sentTo: [], fromWebsiteForm: true };
+    }
+    return ignore; // our system mail, internal mail
   }
-  if (isOwn(from)) return ignore; // our system mail, internal mail
 
   const autoSubmitted = (header('Auto-Submitted') || '').toLowerCase().trim();
   const precedence = (header('Precedence') || '').toLowerCase().trim();
@@ -601,6 +615,13 @@ async function main() {
   say(table(['arrived', 'wait', 'clock', 'from', 'subject'],
     [...answered].sort((a, b) => b.workMins! - a.workMins!).slice(0, 15).map((r) => [
       fmtWhen(r.wait.startAt), fmtMins(r.workMins), fmtMins(r.clockMins), r.from, r.wait.subject.slice(0, 50),
+    ])));
+  say();
+  say('9. OUR OWN ADDRESSES THAT SENT MAIL INTO info@ (top 10; a check that website enquiries are found)');
+  say('  "client in Reply-To" ones are counted above as website form emails; the rest are ignored.');
+  say(table(['from', 'emails', 'client in Reply-To', 'example subject'],
+    [...ownSenders.entries()].sort((a, b) => b[1].count - a[1].count).slice(0, 10).map(([addr, s]) => [
+      addr, String(s.count), String(s.withClientReplyTo), s.subject.slice(0, 45),
     ])));
   say();
 
