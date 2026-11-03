@@ -26,6 +26,7 @@ import { query } from '../config/database';
 import { getGmailProfile, gmailApiGet, getPrimaryMailbox, isGmailConfigured } from '../config/gmail';
 import { matchEmailToJob, extractEmailAddress, extractReferencedJobNumbers } from './email-matcher';
 import { isWiseMoneyReceivedEmail, handleWiseEmail } from './wise-incoming';
+import { isTransientIngestError } from './gmail-errors';
 import { getSystemSetting } from '../routes/system-settings';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
@@ -617,6 +618,11 @@ export async function runIngestionForMailbox(
       try {
         await processMessage(mailbox, id, counters, opts.queueUnmatched);
       } catch (err) {
+        // A temporary failure (Gmail rate limit / outage, network, database):
+        // stop WITHOUT moving the bookmark, so the next run retries this message
+        // and the rest — the ones already done are skipped as duplicates.
+        // Otherwise the email would never reach OP (gmail-errors.ts).
+        if (isTransientIngestError(err)) throw err;
         // One bad message shouldn't stall the batch; log + continue.
         console.error(`[gmail-ingestion] message ${id} (${mailbox}) failed:`, err);
       }
