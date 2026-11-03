@@ -4,6 +4,21 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { api } from '../services/api';
 import { loginWithPasskey, passkeysSupported, wasCancelled } from '../lib/passkeys';
 
+// ?redirect= comes from the link, so anyone can write it. Only a path on THIS
+// site may pass: "//evil.com" and "/\evil.com" both start with "/" but a
+// browser reads them as another website. Today the browser itself refuses to
+// switch site this way (history.replaceState throws, so staff saw "Failed to
+// execute 'replaceState'" after a good login), and React Router 6 doesn't
+// catch "/\" (Dependabot alert, Nov 2026). Checking here means we rely on neither.
+function isSameSitePath(p: string): boolean {
+  if (!p.startsWith('/') || p.startsWith('//') || p.includes('\\')) return false;
+  try {
+    return new URL(p, window.location.origin).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 interface LoginResponse {
   user: {
     id: string;
@@ -58,7 +73,7 @@ export default function LoginPage() {
     }
     const params = new URLSearchParams(location.search);
     const redirect = params.get('redirect');
-    if (redirect && redirect.startsWith('/') && !redirect.startsWith('/login')) {
+    if (redirect && isSameSitePath(redirect) && !redirect.startsWith('/login')) {
       return redirect;
     }
     return '/';
