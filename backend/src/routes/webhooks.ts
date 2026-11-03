@@ -25,6 +25,7 @@ import { closeJobRequirements, fireEventTriggeredReminders } from '../services/r
 import { afterOptionConfirmed } from '../services/option-confirm';
 import { jobNameKeepingOptionSuffixSql } from '../services/job-groups';
 import { sendLastMinuteAlert } from '../services/money-emails';
+import { refreshInvoiceIndexForHhJob } from '../services/hh-invoice-index';
 import { isUnwonTransition, isBookingWonTransition } from '../services/pipeline-stage';
 
 const router = Router();
@@ -130,6 +131,8 @@ router.post('/hirehop', async (req: Request, res: Response) => {
       result = await handleJobUpdate(event, data, changes, topLevelJobId);
     } else if (event.startsWith('contact.')) {
       result = await handleContactChange(event, data, changes);
+    } else if (event.startsWith('invoice.')) {
+      result = await handleInvoiceChange(event, data, topLevelJobId);
     } else {
       result = { success: true, message: `Unhandled event type: ${event} — logged only` };
     }
@@ -567,6 +570,34 @@ async function handleContactChange(
   return {
     success: true,
     message: `Contact event ${event} for ID ${contactId} — logged, will be picked up by next contact sync`,
+  };
+}
+
+// ── Invoice Change Handler ───────────────────────────────────────────────
+// invoice.created / .status.updated / .updated / .deleted → re-read that job's
+// billing so the Wise matcher's invoice-number list is current the moment an invoice
+// is approved (services/hh-invoice-index.ts). Needs the invoice events ticked on the
+// HireHop webhook (Settings › Company settings › Webhooks). We have not captured an
+// invoice payload yet, so the job number is looked for in the likely places; if none
+// is found the payload's keys are logged and the nightly refresh catches it up.
+
+async function handleInvoiceChange(
+  event: string,
+  data: Record<string, unknown> | undefined,
+  topLevelJobId: unknown,
+): Promise<{ success: boolean; message: string }> {
+  const possible = [topLevelJobId, data?.MAIN_ID, data?.main_id, data?.JOB_ID, data?.job_id, data?.JOB, data?.job];
+  for (const v of possible) {
+    const n = parseInt(String(v ?? ''), 10);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const count = await refreshInvoiceIndexForHhJob(n);
+    if (count !== null) {
+      return { success: true, message: `${event}: invoice list refreshed for job ${n} (${count} numbered invoice${count === 1 ? '' : 's'})` };
+    }
+  }
+  return {
+    success: true,
+    message: `${event}: no OP job found in the payload (data keys: ${data ? Object.keys(data).join(', ') : 'none'}) — logged only`,
   };
 }
 

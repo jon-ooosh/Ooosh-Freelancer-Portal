@@ -365,6 +365,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '323_kiosk_devices.sql',
         '324_band_watches.sql',
         '325_site_codes.sql',
+        '326_hh_invoice_index.sql',
       ];
 
       for (const migration of migrations) {

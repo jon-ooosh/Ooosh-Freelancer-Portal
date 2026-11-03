@@ -843,6 +843,24 @@ hid itself. Fixed to the `people` join the rest of the file uses. The overview's
 deposit / excess queries also now exclude `is_deleted` jobs (the soft-deleted scratch shop job
 16749 was showing with £9 outstanding).
 
+**3 Nov 2026 — the invoice-number tier rebuilt, and a double-record guard.** Job 16387: £3,042 from
+Skindred Llp, reference `OT-INV-12347`, the exact balance on that invoice, was queued as "no job or
+invoice number in the reference". The tier read the billing of the 80 jobs with the latest START dates —
+next year's enquiries — and 16387 (finished, completed) was 196th. Now `services/hh-invoice-index.ts`
+keeps every job's invoice numbers (`hh_invoice_index`, migration 326; its own table so a refresh never
+makes the Money overview think a job's figures are fresh), filled from the billing read the Money tab
+summary already makes (every open + the nightly 03:00 refresh), from HireHop's `invoice.*` webhooks
+(`routes/webhooks.ts` `handleInvoiceChange()` — one billing read; the payload's job number is looked for
+in `job`, `MAIN_ID`, `JOB_ID`, as no invoice payload had been captured yet) and from the matcher's own
+reads. The matcher looks the number up there; only on a miss does it read billing for up to 150 jobs the
+overview says still owe money, stalest first. An invoice's owing counts as a hire figure for the amount
+check, and a cancelled job is never recorded automatically. Seeded once with
+`src/scripts/backfill-invoice-index.ts --commit`. Same day, the money had been recorded by a colleague from
+the Money tab instead of the alert link, and the queue's Record would have recorded it AGAIN (a second
+HireHop deposit and Xero payment): `findAlreadyRecordedPayment()` now refuses Record with a 409 naming
+the payment, and the panel offers "Link to that payment" (`POST /incoming-payments/:id/link-existing`,
+nothing recorded) or "Record anyway" for a genuine second payment of the same amount.
+
 **`services/record-payment.ts`** is the staff "Record Payment" route's 330 lines lifted into a
 service (route = validate + relay, same HTTP contract) so the matcher — and the planned
 Stripe Terminal module — record through one chain.

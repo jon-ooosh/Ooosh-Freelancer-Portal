@@ -47,7 +47,8 @@ import { getFrontendUrl } from '../config/app-urls';
 import { getPaymentPortalLink } from '../services/payment-portal-link';
 import { recordPayment } from '../services/record-payment';
 import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
-import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment } from '../services/wise-incoming';
+import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment, linkIncomingToExistingPayment } from '../services/wise-incoming';
+import { indexJobInvoices } from '../services/hh-invoice-index';
 import { ukToday } from '../services/uk-date';
 import { fireArrivalHook } from '../services/close-out-arrival';
 
@@ -1182,12 +1183,14 @@ const incomingRecordSchema = z.object({
   hh_job_number: z.number().int().positive().optional(),
   payment_type: z.enum(['deposit', 'balance', 'excess']),
   amount: z.number().min(0.01).optional(),
+  /** Record even though the same money looks already recorded on the job (a genuine second payment). */
+  allow_duplicate: z.boolean().optional(),
 }).refine(v => v.job_id || v.hh_job_number, { message: 'job_id or hh_job_number is required' });
 
 router.post('/incoming-payments/:id/record', authorize('admin', 'manager'), validate(incomingRecordSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { job_id, hh_job_number, payment_type, amount } = req.body;
+    const { job_id, hh_job_number, payment_type, amount, allow_duplicate } = req.body;
     let jobId: string | undefined = job_id;
     if (!jobId && hh_job_number) {
       const j = await query(`SELECT id FROM jobs WHERE hh_job_number = $1`, [hh_job_number]);
@@ -1205,7 +1208,14 @@ router.post('/incoming-payments/:id/record', authorize('admin', 'manager'), vali
       actorUserId: req.user!.id,
       matchMethod: 'manual',
       matchNotes: `Matched by ${req.user!.email || req.user!.id} from the incoming-payments queue`,
+      allowDuplicate: allow_duplicate === true,
     });
+    if (!result.ok && result.existing) {
+      // Same money already on the job (recorded from the Money tab?) — the panel
+      // offers "link it" or "record anyway".
+      res.status(409).json({ error: result.error, existing_payment: result.existing });
+      return;
+    }
     if (!result.ok) {
       res.status(400).json({ error: result.error });
       return;
@@ -1262,6 +1272,28 @@ router.post('/incoming-payments/:id/rematch', authorize('admin', 'manager'), asy
   } catch (err) {
     console.error('[money] incoming-payments rematch failed:', err);
     res.status(500).json({ error: 'Failed to re-check incoming payment' });
+  }
+});
+
+const incomingLinkSchema = z.object({ job_payment_id: z.string().guid() });
+
+// The money was already recorded by hand (Money tab) — close the row against that
+// payment. Nothing is recorded again, nothing goes to HireHop or Xero.
+router.post('/incoming-payments/:id/link-existing', authorize('admin', 'manager'), validate(incomingLinkSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await linkIncomingToExistingPayment({
+      incomingId: req.params.id as string,
+      jobPaymentId: req.body.job_payment_id,
+      actorUserId: req.user!.id,
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[money] incoming-payments link-existing failed:', err);
+    res.status(500).json({ error: 'Failed to link the incoming payment' });
   }
 });
 
@@ -2215,6 +2247,11 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
            last_synced_at      = NOW()`,
         [job.id, effectiveHireValueIncVat, totalHireDeposits, effectiveBalanceOutstanding, vatAdjustment ? vatAdjustment.vatSaved : 0, clientOverpaid]
       ).catch((e) => console.error('[money] job_financials write-through failed (non-fatal):', e.message));
+    }
+    // Keep this job's invoice numbers for the Wise matcher (services/hh-invoice-index.ts)
+    // from the billing already read above — no extra HireHop call. Only on a good read.
+    if (job.id && hhJobId && Array.isArray(bl?.rows)) {
+      void indexJobInvoices({ id: job.id, hh_job_number: hhJobId }, bl!.rows);
     }
 
     // Read-only top-N check: run the reconcile inside a transaction we always
