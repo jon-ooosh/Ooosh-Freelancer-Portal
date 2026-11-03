@@ -9,4 +9,6 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/src'],
   testMatch: ['**/*.test.ts'],
+  // A dummy JWT_SECRET for every test file, as CI sets (jest.setup-env.js)
+  setupFiles: ['<rootDir>/jest.setup-env.js'],
 };
