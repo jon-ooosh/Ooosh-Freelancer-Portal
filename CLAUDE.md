@@ -309,6 +309,12 @@ Next: the four guides. The Costs form simplification is done (three PRs, Oct 202
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
 Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
 
+**DRAFT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — an admin-only 13-week cash forecast
+(`/money/cashflow`): committed / likely / possible tiers, "cash that's yours" (minus excess held,
+refunds owed, VAT), a Monday balance check-in because Xero lags, "what would fix it" for the low
+week. Xero is the source for bills, never for money in. Not built; §10 is the open questions, §11 the
+phases. Mockup in `docs/design/cashflow-forecast/`.
+
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
 (support, 15 Oct 2026) — never work around it; §3 is the evidence. §5 the decisions, §6 what must exist first.
