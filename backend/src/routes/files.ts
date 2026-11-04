@@ -10,6 +10,7 @@ import { query } from '../config/database';
 import emailService from '../services/email-service';
 import { STAFF_RECORDS_PREFIX, STAFF_RECORD_ROLES } from './staff-records';
 import { CLAIMS_PREFIX } from './incident-claims';
+import { CALLS_PREFIX } from '../services/telephony';
 
 const router = Router();
 router.use(authenticate);
@@ -221,6 +222,13 @@ router.get('/download', authorize(...STAFF_ROLES), async (req: AuthRequest, res:
       // injuries and other people's details. Staff only, never freelancers.
       if (!(STAFF_ROLES as readonly string[]).includes(req.user?.role || '')) {
         res.status(403).json({ error: 'Not authorised to view claim files' });
+        return;
+      }
+    } else if (key.startsWith(CALLS_PREFIX)) {
+      // Call recordings (docs/CALL-INTELLIGENCE-SPEC.md §T3) — admin only (jon,
+      // Nov 2026: the aim is that nobody needs to listen; Claude reads them).
+      if (req.user?.role !== 'admin') {
+        res.status(403).json({ error: 'Not authorised to listen to call recordings' });
         return;
       }
     } else if (!allowedPrefixes.some((p) => key.startsWith(p))) {

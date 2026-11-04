@@ -237,5 +237,5 @@ none fizzles out. Update it when one moves.
 | Claude suggesting actions (§8a) | Agreed: suggest → one click → automatic for low-risk only | First step: "after sending, do this" beside a chase draft | Claude |
 | Quote-vs-spec checker (lesson 7) | Wanted, deliberately set aside | Scope it (reuse the backline matcher) | later |
 | Warehouse habits guide | Idea, from Problem threads | Draft from Problems when there's room | later |
-| Calls / phones | Voipfone has no API; moving to Twilio (`CALL-INTELLIGENCE-SPEC.md` §T, PR #1578). Test number +44 1634 980910 bought | Rest of the Twilio Console setup (§T2), then build §T3, then a week's test on one base | jon, then Claude |
+| Calls / phones | Twilio Console + base 1 set up (4 Nov); OP's call handling built (`CALL-INTELLIGENCE-SPEC.md` §T8) | Deploy, add the three `.env` lines, then a week's test on one base (§T5) | jon, then Claude |
 | Lost-reason data quality | Noted: "No Decision" / "Other" with no detail / test rows | Decide whether to tighten the lost modal | jon |

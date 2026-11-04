@@ -155,7 +155,7 @@ on an employee (`services/staff-doc-cycles.ts`). Same words, different people, d
 consequence. Never merge them.
 
 **`staff_record_files` objects live under the `staff-records/` R2 prefix, and that
-prefix (with `claims/`) is the ONLY one `GET /api/files/download` role-gates.** Every
+prefix (with `claims/` and, admin-only, `calls/`) is the ONLY one `GET /api/files/download` role-gates.** Every
 other prefix it serves is readable by EVERY staff login whatever their role (the
 route is staff-only since Oct 2026; `backups/` is no longer on it). Never file
 anything private under `files/`.
@@ -326,10 +326,11 @@ reads: the voice (Phase A built), house guides as Staff Documents shared with Cl
 admin-only Claude switch, `house-knowledge.ts`), the client brief, and "remember this?" client facts.
 **Code rails beat written guidance**; nothing is learned without a human tick. §9 is the decisions.
 
-**PLANNED (written Mar 2026, updated 29 Oct 2026, not built):** `docs/CALL-INTELLIGENCE-SPEC.md` — the phones move
+**§T PHONES BUILT, IN TEST (Nov 2026); intelligence not built:** `docs/CALL-INTELLIGENCE-SPEC.md` — the phones move
 from Voipfone to **Twilio** with OP as the phone system (§T — build and test that FIRST), then calls are transcribed,
 summarised and matched to people and jobs like emails. **§0 and §T override the March details** (`interactions`,
 one unmatched review surface, a gated `calls/` R2 prefix, recordings from Twilio's callback — no email step).
+**§T8 is what shipped** (`routes/telephony.ts` + `services/telephony.ts`, every request signature-checked; `calls/` is admin-only).
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,

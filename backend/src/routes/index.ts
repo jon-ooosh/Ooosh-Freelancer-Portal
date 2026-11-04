@@ -24,6 +24,7 @@ import assignmentsRouter from './assignments';
 import excessRouter from './excess';
 import hireFormsRouter from './hire-forms';
 import webhooksRouter from './webhooks';
+import telephonyRouter from './telephony';
 import driverVerificationRouter from './driver-verification';
 import requirementsRouter from './requirements';
 import portalRouter from './portal';
@@ -141,6 +142,7 @@ router.use('/mobile-upload', mobileUploadRouter);  // Public token-auth file cap
 router.use('/data-cleanup', dataCleanupRouter);
 router.use('/pre-hire-briefing', preHireBriefingRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
+router.use('/telephony', telephonyRouter);  // PUBLIC — Twilio call webhooks, X-Twilio-Signature checked (CALL-INTELLIGENCE-SPEC §T3)
 router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
 router.use('/enquiry-intake', enquiryIntakeRouter);  // Website enquiry form → OP enquiry (API-key auth, service='enquiry_form')
 router.use('/csp-report', cspReportRouter);  // PUBLIC — browser CSP violation reports (no auth, rate-limited, log only)

@@ -368,6 +368,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '326_hh_invoice_index.sql',
         '327_cashflow_forecast.sql',
         '328_cashflow_card_receipts.sql',
+        '329_telephony.sql',
       ];
 
       for (const migration of migrations) {
