@@ -312,8 +312,8 @@ Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisi
 **DRAFT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — an admin-only 13-week cash forecast
 (`/money/cashflow`): committed / likely / possible tiers, "cash that's yours" (minus excess held,
 refunds owed, VAT), a Monday balance check-in because Xero lags, "what would fix it" for the low
-week. Xero is the source for bills, never for money in. Not built; §10 is the open questions, §11 the
-phases. Mockup in `docs/design/cashflow-forecast/`.
+week. Xero is the source for bills, never for money in. Not built; every question answered (§10), §11 the
+phases — ready for Phase 1. Mockup in `docs/design/cashflow-forecast/`.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
