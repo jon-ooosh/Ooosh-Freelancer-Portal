@@ -198,6 +198,98 @@ by dialling 999 for real; use Twilio's documented test route if one exists.
 
 ---
 
+## I. Call intelligence on Twilio — DRAFT for jon's sign-off (5 Nov 2026)
+
+**This section replaces the March pipeline below** (AssemblyAI, the Calls Inbox, `phone_number_index`
+as a separate system). Same idea, on what OP has now. Nothing here is built until jon agrees it.
+
+### I1. Settled
+
+- **Transcription is Twilio's** (Conversational Intelligence, post-call "batch" transcripts), not
+  AssemblyAI (jon, 5 Nov): one supplier, one data-processing agreement, no new key, and the results come
+  back through the signed `/api/telephony` routes. Roughly $0.024–0.028/min (check Twilio's live pricing
+  page before relying on it); switching supplier later only touches one function.
+- **Claude writes the summary** (`config/anthropic.ts`), from the transcript, as structured output.
+- **Matching is deterministic, like email** (§0): the outside number → a person or organisation. Never a
+  guess.
+- **OP stays the only long-term copy.** A recording is deleted from Twilio once its transcript is back
+  (not straight after the R2 copy, as today); the transcript is copied into OP and deleted from Twilio too.
+
+### I2. The flow
+
+1. A recording finishes → copied to R2 (as now) → OP asks Twilio for a transcript of that recording
+   (by its RecordingSid, dual channel: channel 1 = caller, channel 2 = us).
+2. Twilio calls `/api/telephony/transcript` when it's ready (signature-checked). OP fetches the sentences,
+   stores the text on `call_records`, deletes the transcript and the recording from Twilio.
+3. Claude reads the transcript and returns: a 2–3 sentence summary, what kind of call it was (enquiry,
+   booking, job question, complaint, supplier, personal, other), any job numbers said, a suggested next
+   step (or none), and whether it's urgent.
+4. Matching (I3), then the call goes on the right timelines.
+5. **Voicemail:** the email waits for the summary (up to 5 minutes, then sends without it), so info@ gets
+   ONE email: who, the summary, the audio attached.
+6. Anything that fails retries, then raises the usual admin bell. A call that never gets a transcript
+   still keeps its recording and its row.
+
+### I3. Matching — who was it?
+
+- The outside number (already E.164 on `call_records.other_party_number`) is compared with people's
+  phone / mobile / international phone and organisations' phone, all normalised the same way.
+- **Exactly one person** → matched. **More than one** → the call waits for a person to pick. **None** →
+  unmatched (a person can link it or add a new contact).
+- **Which job?** Only with evidence: a job number said on the call that belongs to that person or their
+  organisation. Otherwise the call goes on the person (and their organisation) only, and the Calls
+  screen shows their live jobs as one-click suggestions. **No silent guessing of the job**, same rule as
+  email.
+
+### I4. Where calls show
+
+- **Timelines:** an `interactions` row, type `call`, on the person / organisation / job: "📞 Incoming
+  call · 4 min · Will Parish", the summary, the suggested next step. Hidden calls never reach any AI read
+  (same rule as hidden emails).
+- **A Calls screen** (new, every staff login): every call, newest first, with filters for missed,
+  voicemail, unmatched and "needs a job". Each row: number / who, when, length, summary, play button
+  (voicemails: everyone; calls: admins), link-to-person, link-to-job, hide.
+  This is also where **missed calls without a voicemail** finally become visible, with a "call back" link.
+- **Personal calls:** a call Claude marks `personal` goes on no timeline and is shown only to admins on the
+  Calls screen. Any admin can hide any call (a private matter), exactly like an email.
+
+### I5. Later (not in this build)
+
+- The client brief (`AI-KNOWLEDGE-SPEC.md` §5) and chase drafts read call summaries, so a reply knows what
+  was said on the phone.
+- The suggested next step becomes a one-click To Do (a person accepts it; never automatic).
+- Unmatched emails join the same review screen (they have no screen today — `gmail_unmatched_inbound` is
+  read by an API only).
+
+### I6. Retention
+
+`telephony_retention_months` (default 24, like email): after it, the audio and full transcript are
+deleted and the summary kept. Runs nightly.
+
+### I7. To decide (jon)
+
+1. **Who can read a full transcript?** Recommendation: admins only, like the audio; everyone sees the
+   summary.
+2. **Calls screen for everyone, or managers up?** Recommendation: everyone (missed calls need calling
+   back by whoever's in); playing a call recording stays admin-only.
+3. **A missed call with no voicemail — tell anyone?** Recommendation: no email (every hang-up would
+   send one); it shows on the Calls screen and the dashboard counts today's unreturned missed calls.
+4. **The job suggestion** — happy with "person always, job only with evidence, otherwise one click"?
+
+### I8. Build order
+
+- **I-a:** transcription + summary on `call_records`, voicemail email with the summary, recording deleted
+  after the transcript. Retention job. (Backend only; nothing new on screen except a better email.)
+- **I-b:** matching + timelines + the Calls screen.
+- **I-c:** brief / chase drafts / suggested To Dos (§I5).
+
+To set up in Twilio when I-a is built (jon): an Intelligence Service (UK English, auto-transcribe OFF,
+data logging OFF, webhook = `https://staff.oooshtours.co.uk/api/telephony/transcript`), and its SID in
+`.env` as `TWILIO_INTELLIGENCE_SERVICE_SID`. To confirm then: that UK English is offered, and the
+"data logging" (Twilio using our calls to train) opt-out.
+
+---
+
 ## Context & Purpose
 
 This document specifies the **Call Intelligence module** for the Ooosh Tours Operations Platform. It is intended to be read by Claude Code sessions building or extending the ops platform, and contains all architectural decisions, data models, API contracts, UI requirements, and integration details needed to build and integrate this module from day one.
