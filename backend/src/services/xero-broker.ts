@@ -402,6 +402,25 @@ class XeroBroker {
     return r.Invoices || [];
   }
 
+  /**
+   * Every approved supplier bill still to be paid (ACCPAY, AUTHORISED — part-paid
+   * ones included; AmountDue is what's left). The cash forecast's "things to be
+   * paid" (docs/CASHFLOW-FORECAST-SPEC.md §5.2). Paged: Xero returns 100 a page.
+   */
+  async getUnpaidBills(): Promise<Array<Record<string, unknown>>> {
+    const all: Array<Record<string, unknown>> = [];
+    for (let page = 1; page <= 30; page++) {
+      const r = await this.request<{ Invoices?: Array<Record<string, unknown>> }>('GET', '/Invoices', {
+        query: { where: 'Type=="ACCPAY" AND Status=="AUTHORISED"', page: String(page) },
+        billsScope: true,
+      });
+      const rows = r.Invoices || [];
+      all.push(...rows);
+      if (rows.length < 100) break;
+    }
+    return all;
+  }
+
   /** Read a single spend-money bank transaction by ID (diagnostics / read-back). */
   async getBankTransaction(bankTransactionId: string): Promise<Record<string, unknown> | null> {
     const r = await this.request<{ BankTransactions?: Array<Record<string, unknown>> }>('GET', `/BankTransactions/${bankTransactionId}`);

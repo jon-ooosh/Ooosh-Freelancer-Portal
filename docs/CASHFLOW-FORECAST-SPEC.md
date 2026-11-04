@@ -1,6 +1,6 @@
 # Cash forecast — spec
 
-**Status: DRAFT, 4 Nov 2026** (second pass with jon). Agreed in principle; nothing built. Mockup:
+**Status: PHASE 1 BUILT, 4 Nov 2026** — Money › Cash forecast (`/money/cashflow`). §13 is what shipped and where it differs from the plan below; read it first. Mockup:
 `docs/design/cashflow-forecast/` (open `mockup.html`, or the PNG in `screenshots/`).
 
 An admin-only, forward-looking **13-week rolling cash forecast** in OP. Xero can tell you
@@ -60,8 +60,8 @@ next to the outgoings Xero knows about, and says what to do when a week dips.
     one of the two big bills is over 10 months, not 12).
 15. **The deposit rule is the one already in OP** (jon, 4 Nov): 25% with a £100 floor, the full
     amount under £400. It is written out twice today (`routes/money.ts` ~2128, `wise-incoming.ts`
-    ~307); the forecast must not make it three. Phase 1 moves it into one shared helper that all
-    three call.
+    ~307); the forecast must not make it three. Phase 2 (moved from Phase 1, §13) moves it into one
+    shared helper that all three call.
 
 ---
 
@@ -406,14 +406,14 @@ Nothing blocks Phase 1.
 
 | Phase | Builds | Gives jon |
 |---|---|---|
-| **1 — Committed forecast** | One shared deposit-rule helper (§1.15); settings (accounts, target, limit); cards (§5.6); YouLend + payoff date; planned items — rules and the schedule editor — incl. instalments, payroll, VAT, tax (§5.4); Monday check-in; Stripe live balance, available dates and fee; OP money in (§5.1 committed rows); Xero unpaid bills + the check pile with "Paid — Xero is behind" (§5.2, existing scope); van HP from fleet finance; chart, tiles, table, drill-down, **next 14 days by day** | A trustworthy committed line from day one, down to the day for the next fortnight |
-| **2 — What's coming that Xero can't see** | Expected job expenses from quotes, freelancers booked and work to invoice, excess refunds, refunds owed (§5.5); weightings (§6); pipeline Likely/Possible band; "What would fix it" (§8) | The forward view and the actions |
+| **1 — Committed forecast** (BUILT, §13) | Settings (accounts, target, limit); cards (§5.6); YouLend + payoff date; planned items — rules and the schedule editor — incl. instalments, payroll, VAT, tax (§5.4); Monday check-in; Stripe live balance, available dates and fee; OP money in (§5.1 committed rows); Xero unpaid bills + the check pile with "Paid — Xero is behind" (§5.2, existing scope); van HP from fleet finance; chart, tiles, table, drill-down, **next 14 days by day** | A trustworthy committed line from day one, down to the day for the next fortnight |
+| **2 — What's coming that Xero can't see** | One shared deposit-rule helper (§1.15); expected job expenses from quotes, freelancers booked and work to invoice, excess refunds, refunds owed (§5.5); weightings (§6); pipeline Likely/Possible band; "What would fix it" (§8) | The forward view and the actions |
 | **3 — Fewer figures to type** | Reports scope on the Custom Connection (re-authorise); statement balance if available; recurring-payment suggestions from Xero bank history; stale warnings | Less of the Monday check-in by hand |
 | **4 — Talking to you** | Monday email + Claude paragraph; forecast vs actual line; OP VAT estimate | The Monday ritual |
 
 Migrations take the next free number at build time and go in `run.ts`'s list. Settings live in
-`system_settings` where they are single values; tables for accounts, snapshots, planned items and
-forecast snapshots.
+their own admin-only table, `cashflow_settings` — NOT `system_settings`, which every staff login can
+read (§13).
 
 ## 12. Deliberately not built
 
@@ -422,3 +422,69 @@ forecast snapshots.
   forecast earns trust; planned one-off items cover the simple case now.
 - Client £ performance — address book (`BACKLOG.md`).
 - Any automatic action (chasing, moving bills). The page suggests; people act.
+
+---
+
+## 13. Phase 1 — what shipped (4 Nov 2026)
+
+**Where:** Money › Cash forecast (`/money/cashflow`), admin only — the nav entry, the page and every
+route (`routes/cashflow.ts`, `authorize('admin')`). Migration 327.
+
+**Code:**
+- `services/cashflow-schedule.ts` — the pure part: UK-day date maths, working days (bank holidays from
+  `bank-holidays.ts`), repeating rules, the card simulation, the YouLend cap. Unit-tested
+  (`__tests__/cashflow-schedule.test.ts`).
+- `services/cashflow-sources.ts` — every reader (settings, balances, job balances, excess, refunds,
+  van finance, planned items, Xero bills, Stripe). Xero and Stripe readers never throw; they answer
+  `ok: false` and the page says what is missing.
+- `services/cashflow-forecast.ts` — `buildForecast()`: places every item, sums weeks and days, builds
+  the piles and warnings. `ROWS` is THE list of table rows.
+- `xero-broker.ts` `getUnpaidBills()` — paged ACCPAY AUTHORISED read, on the existing bills token.
+- Frontend: `pages/CashflowForecastPage.tsx`, `components/cashflow/*` (chart, table, check-in,
+  planned items with the schedule editor, Xero bills, settings), `lib/cashflow.ts`.
+
+**Tables:** `cashflow_settings`, `cashflow_accounts`, `cashflow_cards`, `cashflow_balance_snapshots`,
+`cashflow_planned_items` + `cashflow_planned_item_dates`, `cashflow_bill_flags`,
+`cashflow_excluded_contacts`. Seeded: the five accounts (§2), Capital on Tap and Amex with jon's
+terms, YouLend 28% / £152,671, target £0, overdraft £22,000.
+
+**Where it differs from the plan above:**
+1. **Settings are their own table**, not `system_settings` (readable by every staff login).
+2. **The shared deposit helper moved to Phase 2.** Phase 1 only counts what booked jobs still owe
+   (`job_financials.balance_outstanding`), so it never needs the deposit rule; the pipeline does.
+   Touching the live Money tab for no Phase 1 gain wasn't worth the risk.
+3. **A booked job is one item, not "deposit + balance".** Both were due by the first day, so they
+   landed on the same date anyway; the item says "no deposit yet" when none is paid.
+4. **Excess refunds and refunds owed came into Phase 1** (they were §5.5, Phase 2). Excess coming
+   IN without the matching refunds going OUT would have made every week look better than it is.
+   Excess still held on a hire that finished over 30 days ago is a "check" pile, not next week's
+   refund. Held-on-account excess is never refunded by the forecast.
+5. **Excess on hires of 4 days or fewer is left out** — they take a pre-auth (`preauthEligibility()`),
+   which is a hold, not cash.
+6. **Card interest is a memo row, never in the totals.** Interest is added to the card; the cash that
+   leaves is the repayment plan. Counting both would double it.
+7. **A fixed card plan's minimum top-up** looks at everything paid since the last due day (not since
+   the statement), and only once a statement has been simulated — payments before the check-in are
+   invisible. Otherwise Capital on Tap showed a made-up £3,890 top-up on day one.
+8. **Van HP pays on `finance_start`'s day of the month** (the 1st when unset) — no new column, no
+   change to the vehicle module. If a van's day is wrong, its finance start date is the thing to fix.
+9. **Scheduled payments since the check-in** (planned items, HP, card payments dated after the last
+   check-in but before today) are counted today — they've left the bank since the balance was typed.
+   Owed things (bills, client balances) are "still owed" and placed by their own dates.
+10. **Stripe, live:** the opening balance uses Stripe's *available*; pending money lands on Stripe's
+    own available date (net of fees already); a payout that reached the bank after the main
+    account's check-in is added today. Stripe's balance is assumed already net of YouLend (Stripe
+    Capital deducts as each payment settles) — if YouLend turns out to be taken at payout instead,
+    the "Already in Stripe" row is over by 28%.
+11. **The Stripe restricted key needs "Balance: Read" and "Payouts: Read"** for the live figures
+    (deploy step). Without them the page says so and Stripe is typed in on the check-in.
+12. **Xero repeating bills are not read** (§1.14) and the overdue bills are a pile with per-bill
+    "Paid — Xero is behind" / "Paid by card" / "Instalments…" / "Not real" / "Leave out supplier" —
+    the Xero bills button on the page.
+
+**Known limits (by design, Phase 1):**
+- `job_financials` is refreshed nightly and whenever a Money tab opens. A balance paid by Stripe
+  today can sit in both "Already in Stripe" and "Hire balances" until that refresh.
+- The fix-it list, enquiries, freelancers, quote expenses: Phase 2. The Monday email: Phase 4.
+- Typical card spend is typed per card in Settings; until it is, the card's balance line assumes no
+  new spending and says so.
