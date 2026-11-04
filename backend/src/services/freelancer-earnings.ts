@@ -129,7 +129,12 @@ export function earningsPeriods(today: string): EarningsPeriod[] {
   return periods;
 }
 
-async function labelsFrom(): Promise<string> {
+/**
+ * From when invoices are reliably linked to the work they cover. Work before it
+ * may be paid without a link, so it is never called "to invoice" — here, or in
+ * the cash forecast (services/cashflow-sources.ts).
+ */
+export async function labelsFrom(): Promise<string> {
   const v = String((await getSystemSetting('freelancer_earnings_labels_from')) || '').trim();
   return isYmd(v) ? v : DEFAULT_LABELS_FROM;
 }

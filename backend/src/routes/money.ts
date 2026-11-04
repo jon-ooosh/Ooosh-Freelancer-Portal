@@ -35,6 +35,7 @@ import { afterOptionConfirmed } from '../services/option-confirm';
 import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 import { portalOptionsFor } from '../services/job-groups';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { requiredDeposit as depositRule } from '../services/deposit-rule';
 import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
 import {
   claimStripeEvent,
@@ -2156,8 +2157,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       : effectiveHireValueIncVat - totalHireDeposits - creditNoteWriteOff;
 
     // Calculate deposit requirements using effective (VAT-adjusted) total
-    let requiredDeposit = Math.max(effectiveHireValueIncVat * 0.25, 100);
-    if (effectiveHireValueIncVat < 400) requiredDeposit = effectiveHireValueIncVat;
+    let requiredDeposit = depositRule(effectiveHireValueIncVat);
     if (effectiveHireValueIncVat === 0) requiredDeposit = 0;
     const depositPaid = totalHireDeposits >= (requiredDeposit - 5); // £5 tolerance
     // Credit-note write-offs count toward payment progress (the written-off

@@ -25,7 +25,10 @@ import {
   RECEIPT_SPEND_DAYS, cardReceiptSpend, loadCardReceipts,
   loadAccounts, loadBillFlags, loadCards, loadDepositsOnFutureJobs, loadExcessDue, loadExcessHeld,
   loadJobBalances, loadPlannedItems, loadRefundsOwed, loadSettings, loadVanFinance, loadXeroBills, readStripe,
+  COMMITTED_STATUSES, loadFreelancerCosts, loadOutcomeHistory, loadPipelineJobs,
 } from './cashflow-sources';
+import { FixAction, bookingChance, buildFixList, enquiryCash } from './cashflow-pipeline';
+import { freelancerDueDateFromApproval } from './supplier-terms';
 
 export const WEEKS = 13;
 export const DAYS = 14;
@@ -35,7 +38,9 @@ const STALE_EXCESS_DAYS = 30;
 export type RowKey =
   | 'hire_balance' | 'excess_in' | 'stripe_pending' | 'stripe_payout' | 'planned_in'
   | 'xero_bill' | 'overheads' | 'payroll' | 'vat_tax' | 'instalments' | 'one_off' | 'other_out'
-  | 'van_hp' | 'excess_refund' | 'refund_owed' | 'stripe_fee' | 'youlend' | 'card_payment';
+  | 'van_hp' | 'excess_refund' | 'refund_owed' | 'stripe_fee' | 'youlend' | 'card_payment' | 'freelancers'
+  // Enquiries, weighted (Phase 2) — never in the committed totals.
+  | 'pipeline_likely' | 'pipeline_possible';
 
 /** The table's rows, top to bottom. THE list — the page draws exactly these. */
 export const ROWS: Array<{ key: RowKey; label: string; direction: 'in' | 'out'; clientMoney?: boolean }> = [
@@ -52,6 +57,7 @@ export const ROWS: Array<{ key: RowKey; label: string; direction: 'in' | 'out'; 
   { key: 'van_hp', label: 'Van HP', direction: 'out' },
   { key: 'one_off', label: 'One-offs', direction: 'out' },
   { key: 'other_out', label: 'Other planned', direction: 'out' },
+  { key: 'freelancers', label: 'Freelancers (fees + expenses)', direction: 'out' },
   { key: 'excess_refund', label: 'Excess refunds', direction: 'out', clientMoney: true },
   { key: 'refund_owed', label: 'Refunds owed', direction: 'out' },
   { key: 'stripe_fee', label: 'Stripe fees', direction: 'out' },
@@ -69,6 +75,8 @@ export interface FlowItem {
   windowTo?: string;
   clientMoney?: boolean;
   link?: { type: 'job' | 'vehicle' | 'planned' | 'xero_bill' | 'card' | 'settings'; id?: string };
+  /** Set on weighted enquiry money only. Everything else is committed. */
+  tier?: 'likely' | 'possible';
 }
 
 export interface PileItem {
@@ -91,6 +99,12 @@ export interface Period {
   totalOut: number;
   byRow: Partial<Record<RowKey, number>>;
   interestMemo: number;
+  /** Weighted enquiry money landing in this period. */
+  likelyIn: number;
+  possibleIn: number;
+  /** The committed close plus all likely (then also possible) enquiry money so far. */
+  closingLikely: number;
+  closingPossible: number;
 }
 
 export interface Warning { code: string; message: string }
@@ -130,6 +144,15 @@ export interface Forecast {
   stripe: { live: boolean; reason?: string; available: number; feeRate: number; feeRateSource: 'stripe' | 'setting'; payoutDays: number; share: number };
   xero: { ok: boolean; reason?: string; unpaidBills: number };
   planned: Array<{ id: string; label: string; message: string }>;
+  /** The first week whose committed close is below the target, and what would lift it (spec §8). */
+  dip: { start: string; end: string; closing: number } | null;
+  fixList: FixAction[];
+  pipeline: {
+    enquiries: number;
+    likely: number;      // weighted, net of Stripe's fee and YouLend, over the 13 weeks
+    possible: number;
+    rates: Array<{ likelihood: string; booked: number; lost: number; rate: number | null }>;
+  };
   vanFinanceMissing: Array<{ vehicleId: string; reg: string; lender: string }>;
   warnings: Warning[];
 }
@@ -162,11 +185,14 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
   const nextMonday = addDays(firstMonday, 7);
   const warnings: Warning[] = [];
 
-  const [settings, accounts, cards, jobs, excessDue, excessHeld, refunds, vans, planned, flags, xero, stripe, depositsFuture] =
+  const [settings, accounts, cards, jobs, excessDue, excessHeld, refunds, vans, planned, flags, xero, stripe, depositsFuture,
+    pipelineJobs, outcomeHistory, freelancerCosts] =
     await Promise.all([
       loadSettings(), loadAccounts(), loadCards(), loadJobBalances(), loadExcessDue(today), loadExcessHeld(),
       loadRefundsOwed(), loadVanFinance(), loadPlannedItems(), loadBillFlags(), loadXeroBills(!!opts.fresh),
       readStripe(!!opts.fresh), loadDepositsOnFutureJobs(today),
+      loadPipelineJobs(today), loadOutcomeHistory(today),
+      loadFreelancerCosts(addDays(today, -60), horizonEnd, today, COMMITTED_STATUSES),
     ]);
 
   const items: FlowItem[] = [];
@@ -472,36 +498,122 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
     });
   }
 
+  // ── Freelancers: booked work and work not yet invoiced (§5.5) ─────────────
+  // Paid on their invoice: the first Friday a week after approval. Earliest case:
+  // invoiced and approved on the day of the work (or today, for work already done).
+  for (const f of freelancerCosts) {
+    const due = freelancerDueDateFromApproval(later(f.date, today));
+    if (!due) continue;
+    const parts = [f.fee > 0 ? `fee ${gbp(f.fee)}` : null, f.expenses > 0 ? `expenses ${gbp(f.expenses)} (quote estimate)` : null].filter(Boolean).join(' + ');
+    items.push({
+      date: due, amount: -round2(f.fee + f.expenses), row: 'freelancers', label: f.label,
+      detail: `${f.detail} · ${f.date < today ? `worked ${f.date}, not invoiced yet` : `works ${f.date}`} · ${parts}`,
+      link: f.jobId ? { type: 'job', id: f.jobId } : undefined,
+    });
+  }
+
+  // ── Enquiries, weighted (§6) — the shaded band, never the committed line ──
+  // Money in only (their costs aren't counted yet). Net of Stripe's fee, and of
+  // YouLend while anything is owed, on the Stripe share.
+  const youlendLive = settings.youlendRemaining > 0.5;
+  const netFactor = 1 - share * (feeRate + (youlendLive ? settings.youlendRate : 0));
+  const enquiriesForFix: Array<{ jobId: string; label: string; start: string; chance: number; deposit: number; basis: string }> = [];
+  const pipelineItems: FlowItem[] = [];
+  for (const j of pipelineJobs) {
+    const ch = bookingChance(j.status, j.likelihood, outcomeHistory, settings);
+    if (ch.chance <= 0) continue;
+    const cash = enquiryCash(j, today);
+    const tier: 'likely' | 'possible' = ch.chance >= settings.likelyThreshold ? 'likely' : 'possible';
+    const row: RowKey = tier === 'likely' ? 'pipeline_likely' : 'pipeline_possible';
+    const label = `${j.hh ? `#${j.hh} ` : ''}${j.client || j.name}`;
+    const link = { type: 'job' as const, id: j.jobId };
+    enquiriesForFix.push({ jobId: j.jobId, label, start: j.start, chance: ch.chance, deposit: cash.deposit, basis: ch.basis });
+    if (cash.depositDate && cash.deposit > 0.005) {
+      pipelineItems.push({
+        date: spendable(cash.depositDate), amount: round2(cash.deposit * ch.chance * netFactor), row, tier, label, link,
+        detail: `deposit ${gbp(cash.deposit)} × ${Math.round(ch.chance * 100)}% · ${ch.basis} · hire starts ${j.start}`,
+      });
+    }
+    if (cash.balance > 0.005) {
+      pipelineItems.push({
+        date: spendable(cash.balanceDate), amount: round2(cash.balance * ch.chance * netFactor), row, tier, label, link,
+        detail: `balance ${gbp(cash.balance)} × ${Math.round(ch.chance * 100)}% · ${ch.basis}`, windowTo: j.start,
+      });
+    }
+  }
+  items.push(...pipelineItems);
+  const unratedBig = pipelineJobs.filter((j) => j.status !== 'provisional' && !j.likelihood && j.valueIncVat >= 3000);
+  if (unratedBig.length) {
+    warnings.push({ code: 'likelihood_missing', message: `${unratedBig.length} enquir${unratedBig.length === 1 ? 'y' : 'ies'} over £3k ${unratedBig.length === 1 ? 'has' : 'have'} no likelihood set — set hot / warm / cold on the job for a truer band.` });
+  }
+
   // ── Into weeks and days ───────────────────────────────────────────────────
   const inRange = items.filter((i) => i.date >= today && i.date <= horizonEnd);
-  const bucket = (start: string, end: string, opening: number): Period => {
+  const bucket = (start: string, end: string, opening: number, cumLikely: number, cumPossible: number): Period => {
     const byRow: Partial<Record<RowKey, number>> = {};
     let totalIn = 0;
     let totalOut = 0;
+    let likelyIn = 0;
+    let possibleIn = 0;
     for (const i of inRange) {
       if (i.date < start || i.date > end) continue;
       byRow[i.row] = round2((byRow[i.row] || 0) + i.amount);
+      if (i.tier === 'likely') { likelyIn += i.amount; continue; }
+      if (i.tier === 'possible') { possibleIn += i.amount; continue; }
       if (i.amount >= 0) totalIn += i.amount; else totalOut += i.amount;
     }
     const interestMemo = round2(interest.filter((x) => x.date >= start && x.date <= end).reduce((s, x) => s + x.amount, 0));
-    return { start, end, opening: round2(opening), closing: round2(opening + totalIn + totalOut), totalIn: round2(totalIn), totalOut: round2(totalOut), byRow, interestMemo };
+    const closing = round2(opening + totalIn + totalOut);
+    const likely = cumLikely + likelyIn;
+    return {
+      start, end, opening: round2(opening), closing, totalIn: round2(totalIn), totalOut: round2(totalOut), byRow, interestMemo,
+      likelyIn: round2(likelyIn), possibleIn: round2(possibleIn),
+      closingLikely: round2(closing + likely), closingPossible: round2(closing + likely + cumPossible + possibleIn),
+    };
   };
 
   const weeks: Period[] = [];
   let running = openingTotal;
+  let cumL = 0;
+  let cumP = 0;
   for (let w = 0; w < WEEKS; w++) {
-    const p = bucket(addDays(firstMonday, w * 7), addDays(firstMonday, w * 7 + 6), running);
+    const p = bucket(addDays(firstMonday, w * 7), addDays(firstMonday, w * 7 + 6), running, cumL, cumP);
     weeks.push(p);
     running = p.closing;
+    cumL += p.likelyIn;
+    cumP += p.possibleIn;
   }
   const days: Period[] = [];
   running = openingTotal;
+  cumL = 0;
+  cumP = 0;
   for (let d = 0; d < DAYS; d++) {
     const date = addDays(today, d);
-    const p = bucket(date, date, running);
+    const p = bucket(date, date, running, cumL, cumP);
     days.push(p);
     running = p.closing;
+    cumL += p.likelyIn;
+    cumP += p.possibleIn;
   }
+
+  // ── What would fix it (§8) ────────────────────────────────────────────────
+  const dipWeek = weeks.find((w) => w.closing < settings.targetFloor - 0.5) || null;
+  const dip = dipWeek ? { start: dipWeek.start, end: dipWeek.end, closing: dipWeek.closing } : null;
+  const committedHire = inRange.filter((i) => i.row === 'hire_balance');
+  // What asking for bank transfer would keep in hand: the card share of balances due up to the dip.
+  const bankTransferKeep = dip
+    ? round2(committedHire.filter((i) => i.date <= dip.end).reduce((s, i) => s + i.amount, 0) * share * (feeRate + (youlendLive ? settings.youlendRate : 0)))
+    : 0;
+  const fixList = buildFixList({
+    dip,
+    target: settings.targetFloor,
+    overdueBalances: piles.overdueBalances.map((b) => ({ id: b.id, label: b.label, amount: b.amount, jobId: b.link?.id })),
+    hireBalances: committedHire.map((i) => ({ date: i.date, dueBy: i.windowTo || i.date, label: i.label, amount: i.amount, jobId: i.link?.id })),
+    enquiries: enquiriesForFix,
+    bills: inRange.filter((i) => i.row === 'xero_bill' && i.link?.id).map((i) => ({ id: i.link!.id as string, date: i.date, label: i.label, amount: -i.amount })),
+    cards: cardsOut.map((c) => ({ name: c.name, headroom: c.headroom })),
+    bankTransfer: { on: settings.suggestBankTransfer, keep: bankTransferKeep },
+  });
   const lowWeek = weeks.reduce<Period | null>((lo, p) => (!lo || p.closing < lo.closing ? p : lo), null);
   const lowDay = days.reduce<Period | null>((lo, p) => (!lo || p.closing < lo.closing ? p : lo), null);
 
@@ -562,6 +674,19 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
     stripe: { live: stripeLive, reason: stripe.reason, available: round2(stripe.available), feeRate, feeRateSource: feeSource, payoutDays, share },
     xero: { ok: xero.ok, reason: xero.ok ? undefined : xero.reason, unpaidBills: xeroBills.length },
     planned: plannedNotes,
+    dip,
+    fixList,
+    pipeline: {
+      enquiries: pipelineJobs.length,
+      likely: round2(weeks.reduce((s, w) => s + w.likelyIn, 0)),
+      possible: round2(weeks.reduce((s, w) => s + w.possibleIn, 0)),
+      rates: (['hot', 'warm', 'cold', 'unset'] as const).map((l) => {
+        const h = outcomeHistory.find((x) => x.likelihood === l);
+        const booked = h?.booked || 0;
+        const lost = h?.lost || 0;
+        return { likelihood: l, booked, lost, rate: booked + lost > 0 ? round2(booked / (booked + lost)) : null };
+      }),
+    },
     vanFinanceMissing,
     warnings,
   };

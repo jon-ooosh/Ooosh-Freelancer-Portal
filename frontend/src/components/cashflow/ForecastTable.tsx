@@ -23,6 +23,8 @@ export default function ForecastTable({ forecast, periods, byDay, target, limit,
   const ins = used.filter((r) => r.direction === 'in');
   const outs = used.filter((r) => r.direction === 'out');
   const showInterest = periods.some((p) => p.interestMemo > 0);
+  const showLikely = periods.some((p) => Math.abs(p.likelyIn) >= 0.005);
+  const showPossible = periods.some((p) => Math.abs(p.possibleIn) >= 0.005);
   const lowIdx = periods.reduce((lo, p, i) => (p.closing < periods[lo].closing ? i : lo), 0);
 
   const cell = (period: number, row: RowKey, clientMoney?: boolean) => {
@@ -88,6 +90,27 @@ export default function ForecastTable({ forecast, periods, byDay, target, limit,
               </td>
             ))}
           </tr>
+          {(showLikely || showPossible) && (
+            <tr><td colSpan={periods.length + 1} className="sticky left-0 bg-white px-2 pt-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-gray-400">Enquiries, weighted by their chance of booking — not in the line above</td></tr>
+          )}
+          {showLikely && (
+            <tr>
+              <td className="sticky left-0 bg-white px-2 py-1 text-ooosh-700 whitespace-nowrap">Likely enquiries</td>
+              {periods.map((_, i) => cell(i, 'pipeline_likely'))}
+            </tr>
+          )}
+          {showPossible && (
+            <tr>
+              <td className="sticky left-0 bg-white px-2 py-1 text-ooosh-600/80 whitespace-nowrap">Possible enquiries</td>
+              {periods.map((_, i) => cell(i, 'pipeline_possible'))}
+            </tr>
+          )}
+          {showLikely && (
+            <tr className="font-semibold text-ooosh-700">
+              <td className="sticky left-0 bg-white px-2 py-1.5 whitespace-nowrap">Closing with likely</td>
+              {periods.map((p) => <td key={p.start} className="px-2 py-1.5 text-right tabular-nums">{gbp(p.closingLikely)}</td>)}
+            </tr>
+          )}
           {showInterest && (
             <tr className="text-gray-400 italic">
               <td className="sticky left-0 bg-white px-2 py-1.5 whitespace-nowrap" title="Interest is added to the card, not paid from the bank — so it isn't in the totals. It shows in the card's balance below.">

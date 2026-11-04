@@ -309,13 +309,13 @@ Next: the four guides. The Costs form simplification is done (three PRs, Oct 202
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
 Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
 
-**PHASE 1 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
+**PHASES 1–2 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
 (Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,
 "cash that's yours" (minus excess held, refunds owed, VAT), a Monday balance check-in because Xero lags,
 planned items (rules or an editable schedule), cards, YouLend, Stripe live. Xero is the source for bills,
 never for money in. **Its settings are `cashflow_settings`, NOT `system_settings`** (every staff login
 reads that). Builder `services/cashflow-forecast.ts`, pure maths `cashflow-schedule.ts`. **§13 is what
-shipped and where it differs from the plan**; §11 the phases (Phase 2: enquiries, job costs, fix-it list). Mockup in `docs/design/cashflow-forecast/`.
+shipped and where it differs from the plan**; §11 the phases. **Phase 2 BUILT (§13.2):** freelancers booked and not yet invoiced, enquiries weighted by learned booking rates (the band), "What would fix it". THE deposit rule is `services/deposit-rule.ts` (+ frontend `lib/depositRule.ts`). Mockup in `docs/design/cashflow-forecast/`.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
@@ -404,6 +404,7 @@ existing definition:
 | A bell that ASKS for something — when is it done? | `services/bell-rules.ts` — ONE rule per `notifications.resolve_key` ("still needed while …", SQL over the bell row); `notification-resolve.ts` `retireDoneBells(key, id?)` applies it (call it from the code that finishes the thing — instant) and `sweepDoneBells()` every 5 min catches every other path. Set the key at insert; never on an FYI bell. Older wiring, same file: leave/overtime/WFH/day-swap `retire…Bells()` in `staff-notifications.ts`, mentions `resolveMyThreadMentions()` / `markMentionsSeen()`. Open bells refresh live (`notifications_resolved`); services push through `config/socket.ts` `emitToUser()` |
 | Did this email actually arrive? Is this address bouncing / blocked by Resend? | `services/email-delivery.ts` (Resend webhook → `email_delivery_events`, `email_address_problems`); frontend `hooks/useEmailProblems.ts` + `components/EmailProblemFlag.tsx`. `email_log` 'sent' only means Resend accepted it |
 | Pushing a deposit to HireHop | `services/hh-deposit.ts` |
+| How much deposit does a hire need? | `services/deposit-rule.ts` `requiredDeposit()` — 25% with a £100 floor, the full amount under £400 (frontend mirror `lib/depositRule.ts`; the payment portal has its own copy — change all three) |
 | Pushing anything from HireHop to Xero | `services/hh-xero-sync.ts` |
 | Encrypting PII | `services/encryption.ts` |
 | Which of Ooosh's own guides does an AI client draft read? | `services/house-knowledge.ts` `getGuidesFor(topics)` — Staff Documents an admin shared with Claude (`ai_shared`, `ai_topics`), current approved version only; a shared `voice` guide replaces the built-in voice. Never a second reader (`AI-KNOWLEDGE-SPEC.md` §4) |
