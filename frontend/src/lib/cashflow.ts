@@ -79,7 +79,10 @@ export interface Forecast {
   piles: { overdueBills: PileItem[]; overdueBalances: PileItem[]; staleExcess: PileItem[]; noDate: PileItem[] };
   cards: Array<{
     id: string; name: string; balance: number | null; asOf: string | null; creditLimit: number | null; headroom: number | null;
-    interestThisMonth: number; plan: string; weeklyBalances: Array<number | null>; spendKnown: boolean;
+    interestThisMonth: number; plan: string; weeklyBalances: Array<number | null>;
+    checkInBalance: number | null; loggedSince: number; loggedSinceCount: number;
+    typicalMonthlySpend: number | null; spendSource: 'typed' | 'receipts' | 'none';
+    receiptsMonthly: number; receiptsCount: number; costPaymentMethod: string | null;
   }>;
   youlend: { rate: number; remaining: number; asOf: string | null; withheldInForecast: number; remainingAtEnd: number; paidOffOn: string | null; estimatedPayoff: string | null };
   stripe: { live: boolean; reason?: string; available: number; feeRate: number; feeRateSource: 'stripe' | 'setting'; payoutDays: number; share: number };
@@ -112,10 +115,20 @@ export interface Card {
   fixedEvery: 'week' | 'month' | null;
   fixedWeekday: number | null;
   typicalMonthlySpend: number | null;
+  costPaymentMethod: CostCardMethod | null;
   isActive: boolean;
+  /** Last 90 days of receipts logged in Costs on this card, as a monthly figure (GET /cards only). */
+  receiptsMonthly?: number;
+  receiptsCount?: number;
   balance: number | null;
   asOf: string | null;
 }
+
+/** Costs' payment methods that are a card (costs.payment_method). */
+export type CostCardMethod = 'cot_card' | 'amex' | 'lloyds_cc';
+export const COST_CARD_METHOD_LABELS: Record<CostCardMethod, string> = {
+  cot_card: 'COT card (Capital on Tap)', amex: 'Amex', lloyds_cc: 'Lloyds credit card',
+};
 
 export type PlannedCategory = 'overheads' | 'payroll' | 'vat' | 'tax' | 'instalments' | 'one_off' | 'income' | 'other';
 export type Frequency = 'once' | 'weekly' | 'monthly' | 'quarterly' | 'yearly';

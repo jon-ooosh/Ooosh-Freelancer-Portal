@@ -164,6 +164,12 @@ export interface CardInput {
   typicalMonthlySpend: number | null;
   balance: number;                // owed, from the last check-in
   balanceAsOf: string;
+  /**
+   * Typical spend is added only for days AFTER this (normally today). The days
+   * before it are already in the balance: the check-in, plus card receipts
+   * logged in OP since then. Defaults to the check-in date.
+   */
+  spendFrom?: string;
 }
 
 export interface CardSimulation {
@@ -219,7 +225,7 @@ export function simulateCard(card: CardInput, to: string): CardSimulation {
   };
 
   for (let d = addDays(card.balanceAsOf, 1); d <= to; d = addDays(d, 1)) {
-    balance = round2(balance + dailySpend);
+    if (d > (card.spendFrom || card.balanceAsOf)) balance = round2(balance + dailySpend);
 
     if (sameDayOfMonth(d, card.statementDay)) {
       const interest = round2(balance * (card.monthlyRate || 0));

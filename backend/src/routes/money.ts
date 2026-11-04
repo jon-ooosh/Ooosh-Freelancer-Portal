@@ -1421,6 +1421,10 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       hh_refund_row_id: number; amount: number; date: string;
       description: string | null; memo: string | null;
     }> = [];
+    // Excess deposits applied to an invoice directly in HireHop (damage taken
+    // from the excess) — drives the passive CLAIM catch-up (Pass 3 below,
+    // services/excess-hh-claims.ts). Job 16325.
+    const hhExcessApplications: import('../services/excess-hh-claims').HhExcessApplication[] = [];
     let totalHireDeposits = 0;
     let totalExcessDeposits = 0;
     // Track deposit money applied to invoices via kind=3 (for invoice reconciliation)
@@ -1634,6 +1638,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
               if (isFromExcessDeposit) {
                 // kind=3 sourced from an EXCESS deposit (membership in the kind=6
                 // pre-pass set, NOT the empty description on this twin).
+                if (appliedToInvoice) {
+                  hhExcessApplications.push({
+                    appId,
+                    depositId: Number(ownerDepositId),
+                    invoiceId: ownerInvoiceId,
+                    amount: absAmount,
+                    date: String(data.DATE || row.date || ''),
+                    crossJob: appliedToOtherJobInvoice,
+                  });
+                }
                 if (appliedToThisJobInvoice) {
                   // Excess money applied to THIS hire's invoice = excess paying down
                   // the hire. Credit it to hire deposits so the balance reflects it,
@@ -1931,6 +1945,23 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         }
       } catch (refundReconErr) {
         console.error('[money] HH refund passive reconciliation failed (non-fatal):', refundReconErr);
+      }
+    }
+
+    // Pass 3: excess applied to an invoice in HireHop → claim recorded in OP.
+    // The claim twin of Pass 2 — OP only, no client email, idempotent (HireHop's
+    // applied total is the target, never an increment). Job 16325.
+    if (hhExcessApplications.length > 0 && job.id) {
+      try {
+        const { catchUpHireHopExcessClaims } = await import('../services/excess-hh-claims');
+        const changed = await catchUpHireHopExcessClaims(job.id, hhExcessApplications);
+        if (changed > 0) {
+          syncExcessRequirementStatus(job.id).catch(e =>
+            console.error('[money] syncExcessRequirementStatus failed (HH claim catch-up):', e)
+          );
+        }
+      } catch (claimReconErr) {
+        console.error('[money] HH excess claim catch-up failed (non-fatal):', claimReconErr);
       }
     }
 

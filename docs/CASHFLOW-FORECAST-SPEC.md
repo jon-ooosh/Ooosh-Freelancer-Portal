@@ -488,3 +488,23 @@ terms, YouLend 28% / £152,671, target £0, overdraft £22,000.
 - The fix-it list, enquiries, freelancers, quote expenses: Phase 2. The Monday email: Phase 4.
 - Typical card spend is typed per card in Settings; until it is, the card's balance line assumes no
   new spending and says so.
+
+### 13.1 After going live (5 Nov 2026)
+
+**Cards follow the receipts logged in Costs** (jon: "immediate updates on cards put through OP, manual
+adjustments on a Monday morning"). Migration 328 links each card to its Costs payment method
+(`cashflow_cards.cost_payment_method`: Capital on Tap = `cot_card`, Amex = `amex`; one card per method).
+- A card's balance = its Monday check-in + card receipts dated after it (credits net off). The page says how
+  much of the balance came from receipts since Monday.
+- Typical monthly spend = the typed figure, else the last 90 days of receipts on that card
+  (`cardReceiptSpend()` in `cashflow-sources.ts`). It only knows what was logged, so it runs low, and the
+  page says so.
+- Spend accrues only from today (`simulateCard` `spendFrom`): the days before are already in the check-in or
+  the logged receipts.
+- **Next:** once there are ~4 Monday check-ins, compare each card's real movement (balance change + payments −
+  interest) with what the receipts explain, and say how much spend isn't being logged.
+
+**The "excess still held on old hires" pile surfaced a real excess-module gap** — excess applied to an
+invoice directly in HireHop never reached OP's excess record (job 16325). Fixed in the Money tab, not here:
+`services/excess-hh-claims.ts`, documented in `docs/reference/MONEY-AND-EXCESS.md` (last section). The pile
+shrinks as those jobs are refreshed.
