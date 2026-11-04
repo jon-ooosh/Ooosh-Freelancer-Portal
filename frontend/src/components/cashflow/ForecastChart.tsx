@@ -1,12 +1,13 @@
 /**
  * The cash forecast's chart: closing balance per week (or per day), against
- * the target line and the overdraft limit. Plain SVG — the page needs one line
- * and two thresholds, not a chart library.
+ * the target line and the overdraft limit, with the weighted enquiries as a
+ * shaded band above the committed line (likely darker, possible lighter).
+ * Plain SVG — one line, one band and two thresholds, not a chart library.
  */
 import { gbp, shortDate } from '../../lib/cashflow';
 
 interface Props {
-  points: Array<{ date: string; closing: number }>;
+  points: Array<{ date: string; closing: number; closingLikely?: number; closingPossible?: number }>;
   target: number;
   overdraftLimit: number;   // positive £; drawn at minus this
   selected: number | null;
@@ -36,7 +37,7 @@ const axisLabel = (v: number) => {
 export default function ForecastChart({ points, target, overdraftLimit, selected, onSelect }: Props) {
   if (points.length === 0) return null;
   const limit = -Math.abs(overdraftLimit);
-  const values = [...points.map((p) => p.closing), target, limit, 0];
+  const values = [...points.map((p) => p.closing), ...points.map((p) => p.closingPossible ?? p.closing), target, limit, 0];
   const step = niceStep(Math.max(...values) - Math.min(...values) || 1000);
   const yMin = Math.floor(Math.min(...values) / step) * step - step / 2;
   const yMax = Math.ceil(Math.max(...values) / step) * step + step / 2;
@@ -47,6 +48,13 @@ export default function ForecastChart({ points, target, overdraftLimit, selected
   for (let v = Math.ceil(yMin / step) * step; v <= yMax; v += step) ticks.push(v);
   const labelEvery = points.length > 14 ? 2 : 1;
   const colourFor = (v: number) => (v < limit ? '#b91c1c' : v < target ? '#b45309' : '#0074c6');
+  // The band between two lines (top series, bottom series) as one closed shape.
+  const band = (top: number[], bottom: number[]) =>
+    `M${top.map((v, i) => `${x(i)},${y(v)}`).join(' L')} L${bottom.map((v, i) => [i, v] as const).reverse().map(([i, v]) => `${x(i)},${y(v)}`).join(' L')}Z`;
+  const committed = points.map((p) => p.closing);
+  const likely = points.map((p) => p.closingLikely ?? p.closing);
+  const possible = points.map((p) => p.closingPossible ?? p.closingLikely ?? p.closing);
+  const hasBand = possible.some((v, i) => v - committed[i] > 0.5);
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" role="img" aria-label="Forecast closing balance">
@@ -61,6 +69,8 @@ export default function ForecastChart({ points, target, overdraftLimit, selected
       <line x1={L} x2={W - R} y1={y(limit)} y2={y(limit)} stroke="#b91c1c" strokeWidth="1.5" strokeDasharray="5 4" />
       <text x={L + 4} y={y(limit) - 5} textAnchor="start" fontSize="11" fill="#b91c1c">Overdraft limit {axisLabel(limit)}</text>
 
+      {hasBand && <path d={band(possible, likely)} fill="#e0effe" />}
+      {hasBand && <path d={band(likely, committed)} fill="#bae0fd" />}
       {selected !== null && selected < points.length && (
         <rect x={x(selected) - (W - L - R) / points.length / 2} y={T} width={(W - L - R) / points.length} height={H - T - B} fill="#e0effe" opacity="0.6" />
       )}
@@ -72,7 +82,7 @@ export default function ForecastChart({ points, target, overdraftLimit, selected
         <g key={p.date} onClick={() => onSelect(i)} style={{ cursor: 'pointer' }}>
           <rect x={x(i) - (W - L - R) / points.length / 2} y={T} width={(W - L - R) / points.length} height={H - T - B} fill="transparent" />
           <circle cx={x(i)} cy={y(p.closing)} r={i === lowIdx ? 5 : 3.5} fill={colourFor(p.closing)} stroke="#fff" strokeWidth="1.5" />
-          <title>{`${shortDate(p.date, true)}: ${gbp(p.closing)}`}</title>
+          <title>{`${shortDate(p.date, true)}: ${gbp(p.closing)} booked${p.closingLikely !== undefined && p.closingLikely - p.closing > 0.5 ? ` · ${gbp(p.closingLikely)} with likely enquiries` : ''}${p.closingPossible !== undefined && p.closingPossible - (p.closingLikely ?? p.closing) > 0.5 ? ` · ${gbp(p.closingPossible)} with possible too` : ''}`}</title>
         </g>
       ))}
       <text x={x(lowIdx)} y={Math.min(y(points[lowIdx].closing) + 20, H - B - 4)} textAnchor="middle" fontSize="12" fontWeight="700" fill={colourFor(points[lowIdx].closing)}>

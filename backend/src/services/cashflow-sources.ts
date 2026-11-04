@@ -15,6 +15,11 @@ import { getStripeClient, isStripeConfigured } from '../config/stripe';
 import { xeroBroker } from './xero-broker';
 import { xeroDateToISO } from './cost-xero-payment-sync';
 import { ukDateOf } from './uk-date';
+import { personalFee } from './freelancer-fees';
+import { bookingEstimate } from './freelancer-work';
+import { labelsFrom } from './freelancer-earnings';
+import { JOB_BOOKED_SQL, JOB_OUTCOME_SQL } from './job-outcomes';
+import { nonLeadMemberIds, notAltQuoteLossSql } from './job-groups';
 
 const num = (v: unknown): number => {
   const n = Number(v);
@@ -39,6 +44,14 @@ export interface CashflowSettings {
   countOverdueBills: boolean;
   countOverdueBalances: boolean;
   suggestBankTransfer: boolean;
+  /** Fallback booking chances when history is too thin (and always for provisional). */
+  weightProvisional: number;
+  weightHot: number;
+  weightWarm: number;
+  weightCold: number;
+  weightUnset: number;
+  /** At or above this, a weighted enquiry is "likely"; below, "possible". */
+  likelyThreshold: number;
 }
 
 /** key in cashflow_settings → field + how to read it. The ONLY list of settings. */
@@ -55,12 +68,19 @@ export const SETTING_FIELDS: Array<{ key: string; field: keyof CashflowSettings;
   { key: 'count_overdue_bills', field: 'countOverdueBills', type: 'bool' },
   { key: 'count_overdue_balances', field: 'countOverdueBalances', type: 'bool' },
   { key: 'suggest_bank_transfer', field: 'suggestBankTransfer', type: 'bool' },
+  { key: 'weight_provisional', field: 'weightProvisional', type: 'number' },
+  { key: 'weight_hot', field: 'weightHot', type: 'number' },
+  { key: 'weight_warm', field: 'weightWarm', type: 'number' },
+  { key: 'weight_cold', field: 'weightCold', type: 'number' },
+  { key: 'weight_unset', field: 'weightUnset', type: 'number' },
+  { key: 'likely_threshold', field: 'likelyThreshold', type: 'number' },
 ];
 
 const DEFAULT_SETTINGS: CashflowSettings = {
   targetFloor: 0, overdraftLimit: 22000, youlendRate: 0.28, youlendRemaining: 0, youlendAsOf: null,
   stripeShare: 0.9, stripeFeeRate: 0.015, stripePayoutDays: 2, excessRefundDays: 7,
   countOverdueBills: false, countOverdueBalances: false, suggestBankTransfer: true,
+  weightProvisional: 0.85, weightHot: 0.7, weightWarm: 0.4, weightCold: 0.15, weightUnset: 0.25, likelyThreshold: 0.6,
 };
 
 export async function loadSettings(): Promise<CashflowSettings> {
@@ -263,6 +283,231 @@ export async function loadDepositsOnFutureJobs(today: string): Promise<number> {
     [COMMITTED_STATUSES, today],
   );
   return num(r.rows[0]?.total);
+}
+
+// ── Enquiries (Phase 2) ────────────────────────────────────────────────────
+
+/** Pipeline stages that are still an enquiry. */
+export const PIPELINE_STATUSES = ['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional'];
+
+export interface PipelineJobRow {
+  jobId: string;
+  hh: number | null;
+  name: string;
+  client: string;
+  status: string;
+  likelihood: 'hot' | 'warm' | 'cold' | null;
+  start: string;
+  nextChase: string | null;
+  valueIncVat: number;
+  depositsPaid: number;
+}
+
+/**
+ * Open enquiries for hires that haven't started, with a value. One per group of
+ * alternative quotes (the lead option — job-groups.ts nonLeadMemberIds()).
+ * Value: the Money tab's inc-VAT figure where it has been read, else the
+ * pipeline's ex-VAT job_value + 20%.
+ */
+export async function loadPipelineJobs(today: string): Promise<PipelineJobRow[]> {
+  const [r, nonLead] = await Promise.all([
+    query(
+      `SELECT j.id, j.hh_job_number, j.job_name, COALESCE(j.client_name, j.company_name) AS client_name,
+              j.pipeline_status, j.likelihood,
+              to_char((j.job_date AT TIME ZONE 'Europe/London')::date, 'YYYY-MM-DD') AS start_date,
+              to_char(j.next_chase_date, 'YYYY-MM-DD') AS next_chase,
+              COALESCE(NULLIF(jf.hire_value_inc_vat, 0), j.job_value * 1.2) AS value_inc_vat,
+              COALESCE(jf.total_hire_deposits, 0) AS deposits_paid
+       FROM jobs j
+       LEFT JOIN job_financials jf ON jf.job_id = j.id
+       WHERE j.pipeline_status = ANY($1::text[])
+         AND j.job_date IS NOT NULL
+         AND (j.job_date AT TIME ZONE 'Europe/London')::date >= $2::date
+         AND COALESCE(j.is_internal, false) = false
+         AND COALESCE(j.is_deleted, false) = false
+         AND COALESCE(NULLIF(jf.hire_value_inc_vat, 0), j.job_value * 1.2, 0) > 0.01`,
+      [PIPELINE_STATUSES, today],
+    ),
+    nonLeadMemberIds(),
+  ]);
+  const skip = new Set(nonLead);
+  return r.rows
+    .filter((row: Record<string, unknown>) => !skip.has(String(row.id)))
+    .map((row: Record<string, unknown>) => ({
+      jobId: String(row.id), hh: numOrNull(row.hh_job_number), name: String(row.job_name || ''),
+      client: String(row.client_name || ''), status: String(row.pipeline_status),
+      likelihood: (['hot', 'warm', 'cold'].includes(String(row.likelihood)) ? row.likelihood : null) as PipelineJobRow['likelihood'],
+      start: String(row.start_date), nextChase: (row.next_chase as string) || null,
+      valueIncVat: num(row.value_inc_vat), depositsPaid: num(row.deposits_paid),
+    }));
+}
+
+export interface OutcomeBucket { likelihood: 'hot' | 'warm' | 'cold' | 'unset'; booked: number; lost: number }
+
+/**
+ * How enquiries actually ended, last 24 months, by the likelihood they carried.
+ * Booked = went ahead (or booked then cancelled — it did book); lost = not
+ * interested, EXCEPT "we booked their other option" losses, which aren't losses.
+ * OP keeps a job's LAST likelihood, so a lost job reads as whatever it was set
+ * to when it died — good enough to start (spec §6).
+ */
+export async function loadOutcomeHistory(today: string): Promise<OutcomeBucket[]> {
+  const r = await query(
+    `SELECT COALESCE(NULLIF(j.likelihood, ''), 'unset') AS bucket,
+            COUNT(*) FILTER (WHERE ${JOB_BOOKED_SQL} OR ${JOB_OUTCOME_SQL.cancelled})::int AS booked,
+            COUNT(*) FILTER (WHERE ${JOB_OUTCOME_SQL.lostOnly} AND ${notAltQuoteLossSql('j')})::int AS lost
+     FROM jobs j
+     WHERE j.job_date IS NOT NULL
+       AND j.job_date >= ($1::date - INTERVAL '24 months')
+       AND j.job_date < $1::date
+       AND COALESCE(j.is_internal, false) = false
+       AND COALESCE(j.is_deleted, false) = false
+     GROUP BY 1`,
+    [today],
+  );
+  return r.rows
+    .filter((row: Record<string, unknown>) => ['hot', 'warm', 'cold', 'unset'].includes(String(row.bucket)))
+    .map((row: Record<string, unknown>) => ({ likelihood: row.bucket as OutcomeBucket['likelihood'], booked: Number(row.booked) || 0, lost: Number(row.lost) || 0 }));
+}
+
+// ── Freelancers: booked work and work not yet invoiced (Phase 2) ───────────
+
+export interface FreelancerCostRow {
+  key: string;
+  date: string;              // the day of the work
+  label: string;
+  detail: string;
+  fee: number;
+  expenses: number;          // fronted, claimed on their invoice (bookingEstimate)
+  jobId: string | null;
+  unassigned?: boolean;
+}
+
+/** The "Ooosh Staff" person used for crew who are on the payroll (mig 036). */
+const OOOSH_STAFF_PERSON_ID = '00000000-0000-0000-0000-000000000001';
+
+/**
+ * What freelancers will invoice us for: deliveries, collections and crew on
+ * booked jobs, studio evenings and yard days — from `from` to `to`, not yet on
+ * an invoice (cost_work_items). Work before the portal's "invoices are linked
+ * from" date is never counted (it may be paid without a link). Fees through
+ * personalFee() and expenses through bookingEstimate() — the same figures the
+ * portal and Costs show. Payroll staff on a crew cost their expenses only.
+ * A confirmed quote with fewer people booked than it needs is costed at the
+ * quote's fee for each empty place, marked "not yet booked".
+ */
+export async function loadFreelancerCosts(from: string, to: string, today: string, committedStatuses: string[]): Promise<FreelancerCostRow[]> {
+  const linkedFrom = await labelsFrom();
+  const start = from > linkedFrom ? from : linkedFrom;
+  const [bookings, emptySlots, sitter, yard] = await Promise.all([
+    query(
+      `SELECT qa.id, qa.person_id, qa.agreed_rate, qa.expected_expenses,
+              q.id AS quote_id, q.job_type, q.venue_name, q.job_date::text AS job_date,
+              q.freelancer_fee, q.freelancer_fee_rounded, q.crew_count,
+              q.travel_method, q.travel_cost, q.expected_fuel_cost, q.expenses,
+              q.run_group, rg.combined_freelancer_fee AS run_fee,
+              j.id AS job_id, j.hh_job_number,
+              COALESCE(NULLIF(TRIM(p.first_name || ' ' || COALESCE(p.last_name, '')), ''), 'Freelancer') AS person_name
+         FROM quote_assignments qa
+         JOIN quotes q ON q.id = qa.quote_id AND q.is_deleted = false
+         JOIN jobs j ON j.id = q.job_id AND COALESCE(j.is_deleted, false) = false
+         LEFT JOIN run_groups rg ON rg.id = q.run_group
+         LEFT JOIN people p ON p.id = qa.person_id
+        WHERE qa.status NOT IN ('declined', 'cancelled')
+          AND COALESCE(q.status, '') <> 'cancelled' AND COALESCE(q.ops_status, '') <> 'cancelled'
+          AND j.pipeline_status = ANY($3::text[])
+          AND q.job_date BETWEEN $1::date AND $2::date
+          AND NOT EXISTS (SELECT 1 FROM cost_work_items w WHERE w.quote_assignment_id = qa.id)`,
+      [start, to, committedStatuses],
+    ),
+    query(
+      `SELECT q.id AS quote_id, q.job_type, q.venue_name, q.job_date::text AS job_date,
+              q.freelancer_fee, q.freelancer_fee_rounded, q.crew_count,
+              q.travel_method, q.travel_cost, q.expected_fuel_cost, q.expenses,
+              j.id AS job_id, j.hh_job_number,
+              GREATEST(CASE WHEN q.job_type = 'crewed' THEN GREATEST(COALESCE(q.crew_count, 1), 1) ELSE 1 END
+                       - (SELECT COUNT(*) FROM quote_assignments qa
+                          WHERE qa.quote_id = q.id AND qa.status NOT IN ('declined', 'cancelled')), 0)::int AS empty
+         FROM quotes q
+         JOIN jobs j ON j.id = q.job_id AND COALESCE(j.is_deleted, false) = false
+        WHERE q.is_deleted = false
+          AND q.status = 'confirmed' AND COALESCE(q.ops_status, '') <> 'cancelled'
+          AND j.pipeline_status = ANY($3::text[])
+          AND q.job_date BETWEEN GREATEST($1::date, $4::date) AND $2::date`,
+      [start, to, committedStatuses, today],
+    ),
+    query(
+      `SELECT a.id, a.fee, s.shift_date::text AS shift_date,
+              COALESCE(NULLIF(TRIM(p.first_name || ' ' || COALESCE(p.last_name, '')), ''), 'Studio sitter') AS person_name
+         FROM studio_sitter_shift_assignments a
+         JOIN studio_sitter_shifts s ON s.id = a.shift_id
+         LEFT JOIN people p ON p.id = a.person_id
+        WHERE a.status NOT IN ('declined', 'cancelled') AND s.status <> 'cancelled'
+          AND s.shift_date BETWEEN $1::date AND $2::date
+          AND NOT EXISTS (SELECT 1 FROM cost_work_items w WHERE w.sitter_assignment_id = a.id)`,
+      [start, to],
+    ),
+    query(
+      `SELECT b.id, b.booking_date::text AS booking_date, b.expected_total,
+              COALESCE(NULLIF(TRIM(p.first_name || ' ' || COALESCE(p.last_name, '')), ''), 'Freelancer') AS person_name
+         FROM freelancer_day_bookings b
+         LEFT JOIN people p ON p.id = b.person_id
+        WHERE b.status IN ('accepted', 'completed')
+          AND b.booking_date BETWEEN $1::date AND $2::date
+          AND NOT EXISTS (SELECT 1 FROM cost_work_items w WHERE w.day_booking_id = b.id)`,
+      [start, to],
+    ),
+  ]);
+
+  const out: FreelancerCostRow[] = [];
+  const jobRef = (r: Record<string, unknown>) => (r.hh_job_number ? `#${r.hh_job_number} ` : '');
+  const typeLabel = (t: unknown) => (t === 'delivery' ? 'Delivery' : t === 'collection' ? 'Collection' : t === 'crewed' ? 'Crew' : 'Job');
+
+  // Deliveries / collections on one run are one piece of work at the run's fee (as listFreelancerWork).
+  const runs = new Map<string, Array<Record<string, unknown>>>();
+  for (const r of bookings.rows as Array<Record<string, unknown>>) {
+    if (r.run_group && (r.job_type === 'delivery' || r.job_type === 'collection')) {
+      const k = `${r.person_id}:${r.run_group}`;
+      runs.set(k, [...(runs.get(k) || []), r]);
+      continue;
+    }
+    const staff = r.person_id === OOOSH_STAFF_PERSON_ID;
+    out.push({
+      key: `booking:${r.id}`, date: String(r.job_date), jobId: (r.job_id as string) || null,
+      label: `${jobRef(r)}${typeLabel(r.job_type)}${r.venue_name ? `, ${r.venue_name}` : ''}`,
+      detail: staff ? 'payroll crew — expenses only' : String(r.person_name),
+      fee: staff ? 0 : personalFee(r), expenses: bookingEstimate(r).total,
+    });
+  }
+  for (const [k, stops] of runs) {
+    const runFee = stops.find((s) => s.run_fee != null)?.run_fee;
+    const fee = runFee != null ? num(runFee) : stops.reduce((t, s) => t + personalFee(s), 0);
+    const first = stops[0];
+    out.push({
+      key: `run:${k}`, date: String(first.job_date), jobId: (first.job_id as string) || null,
+      label: `${jobRef(first)}Run, ${stops.length} stop${stops.length === 1 ? '' : 's'}`, detail: String(first.person_name),
+      fee: first.person_id === OOOSH_STAFF_PERSON_ID ? 0 : fee,
+      expenses: stops.reduce((t, s) => t + bookingEstimate(s).total, 0),
+    });
+  }
+  for (const r of emptySlots.rows as Array<Record<string, unknown>>) {
+    const n = Number(r.empty) || 0;
+    for (let i = 0; i < n; i++) {
+      out.push({
+        key: `slot:${r.quote_id}:${i}`, date: String(r.job_date), jobId: (r.job_id as string) || null, unassigned: true,
+        label: `${jobRef(r)}${typeLabel(r.job_type)}${r.venue_name ? `, ${r.venue_name}` : ''}`,
+        detail: "not yet booked — at the quote's fee",
+        fee: personalFee(r), expenses: bookingEstimate(r).total,
+      });
+    }
+  }
+  for (const r of sitter.rows as Array<Record<string, unknown>>) {
+    out.push({ key: `sitter:${r.id}`, date: String(r.shift_date), jobId: null, label: 'Studio evening', detail: String(r.person_name), fee: num(r.fee), expenses: 0 });
+  }
+  for (const r of yard.rows as Array<Record<string, unknown>>) {
+    out.push({ key: `yard:${r.id}`, date: String(r.booking_date), jobId: null, label: 'Yard day', detail: String(r.person_name), fee: num(r.expected_total), expenses: 0 });
+  }
+  return out.filter((x) => x.fee + x.expenses > 0.005);
 }
 
 // ── Excess ─────────────────────────────────────────────────────────────────

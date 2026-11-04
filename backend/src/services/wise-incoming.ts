@@ -50,6 +50,7 @@ import { getSystemSetting } from '../routes/system-settings';
 import { recordPayment, SYSTEM_SERVICE_USER_ID, type RecordPaymentType } from './record-payment';
 import { xeroBroker } from './xero-broker';
 import { isXeroConfigured } from '../config/xero';
+import { requiredDeposit as depositRule } from './deposit-rule';
 
 export const WISE_SENDER = 'noreply@wise.com';
 /** Pennies of slack when comparing the amount sent against an expected figure (jon: "a couple"). */
@@ -304,8 +305,7 @@ async function getMoneyPosition(job: JobRow): Promise<MoneyPosition> {
   }
 
   const remaining = Math.max(0, hireValueIncVat - depositsPaid);
-  let requiredDeposit = Math.max(hireValueIncVat * 0.25, 100);
-  if (hireValueIncVat < 400) requiredDeposit = hireValueIncVat;
+  const requiredDeposit = depositRule(hireValueIncVat);
   const depositPaid = depositsPaid >= requiredDeposit - 5; // portal's £5 tolerance
   return {
     hireValueIncVat,

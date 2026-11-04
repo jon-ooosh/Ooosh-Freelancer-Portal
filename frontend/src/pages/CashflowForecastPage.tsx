@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import type { FlowItem, Forecast, PileItem, XeroBillRow } from '../lib/cashflow';
+import type { FixAction, FlowItem, Forecast, PileItem, RowKey, XeroBillRow } from '../lib/cashflow';
 import { gbp, monthYear, shortDate } from '../lib/cashflow';
 import ForecastChart from '../components/cashflow/ForecastChart';
 import ForecastTable, { type CellRef } from '../components/cashflow/ForecastTable';
@@ -27,6 +27,59 @@ function Tile({ label, children, tone = 'plain' }: { label: string; children: Re
     <div className={`rounded-xl border p-4 ${toneCls}`}>
       <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{label}</p>
       {children}
+    </div>
+  );
+}
+
+/** A table row's name — the committed rows come from the forecast; the enquiry rows are the page's own. */
+function rowLabel(forecast: Forecast, key: RowKey | 'all'): string {
+  if (key === 'all') return 'everything';
+  if (key === 'pipeline_likely') return 'Likely enquiries (weighted)';
+  if (key === 'pipeline_possible') return 'Possible enquiries (weighted)';
+  return forecast.rows.find((r) => r.key === key)?.label || key;
+}
+
+/** "What would fix it" — rules from the backend (cashflow-pipeline.ts buildFixList), shown as they come. */
+function FixPanel({ forecast, onBills }: { forecast: Forecast; onBills: () => void }) {
+  const dip = forecast.dip;
+  const target = forecast.settings.targetFloor;
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4">
+      <h2 className="text-sm font-semibold text-gray-900">What would fix it</h2>
+      {!dip ? (
+        <p className="text-sm text-green-800 mt-2">No week in the next 13 dips below your {gbp(target)} target on booked money alone.</p>
+      ) : (
+        <>
+          <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            Week of <b>{shortDate(dip.start)}</b> closes at <b>{gbp(dip.closing)}</b> — the first below your {gbp(target)} target. These would lift it:
+          </div>
+          {forecast.fixList.length === 0 && <p className="text-sm text-gray-600 mt-2">Nothing OP can see would move it — look at planned items and bills.</p>}
+          <ol className="mt-1 divide-y divide-gray-100">
+            {forecast.fixList.map((a: FixAction, i) => (
+              <li key={a.key} className="py-2.5 flex gap-2.5">
+                <span className="shrink-0 w-5 h-5 rounded-full bg-ooosh-50 text-ooosh-700 text-[11px] font-bold grid place-items-center">{i + 1}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <p className="text-sm font-semibold text-gray-900">{a.title}</p>
+                    {a.amount !== null ? <span className="text-sm font-bold tabular-nums text-green-700 whitespace-nowrap">+{gbp(a.amount)}</span>
+                      : <span className="text-xs text-gray-400">info</span>}
+                  </div>
+                  <p className="text-xs text-gray-600 mt-0.5">{a.detail}</p>
+                  {a.links.length > 0 && (
+                    <p className="text-xs mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+                      {a.links.map((l, k) => (l.jobId
+                        ? <Link key={k} to={`/jobs/${l.jobId}`} className="text-ooosh-700 hover:underline">{l.label}</Link>
+                        : l.billId ? <button key={k} type="button" onClick={onBills} className="text-ooosh-700 hover:underline">{l.label}</button>
+                          : <span key={k} className="text-gray-600">{l.label}</span>))}
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+      <p className="text-[11px] text-gray-400 mt-2 border-t border-gray-100 pt-2">Rules, not guesses. Never suggests delaying an excess refund or money owed to a client.</p>
     </div>
   );
 }
@@ -70,7 +123,7 @@ export default function CashflowForecastPage() {
   const drillItems: FlowItem[] = useMemo(() => {
     if (!forecast || !selected || !periods[selected.period]) return [];
     const p = periods[selected.period];
-    return forecast.items.filter((i) => i.date >= p.start && i.date <= p.end && (selected.row === 'all' || i.row === selected.row));
+    return forecast.items.filter((i) => i.date >= p.start && i.date <= p.end && (selected.row === 'all' ? !i.tier : i.row === selected.row));
   }, [forecast, selected, periods]);
 
   if (role !== 'admin') {
@@ -191,6 +244,11 @@ export default function CashflowForecastPage() {
                   {lowWeek.closing >= limit ? `, ${gbp(lowWeek.closing - limit)} above the overdraft limit.` : ' — past the overdraft limit.'}
                 </p>
               )}
+              {lowWeek && (() => {
+                const w = forecast.weeks.find((x) => x.start === lowWeek.start);
+                return w && w.closingLikely - w.closing > 0.5
+                  ? <p className="text-xs text-gray-700 mt-1">With likely enquiries: <b>{gbp(w.closingLikely)}</b>.</p> : null;
+              })()}
               {lowDay && lowWeek && lowDay.closing < lowWeek.closing - 0.5 && (
                 <p className="text-xs text-gray-700 mt-1">Inside the next fortnight it dips to <b>{gbp(lowDay.closing)}</b> on {shortDate(lowDay.date, true)}.</p>
               )}
@@ -201,6 +259,11 @@ export default function CashflowForecastPage() {
               <p className="text-[11px] text-gray-500 mt-1">
                 YouLend takes {gbp(forecast.youlend.withheldInForecast)} of it; {gbp(forecast.youlend.remainingAtEnd)} left after.
               </p>
+              {forecast.pipeline.enquiries > 0 && (
+                <p className="text-[11px] text-gray-500 mt-1">
+                  Plus {gbp(forecast.pipeline.likely)} likely and {gbp(forecast.pipeline.possible)} possible from {forecast.pipeline.enquiries} enquiries (weighted).
+                </p>
+              )}
             </Tile>
           </div>
 
@@ -217,11 +280,12 @@ export default function CashflowForecastPage() {
             </div>
           )}
 
-          <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+          <div className="lg:col-span-2 rounded-xl border border-gray-200 bg-white p-4">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <div>
                 <h2 className="text-sm font-semibold text-gray-900">Closing balance {byDay ? 'by day' : 'by week'}</h2>
-                <p className="text-xs text-gray-500">All counted cash pooled — booked jobs only (enquiries come in Phase 2).</p>
+                <p className="text-xs text-gray-500">All counted cash pooled. The line is booked money only; the shaded band adds enquiries, weighted by their chance of booking.</p>
               </div>
               <div className="inline-flex rounded-lg border border-gray-300 p-0.5 text-sm">
                 <button type="button" onClick={() => { setByDay(false); setSelected(null); }} className={`px-3 py-1 rounded-md ${!byDay ? 'bg-ooosh-600 text-white' : 'text-gray-700'}`}>13 weeks</button>
@@ -229,17 +293,24 @@ export default function CashflowForecastPage() {
               </div>
             </div>
             <ForecastChart
-              points={periods.map((p) => ({ date: p.start, closing: p.closing }))}
+              points={periods.map((p) => ({ date: p.start, closing: p.closing, closingLikely: p.closingLikely, closingPossible: p.closingPossible }))}
               target={target}
               overdraftLimit={settings.overdraftLimit}
               selected={selected?.period ?? null}
               onSelect={(i) => setSelected({ period: i, row: 'all' })}
             />
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-600 mt-1">
+              <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-ooosh-600" />Booked</span>
+              <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-2.5 bg-[#bae0fd]" />+ likely enquiries</span>
+              <span className="flex items-center gap-1.5"><span className="inline-block w-3 h-2.5 bg-[#e0effe]" />+ possible</span>
+            </div>
             {!byDay && (
               <p className="text-[11px] text-gray-500 mt-1">
-                The far weeks always look worse: only jobs already booked are counted, while rent, HP and payroll are known months ahead. Act on the next four weeks.
+                The far weeks always look worse: only jobs already booked are counted, while rent, HP and payroll are known months ahead. Act on the next four weeks; further out, read the band.
               </p>
             )}
+          </div>
+          <FixPanel forecast={forecast} onBills={() => setModal('bills')} />
           </div>
 
           <div className="rounded-xl border border-gray-200 bg-white p-4">
@@ -257,7 +328,7 @@ export default function CashflowForecastPage() {
                 <h3 className="text-sm font-semibold text-gray-900">
                   {byDay ? shortDate(periods[selected.period].start, true) : `Week of ${shortDate(periods[selected.period].start)}`}
                   {' · '}
-                  {selected.row === 'all' ? 'everything' : forecast.rows.find((r) => r.key === selected.row)?.label}
+                  {rowLabel(forecast, selected.row)}
                   {' · '}
                   <span className="tabular-nums">{gbp(drillItems.reduce((s, i) => s + i.amount, 0), true)}</span>
                 </h3>
@@ -283,7 +354,7 @@ export default function CashflowForecastPage() {
                           <td className="px-2 py-1.5 whitespace-nowrap text-gray-700">{shortDate(i.date, true)}</td>
                           <td className={`px-2 py-1.5 ${i.clientMoney ? 'text-violet-700' : 'text-gray-900'}`}>
                             {i.label}
-                            {selected.row === 'all' && <span className="block text-[11px] text-gray-400">{forecast.rows.find((r) => r.key === i.row)?.label}</span>}
+                            {selected.row === 'all' && <span className="block text-[11px] text-gray-400">{rowLabel(forecast, i.row)}</span>}
                           </td>
                           <td className="px-2 py-1.5 text-xs text-gray-600">
                             {i.detail}

@@ -7,7 +7,8 @@
 export type RowKey =
   | 'hire_balance' | 'excess_in' | 'stripe_pending' | 'stripe_payout' | 'planned_in'
   | 'xero_bill' | 'overheads' | 'payroll' | 'vat_tax' | 'instalments' | 'one_off' | 'other_out'
-  | 'van_hp' | 'excess_refund' | 'refund_owed' | 'stripe_fee' | 'youlend' | 'card_payment';
+  | 'van_hp' | 'excess_refund' | 'refund_owed' | 'stripe_fee' | 'youlend' | 'card_payment' | 'freelancers'
+  | 'pipeline_likely' | 'pipeline_possible';
 
 export interface FlowItem {
   date: string;
@@ -19,6 +20,16 @@ export interface FlowItem {
   windowTo?: string;
   clientMoney?: boolean;
   link?: { type: 'job' | 'vehicle' | 'planned' | 'xero_bill' | 'card' | 'settings'; id?: string };
+  /** Weighted enquiry money only. */
+  tier?: 'likely' | 'possible';
+}
+
+export interface FixAction {
+  key: 'chase_overdue' | 'ask_early' | 'nudge_enquiries' | 'move_bills' | 'card_headroom' | 'bank_transfer';
+  title: string;
+  detail: string;
+  amount: number | null;
+  links: Array<{ label: string; jobId?: string; billId?: string }>;
 }
 
 export interface PileItem {
@@ -41,6 +52,10 @@ export interface Period {
   totalOut: number;
   byRow: Partial<Record<RowKey, number>>;
   interestMemo: number;
+  likelyIn: number;
+  possibleIn: number;
+  closingLikely: number;
+  closingPossible: number;
 }
 
 export interface CashflowSettings {
@@ -56,6 +71,12 @@ export interface CashflowSettings {
   countOverdueBills: boolean;
   countOverdueBalances: boolean;
   suggestBankTransfer: boolean;
+  weightProvisional: number;
+  weightHot: number;
+  weightWarm: number;
+  weightCold: number;
+  weightUnset: number;
+  likelyThreshold: number;
 }
 
 export interface Forecast {
@@ -88,6 +109,14 @@ export interface Forecast {
   stripe: { live: boolean; reason?: string; available: number; feeRate: number; feeRateSource: 'stripe' | 'setting'; payoutDays: number; share: number };
   xero: { ok: boolean; reason?: string; unpaidBills: number };
   planned: Array<{ id: string; label: string; message: string }>;
+  dip: { start: string; end: string; closing: number } | null;
+  fixList: FixAction[];
+  pipeline: {
+    enquiries: number;
+    likely: number;
+    possible: number;
+    rates: Array<{ likelihood: string; booked: number; lost: number; rate: number | null }>;
+  };
   vanFinanceMissing: Array<{ vehicleId: string; reg: string; lender: string }>;
   warnings: Array<{ code: string; message: string }>;
 }

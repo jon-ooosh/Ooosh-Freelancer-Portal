@@ -508,3 +508,53 @@ adjustments on a Monday morning"). Migration 328 links each card to its Costs pa
 invoice directly in HireHop never reached OP's excess record (job 16325). Fixed in the Money tab, not here:
 `services/excess-hh-claims.ts`, documented in `docs/reference/MONEY-AND-EXCESS.md` (last section). The pile
 shrinks as those jobs are refreshed.
+
+### 13.2 Phase 2 — what shipped (5 Nov 2026)
+
+**The deposit rule is one helper** — `services/deposit-rule.ts` `requiredDeposit()` (Money tab summary, Wise
+matcher, forecast) with the frontend mirror `lib/depositRule.ts` (Money tab quick amounts). The payment portal
+keeps its own copy (netlify-functions) — change all three together. Behaviour unchanged.
+
+**Freelancers** (`loadFreelancerCosts()` in `cashflow-sources.ts`, row "Freelancers (fees + expenses)"):
+- deliveries, collections and crew on booked jobs (quote confirmed or completed, or someone assigned), studio
+  evenings and yard days; fee by `personalFee()`, expenses by `bookingEstimate()` — the portal's and Costs'
+  own figures. A multi-drop run is one piece of work at the run's fee. Payroll crew ("Ooosh Staff") cost their
+  expenses only.
+- a confirmed quote with fewer people booked than it needs is costed at the quote's fee per empty place,
+  "not yet booked";
+- not yet on an invoice (`cost_work_items`) — once invoiced, it is a Costs bill and Xero's. Work before the
+  portal's "invoices linked from" date (`freelancer_earnings_labels_from`, `labelsFrom()`) never counts;
+- paid on `freelancerDueDateFromApproval()` from the day of the work (today for work already done) — the
+  earliest case.
+- **Differs from §5.5:** quote expenses are the freelancer's estimate (they front them and claim them), not
+  every quote line, so a cost line on the quote that Ooosh pays directly by card isn't here — it arrives as a
+  card receipt.
+
+**Enquiries** (`cashflow-pipeline.ts`, `loadPipelineJobs()`, `loadOutcomeHistory()`):
+- open enquiries for hires that haven't started (new enquiry, quoting, chasing, paused, provisional), one per
+  group of options (`nonLeadMemberIds()`); value = the Money tab's inc-VAT figure, else `job_value` + 20%.
+- chance = provisional → Settings (85%); else what happened to enquiries with the same likelihood in the last
+  24 months once there are 20 decided (booked or booked-then-cancelled ÷ booked + lost, alternative-quote
+  losses excluded), else Settings (hot 70 / warm 40 / cold 15 / unset 25). Editable in Settings with the
+  history beside them (migration 330).
+- **Differs from §6:** no status or lead-time buckets — OP doesn't record what a past job looked like weeks
+  before it started (status or likelihood history), so only likelihood is learned and provisional is a setting.
+- deposit (the rule, less anything paid) on the earlier of a week after the next chase and a week before the
+  start, never before tomorrow; the rest on the first day; both + Stripe's payout days; weighted; net of
+  Stripe's fee and YouLend on the Stripe share. Money in only — their costs aren't weighted in yet.
+- ≥ 60% (Settings) is Likely, the rest Possible: the shaded band on the chart, two rows and "Closing with
+  likely" under the table — never in the committed line or its totals.
+- a warning lists enquiries over £3k with no likelihood set.
+
+**What would fix it** (`buildFixList()`): for the first week whose committed close is below the target —
+chase overdue balances; ask early for balances due in the fortnight after; nudge enquiries starting up to four
+weeks after (ranked by deposit × chance); Xero bills due that week ("only with the supplier's say-so"); bank
+transfer instead of card (switch in Settings); card headroom as information. Biggest first. Never delays a
+client's money.
+
+**Not built (next):** the comparison of each card's real movement with logged receipts (needs ~4 check-ins);
+Phase 3 (Xero reports scope, statement balances, recurring-payment suggestions); Phase 4 (Monday email,
+forecast-vs-actual).
+
+**Also in this PR:** `scripts/record-hh-excess-refund.ts` — a one-off to record an excess refund made directly
+in HireHop as a payment application (jobs 12150, 15145; run after the claim sweep).

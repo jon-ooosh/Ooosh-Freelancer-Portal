@@ -48,6 +48,9 @@ const cardDraft = (c: Card | null): CardDraft => ({
 export default function CashflowSettingsModal({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }) {
   const [settings, setSettings] = useState<Record<string, string> | null>(null);
   const [measured, setMeasured] = useState<{ share: number | null; payments: number } | null>(null);
+  const [outcomes, setOutcomes] = useState<Array<{ likelihood: string; booked: number; lost: number }>>([]);
+  const [minSample, setMinSample] = useState(20);
+  const [suggestTransfer, setSuggestTransfer] = useState(true);
   const [cards, setCards] = useState<Card[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [card, setCard] = useState<CardDraft | null>(null);
@@ -59,7 +62,10 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
   const loadAll = async () => {
     try {
       const [s, c, a] = await Promise.all([
-        api.get<{ data: { settings: CashflowSettings; measuredStripeShare: { share: number | null; payments: number } } }>('/cashflow/settings'),
+        api.get<{ data: {
+          settings: CashflowSettings; measuredStripeShare: { share: number | null; payments: number };
+          outcomes: Array<{ likelihood: string; booked: number; lost: number }>; minSample: number;
+        } }>('/cashflow/settings'),
         api.get<{ data: Card[] }>('/cashflow/cards?all=1'),
         api.get<{ data: Account[] }>('/cashflow/accounts?all=1'),
       ]);
@@ -68,8 +74,13 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
         targetFloor: str(v.targetFloor), overdraftLimit: str(v.overdraftLimit), excessRefundDays: str(v.excessRefundDays),
         stripeSharePct: pct(v.stripeShare, 0), stripeFeePct: pct(v.stripeFeeRate), stripePayoutDays: str(v.stripePayoutDays),
         youlendRatePct: pct(v.youlendRate, 0), youlendRemaining: str(v.youlendRemaining), youlendAsOf: v.youlendAsOf || '',
+        weightProvisionalPct: pct(v.weightProvisional, 0), weightHotPct: pct(v.weightHot, 0), weightWarmPct: pct(v.weightWarm, 0),
+        weightColdPct: pct(v.weightCold, 0), weightUnsetPct: pct(v.weightUnset, 0), likelyThresholdPct: pct(v.likelyThreshold, 0),
       });
       setMeasured(s.data.measuredStripeShare);
+      setOutcomes(s.data.outcomes || []);
+      setMinSample(s.data.minSample || 20);
+      setSuggestTransfer(v.suggestBankTransfer);
       setCards(c.data);
       setAccounts(a.data);
     } catch (e) {
@@ -83,6 +94,7 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
     if (!settings) return;
     setError(null);
     const n = (k: string) => num(settings[k]);
+    const frac = (k: string) => { const v = n(k); return v === null || Number.isNaN(v) ? v : v / 100; };
     const body: Record<string, unknown> = {
       targetFloor: n('targetFloor'), overdraftLimit: n('overdraftLimit'), excessRefundDays: n('excessRefundDays'),
       stripeShare: n('stripeSharePct') !== null ? (n('stripeSharePct') as number) / 100 : null,
@@ -90,9 +102,12 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
       stripePayoutDays: n('stripePayoutDays'),
       youlendRate: n('youlendRatePct') !== null ? (n('youlendRatePct') as number) / 100 : null,
       youlendRemaining: n('youlendRemaining'), youlendAsOf: settings.youlendAsOf || null,
+      weightProvisional: frac('weightProvisionalPct'), weightHot: frac('weightHotPct'), weightWarm: frac('weightWarmPct'),
+      weightCold: frac('weightColdPct'), weightUnset: frac('weightUnsetPct'), likelyThreshold: frac('likelyThresholdPct'),
+      suggestBankTransfer: suggestTransfer,
     };
     for (const [k, v] of Object.entries(body)) {
-      if (k === 'youlendAsOf') continue;
+      if (k === 'youlendAsOf' || k === 'suggestBankTransfer') continue;
       if (v === null) { setError('Every figure needs a value.'); return; }
       if (Number.isNaN(v)) { setError('One of the figures isn\'t a number.'); return; }
     }
@@ -209,6 +224,55 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
               {field('youlendRemaining', 'YouLend still owed (£)', 'From the YouLend statement — update monthly')}
               {field('youlendAsOf', 'As of', undefined, undefined, 'date')}
             </div>
+            <label className="flex items-center gap-2 text-sm text-gray-700 mt-3">
+              <input type="checkbox" checked={suggestTransfer} onChange={(e) => setSuggestTransfer(e.target.checked)} />
+              Suggest asking for bank transfer instead of card when a week dips (keeps YouLend's cut and Stripe's fee in hand)
+            </label>
+          </section>
+
+          <section>
+            <h3 className="text-sm font-semibold text-gray-900 mb-1">Enquiries — how likely they are to book</h3>
+            <p className="text-xs text-gray-600 mb-2">
+              Each enquiry is weighted by what actually happened to enquiries with the same likelihood over the last 24 months, once there are {minSample} to learn from.
+              Below that, and always for provisional, these figures are used.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+              {field('weightProvisionalPct', 'Provisional', undefined, '%')}
+              {field('weightHotPct', 'Hot', undefined, '%')}
+              {field('weightWarmPct', 'Warm', undefined, '%')}
+              {field('weightColdPct', 'Cold', undefined, '%')}
+              {field('weightUnsetPct', 'Not set', undefined, '%')}
+              {field('likelyThresholdPct', '"Likely" from', undefined, '%')}
+            </div>
+            <div className="mt-2 rounded-lg border border-gray-200 overflow-hidden">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 text-gray-500">
+                  <tr>
+                    <th className="text-left font-semibold px-3 py-1.5">Last 24 months</th>
+                    <th className="text-right font-semibold px-3 py-1.5">Booked</th>
+                    <th className="text-right font-semibold px-3 py-1.5">Lost</th>
+                    <th className="text-right font-semibold px-3 py-1.5">Booked %</th>
+                    <th className="text-left font-semibold px-3 py-1.5">Used</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {(['hot', 'warm', 'cold', 'unset'] as const).map((l) => {
+                    const o = outcomes.find((x) => x.likelihood === l);
+                    const decided = o ? o.booked + o.lost : 0;
+                    return (
+                      <tr key={l}>
+                        <td className="px-3 py-1.5 text-gray-800">{l === 'unset' ? 'No likelihood set' : l[0].toUpperCase() + l.slice(1)}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">{o?.booked ?? 0}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">{o?.lost ?? 0}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">{decided ? `${Math.round(((o?.booked ?? 0) / decided) * 100)}%` : '—'}</td>
+                        <td className="px-3 py-1.5 text-gray-600">{decided >= minSample ? 'learned' : 'figure above'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-gray-500 mt-1">"Lost" leaves out quotes lost because they booked their other option. Booked-then-cancelled counts as booked.</p>
           </section>
 
           <div className="flex items-center justify-end gap-3">

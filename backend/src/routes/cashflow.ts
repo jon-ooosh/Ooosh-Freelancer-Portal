@@ -22,9 +22,10 @@ import { getClient, query } from '../config/database';
 import { buildForecast } from '../services/cashflow-forecast';
 import {
   RECEIPT_SPEND_DAYS, SETTING_FIELDS, cardReceiptSpend, forgetXeroBillsCache, loadAccounts, loadCardReceipts, loadBillFlags, loadCards, loadPlannedItems,
-  loadSettings, loadXeroBills, measureStripeShare, readStripe,
+  loadOutcomeHistory, loadSettings, loadXeroBills, measureStripeShare, readStripe,
 } from '../services/cashflow-sources';
 import { addDays, isIsoDate, nextDates } from '../services/cashflow-schedule';
+import { MIN_SAMPLE } from '../services/cashflow-pipeline';
 import { ukToday } from '../services/uk-date';
 import { isXeroConfigured } from '../config/xero';
 import { xeroBroker } from '../services/xero-broker';
@@ -58,8 +59,8 @@ router.get('/forecast', async (req: AuthRequest, res: Response) => {
 
 router.get('/settings', async (_req: AuthRequest, res: Response) => {
   try {
-    const [settings, measured] = await Promise.all([loadSettings(), measureStripeShare()]);
-    res.json({ data: { settings, measuredStripeShare: measured } });
+    const [settings, measured, outcomes] = await Promise.all([loadSettings(), measureStripeShare(), loadOutcomeHistory(ukToday())]);
+    res.json({ data: { settings, measuredStripeShare: measured, outcomes, minSample: MIN_SAMPLE } });
   } catch (err) {
     fail(res, 'settings', err);
   }
@@ -78,6 +79,12 @@ const settingsSchema = z.object({
   countOverdueBills: z.boolean().optional(),
   countOverdueBalances: z.boolean().optional(),
   suggestBankTransfer: z.boolean().optional(),
+  weightProvisional: z.number().min(0).max(1).optional(),
+  weightHot: z.number().min(0).max(1).optional(),
+  weightWarm: z.number().min(0).max(1).optional(),
+  weightCold: z.number().min(0).max(1).optional(),
+  weightUnset: z.number().min(0).max(1).optional(),
+  likelyThreshold: z.number().min(0).max(1).optional(),
 }).strict();
 
 router.put('/settings', validate(settingsSchema), async (req: AuthRequest, res: Response) => {

@@ -23,6 +23,7 @@ import CloseOutMoneyPanel from './CloseOutMoneyPanel';
 import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
 import type { JobExcess } from '../../../shared/types';
+import { requiredDeposit } from '../lib/depositRule';
 
 /** The Stripe line on a refund, in the words the money came in by: the reader, a PayPal
  *  payment through the portal (the portal tags the HireHop deposit "(PayPal)"), or a card
@@ -2205,7 +2206,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
         // Smart payment options
         const total = financial.hire_value_inc_vat;
         const remaining = financial.balance_outstanding;
-        const minDeposit = total < 400 ? total : Math.max(total * 0.25, 100);
+        const minDeposit = requiredDeposit(total);
         const halfPayment = Math.round(total * 0.5);
         // Quick amounts for hire payments (deposit / balance)
         const quickAmounts: { label: string; amount: number }[] = [];
