@@ -1,6 +1,6 @@
 # Cash forecast — spec
 
-**Status: DRAFT, 3 Nov 2026.** Agreed in principle with jon; nothing built. Mockup:
+**Status: DRAFT, 4 Nov 2026** (second pass with jon). Agreed in principle; nothing built. Mockup:
 `docs/design/cashflow-forecast/` (open `mockup.html`, or the PNG in `screenshots/`).
 
 An admin-only, forward-looking **13-week rolling cash forecast** in OP. Xero can tell you
@@ -27,8 +27,9 @@ next to the outgoings Xero knows about, and says what to do when a week dips.
    forecast that errs should err towards caution. Every inflow also carries its window ("between
    10 Nov and 1 Dec") — jon: knowing *that* £1,000 lands between two dates is as useful as a
    guess at the day. The drill-down shows the window; the line uses the latest date.
-6. **Xero is the source of truth for "things to be paid"** (bills), with two exceptions owned by
-   OP: van HP (§5.3) and anything Xero cannot know (§5.5). Never read both for the same thing.
+6. **Xero is the source of truth for "things to be paid"** (bills), with three exceptions owned by
+   OP: van HP (§5.3), a Xero bill being paid off in instalments (§5.4) and anything Xero cannot
+   know (§5.5). Never read both for the same thing.
 7. **Xero is never the source for money coming IN.** Its receivables are not usable here: HireHop
    pushes deposits as overpayments, so Xero shows "Invoices owed to you: −£163,683" (3 Nov 2026).
    Incoming money is OP's (`job_financials`, `job_excess`, the pipeline).
@@ -48,6 +49,17 @@ next to the outgoings Xero knows about, and says what to do when a week dips.
     bill a week; it never suggests delaying an excess refund or a refund owed.
 12. **Client £ performance** (who pays late, who books what) is wanted but belongs in the address
     book — not this module. `BACKLOG.md`.
+13. **Stripe money is cash on the day Stripe says it becomes available** (4 Nov). Weekly, that is
+    nearly the same as "cash when paid"; but jon's tight spots are inside a week ("paid Monday,
+    spendable Wednesday, payroll Tuesday"), so the page also shows **the next 14 days day by day**
+    (§7) — the same items, bucketed by day. Stripe's fee and YouLend's cut are their own lines.
+14. **Planned items are the ONE place** to say "this amount, on this day, every month, until then"
+    (§5.4) — rent, DDs, payroll, tax, and a Xero bill being paid off in instalments. OP does not
+    read Xero's repeating bills.
+15. **The deposit rule is the one already in OP** (jon, 4 Nov): 25% with a £100 floor, the full
+    amount under £400. It is written out twice today (`routes/money.ts` ~2128, `wise-incoming.ts`
+    ~307); the forecast must not make it three. Phase 1 moves it into one shared helper that all
+    three call.
 
 ---
 
@@ -58,13 +70,13 @@ From jon's Xero bank list (3 Nov 2026). Configured once in Settings (`cashflow_a
 | Account | Treat as | Balance from |
 |---|---|---|
 | Lloyds current | **Main account** — the £22k overdraft | Monday check-in (Xero statement balance if the API gives it — §3) |
-| Wise | Cash (client-facing bank) | Wise API if a live read token is set (`config/wise.ts` exists, sandbox only today), else check-in |
-| Stripe GBP | Cash in transit | **Stripe API, live** (`balance` available + pending). Xero's £52,867 is an unreconciled clearing figure — ignore it |
+| Wise | Cash (client-facing bank) | Check-in. No Wise API needed: money in is already recorded in OP, and money out of Wise shows up in the next Monday balance and the forecast-vs-actual line (§9) |
+| Stripe GBP | Cash — available now, plus pending money on the date it becomes available | **Stripe API, live** (`balance` available + pending, with each pending amount's available date). Xero's £52,867 is an unreconciled clearing figure — ignore it |
 | Virgin, Aldermore 2, Capital on Tap savings, Moneybox | **One "Savings" lump**, counted as cash | Check-in (one figure) |
 | Petty cash + Till | One "Cash on site" figure | Check-in (optional — small) |
-| Capital on Tap card | Card — **interest-bearing** | Check-in; APR + repayment plan in settings (§5.6) |
-| Amex Gold charge card | Card — paid in full monthly, no interest | Check-in; statement due day in settings |
-| Lloyds credit card, PayPal | Card / small | Check-in (optional) |
+| Capital on Tap card | Card — interest-bearing (1.83% a month) | Check-in; terms and repayment plan in the card's settings (§5.6) |
+| Amex Gold charge card | Card — paid in full monthly today, but that is a setting, not an assumption | Check-in; card settings (§5.6) |
+| Lloyds credit card, PayPal | Card / small | Check-in (optional); any card can be added |
 | Worldpay, Amex merchant, Funding Circle, Director's loan, New Stripe GBP | **Ignored** (retired / zero) | — |
 
 ---
@@ -72,7 +84,7 @@ From jon's Xero bank list (3 Nov 2026). Configured once in Settings (`cashflow_a
 ## 3. The Monday check-in (the opening balance)
 
 A small modal: one row per counted account, pre-filled with the best figure OP has (live Stripe;
-live Wise if configured; Xero's statement balance if readable; else last week's) and its age.
+Xero's statement balance if readable; else last week's) and its age.
 jon confirms or types; 30 seconds. Stored in `cashflow_balance_snapshots` (account, amount,
 as_of, source, entered_by).
 
@@ -80,7 +92,7 @@ as_of, source, entered_by).
   banner** "The forecast starts from a balance confirmed on …".
 - Between check-ins, the opening balance is the last confirmed figure plus what OP knows has
   moved since (payments recorded in OP, Stripe live). Good enough for mid-week; Monday resets it.
-- **To verify in Phase 2:** whether Xero's API exposes the bank-feed *statement* balance (the
+- **To verify in Phase 3:** whether Xero's API exposes the bank-feed *statement* balance (the
   figure on Xero's bank cards). The Bank Summary report gives the *reconciled* balance, which is
   the lagging one. If the statement balance isn't available, the check-in stays manual for
   Lloyds and the cards — three figures.
@@ -114,7 +126,7 @@ week by §1.5, and sums. One builder, one place.
 | Item | Tier | Amount | Date (window) |
 |---|---|---|---|
 | Balance on a confirmed+ job | Committed | `job_financials.balance_outstanding` | Due by the first day of the hire. Client on credit (`working_terms_credit_days` on the client org/person — the live field; the old `organisations.payment_terms` column is unused): job end + N days. Window: today → due date |
-| Deposit owed on a confirmed job with none paid | Committed | the deposit rule (§10 Q1) | Window today → first day; placed at the first day |
+| Deposit owed on a confirmed job with none paid | Committed | the deposit rule (§1.15) | Window today → first day; placed at the first day |
 | Balance **overdue** (hire started, still owing) | Committed, flagged | balance | Not placed in week 1 by default — listed as "Overdue: chase" and counted in the fix-it list. A toggle puts them in "next week" |
 | Excess due on jobs starting (needed / pending records) | Committed, client money | £ per record | First day of the hire |
 | Pipeline jobs (provisional, quoting, new enquiry) | Likely / Possible | job value × weighting (§6), split into deposit and balance | Deposit: earlier of (next chase date + 7 days, first day − 7); balance: first day. Starting rules — tune after a month |
@@ -127,6 +139,17 @@ Rules that bite:
 - **Cancelled jobs:** only the fee invoice owing counts (`cancellation-close.ts`), never the hire.
 - Any "is it settled" test goes through `lib/money.ts` / the backend equivalent — never `> 0`.
 
+**How a client pays changes when the money is spendable.** About 90% of money in comes through
+Stripe (jon, 4 Nov; Phase 1 measures it from the methods OP records, last 90 days, as
+`cashflow_stripe_share`). For the Stripe share of any expected payment:
+- it becomes spendable on its date **plus Stripe's payout delay**, read from the account's payout
+  schedule (Stripe API), so a balance due on a Friday is spendable the following Tuesday or so;
+- **Stripe's fee** is its own outgoing line, at the effective rate of the last 90 days of Stripe
+  balance transactions (fee ÷ amount), not a guessed percentage;
+- **YouLend's cut** is its own outgoing line (§5.6).
+
+Money already in Stripe is exact: the API gives each pending amount and the day it becomes available.
+
 ### 5.2 Money out (Xero)
 
 - **Unpaid bills** (ACCPAY, AUTHORISED) by due date — the bills token already has
@@ -136,7 +159,15 @@ Rules that bite:
   into week 1 would make the chart useless. Overdue bills appear as an amber "Overdue in Xero —
   check" total, outside the line, with a one-click "count these from next week". Once the bookkeeper
   has cleaned them up this pile should be small.
-- **Repeating bills** (Xero RepeatingInvoices) projected forward. Committed.
+  On 4 Nov jon split it: ~£15k is paid but not reconciled yet, ~£60k is two large bills being paid
+  off monthly, and the rest is genuinely due. So:
+  - **"Paid — Xero is behind"**: a tick on a bill in the check pile hides it until Xero marks it
+    paid, then the tick clears itself. Never written to Xero.
+  - **Instalments**: a bill being paid monthly is turned into an instalment plan (§5.4) and leaves
+    the pile.
+  - What's left is real and goes in from next week.
+- **Xero repeating bills are NOT read** (§1.14). If the bookkeeper uses them, each month's bill
+  appears in Xero as an ordinary bill and is matched against the planned item (§5.4).
 - **Excluded contacts:** a Xero contact marked "handled by fleet finance" (the HP lenders) is skipped,
   so HP is never counted twice (§5.3).
 
@@ -151,23 +182,43 @@ a per-agreement day-of-month (new column, defaults to the 1st). Committed.
 `monthly_payment` and `finance_ends`, or that van is missing from the forecast. The page lists
 "financed vans with no monthly payment" as a warning.
 
-### 5.4 Planned items (manual, in settings)
+### 5.4 Planned items — the one place for anything Xero doesn't schedule
 
-`cashflow_planned_items`: label, amount, category, frequency (once / weekly / monthly / quarterly /
-yearly), day, start, end, tier. For everything that is not a Xero bill:
+**Where:** Money › Cash forecast › **Planned items** (the button in the header): a list with
+**+ Add**, each row editable, and a preview of the next three dates so a mistyped day shows at once.
 
+`cashflow_planned_items`: label, category, amount, frequency (once / weekly / monthly / quarterly /
+yearly), day, start, end, tier, and two optional links:
+- **`xero_contact_id` — "matches bills from"**. When a Xero bill from that contact lands within
+  ±7 days of a planned date, for a similar amount (±10%), that occurrence counts as arrived and the
+  bill is used instead. So a payment is never counted twice whether or not the bookkeeper raises a
+  bill for it.
+- **`xero_bill_id` — "instalments of this bill"**. The bill leaves the bills line and the plan
+  takes over: £X on day N each month **until the bill's amount due in Xero is used up** (read each
+  time, so payments the bookkeeper records shorten the plan by themselves). The two big bills from
+  §5.2 are the first two.
+
+What goes here:
 - rent, rates, water, insurance, software and other direct debits;
 - **payroll** (net pay date) and **PAYE/NI** (22nd);
 - **VAT** — one item per quarter, amount typed in (the bookkeeper's figure). An OP estimate is
   Phase 4;
 - **corporation tax**;
+- instalment plans on Xero bills (above);
 - one-offs jon is planning (a van deposit, a big purchase).
 
-Phase 2 adds *suggestions*: payments that recur in the last 12 months of Xero bank transactions
+**Not here:** card repayments (they are the card's own settings, §5.6), van HP (§5.3) and YouLend
+(§5.6) — each has one home so it can't be entered twice.
+
+Phase 3 adds *suggestions*: payments that recur in the last 12 months of Xero bank transactions
 but are not a bill or a planned item ("£1,450 to X on the 1st, 11 of 12 months — add?"). A
 suggestion is never counted until jon accepts it.
 
-### 5.5 Money out that only OP knows (Phase 3)
+### 5.5 Money out that only OP knows (Phase 2)
+
+jon (4 Nov): "being able to see what's going to be owed, as part of a job cost, before we've
+done it — flights, freelancers, fuel" — the part Xero can never do. Phase 2, ahead of the Xero
+extras.
 
 - **Excess refunds** on returned and upcoming jobs: return date + `cashflow_excess_refund_days`
   (default 7). Held-on-account excess (`held_on_account`) is standing — never refunded by the
@@ -176,23 +227,57 @@ suggestion is never counted until jon accepts it.
 - **Freelancer work done but not yet invoiced** (`freelancer-earnings.ts` "To invoice") and
   **freelancers booked on confirmed jobs** (`freelancer-fees.ts` `personalFee()`): due by
   `supplier-terms.ts` `resolveDueDate()`. Xero cannot see these until the invoice arrives.
+- **Expected job expenses on confirmed jobs' quotes** — `quotes.expenses` (the transport
+  calculator's lines: fuel, parking, tolls, outbound / return travel — flights, trains, ferries —
+  hotel, per diems) and `quote_assignments.expected_expenses`. Placed on the job's date, labelled
+  "estimate from the quote". Lines the client is recharged for still count as money out (the
+  recharge comes back later as part of the balance). **Gap to know about:** fuel for self-drive
+  hires and costs never put on a quote are not in OP before they happen; they appear when the
+  receipt or bill arrives.
+- **Once a cost is captured in Costs it is OP's actual, and it's pushed to Xero** — the
+  quote estimate for that line stops counting when a cost is linked to the job for the same
+  category, so it is never counted twice.
 
 ### 5.6 Cards and YouLend
 
-- **Cards:** settings per card — APR, statement due day, repayment plan (full / fixed £ / minimum).
-  Monthly interest = balance × APR ÷ 12, shown as its own line ("Capital on Tap interest
-  ≈ £520/month"). The Amex statement is an outflow in full on its due day. The balance comes from the
-  check-in; Xero's lags.
-- **YouLend** (taken out of Stripe receipts until paid off — expected by summer 2027): its own
-  **outflow line**, not a hidden cut to income, so it is visible and disappears when done.
-  ```
-  YouLend this week = withhold rate × (expected receipts this week × Stripe share)
-                      capped at the remaining balance
-  ```
-  *Stripe share* = the share of hire + excess money that came in by Stripe over the last 90 days
-  (OP records every payment's method) — nobody knows how one client will pay, but the mix across
-  a week is steady. Inputs: remaining balance and withhold rate, typed in from the YouLend
-  statement monthly (settings). When the remaining balance reaches £0 the line stops.
+**Cards** — `cashflow_cards`, any number (Capital on Tap, Amex, Lloyds card, one added later):
+name, monthly interest rate (0 for a charge card), statement day, payment due day, credit limit,
+and a **repayment plan**: *in full* (the statement balance on the due day) / *minimum* (a % of the
+statement balance) / *fixed* (£X a week or a month, never below the minimum). Amex is "in full"
+today; switching it is one setting, so a month where it isn't paid in full can be planned for.
+
+- Cash out = the plan's payments. **A purchase on a card is not cash out** — it is cash out when
+  the card is paid. So a Xero bill paid by card would be counted twice (as a bill, then in the card
+  balance); a bill can be marked "paid by card" and leaves the bills line.
+- Interest = the card's balance × its monthly rate, on the statement day, as its own line.
+- **A balance line per card** (small, under the table): balance + typical spend − payments +
+  interest, week by week. Typical spend = the average weekly rise between Monday check-ins over the
+  last 8 weeks, once there are 8. This is what shows the "cash drag" jon described.
+
+**Capital on Tap, 4 Nov:** 1.83% a month (≈ 24% a year compounded), statement on the 27th, minimum
+10% due around the 2nd–3rd, jon paying £1,000 a week. Balance £30–40k for six months: spending
+roughly matches the £1,000 a week, so the balance stands still and costs **~£550–730 a month in
+interest**. The card line makes that visible; whether to change it is jon's call.
+
+**YouLend** — its own outgoing line, so it is visible and stops by itself when paid off.
+```
+YouLend this week = 28% × (Stripe receipts expected this week)
+                    capped at the remaining balance
+```
+- Inputs (settings, from the YouLend statement — update monthly): withholding **28%**, remaining
+  **£152,671** (4 Nov 2026). The page shows the **forecast payoff date** from these figures.
+- **It is big.** 28% of 90% is about **a quarter of everything coming in**. Clearing £152,671 at 28%
+  takes about **£545,000** of Stripe receipts. If that is more than will come through Stripe by the
+  summer, the payoff date will say so.
+- **Excess paid by card loses 28% on the way in and goes back out at 100%.** A £1,200 card excess
+  leaves £864 to spend, then £1,200 is refunded. A **pre-auth** is never captured, so YouLend never
+  sees it. While the loan runs, pre-auths are better for cash than card excess payments. The
+  pre-auth rule (`excess-preauth.ts` `preauthEligibility()`) is unchanged — this is information, not a
+  new gate.
+- **Bank transfer instead of card** keeps the 28% (and Stripe's fee) in hand *now*. It does not reduce
+  what is owed — it only puts the repayment later. **Before the page ever suggests it, jon checks
+  the YouLend agreement**: cash-advance agreements commonly forbid steering card takings away from
+  the processor. Until he has, the suggestion is off (`cashflow_suggest_bank_transfer = false`).
 
 ---
 
@@ -210,7 +295,7 @@ Learned from what has actually happened, not guessed.
 - Every weighted figure says what it was learned from ("hot, starts within 4 weeks — 71%, from 38
   jobs").
 - **Tiers:** weighted ≥ 60% is Likely, otherwise Possible.
-- **First step of Phase 3:** count how many open jobs actually have a likelihood set. If it's
+- **First step of Phase 2:** count how many open jobs actually have a likelihood set. If it's
   rarely used, lead time and status carry the weight, and the fix-it list asks for likelihoods on
   the biggest jobs.
 
@@ -228,11 +313,15 @@ when it died. Good enough to start; a likelihood-change log would sharpen it lat
    week, colour against target/limit) · Next 13 weeks: committed in / out.
 3. **Chart:** weekly closing balance, solid line = Committed, shaded band above = + Likely
    (+ Possible lighter). Dashed lines at the £0 target and the −£22k limit.
+   **"Next 14 days" switch:** the same chart and table by day for the next fortnight — Stripe money on
+   the day it becomes available, DDs and HP on their day, payroll on its day. This is where a
+   Wednesday dip inside a fine-looking week shows up. The lowest-point tile also names the lowest
+   *day* in the next 14 when it is lower than any week's close.
 4. **What would fix it** (shown when any week goes below target): rules-based, ranked by £, each a
    link — see §8.
 5. **Weekly table:** 13 columns. Rows: opening · in (hire balances, deposits, excess, pipeline
    weighted) · out (Xero bills, planned, van HP, payroll & PAYE, VAT & tax, excess refunds,
-   freelancers, YouLend, card interest) · closing committed · closing with likely. **Click any cell →
+   freelancers, job expenses, Stripe fees, YouLend, card payments, card interest) · closing committed · closing with likely. **Click any cell →
    side panel listing the items behind it**, each with its window and a link (job, bill, setting).
 6. **Warnings strip:** overdue Xero bills to check, financed vans with no payment set, balance
    not confirmed this week, likelihoods missing on big jobs.
@@ -256,7 +345,9 @@ For the first week that goes below target, list the actions that would lift it, 
    (link: job; uses the existing chase flow).
 4. **Bills that could move** — Xero bills due in the dip, not overdue, from suppliers on terms
    ("could go a week later").
-5. **Card headroom** — how much is free on Capital on Tap (information, not advice).
+5. **Card headroom** — how much is free on each card against its limit (information, not advice).
+6. **Ask for bank transfer instead of card** — only when `cashflow_suggest_bank_transfer` is on
+   (§5.6): balances due in the dip × (28% + Stripe's fee) kept in hand now.
 
 Never: delay an excess refund or a refund owed (§1.11).
 
@@ -279,18 +370,17 @@ first months, not a history module.
 
 ## 10. Questions still open
 
-1. **Which deposit rule is right?** jon (3 Nov): "25% or £400, or the full hire fee if less —
-   whichever is greatest". The code (`routes/money.ts` ~2128, `wise-incoming.ts` ~307, the Money
-   doc "min 25%, floor £100, full if under £400") says **25% with a £100 floor, full under £400**.
-   They differ for jobs between £400 and £1,600 (jon's rule asks £400; the code asks 25%). The
-   forecast uses ONE helper either way; if the rule changes, the portal and Money tab change with it
-   — a separate decision, not this module's.
-2. **The £88,708 overdue in Xero** — real, or paid but not marked? Decides how big the "check"
-   pile is on day one.
-3. **Capital on Tap APR and how it is repaid**; Amex statement day.
-4. **YouLend:** current remaining balance and withhold rate.
-5. **Does Wise allow a live read-only token for balances** on the business account? (If not, Wise
-   is a check-in figure.)
+Answered 4 Nov: deposit rule (OP's is right, §1.15); the overdue bills (§5.2); Capital on Tap's
+terms (§5.6); YouLend's rate and balance (§5.6); Wise (check-in, no API, §2); Stripe (§1.13).
+
+Still open:
+1. **Capital on Tap credit limit**, and **Amex's statement and payment days** — for the card lines.
+2. **The YouLend agreement**: does it allow asking clients to pay by bank transfer? Until jon has
+   checked, the page never suggests it (§5.6).
+3. **Does ~£545k through Stripe by summer sound right?** If not, YouLend runs longer than planned,
+   and the forecast will show it from day one.
+4. **The two instalment bills:** monthly amount and day for each, to enter as the first planned
+   items.
 
 ---
 
@@ -298,9 +388,9 @@ first months, not a history module.
 
 | Phase | Builds | Gives jon |
 |---|---|---|
-| **1 — Committed forecast** | Settings (accounts, target, limit, cards, YouLend, planned items incl. payroll/VAT/tax); Monday check-in; Stripe live balance; OP money in (§5.1 committed rows); Xero unpaid + overdue bills (§5.2, existing scope); van HP from fleet finance; chart, tiles, table, drill-down | A trustworthy 13-week committed line from day one |
-| **2 — Xero and balances** | Reports scope on the Custom Connection (re-authorise); statement balance if available; Wise balance; Xero repeating bills; recurring-payment suggestions; stale warnings | Fewer figures to type, nothing missed |
-| **3 — What's coming that Xero can't see** | Weightings (§6); pipeline Likely/Possible band; excess refunds, refunds owed, freelancer work and bookings (§5.5); "What would fix it" | The forward view and the actions |
+| **1 — Committed forecast** | One shared deposit-rule helper (§1.15); settings (accounts, target, limit); cards (§5.6); YouLend + payoff date; planned items incl. instalments, payroll, VAT, tax (§5.4); Monday check-in; Stripe live balance, available dates and fee; OP money in (§5.1 committed rows); Xero unpaid bills + the check pile with "Paid — Xero is behind" (§5.2, existing scope); van HP from fleet finance; chart, tiles, table, drill-down, **next 14 days by day** | A trustworthy committed line from day one, down to the day for the next fortnight |
+| **2 — What's coming that Xero can't see** | Expected job expenses from quotes, freelancers booked and work to invoice, excess refunds, refunds owed (§5.5); weightings (§6); pipeline Likely/Possible band; "What would fix it" (§8) | The forward view and the actions |
+| **3 — Fewer figures to type** | Reports scope on the Custom Connection (re-authorise); statement balance if available; recurring-payment suggestions from Xero bank history; stale warnings | Less of the Monday check-in by hand |
 | **4 — Talking to you** | Monday email + Claude paragraph; forecast vs actual line; OP VAT estimate | The Monday ritual |
 
 Migrations take the next free number at build time and go in `run.ts`'s list. Settings live in
