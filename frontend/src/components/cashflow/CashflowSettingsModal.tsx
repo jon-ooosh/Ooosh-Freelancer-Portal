@@ -6,8 +6,8 @@
 import { useEffect, useState } from 'react';
 import ModalShell from '../ModalShell';
 import { api } from '../../services/api';
-import type { Account, Card, CashflowSettings } from '../../lib/cashflow';
-import { WEEKDAYS, gbp, ordinal } from '../../lib/cashflow';
+import type { Account, Card, CashflowSettings, CostCardMethod } from '../../lib/cashflow';
+import { COST_CARD_METHOD_LABELS, WEEKDAYS, gbp, ordinal } from '../../lib/cashflow';
 
 const inputCls = 'rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500';
 const num = (s: string): number | null => {
@@ -32,6 +32,9 @@ interface CardDraft {
   fixedEvery: 'week' | 'month';
   fixedWeekday: string;
   typicalMonthlySpend: string;
+  costPaymentMethod: CostCardMethod | '';
+  receiptsMonthly: number;
+  receiptsCount: number;
 }
 
 const cardDraft = (c: Card | null): CardDraft => ({
@@ -39,6 +42,7 @@ const cardDraft = (c: Card | null): CardDraft => ({
   statementDay: str(c?.statementDay), paymentDay: str(c?.paymentDay), creditLimit: str(c?.creditLimit),
   plan: c?.plan || 'full', minPct: str(c?.minPct), fixedAmount: str(c?.fixedAmount),
   fixedEvery: c?.fixedEvery || 'week', fixedWeekday: str(c?.fixedWeekday ?? 1), typicalMonthlySpend: str(c?.typicalMonthlySpend),
+  costPaymentMethod: c?.costPaymentMethod || '', receiptsMonthly: c?.receiptsMonthly ?? 0, receiptsCount: c?.receiptsCount ?? 0,
 });
 
 export default function CashflowSettingsModal({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }) {
@@ -116,6 +120,7 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
       fixedEvery: card.plan === 'fixed' ? card.fixedEvery : null,
       fixedWeekday: card.plan === 'fixed' && card.fixedEvery === 'week' ? num(card.fixedWeekday) : null,
       typicalMonthlySpend: num(card.typicalMonthlySpend),
+      costPaymentMethod: card.costPaymentMethod || null,
     };
     if (!body.name) { setError('Give the card a name.'); return; }
     if (Object.values(body).some((v) => typeof v === 'number' && Number.isNaN(v))) { setError('One of the figures isn\'t a number.'); return; }
@@ -135,7 +140,7 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
       await api.put(`/cashflow/cards/${c.id}`, {
         name: c.name, monthlyRate: c.monthlyRate, statementDay: c.statementDay, paymentDay: c.paymentDay, creditLimit: c.creditLimit,
         plan: c.plan, minPct: c.minPct, fixedAmount: c.fixedAmount, fixedEvery: c.fixedEvery, fixedWeekday: c.fixedWeekday,
-        typicalMonthlySpend: c.typicalMonthlySpend, isActive: !c.isActive,
+        typicalMonthlySpend: c.typicalMonthlySpend, costPaymentMethod: c.costPaymentMethod, isActive: !c.isActive,
       });
       setChanged(true);
       await loadAll();
@@ -268,8 +273,22 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
                   </label>
                   <label className="text-sm">
                     <span className="block text-gray-700 mb-1">Typical spend a month (£)</span>
-                    <input inputMode="decimal" value={card.typicalMonthlySpend} onChange={(e) => setCard({ ...card, typicalMonthlySpend: e.target.value })} className={`${inputCls} w-full text-right`} />
+                    <input inputMode="decimal" value={card.typicalMonthlySpend} onChange={(e) => setCard({ ...card, typicalMonthlySpend: e.target.value })}
+                      className={`${inputCls} w-full text-right`} placeholder={card.costPaymentMethod && card.receiptsCount > 0 ? String(Math.round(card.receiptsMonthly)) : ''} />
                   </label>
+                </div>
+                <div className="text-sm">
+                  <span className="block text-gray-700 mb-1">Receipts in Costs paid by</span>
+                  <select value={card.costPaymentMethod} onChange={(e) => setCard({ ...card, costPaymentMethod: e.target.value as CostCardMethod | '' })} className={inputCls}>
+                    <option value="">— not linked —</option>
+                    {(Object.keys(COST_CARD_METHOD_LABELS) as CostCardMethod[]).map((m) => <option key={m} value={m}>{COST_CARD_METHOD_LABELS[m]}</option>)}
+                  </select>
+                  <span className="block text-[11px] text-gray-500 mt-1">
+                    A receipt logged on this card after Monday's check-in raises its balance straight away.
+                    {card.costPaymentMethod && card.id && (card.receiptsCount > 0
+                      ? <> Last 90 days of receipts: <b>{gbp(card.receiptsMonthly)} a month</b> ({card.receiptsCount} receipts) — used as the typical spend while the box above is empty. It only counts what was logged, so it runs low.</>
+                      : <> No receipts logged on it in the last 90 days.</>)}
+                  </span>
                 </div>
                 <div className="text-sm">
                   <span className="block text-gray-700 mb-1">How it's paid</span>

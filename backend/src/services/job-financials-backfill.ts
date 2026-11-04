@@ -24,6 +24,8 @@ interface BackfillOpts {
   delayMs?: number;
   /** Re-sync a job whose cache is older than this many days. Default 7. */
   staleAfterDays?: number;
+  /** Exactly these jobs instead of the stalest (e.g. every job still holding excess). */
+  hhJobNumbers?: number[];
 }
 
 interface BackfillResult { processed: number; failed: number; candidates: number }
@@ -55,7 +57,7 @@ export async function backfillJobFinancials(opts: BackfillOpts = {}): Promise<Ba
   // meaningful billing), not dead, whose cache is missing or stale. Never-synced
   // first, then stalest; within those, most recent jobs first so the
   // operationally-relevant history fills before ancient hires.
-  const cand = await query(
+  const cand = opts.hhJobNumbers ? { rows: opts.hhJobNumbers.map((hh) => ({ hh_job_number: hh })) } : await query(
     `SELECT j.hh_job_number
      FROM jobs j
      LEFT JOIN job_financials jf ON jf.job_id = j.id

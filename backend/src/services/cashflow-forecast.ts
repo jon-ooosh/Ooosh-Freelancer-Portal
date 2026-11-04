@@ -22,6 +22,7 @@ import {
 } from './cashflow-schedule';
 import {
   CashflowSettings, CardRow, PlannedItemRow, XeroBill,
+  RECEIPT_SPEND_DAYS, cardReceiptSpend, loadCardReceipts,
   loadAccounts, loadBillFlags, loadCards, loadDepositsOnFutureJobs, loadExcessDue, loadExcessHeld,
   loadJobBalances, loadPlannedItems, loadRefundsOwed, loadSettings, loadVanFinance, loadXeroBills, readStripe,
 } from './cashflow-sources';
@@ -111,7 +112,19 @@ export interface Forecast {
   piles: { overdueBills: PileItem[]; overdueBalances: PileItem[]; staleExcess: PileItem[]; noDate: PileItem[] };
   cards: Array<{
     id: string; name: string; balance: number | null; asOf: string | null; creditLimit: number | null; headroom: number | null;
-    interestThisMonth: number; plan: string; weeklyBalances: Array<number | null>; spendKnown: boolean;
+    interestThisMonth: number; plan: string; weeklyBalances: Array<number | null>;
+    /** The Monday figure, before receipts logged since. */
+    checkInBalance: number | null;
+    /** Card receipts logged in Costs dated after the check-in — already added to `balance`. */
+    loggedSince: number;
+    loggedSinceCount: number;
+    /** The typical monthly spend the line uses, and where it came from. */
+    typicalMonthlySpend: number | null;
+    spendSource: 'typed' | 'receipts' | 'none';
+    /** The last 90 days of logged receipts, as a monthly figure (shown even when a figure is typed). */
+    receiptsMonthly: number;
+    receiptsCount: number;
+    costPaymentMethod: string | null;
   }>;
   youlend: { rate: number; remaining: number; asOf: string | null; withheldInForecast: number; remainingAtEnd: number; paidOffOn: string | null; estimatedPayoff: string | null };
   stripe: { live: boolean; reason?: string; available: number; feeRate: number; feeRateSource: 'stripe' | 'setting'; payoutDays: number; share: number };
@@ -410,17 +423,35 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
   const estimatedPayoff = yl.paidOffOn ? null : youlendPayoffEstimate(yl.remainingAtEnd, settings.youlendRate, stripeTotal / WEEKS, horizonEnd);
 
   // ── Cards ─────────────────────────────────────────────────────────────────
+  // The balance is the Monday check-in PLUS card receipts logged in Costs since
+  // (jon, Nov 2026: "immediate updates on cards put through OP"). Typical spend
+  // is typed, else the last 90 days of logged receipts — and it only accrues
+  // from today, because the days before are already in that balance.
   const interest: Forecast['interest'] = [];
   const cardsOut: Forecast['cards'] = [];
+  const receiptWindowStart = addDays(today, -RECEIPT_SPEND_DAYS + 1);
+  const earliestCardCheckIn = (cards as CardRow[]).reduce<string>((min, c) => (c.asOf && c.asOf < min ? c.asOf : min), receiptWindowStart);
+  const cardReceipts = (cards as CardRow[]).some((c) => c.costPaymentMethod) ? await loadCardReceipts(earliestCardCheckIn) : [];
   for (const c of cards as CardRow[]) {
+    const spend = cardReceiptSpend(cardReceipts, c.costPaymentMethod, c.asOf, today, receiptWindowStart);
+    const typed = c.typicalMonthlySpend !== null && c.typicalMonthlySpend > 0 ? c.typicalMonthlySpend : null;
+    const fromReceipts = !typed && spend.count > 0 && spend.monthly > 0 ? spend.monthly : null;
+    const typical = typed ?? fromReceipts;
+    const spendSource: 'typed' | 'receipts' | 'none' = typed ? 'typed' : fromReceipts ? 'receipts' : 'none';
+    const base = {
+      id: c.id, name: c.name, creditLimit: c.creditLimit, plan: c.plan,
+      typicalMonthlySpend: typical, spendSource, receiptsMonthly: spend.monthly, receiptsCount: spend.count,
+      costPaymentMethod: c.costPaymentMethod,
+    };
     if (c.balance === null || !c.asOf) {
-      cardsOut.push({ id: c.id, name: c.name, balance: null, asOf: null, creditLimit: c.creditLimit, headroom: null, interestThisMonth: 0, plan: c.plan, weeklyBalances: [], spendKnown: false });
+      cardsOut.push({ ...base, balance: null, asOf: null, headroom: null, interestThisMonth: 0, weeklyBalances: [], checkInBalance: null, loggedSince: 0, loggedSinceCount: 0 });
       continue;
     }
+    const balanceNow = round2(c.balance + spend.sinceCheckIn);
     const sim = simulateCard({
       monthlyRate: c.monthlyRate, statementDay: c.statementDay, paymentDay: c.paymentDay, plan: c.plan,
       minPct: c.minPct, fixedAmount: c.fixedAmount, fixedEvery: c.fixedEvery, fixedWeekday: c.fixedWeekday,
-      typicalMonthlySpend: c.typicalMonthlySpend, balance: c.balance, balanceAsOf: c.asOf,
+      typicalMonthlySpend: typical, balance: balanceNow, balanceAsOf: c.asOf, spendFrom: today,
     }, horizonEnd);
     for (const p of sim.payments) {
       const when = later(p.date, today);
@@ -431,13 +462,13 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
     for (let w = 0; w < WEEKS; w++) {
       const end = addDays(firstMonday, w * 7 + 6);
       const point = [...sim.balances].reverse().find((b) => b.date <= end);
-      weeklyBalances.push(point ? point.balance : (end >= c.asOf ? c.balance : null));
+      weeklyBalances.push(point ? point.balance : (end >= c.asOf ? balanceNow : null));
     }
     cardsOut.push({
-      id: c.id, name: c.name, balance: c.balance, asOf: c.asOf, creditLimit: c.creditLimit,
-      headroom: c.creditLimit !== null ? round2(c.creditLimit - c.balance) : null,
-      interestThisMonth: round2(c.balance * c.monthlyRate), plan: c.plan, weeklyBalances,
-      spendKnown: !!(c.typicalMonthlySpend && c.typicalMonthlySpend > 0),
+      ...base, balance: balanceNow, asOf: c.asOf, checkInBalance: c.balance,
+      loggedSince: spend.sinceCheckIn, loggedSinceCount: spend.sinceCount,
+      headroom: c.creditLimit !== null ? round2(c.creditLimit - balanceNow) : null,
+      interestThisMonth: round2(balanceNow * c.monthlyRate), weeklyBalances,
     });
   }
 

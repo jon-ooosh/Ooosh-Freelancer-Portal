@@ -21,10 +21,10 @@ import { validate } from '../middleware/validate';
 import { getClient, query } from '../config/database';
 import { buildForecast } from '../services/cashflow-forecast';
 import {
-  SETTING_FIELDS, forgetXeroBillsCache, loadAccounts, loadBillFlags, loadCards, loadPlannedItems,
+  RECEIPT_SPEND_DAYS, SETTING_FIELDS, cardReceiptSpend, forgetXeroBillsCache, loadAccounts, loadCardReceipts, loadBillFlags, loadCards, loadPlannedItems,
   loadSettings, loadXeroBills, measureStripeShare, readStripe,
 } from '../services/cashflow-sources';
-import { isIsoDate, nextDates } from '../services/cashflow-schedule';
+import { addDays, isIsoDate, nextDates } from '../services/cashflow-schedule';
 import { ukToday } from '../services/uk-date';
 import { isXeroConfigured } from '../config/xero';
 import { xeroBroker } from '../services/xero-broker';
@@ -210,7 +210,16 @@ router.patch('/accounts/:id', validate(idParam, 'params'), validate(accountSchem
 
 router.get('/cards', async (req: AuthRequest, res: Response) => {
   try {
-    res.json({ data: await loadCards(req.query.all === '1') });
+    // Each card with what its logged receipts say (for the Settings hint).
+    const today = ukToday();
+    const windowStart = addDays(today, -RECEIPT_SPEND_DAYS + 1);
+    const [cards, receipts] = await Promise.all([loadCards(req.query.all === '1'), loadCardReceipts(windowStart)]);
+    res.json({
+      data: cards.map((c) => {
+        const spend = cardReceiptSpend(receipts, c.costPaymentMethod, null, today, windowStart);
+        return { ...c, receiptsMonthly: spend.monthly, receiptsCount: spend.count };
+      }),
+    });
   } catch (err) {
     fail(res, 'cards', err);
   }
@@ -228,8 +237,21 @@ const cardSchema = z.object({
   fixedEvery: z.enum(['week', 'month']).nullable(),
   fixedWeekday: z.number().int().min(1).max(7).nullable(),
   typicalMonthlySpend: z.number().min(0).max(10_000_000).nullable(),
+  costPaymentMethod: z.enum(['cot_card', 'amex', 'lloyds_cc']).nullable().optional(),
   isActive: z.boolean().optional(),
 });
+
+const METHOD_LABELS: Record<string, string> = { cot_card: 'COT card', amex: 'Amex', lloyds_cc: 'Lloyds card' };
+
+/** One card per Costs payment method (unique index, migration 328). */
+async function methodTaken(method: string | null | undefined, exceptId: string | null): Promise<string | null> {
+  if (!method) return null;
+  const r = await query(
+    `SELECT name FROM cashflow_cards WHERE cost_payment_method = $1 AND ($2::uuid IS NULL OR id <> $2::uuid) LIMIT 1`,
+    [method, exceptId],
+  );
+  return r.rows.length ? `${r.rows[0].name} already takes receipts paid by ${METHOD_LABELS[method] || method}.` : null;
+}
 
 /** A plan must carry what it needs, or the forecast silently pays nothing. */
 function cardProblem(c: z.infer<typeof cardSchema>): string | null {
@@ -245,18 +267,18 @@ function cardProblem(c: z.infer<typeof cardSchema>): string | null {
 
 const cardValues = (c: z.infer<typeof cardSchema>) => [
   c.name, c.monthlyRate, c.statementDay, c.paymentDay, c.creditLimit, c.plan, c.minPct,
-  c.fixedAmount, c.fixedEvery, c.fixedWeekday, c.typicalMonthlySpend,
+  c.fixedAmount, c.fixedEvery, c.fixedWeekday, c.typicalMonthlySpend, c.costPaymentMethod ?? null,
 ];
 
 router.post('/cards', validate(cardSchema), async (req: AuthRequest, res: Response) => {
   try {
     const c = req.body as z.infer<typeof cardSchema>;
-    const problem = cardProblem(c);
+    const problem = cardProblem(c) || await methodTaken(c.costPaymentMethod, null);
     if (problem) { res.status(400).json({ error: problem }); return; }
     const r = await query(
       `INSERT INTO cashflow_cards (name, monthly_rate, statement_day, payment_day, credit_limit, plan, min_pct,
-         fixed_amount, fixed_every, fixed_weekday, typical_monthly_spend, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, COALESCE((SELECT MAX(sort_order) FROM cashflow_cards), 0) + 10)
+         fixed_amount, fixed_every, fixed_weekday, typical_monthly_spend, cost_payment_method, sort_order)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, COALESCE((SELECT MAX(sort_order) FROM cashflow_cards), 0) + 10)
        RETURNING id`,
       cardValues(c),
     );
@@ -269,14 +291,16 @@ router.post('/cards', validate(cardSchema), async (req: AuthRequest, res: Respon
 router.put('/cards/:id', validate(idParam, 'params'), validate(cardSchema), async (req: AuthRequest, res: Response) => {
   try {
     const c = req.body as z.infer<typeof cardSchema>;
-    const problem = cardProblem(c);
+    const problem = cardProblem(c) || await methodTaken(c.costPaymentMethod, String(req.params.id));
     if (problem) { res.status(400).json({ error: problem }); return; }
     const r = await query(
       `UPDATE cashflow_cards SET name = $2, monthly_rate = $3, statement_day = $4, payment_day = $5, credit_limit = $6,
          plan = $7, min_pct = $8, fixed_amount = $9, fixed_every = $10, fixed_weekday = $11, typical_monthly_spend = $12,
-         is_active = COALESCE($13, is_active), updated_at = NOW()
+         cost_payment_method = CASE WHEN $15::boolean THEN $13 ELSE cost_payment_method END,
+         is_active = COALESCE($14, is_active), updated_at = NOW()
        WHERE id = $1 RETURNING id`,
-      [req.params.id, ...cardValues(c), c.isActive ?? null],
+      // An edit that doesn't mention the receipts link keeps it (e.g. "Stop counting").
+      [req.params.id, ...cardValues(c), c.isActive ?? null, c.costPaymentMethod !== undefined],
     );
     if (!r.rows.length) { res.status(404).json({ error: 'Card not found' }); return; }
     res.json({ data: { id: req.params.id } });

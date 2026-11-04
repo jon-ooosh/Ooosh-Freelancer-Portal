@@ -117,6 +117,12 @@ describe('simulateCard', () => {
     expect(dec3.reduce((s, p) => s + p.amount, 0)).toBeCloseTo(1990, 2);
   });
 
+  it('adds typical spend only after spendFrom, so receipts already logged aren\'t counted twice', () => {
+    const sim = simulateCard({ ...base, balance: 1000, balanceAsOf: '2026-11-02', typicalMonthlySpend: 3650, spendFrom: '2026-11-04' }, '2026-11-06');
+    // 2 Nov check-in, today 4 Nov: only 5 and 6 Nov accrue £120 each.
+    expect(sim.balances.map((b) => b.balance)).toEqual([1000, 1000, 1120, 1240]);
+  });
+
   it('never pays more than is owed', () => {
     const sim = simulateCard({ ...base, plan: 'fixed', fixedAmount: 600, fixedEvery: 'week', fixedWeekday: 1 }, '2026-11-30');
     expect(sim.payments.reduce((s, p) => s + p.amount, 0)).toBe(1000);

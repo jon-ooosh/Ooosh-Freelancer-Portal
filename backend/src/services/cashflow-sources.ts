@@ -128,6 +128,7 @@ export interface CardRow {
   fixedEvery: 'week' | 'month' | null;
   fixedWeekday: number | null;
   typicalMonthlySpend: number | null;
+  costPaymentMethod: 'cot_card' | 'amex' | 'lloyds_cc' | null;
   isActive: boolean;
   balance: number | null;
   asOf: string | null;
@@ -153,9 +154,49 @@ export async function loadCards(includeInactive = false): Promise<CardRow[]> {
     creditLimit: numOrNull(row.credit_limit), plan: row.plan as CardRow['plan'],
     minPct: numOrNull(row.min_pct), fixedAmount: numOrNull(row.fixed_amount),
     fixedEvery: (row.fixed_every as CardRow['fixedEvery']) || null, fixedWeekday: numOrNull(row.fixed_weekday),
-    typicalMonthlySpend: numOrNull(row.typical_monthly_spend), isActive: !!row.is_active,
+    typicalMonthlySpend: numOrNull(row.typical_monthly_spend),
+    costPaymentMethod: (row.cost_payment_method as CardRow['costPaymentMethod']) || null, isActive: !!row.is_active,
     balance: numOrNull(row.balance), asOf: (row.as_of as string) || null,
   }));
+}
+
+// ── Card receipts logged in OP (Costs) ─────────────────────────────────────
+
+/** How many days of receipts make the "typical spend" average. */
+export const RECEIPT_SPEND_DAYS = 90;
+
+export interface CardReceiptRow { method: string; date: string; amount: number }
+
+/**
+ * Every card purchase logged in Costs since `from` (credits are stored negative,
+ * so they net off). By the date on the receipt, not the day it was logged.
+ */
+export async function loadCardReceipts(from: string): Promise<CardReceiptRow[]> {
+  const r = await query(
+    `SELECT payment_method, to_char(cost_date, 'YYYY-MM-DD') AS d, amount_gross
+     FROM costs
+     WHERE payment_method IN ('cot_card', 'amex', 'lloyds_cc')
+       AND cost_date IS NOT NULL
+       AND cost_date >= $1::date`,
+    [from],
+  );
+  return r.rows.map((row: Record<string, unknown>) => ({ method: String(row.payment_method), date: String(row.d), amount: num(row.amount_gross) }));
+}
+
+/** A card's spend from logged receipts: since its check-in, and the 90-day monthly average. */
+export function cardReceiptSpend(
+  rows: CardReceiptRow[], method: string | null, checkInAsOf: string | null, today: string, windowStart: string,
+): { sinceCheckIn: number; sinceCount: number; monthly: number; count: number } {
+  const mine = method ? rows.filter((r) => r.method === method) : [];
+  const since = checkInAsOf ? mine.filter((r) => r.date > checkInAsOf && r.date <= today) : [];
+  const window = mine.filter((r) => r.date >= windowStart && r.date <= today);
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  return {
+    sinceCheckIn: round2(since.reduce((s, r) => s + r.amount, 0)),
+    sinceCount: since.length,
+    monthly: round2((window.reduce((s, r) => s + r.amount, 0) * 30.44) / RECEIPT_SPEND_DAYS),
+    count: window.length,
+  };
 }
 
 // ── Money in: confirmed jobs (OP) ──────────────────────────────────────────

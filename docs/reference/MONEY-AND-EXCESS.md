@@ -893,3 +893,32 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [ ] Gate conditions: check excess collected before allowing dispatch
 - [ ] HH item check-in/out counts for prep progress indicator (needs API research)
 - [x] **Job Issues / Problems Register — Stage 2 control panel** (May 2026) — cross-module register at `/operations/problems` + per-issue control panel at `/operations/problems/:id`. Smart-picker panel on Job Detail Overview (vehicles / equipment line items / drivers / job people / client org auto-populated from job context — no typing reg numbers). NeedsAttention bucket. "Has issues" filter on JobsPage + ReturnsPage. Backend `/api/problems/*` (NOT `/api/issues/*` — platform bug tracker). Storage: dedicated `job_issues` table (migration 075) with anchor FKs (`vehicle_id`, `driver_id`, `person_id`, `client_organisation_id`, `hh_stock_item_id`, `barcode`), `job_issue_events` audit timeline, `job_issue_files` attachments table. Categories: damaged / missing / broken / dispute / breakdown / other. Severity: low / normal / urgent. Status: open / investigating / awaiting_quote / quoted / actioned / resolved / written_off / cancelled. Resolution paths: claim_excess / charge_client / write_off / replaced / other. RBAC: any STAFF_ROLES user can progress + close. Stage 3 (file uploads, surface_on rules, auto-create from vehicle damage, severity → notification mapping, Vehicle/Org Detail Issues tabs) and Stage 4 (HH barcode auto-pull, retire standalone `/vehicles/issues`) captured in Future Enhancements.
+
+
+## Excess applied to an invoice in HireHop — the claim catch-up (Nov 2026)
+
+**The gap.** Job 16325: the client's £1,200 excess was applied to the hire invoice (OT-INV-12254) directly
+in HireHop on 28 Sep 2026 — damage taken from the excess. OP's Payment History showed it ("Excess applied
+to hire invoice", read from HireHop's billing), but the `job_excess` record stayed `taken` with no claim, so
+`v_excess_held`, the Money overview's Excess Held, the excess ledger and the cash forecast all went on
+counting £1,200 that had been kept. The same client's earlier excess (job 15516, Mar 2026) was claimed
+through OP's own Claim button, which writes both sides, and read correctly — the difference is where the
+claim was made, not a change in the code. The cash forecast's "Excess still held on old hires" pile (§13 of
+`CASHFLOW-FORECAST-SPEC.md`) is what surfaced it: £9,053 across several hires.
+
+**Why it existed.** HireHop-side REFUNDS of excess were already caught (Money tab Pass 2,
+`unwindRefundOnExcess`, the Pom Poko shape). HireHop-side CLAIMS had no twin.
+
+**The fix — Pass 3** (`routes/money.ts` summary → `services/excess-hh-claims.ts`
+`catchUpHireHopExcessClaims()`): every kind=3 application whose OWNER_DEPOSIT is an excess deposit and whose
+OWNER is an invoice (this job's or another job's) is collected; per deposit, HireHop's applied total becomes
+the claim OP should show, capped at what the deposit has left after refunds. The UPDATE only writes while OP
+is behind (`claim_amount < target`), so it is idempotent and two simultaneous Money-tab loads can't both add.
+Status moves to `fully_claimed` on the claim route's own rule (consumed AND nothing reimbursed). A note goes
+on `claim_notes` naming the HireHop rows; `claim_date` is HireHop's application date. **No client email**
+(the claim route sends `excess_claimed`; a catch-up weeks later must not). Two OP records on one HireHop
+deposit → skipped with a warning, never guessed.
+
+**Reaching old jobs.** The nightly job-financials refresh drives the same summary (300 stalest a night), so
+old jobs heal on their own; `npx tsx src/scripts/sweep-excess-claims.ts` lists every job still holding cash
+excess and `--run` refreshes them all at once (server running).

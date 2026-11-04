@@ -341,8 +341,17 @@ export default function CashflowForecastPage() {
                         })}
                       </div>
                     )}
-                    {c.balance !== null && !c.spendKnown && (
-                      <p className="text-[11px] text-gray-500 mt-0.5">Assumes no new spending — set a typical monthly spend in Settings for a truer line.</p>
+                    {c.balance !== null && c.loggedSince !== 0 && (
+                      <p className="text-[11px] text-gray-500 mt-0.5">
+                        Includes {gbp(c.loggedSince, true)} from {c.loggedSinceCount} receipt{c.loggedSinceCount === 1 ? '' : 's'} logged since Monday's {gbp(c.checkInBalance)}.
+                      </p>
+                    )}
+                    {c.balance !== null && (
+                      <p className="text-[11px] text-gray-500 mt-0.5">
+                        {c.spendSource === 'typed' && <>New spending: {gbp(c.typicalMonthlySpend)} a month (typed in Settings).</>}
+                        {c.spendSource === 'receipts' && <>New spending: {gbp(c.typicalMonthlySpend)} a month, from {c.receiptsCount} receipts logged in the last 90 days — runs low if some aren't logged.</>}
+                        {c.spendSource === 'none' && <>Assumes no new spending — {c.costPaymentMethod ? 'no receipts logged on it lately' : 'link it to its receipts or type a typical spend'} in Settings.</>}
+                      </p>
                     )}
                   </div>
                 ))}
