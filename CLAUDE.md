@@ -309,11 +309,13 @@ Next: the four guides. The Costs form simplification is done (three PRs, Oct 202
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
 Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
 
-**DRAFT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — an admin-only 13-week cash forecast
-(`/money/cashflow`): committed / likely / possible tiers, "cash that's yours" (minus excess held,
-refunds owed, VAT), a Monday balance check-in because Xero lags, "what would fix it" for the low
-week. Xero is the source for bills, never for money in. Not built; §10 is the open questions, §11 the
-phases. Mockup in `docs/design/cashflow-forecast/`.
+**PHASE 1 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
+(Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,
+"cash that's yours" (minus excess held, refunds owed, VAT), a Monday balance check-in because Xero lags,
+planned items (rules or an editable schedule), cards, YouLend, Stripe live. Xero is the source for bills,
+never for money in. **Its settings are `cashflow_settings`, NOT `system_settings`** (every staff login
+reads that). Builder `services/cashflow-forecast.ts`, pure maths `cashflow-schedule.ts`. **§13 is what
+shipped and where it differs from the plan**; §11 the phases (Phase 2: enquiries, job costs, fix-it list). Mockup in `docs/design/cashflow-forecast/`.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
