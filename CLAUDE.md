@@ -330,7 +330,7 @@ admin-only Claude switch, `house-knowledge.ts`), the client brief, and "remember
 from Voipfone to **Twilio** with OP as the phone system (§T — build and test that FIRST), then calls are transcribed,
 summarised and matched to people and jobs like emails. **§0 and §T override the March details** (`interactions`,
 one unmatched review surface, a gated `calls/` R2 prefix, recordings from Twilio's callback — no email step).
-**§T8 is what shipped** (`routes/telephony.ts` + `services/telephony.ts`, every request signature-checked; `calls/` is admin-only).
+**§T8 is what shipped** (`routes/telephony.ts` + `services/telephony.ts`, every request signature-checked; call recordings `calls/` are admin-only, voicemails `voicemails/` any staff).
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,

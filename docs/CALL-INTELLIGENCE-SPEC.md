@@ -187,6 +187,12 @@ by dialling 999 for real; use Twilio's documented test route if one exists.
   answered an incoming call, any screen for calls (missed calls are logged but only visible in the
   table and in Twilio's call log), retention, and everything from the March phases (transcription,
   summaries, matching).
+- **After the first live test (jon, 5 Nov):** voicemails are open to every staff login — they're stored
+  under `voicemails/` (in the download route's general list); only call recordings (`calls/`) are
+  admin-only. Both `<Dial>`s use `ringTone="uk"` (the default ringback was a fading US-style tone).
+  Voice options to try in `telephony_voice`: `Polly.Emma-Neural`, `Polly.Brian-Neural`,
+  `Polly.Arthur-Neural`, `Google.en-GB-Neural2-A/B/C/D/F`. Chirp3-HD voices may ignore SSML, so the
+  "Ooosh" alias could stop working with them.
 - **To check in the test week:** that a `<Dial>` recording's callback carries the PARENT CallSid (the
   code assumes so; if not, a recording lands on a new bare row instead of its call).
 

@@ -13,7 +13,8 @@
  *     recordings are processed after the reply, wrapped in runHookWithRecovery.
  *   - Twilio is called over REST with the same API key as SMS — no SDK.
  *   - An emergency number is NEVER refused here (see EMERGENCY_NUMBERS).
- *   - Recordings live under `calls/`, which GET /api/files/download serves to admins only.
+ *   - Call recordings live under `calls/` (GET /api/files/download: admins only);
+ *     voicemails under `voicemails/` (any staff login).
  */
 
 import crypto from 'crypto';
@@ -24,6 +25,8 @@ import { normaliseMsisdn } from './sms-service';
 import { emailService } from './email-service';
 
 export const CALLS_PREFIX = 'calls/';
+/** Voicemails are a different matter (jon, Nov 2026): any staff login may open one. */
+export const VOICEMAILS_PREFIX = 'voicemails/';
 
 /** 999 / 112 (UK), 911 (a visitor's habit). Always dialled, never refused or recorded. */
 const EMERGENCY_NUMBERS = new Set(['999', '112', '911']);
@@ -226,7 +229,8 @@ export async function processRecording(cb: RecordingCallback): Promise<void> {
   const audio = Buffer.from(await res.arrayBuffer());
 
   const now = new Date();
-  const key = `${CALLS_PREFIX}${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${cb.callSid}-${cb.recordingSid}.mp3`;
+  const prefix = cb.kind === 'voicemail' ? VOICEMAILS_PREFIX : CALLS_PREFIX;
+  const key = `${prefix}${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${cb.callSid}-${cb.recordingSid}.mp3`;
   await uploadToR2(key, audio, 'audio/mpeg');
 
   const updated = await query(
