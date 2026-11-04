@@ -165,6 +165,31 @@ by dialling 999 for real; use Twilio's documented test route if one exists.
 - **Office network:** NAT and router "SIP ALG" are the usual first-week faults (one-way audio, dropped registrations).
 - **Data location:** recordings sit briefly in Twilio, a US account, until OP deletes them; covered by Twilio's DPA. UK-GDPR-compliant storage is enough (jon); UK-only storage is not required.
 
+### T8. What shipped (Nov 2026, the first build)
+
+- **Console + one base done by jon** (4 Nov): SIP domain `ooosh.sip.twilio.com` (US1), credential list
+  `OP bases` (`base1`, `base2`), SIP Registration and Emergency Calling on, no IP list (the office
+  address changes), secure media OFF (the N300IP's support is unproven — try it after the test week).
+  Fallbacks: the number → TwiML Bin "Inbound backup - ring both bases" (rings, then a spoken "nobody
+  can take your call" — no voicemail); the SIP domain → TwiML Bin "Outbound unavailable" (a spoken
+  "use a mobile" — it must never dial, or premium-rate numbers would go unchecked). Base 1 keeps its
+  two Voipfone lines and gained Twilio as connection IP3, set to RECEIVE only on one handset, so the
+  office phones are untouched during the test. Username must be filled (`base1`), not just the
+  authentication name, or outgoing calls are refused.
+- **Built:** `routes/telephony.ts` (the routes in §T3 plus `/voicemail-done` and `/outbound-after`),
+  `services/telephony.ts`, migration 329 (`call_records` + the Settings › Phones rows), `calls/`
+  admin-only in `GET /api/files/download` (jon: recordings are for Claude to read; nobody needs to
+  listen). The recording notice is spoken to incoming callers before the phones ring and ends
+  "Connecting you now"; outgoing calls get no notice (jon) — mention recording in the privacy notice.
+- **"Ooosh" is spoken as `telephony_say_ooosh_as`** (SSML `<sub alias>`, default "oosh"; also inside
+  "oooshtours"). Voice `Polly.Amy-Neural`. All wording is in Settings › Phones, read on every call.
+- **Not built yet:** cross-base transfer (`referUrl`, §T3 — prove in the test week first), which base
+  answered an incoming call, any screen for calls (missed calls are logged but only visible in the
+  table and in Twilio's call log), retention, and everything from the March phases (transcription,
+  summaries, matching).
+- **To check in the test week:** that a `<Dial>` recording's callback carries the PARENT CallSid (the
+  code assumes so; if not, a recording lands on a new bare row instead of its call).
+
 ---
 
 ## Context & Purpose

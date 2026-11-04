@@ -87,6 +87,9 @@ function SettingsContent() {
       {/* Insurance claims: broker address, insured block, vehicle-value curve — admin & manager */}
       <ClaimsSettingsSection />
 
+      {/* Phones (Twilio) — spoken messages, ring time, voicemail email — admin & manager */}
+      <PhonesSettingsSection />
+
       {/* Staff time thresholds & bank holidays — admin & manager */}
       <StaffTimeSettingsSection />
 
@@ -2415,6 +2418,92 @@ function ClaimsSettingsSection() {
             <input id={row.key} value={vals[row.key] ?? ''}
               onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
               className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Phones on Twilio (docs/CALL-INTELLIGENCE-SPEC.md §T4). The spoken messages are
+// read live on every call, so a change here is heard on the next call — ring the
+// number to check how it sounds (especially how "Ooosh" is said).
+const PHONES_LONG_TEXT = new Set(['telephony_recording_notice', 'telephony_voicemail_greeting']);
+
+function PhonesSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=phones');
+      setSettings(res.data);
+      const v: Record<string, string> = {};
+      for (const row of res.data) v[row.key] = row.value ?? '';
+      setVals(v);
+    } catch {
+      setError('Could not load the phone settings (has migration 329 run?).');
+    } finally { setLoading(false); }
+  }
+
+  async function save() {
+    setSaving(true); setError(''); setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const row of settings) {
+        const orig = row.value ?? '';
+        if (orig !== (vals[row.key] ?? '')) changed[row.key] = vals[row.key];
+      }
+      if (Object.keys(changed).length === 0) { setSuccess('Nothing changed.'); return; }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess(`Saved. Ring the number to hear it.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (loading || settings.length === 0) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Phones</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        What callers hear, how long the phones ring, and where voicemails go. Changes are heard on the next call.
+      </p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        {settings.map(row => (
+          <div key={row.key} className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-start">
+            <label htmlFor={row.key} className="text-sm text-gray-700">
+              {row.label ?? row.key}
+              <span className="block text-xs text-gray-400 font-mono">{row.key}</span>
+            </label>
+            {PHONES_LONG_TEXT.has(row.key) ? (
+              <textarea id={row.key} rows={3} value={vals[row.key] ?? ''}
+                onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+                className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+            ) : (
+              <input id={row.key} value={vals[row.key] ?? ''}
+                onChange={e => setVals(v => ({ ...v, [row.key]: e.target.value }))}
+                className="px-2 py-1.5 rounded border border-gray-300 text-sm" />
+            )}
           </div>
         ))}
       </div>
