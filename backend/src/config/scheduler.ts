@@ -1772,6 +1772,33 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Close-out Xero sweep scheduled nightly at 03:30 Europe/London');
 
+  // ── Call transcripts (CALL-INTELLIGENCE-SPEC §I) — every 2 minutes ─────
+  // Collects finished Twilio transcripts, has Claude summarise them, emails
+  // voicemails with their summary, deletes transcript + recording from Twilio.
+  // Inert until TWILIO_INTELLIGENCE_SERVICE_SID is set (runTranscriptPoll no-ops).
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      const { runTranscriptPoll } = await import('../services/call-intelligence');
+      const r = await runTranscriptPoll();
+      if (r.errors) console.error(`Scheduler: call transcript poll — ${r.checked} checked, ${r.errors} error(s)`);
+    } catch (err) {
+      console.error('Scheduler: call transcript poll failed:', err instanceof Error ? err.message : err);
+    }
+  });
+
+  // ── Call retention — nightly 03:40 Europe/London ──────────────────────
+  // After `telephony_retention_months` (default 24): audio + full transcript go,
+  // the summary stays.
+  cron.schedule('40 3 * * *', async () => {
+    try {
+      const { runCallRetention } = await import('../services/call-intelligence');
+      const r = await runCallRetention();
+      if (r.purged) console.log(`Scheduler: call retention — ${r.purged} call(s) trimmed to their summary`);
+    } catch (err) {
+      console.error('Scheduler: call retention failed:', err instanceof Error ? err.message : err);
+    }
+  }, { timezone: 'Europe/London' });
+
   // ── Gmail ingestion (Auto-Chase Phase 1) ────────────────────────────
   // Every 10 minutes — poll the info@ mailbox, log new client emails onto job
   // timelines as interactions, drop the residue into the review queue. Inert

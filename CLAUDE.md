@@ -331,6 +331,8 @@ from Voipfone to **Twilio** with OP as the phone system (§T — build and test 
 summarised and matched to people and jobs like emails. **§0 and §T override the March details** (`interactions`,
 one unmatched review surface, a gated `calls/` R2 prefix, recordings from Twilio's callback — no email step).
 **§T8 is what shipped** (`routes/telephony.ts` + `services/telephony.ts`, every request signature-checked; call recordings `calls/` are admin-only, voicemails `voicemails/` any staff).
+**§I is call intelligence** — I-a built (Nov 2026): Twilio transcripts collected by a 2-minute poll + a Claude summary
+(`services/call-intelligence.ts`; off until `TWILIO_INTELLIGENCE_SERVICE_SID` is set). Full transcripts are admin-only; I-b (matching, timelines, the Calls screen) is next.
 
 **LIVE, Oct 2026:** `docs/TOUR-FINDER-SPEC.md` — the Leads module (Jobs → Leads): Ticketmaster
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
