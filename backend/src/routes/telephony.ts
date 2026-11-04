@@ -76,7 +76,7 @@ router.post('/inbound', async (req: Request, res: Response) => {
   const sips = s.bases.map(b => `<Sip>sip:${xmlEscape(b)}@${xmlEscape(domain)}</Sip>`).join('');
   sendTwiml(res,
     sayXml(s.notice, s) +
-    `<Dial timeout="${s.ringTimeout}" record="record-from-answer-dual"` +
+    `<Dial timeout="${s.ringTimeout}" ringTone="uk" record="record-from-answer-dual"` +
     ` recordingStatusCallback="${base()}/recording?kind=call" recordingStatusCallbackEvent="completed"` +
     ` action="${base()}/inbound-after" method="POST">${sips}</Dial>`,
   );
@@ -138,7 +138,7 @@ router.post('/outbound', async (req: Request, res: Response) => {
     console.error('[telephony] could not log outbound call:', (err as Error).message);
   }
   sendTwiml(res,
-    `<Dial callerId="${xmlEscape(callerId)}" answerOnBridge="true" record="record-from-answer-dual"` +
+    `<Dial callerId="${xmlEscape(callerId)}" answerOnBridge="true" ringTone="uk" record="record-from-answer-dual"` +
     ` recordingStatusCallback="${base()}/recording?kind=call" recordingStatusCallbackEvent="completed"` +
     ` action="${base()}/outbound-after" method="POST"><Number>${xmlEscape(plan.e164)}</Number></Dial>`,
   );

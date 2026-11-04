@@ -205,6 +205,7 @@ router.get('/download', authorize(...STAFF_ROLES), async (req: AuthRequest, res:
       'delivery-notes/', // completion delivery-note PDFs
       'carnet-authority/', // carnet Letter of Authorisation PDFs
       'email-quotes/',   // harvested quote PDFs (auto-chase §7.3 version diff)
+      'voicemails/',     // phone voicemails — any staff login (jon, Nov 2026); call recordings are calls/, admin-only
     ];
 
     // Private staff records (docs/STAFF-RECORDS-SPEC.md §3.1) live under their
