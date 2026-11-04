@@ -45,7 +45,7 @@ clients — the test bench for everything here.
   closing line + first name, warm through being helpful not enthusiastic, a list of banned
   AI/American phrases, no em dashes. **One house voice** for every sender (jon); only the
   name changes.
-- **The staff half** is the draft guide `docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md`; its
+- **The staff half** was the draft guide `docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md` (now the Staff Document "How we write to clients", shared with Claude as `voice`; the draft was deleted 4 Nov 2026); its
   For-Claude half mirrors the prompt (change both together) until Phase B moves the voice into
   a Staff Document and the prompt reads it from there.
 - **`chase_voice_instructions` stays** as the no-deploy steer on top of the house voice.
@@ -219,7 +219,7 @@ to a job the same deterministic way emails are matched.
    vans, 20% off rehearsals of 2+ days). Simpler than expected. Discounts are the discounts
    module's job; client facts still get built. How far the brief looks: §5.
 
-## 10. Open threads (29 Oct 2026)
+## 10. Open threads (29 Oct 2026, updated 4 Nov)
 
 One conversation (15–29 Oct) branched into several pieces of work. This is where each one stands, so
 none fizzles out. Update it when one moves.
@@ -229,13 +229,13 @@ none fizzles out. Update it when one moves.
 | AI quoting | Parked. HireHop forbids generating its PDFs via the API (`AI-QUOTING-SPEC.md` §3) | Pick up after Phases C–D | — |
 | House voice (Phase A) | Done; the voice is a Staff Document shared with Claude | Tweak the document as drafts come in | jon |
 | Guides shared with Claude (Phase B) | Built (PR #1562) | — | — |
-| Van quoting guide | Drafted (`guide-drafts/QUOTING-A-VAN-HIRE.md`) | Paste into Staff Documents, share with Claude (Quoting – vans), delete the draft | jon |
-| Lessons learned guide | Draft 3, all 14 confirmed (`guide-drafts/LESSONS-LEARNED.md`) | Paste into Staff Documents, share with Claude (Client questions, Quoting), delete the draft | jon |
+| Van quoting guide | In OP as a Staff Document, shared with Claude (4 Nov 2026); draft deleted | Edit it in OP | jon |
+| Lessons learned guide | In OP as a Staff Document, shared with Claude (4 Nov 2026); draft deleted | Edit it in OP | jon |
 | Retro "next time?" box | Live (PR #1573) | Add retro-derived lessons to the guide from time to time | jon + Claude |
 | Client brief (Phase C, §5) | Specified, not built | Build when chosen | Claude |
 | Client facts (Phase D, §6) | Specified, not built | Build after C | Claude |
 | Claude suggesting actions (§8a) | Agreed: suggest → one click → automatic for low-risk only | First step: "after sending, do this" beside a chase draft | Claude |
 | Quote-vs-spec checker (lesson 7) | Wanted, deliberately set aside | Scope it (reuse the backline matcher) | later |
 | Warehouse habits guide | Idea, from Problem threads | Draft from Problems when there's room | later |
-| Calls / phones | Voipfone has no API; moving to Twilio (`CALL-INTELLIGENCE-SPEC.md` §T, PR #1578). Test number +44 1634 980910 | Twilio Console setup (§T2), then build §T3, then a week's test on one base | jon, then Claude |
+| Calls / phones | Voipfone has no API; moving to Twilio (`CALL-INTELLIGENCE-SPEC.md` §T, PR #1578). Test number +44 1634 980910 bought | Rest of the Twilio Console setup (§T2), then build §T3, then a week's test on one base | jon, then Claude |
 | Lost-reason data quality | Noted: "No Decision" / "Other" with no detail / test rows | Decide whether to tighten the lost modal | jon |

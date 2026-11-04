@@ -58,7 +58,8 @@ HARD RULES — never break these:
 // The built-in house voice — used ONLY while no Staff Document tagged `voice` is
 // shared with Claude (services/house-knowledge.ts). Once one is, that document IS
 // the voice and this text is skipped, so the two can't contradict each other.
-// Mirrors docs/guide-drafts/HOW-WE-WRITE-TO-CLIENTS.md.
+// Written from the "How we write to clients" Staff Document (Oct 2026); that
+// document, shared with Claude, is now the live voice.
 const BUILT_IN_VOICE = `HOW OOOSH SOUNDS — the house voice:
 - BRIEF BUT COMPLETE. A few sentences is often enough; busy touring people skim. Answer every question in their last message, give them what they need for the next decision, and end with one clear call to action.
 - Never promise an action unless the data you were given says it has been done or will be done (no "I've held the van" or "I'll send the link" on a guess).
