@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { hasOutstanding } from '../lib/money';
 import ExcessPaymentModal, { statusLabel, statusColor } from '../components/ExcessPaymentModal';
 import { MobileListCard } from '../components/mobile/MobileListCard';
 import type { ClientExcessLedgerEntry, JobExcess } from '../../../shared/types';
@@ -136,7 +137,8 @@ export default function ExcessLedgerPage() {
   } else {
     totalHeld = ledger.reduce((sum, c) => sum + Number(c.balance_held || 0), 0);
     totalPending = ledger.reduce((sum, c) => sum + Number(c.pending_count || 0), 0);
-    totalClients = ledger.length;
+    // Clients still holding money — not every client who has ever had an excess (was ledger.length: 521, Nov 2026).
+    totalClients = ledger.filter((c) => hasOutstanding(Number(c.balance_held || 0))).length;
     totalRolledOver = ledger.reduce((sum, c) => sum + Number(c.rolled_over_count || 0), 0);
   }
 

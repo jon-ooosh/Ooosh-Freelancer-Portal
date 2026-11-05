@@ -380,6 +380,27 @@ class XeroBroker {
     return r.BankTransactions || [];
   }
 
+  /**
+   * Every money-out bank transaction (SPEND) dated on or after `fromIso`
+   * (YYYY-MM-DD), paged 100 at a time — the cash forecast's regular-payment
+   * suggestions (docs/CASHFLOW-FORECAST-SPEC.md §13.3). Reconciled ones are what
+   * Xero has; the bookkeeper's lag doesn't matter for spotting a pattern.
+   */
+  async getSpendTransactionsSince(fromIso: string, maxPages = 40): Promise<Array<Record<string, unknown>>> {
+    const [y, m, d] = fromIso.split('-').map(Number);
+    const where = `Type=="SPEND" AND Status=="AUTHORISED" AND Date >= DateTime(${y}, ${m}, ${d})`;
+    const all: Array<Record<string, unknown>> = [];
+    for (let page = 1; page <= maxPages; page++) {
+      const r = await this.request<{ BankTransactions?: Array<Record<string, unknown>> }>('GET', '/BankTransactions', {
+        query: { where, page: String(page) },
+      });
+      const rows = r.BankTransactions || [];
+      all.push(...rows);
+      if (rows.length < 100) break;
+    }
+    return all;
+  }
+
   /** Read a single ACCPAY/ACCREC invoice by ID (diagnostics / read-back). billsScope for ACCPAY. */
   async getInvoice(invoiceId: string): Promise<Record<string, unknown> | null> {
     const r = await this.request<{ Invoices?: Array<Record<string, unknown>> }>('GET', `/Invoices/${invoiceId}`, { billsScope: true });

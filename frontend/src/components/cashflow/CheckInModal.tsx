@@ -14,6 +14,7 @@ interface CheckInData {
   accounts: Account[];
   cards: Card[];
   stripe: { live: true; available: number; pending: number } | { live: false; reason?: string };
+  wise: { live: true; gbp: number; others: Array<{ currency: string; value: number }> } | { live: false; reason?: string };
 }
 
 const toInput = (n: number | null) => (n === null ? '' : String(n));
@@ -45,7 +46,10 @@ export default function CheckInModal({ onClose, onSaved }: { onClose: () => void
   }, []);
 
   const stripeLive = data?.stripe.live === true;
-  const typedAccounts = (data?.accounts || []).filter((a) => !(a.kind === 'stripe' && stripeLive));
+  const wiseLive = data?.wise.live === true;
+  /** Accounts OP reads itself — nothing to type for these. */
+  const isLive = (kind: string) => (kind === 'stripe' && stripeLive) || (kind === 'wise' && wiseLive);
+  const typedAccounts = (data?.accounts || []).filter((a) => !isLive(a.kind));
 
   const save = async () => {
     if (!data) return;
@@ -100,20 +104,25 @@ export default function CheckInModal({ onClose, onSaved }: { onClose: () => void
                   <div className="min-w-0">
                     <p className="text-sm text-gray-900">{a.name}{a.isMain && <span className="ml-1.5 text-[10px] font-semibold text-ooosh-700 bg-ooosh-50 rounded px-1.5 py-0.5">main</span>}</p>
                     <p className="text-[11px] text-gray-500">
-                      {a.kind === 'stripe' && data.stripe.live
-                        ? 'Read live from Stripe — nothing to type'
+                      {isLive(a.kind)
+                        ? `Read live from ${a.kind === 'stripe' ? 'Stripe' : 'Wise'} — nothing to type`
                         : a.balance !== null ? `Last: ${gbp(a.balance, true)} on ${shortDate(a.asOf)}` : 'Not typed yet'}
                     </p>
                   </div>
                   {a.kind === 'stripe' && data.stripe.live
                     ? <span className="text-sm tabular-nums text-gray-700">{gbp(data.stripe.available, true)} <span className="text-[11px] text-gray-500">+ {gbp(data.stripe.pending, true)} pending</span></span>
-                    : input(`a:${a.id}`)}
+                    : a.kind === 'wise' && data.wise.live
+                      ? <span className="text-sm tabular-nums text-gray-700">{gbp(data.wise.gbp, true)}{data.wise.others.length > 0 && <span className="block text-[11px] text-gray-500 text-right">+ {data.wise.others.map((o) => `${o.value.toLocaleString('en-GB', { maximumFractionDigits: 2 })} ${o.currency}`).join(', ')} (not counted)</span>}</span>
+                      : input(`a:${a.id}`)}
                 </div>
               ))}
             </div>
             <p className="text-[11px] text-gray-500 mt-1">An overdrawn account is a minus figure (e.g. −1500).</p>
             {data.stripe.live === false && (
               <p className="text-[11px] text-amber-700 mt-1">Stripe can't be read live ({data.stripe.reason}) — type its balance.</p>
+            )}
+            {data.wise.live === false && data.accounts.some((a) => a.kind === 'wise') && (
+              <p className="text-[11px] text-gray-500 mt-1">Wise isn't read live ({data.wise.reason}) — type its balance.</p>
             )}
           </div>
 

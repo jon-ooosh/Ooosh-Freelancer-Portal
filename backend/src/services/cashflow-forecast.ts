@@ -17,7 +17,7 @@
 import { preauthEligibility } from './excess-preauth';
 import { ukToday } from './uk-date';
 import {
-  addDays, addWorkingDays, daysBetween, expandRule, mondayOf, simulateCard,
+  CardCheck, addDays, addWorkingDays, cardSpendCheck, daysBetween, expandRule, mondayOf, simulateCard,
   youlendPayoffEstimate, youlendWithholding,
 } from './cashflow-schedule';
 import {
@@ -25,7 +25,7 @@ import {
   RECEIPT_SPEND_DAYS, cardReceiptSpend, loadCardReceipts,
   loadAccounts, loadBillFlags, loadCards, loadDepositsOnFutureJobs, loadExcessDue, loadExcessHeld,
   loadJobBalances, loadPlannedItems, loadRefundsOwed, loadSettings, loadVanFinance, loadXeroBills, readStripe,
-  COMMITTED_STATUSES, loadFreelancerCosts, loadOutcomeHistory, loadPipelineJobs,
+  COMMITTED_STATUSES, loadFreelancerCosts, loadOutcomeHistory, loadPipelineJobs, loadCardSnapshots, readWise,
 } from './cashflow-sources';
 import { FixAction, bookingChance, buildFixList, enquiryCash } from './cashflow-pipeline';
 import { freelancerDueDateFromApproval } from './supplier-terms';
@@ -114,7 +114,7 @@ export interface Forecast {
   firstMonday: string;
   horizonEnd: string;
   checkIn: { asOf: string | null; ageDays: number | null; stale: boolean; missing: string[] };
-  opening: { total: number; mainAccount: number | null; accounts: Array<{ id: string; name: string; kind: string; balance: number | null; asOf: string | null; source: 'check_in' | 'stripe_live' | 'missing' }> };
+  opening: { total: number; mainAccount: number | null; accounts: Array<{ id: string; name: string; kind: string; balance: number | null; asOf: string | null; source: 'check_in' | 'stripe_live' | 'wise_live' | 'missing' }> };
   yours: { total: number; excessHeld: number; refundsOwed: number; vatOwed: number; vatDue: string | null; depositsOnFutureJobs: number };
   settings: CashflowSettings;
   rows: typeof ROWS;
@@ -139,8 +139,11 @@ export interface Forecast {
     receiptsMonthly: number;
     receiptsCount: number;
     costPaymentMethod: string | null;
+    /** Real spend between check-ins against the receipts logged for it (§13.3); null until two check-ins a week apart. */
+    check: CardCheck | null;
   }>;
   youlend: { rate: number; remaining: number; asOf: string | null; withheldInForecast: number; remainingAtEnd: number; paidOffOn: string | null; estimatedPayoff: string | null };
+  wise: { live: boolean; reason?: string; others: Array<{ currency: string; value: number }> };
   stripe: { live: boolean; reason?: string; available: number; feeRate: number; feeRateSource: 'stripe' | 'setting'; payoutDays: number; share: number };
   xero: { ok: boolean; reason?: string; unpaidBills: number };
   planned: Array<{ id: string; label: string; message: string }>;
@@ -186,13 +189,14 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
   const warnings: Warning[] = [];
 
   const [settings, accounts, cards, jobs, excessDue, excessHeld, refunds, vans, planned, flags, xero, stripe, depositsFuture,
-    pipelineJobs, outcomeHistory, freelancerCosts] =
+    pipelineJobs, outcomeHistory, freelancerCosts, wise, cardHistory] =
     await Promise.all([
       loadSettings(), loadAccounts(), loadCards(), loadJobBalances(), loadExcessDue(today), loadExcessHeld(),
       loadRefundsOwed(), loadVanFinance(), loadPlannedItems(), loadBillFlags(), loadXeroBills(!!opts.fresh),
       readStripe(!!opts.fresh), loadDepositsOnFutureJobs(today),
       loadPipelineJobs(today), loadOutcomeHistory(today),
       loadFreelancerCosts(addDays(today, -60), horizonEnd, today, COMMITTED_STATUSES),
+      readWise(!!opts.fresh), loadCardSnapshots(addDays(today, -35)),
     ]);
 
   const items: FlowItem[] = [];
@@ -209,6 +213,11 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
     if (a.kind === 'stripe' && stripeLive) {
       openingAccounts.push({ id: a.id, name: a.name, kind: a.kind, balance: round2(stripe.available), asOf: today, source: 'stripe_live' });
       openingTotal += stripe.available;
+      continue;
+    }
+    if (a.kind === 'wise' && wise.ok) {
+      openingAccounts.push({ id: a.id, name: a.name, kind: a.kind, balance: wise.gbp, asOf: today, source: 'wise_live' });
+      openingTotal += wise.gbp;
       continue;
     }
     if (a.balance === null) {
@@ -228,6 +237,9 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
   if (!checkInAsOf) warnings.push({ code: 'no_check_in', message: 'No balances yet — do the Monday check-in so the forecast has somewhere to start.' });
   else if (checkInStale) warnings.push({ code: 'stale_check_in', message: `The forecast starts from balances confirmed on ${checkInAsOf}, ${checkInAge} days ago.` });
   if (missing.length && checkInAsOf) warnings.push({ code: 'missing_balance', message: `No balance yet for: ${missing.join(', ')}.` });
+  if (!wise.ok && process.env.WISE_API_TOKEN && accounts.some((a) => a.kind === 'wise')) {
+    warnings.push({ code: 'wise_unavailable', message: `${wise.reason} Wise is taken from the check-in instead.` });
+  }
   if (!stripeLive) warnings.push({ code: 'stripe_unavailable', message: `${stripe.reason || 'Stripe could not be read.'} Stripe is taken from the check-in instead.` });
 
   /** A scheduled payment: before the check-in it's already in the balance; after it but before today, it went today. */
@@ -470,7 +482,7 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
       costPaymentMethod: c.costPaymentMethod,
     };
     if (c.balance === null || !c.asOf) {
-      cardsOut.push({ ...base, balance: null, asOf: null, headroom: null, interestThisMonth: 0, weeklyBalances: [], checkInBalance: null, loggedSince: 0, loggedSinceCount: 0 });
+      cardsOut.push({ ...base, balance: null, asOf: null, headroom: null, interestThisMonth: 0, weeklyBalances: [], checkInBalance: null, loggedSince: 0, loggedSinceCount: 0, check: null });
       continue;
     }
     const balanceNow = round2(c.balance + spend.sinceCheckIn);
@@ -495,6 +507,11 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
       loggedSince: spend.sinceCheckIn, loggedSinceCount: spend.sinceCount,
       headroom: c.creditLimit !== null ? round2(c.creditLimit - balanceNow) : null,
       interestThisMonth: round2(balanceNow * c.monthlyRate), weeklyBalances,
+      check: c.costPaymentMethod ? cardSpendCheck(
+        { monthlyRate: c.monthlyRate, statementDay: c.statementDay, paymentDay: c.paymentDay, plan: c.plan, minPct: c.minPct, fixedAmount: c.fixedAmount, fixedEvery: c.fixedEvery, fixedWeekday: c.fixedWeekday },
+        cardHistory.get(c.id) || [],
+        cardReceipts.filter((r) => r.method === c.costPaymentMethod),
+      ) : null,
     });
   }
 
@@ -671,6 +688,7 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
       withheldInForecast: round2(settings.youlendRemaining - yl.remainingAtEnd), remainingAtEnd: yl.remainingAtEnd,
       paidOffOn: yl.paidOffOn, estimatedPayoff,
     },
+    wise: { live: wise.ok, reason: wise.reason, others: wise.others },
     stripe: { live: stripeLive, reason: stripe.reason, available: round2(stripe.available), feeRate, feeRateSource: feeSource, payoutDays, share },
     xero: { ok: xero.ok, reason: xero.ok ? undefined : xero.reason, unpaidBills: xeroBills.length },
     planned: plannedNotes,

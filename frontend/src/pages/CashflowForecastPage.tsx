@@ -220,7 +220,7 @@ export default function CashflowForecastPage() {
               <p className="text-2xl font-bold tabular-nums mt-1">{gbp(forecast.opening.total)}</p>
               <div className="mt-2 space-y-0.5">
                 {forecast.opening.accounts.map((a) => (
-                  <Line key={a.id} label={`${a.name}${a.source === 'stripe_live' ? ' (live)' : ''}`} value={a.balance === null ? 'not typed' : gbp(a.balance)} />
+                  <Line key={a.id} label={`${a.name}${a.source === 'stripe_live' || a.source === 'wise_live' ? ' (live)' : ''}`} value={a.balance === null ? 'not typed' : gbp(a.balance)} />
                 ))}
               </div>
             </Tile>
@@ -415,6 +415,19 @@ export default function CashflowForecastPage() {
                     {c.balance !== null && c.loggedSince !== 0 && (
                       <p className="text-[11px] text-gray-500 mt-0.5">
                         Includes {gbp(c.loggedSince, true)} from {c.loggedSinceCount} receipt{c.loggedSinceCount === 1 ? '' : 's'} logged since Monday's {gbp(c.checkInBalance)}.
+                      </p>
+                    )}
+                    {c.costPaymentMethod && (
+                      <p className="text-[11px] mt-0.5">
+                        {c.check
+                          ? c.check.spent > 1
+                            ? <span className={c.check.explained !== null && c.check.explained < 0.8 ? 'text-amber-800' : 'text-gray-600'}>
+                                Check-ins {shortDate(c.check.from)}–{shortDate(c.check.to)}: about <b>{gbp(c.check.spent)}</b> went on the card; receipts logged explain <b>{gbp(c.check.receipts)}</b>
+                                {c.check.explained !== null && <> ({Math.round(c.check.explained * 100)}%)</>}.
+                                <span className="text-gray-400"> Assumes the planned payments were made ({gbp(c.check.assumedPayments)}).</span>
+                              </span>
+                            : <span className="text-gray-500">Check-ins {shortDate(c.check.from)}–{shortDate(c.check.to)}: the balance fell by more than the planned payments — paid extra, or a payment we don't know about.</span>
+                          : <span className="text-gray-400">The receipts check starts once there are two Monday check-ins a week apart.</span>}
                       </p>
                     )}
                     {c.balance !== null && (
