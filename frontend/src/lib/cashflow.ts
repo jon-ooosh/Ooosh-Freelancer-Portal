@@ -19,7 +19,7 @@ export interface FlowItem {
   windowFrom?: string;
   windowTo?: string;
   clientMoney?: boolean;
-  link?: { type: 'job' | 'vehicle' | 'planned' | 'xero_bill' | 'card' | 'settings'; id?: string };
+  link?: { type: 'job' | 'vehicle' | 'planned' | 'xero_bill' | 'card' | 'settings' | 'check_in'; id?: string };
   /** Weighted enquiry money only. */
   tier?: 'likely' | 'possible';
 }
@@ -106,6 +106,8 @@ export interface CashflowSettings {
   weightCold: number;
   weightUnset: number;
   likelyThreshold: number;
+  vatQuarterEndMonth: number;
+  vatDueDay: number;
 }
 
 export interface Forecast {
@@ -118,7 +120,7 @@ export interface Forecast {
     mainAccount: number | null;
     accounts: Array<{ id: string; name: string; kind: string; balance: number | null; asOf: string | null; source: 'check_in' | 'stripe_live' | 'wise_live' | 'missing' }>;
   };
-  yours: { total: number; excessHeld: number; refundsOwed: number; vatOwed: number; vatDue: string | null; depositsOnFutureJobs: number };
+  yours: { total: number; excessHeld: number; refundsOwed: number; vatOwed: number; vatDue: string | null; vatDetail: string | null; depositsOnFutureJobs: number };
   settings: CashflowSettings;
   rows: Array<{ key: RowKey; label: string; direction: 'in' | 'out'; clientMoney?: boolean }>;
   weeks: Period[];
@@ -149,7 +151,7 @@ export interface Forecast {
     rates: Array<{ likelihood: string; booked: number; lost: number; rate: number | null }>;
   };
   vanFinanceMissing: Array<{ vehicleId: string; reg: string; lender: string }>;
-  warnings: Array<{ code: string; message: string }>;
+  warnings: Array<{ code: string; message: string; links?: Array<{ type: 'job' | 'vehicle'; id: string; label: string }> }>;
 }
 
 export interface Account {

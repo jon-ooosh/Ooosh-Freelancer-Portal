@@ -15,6 +15,8 @@ interface CheckInData {
   cards: Card[];
   stripe: { live: true; available: number; pending: number } | { live: false; reason?: string };
   wise: { live: true; gbp: number; others: Array<{ currency: string; value: number }> } | { live: false; reason?: string };
+  /** The VAT quarter to type (§13.4): just ended and not yet filed, else the one in progress. */
+  vat: { quarterStart: string; quarterEnd: string; due: string; label: string; ended: boolean; last: { amount: number; asOf: string } | null };
 }
 
 const toInput = (n: number | null) => (n === null ? '' : String(n));
@@ -67,11 +69,16 @@ export default function CheckInModal({ onClose, onSaved }: { onClose: () => void
       if (Number.isNaN(n)) { setError(`${c.name}: that isn't an amount.`); return; }
       cards.push({ id: c.id, balance: Math.abs(n) });
     }
-    if (accounts.length + cards.length === 0) { setError('Type at least one balance.'); return; }
+    // VAT is never pre-filled: re-saving last week's figure as today's would read as
+    // "nothing collected since" and pull the estimate for the rest of the quarter down.
+    const vatTyped = parseMoney(values.vat || '');
+    if (Number.isNaN(vatTyped)) { setError('VAT: that isn\'t an amount.'); return; }
+    const vat = vatTyped === null || !data.vat ? null : { quarterEnd: data.vat.quarterEnd, amount: vatTyped };
+    if (accounts.length + cards.length === 0 && !vat) { setError('Type at least one balance.'); return; }
     setSaving(true);
     setError(null);
     try {
-      await api.post('/cashflow/check-in', { asOf, accounts, cards });
+      await api.post('/cashflow/check-in', { asOf, accounts, cards, vat });
       onSaved();
     } catch (e) {
       setError((e as Error).message || 'Could not save.');
@@ -140,6 +147,25 @@ export default function CheckInModal({ onClose, onSaved }: { onClose: () => void
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {data.vat && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1">VAT</p>
+              <div className="flex items-center justify-between gap-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-sm text-gray-900">{data.vat.ended ? `${data.vat.label} — the whole quarter` : `${data.vat.label} so far`}</p>
+                  <p className="text-[11px] text-gray-500">
+                    From Xero's VAT return (box 5) · paid {shortDate(data.vat.due)}
+                    {data.vat.last ? ` · last: ${gbp(data.vat.last.amount, true)} on ${shortDate(data.vat.last.asOf)}` : ' · not typed yet'}
+                  </p>
+                </div>
+                {input('vat')}
+              </div>
+              <p className="text-[11px] text-gray-500">
+                Optional. A minus figure if HMRC owes you. {data.vat.ended ? 'The quarter has ended, so nothing is added — type the return\'s final figure. (A VAT payment in Planned items near that date replaces it.)' : 'The forecast adds the rest of the quarter at the same rate.'}
+              </p>
             </div>
           )}
 

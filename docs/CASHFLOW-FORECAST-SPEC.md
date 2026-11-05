@@ -592,4 +592,50 @@ warning when a token is set but failing.
 **Also:** Money › Excess "Clients with Balance" counted every client ever on the Client Ledger tab (521) —
 now only those holding money.
 
+### 13.4 After Phase 3 went live — tidy-ups and VAT (5 Nov 2026)
+
+jon's first look at live figures, and what changed:
+
+**The warnings name what they're about.** "1 financed van has no monthly payment" and "3 enquiries over £3k
+have no likelihood" now list the vans (reg + lender, to the van's page) and the enquiries (to the job)
+(`Warning.links`).
+
+**Refunds owed were mostly old reminders, not a forecast bug.** The line reads OP's pending refund reminders
+(`job_payments` refund, `pending` — made by a cancellation). Most had been refunded outside OP or were
+duplicates; jon clears them on Money › Overview › Pending refunds (an OP note, no money moves). The drill-down
+now shows when each was agreed and points there. **The cancelled job's banner now follows those reminders**
+(`cancellation-close.ts` `readRefundOutcome()`, `CancellationPlan.refundOutcome`): with no fee invoice it said
+"Refund due" from the figure saved at cancellation for ever; now it shows what's pending, else "Refund paid
+£X on D", else "Refund cleared on D — <reason>". With a fee invoice the figure is still HireHop's, and a
+cleared reminder beside a HireHop credit gets an amber "HireHop still shows this money on the job".
+
+**Overpaid invoices: "Dealt with outside OP"** (Money › Overview, admin; migration 336
+`job_overpaid_dismissals`; `POST`/`DELETE /money/:jobId/dismiss-overpaid`). For an overpayment sorted out by
+hand (job 15250: a credit note tidied in Xero). OP note only — never record a refund in HireHop to clear one
+of these, which would send it to Xero a second time. Kept with the figure: if HireHop's changes, the row is
+back. The job's Money tab shows it grey with Undo; the Overview strip stops saying "owed to client". Not read
+by the forecast (it never was).
+
+**VAT is typed, by quarter, on the Monday check-in** (`cashflow-vat.ts`, `cashflow_vat_snapshots`). jon's call
+over working it out from Xero's invoices and bills: Xero's VAT return is the number HMRC is paid
+(adjustments included), and typing it weekly is a reminder of what's building up. Standard accounting;
+quarters end Mar/Jun/Sep/Dec, direct debit on the 10th of the second month after, the next working day at a
+weekend (settings `vat_quarter_end_month`, `vat_due_day`, in Settings › VAT).
+- The check-in asks for the quarter **just ended** until its return is filed and paid, else the quarter **in
+  progress**. Never pre-filled — re-saving last week's figure as today's would drag the estimate down.
+- A quarter in progress gets the rest of it added at the rate so far (`projectQuarterVat()`), on its payment
+  date, row "VAT & tax", if that date is in the 13 weeks. An ended quarter is counted as typed.
+- **Negative is allowed and means HMRC owes us** (the six vans in April 2027). It is money in on the payment
+  date, at what was typed — never multiplied out, so a one-off purchase can't turn into a fantasy refund.
+- **A filed return is still a planned item** (category VAT, one-off). One within 10 days of a quarter's due
+  date is that quarter's, and the typed estimate steps aside.
+- "Cash that's yours" takes off the next filed return plus the VAT collected so far on quarters not yet filed
+  (a refund is not added). A quarter whose payment is in the 13 weeks with nothing typed or filed is a warning.
+
+**Planned items say "including VAT".** The forecast is cash: what leaves the bank, VAT and all. The VAT back
+comes through the VAT bill.
+
+**Captured for later** (`BACKLOG.md`): a business-figures tab — monthly utilisation by service, enquiry-to-
+booking conversion, repeat-client rate.
+
 **Next:** Phase 4 — the Monday email and the "last week we said X, it was Y" line.

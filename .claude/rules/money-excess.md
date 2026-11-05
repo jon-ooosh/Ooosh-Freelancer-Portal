@@ -157,7 +157,8 @@ writing any new billing call).
 
 - Excess is a **warning, not a hard gate** — dispatch is non-blocking, and the dispatch gate is lifecycle-bound (suppressed once the hire is finished).
 - **Never silently move money.** Surface a recomputed figure and let staff decide.
-- Balance overrides, "mark externally resolved" and refund-dismissal are **pure OP annotations** — they touch neither HireHop nor Xero.
+- Balance overrides, "mark externally resolved", refund-dismissal and "Dealt with outside OP" on an overpaid invoice (`job_overpaid_dismissals`, mig 336 — kept with the figure, so a changed HireHop figure brings the row back) are **pure OP annotations** — they touch neither HireHop nor Xero. **Never clear an overpayment that was tidied in Xero by recording a refund in HireHop** — it goes to Xero a second time.
+- **A cancelled job's banner follows OP's refund reminders** (`cancellation-close.ts` `readRefundOutcome()` → `CancellationPlan.refundOutcome`): pending → "Refund due", else paid, else cleared with its reason; `jobs.cancellation_refund` (the estimate saved at cancellation) only when the job never had a reminder.
 - **A cancelled job owes its FEE, not the hire** (`services/cancellation-close.ts`, CANCELLATION-SPEC.md final section). HireHop keeps the hire's lines on a cancelled job, so any surface computing "hire value − payments" for one shows a phantom balance: read `financial.cancellation` / `CloseOutPlan.cancellation` instead. Never zero or delete the job's lines to make HireHop agree — Re-open duplicates them.
 - **Allocate a cancelled job's payments up to the fee only, then refund the rest** — never the other way round (a fully-applied deposit cannot be refunded, error 370), and never by moving more than the fee invoice owes.
 - `MIN_CANCELLATION_FEE` is the **ex-VAT** figure `25` (£30 inc-VAT). The whole calculator works ex-VAT; callers add 20%. Setting it to `30` double-counts VAT.

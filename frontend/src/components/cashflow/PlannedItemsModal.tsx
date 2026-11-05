@@ -335,6 +335,9 @@ export default function PlannedItemsModal({ notes, onClose, onChanged, startWith
             </button>
           ))}
         </div>
+        <p className="text-[11px] text-gray-500 -mt-1">
+          Type what actually leaves the bank, <b>including VAT</b> — the forecast is cash. The VAT you get back comes off the VAT bill, which is typed on the Monday check-in.
+        </p>
 
         {draft.kind === 'rule' && (
           <div className="space-y-3">

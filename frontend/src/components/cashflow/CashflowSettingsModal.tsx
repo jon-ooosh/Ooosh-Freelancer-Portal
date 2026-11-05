@@ -76,6 +76,7 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
         youlendRatePct: pct(v.youlendRate, 0), youlendRemaining: str(v.youlendRemaining), youlendAsOf: v.youlendAsOf || '',
         weightProvisionalPct: pct(v.weightProvisional, 0), weightHotPct: pct(v.weightHot, 0), weightWarmPct: pct(v.weightWarm, 0),
         weightColdPct: pct(v.weightCold, 0), weightUnsetPct: pct(v.weightUnset, 0), likelyThresholdPct: pct(v.likelyThreshold, 0),
+        vatQuarterEndMonth: str(v.vatQuarterEndMonth), vatDueDay: str(v.vatDueDay),
       });
       setMeasured(s.data.measuredStripeShare);
       setOutcomes(s.data.outcomes || []);
@@ -104,6 +105,7 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
       youlendRemaining: n('youlendRemaining'), youlendAsOf: settings.youlendAsOf || null,
       weightProvisional: frac('weightProvisionalPct'), weightHot: frac('weightHotPct'), weightWarm: frac('weightWarmPct'),
       weightCold: frac('weightColdPct'), weightUnset: frac('weightUnsetPct'), likelyThreshold: frac('likelyThresholdPct'),
+      vatQuarterEndMonth: n('vatQuarterEndMonth'), vatDueDay: n('vatDueDay'),
       suggestBankTransfer: suggestTransfer,
     };
     for (const [k, v] of Object.entries(body)) {
@@ -228,6 +230,24 @@ export default function CashflowSettingsModal({ onClose, onChanged }: { onClose:
               <input type="checkbox" checked={suggestTransfer} onChange={(e) => setSuggestTransfer(e.target.checked)} />
               Suggest asking for bank transfer instead of card when a week dips (keeps YouLend's cut and Stripe's fee in hand)
             </label>
+          </section>
+
+          <section>
+            <h3 className="text-sm font-semibold text-gray-900 mb-1">VAT</h3>
+            <p className="text-xs text-gray-600 mb-2">
+              Each quarter's VAT is typed on the Monday check-in from Xero's VAT return, and paid on this day of the second month after the quarter ends (the next working day if that's a weekend).
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <label className="text-sm">
+                <span className="block text-gray-700 mb-1">Quarters end</span>
+                <select value={settings.vatQuarterEndMonth ?? '3'} onChange={(e) => setSettings((x) => (x ? { ...x, vatQuarterEndMonth: e.target.value } : x))} className={`${inputCls} w-full`}>
+                  <option value="3">Mar, Jun, Sep, Dec</option>
+                  <option value="1">Jan, Apr, Jul, Oct</option>
+                  <option value="2">Feb, May, Aug, Nov</option>
+                </select>
+              </label>
+              {field('vatDueDay', 'Paid on day', 'Of the second month after (1–28)')}
+            </div>
           </section>
 
           <section>

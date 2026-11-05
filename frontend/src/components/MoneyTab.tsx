@@ -71,6 +71,8 @@ interface FinancialData {
     /** Money the client has OVERPAID and is owed back. 0 when square. Derived
      *  from HireHop's own invoice `owing`, so it self-clears once refunded. */
     client_overpaid?: number;
+    /** An admin marked the overpayment dealt with outside OP (Money › Overview) — only while the figure is unchanged. */
+    client_overpaid_dealt_with?: { amount: number; notes: string | null; dismissed_at: string; dismissed_by_name: string | null } | null;
     /** Portion of credit notes treated as a write-off of accrued value —
      *  already subtracted from balance_outstanding by the backend. */
     credit_note_write_off?: number;
@@ -889,6 +891,15 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
       setBalSaving(false);
     }
   };
+  const undoOverpaidDealtWith = async () => {
+    try {
+      await api.delete(`/money/${jobId}/dismiss-overpaid`);
+      await loadData();
+    } catch (e) {
+      setBalError(e instanceof Error ? e.message : 'Failed to undo');
+    }
+  };
+
   const undoResolveBalance = async () => {
     try {
       await api.delete(`/money/${jobId}/resolve-balance`);
@@ -1430,7 +1441,23 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                 Stripe, invisible) and still tells us on 15187 (£120 goodwill
                 credit, unrefunded). Taken from HireHop's own invoice `owing`,
                 so it disappears by itself once the refund is made. */}
-            {(financial.client_overpaid ?? 0) > 0.009 && (
+            {(financial.client_overpaid ?? 0) > 0.009 && financial.client_overpaid_dealt_with && (
+              <div className="mt-2 p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-600 flex items-start justify-between gap-3">
+                <div>
+                  <span className="font-semibold text-gray-700">£{(financial.client_overpaid as number).toFixed(2)} overpaid in HireHop — dealt with outside OP</span>
+                  {financial.client_overpaid_dealt_with.notes && <span className="block mt-0.5 text-gray-500">{financial.client_overpaid_dealt_with.notes}</span>}
+                  <span className="block mt-0.5 text-gray-400">
+                    {financial.client_overpaid_dealt_with.dismissed_by_name || '—'}
+                    {` · ${new Date(financial.client_overpaid_dealt_with.dismissed_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                    {' · HireHop and Xero left untouched'}
+                  </span>
+                </div>
+                {isAdmin && (
+                  <button onClick={undoOverpaidDealtWith} className="text-[11px] text-gray-400 hover:text-red-600 underline whitespace-nowrap">Undo</button>
+                )}
+              </div>
+            )}
+            {(financial.client_overpaid ?? 0) > 0.009 && !financial.client_overpaid_dealt_with && (
               <div className="mt-2 p-3 bg-amber-50 border border-amber-300 rounded-lg">
                 <p className="text-sm font-semibold text-amber-900">
                   Client is owed £{(financial.client_overpaid as number).toFixed(2)}

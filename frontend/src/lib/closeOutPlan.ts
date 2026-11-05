@@ -66,6 +66,8 @@ export interface CancellationPlan {
   invoiced: boolean;
   /** OP's pending refund reminders — what the Money tab's Process button acts on. */
   refundReminders: Array<{ id: string; amount: number }>;
+  /** With no reminder pending: the latest refund paid through OP, else the latest reminder cleared on Money › Overview. */
+  refundOutcome?: { kind: 'paid' | 'cleared'; amount: number; date: string | null; reason: string | null } | null;
   /** Fee invoiced and paid, nothing left on a hire payment. */
   settled: boolean;
 }

@@ -44,7 +44,7 @@ import { hhLocalNow } from './shop-stock';
 import { getMethodForBankId, PAYMENT_METHODS_LABELS } from './hh-deposit';
 import { handleJobStatusChange } from '../routes/webhooks';
 import {
-  CancellationPlan, readCancellation, readRefundReminders, planCancellationInvoice, raiseCancellationFee, syncRefundReminder, markCancellationReconciled,
+  CancellationPlan, readCancellation, readRefundReminders, readRefundOutcome, planCancellationInvoice, raiseCancellationFee, syncRefundReminder, markCancellationReconciled,
 } from './cancellation-close';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -682,7 +682,11 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     blockers.push(...c.planBlockers);
     warnings.push(...c.warnings);
     feeInvoiced = c.invoiced;
-    base.cancellation = { ...facts, invoiced: c.invoiced, refundReminders: await readRefundReminders(job.id), settled: false };
+    const refundReminders = await readRefundReminders(job.id);
+    base.cancellation = {
+      ...facts, invoiced: c.invoiced, refundReminders,
+      refundOutcome: refundReminders.length === 0 ? await readRefundOutcome(job.id) : null, settled: false,
+    };
   }
   if (invoices.length === 0 && !(cancelled && feeInvoiced)) {
     blockers.push('Raise the invoice first — the job has no approved invoice in HireHop.');

@@ -3423,11 +3423,36 @@ function JobDetailContent() {
                       return <span className="text-gray-500 italic">Reading HireHop…</span>;
                     }
                     const c = closeOutPlan?.cancellation;
+                    // OP's own refund reminders (Money › Overview › Pending refunds). Once one is
+                    // paid or cleared there, the banner says so instead of "Refund due" (jon, Nov 2026).
+                    const outcome = c?.refundOutcome ?? null;
+                    const onDay = (d: string | null) => (d ? ` on ${new Date(`${d}T12:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}` : '');
                     if (c && c.invoiced) {
                       const v = closeOutView(closeOutPlan!, { isManager: false });
-                      if (v.credit >= 0.005) return <span className="text-green-700">Refund due to client: <strong>£{v.credit.toFixed(2)}</strong></span>;
+                      if (v.credit >= 0.005) {
+                        return (
+                          <span className="text-green-700">
+                            Refund due to client: <strong>£{v.credit.toFixed(2)}</strong>
+                            {outcome?.kind === 'cleared' && (
+                              <span className="block text-amber-700 text-xs mt-0.5">
+                                OP's refund reminder was cleared{onDay(outcome.date)}{outcome.reason ? ` (${outcome.reason})` : ''}, but HireHop still shows this money on the job.
+                              </span>
+                            )}
+                          </span>
+                        );
+                      }
                       if (v.owing >= 0.005) return <span className="text-red-700">Fee still owing: <strong>£{v.owing.toFixed(2)}</strong></span>;
                       if (c.settled) return <span className="text-green-700 font-semibold">Settled — fee paid, nothing left to refund</span>;
+                    }
+                    if (c && c.refundReminders.length > 0) {
+                      const due = c.refundReminders.reduce((sum, r) => sum + r.amount, 0);
+                      return <span className="text-green-700">Refund due to client: <strong>£{due.toFixed(2)}</strong></span>;
+                    }
+                    if (outcome?.kind === 'paid') {
+                      return <span className="text-green-700">Refund paid: <strong>£{outcome.amount.toFixed(2)}</strong>{onDay(outcome.date)}</span>;
+                    }
+                    if (outcome?.kind === 'cleared') {
+                      return <span className="text-gray-600">Refund cleared{onDay(outcome.date)}{outcome.reason ? ` — ${outcome.reason}` : ''}</span>;
                     }
                     return job.cancellation_refund != null && Number(job.cancellation_refund) > 0
                       ? <span className="text-green-700">Refund due to client: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
@@ -7201,7 +7226,8 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
             balance_outstanding: f.balance_outstanding,
             deposit_percent: f.deposit_percent,
             deposit_paid: f.deposit_paid,
-            client_overpaid: f.client_overpaid,
+            // An overpayment marked "dealt with outside OP" isn't owed any more as far as OP is concerned.
+            client_overpaid: f.client_overpaid_dealt_with ? 0 : f.client_overpaid,
             cancellation: f.cancellation ?? null,
           });
         }
