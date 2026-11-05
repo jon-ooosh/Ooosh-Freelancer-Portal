@@ -54,6 +54,10 @@ export interface CashflowSettings {
   weightUnset: number;
   /** At or above this, a weighted enquiry is "likely"; below, "possible". */
   likelyThreshold: number;
+  /** VAT quarters end in this month and every third after (3 = Mar/Jun/Sep/Dec). */
+  vatQuarterEndMonth: number;
+  /** VAT is paid on this day of the second month after the quarter (or the next working day). */
+  vatDueDay: number;
 }
 
 /** key in cashflow_settings → field + how to read it. The ONLY list of settings. */
@@ -76,6 +80,8 @@ export const SETTING_FIELDS: Array<{ key: string; field: keyof CashflowSettings;
   { key: 'weight_cold', field: 'weightCold', type: 'number' },
   { key: 'weight_unset', field: 'weightUnset', type: 'number' },
   { key: 'likely_threshold', field: 'likelyThreshold', type: 'number' },
+  { key: 'vat_quarter_end_month', field: 'vatQuarterEndMonth', type: 'number' },
+  { key: 'vat_due_day', field: 'vatDueDay', type: 'number' },
 ];
 
 const DEFAULT_SETTINGS: CashflowSettings = {
@@ -83,6 +89,7 @@ const DEFAULT_SETTINGS: CashflowSettings = {
   stripeShare: 0.9, stripeFeeRate: 0.015, stripePayoutDays: 2, excessRefundDays: 7,
   countOverdueBills: false, countOverdueBalances: false, suggestBankTransfer: true,
   weightProvisional: 0.85, weightHot: 0.7, weightWarm: 0.4, weightCold: 0.15, weightUnset: 0.25, likelyThreshold: 0.6,
+  vatQuarterEndMonth: 3, vatDueDay: 10,
 };
 
 export async function loadSettings(): Promise<CashflowSettings> {
@@ -589,19 +596,22 @@ export async function loadExcessHeld(): Promise<ExcessHeldRow[]> {
     .filter((x: ExcessHeldRow) => x.cash > 0.01);
 }
 
-export interface RefundOwedRow { id: string; jobId: string | null; hh: number | null; client: string; amount: number }
+export interface RefundOwedRow { id: string; jobId: string | null; hh: number | null; client: string; amount: number; loggedOn: string | null }
 
 /** Refunds we've decided to make and haven't yet (the Money overview's pending IOUs). */
 export async function loadRefundsOwed(): Promise<RefundOwedRow[]> {
   const r = await query(
-    `SELECT jp.id, jp.job_id, j.hh_job_number, COALESCE(j.client_name, j.company_name) AS client_name, jp.amount
+    `SELECT jp.id, jp.job_id, j.hh_job_number, COALESCE(j.client_name, j.company_name) AS client_name, jp.amount,
+            to_char((jp.payment_date AT TIME ZONE 'Europe/London')::date, 'YYYY-MM-DD') AS logged_on
      FROM job_payments jp
      LEFT JOIN jobs j ON j.id = jp.job_id
-     WHERE jp.payment_type = 'refund' AND jp.payment_status = 'pending'`,
+     WHERE jp.payment_type = 'refund' AND jp.payment_status = 'pending'
+     ORDER BY jp.payment_date`,
   );
   return r.rows.map((row: Record<string, unknown>) => ({
     id: String(row.id), jobId: row.job_id ? String(row.job_id) : null, hh: numOrNull(row.hh_job_number),
     client: String(row.client_name || ''), amount: Math.abs(num(row.amount)),
+    loggedOn: (row.logged_on as string) || null,
   }));
 }
 
@@ -749,6 +759,26 @@ export async function loadBillFlags(): Promise<BillFlags> {
     byBill: new Map(f.rows.map((r: { xero_invoice_id: string; flag: 'paid_xero_behind' | 'paid_by_card' | 'ignore' }) => [r.xero_invoice_id, r.flag])),
     excludedContacts: new Map(c.rows.map((r: { xero_contact_id: string; contact_name: string | null }) => [r.xero_contact_id, r.contact_name || ''])),
   };
+}
+
+// ── VAT so far, typed on the Monday check-in (§13.4) ───────────────────────
+
+export interface VatSnapshot { quarterEnd: string; amount: number; asOf: string }
+
+/** The latest figure typed for each quarter ending on or after `from`. */
+export async function loadVatSnapshots(from: string): Promise<Map<string, VatSnapshot>> {
+  const r = await query(
+    `SELECT DISTINCT ON (quarter_end) to_char(quarter_end, 'YYYY-MM-DD') AS quarter_end, amount, to_char(as_of, 'YYYY-MM-DD') AS as_of
+       FROM cashflow_vat_snapshots
+      WHERE quarter_end >= $1::date
+      ORDER BY quarter_end, as_of DESC, created_at DESC`,
+    [from],
+  );
+  const out = new Map<string, VatSnapshot>();
+  for (const row of r.rows as Array<{ quarter_end: string; amount: string; as_of: string }>) {
+    out.set(row.quarter_end, { quarterEnd: row.quarter_end, amount: num(row.amount), asOf: row.as_of });
+  }
+  return out;
 }
 
 // ── Card balance history (the card check, §13.3) ───────────────────────────

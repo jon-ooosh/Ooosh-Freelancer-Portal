@@ -240,8 +240,11 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
               jf.client_overpaid AS amount, jf.last_synced_at
        FROM job_financials jf
        JOIN jobs j ON j.id = jf.job_id
+       LEFT JOIN job_overpaid_dismissals od ON od.job_id = jf.job_id
        WHERE jf.client_overpaid > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('cancelled', 'lost')
+         -- "Dealt with outside OP" hides the row only while HireHop's figure is the one it was about.
+         AND (od.job_id IS NULL OR ABS(od.amount - jf.client_overpaid) > 0.01)
        ORDER BY jf.client_overpaid DESC
        LIMIT 200`
     );
@@ -378,6 +381,73 @@ router.delete('/:jobId/resolve-balance', authorize('admin'), async (req: AuthReq
     const msg = error instanceof Error ? error.message : String(error);
     console.error('[money] unresolve-balance error:', msg);
     res.status(500).json({ error: 'Failed to remove balance override', detail: msg });
+  }
+});
+
+// ── "Dealt with outside OP" on an overpaid invoice (migration 336) ──
+//
+// Money › Overview › Overpaid invoices lists jobs where HireHop shows more paid
+// than the invoices are worth. Some were sorted out in Xero by hand and HireHop
+// was never tidied — and OP has no safe way to tidy it: recording a refund in
+// HireHop would send it to Xero a second time. This is an OP note ONLY (HireHop
+// and Xero untouched), kept with the figure it was about, so a changed figure
+// brings the row back (jon, Nov 2026).
+const dismissOverpaidSchema = z.object({
+  notes: z.string().max(1000).nullable().optional(),
+});
+
+// POST /api/money/:jobId/dismiss-overpaid — mark the job's overpayment dealt with outside OP.
+router.post('/:jobId/dismiss-overpaid', authorize('admin'), validate(dismissOverpaidSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const cur = await query(`SELECT client_overpaid FROM job_financials WHERE job_id = $1`, [jobUuid]);
+    const amount = Number(cur.rows[0]?.client_overpaid ?? 0);
+    if (!(amount > 0.01)) { res.status(409).json({ error: 'HireHop shows nothing overpaid on this job any more — open its Money tab to refresh.' }); return; }
+    const notes = (req.body.notes as string | null | undefined) ?? null;
+    const result = await query(
+      `INSERT INTO job_overpaid_dismissals (job_id, amount, notes, dismissed_by, dismissed_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (job_id) DO UPDATE SET
+         amount = EXCLUDED.amount, notes = EXCLUDED.notes, dismissed_by = EXCLUDED.dismissed_by, dismissed_at = NOW()
+       RETURNING *`,
+      [jobUuid, amount, notes, req.user!.id]
+    );
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by, source)
+       VALUES ('note', $1, $2, $3, 'system')`,
+      [`£${amount.toFixed(2)} overpaid in HireHop marked as dealt with outside OP${notes ? ` (${notes})` : ''}. Nothing changed in HireHop or Xero.`, jobUuid, req.user!.id]
+    ).catch((e) => console.error('[money] dismiss-overpaid timeline note failed (non-fatal):', e));
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, after_json)
+       VALUES ($1, 'jobs', $2, 'dismiss_overpaid', $3::jsonb)`,
+      [req.user!.id, jobUuid, JSON.stringify({ amount, notes })]
+    ).catch((e) => console.error('[money] audit_log insert failed (dismiss_overpaid):', e));
+    res.json({ data: result.rows[0], message: 'Marked as dealt with outside OP' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] dismiss-overpaid error:', msg);
+    res.status(500).json({ error: 'Failed to mark the overpayment as dealt with', detail: msg });
+  }
+});
+
+// DELETE /api/money/:jobId/dismiss-overpaid — undo.
+router.delete('/:jobId/dismiss-overpaid', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const result = await query(`DELETE FROM job_overpaid_dismissals WHERE job_id = $1 RETURNING *`, [jobUuid]);
+    if (result.rows.length === 0) { res.status(404).json({ error: 'Nothing to undo on this job' }); return; }
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, before_json)
+       VALUES ($1, 'jobs', $2, 'undismiss_overpaid', $3::jsonb)`,
+      [req.user!.id, jobUuid, JSON.stringify({ amount: result.rows[0].amount, notes: result.rows[0].notes })]
+    ).catch((e) => console.error('[money] audit_log insert failed (undismiss_overpaid):', e));
+    res.json({ message: 'Back on the Overpaid list' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] undismiss-overpaid error:', msg);
+    res.status(500).json({ error: 'Failed to undo', detail: msg });
   }
 });
 
@@ -2319,6 +2389,29 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     );
     const balanceOverride = overrideResult.rows[0] ?? null;
 
+    // "Dealt with outside OP" on the overpayment (migration 336) — only while HireHop's
+    // figure is still the one it was about; a different figure means look again.
+    let overpaidDealtWith: { amount: number; notes: string | null; dismissed_at: string; dismissed_by_name: string | null } | null = null;
+    if (job.id && clientOverpaid > 0.01) {
+      try {
+        const od = await query(
+          `SELECT d.amount, d.notes, d.dismissed_at,
+                  COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS dismissed_by_name
+           FROM job_overpaid_dismissals d
+           LEFT JOIN users u ON u.id = d.dismissed_by
+           LEFT JOIN people pu ON pu.id = u.person_id
+           WHERE d.job_id = $1`,
+          [job.id]
+        );
+        const row = od.rows[0];
+        if (row && Math.abs(Number(row.amount) - clientOverpaid) <= 0.01) {
+          overpaidDealtWith = { amount: Number(row.amount), notes: row.notes ?? null, dismissed_at: row.dismissed_at, dismissed_by_name: row.dismissed_by_name ?? null };
+        }
+      } catch (e) {
+        console.error('[money] overpaid dismissal read failed (non-fatal):', e);
+      }
+    }
+
     res.json({
       data: {
         job: {
@@ -2342,6 +2435,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           credit_note_write_off: creditNoteWriteOff,
           /** Money the client has overpaid and is owed back (0 when square). */
           client_overpaid: clientOverpaid,
+          /** Set when an admin marked this overpayment dealt with outside OP (Money › Overview). */
+          client_overpaid_dealt_with: overpaidDealtWith,
           balance_outstanding: effectiveBalanceOutstanding,
           required_deposit: requiredDeposit,
           deposit_paid: depositPaid,

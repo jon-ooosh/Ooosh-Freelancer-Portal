@@ -144,13 +144,14 @@ export default function CashflowForecastPage() {
     if (link.type === 'planned') setModal('planned');
     else if (link.type === 'xero_bill') setModal('bills');
     else if (link.type === 'card' || link.type === 'settings') setModal('settings');
+    else if (link.type === 'check_in') setModal('check-in');
   };
   const linkFor = (item: { link?: FlowItem['link'] }) => {
     const l = item.link;
     if (!l) return null;
     if (l.type === 'job' && l.id) return <Link to={`/jobs/${l.id}`} className="text-ooosh-700 hover:underline">Job</Link>;
     if (l.type === 'vehicle' && l.id) return <Link to={`/vehicles/fleet/${l.id}`} className="text-ooosh-700 hover:underline">Van</Link>;
-    const word = l.type === 'planned' ? 'Planned items' : l.type === 'xero_bill' ? 'Xero bills' : 'Settings';
+    const word = l.type === 'planned' ? 'Planned items' : l.type === 'xero_bill' ? 'Xero bills' : l.type === 'check_in' ? 'Check-in' : 'Settings';
     return <button type="button" onClick={() => openLink(l)} className="text-ooosh-700 hover:underline">{word}</button>;
   };
 
@@ -229,7 +230,8 @@ export default function CashflowForecastPage() {
               <div className="mt-2 space-y-0.5">
                 <Line label="Excess held (client money)" value={`−${gbp(forecast.yours.excessHeld)}`} />
                 <Line label="Refunds owed" value={`−${gbp(forecast.yours.refundsOwed)}`} />
-                <Line label={`VAT${forecast.yours.vatDue ? ` due ${shortDate(forecast.yours.vatDue)}` : ' (add it in Planned items)'}`} value={`−${gbp(forecast.yours.vatOwed)}`} />
+                <Line label={`VAT${forecast.yours.vatDue ? ` due ${shortDate(forecast.yours.vatDue)}` : ' (type it on the check-in)'}`} value={`−${gbp(forecast.yours.vatOwed)}`} />
+                {forecast.yours.vatDetail && <p className="text-[11px] text-gray-500 pl-2">{forecast.yours.vatDetail}</p>}
               </div>
               <p className="text-[11px] text-gray-500 mt-1.5">Plus {gbp(forecast.yours.depositsOnFutureJobs)} of deposits on jobs not started (kept, so not taken off).</p>
             </Tile>
@@ -273,8 +275,18 @@ export default function CashflowForecastPage() {
                 <div key={w.code} className="text-xs px-2.5 py-1.5 rounded-md border border-amber-200 bg-amber-50 text-amber-900">
                   ⚠ {w.message}
                   {w.code === 'overdue_bills' && <button type="button" onClick={() => setModal('bills')} className="ml-1 font-semibold underline">Check them</button>}
-                  {(w.code === 'no_check_in' || w.code === 'stale_check_in' || w.code === 'missing_balance') && <button type="button" onClick={() => setModal('check-in')} className="ml-1 font-semibold underline">Check in</button>}
+                  {(w.code === 'no_check_in' || w.code === 'stale_check_in' || w.code === 'missing_balance' || w.code === 'vat_missing') && <button type="button" onClick={() => setModal('check-in')} className="ml-1 font-semibold underline">Check in</button>}
                   {w.code === 'planned_mismatch' && <button type="button" onClick={() => setModal('planned')} className="ml-1 font-semibold underline">Look</button>}
+                  {w.links && w.links.length > 0 && (
+                    <span className="ml-1">
+                      {w.links.map((l, k) => (
+                        <span key={l.id}>
+                          {k > 0 && ', '}
+                          <Link to={l.type === 'job' ? `/jobs/${l.id}` : `/vehicles/fleet/${l.id}`} className="font-semibold underline">{l.label}</Link>
+                        </span>
+                      ))}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -334,6 +346,12 @@ export default function CashflowForecastPage() {
                 </h3>
                 <button type="button" onClick={() => setSelected(null)} className="text-xs text-gray-500 hover:underline">Close</button>
               </div>
+              {selected.row === 'refund_owed' && drillItems.length > 0 && (
+                <p className="text-xs text-gray-500 mb-2">
+                  OP's list of refunds agreed and not yet paid. One already paid outside OP, or a duplicate? Clear it on{' '}
+                  <Link to="/money/overview" className="text-ooosh-700 hover:underline">Money › Overview › Pending refunds</Link> — no money moves.
+                </p>
+              )}
               {drillItems.length === 0 ? (
                 <p className="text-sm text-gray-500">Nothing lands here.</p>
               ) : (

@@ -275,6 +275,56 @@ function ResolveBalanceModal({ target, onClose, onDone }: {
   );
 }
 
+// "Dealt with outside OP" on an overpaid invoice (migration 336). An OP note only:
+// HireHop and Xero are not touched — recording a refund in HireHop to clear one
+// already tidied in Xero would send it to Xero a second time. The row comes back
+// if HireHop's figure changes.
+function OverpaidDealtWithModal({ target, onClose, onDone }: {
+  target: ClientOverpaidRow;
+  onClose: () => void;
+  onDone: (msg: string, jobId: string) => void;
+}) {
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async () => {
+    setSaving(true); setErr('');
+    try {
+      await api.post(`/money/${target.job_id}/dismiss-overpaid`, { notes: notes.trim() || null });
+      onDone('Marked as dealt with outside OP', target.job_id);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold text-gray-900 mb-1">Dealt with outside OP</h3>
+        <p className="text-xs text-gray-500 mb-3">
+          #{target.hh_job_number ?? '—'}{target.client_name ? ` · ${target.client_name}` : ''} · {gbp(target.amount)} overpaid in HireHop.
+          This only takes it off this list — nothing changes in HireHop or Xero. If HireHop's figure changes, it comes back.
+        </p>
+        <div className="mb-4">
+          <label className="block text-xs font-medium text-gray-600 mb-1">What happened (optional)</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="e.g. credit note sorted in Xero, nothing owed"
+            className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 resize-y" />
+        </div>
+        {err && <p className="text-xs text-red-600 mb-3">{err}</p>}
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+          <button onClick={submit} disabled={saving}
+            className="px-4 py-1.5 text-sm font-medium text-white bg-ooosh-600 rounded-md hover:bg-ooosh-700 disabled:opacity-50">
+            {saving ? 'Saving…' : 'Take it off the list'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Pending-refund dismiss reasons (mirror of money.ts DISMISS_REFUND_REASONS).
 const DISMISS_REASONS = [
   { value: 'refunded_externally', label: 'Already refunded outside OP (HireHop / Stripe / bank)' },
@@ -738,6 +788,7 @@ export default function MoneyOverviewPage() {
   const canManage = hasManagerRole(role);
   const [resolveTarget, setResolveTarget] = useState<BalanceRow | 'bulk' | null>(null);
   const [dismissTarget, setDismissTarget] = useState<PendingRefundRow | 'bulk' | null>(null);
+  const [overpaidTarget, setOverpaidTarget] = useState<ClientOverpaidRow | null>(null);
   const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   // Filters initialise from the last-used prefs and persist on every change.
   const [prefs] = useState(loadPrefs);
@@ -951,6 +1002,13 @@ export default function MoneyOverviewPage() {
       r.client_name || '—',
       <span className="font-semibold text-amber-700">{gbp(r.amount)}</span>,
       <span className="text-gray-500 text-xs">{fmtDate(r.last_synced_at)}</span>,
+      ...(isAdmin ? [
+        <button
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOverpaidTarget(r); }}
+          title="Take it off this list without changing HireHop or Xero (sorted out by hand)"
+          className="text-xs text-gray-500 hover:text-ooosh-700 underline whitespace-nowrap"
+        >Dealt with outside OP</button>,
+      ] : []),
     ],
   }));
 
@@ -958,6 +1016,7 @@ export default function MoneyOverviewPage() {
     { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
     { label: 'Overpaid', sortable: true, align: 'right' },
     { label: 'Figures from', sortable: true },
+    ...(isAdmin ? [{ label: '', align: 'right' as const }] : []),
   ];
 
   const refundColumns: Col[] = [
@@ -1149,8 +1208,9 @@ export default function MoneyOverviewPage() {
                   <h3 className="text-sm font-semibold text-gray-900">Overpaid invoices</h3>
                   <p className="text-xs text-gray-500 mt-0.5">
                     HireHop shows more paid than these invoices are worth — usually a credit note raised after payment.
-                    There's no IOU to clear: refund it from the job's Money tab and the row disappears on its own.
-                    Jobs appear here once their Money tab has been opened.
+                    If it's still owed, refund it from the job's Money tab and the row disappears on its own.
+                    If it was sorted out by hand (in Xero, say), "Dealt with outside OP" takes it off the list — don't record a refund in HireHop for it,
+                    which would send it to Xero a second time. Jobs appear here once their Money tab has been opened.
                   </p>
                 </div>
                 <Table
@@ -1170,6 +1230,20 @@ export default function MoneyOverviewPage() {
           target={resolveTarget}
           onClose={() => setResolveTarget(null)}
           onDone={(msg) => { setResolveTarget(null); setToast({ msg }); load(); }}
+        />
+      )}
+      {overpaidTarget && (
+        <OverpaidDealtWithModal
+          target={overpaidTarget}
+          onClose={() => setOverpaidTarget(null)}
+          onDone={(msg, jobId) => {
+            setOverpaidTarget(null);
+            setToast({
+              msg,
+              undo: () => { api.delete(`/money/${jobId}/dismiss-overpaid`).then(() => load()).catch(() => setToast({ msg: 'Could not undo — use Undo on the job\'s Money tab' })); },
+            });
+            load();
+          }}
         />
       )}
       {dismissTarget && (

@@ -26,6 +26,7 @@ import {
 } from '../services/cashflow-sources';
 import { addDays, isIsoDate, nextDates } from '../services/cashflow-schedule';
 import { MIN_SAMPLE } from '../services/cashflow-pipeline';
+import { plannedVatPayments, quarterLabel, quarterToType } from '../services/cashflow-vat';
 import { ukToday } from '../services/uk-date';
 import { isXeroConfigured } from '../config/xero';
 import { xeroBroker } from '../services/xero-broker';
@@ -85,6 +86,8 @@ const settingsSchema = z.object({
   weightCold: z.number().min(0).max(1).optional(),
   weightUnset: z.number().min(0).max(1).optional(),
   likelyThreshold: z.number().min(0).max(1).optional(),
+  vatQuarterEndMonth: z.number().int().min(1).max(3).optional(),
+  vatDueDay: z.number().int().min(1).max(28).optional(),
 }).strict();
 
 router.put('/settings', validate(settingsSchema), async (req: AuthRequest, res: Response) => {
@@ -108,14 +111,36 @@ router.put('/settings', validate(settingsSchema), async (req: AuthRequest, res: 
 
 // ── The Monday check-in ────────────────────────────────────────────────────
 
+/**
+ * The VAT quarter the check-in asks about (§13.4): the one just ended until its
+ * return is in as a planned item and paid, else the one in progress.
+ */
+async function vatToType(today: string) {
+  const [settings, planned] = await Promise.all([loadSettings(), loadPlannedItems()]);
+  const plannedDates = plannedVatPayments(planned, addDays(today, -200), addDays(today, 200)).map((p) => p.date);
+  const { quarter, ended } = quarterToType(today, settings.vatQuarterEndMonth, settings.vatDueDay, plannedDates);
+  const last = await query(
+    `SELECT amount, to_char(as_of, 'YYYY-MM-DD') AS as_of FROM cashflow_vat_snapshots
+      WHERE quarter_end = $1::date ORDER BY as_of DESC, created_at DESC LIMIT 1`,
+    [quarter.end],
+  );
+  const row = last.rows[0] as { amount: string; as_of: string } | undefined;
+  return {
+    quarterStart: quarter.start, quarterEnd: quarter.end, due: quarter.due, label: quarterLabel(quarter), ended,
+    last: row ? { amount: Number(row.amount), asOf: row.as_of } : null,
+  };
+}
+
 router.get('/check-in', async (_req: AuthRequest, res: Response) => {
   try {
-    const [accounts, cards, stripe, wise] = await Promise.all([loadAccounts(), loadCards(), readStripe(true), readWise(true)]);
+    const today = ukToday();
+    const [accounts, cards, stripe, wise, vat] = await Promise.all([loadAccounts(), loadCards(), readStripe(true), readWise(true), vatToType(today)]);
     res.json({
       data: {
-        today: ukToday(),
+        today,
         accounts,
         cards,
+        vat,
         stripe: stripe.ok
           ? { live: true, available: stripe.available, pending: stripe.pending.reduce((s, p) => s + p.amount, 0) }
           : { live: false, reason: stripe.reason },
@@ -131,6 +156,8 @@ const checkInSchema = z.object({
   asOf: isoDate,
   accounts: z.array(z.object({ id: z.string().guid(), balance: money })).max(50),
   cards: z.array(z.object({ id: z.string().guid(), balance: money })).max(50),
+  /** VAT on Xero's VAT return for this quarter so far — a minus figure when HMRC owes us. */
+  vat: z.object({ quarterEnd: isoDate, amount: money }).nullable().optional(),
 });
 
 router.post('/check-in', validate(checkInSchema), async (req: AuthRequest, res: Response) => {
@@ -154,8 +181,14 @@ router.post('/check-in', validate(checkInSchema), async (req: AuthRequest, res: 
         [c.id, c.balance, body.asOf, req.user!.id],
       );
     }
+    if (body.vat) {
+      await client.query(
+        `INSERT INTO cashflow_vat_snapshots (quarter_end, amount, as_of, entered_by) VALUES ($1, $2, $3, $4)`,
+        [body.vat.quarterEnd, body.vat.amount, body.asOf, req.user!.id],
+      );
+    }
     await client.query('COMMIT');
-    res.json({ data: { saved: body.accounts.length + body.cards.length } });
+    res.json({ data: { saved: body.accounts.length + body.cards.length + (body.vat ? 1 : 0) } });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     fail(res, 'check-in save', err);

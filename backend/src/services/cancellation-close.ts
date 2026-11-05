@@ -51,12 +51,23 @@ export interface CancellationFacts {
 /** OP's own reminder that a refund is due (`job_payments`, refund, pending). */
 export interface RefundReminder { id: string; amount: number }
 
+/**
+ * What happened to the refund once no reminder is pending: paid through OP (a
+ * completed refund row), or the reminder cleared on Money › Overview ("already
+ * refunded outside OP", "duplicate"…, which sets it `cancelled` with a stamp in its
+ * notes). The cancelled banner follows this so it stops saying "Refund due" once
+ * somebody has dealt with it (jon, Nov 2026).
+ */
+export interface RefundOutcome { kind: 'paid' | 'cleared'; amount: number; date: string | null; reason: string | null }
+
 /** The cancellation half of the close-out plan. */
 export interface CancellationPlan extends CancellationFacts {
   /** The fee is on an approved invoice (or there is no fee to invoice). */
   invoiced: boolean;
   /** OP's pending refund reminder(s) on the job. */
   refundReminders: RefundReminder[];
+  /** With nothing pending: the latest refund paid, else the latest reminder cleared. */
+  refundOutcome: RefundOutcome | null;
   /** Fee invoiced and paid, nothing left on a hire payment — the money is done. */
   settled: boolean;
 }
@@ -88,6 +99,32 @@ export async function readRefundReminders(jobId: string): Promise<RefundReminder
     [jobId],
   );
   return r.rows.map((x: any) => ({ id: String(x.id), amount: round2(Number(x.amount)) }));
+}
+
+/** The reason a cleared reminder carries in its notes: "[Dismissed: <reason> — by …]". */
+export function dismissedReason(notes: string | null | undefined): string | null {
+  const m = /\[Dismissed(?: \(bulk\))?: (.+?) — by /.exec(String(notes || ''));
+  return m ? m[1] : null;
+}
+
+export async function readRefundOutcome(jobId: string): Promise<RefundOutcome | null> {
+  const r = await query(
+    `SELECT payment_status, amount, notes,
+            to_char((COALESCE(CASE WHEN payment_status = 'cancelled' THEN updated_at END, payment_date) AT TIME ZONE 'Europe/London')::date, 'YYYY-MM-DD') AS on_date
+       FROM job_payments
+      WHERE job_id = $1 AND payment_type = 'refund' AND payment_status IN ('completed', 'cancelled')
+      ORDER BY (payment_status = 'completed') DESC, COALESCE(updated_at, payment_date) DESC
+      LIMIT 1`,
+    [jobId],
+  );
+  const x = r.rows[0];
+  if (!x) return null;
+  const paid = x.payment_status === 'completed';
+  if (!paid && !dismissedReason(x.notes)) return null;
+  return {
+    kind: paid ? 'paid' : 'cleared', amount: round2(Math.abs(Number(x.amount))),
+    date: x.on_date || null, reason: paid ? null : dismissedReason(x.notes),
+  };
 }
 
 const isProforma = (row: Row) => String(row.data?.DESCRIPTION || row.desc || '').toLowerCase().includes('proforma');

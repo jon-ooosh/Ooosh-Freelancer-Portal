@@ -25,9 +25,10 @@ import {
   RECEIPT_SPEND_DAYS, cardReceiptSpend, loadCardReceipts,
   loadAccounts, loadBillFlags, loadCards, loadDepositsOnFutureJobs, loadExcessDue, loadExcessHeld,
   loadJobBalances, loadPlannedItems, loadRefundsOwed, loadSettings, loadVanFinance, loadXeroBills, readStripe,
-  COMMITTED_STATUSES, loadFreelancerCosts, loadOutcomeHistory, loadPipelineJobs, loadCardSnapshots, readWise,
+  COMMITTED_STATUSES, loadFreelancerCosts, loadOutcomeHistory, loadPipelineJobs, loadCardSnapshots, readWise, loadVatSnapshots,
 } from './cashflow-sources';
 import { FixAction, bookingChance, buildFixList, enquiryCash } from './cashflow-pipeline';
+import { dayMonth, isFiled, nextQuarter, plannedVatPayments, projectQuarterVat, quarterLabel, vatQuarterOf } from './cashflow-vat';
 import { freelancerDueDateFromApproval } from './supplier-terms';
 
 export const WEEKS = 13;
@@ -74,7 +75,7 @@ export interface FlowItem {
   windowFrom?: string;
   windowTo?: string;
   clientMoney?: boolean;
-  link?: { type: 'job' | 'vehicle' | 'planned' | 'xero_bill' | 'card' | 'settings'; id?: string };
+  link?: { type: 'job' | 'vehicle' | 'planned' | 'xero_bill' | 'card' | 'settings' | 'check_in'; id?: string };
   /** Set on weighted enquiry money only. Everything else is committed. */
   tier?: 'likely' | 'possible';
 }
@@ -107,7 +108,8 @@ export interface Period {
   closingPossible: number;
 }
 
-export interface Warning { code: string; message: string }
+/** A warning, with the jobs or vans it is about when there are any (jon, Nov 2026: "which van?"). */
+export interface Warning { code: string; message: string; links?: Array<{ type: 'job' | 'vehicle'; id: string; label: string }> }
 
 export interface Forecast {
   today: string;
@@ -115,7 +117,7 @@ export interface Forecast {
   horizonEnd: string;
   checkIn: { asOf: string | null; ageDays: number | null; stale: boolean; missing: string[] };
   opening: { total: number; mainAccount: number | null; accounts: Array<{ id: string; name: string; kind: string; balance: number | null; asOf: string | null; source: 'check_in' | 'stripe_live' | 'wise_live' | 'missing' }> };
-  yours: { total: number; excessHeld: number; refundsOwed: number; vatOwed: number; vatDue: string | null; depositsOnFutureJobs: number };
+  yours: { total: number; excessHeld: number; refundsOwed: number; vatOwed: number; vatDue: string | null; vatDetail: string | null; depositsOnFutureJobs: number };
   settings: CashflowSettings;
   rows: typeof ROWS;
   weeks: Period[];
@@ -189,14 +191,14 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
   const warnings: Warning[] = [];
 
   const [settings, accounts, cards, jobs, excessDue, excessHeld, refunds, vans, planned, flags, xero, stripe, depositsFuture,
-    pipelineJobs, outcomeHistory, freelancerCosts, wise, cardHistory] =
+    pipelineJobs, outcomeHistory, freelancerCosts, wise, cardHistory, vatSnapshots] =
     await Promise.all([
       loadSettings(), loadAccounts(), loadCards(), loadJobBalances(), loadExcessDue(today), loadExcessHeld(),
       loadRefundsOwed(), loadVanFinance(), loadPlannedItems(), loadBillFlags(), loadXeroBills(!!opts.fresh),
       readStripe(!!opts.fresh), loadDepositsOnFutureJobs(today),
       loadPipelineJobs(today), loadOutcomeHistory(today),
       loadFreelancerCosts(addDays(today, -60), horizonEnd, today, COMMITTED_STATUSES),
-      readWise(!!opts.fresh), loadCardSnapshots(addDays(today, -35)),
+      readWise(!!opts.fresh), loadCardSnapshots(addDays(today, -35)), loadVatSnapshots(addDays(today, -200)),
     ]);
 
   const items: FlowItem[] = [];
@@ -385,6 +387,49 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
     items.push({ date: when, amount: -b.amountDue, row: 'xero_bill', label, detail: detail || undefined, link });
   }
 
+  // ── VAT by quarter (§13.4) ────────────────────────────────────────────────
+  // A filed return is a planned VAT payment (above). A quarter not yet filed is
+  // the figure typed on the Monday check-in from Xero's VAT return, plus the rest
+  // of the quarter at the same rate, on its direct debit date. Negative is money
+  // back from HMRC, counted at what's been typed — never multiplied out.
+  const vatEm = settings.vatQuarterEndMonth;
+  const vatDay = settings.vatDueDay;
+  const plannedVat = plannedVatPayments(planned, addDays(today, -200), addDays(horizonEnd, 200));
+  const plannedVatDates = plannedVat.map((p) => p.date);
+  let vatSoFar = 0;
+  let vatSoFarDue: string | null = null;
+  const vatSoFarLabels: string[] = [];
+  for (let q = vatQuarterOf(addDays(today, -200), vatEm, vatDay); q.start <= horizonEnd; q = nextQuarter(q, vatEm, vatDay)) {
+    if (q.due < scheduledFrom || isFiled(q, plannedVatDates)) continue;
+    const label = quarterLabel(q);
+    const inLine = q.due <= horizonEnd;
+    const snap = vatSnapshots.get(q.end);
+    if (!snap) {
+      if (inLine) {
+        warnings.push({ code: 'vat_missing', message: `VAT for ${label}, paid ${dayMonth(q.due)}, isn't in the forecast — type it on the Monday check-in, or add the filed return in Planned items.` });
+      }
+      continue;
+    }
+    const est = projectQuarterVat(snap.amount, snap.asOf, q);
+    const when = inLine ? placeScheduled(q.due) : null;
+    if (when && Math.abs(est.amount) > 0.005) {
+      const typed = `${gbp(snap.amount)}${snap.amount < 0 ? ' back' : ''} typed on ${dayMonth(snap.asOf)}`;
+      items.push({
+        date: when, amount: -est.amount, row: 'vat_tax', label: `VAT ${label}`,
+        detail: est.amount < 0
+          ? `HMRC owes this back (${typed}) · counted on ${dayMonth(q.due)}; it can come sooner once the return is filed`
+          : `${typed}${est.projected > 0 ? ` + about ${gbp(est.projected)} for the rest of the quarter at the same rate` : ''} · direct debit ${dayMonth(q.due)}`,
+        link: { type: 'check_in' },
+      });
+    }
+    // VAT already collected belongs to HMRC — taken off "cash that's yours". A refund isn't added.
+    if (q.due >= today && snap.amount > 0) {
+      vatSoFar += snap.amount;
+      vatSoFarLabels.push(`${gbp(snap.amount)} ${q.end < today ? 'for' : 'so far for'} ${label}, not filed yet`);
+      if (!vatSoFarDue || q.due < vatSoFarDue) vatSoFarDue = q.due;
+    }
+  }
+
   // ── Money out: van HP (fleet finance) ─────────────────────────────────────
   const vanFinanceMissing: Forecast['vanFinanceMissing'] = [];
   for (const v of vans) {
@@ -405,7 +450,11 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
     }
   }
   if (vanFinanceMissing.length) {
-    warnings.push({ code: 'van_finance_missing', message: `${vanFinanceMissing.length} financed van${vanFinanceMissing.length === 1 ? ' has' : 's have'} no monthly payment set (Fleet › Finance), so ${vanFinanceMissing.length === 1 ? 'it is' : 'they are'} missing from the forecast.` });
+    warnings.push({
+      code: 'van_finance_missing',
+      message: `${vanFinanceMissing.length} financed van${vanFinanceMissing.length === 1 ? ' has' : 's have'} no monthly payment set (Fleet › Finance), so ${vanFinanceMissing.length === 1 ? 'it is' : 'they are'} missing from the forecast.`,
+      links: vanFinanceMissing.map((v) => ({ type: 'vehicle' as const, id: v.vehicleId, label: `${v.reg} (${v.lender})` })),
+    });
   }
 
   // ── Money out: excess refunds and refunds owed ────────────────────────────
@@ -435,7 +484,8 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
     refundsOwedTotal += r.amount;
     items.push({
       date: today, amount: -r.amount, row: 'refund_owed', label: `${r.hh ? `#${r.hh} ` : ''}${r.client}`,
-      detail: 'refund agreed, not yet paid', link: r.jobId ? { type: 'job', id: r.jobId } : undefined,
+      // The date it was agreed makes the forgotten ones stand out — clear those on Money › Overview.
+      detail: `refund agreed${r.loggedOn ? ` ${dayMonth(r.loggedOn)} ${r.loggedOn.slice(0, 4)}` : ''}, not yet paid`, link: r.jobId ? { type: 'job', id: r.jobId } : undefined,
     });
   }
 
@@ -561,7 +611,11 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
   items.push(...pipelineItems);
   const unratedBig = pipelineJobs.filter((j) => j.status !== 'provisional' && !j.likelihood && j.valueIncVat >= 3000);
   if (unratedBig.length) {
-    warnings.push({ code: 'likelihood_missing', message: `${unratedBig.length} enquir${unratedBig.length === 1 ? 'y' : 'ies'} over £3k ${unratedBig.length === 1 ? 'has' : 'have'} no likelihood set — set hot / warm / cold on the job for a truer band.` });
+    warnings.push({
+      code: 'likelihood_missing',
+      message: `${unratedBig.length} enquir${unratedBig.length === 1 ? 'y' : 'ies'} over £3k ${unratedBig.length === 1 ? 'has' : 'have'} no likelihood set — set hot / warm / cold on the job for a truer band.`,
+      links: unratedBig.map((j) => ({ type: 'job' as const, id: j.jobId, label: j.hh ? `#${j.hh}` : (j.client || j.name) })),
+    });
   }
 
   // ── Into weeks and days ───────────────────────────────────────────────────
@@ -635,18 +689,12 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
   const lowDay = days.reduce<Period | null>((lo, p) => (!lo || p.closing < lo.closing ? p : lo), null);
 
   // ── Cash that's yours (§4) ────────────────────────────────────────────────
-  const vatItem = planned.find((p) => p.category === 'vat');
-  let vatOwed = 0;
-  let vatDue: string | null = null;
-  if (vatItem) {
-    const next = vatItem.kind === 'rule' && vatItem.frequency && vatItem.startDate && vatItem.amount !== null
-      ? expandRule({ frequency: vatItem.frequency, start: vatItem.startDate, end: vatItem.endDate }, today, addDays(today, 400))[0]
-      : vatItem.dates.find((d) => d.date >= today)?.date;
-    if (next) {
-      vatDue = next;
-      vatOwed = vatItem.kind === 'rule' ? vatItem.amount || 0 : vatItem.dates.find((d) => d.date === next)?.amount || 0;
-    }
-  }
+  // VAT owed: the next filed return still to pay, plus what's been collected so far
+  // on quarters not yet filed (typed on the check-in).
+  const nextFiled = plannedVat.find((p) => p.date >= today && p.amount < 0) || null;
+  const vatOwed = (nextFiled ? -nextFiled.amount : 0) + vatSoFar;
+  const vatDue = [nextFiled?.date, vatSoFarDue].filter((d): d is string => !!d).sort()[0] || null;
+  const vatDetail = [nextFiled ? `${gbp(-nextFiled.amount)} filed, due ${dayMonth(nextFiled.date)}` : null, ...vatSoFarLabels].filter(Boolean).join(' · ') || null;
 
   if (piles.overdueBills.length && !settings.countOverdueBills) {
     const t = piles.overdueBills.reduce((s, b) => s + b.amount, 0);
@@ -668,7 +716,7 @@ export async function buildForecast(opts: { fresh?: boolean } = {}): Promise<For
     opening: { total: round2(openingTotal), mainAccount, accounts: openingAccounts },
     yours: {
       total: round2(openingTotal - excessHeldTotal - refundsOwedTotal - vatOwed),
-      excessHeld: round2(excessHeldTotal), refundsOwed: round2(refundsOwedTotal), vatOwed: round2(vatOwed), vatDue,
+      excessHeld: round2(excessHeldTotal), refundsOwed: round2(refundsOwedTotal), vatOwed: round2(vatOwed), vatDue, vatDetail,
       depositsOnFutureJobs: round2(depositsFuture),
     },
     settings,
